@@ -8,11 +8,13 @@
 # This software is distributed under the GNU General Public License.
 # See the file COPYING for details.
 
+import copy
 from .manager import Manager
 from .task import PythonTask
 from .task import FunctionCall
 from .dask_dag import DaskVineDag
 from .cvine import VINE_TEMP
+import types
 
 import contextlib
 import cloudpickle
@@ -25,6 +27,7 @@ try:
 except ImportError:
     rich = None
 
+dsk_dict = {}
 ##
 # @class ndcctools.taskvine.dask_executor.DaskVine
 #
@@ -331,6 +334,70 @@ class DaskVine(Manager):
                 lazy = self.checkpoint_fn(dag, k)
 
             cat = self.category_name(sexpr)
+            #print(f"sexpr[0] {type(sexpr[0])}")
+            #print(f"sexpr[1] {sexpr[1:]}")
+            callable = sexpr[0]
+            args = sexpr[1:]
+            import json
+
+            def serialize_value(value, dask_blockwise_list):
+                if isinstance(value, tuple):
+                    ret = []
+                    for v in value:
+                        selized = serialize_element(v, dask_blockwise_list)
+                        ret.append(selized)
+
+                    # convert to tuple
+                    ret = tuple(ret)
+                    return ret
+                else:
+                    return serialize_element(value, dask_blockwise_list)
+
+            def serialize_element(element, dask_blockwise_list):
+                if isinstance(element, str):
+                    if element.startswith("__dask_blockwise"):
+                        blockwise_id = int(element.split('__')[-1])
+                        return serialize_element(dask_blockwise_list[blockwise_id], dask_blockwise_list)
+                    else:    
+                        return element
+                elif isinstance(element, list):
+                    return [serialize_element(e, dask_blockwise_list) for e in element]
+                elif isinstance(element, dict):
+                    return {serialize_element(k, dask_blockwise_list): serialize_element(v, dask_blockwise_list) for k, v in element.items()}
+                elif isinstance(element, tuple):
+                    return tuple(serialize_element(e, dask_blockwise_list) for e in element)
+                else:
+                    return str(element)
+
+            try:
+                print(f"callable: {callable}")
+                print(f"args: {args}")
+                dask_blockwise_list = list(args)
+                for key, value in callable.dsk.items():
+                    serializable_value = serialize_value(value, dask_blockwise_list)
+                    if key in dsk_dict:
+                        # print(f"key: {key} already exists in dsk_dict")
+                        # generate a randome new key in 4 digits
+                        new_key = key + "-" + str(uuid4())[:8]
+                        dsk_dict[new_key] = serializable_value
+                    else:
+                        dsk_dict[key] = serializable_value
+                    print(f"key: {key}")
+                    print(f"value: {serializable_value}")
+                print()
+            except Exception as e:
+                print(f"{e}")
+                print(callable)
+                print(args)
+                if isinstance(callable, types.FunctionType):
+                    func_id = callable.__name__ + str(uuid4())[:8]
+                    dsk_dict[func_id] = 1
+            # save to json
+            with open(f"dsk.json", "w") as f:
+                # dump with formats
+                json.dump(dsk_dict, f, indent=4)
+            #exit(1)
+
             if self.task_mode == 'tasks':
                 if cat not in self._categories_known:
                     if self.resources:
