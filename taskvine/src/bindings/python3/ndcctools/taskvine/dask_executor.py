@@ -15,11 +15,15 @@ from .task import FunctionCall
 from .dask_dag import DaskVineDag
 from .cvine import VINE_TEMP
 import types
-
+import dask
 import contextlib
 import cloudpickle
+import json
 import os
 from uuid import uuid4
+from dask.utils import ensure_dict
+from collections import defaultdict
+import inspect
 
 try:
     import rich
@@ -27,7 +31,79 @@ try:
 except ImportError:
     rich = None
 
+layers = defaultdict(dict)
+dependencies = defaultdict(set)
+
 dsk_dict = {}
+
+temp_dir = "/afs/crc.nd.edu/user/j/jzhou24/111/cctools/taskvine/src/bindings/python3/ndcctools/taskvine"
+
+def get_layer_name(key, task):
+    return f"layer-{hash_name(key, task)}"
+
+def get_task_dependencies(task):
+    deps = set()
+    for arg in task[1:]:
+        if isinstance(arg, str) and arg in dsk_dict:
+            deps.add(arg)
+        elif isinstance(arg, (list, tuple)):
+            deps.update(get_task_dependencies(arg))
+    return deps
+
+
+def hash_name(*args):
+    out_str = ""
+    for arg in args:
+        out_str += str(arg)
+    return hashlib.sha256(out_str.encode('utf-8')).hexdigest()[:12]
+
+def customer_serializer(obj):
+    try:
+        return str(obj)
+    except Exception:
+        print(f"ERROR: Unexpected type: {type(obj)}")
+        exit(1)
+
+def map_keys_to_str(d):
+    if isinstance(d, dict):
+        return {str(k): map_keys_to_str(v) for k, v in d.items()}
+    elif isinstance(d, list):
+        return [map_keys_to_str(i) for i in d]
+    else:
+        return d
+
+def serialize_args(args):
+    if isinstance(args, (list, tuple)):
+        return '[' + ','.join(serialize_args(a) for a in args) + ']'
+    elif isinstance(args, dict):
+        return '{' + ','.join(f"{k}:{serialize_args(v)}" for k, v in args.items()) + '}'
+    else:
+        return str(args)
+
+
+def serialize_function_call(func, args):
+    # Use function name and module as function identifier
+    func_name = func.__name__ if hasattr(func, '__name__') else str(func)
+    func_module = func.__module__ if hasattr(func, '__module__') else ''
+    
+    # Serialize function identifier and arguments
+    func_identifier = f"{func_module}.{func_name}"
+    
+    # Serialize arguments recursively
+    serialized_args = serialize_args(args)
+    
+    # Combine function identifier and serialized arguments
+    func_call_repr = (func_identifier, serialized_args)
+    
+    # Use pickle to serialize the representation
+    import pickle
+    return pickle.dumps(func_call_repr)
+
+
+################################################################################################
+
+
+################################################################################################
 ##
 # @class ndcctools.taskvine.dask_executor.DaskVine
 #
@@ -137,6 +213,7 @@ class DaskVine(Manager):
             lazy_transfers=True,    # Deprecated, use worker_tranfers
             ):
         try:
+
             self.set_property("framework", "dask")
             if retries and retries < 1:
                 raise ValueError("retries should be larger than 0")
@@ -203,7 +280,8 @@ class DaskVine(Manager):
         indices = {k: inds for (k, inds) in find_dask_keys(keys)}
         keys_flatten = indices.keys()
 
-        dag = DaskVineDag(dsk, low_memory_mode=self.low_memory_mode)
+        dag = DaskVineDag(dsk, collapse_hlg=False, low_memory_mode=self.low_memory_mode)
+
         tag = f"dag-{id(dag)}"
 
         # create Library if using 'function-calls' task mode.
@@ -245,7 +323,9 @@ class DaskVine(Manager):
             self.install_library(libtask)
 
         enqueued_calls = []
+
         rs = dag.set_targets(keys_flatten)
+
         self._enqueue_dask_calls(dag, tag, rs, self.retries, enqueued_calls)
 
         timeout = 5
@@ -259,10 +339,11 @@ class DaskVine(Manager):
                     enqueued_calls
                     and (not self.submit_per_cycle or submitted < self.submit_per_cycle)
                     and (not self.max_pending or pending < self.max_pending)
+                    and self.hungry()
                 ):
-                    self.submit(enqueued_calls.pop())
                     submitted += 1
                     pending += 1
+                    self.submit(enqueued_calls.pop())
 
                 t = self.wait_for_tag(tag, timeout)
                 if t:
@@ -274,12 +355,13 @@ class DaskVine(Manager):
                     if t.successful():
                         result_file = DaskVineFile(t.output_file, t.key, dag, self.task_mode)
                         rs = dag.set_result(t.key, result_file)
+
                         self._enqueue_dask_calls(dag, tag, rs, self.retries, enqueued_calls)
 
                         if self.wrapper:
                             self.wrapper_proc(t.load_wrapper_output(self))
 
-                        if t.key in dsk:
+                        if t.key in dag.hlg:
                             bar_update(advance=1)
 
                         if self.prune_files:
@@ -294,6 +376,7 @@ class DaskVine(Manager):
                     t = None  # drop task reference
                 else:
                     timeout = 5
+
             return self._load_results(dag, indices, keys)
 
     def _make_progress_bar(self, total):
@@ -328,76 +411,15 @@ class DaskVine(Manager):
 
     def _enqueue_dask_calls(self, dag, tag, rs, retries, enqueued_calls):
         targets = dag.get_targets()
+
         for (k, sexpr) in rs:
+
             lazy = self.worker_transfers and k not in targets
             if lazy and self.checkpoint_fn:
                 lazy = self.checkpoint_fn(dag, k)
 
             cat = self.category_name(sexpr)
-            #print(f"sexpr[0] {type(sexpr[0])}")
-            #print(f"sexpr[1] {sexpr[1:]}")
-            callable = sexpr[0]
-            args = sexpr[1:]
-            import json
-
-            def serialize_value(value, dask_blockwise_list):
-                if isinstance(value, tuple):
-                    ret = []
-                    for v in value:
-                        selized = serialize_element(v, dask_blockwise_list)
-                        ret.append(selized)
-
-                    # convert to tuple
-                    ret = tuple(ret)
-                    return ret
-                else:
-                    return serialize_element(value, dask_blockwise_list)
-
-            def serialize_element(element, dask_blockwise_list):
-                if isinstance(element, str):
-                    if element.startswith("__dask_blockwise"):
-                        blockwise_id = int(element.split('__')[-1])
-                        return serialize_element(dask_blockwise_list[blockwise_id], dask_blockwise_list)
-                    else:    
-                        return element
-                elif isinstance(element, list):
-                    return [serialize_element(e, dask_blockwise_list) for e in element]
-                elif isinstance(element, dict):
-                    return {serialize_element(k, dask_blockwise_list): serialize_element(v, dask_blockwise_list) for k, v in element.items()}
-                elif isinstance(element, tuple):
-                    return tuple(serialize_element(e, dask_blockwise_list) for e in element)
-                else:
-                    return str(element)
-
-            try:
-                print(f"callable: {callable}")
-                print(f"args: {args}")
-                dask_blockwise_list = list(args)
-                for key, value in callable.dsk.items():
-                    serializable_value = serialize_value(value, dask_blockwise_list)
-                    if key in dsk_dict:
-                        # print(f"key: {key} already exists in dsk_dict")
-                        # generate a randome new key in 4 digits
-                        new_key = key + "-" + str(uuid4())[:8]
-                        dsk_dict[new_key] = serializable_value
-                    else:
-                        dsk_dict[key] = serializable_value
-                    print(f"key: {key}")
-                    print(f"value: {serializable_value}")
-                print()
-            except Exception as e:
-                print(f"{e}")
-                print(callable)
-                print(args)
-                if isinstance(callable, types.FunctionType):
-                    func_id = callable.__name__ + str(uuid4())[:8]
-                    dsk_dict[func_id] = 1
-            # save to json
-            with open(f"dsk.json", "w") as f:
-                # dump with formats
-                json.dump(dsk_dict, f, indent=4)
-            #exit(1)
-
+            
             if self.task_mode == 'tasks':
                 if cat not in self._categories_known:
                     if self.resources:
@@ -719,7 +741,7 @@ class FunctionCallDask(FunctionCall):
                 self._wrapper_output = self._wrapper_output_file.contents(cloudpickle.load)
                 manager.undeclare_file(self._wrapper_output_file)
                 self._wrapper_output_file = None
-        return self._wrapper_output
+        return self._wrapper_outputd
 
 
 def execute_graph_vertex(wrapper, key, sexpr, args, keys_of_files):

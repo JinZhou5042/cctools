@@ -3,7 +3,61 @@
 # See the file COPYING for details.
 
 from uuid import uuid4
-from collections import defaultdict
+from collections import defaultdict, deque
+import dask
+import types
+import hashlib
+import os
+import cloudpickle
+from dask.utils import ensure_dict
+import json
+from dask.highlevelgraph import HighLevelGraph, MaterializedLayer
+
+
+
+WORKING_PATH = "/afs/crc.nd.edu/user/j/jzhou24/111/cctools/taskvine/src/bindings/python3/ndcctools/taskvine"
+def map_keys_to_str(d):
+    if isinstance(d, dict):
+        return {str(k): map_keys_to_str(v) for k, v in d.items()}
+    elif isinstance(d, list):
+        return [map_keys_to_str(i) for i in d]
+    else:
+        return d
+
+def customer_serializer(obj):
+    try:
+        return str(obj)
+    except Exception:
+        print(f"ERROR: Unexpected type: {type(obj)}")
+        exit(1)
+
+def save_to_json(data, mode="w", filename="dsk.json", path=WORKING_PATH):
+    data_with_str_keys = map_keys_to_str(data)
+    with open(os.path.join(path, filename), mode) as f:
+        json.dump(data_with_str_keys, f, indent=4, default=customer_serializer)
+
+def hash_name(*args):
+    out_str = ""
+    for arg in args:
+        out_str += str(arg)
+    return hashlib.sha256(out_str.encode('utf-8')).hexdigest()[:12]
+
+def convert_args(dsk_key, dsk, args, blockwise_args):
+    try:
+        if args in dsk:
+            return hash_name(dsk_key, args)
+    except:
+        pass
+    if isinstance(args, list):
+        return [convert_args(dsk_key, dsk, item, blockwise_args) for item in args]
+    elif isinstance(args, tuple):
+        # nested tuple is not allowed
+        return tuple(convert_args(dsk_key, dsk, item, blockwise_args) for item in args)
+    else:
+        if isinstance(args, str) and args.startswith('__dask_blockwise__'):
+            blockwise_arg_idx = int(args.split('__')[-1])
+            return blockwise_args[blockwise_arg_idx]
+        return args
 
 
 class DaskVineDag:
@@ -58,8 +112,12 @@ class DaskVineDag:
         except TypeError:
             return False
 
-    def __init__(self, dsk, low_memory_mode=False):
-        self._dsk = dsk
+    def __init__(self, dsk, collapse_hlg=False, low_memory_mode=False):
+
+        if collapse_hlg:
+            self.hlg = self.collapse_hlg(dsk)
+        else:
+            self.hlg = dsk
 
         # child -> parents. I.e., which parents needs the result of child
         self._parents_of = defaultdict(lambda: set())
@@ -82,11 +140,50 @@ class DaskVineDag:
         # target keys that the dag should compute
         self._targets = set()
 
-        self._working_graph = dict(dsk)
+        self._working_graph = dict(self.hlg)
         if low_memory_mode:
             self._flatten_graph()
 
         self.initialize_graph()
+
+    def collapse_hlg(self, dsk, save=True):
+        print(f"collapsing {len(dsk)} tasks in the original hlg......")
+        dict = {}
+
+        for k, sexpr in dsk.items():
+            callable = sexpr[0]
+            args = sexpr[1:]
+
+            if isinstance(callable, dask.optimization.SubgraphCallable):
+                dict[k] = hash_name(k, callable.outkey)
+                for sub_key, sub_sexpr in callable.dsk.items():
+                    unique_key = hash_name(k, sub_key)
+
+                    dict[unique_key] = convert_args(k, callable.dsk, sub_sexpr, args)
+
+            elif isinstance(callable, types.FunctionType):
+                dict[k] = sexpr
+
+            else:
+                print(f"ERROR: unexpected type: {type(callable)}")
+                exit(1)
+
+        layers = ensure_dict({'layer': dict})
+        dependencies = {'layer': set()}
+        hlg = HighLevelGraph(layers, dependencies)
+
+        if save:
+            with open(os.path.join(WORKING_PATH, 'converted_hlg.pkl'), 'wb') as f:
+                cloudpickle.dump(hlg, f)
+
+            save_to_json(dict, filename="converted_hlg.json")
+
+        print(f"collapsing hlg done, now the dag has {len(hlg)}.")
+
+        return hlg
+
+    def remove_key(self, key):
+        del self._working_graph[key]
 
     def left_to_compute(self):
         return len(self._working_graph) - len(self._result_of)
@@ -145,6 +242,7 @@ class DaskVineDag:
         of computations that become ready to be executed """
         rs = {}
         self._result_of[key] = value
+
         for p in self._parents_of[key]:
             self._missing_of[p].discard(key)
 
@@ -152,13 +250,15 @@ class DaskVineDag:
                 continue
 
             sexpr = self._working_graph[p]
+            """
             if self.graph_keyp(sexpr):
                 rs.update(
                     self.set_result(p, self.get_result(sexpr))
                 )  # case e.g, "x": "y", and we just set the value of "y"
             elif self.symbolp(sexpr):
                 rs.update(self.set_result(p, sexpr))
-            else:
+            """
+            if True:
                 rs[p] = (p, sexpr)
 
         for c in self._children_of[key]:
