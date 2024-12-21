@@ -1076,14 +1076,14 @@ static int release_worker(struct vine_manager *q, struct vine_worker_info *w)
 
 /* Check for new connections on the manager's port, and add a worker if one is there. */
 
-static void add_worker(struct vine_manager *q)
+static int add_worker(struct vine_manager *q)
 {
 	char addr[LINK_ADDRESS_MAX];
 	int port;
 
 	struct link *link = link_accept(q->manager_link, time(0) + q->short_timeout);
 	if (!link) {
-		return;
+		return 0;
 	}
 
 	link_keepalive(link, 1);
@@ -1091,7 +1091,7 @@ static void add_worker(struct vine_manager *q)
 
 	if (!link_address_remote(link, addr, &port)) {
 		link_close(link);
-		return;
+		return 0;
 	}
 
 	debug(D_VINE, "worker %s:%d connected", addr, port);
@@ -1102,7 +1102,7 @@ static void add_worker(struct vine_manager *q)
 		} else {
 			debug(D_VINE, "worker %s:%d failed ssl connection", addr, port);
 			link_close(link);
-			return;
+			return 0;
 		}
 	} else {
 		/* nothing to do */
@@ -1113,7 +1113,7 @@ static void add_worker(struct vine_manager *q)
 		if (!link_auth_password(link, q->password, time(0) + q->short_timeout)) {
 			debug(D_VINE | D_NOTICE, "worker %s:%d presented the wrong password", addr, port);
 			link_close(link);
-			return;
+			return 0;
 		}
 	}
 
@@ -1121,13 +1121,15 @@ static void add_worker(struct vine_manager *q)
 	if (!w) {
 		debug(D_NOTICE, "Cannot allocate memory for worker %s:%d.", addr, port);
 		link_close(link);
-		return;
+		return 0;
 	}
 
 	w->hashkey = link_to_hash_key(link);
 	w->addrport = string_format("%s:%d", addr, port);
 
 	hash_table_insert(q->worker_table, w->hashkey, w);
+
+	return 1;
 }
 
 /* Delete a single file on a remote worker except those with greater delete_upto_level cache level */
@@ -4885,17 +4887,16 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 
 static int connect_new_workers(struct vine_manager *q, int stoptime, int max_new_workers)
 {
+	// If the manager link was awake, then accept at most max_new_workers.
+
 	int new_workers = 0;
 
-	// If the manager link was awake, then accept at most max_new_workers.
-	// Note we are using the information gathered in poll_active_workers, which
-	// is a little ugly.
-	if (q->poll_table[0].revents) {
-		do {
-			add_worker(q);
+	do {
+		link_poll(q->poll_table, 1, 0);
+		if (q->poll_table[0].revents && add_worker(q)) {
 			new_workers++;
-		} while (link_usleep(q->manager_link, 0, 1, 0) && (stoptime >= time(0) && (max_new_workers > new_workers)));
-	}
+		}
+	} while (link_usleep(q->manager_link, 0, 1, 0) && (stoptime >= time(0) && (max_new_workers > new_workers)));
 
 	return new_workers;
 }
@@ -5045,6 +5046,15 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			}
 		}
 
+		// retrieve worker status messages
+		if (poll_active_workers(q, stoptime) > 0) {
+			// at least one worker was removed.
+			events++;
+			// note we keep going, and we do not restart the loop as we do in
+			// further events. This is because we give top priority to
+			// returning and retrieving tasks.
+		}
+
 		// if new workers, connect n of them
 		BEGIN_ACCUM_TIME(q, time_status_msgs);
 		result = connect_new_workers(q, stoptime, MAX(q->wait_for_workers, q->max_new_workers));
@@ -5054,15 +5064,6 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			// reset the rotate cursor on worker connection
 			priority_queue_rotate_reset(q->ready_tasks);
 			events++;
-		}
-
-		// retrieve worker status messages
-		if (poll_active_workers(q, stoptime) > 0) {
-			// at least one worker was removed.
-			events++;
-			// note we keep going, and we do not restart the loop as we do in
-			// further events. This is because we give top priority to
-			// returning and retrieving tasks.
 		}
 
 		// get updates for watched files.
