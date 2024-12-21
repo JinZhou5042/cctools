@@ -5045,6 +5045,17 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			}
 		}
 
+		// if new workers, connect n of them
+		BEGIN_ACCUM_TIME(q, time_status_msgs);
+		result = connect_new_workers(q, stoptime, MAX(q->wait_for_workers, q->max_new_workers));
+		END_ACCUM_TIME(q, time_status_msgs);
+		if (result) {
+			// accepted at least one worker
+			// reset the rotate cursor on worker connection
+			priority_queue_rotate_reset(q->ready_tasks);
+			events++;
+		}
+
 		// retrieve worker status messages
 		if (poll_active_workers(q, stoptime) > 0) {
 			// at least one worker was removed.
@@ -5165,18 +5176,6 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		result += shutdown_drained_workers(q);
 		vine_blocklist_unblock_all_by_time(q, time(0));
 		END_ACCUM_TIME(q, time_internal);
-
-		// if new workers, connect n of them
-		BEGIN_ACCUM_TIME(q, time_status_msgs);
-		result = connect_new_workers(q, stoptime, MAX(q->wait_for_workers, q->max_new_workers));
-		END_ACCUM_TIME(q, time_status_msgs);
-		if (result) {
-			// accepted at least one worker
-			// reset the rotate cursor on worker connection
-			priority_queue_rotate_reset(q->ready_tasks);
-			events++;
-			continue;
-		}
 
 		if (q->process_pending_check) {
 			BEGIN_ACCUM_TIME(q, time_internal);
