@@ -29,6 +29,8 @@ See the file COPYING for details.
 #include "vine_taskgraph_log.h"
 #include "vine_txn_log.h"
 #include "vine_worker_info.h"
+#include "vine_file_recovery_subgraph.h"
+#include "vine_checkpoint.h"
 
 #include "address.h"
 #include "buffer.h"
@@ -112,6 +114,8 @@ See the file COPYING for details.
 /* Default value for maximum number of workers to add in a single cycle before dealing with other matters. */
 #define MAX_NEW_WORKERS 10
 
+#define VINE_CHECKPOINT_THRESHOLD (uint64_t)(5 * 1e6) // 10 seconds in usecs
+
 /* Default value for how frequently to check for tasks that do not fit any worker. */
 #define VINE_LARGE_TASK_CHECK_INTERVAL 180000000 // 3 minutes in usecs
 
@@ -151,7 +155,7 @@ static struct jx *manager_to_jx(struct vine_manager *q);
 static struct jx *manager_lean_to_jx(struct vine_manager *q);
 
 char *vine_monitor_wrap(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, struct rmsummary *limits);
-
+struct set *find_file_sources(struct vine_manager *q, const char *cached_name);
 void vine_accumulate_task(struct vine_manager *q, struct vine_task *t);
 struct category *vine_category_lookup_or_create(struct vine_manager *q, const char *name);
 
@@ -165,11 +169,11 @@ static int vine_manager_check_inputs_available(struct vine_manager *q, struct vi
 static void vine_manager_consider_recovery_task(struct vine_manager *q, struct vine_file *lost_file, struct vine_task *rt);
 
 static void delete_uncacheable_files(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
-static int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const char *filename, vine_cache_level_t cache_level, vine_cache_level_t delete_upto_level);
 
 struct vine_task *send_library_to_worker(struct vine_manager *q, struct vine_worker_info *w, const char *name);
 
-/* Return the number of workers matching a given type: WORKER, STATUS, etc */
+int temp_file_replica_demand(struct vine_manager *q, struct vine_file *f);
+
 
 static int count_workers(struct vine_manager *q, vine_worker_type_t type)
 {
@@ -393,9 +397,15 @@ static int handle_cache_update(struct vine_manager *q, struct vine_worker_info *
 			f->state = VINE_FILE_STATE_CREATED;
 			f->size = size;
 
-			/* And if the file is a newly created temporary, replicate as needed. */
-			if (f->type == VINE_TEMP && *id == 'X' && q->temp_replica_count > 1) {
-				hash_table_insert(q->temp_files_to_replicate, f->cached_name, NULL);
+			/* And if the file is a newly created temporary. */
+			if (f->type == VINE_TEMP && *id == 'X') {
+				/* replicate as needed */
+				if (q->temp_replica_count > 1) {
+					int replica_demand = temp_file_replica_demand(q, f);
+					if (replica_demand > 0) {
+						priority_queue_push(q->temp_files_to_replicate, f, replica_demand);
+					}
+				}
 			}
 		}
 	}
@@ -583,6 +593,35 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 		t->output_length = output_length;
 		t->result = task_status;
 		t->exit_code = exit_status;
+
+		/* traverse all files produced by this task and set the producer task creation time */
+		struct vine_mount *m;
+		uint64_t critical_time = 0;
+		uint64_t total_time = 0;
+		LIST_ITERATE(t->input_mounts, m) {
+			if (m->file->type != VINE_TEMP || !q->temp_file_checkpoint) {
+				continue;
+			}
+			vine_file_add_consumer_task(m->file, t->task_id);
+
+			critical_time = MAX(critical_time, m->file->recovery_subgraph_critical_time);
+			total_time += m->file->recovery_subgraph_total_time;
+		}
+		critical_time += t->time_workers_execute_last;
+		total_time += t->time_workers_execute_last;
+		LIST_ITERATE(t->output_mounts, m)
+		{
+			if (m->file->type != VINE_TEMP || !q->temp_file_checkpoint) {
+				continue;
+			}
+			m->file->producer_task_id = t->task_id;
+			m->file->producer_task_execution_time = t->time_workers_execute_last;
+
+			m->file->recovery_subgraph_cost = (uint64_t)(0.5 * total_time + 0.5 * critical_time);
+			if (!hash_table_lookup(q->checkpoint_queue, m->file->cached_name)) {
+				hash_table_insert(q->checkpoint_queue, m->file->cached_name, m->file);
+			}
+		}
 
 		/* fill resources measured with whatever vine reported/committed, as a fallback when task ran without monitoring enabled */
 		t->resources_measured->start = ((double)start_time) / ONE_SECOND;
@@ -946,71 +985,216 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w)
 	cleanup_worker_files(q, w);
 }
 
-/* Start replicating files that may need replication */
-static int consider_tempfile_replications(struct vine_manager *q)
+int temp_file_replica_demand(struct vine_manager *q, struct vine_file *f)
 {
-	if (hash_table_size(q->temp_files_to_replicate) <= 0) {
+	if (!f || f->type != VINE_TEMP) {
 		return 0;
 	}
 
-	char *cached_name = NULL;
-	void *empty_val = NULL;
+	return q->temp_replica_count - vine_file_replica_count(q, f);
+}
+
+int temp_file_has_ready_source(struct vine_manager *q, struct vine_file *f)
+{
+	if (!f || f->type != VINE_TEMP) {
+		return 0;
+	}
+
+	struct set *sources = hash_table_lookup(q->file_worker_table, f->cached_name);
+	if (!sources) {
+		return 0;
+	}
+
+	int has_ready_source = 0;
+	struct vine_worker_info *w = NULL;
+	SET_ITERATE(sources, w)
+	{
+		struct vine_file_replica *replica = hash_table_lookup(w->current_files, f->cached_name);
+		if (replica && replica->state == VINE_FILE_REPLICA_STATE_READY) {
+			has_ready_source = 1;
+			break;
+		}
+	}
+	return has_ready_source;
+}
+
+struct priority_queue *ensure_temp_file_transfer_sources(struct vine_manager *q, struct vine_file *f, int transfer_throttle)
+{
+	if (!f || f->type != VINE_TEMP) {
+		return NULL;
+	}
+
+	/* If the file doesn't exist, it indicates that the file is either pruned or lost.
+	   Because a pruned file is removed from the recovery queue, so it definitely indicates that the file is lost. */
+	struct set *sources = hash_table_lookup(q->file_worker_table, f->cached_name);
+	if (!sources) {
+		if (q->transfer_temps_recovery) {
+			vine_manager_consider_recovery_task(q, f, f->recovery_task);
+		}
+		int f_idx = priority_queue_find_idx(q->temp_files_to_replicate, f);
+		if (f_idx != -1) {
+			priority_queue_remove(q->temp_files_to_replicate, f_idx);
+		}
+		return NULL;
+	}
+
+	/* If all replicas are pending, this file is stuck, so unlink from all workers and remove from the replication queue */
+	if (!temp_file_has_ready_source(q, f)) {
+		vine_prune_file(q, f);
+		if (q->transfer_temps_recovery) {
+			vine_manager_consider_recovery_task(q, f, f->recovery_task);
+		}
+		int f_idx = priority_queue_find_idx(q->temp_files_to_replicate, f);
+		if (f_idx != -1) {
+			priority_queue_remove(q->temp_files_to_replicate, f_idx);
+		}
+		return NULL;
+	}
+
+	struct priority_queue *valid_sources = priority_queue_create(0);
+	struct vine_worker_info *w = NULL;
+	SET_ITERATE(sources, w)
+	{
+		if (!w->transfer_port_active) {
+			continue;
+		}
+		/* do not check the inuse transfer slot at this moment */
+		if (vine_current_transfers_source_in_use(q, w) >= transfer_throttle) {
+			continue;
+		}
+		struct vine_file_replica *replica = hash_table_lookup(w->current_files, f->cached_name);
+		if (!replica) {
+			continue;
+		}
+		if (replica->state != VINE_FILE_REPLICA_STATE_READY) {
+			continue;
+		}
+		priority_queue_push(valid_sources, w, -(w->resources->disk.total - w->resources->disk.inuse));
+	}
+
+	if (priority_queue_size(valid_sources) == 0) {
+		priority_queue_delete(valid_sources);
+		return NULL;
+	}
+
+	return valid_sources;
+}
+
+struct priority_queue *ensure_temp_file_transfer_destinations(struct vine_manager *q, struct vine_file *f, int transfer_throttle)
+{
+	if (!f || f->type != VINE_TEMP) {
+		return NULL;
+	}
+
+	struct priority_queue *valid_destinations = priority_queue_create(0);
+	char *key = NULL;
+	struct vine_worker_info *w = NULL;
+	HASH_TABLE_ITERATE(q->worker_table, key, w)
+	{
+		if (hash_table_lookup(w->current_files, f->cached_name)) {
+			continue;
+		}
+		if (!w->transfer_port_active) {
+			continue;
+		}
+		if (!w->resources) {
+			continue;
+		}
+		if (vine_current_transfers_dest_in_use(q, w) >= transfer_throttle) {
+			continue;
+		}
+		if (w->is_pbb_worker) {
+			continue;
+		}
+		if (w->resources->disk.total - w->resources->disk.inuse < (long long)f->size) {
+			continue;
+		}
+		priority_queue_push(valid_destinations, w, w->resources->disk.total - w->resources->disk.inuse);
+	}
+
+	if (priority_queue_size(valid_destinations) == 0) {
+		priority_queue_delete(valid_destinations);
+		return NULL;
+	}
+
+	return valid_destinations;
+}
+
+/* Start replicating files that may need replication */
+static int consider_tempfile_replications(struct vine_manager *q)
+{
 	int total_replication_request_sent = 0;
 
-	static char key_start[PATH_MAX] = "random init";
-	int iter_control;
-	int iter_count_var;
+	struct priority_queue *valid_sources = NULL;
+	struct priority_queue *valid_destinations = NULL;
 
-	HASH_TABLE_ITERATE_FROM_KEY(q->temp_files_to_replicate, iter_control, iter_count_var, key_start, cached_name, empty_val)
-	{
-		struct vine_file *f = hash_table_lookup(q->file_table, cached_name);
-
+	while (priority_queue_size(q->temp_files_to_replicate) > 0) {
+		struct vine_file *f = priority_queue_peek_top(q->temp_files_to_replicate);
 		if (!f) {
+			return 0;
+		}
+
+		valid_sources = ensure_temp_file_transfer_sources(q, f, q->worker_source_max_transfers * 2);
+		valid_destinations = ensure_temp_file_transfer_destinations(q, f, q->worker_source_max_transfers * 2);
+
+		if (!valid_sources || !valid_destinations) {
+			break;
+		}
+
+		int replica_demand = temp_file_replica_demand(q, f);
+		if (replica_demand < 0) {
+			priority_queue_pop(q->temp_files_to_replicate);
 			continue;
 		}
 
-		/* are there any available sources? */
-		struct set *sources = hash_table_lookup(q->file_worker_table, f->cached_name);
-		if (!sources) {
-			/* If no sources found, it indicates that the file doesn't exist, either pruned or lost.
-			Because a pruned file is removed from the recovery queue, so it definitely indicates that the file is lost. */
-			if (q->transfer_temps_recovery) {
-				vine_manager_consider_recovery_task(q, f, f->recovery_task);
+		/* for each destination, choose a valid source and replicate the file */
+		struct vine_worker_info *destination = NULL;
+		struct vine_worker_info *source = NULL;
+
+		while (priority_queue_size(valid_destinations) > 0) {
+			destination = priority_queue_pop(valid_destinations);
+			source = NULL;
+			int idx;
+			int iter_count = 0;
+			int iter_depth = priority_queue_size(valid_sources);
+			struct vine_worker_info *w = NULL;
+			PRIORITY_QUEUE_BASE_ITERATE(valid_sources, idx, w, iter_count, iter_depth)
+			{
+				if (strcmp(w->hostname, destination->hostname) != 0) {
+					source = w;
+					break;
+				}
 			}
-			hash_table_remove(q->temp_files_to_replicate, f->cached_name);
-			continue;
-		}
-
-		/* at least one source is able to transfer? */
-		int has_valid_source = 0;
-		struct vine_worker_info *s;
-		SET_ITERATE(sources, s)
-		{
-			if (s->transfer_port_active && vine_current_transfers_source_in_use(q, s) < q->worker_source_max_transfers) {
-				has_valid_source = 1;
+			if (source) {
 				break;
 			}
 		}
-		if (!has_valid_source) {
-			continue;
+		if (!source || !destination) {
+			break;
 		}
 
-		/* has this file been fully replicated? */
-		int nsources = set_size(sources);
-		int to_find = MIN(q->temp_replica_count - nsources, q->transfer_replica_per_cycle);
-		if (to_find <= 0) {
-			hash_table_remove(q->temp_files_to_replicate, f->cached_name);
-			continue;
+		char *source_addr = string_format("%s/%s", source->transfer_url, f->cached_name);
+		vine_manager_put_url_now(q, destination, source_addr, f);
+		free(source_addr);
+
+		replica_demand = temp_file_replica_demand(q, f);
+		if (replica_demand > 0) {
+			priority_queue_update_priority(q->temp_files_to_replicate, f, replica_demand);
+		} else {
+			priority_queue_pop(q->temp_files_to_replicate);
 		}
 
-		// debug(D_VINE, "Found %d workers holding %s, %d replicas needed", nsources, f->cached_name, to_find);
-
-		int round_replication_request_sent = vine_file_replica_table_replicate(q, f, sources, to_find);
-		total_replication_request_sent += round_replication_request_sent;
-
+		total_replication_request_sent++;
 		if (total_replication_request_sent >= q->attempt_schedule_depth) {
 			break;
 		}
+	}
+
+	if (valid_sources) {
+		priority_queue_delete(valid_sources);
+	}
+	if (valid_destinations) {
+		priority_queue_delete(valid_destinations);
 	}
 
 	return total_replication_request_sent;
@@ -1031,7 +1215,19 @@ static void recall_worker_lost_temp_files(struct vine_manager *q, struct vine_wo
 		struct vine_file *f = hash_table_lookup(q->file_table, cached_name);
 
 		if (f && f->type == VINE_TEMP) {
-			hash_table_insert(q->temp_files_to_replicate, cached_name, NULL);
+			// skip if the file is already in the replication queue
+			int idx = priority_queue_find_idx(q->temp_files_to_replicate, f);
+			if (idx != -1) {
+				continue;
+			}
+
+			// skip if it does not need replication (if 0, one replica is needed because of this failure)
+			int replica_demand = temp_file_replica_demand(q, f);
+			if (replica_demand < 0) {
+				continue;
+			}
+
+			priority_queue_push(q->temp_files_to_replicate, f, replica_demand);
 		}
 	}
 }
@@ -1141,11 +1337,23 @@ static void add_worker(struct vine_manager *q)
 	w->addrport = string_format("%s:%d", addr, port);
 
 	hash_table_insert(q->worker_table, w->hashkey, w);
+
+	// Check if this worker should be designated as the PBB worker
+	if (strcmp(addr, "10.32.85.31") == 0) {
+		// If we already have a PBB worker, log an error
+		if (q->pbb_worker) {
+			debug(D_NOTICE, "\nAttempt to add a second PBB worker. Only one PBB worker is supported. Continuing as a normal worker.");
+		} else {
+			debug(D_NOTICE, "\nWorker %s designated as the PBB (checkpoint) worker", w->addrport);
+			q->pbb_worker = w;
+			w->is_pbb_worker = 1;
+		}
+	}
 }
 
 /* Delete a single file on a remote worker except those with greater delete_upto_level cache level */
 
-static int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const char *filename, vine_cache_level_t cache_flags, vine_cache_level_t delete_upto_level)
+int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const char *filename, vine_cache_level_t cache_flags, vine_cache_level_t delete_upto_level)
 {
 	if (cache_flags <= delete_upto_level) {
 		vine_manager_send(q, w, "unlink %s\n", filename);
@@ -1508,6 +1716,12 @@ we remove the worker and retry the tasks dispatched to it elsewhere.
 static void handle_worker_failure(struct vine_manager *q, struct vine_worker_info *w)
 {
 	vine_manager_remove_worker(q, w, VINE_WORKER_DISCONNECT_FAILURE);
+
+	// Prevent removal of PBB worker
+	if (w->is_pbb_worker) {
+		debug(D_NOTICE, "Attempt to remove the PBB worker %s. PBB workers cannot be removed. Operation cancelled.", w->addrport);
+		exit(1);
+	}
 	return;
 }
 
@@ -4031,7 +4245,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->worker_table = hash_table_create(0, 0);
 	q->file_worker_table = hash_table_create(0, 0);
-	q->temp_files_to_replicate = hash_table_create(0, 0);
+	q->temp_files_to_replicate = priority_queue_create(0);
+	q->checkpoint_queue = hash_table_create(0, 0);
 	q->worker_blocklist = hash_table_create(0, 0);
 
 	q->file_table = hash_table_create(0, 0);
@@ -4131,11 +4346,15 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->transient_error_interval = VINE_DEFAULT_TRANSIENT_ERROR_INTERVAL;
 	q->max_task_stdout_storage = MAX_TASK_STDOUT_STORAGE;
 	q->max_new_workers = MAX_NEW_WORKERS;
+	q->checkpoint_threshold = VINE_CHECKPOINT_THRESHOLD;
+	q->checkpointed_files = priority_queue_create(0);
 	q->large_task_check_interval = VINE_LARGE_TASK_CHECK_INTERVAL;
 	q->hungry_check_interval = VINE_HUNGRY_CHECK_INTERVAL;
 	q->option_blocklist_slow_workers_timeout = vine_option_blocklist_slow_workers_timeout;
 
 	q->manager_preferred_connection = xxstrdup("by_ip");
+
+	q->pbb_worker = NULL;
 
 	if ((envstring = getenv("VINE_BANDWIDTH"))) {
 		q->bandwidth_limit = string_metric_parse(envstring);
@@ -4373,8 +4592,7 @@ void vine_delete(struct vine_manager *q)
 	hash_table_clear(q->file_worker_table, (void *)set_delete);
 	hash_table_delete(q->file_worker_table);
 
-	hash_table_clear(q->temp_files_to_replicate, 0);
-	hash_table_delete(q->temp_files_to_replicate);
+	priority_queue_delete(q->temp_files_to_replicate);
 
 	hash_table_clear(q->factory_table, (void *)vine_factory_info_delete);
 	hash_table_delete(q->factory_table);
@@ -4407,6 +4625,7 @@ void vine_delete(struct vine_manager *q)
 	hash_table_delete(q->categories);
 
 	priority_queue_delete(q->ready_tasks);
+	hash_table_delete(q->checkpoint_queue);
 	itable_delete(q->running_table);
 	list_delete(q->waiting_retrieval_list);
 	list_delete(q->retrieved_list);
@@ -4415,6 +4634,7 @@ void vine_delete(struct vine_manager *q)
 
 	list_clear(q->task_info_list, (void *)vine_task_info_delete);
 	list_delete(q->task_info_list);
+	priority_queue_delete(q->checkpointed_files);
 
 	char *staging = vine_get_path_staging(q, NULL);
 	if (!access(staging, F_OK)) {
@@ -4645,8 +4865,8 @@ static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_t
 			q->fixed_location_in_queue--;
 		}
 		vine_taskgraph_log_write_task(q, t);
-		itable_remove(q->tasks, t->task_id);
-		vine_task_delete(t);
+		// itable_remove(q->tasks, t->task_id);
+		// vine_task_delete(t);
 		break;
 	}
 
@@ -4961,7 +5181,7 @@ static void print_password_warning(struct vine_manager *q)
 #define BEGIN_ACCUM_TIME(q, stat) \
 	{ \
 		if (q->stats_measure->stat != 0) { \
-			fatal("Double-counting stat %s. This should not happen, and it is a taskvine bug."); \
+			fatal("Double-counting stat %s. This should not happen, and it is a taskvine bug.", #stat); \
 		} else { \
 			q->stats_measure->stat = timestamp_get(); \
 		} \
@@ -5127,6 +5347,56 @@ struct vine_task *find_task_to_return(struct vine_manager *q, const char *tag, i
 	return NULL;
 }
 
+static int process_checkpoint_queue(struct vine_manager *q)
+{
+    if (!q->temp_file_checkpoint || !q->pbb_worker || !q->checkpoint_queue) {
+        return 0;
+    }
+
+    int num_checkpointed = 0;
+
+	/* collect files to be removed */
+	struct list *to_remove = list_create();
+
+	char *key;
+	struct vine_file *f;
+
+	HASH_TABLE_ITERATE(q->checkpoint_queue, key, f) {
+		/* no need to checkpoint */
+		if (!f || f->recovery_subgraph_cost < q->checkpoint_threshold) {
+			list_push_tail(to_remove, f);
+			continue;
+		}
+		/* already checkpointed */
+		if (vine_checkpoint_checkpointed(q, f)) {
+			list_push_tail(to_remove, f);
+			continue;
+		}
+		/* no valid source at the moment */
+		struct vine_worker_info *source = vine_checkpoint_choose_source(q, f);
+		if (!source) {
+			continue;
+		}
+		/* no available space on PBB */
+		if (!vine_checkpoint_release_pbb(q, f)) {
+			list_push_tail(to_remove, f);
+			continue;
+		}
+		/* checkpoint the file */
+		vine_checkpoint_persist(q, source, f);
+		num_checkpointed++;
+		list_push_tail(to_remove, f);
+	}
+    
+	LIST_ITERATE(to_remove, f) {
+		hash_table_remove(q->checkpoint_queue, f->cached_name);
+	}
+
+	list_delete(to_remove);
+
+    return num_checkpointed;
+}
+
 static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout, const char *tag, int task_id)
 {
 	/*
@@ -5183,7 +5453,6 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 
 	// time left?
 	while ((stoptime == 0) || (time(0) < stoptime)) {
-
 		BEGIN_ACCUM_TIME(q, time_internal);
 		// update catalog if appropriate
 		if (q->name) {
@@ -5217,7 +5486,6 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			// further events. This is because we give top priority to
 			// returning and retrieving tasks.
 		}
-
 		// get updates for watched files.
 		if (hash_table_size(q->workers_with_watched_file_updates)) {
 
@@ -5308,6 +5576,16 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			}
 		}
 
+		// Check if any temp files need checkpointing and start checkpointing
+		BEGIN_ACCUM_TIME(q, time_internal);
+		result = process_checkpoint_queue(q);
+		END_ACCUM_TIME(q, time_internal);
+		if (result) {
+			// checkpointed at least one temp file
+			events++;
+			continue;
+		}
+
 		// Check if any temp files need replication and start replicating
 		BEGIN_ACCUM_TIME(q, time_internal);
 		result = consider_tempfile_replications(q);
@@ -5334,6 +5612,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		BEGIN_ACCUM_TIME(q, time_status_msgs);
 		result = connect_new_workers(q, stoptime, MAX(q->wait_for_workers, q->max_new_workers));
 		END_ACCUM_TIME(q, time_status_msgs);
+
 		if (result) {
 			// accepted at least one worker
 			// reset the rotate cursor on worker connection
@@ -5831,6 +6110,8 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 		if (value < 1 && value > 0) {
 			q->disk_proportion_available_to_task = value;
 		}
+	} else if (!strcmp(name, "temp-file-checkpoint")) {
+		q->temp_file_checkpoint = !!((int)value);
 	} else {
 		debug(D_NOTICE | D_VINE, "Warning: tuning parameter \"%s\" not recognized\n", name);
 		return -1;
@@ -6309,6 +6590,10 @@ void vine_prune_file(struct vine_manager *m, struct vine_file *f)
 		struct vine_worker_info *w;
 		HASH_TABLE_ITERATE(m->worker_table, key, w)
 		{
+			// skip PBB worker
+			if (w->is_pbb_worker) {
+				continue;
+			}
 			if (vine_file_replica_table_lookup(w, filename)) {
 				delete_worker_file(m, w, filename, 0, 0);
 			}
@@ -6316,7 +6601,10 @@ void vine_prune_file(struct vine_manager *m, struct vine_file *f)
 	}
 
 	/* Also remove from the replication table. */
-	hash_table_remove(m->temp_files_to_replicate, f->cached_name);
+	int f_idx = priority_queue_find_idx(m->temp_files_to_replicate, f);
+	if (f_idx != -1) {
+		priority_queue_remove(m->temp_files_to_replicate, f_idx);
+	}
 }
 
 /*

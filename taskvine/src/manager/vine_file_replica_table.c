@@ -93,7 +93,11 @@ struct vine_file_replica *vine_file_replica_table_lookup(struct vine_worker_info
 // count the number of in-cluster replicas of a file
 int vine_file_replica_count(struct vine_manager *m, struct vine_file *f)
 {
-	return set_size(hash_table_lookup(m->file_worker_table, f->cached_name));
+	struct set *replicas = hash_table_lookup(m->file_worker_table, f->cached_name);
+	if (!replicas) {
+		return 0;
+	}
+	return set_size(replicas);
 }
 
 // find a worker (randomly) in posession of a specific file, and is ready to transfer it.
@@ -177,6 +181,11 @@ int vine_file_replica_table_replicate(struct vine_manager *m, struct vine_file *
 
 		HASH_TABLE_ITERATE_RANDOM_START(m->worker_table, offset_bookkeep, id, dest)
 		{
+			// skip if the destination is the PBB worker
+			if (dest->is_pbb_worker) {
+				continue;
+			}
+
 			// skip if the source and destination are on the same host
 			if (set_lookup(sources, dest) || strcmp(source->hostname, dest->hostname) == 0) {
 				continue;

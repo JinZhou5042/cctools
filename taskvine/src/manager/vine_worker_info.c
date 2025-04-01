@@ -45,6 +45,8 @@ struct vine_worker_info *vine_worker_create(struct link *lnk)
 
 	vine_counters.worker.created++;
 
+	w->is_pbb_worker = 0;
+
 	return w;
 }
 
