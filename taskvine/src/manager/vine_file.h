@@ -45,6 +45,14 @@ struct vine_file {
 	struct vine_worker_info *source_worker; // if this is a substitute file, attach the worker serving it. 
 	int change_message_shown; // True if error message already shown.
 	int refcount;       // Number of references from a task object, delete when zero.
+
+	int producer_task_id;
+	struct list *consumer_tasks;
+	
+	uint64_t producer_task_execution_time;
+	uint64_t recovery_subgraph_critical_time;
+	uint64_t recovery_subgraph_total_time;
+	uint64_t recovery_subgraph_cost;
 };
 
 struct vine_file * vine_file_create( const char *source, const char *cached_name, const char *data, size_t size, vine_file_type_t type, struct vine_task *mini_task, vine_cache_level_t cache_level, vine_file_flags_t flags);
@@ -52,6 +60,10 @@ struct vine_file * vine_file_create( const char *source, const char *cached_name
 struct vine_file * vine_file_substitute_url( struct vine_file *f, const char *source, struct vine_worker_info *w );
 
 struct vine_file *vine_file_addref( struct vine_file *f );
+
+int vine_file_add_consumer_task(struct vine_file *f, int task_id);
+void vine_file_free_consumer_tasks(struct vine_file *f);
+void vine_file_producer_task_completes(struct vine_file *f, struct vine_task *t);
 
 /* Decreases reference count of file, and frees if zero. */
 int vine_file_delete( struct vine_file *f );

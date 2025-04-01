@@ -201,6 +201,11 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 	/* THIS FUNCTION SHOULD NOT MODIFY t IN ANY WAY. */
 	/* Otherwise library templates are modified during the run. */
 
+	/* skip pbb worker */
+	if (w->is_pbb_worker) {
+		return 0;
+	}
+
 	/* worker has not reported any resources yet */
 	if (w->resources->tag < 0 || w->resources->workers.total < 1 || w->end_time < 0) {
 		return 0;

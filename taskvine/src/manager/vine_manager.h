@@ -124,8 +124,9 @@ struct vine_manager {
 
 	struct hash_table *file_table;      /* Maps fileid -> struct vine_file.* */
 	struct hash_table *file_worker_table; /* Maps cachename -> struct set of workers with a replica of the file.* */
-	struct hash_table *temp_files_to_replicate; /* Maps cachename -> NULL. Used as a set of temp files to be replicated */
 
+	struct priority_queue *temp_files_to_replicate; /* Queue of temp files to be replicated */
+	struct hash_table *checkpoint_queue; /* Queue of output files that need to be checkpointed */
 
 	/* Primary scheduling controls. */
 
@@ -237,6 +238,13 @@ struct vine_manager {
 
 	timestamp_t large_task_check_interval;	/* How frequently to check for tasks that do not fit any worker. */
 	double option_blocklist_slow_workers_timeout;	/* Default timeout for slow workers to come back to the pool, can be set prior to creating a manager. */
+
+	int temp_file_checkpoint; /* If true, checkpoint temp files when they are lost */
+
+	struct vine_worker_info *pbb_worker;
+	struct priority_queue *checkpointed_files;
+
+	uint64_t checkpoint_threshold; /* Minimum recovery subgraph cost to checkpoint a file */
 };
 
 /*
@@ -248,6 +256,12 @@ be called on the manager object by other elements of the manager process.
  * is ****deleted**** and the previous file is returned. Otherwise f is returned. */
 struct vine_file *vine_manager_declare_file(struct vine_manager *m, struct vine_file *f);
 struct vine_file *vine_manager_lookup_file(struct vine_manager *q, const char *cached_name);
+
+/* Add an output file to checkpoint queue */
+void vine_manager_add_to_checkpoint_queue(struct vine_manager *q, struct vine_file *f);
+
+/* Process files in the checkpoint queue */
+int vine_manager_process_checkpoint_queue(struct vine_manager *q);
 
 /* Send a printf-style message to a remote worker. */
 #ifndef SWIG
@@ -285,6 +299,10 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 /* Check if the worker is able to transfer the necessary files for this task. */
 int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
+
+struct priority_queue *ensure_temp_file_transfer_sources(struct vine_manager *q, struct vine_file *f, int transfer_throttle);
+struct priority_queue *ensure_temp_file_transfer_destinations(struct vine_manager *q, struct vine_file *f, int transfer_throttle);
+int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const char *filename, vine_cache_level_t cache_level, vine_cache_level_t delete_upto_level);
 
 /* The expected format of files created by the resource monitor.*/
 #define RESOURCE_MONITOR_TASK_LOCAL_NAME "vine-task-%d"

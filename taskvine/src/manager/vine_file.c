@@ -8,6 +8,7 @@ See the file COPYING for details.
 #include "vine_cached_name.h"
 #include "vine_counters.h"
 #include "vine_task.h"
+#include "vine_mount.h"
 
 #include "copy_stream.h"
 #include "debug.h"
@@ -16,6 +17,7 @@ See the file COPYING for details.
 #include "timestamp.h"
 #include "unlink_recursive.h"
 #include "uuid.h"
+#include "list.h"
 #include "xxmalloc.h"
 
 #include <errno.h>
@@ -64,6 +66,13 @@ int vine_file_delete(struct vine_file *f)
 			debug(D_VINE, "vine_file_delete: deleting %s on reference count took: %.03lfs", f->source, (end_time - start_time) / 1000000.00);
 		}
 
+		
+		if (f->consumer_tasks) {
+			list_delete(f->consumer_tasks);
+		}
+		f->producer_task_id = -1;
+		f->consumer_tasks = NULL;
+
 		vine_task_delete(f->mini_task);
 		free(f->source);
 		free(f->cached_name);
@@ -91,6 +100,11 @@ struct vine_file *vine_file_create(const char *source, const char *cached_name, 
 	f->state = VINE_FILE_STATE_CREATED; /* Assume state created until told otherwise */
 	f->cache_level = cache_level;
 	f->flags = flags;
+
+	f->producer_task_execution_time = 0;
+	f->recovery_subgraph_critical_time = 0;
+	f->recovery_subgraph_total_time = 0;
+	f->recovery_subgraph_cost = 0;
 
 	if (data) {
 		/* Terminate with a null, just in case the user tries to treat this as a C string. */
@@ -131,6 +145,9 @@ struct vine_file *vine_file_create(const char *source, const char *cached_name, 
 
 	f->refcount = 1;
 	vine_counters.file.created++;
+
+	f->producer_task_id = -1;
+	f->consumer_tasks = list_create();
 
 	return f;
 }
@@ -377,6 +394,84 @@ void vine_file_set_mode(struct vine_file *f, int mode)
 	/* The mode must contain, at a minimum, owner-rw (0600) (so that we can delete it) */
 	/* And it should not contain anything beyond the standard 0777. */
 	f->mode = (mode | 0600) & 0777;
+}
+
+int vine_file_add_consumer_task(struct vine_file *f, int task_id)
+{
+	if (!f)
+		return 0;
+
+	if (!f->consumer_tasks) {
+		f->consumer_tasks = list_create();
+	}
+
+	int found = 0;
+	int *existing_task_id;
+
+	// Look for the exact same task pointer in the list
+	LIST_ITERATE(f->consumer_tasks, existing_task_id)
+	{
+		if (*existing_task_id == task_id) {
+			found = 1;
+			break;
+		}
+	}
+
+	if (!found) {
+		int *new_task_id = malloc(sizeof(int));
+		*new_task_id = task_id;
+		list_push_tail(f->consumer_tasks, new_task_id);
+	}
+
+	return found;
+}
+
+void vine_file_free_consumer_tasks(struct vine_file *f)
+{
+    if (!f || !f->consumer_tasks) {
+		return;
+	}
+
+    int *task_id;
+    LIST_ITERATE(f->consumer_tasks, task_id) {
+        free(task_id);
+    }
+	
+    list_delete(f->consumer_tasks);
+    f->consumer_tasks = NULL;
+}
+
+
+void vine_file_producer_task_completes(struct vine_file *f, struct vine_task *t)
+{
+	if (!f || !t)
+		return;
+
+	if (f->type == VINE_TEMP) {
+		f->producer_task_execution_time = t->time_workers_execute_last;
+
+		timestamp_t max_input_critical_time = 0;
+		struct vine_mount *m;
+
+		LIST_ITERATE(t->input_mounts, m)
+		{
+			struct vine_file *input_file = m->file;
+			if (input_file && input_file->recovery_subgraph_critical_time > max_input_critical_time) {
+				max_input_critical_time = input_file->recovery_subgraph_critical_time;
+			}
+		}
+
+		f->recovery_subgraph_critical_time = max_input_critical_time + f->producer_task_execution_time;
+
+		f->recovery_subgraph_total_time += f->producer_task_execution_time;
+		f->recovery_subgraph_cost = 0.5 * f->recovery_subgraph_total_time + 0.5 * f->recovery_subgraph_critical_time;
+	} else {
+		f->recovery_subgraph_critical_time = 0;
+		f->recovery_subgraph_total_time = 0;
+		f->recovery_subgraph_cost = 0;
+	}
+
+	return;
 }
 
 /* vim: set noexpandtab tabstop=8: */
