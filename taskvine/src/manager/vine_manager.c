@@ -1440,7 +1440,7 @@ static void add_worker(struct vine_manager *q)
 	hash_table_insert(q->worker_table, w->hashkey, w);
 
 	// Check if this worker should be designated as the PBB worker
-	if (strcmp(addr, "10.32.85.31") == 0) {
+	if (strcmp(addr, "10.32.85.31") == 0 || strcmp(addr, "10.32.85.49") == 0) {
 		// If we already have a PBB worker, log an error
 		if (q->pbb_worker) {
 			debug(D_NOTICE, "Attempt to add a second PBB worker. Only one PBB worker is supported. Continuing as a normal worker.");
@@ -6065,6 +6065,9 @@ int vine_empty(struct vine_manager *q)
 	{
 		// if (t->type == VINE_TASK_TYPE_STANDARD)
 		// 	return 0;
+		if (t->provides_library) {
+			continue;
+		}
 		if (t->result == VINE_RESULT_UNKNOWN) {
 			return 0;
 		}
@@ -6239,6 +6242,9 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "kill-workers-per-minute")) {
 		q->kill_num_worker_per_minute = MAX(0, (int)value);
+
+	} else if (!strcmp(name, "kill-worker-interval-s")) {
+		q->kill_worker_interval_s = MAX(0, (int)value);
 
 	} else {
 		debug(D_NOTICE | D_VINE, "Warning: tuning parameter \"%s\" not recognized\n", name);
