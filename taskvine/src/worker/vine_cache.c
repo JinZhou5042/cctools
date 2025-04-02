@@ -777,6 +777,8 @@ static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_fil
 		}
 	}
 
+	trash_file(transfer_path);
+
 	free(cache_path);
 	free(transfer_path);
 }

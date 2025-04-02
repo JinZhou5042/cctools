@@ -104,7 +104,7 @@ struct vine_file *vine_file_create(const char *source, const char *cached_name, 
 	f->producer_task_execution_time = 0;
 	f->recovery_subgraph_critical_time = 0;
 	f->recovery_subgraph_total_time = 0;
-	f->recovery_subgraph_cost = 0;
+	f->penalty = 0;
 
 	if (data) {
 		/* Terminate with a null, just in case the user tries to treat this as a C string. */
@@ -464,11 +464,11 @@ void vine_file_producer_task_completes(struct vine_file *f, struct vine_task *t)
 		f->recovery_subgraph_critical_time = max_input_critical_time + f->producer_task_execution_time;
 
 		f->recovery_subgraph_total_time += f->producer_task_execution_time;
-		f->recovery_subgraph_cost = 0.5 * f->recovery_subgraph_total_time + 0.5 * f->recovery_subgraph_critical_time;
+		f->penalty = 0.5 * f->recovery_subgraph_total_time + 0.5 * f->recovery_subgraph_critical_time;
 	} else {
 		f->recovery_subgraph_critical_time = 0;
 		f->recovery_subgraph_total_time = 0;
-		f->recovery_subgraph_cost = 0;
+		f->penalty = 0;
 	}
 
 	return;

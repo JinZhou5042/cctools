@@ -7,7 +7,7 @@
 #include "vine_task.h"
 #include "vine_mount.h"
 #include "vine_checkpoint_queue.h"
-
+#include "vine_file_replica_table.h"
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
@@ -18,11 +18,13 @@ int vine_checkpoint_persist(struct vine_manager *q, struct vine_worker_info *sou
         return 0;
     }
 
+    // printf("Persisting file %s, size: %ld\n", f->cached_name, f->size);
+
     char *source_addr = string_format("%s/%s", source->transfer_url, f->cached_name);
     vine_manager_put_url_now(q, q->pbb_worker, source_addr, f);
     free(source_addr);
     
-    priority_queue_push(q->checkpointed_files, f, -(double)(f->recovery_subgraph_cost / f->size));
+    priority_queue_push(q->checkpointed_files, f, -(double)(f->penalty / f->size));
 
     return 1;
 }
@@ -40,7 +42,7 @@ struct vine_worker_info *vine_checkpoint_choose_source(struct vine_manager *q, s
     return source;
 }
 
-static int64_t vine_checkpoint_pbb_used_bytes(struct vine_manager *q)
+static int64_t vine_checkpoint_pbb_inuse_cache(struct vine_manager *q)
 {
     if (!q) {
         return 0;
@@ -62,20 +64,14 @@ static int64_t vine_checkpoint_pbb_used_bytes(struct vine_manager *q)
     int iter_depth = priority_queue_size(q->checkpointed_files);
     PRIORITY_QUEUE_BASE_ITERATE(q->checkpointed_files, idx, candidate, iter_count, iter_depth) 
     {
-        total_checkpointed_bytes += candidate->size;
+        struct vine_file_replica *replica = hash_table_lookup(q->pbb_worker->current_files, candidate->cached_name);
+        if (replica && replica->state == VINE_FILE_REPLICA_STATE_READY) {
+            total_checkpointed_bytes += replica->size;
+        }
     }
     return total_checkpointed_bytes;
 }   
 
-static int64_t vine_checkpoint_pbb_available_bytes(struct vine_manager *q)
-{
-    return (int64_t)(q->pbb_worker->resources->disk.total * 1024 * 1024) - vine_checkpoint_pbb_used_bytes(q);
-}
-
-int vine_checkpoint_pbb_available(struct vine_manager *q, struct vine_file *f)
-{
-    return (int64_t)(f->size) <= vine_checkpoint_pbb_available_bytes(q);
-}
 
 int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f)
 {
@@ -83,29 +79,34 @@ int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f)
         return 0;
     }
 
-    if (vine_checkpoint_pbb_available(q, f)) {
+    int64_t total_bytes = (int64_t)(q->pbb_worker->resources->disk.total * 1024 * 1024 / 2);
+    int64_t actual_inuse_bytes = q->pbb_actual_inuse_cache;
+    int64_t pending_transfer_bytes = q->pbb_worker->inuse_cache - q->pbb_actual_inuse_cache;
+
+    int64_t available_bytes = total_bytes - actual_inuse_bytes - pending_transfer_bytes;
+    int64_t this_file_size = (int64_t)(f->size);
+
+    if (this_file_size <= available_bytes) {
         return 1;
     }
 
-    int64_t available_bytes = vine_checkpoint_pbb_available_bytes(q);
+    // printf("total bytes: %ld, inuse cache: %ld, available bytes: %ld, this file size: %ld\n", total_bytes, actual_inuse_bytes, available_bytes, this_file_size);
 
-    double this_file_cost = (double)f->recovery_subgraph_cost / f->size;
+    double this_file_cost = (double)f->penalty / f->size;
 
-    double total_eviction_cost = 0;
+    double eviction_penalty = 0;
     struct list *candidates = list_create();
     struct vine_file *candidate;
 
     while ((candidate = priority_queue_pop(q->checkpointed_files))) {
         list_push_tail(candidates, candidate);
         available_bytes += candidate->size;
-        total_eviction_cost += (double)candidate->recovery_subgraph_cost / candidate->size;
+        eviction_penalty += (double)candidate->penalty / candidate->size;
         /* now, if the capacity suits, we can stop */
         if (available_bytes >= (int64_t)f->size) {
             break;
         }
     }
-
-    printf("recovery_subgraph_cost: %ld, size: %ld, this_file_cost: %f, total_eviction_cost: %f\n", f->recovery_subgraph_cost, f->size, this_file_cost, total_eviction_cost);
 
     if (list_size(candidates) == 0) {
         list_delete(candidates);
@@ -118,12 +119,11 @@ int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f)
 
 
     // the cost is too high, we don't want to evict for this file
-    // if (total_eviction_cost > this_file_cost) {
-    if (0) {
+    if (eviction_penalty > this_file_cost) {
         // pop back the files we popped from the checkpointed_files
         LIST_ITERATE(candidates, candidate)
         {
-            priority_queue_push(q->checkpointed_files, candidate, -(double)(candidate->recovery_subgraph_cost / candidate->size));
+            priority_queue_push(q->checkpointed_files, candidate, -(double)(candidate->penalty / candidate->size));
         }
         list_delete(candidates);
         return 0;
@@ -132,7 +132,7 @@ int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f)
     // otherwise, we can evict the selected files for this file
     LIST_ITERATE(candidates, candidate) 
     {
-        printf("Evicting %s\n", candidate->cached_name);
+        printf("Evicting file %s, size: %ld\n", candidate->cached_name, candidate->size);
         vine_checkpoint_evict(q, candidate);
     }
     list_delete(candidates);
@@ -168,7 +168,7 @@ static void update_downstream_recovery_metrics(struct vine_manager *q, struct vi
     /* update this file's recovery metrics */
     f->recovery_subgraph_critical_time = critical_time;
     f->recovery_subgraph_total_time = total_time;
-    f->recovery_subgraph_cost = (uint64_t)(0.5 * total_time + 0.5 * critical_time);
+    f->penalty = (uint64_t)(0.5 * total_time + 0.5 * critical_time);
 
     /* add to checkpoint queue for potential checkpointing */
     hash_table_insert(q->checkpoint_queue, f->cached_name, f);
@@ -201,7 +201,6 @@ int vine_checkpoint_evict(struct vine_manager *q, struct vine_file *f)
     }
 
     /* remove from checkpoint storage */
-    printf("Removing %s from checkpoint storage\n", f->cached_name);
     delete_worker_file(q, q->pbb_worker, f->cached_name, 0, 0);
 
     /* update this file's recovery metrics after eviction */
@@ -224,10 +223,9 @@ int vine_checkpoint_evict(struct vine_manager *q, struct vine_file *f)
 
     f->recovery_subgraph_critical_time = critical_time;
     f->recovery_subgraph_total_time = total_time;
-    f->recovery_subgraph_cost = (uint64_t)(0.5 * total_time + 0.5 * critical_time);
+    f->penalty = (uint64_t)(0.5 * total_time + 0.5 * critical_time);
 
     /* recursively update all downstream files' recovery metrics */
-    printf("Recursively updating recovery metrics for downstream files of %s\n", f->cached_name);
 
     int *task_id;
     if (f->consumer_tasks) {
@@ -250,10 +248,6 @@ int vine_checkpoint_evict(struct vine_manager *q, struct vine_file *f)
 
 int vine_checkpoint_checkpointed(struct vine_manager *q, struct vine_file *f)
 {
-    struct vine_file *replica = hash_table_lookup(q->pbb_worker->current_files, f->cached_name);
-    if (replica) {
-        return 1;
-    }
-    return 0;
+    return vine_file_replica_table_lookup(q->pbb_worker, f->cached_name) != NULL;
 }
 

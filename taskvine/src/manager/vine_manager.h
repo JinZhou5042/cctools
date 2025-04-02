@@ -245,6 +245,12 @@ struct vine_manager {
 	struct priority_queue *checkpointed_files;
 
 	uint64_t checkpoint_threshold; /* Minimum recovery subgraph cost to checkpoint a file */
+
+    /* Worker kill rate control */
+    int kill_num_worker_per_minute;     /* Number of workers to kill per minute */
+    timestamp_t last_kill_check_time;   /* Last time we checked kill rate */
+    int total_workers_killed;           /* Total number of workers killed */
+	int64_t pbb_actual_inuse_cache;     /* Actual inuse cache of PBB worker */
 };
 
 /*
