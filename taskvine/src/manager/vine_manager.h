@@ -250,6 +250,8 @@ struct vine_manager {
     int kill_num_worker_per_minute;     /* Number of workers to kill per minute */
     timestamp_t last_kill_check_time;   /* Last time we checked kill rate */
     int total_workers_killed;           /* Total number of workers killed */
+    int kill_worker_interval_s;         /* Interval in seconds between killing workers */
+    timestamp_t last_interval_kill_time; /* Last time we killed a worker by interval */
 	int64_t pbb_actual_inuse_cache;     /* Actual inuse cache of PBB worker */
 };
 
