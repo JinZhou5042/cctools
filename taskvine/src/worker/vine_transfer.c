@@ -209,26 +209,26 @@ name for validity.
 static int vine_transfer_get_file_internal(struct link *lnk, const char *filename, int64_t length, int mode, int mtime, time_t stoptime)
 {
 	if (!check_disk_space_for_filesize(".", length, 0)) {
-		debug(D_VINE, "Could not put file %s, not enough disk space (%" PRId64 " bytes needed)\n", filename, length);
+		debug(D_VINE | D_NOTICE, "Could not put file %s, not enough disk space (%" PRId64 " bytes needed)\n", filename, length);
 		return 0;
 	}
 
 	int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0700);
 	if (fd < 0) {
-		debug(D_VINE, "Could not open %s for writing. (%s)\n", filename, strerror(errno));
+		debug(D_VINE | D_NOTICE, "Could not open %s for writing. (%s)\n", filename, strerror(errno));
 		return 0;
 	}
 
 	int64_t actual = link_stream_to_fd(lnk, fd, length, stoptime);
 
 	if (actual != length) {
-		debug(D_VINE, "Failed to put file - %s (%s)\n", filename, strerror(errno));
+		debug(D_VINE | D_NOTICE, "Failed to put file - %s (%s)\n", filename, strerror(errno));
 		close(fd);
 		return 0;
 	}
 
 	if (close(fd) < 0) {
-		debug(D_VINE, "Failed to close file - %s (%s)\n", filename, strerror(errno));
+		debug(D_VINE | D_NOTICE, "Failed to close file - %s (%s)\n", filename, strerror(errno));
 		return 0;
 	}
 

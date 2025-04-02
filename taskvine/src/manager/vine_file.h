@@ -52,7 +52,7 @@ struct vine_file {
 	uint64_t producer_task_execution_time;
 	uint64_t recovery_subgraph_critical_time;
 	uint64_t recovery_subgraph_total_time;
-	uint64_t recovery_subgraph_cost;
+	uint64_t penalty;
 };
 
 struct vine_file * vine_file_create( const char *source, const char *cached_name, const char *data, size_t size, vine_file_type_t type, struct vine_task *mini_task, vine_cache_level_t cache_level, vine_file_flags_t flags);

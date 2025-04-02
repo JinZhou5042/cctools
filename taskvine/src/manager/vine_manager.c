@@ -114,7 +114,7 @@ See the file COPYING for details.
 /* Default value for maximum number of workers to add in a single cycle before dealing with other matters. */
 #define MAX_NEW_WORKERS 10
 
-#define VINE_CHECKPOINT_THRESHOLD (uint64_t)(5 * 1e6) // 10 seconds in usecs
+// #define VINE_CHECKPOINT_THRESHOLD (uint64_t)(5 * 1e6) // 10 seconds in usecs
 
 /* Default value for how frequently to check for tasks that do not fit any worker. */
 #define VINE_LARGE_TASK_CHECK_INTERVAL 180000000 // 3 minutes in usecs
@@ -382,6 +382,10 @@ static int handle_cache_update(struct vine_manager *q, struct vine_worker_info *
 		replica->transfer_time = transfer_time;
 		replica->state = VINE_FILE_REPLICA_STATE_READY;
 
+		if (w->is_pbb_worker) {
+			q->pbb_actual_inuse_cache += replica->size;
+		}
+
 		vine_current_transfers_set_success(q, id);
 		vine_current_transfers_remove(q, id);
 
@@ -576,11 +580,11 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 			original->library_failed_count++;
 			original->time_when_last_failure = timestamp_get();
 		}
-		debug(D_VINE | D_NOTICE, "Library %s failed on worker %s (%s)", t->provides_library, w->hostname, w->addrport);
+		debug(D_VINE, "Library %s failed on worker %s (%s)", t->provides_library, w->hostname, w->addrport);
 		if (q->watch_library_logfiles) {
-			debug(D_VINE | D_NOTICE, ", check the library log file %s\n", t->library_log_path);
+			debug(D_VINE, ", check the library log file %s\n", t->library_log_path);
 		} else {
-			debug(D_VINE | D_NOTICE, ", enable watch-library-logfiles for debug\n");
+			debug(D_VINE, ", enable watch-library-logfiles for debug\n");
 		}
 	} else {
 		/* Update task stats for this completion. */
@@ -617,7 +621,8 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 			m->file->producer_task_id = t->task_id;
 			m->file->producer_task_execution_time = t->time_workers_execute_last;
 
-			m->file->recovery_subgraph_cost = (uint64_t)(0.5 * total_time + 0.5 * critical_time);
+			m->file->penalty = (uint64_t)(0.5 * total_time + 0.5 * critical_time);
+			debug(D_VINE, "filename: %s, total_time: %ld, critical_time: %ld, cost: %ld\n", m->file->cached_name, total_time, critical_time, m->file->penalty);
 			if (!hash_table_lookup(q->checkpoint_queue, m->file->cached_name)) {
 				hash_table_insert(q->checkpoint_queue, m->file->cached_name, m->file);
 			}
@@ -1058,7 +1063,6 @@ struct priority_queue *ensure_temp_file_transfer_sources(struct vine_manager *q,
 		if (!w->transfer_port_active) {
 			continue;
 		}
-		/* do not check the inuse transfer slot at this moment */
 		if (vine_current_transfers_source_in_use(q, w) >= transfer_throttle) {
 			continue;
 		}
@@ -1232,6 +1236,102 @@ static void recall_worker_lost_temp_files(struct vine_manager *q, struct vine_wo
 	}
 }
 
+static int kill_workers_by_rate(struct vine_manager *q)
+{
+    if(q->kill_num_worker_per_minute <= 0) {
+        return 0;
+    }
+
+    timestamp_t current_time = timestamp_get();
+    
+    if(current_time - q->last_kill_check_time < 60000000) {
+        return 0;
+    }
+
+    q->last_kill_check_time = current_time;
+
+    int target_kills = q->total_workers_killed + q->kill_num_worker_per_minute;
+    int workers_to_kill = target_kills - q->total_workers_killed;
+    
+    if(workers_to_kill <= 0) {
+        return 0;
+    }
+
+    int killable_workers = 0;
+    char *key;
+    struct vine_worker_info *w;
+    
+    HASH_TABLE_ITERATE(q->worker_table, key, w) {
+        if(!w->is_pbb_worker) {
+            killable_workers++;
+        }
+    }
+
+    if(killable_workers == 0) {
+        debug(D_VINE, "No available workers to kill (excluding PBB worker)");
+        return 0;
+    }
+
+    struct vine_worker_info **workers = calloc(killable_workers, sizeof(struct vine_worker_info *));
+    if(!workers) {
+        debug(D_VINE, "Failed to allocate memory for worker array");
+        return 0;
+    }
+
+    int worker_count = 0;
+    HASH_TABLE_ITERATE(q->worker_table, key, w) {
+        if(!w->is_pbb_worker) {
+            if(worker_count >= killable_workers) {
+                break;
+            }
+            workers[worker_count++] = w;
+        }
+    }
+
+    if(worker_count == 0) {
+        free(workers);
+        return 0;
+    }
+
+    workers_to_kill = MIN(workers_to_kill, worker_count);
+    
+    struct list *to_kill = list_create();
+    
+    for(int i = 0; i < workers_to_kill && worker_count > 0; i++) {
+        int random_index = (int)(random() % worker_count);
+        
+        struct vine_worker_info *selected = workers[random_index];
+        
+        if(hash_table_lookup(q->worker_table, selected->hashkey) && 
+           !selected->is_pbb_worker) {
+            list_push_tail(to_kill, selected);
+        }
+        
+        workers[random_index] = workers[worker_count - 1];
+        worker_count--;
+    }
+
+    free(workers);
+
+    int killed = 0;
+    while((w = list_pop_head(to_kill))) {
+        if(hash_table_lookup(q->worker_table, w->hashkey) && 
+           !w->is_pbb_worker) {
+            if(itable_size(w->current_tasks) > 0) {
+                debug(D_VINE, "Killing busy worker %s (running %d tasks) due to kill rate control", 
+                      w->addrport, itable_size(w->current_tasks));
+            } else {
+                debug(D_VINE, "Killing idle worker %s due to kill rate control", w->addrport);
+            }
+            vine_manager_remove_worker(q, w, VINE_WORKER_DISCONNECT_EXPLICIT);
+            killed++;
+        }
+    }
+
+    list_delete(to_kill);
+    return killed;
+}
+
 /* Remove a worker from this master by removing all remote state, all local state, and disconnecting. */
 
 void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info *w, vine_worker_disconnect_reason_t reason)
@@ -1240,6 +1340,7 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 		return;
 
 	debug(D_VINE, "worker %s (%s) removed", w->hostname, w->addrport);
+	q->total_workers_killed++;
 
 	if (w->type == VINE_WORKER_TYPE_WORKER) {
 		q->stats->workers_removed++;
@@ -1342,9 +1443,9 @@ static void add_worker(struct vine_manager *q)
 	if (strcmp(addr, "10.32.85.31") == 0) {
 		// If we already have a PBB worker, log an error
 		if (q->pbb_worker) {
-			debug(D_NOTICE, "\nAttempt to add a second PBB worker. Only one PBB worker is supported. Continuing as a normal worker.");
+			debug(D_NOTICE, "Attempt to add a second PBB worker. Only one PBB worker is supported. Continuing as a normal worker.");
 		} else {
-			debug(D_NOTICE, "\nWorker %s designated as the PBB (checkpoint) worker", w->addrport);
+			debug(D_NOTICE, "Worker %s designated as the PBB (checkpoint) worker", w->addrport);
 			q->pbb_worker = w;
 			w->is_pbb_worker = 1;
 		}
@@ -1360,6 +1461,9 @@ int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const
 		struct vine_file_replica *replica;
 		replica = vine_file_replica_table_remove(q, w, filename);
 		if (replica) {
+			if (w->is_pbb_worker) {
+				q->pbb_actual_inuse_cache -= replica->size;
+			}
 			vine_file_replica_delete(replica);
 		}
 		return 1;
@@ -1715,13 +1819,13 @@ we remove the worker and retry the tasks dispatched to it elsewhere.
 
 static void handle_worker_failure(struct vine_manager *q, struct vine_worker_info *w)
 {
-	vine_manager_remove_worker(q, w, VINE_WORKER_DISCONNECT_FAILURE);
-
 	// Prevent removal of PBB worker
 	if (w->is_pbb_worker) {
 		debug(D_NOTICE, "Attempt to remove the PBB worker %s. PBB workers cannot be removed. Operation cancelled.", w->addrport);
 		exit(1);
 	}
+
+	vine_manager_remove_worker(q, w, VINE_WORKER_DISCONNECT_FAILURE);
 	return;
 }
 
@@ -1757,7 +1861,7 @@ static vine_msg_code_t handle_taskvine(struct vine_manager *q, struct vine_worke
 		return VINE_MSG_FAILURE;
 
 	if (worker_protocol != VINE_PROTOCOL_VERSION) {
-		debug(D_VINE | D_NOTICE, "rejecting worker (%s) as it uses protocol %d. The manager is using protocol %d.", w->addrport, worker_protocol, VINE_PROTOCOL_VERSION);
+		debug(D_VINE, "rejecting worker (%s) as it uses protocol %d. The manager is using protocol %d.", w->addrport, worker_protocol, VINE_PROTOCOL_VERSION);
 		vine_block_host(q, w->hostname);
 		return VINE_MSG_FAILURE;
 	}
@@ -4346,7 +4450,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->transient_error_interval = VINE_DEFAULT_TRANSIENT_ERROR_INTERVAL;
 	q->max_task_stdout_storage = MAX_TASK_STDOUT_STORAGE;
 	q->max_new_workers = MAX_NEW_WORKERS;
-	q->checkpoint_threshold = VINE_CHECKPOINT_THRESHOLD;
+	q->checkpoint_threshold = (uint64_t)(1 * 1e6);
 	q->checkpointed_files = priority_queue_create(0);
 	q->large_task_check_interval = VINE_LARGE_TASK_CHECK_INTERVAL;
 	q->hungry_check_interval = VINE_HUNGRY_CHECK_INTERVAL;
@@ -4355,6 +4459,10 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->manager_preferred_connection = xxstrdup("by_ip");
 
 	q->pbb_worker = NULL;
+	q->pbb_actual_inuse_cache = 0;
+	q->kill_num_worker_per_minute = 0;
+	q->last_kill_check_time = timestamp_get();
+	q->total_workers_killed = 0;
 
 	if ((envstring = getenv("VINE_BANDWIDTH"))) {
 		q->bandwidth_limit = string_metric_parse(envstring);
@@ -5030,7 +5138,7 @@ struct vine_task *send_library_to_worker(struct vine_manager *q, struct vine_wor
 	*/
 	if (original->library_failed_count > q->max_library_retries) {
 		vine_manager_remove_library(q, name);
-		debug(D_VINE | D_NOTICE, "library %s has reached the maximum failure count %d, it has been removed\n", name, q->max_library_retries);
+		debug(D_VINE, "library %s has reached the maximum failure count %d, it has been removed\n", name, q->max_library_retries);
 		return 0;
 	}
 
@@ -5363,7 +5471,7 @@ static int process_checkpoint_queue(struct vine_manager *q)
 
 	HASH_TABLE_ITERATE(q->checkpoint_queue, key, f) {
 		/* no need to checkpoint */
-		if (!f || f->recovery_subgraph_cost < q->checkpoint_threshold) {
+		if (!f || f->penalty < q->checkpoint_threshold) {
 			list_push_tail(to_remove, f);
 			continue;
 		}
@@ -5499,6 +5607,15 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		}
 
 		q->busy_waiting_flag = 0;
+
+		// Check if we need to kill any workers according to the kill rate
+        BEGIN_ACCUM_TIME(q, time_internal);
+        result = kill_workers_by_rate(q);
+        END_ACCUM_TIME(q, time_internal);
+        if(result > 0) {
+            events++;
+            continue;
+        }
 
 		// retrieve results from workers
 		// if worker_retrievals, then all the tasks from a worker
@@ -5946,8 +6063,11 @@ int vine_empty(struct vine_manager *q)
 
 	ITABLE_ITERATE(q->tasks, task_id, t)
 	{
-		if (t->type == VINE_TASK_TYPE_STANDARD)
+		// if (t->type == VINE_TASK_TYPE_STANDARD)
+		// 	return 0;
+		if (t->result == VINE_RESULT_UNKNOWN) {
 			return 0;
+		}
 	}
 
 	return 1;
@@ -6112,6 +6232,14 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 		}
 	} else if (!strcmp(name, "temp-file-checkpoint")) {
 		q->temp_file_checkpoint = !!((int)value);
+
+	} else if (!strcmp(name, "checkpoint-threshold")) {
+		q->checkpoint_threshold = (int64_t)((int)value * 1e6);
+		printf("checkpoint_threshold: %ld\n", q->checkpoint_threshold);
+
+	} else if (!strcmp(name, "kill-workers-per-minute")) {
+		q->kill_num_worker_per_minute = MAX(0, (int)value);
+
 	} else {
 		debug(D_NOTICE | D_VINE, "Warning: tuning parameter \"%s\" not recognized\n", name);
 		return -1;
