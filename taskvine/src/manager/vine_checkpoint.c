@@ -4,7 +4,6 @@
 #include "stringtools.h"
 #include "vine_worker_info.h"
 #include "vine_manager_put.h"
-#include "vine_task.h"
 #include "vine_mount.h"
 #include "vine_checkpoint_queue.h"
 #include "vine_file_replica_table.h"
@@ -120,19 +119,14 @@ static void update_downstream_recovery_metrics(struct vine_manager *q, struct vi
     uint64_t critical_time = 0;
     uint64_t total_time = 0;
 
-    struct vine_mount *m;
-    struct vine_task *t = itable_lookup(q->tasks, f->producer_task_id);
-    if (t->input_mounts) {
-        LIST_ITERATE(t->input_mounts, m) {
-            if (!m->file || m->file->type != VINE_TEMP) {
-                continue;   
-            }
-            critical_time = MAX(critical_time, m->file->recovery_subgraph_critical_time);
-            total_time += m->file->recovery_subgraph_total_time;
-        }
+    char *parent_file_name;
+    struct vine_file *parent_file;
+    HASH_TABLE_ITERATE(f->parent_temp_files, parent_file_name, parent_file) {
+        critical_time = MAX(critical_time, parent_file->recovery_subgraph_critical_time);
+        total_time += parent_file->recovery_subgraph_total_time;
     }
-    critical_time += t->time_workers_execute_last;
-    total_time += t->time_workers_execute_last;
+    critical_time += f->producer_task_execution_time;
+    total_time += f->producer_task_execution_time;
 
     /* update this file's recovery metrics */
     f->recovery_subgraph_critical_time = critical_time;
@@ -140,18 +134,16 @@ static void update_downstream_recovery_metrics(struct vine_manager *q, struct vi
     f->penalty = (uint64_t)(0.5 * total_time + 0.5 * critical_time);
 
     /* add to checkpoint queue for potential checkpointing */
-    hash_table_insert(q->checkpoint_queue, f->cached_name, f);
+    if (!hash_table_lookup(q->checkpoint_queue, f->cached_name)) {
+        hash_table_insert(q->checkpoint_queue, f->cached_name, f);
+    }
 
     /* recursively update all downstream files */
-    int *task_id;
-    if (f->consumer_tasks) {
-        LIST_ITERATE(f->consumer_tasks, task_id) {
-            t = itable_lookup(q->tasks, *task_id);
-            struct vine_mount *m;
-            LIST_ITERATE(t->output_mounts, m) {
-                update_downstream_recovery_metrics(q, m->file);
-            }
-        }
+    char *child_file_name;
+    struct vine_file *child_file;
+    HASH_TABLE_ITERATE(f->child_temp_files, child_file_name, child_file)
+    {
+        update_downstream_recovery_metrics(q, child_file);
     }
 }
 
@@ -173,43 +165,27 @@ int vine_checkpoint_evict(struct vine_manager *q, struct vine_file *f)
     delete_worker_file(q, q->pbb_worker, f->cached_name, 0, 0);
 
     /* update this file's recovery metrics after eviction */
-    struct vine_task *t = itable_lookup(q->tasks, f->producer_task_id);
     uint64_t critical_time = 0;
     uint64_t total_time = 0;
-    struct vine_mount *m;
-
-    if (t->input_mounts) {
-        LIST_ITERATE(t->input_mounts, m) {
-            if (!m->file || m->file->type != VINE_TEMP) {
-                continue;
-            }
-            critical_time = MAX(critical_time, m->file->recovery_subgraph_critical_time);
-            total_time += m->file->recovery_subgraph_total_time;
-        }
+    struct vine_file *parent_file;
+    char *parent_file_name;
+    HASH_TABLE_ITERATE(f->parent_temp_files, parent_file_name, parent_file)
+    {
+        critical_time = MAX(critical_time, parent_file->recovery_subgraph_critical_time);
+        total_time += parent_file->recovery_subgraph_total_time;
     }
-    critical_time += t->time_workers_execute_last;
-    total_time += t->time_workers_execute_last;
+    critical_time += f->producer_task_execution_time;
+    total_time += f->producer_task_execution_time;
 
     f->recovery_subgraph_critical_time = critical_time;
     f->recovery_subgraph_total_time = total_time;
     f->penalty = (uint64_t)(0.5 * total_time + 0.5 * critical_time);
 
     /* recursively update all downstream files' recovery metrics */
-
-    int *task_id;
-    if (f->consumer_tasks) {
-        LIST_ITERATE(f->consumer_tasks, task_id) {
-            struct vine_mount *m;
-            t = itable_lookup(q->tasks, *task_id);
-            if (t->output_mounts) {
-                LIST_ITERATE(t->output_mounts, m) {
-                    if (!m->file || m->file->type != VINE_TEMP) {
-                        continue;
-                    }
-                    update_downstream_recovery_metrics(q, m->file);
-                }
-            }
-        }
+    struct vine_file *child_file;
+    char *child_file_name;
+    HASH_TABLE_ITERATE(f->child_temp_files, child_file_name, child_file) {
+        update_downstream_recovery_metrics(q, child_file);
     }
 
     return 1;

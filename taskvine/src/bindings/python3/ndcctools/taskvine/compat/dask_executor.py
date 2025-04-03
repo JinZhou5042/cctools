@@ -189,6 +189,9 @@ class DaskVine(Manager):
                 max_pending = None
             self.max_pending = max_pending
 
+            self.total_submitted_tasks = 0
+            self.total_completed_tasks = 0
+
             self._categories_known = set()
 
             self.tune("category-steady-n-tasks", 1)
@@ -259,27 +262,35 @@ class DaskVine(Manager):
         rs = dag.set_targets(keys_flatten)
         self._enqueue_dask_calls(dag, tag, rs, self.retries, enqueued_calls)
 
-        timeout = 5
+        timeout = 3
         pending = 0
 
         (bar_progress, bar_update) = self._make_progress_bar(dag.left_to_compute())
         with bar_progress:
+
             while not self.empty() or enqueued_calls:
-                submitted = 0
-                while (
-                    enqueued_calls
-                    and (not self.submit_per_cycle or submitted < self.submit_per_cycle)
-                    and (not self.max_pending or pending < self.max_pending)
-                    # and self.hungry()
-                ):
-                    self.submit(enqueued_calls.pop())
-                    submitted += 1
-                    pending += 1
+                total_executing_tasks = self.total_submitted_tasks - self.total_completed_tasks
+                if total_executing_tasks < 3000:
+                    submitted = 0
+                    while (
+                        enqueued_calls
+                        and (not self.submit_per_cycle or submitted < self.submit_per_cycle)
+                        and (not self.max_pending or pending < self.max_pending)
+                        # and self.hungry()
+                    ):
+                        self.submit(enqueued_calls.pop())
+                        submitted += 1
+                        self.total_submitted_tasks += 1
+                        pending += 1
+
+                        if submitted > 3000:
+                            break
 
                 t = self.wait_for_tag(tag, timeout)
                 if t:
                     timeout = 0
                     pending -= 1
+                    self.total_completed_tasks += 1
                     if self.verbose:
                         print(f"{t.key} ran on {t.hostname}")
 

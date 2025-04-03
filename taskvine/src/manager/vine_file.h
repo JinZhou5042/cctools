@@ -46,10 +46,12 @@ struct vine_file {
 	int change_message_shown; // True if error message already shown.
 	int refcount;       // Number of references from a task object, delete when zero.
 
-	int producer_task_id;
 	struct list *consumer_tasks;
-	
+
+	struct hash_table *child_temp_files;
+	struct hash_table *parent_temp_files;
 	uint64_t producer_task_execution_time;
+
 	uint64_t recovery_subgraph_critical_time;
 	uint64_t recovery_subgraph_total_time;
 	uint64_t penalty;
@@ -62,6 +64,10 @@ struct vine_file * vine_file_substitute_url( struct vine_file *f, const char *so
 struct vine_file *vine_file_addref( struct vine_file *f );
 
 int vine_file_add_consumer_task(struct vine_file *f, int task_id);
+
+int vine_file_add_child_temp_file(struct vine_file *f, struct vine_file *child);
+int vine_file_add_parent_temp_file(struct vine_file *f, struct vine_file *parent);
+
 void vine_file_free_consumer_tasks(struct vine_file *f);
 void vine_file_producer_task_completes(struct vine_file *f, struct vine_task *t);
 
