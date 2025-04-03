@@ -19,4 +19,6 @@ struct vine_worker_info *vine_checkpoint_choose_source(struct vine_manager *q, s
 
 int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f);
 
+void vine_checkpoint_update_file_penalty(struct vine_manager *q, struct vine_file *f);
+
 #endif /* VINE_CHECKPOINT_H */

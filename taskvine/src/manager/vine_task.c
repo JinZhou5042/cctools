@@ -262,6 +262,8 @@ struct vine_task *vine_task_copy(const struct vine_task *task)
 		new->group_id = task->group_id;
 	}
 
+	new->priority = task->priority;
+
 	return new;
 }
 

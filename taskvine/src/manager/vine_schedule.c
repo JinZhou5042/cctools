@@ -155,7 +155,7 @@ int check_worker_have_enough_disk_with_inputs(struct vine_manager *q, struct vin
  * @param q         Manager info structure
  * @param w The worker info structure.
  */
-static int check_worker_have_committable_resources(struct vine_manager *q, struct vine_worker_info *w)
+int check_worker_have_committable_resources(struct vine_manager *q, struct vine_worker_info *w)
 {
 	/* Check if there are free slots on any of the running libraries */
 	if (w->current_libraries && itable_size(w->current_libraries) > 0) {
@@ -167,6 +167,11 @@ static int check_worker_have_committable_resources(struct vine_manager *q, struc
 				return 1;
 			}
 		}
+	}
+
+	// a function cannot run, if there are running libraries, we think no other tasks can run on this worker
+	if (itable_size(w->current_libraries) > 0) {
+		return 0;
 	}
 
 	/* Check if there are free resources for tasks except function calls */
@@ -184,6 +189,7 @@ static int check_worker_have_committable_resources(struct vine_manager *q, struc
 	}
 
 	/* If reach here, no free slots for function calls, and no committable resources for other tasks. */
+
 	return 0;
 }
 
@@ -234,8 +240,13 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 		}
 	}
 
-	/* Finally check to see if a function task has the needed library task */
+	/* if worker has free resources to use */
+	if (!check_worker_have_committable_resources(q, w)) {
+		// printf("worker %s has no committable resources\n", w->hostname);
+		return 0;
+	}
 
+	/* Finally check to see if a function task has the needed library task */
 	if (t->needs_library) {
 		struct vine_task *library = vine_schedule_find_library(q, w, t->needs_library);
 		if (library) {
@@ -247,10 +258,12 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 					/* The library would fit this worker if it was sent. */
 				} else {
 					/* The library would not fit the worker. */
+					printf("worker %s has no library %s\n", w->hostname, t->needs_library);
 					return 0;
 				}
 			} else {
 				/* There is no library by that name, yikes! */
+				printf("worker %s has no library %s\n", w->hostname, t->needs_library);
 				return 0;
 			}
 		}
@@ -258,11 +271,7 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 	
 	/* Check if worker is blocked from the manager. */
 	if (vine_blocklist_is_blocked(q, w->hostname)) {
-		return 0;
-	}
-
-	/* if worker has free resources to use */
-	if (!check_worker_have_committable_resources(q, w)) {
+		printf("worker %s is blocked from the manager\n", w->hostname);
 		return 0;
 	}
 
@@ -270,6 +279,7 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 	struct rmsummary *l = vine_manager_choose_resources_for_task(q, w, t);
 
 	if (!check_worker_have_enough_resources(q, w, t, l)) {
+		printf("worker %s has no enough resources\n", w->hostname);
 		rmsummary_delete(l);
 		return 0;
 	}
@@ -287,28 +297,33 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 	}
 
 	if (!check_worker_have_enough_disk_with_inputs(q, w, t)) {
+		printf("worker %s has no enough disk with inputs\n", w->hostname);
 		return 0;
 	}
 
 	/* If the worker is not the one the task wants. */
 	if (t->has_fixed_locations && !check_fixed_location_worker(q, w, t)) {
+		printf("worker %s has no fixed location\n", w->hostname);
 		return 0;
 	}
 
 	/* If the worker has transfer capacity to get this task. */
 	if (q->peer_transfers_enabled && !vine_manager_transfer_capacity_available(q, w, t)) {
+		printf("worker %s has no transfer capacity\n", w->hostname);
 		return 0;
 	}
 
 	/* If the worker doesn't have the features the task requires. */
 	if (t->feature_list) {
 		if (!w->features) {
+			printf("worker %s has no features\n", w->hostname);
 			return 0;
 		} else {
 			char *feature;
 			LIST_ITERATE(t->feature_list, feature)
 			{
 				if (!hash_table_lookup(w->features, feature)) {
+					printf("worker %s has no feature %s\n", w->hostname, feature);
 					return 0;
 				}
 			}
@@ -393,6 +408,9 @@ static struct vine_worker_info *find_worker_by_files(struct vine_manager *q, str
 	{
 		/* Careful: If check_worker_against task fails, then w may no longer be valid. */
 		if (check_worker_against_task(q, w, t)) {
+
+			return w;
+			
 			task_cached_bytes = 0;
 			has_all_files = 1;
 
@@ -552,6 +570,8 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 	if (a == VINE_SCHEDULE_UNSET) {
 		a = q->worker_selection_algorithm;
 	}
+
+	a = VINE_SCHEDULE_FILES;
 
 	switch (a) {
 	case VINE_SCHEDULE_FILES:
