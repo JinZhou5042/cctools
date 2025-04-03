@@ -234,6 +234,28 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 		}
 	}
 
+	/* Finally check to see if a function task has the needed library task */
+
+	if (t->needs_library) {
+		struct vine_task *library = vine_schedule_find_library(q, w, t->needs_library);
+		if (library) {
+			/* The worker already has the library with a free slot. */
+		} else {
+			library = vine_manager_find_library_template(q, t->needs_library);
+			if (library) {
+				if (check_worker_against_task(q, w, library)) {
+					/* The library would fit this worker if it was sent. */
+				} else {
+					/* The library would not fit the worker. */
+					return 0;
+				}
+			} else {
+				/* There is no library by that name, yikes! */
+				return 0;
+			}
+		}
+	}
+	
 	/* Check if worker is blocked from the manager. */
 	if (vine_blocklist_is_blocked(q, w->hostname)) {
 		return 0;
@@ -293,27 +315,6 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 		}
 	}
 
-	/* Finally check to see if a function task has the needed library task */
-
-	if (t->needs_library) {
-		struct vine_task *library = vine_schedule_find_library(q, w, t->needs_library);
-		if (library) {
-			/* The worker already has the library with a free slot. */
-		} else {
-			library = vine_manager_find_library_template(q, t->needs_library);
-			if (library) {
-				if (check_worker_against_task(q, w, library)) {
-					/* The library would fit this worker if it was sent. */
-				} else {
-					/* The library would not fit the worker. */
-					return 0;
-				}
-			} else {
-				/* There is no library by that name, yikes! */
-				return 0;
-			}
-		}
-	}
 	return 1;
 }
 

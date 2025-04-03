@@ -70,7 +70,12 @@ int vine_file_delete(struct vine_file *f)
 		if (f->consumer_tasks) {
 			list_delete(f->consumer_tasks);
 		}
-		f->producer_task_id = -1;
+		if (f->child_temp_files) {
+			hash_table_delete(f->child_temp_files);
+		}
+		if (f->parent_temp_files) {
+			hash_table_delete(f->parent_temp_files);
+		}
 		f->consumer_tasks = NULL;
 
 		vine_task_delete(f->mini_task);
@@ -146,8 +151,10 @@ struct vine_file *vine_file_create(const char *source, const char *cached_name, 
 	f->refcount = 1;
 	vine_counters.file.created++;
 
-	f->producer_task_id = -1;
 	f->consumer_tasks = list_create();
+
+	f->child_temp_files = hash_table_create(0, 0);
+	f->parent_temp_files = hash_table_create(0, 0);
 
 	return f;
 }
@@ -398,8 +405,9 @@ void vine_file_set_mode(struct vine_file *f, int mode)
 
 int vine_file_add_consumer_task(struct vine_file *f, int task_id)
 {
-	if (!f)
+	if (!f) {
 		return 0;
+	}
 
 	if (!f->consumer_tasks) {
 		f->consumer_tasks = list_create();
@@ -424,6 +432,38 @@ int vine_file_add_consumer_task(struct vine_file *f, int task_id)
 	}
 
 	return found;
+}
+
+int vine_file_add_child_temp_file(struct vine_file *f, struct vine_file *child)
+{
+	if (!f || !child) {
+		return 0;
+	}
+	if (child->type != VINE_TEMP) {
+		return 0;
+	}
+
+	if (!hash_table_lookup(f->child_temp_files, child->cached_name)) {
+		hash_table_insert(f->child_temp_files, child->cached_name, child);
+	}
+
+	return 1;
+}
+
+int vine_file_add_parent_temp_file(struct vine_file *f, struct vine_file *parent)
+{
+	if (!f || !parent) {
+		return 0;
+	}
+	if (parent->type != VINE_TEMP) {
+		return 0;
+	}
+
+	if (!hash_table_lookup(f->parent_temp_files, parent->cached_name)) {
+		hash_table_insert(f->parent_temp_files, parent->cached_name, parent);
+	}
+
+	return 1;
 }
 
 void vine_file_free_consumer_tasks(struct vine_file *f)
