@@ -23,7 +23,7 @@ int vine_checkpoint_persist(struct vine_manager *q, struct vine_worker_info *sou
     vine_manager_put_url_now(q, q->pbb_worker, source_addr, f);
     free(source_addr);
     
-    priority_queue_push(q->checkpointed_files, f, -(double)(f->penalty / f->size));
+    priority_queue_push(q->checkpointed_files, f, -f->penalty / f->size);
 
     return 1;
 }
@@ -60,16 +60,16 @@ int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f)
 
     // printf("total bytes: %ld, inuse cache: %ld, available bytes: %ld, this file size: %ld\n", total_bytes, actual_inuse_bytes, available_bytes, this_file_size);
 
-    double this_file_cost = (double)f->penalty / f->size;
+    double candidates_penalty = 0;
+    int64_t candidates_size = 0;
 
-    double eviction_penalty = 0;
     struct list *candidates = list_create();
     struct vine_file *candidate;
-
     while ((candidate = priority_queue_pop(q->checkpointed_files))) {
         list_push_tail(candidates, candidate);
         available_bytes += candidate->size;
-        eviction_penalty += (double)candidate->penalty / candidate->size;
+        candidates_penalty += candidate->penalty;
+        candidates_size += candidate->size;
         /* now, if the capacity suits, we can stop */
         if (available_bytes >= (int64_t)f->size) {
             break;
@@ -85,22 +85,24 @@ int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f)
         return 0;
     }
 
+    double this_efficiency = f->penalty / f->size;
+    double candidates_efficiency = candidates_penalty / candidates_size;
 
     // the cost is too high, we don't want to evict for this file
-    if (eviction_penalty > this_file_cost) {
+    if (candidates_efficiency > this_efficiency) {
         // pop back the files we popped from the checkpointed_files
         LIST_ITERATE(candidates, candidate)
         {
-            priority_queue_push(q->checkpointed_files, candidate, -(double)(candidate->penalty / candidate->size));
+            priority_queue_push(q->checkpointed_files, candidate, -candidate->penalty / candidate->size);
         }
         list_delete(candidates);
         return 0;
     }
     
     // otherwise, we can evict the selected files for this file
-    LIST_ITERATE(candidates, candidate) 
+    LIST_ITERATE(candidates, candidate)
     {
-        printf("Evicting file %s, size: %ld\n", candidate->cached_name, candidate->size);
+        printf("Evicting file %s, size: %ld, penalty: %f\n", candidate->cached_name, candidate->size, candidate->penalty);
         vine_checkpoint_evict(q, candidate);
     }
     list_delete(candidates);
@@ -108,43 +110,94 @@ int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f)
     return 1;
 }
 
-/* Helper function to recursively update downstream files */
-static void update_downstream_recovery_metrics(struct vine_manager *q, struct vine_file *f) 
+/* Get all reachable files in topological order from the given starting file */
+static struct list *get_reachable_files_by_topo_order(struct vine_manager *q, struct vine_file *start_file)
 {
-    if (!f || f->type != VINE_TEMP || vine_checkpoint_checkpointed(q, f)) {
-        return;
+    if (!start_file || start_file->type != VINE_TEMP) {
+        return list_create();
     }
 
-    /* calculate new recovery metrics from input files */
-    uint64_t critical_time = 0;
-    uint64_t total_time = 0;
+    /* Define file visit states for topological sort */
+    typedef enum {
+        VISIT_STATE_UNVISITED = 0,   /* Node hasn't been seen yet */
+        VISIT_STATE_IN_PROGRESS = 1, /* Node is being processed (temp mark) */
+        VISIT_STATE_COMPLETED = 2    /* Node processing complete (permanent mark) */
+    } visit_state_t;
 
-    char *parent_file_name;
-    struct vine_file *parent_file;
-    HASH_TABLE_ITERATE(f->parent_temp_files, parent_file_name, parent_file) {
-        critical_time = MAX(critical_time, parent_file->recovery_subgraph_critical_time);
-        total_time += parent_file->recovery_subgraph_total_time;
+    struct list *result = list_create();
+    struct hash_table *visited = hash_table_create(0, 0);
+    
+    /* Helper structure for DFS */
+    struct dfs_state {
+        struct vine_file *file;
+        struct list *queue; /* List of unprocessed children */
+    };
+
+    /* Create a stack for DFS (non-recursive) */
+    struct list *stack = list_create();
+
+    /* Add starting node to the stack */
+    struct dfs_state *initial = malloc(sizeof(struct dfs_state));
+    initial->file = start_file;
+    initial->queue = list_create();
+
+    /* Pre-populate with all VINE_TEMP type children */
+    char *child_name;
+    struct vine_file *child;
+    HASH_TABLE_ITERATE(start_file->child_temp_files, child_name, child) {
+        if (child && child->type == VINE_TEMP) {
+            list_push_tail(initial->queue, child);
+        }
     }
-    critical_time += f->producer_task_execution_time;
-    total_time += f->producer_task_execution_time;
 
-    /* update this file's recovery metrics */
-    f->recovery_subgraph_critical_time = critical_time;
-    f->recovery_subgraph_total_time = total_time;
-    f->penalty = (uint64_t)(0.5 * total_time + 0.5 * critical_time);
+    list_push_head(stack, initial);
+    hash_table_insert(visited, start_file->cached_name, (void*)VISIT_STATE_IN_PROGRESS);
 
-    /* add to checkpoint queue for potential checkpointing */
-    if (!hash_table_lookup(q->checkpoint_queue, f->cached_name)) {
-        hash_table_insert(q->checkpoint_queue, f->cached_name, f);
+    while (list_size(stack) > 0) {
+        struct dfs_state *current = list_peek_head(stack);
+        
+        if (list_size(current->queue) == 0) {
+            /* All children processed, add to result and mark as completed */
+            list_pop_head(stack);
+            list_push_tail(result, current->file);
+            hash_table_remove(visited, current->file->cached_name);
+            hash_table_insert(visited, current->file->cached_name, (void*)VISIT_STATE_COMPLETED);
+            list_delete(current->queue);
+            free(current);
+            continue;
+        }
+
+        /* Take next child from queue */
+        struct vine_file *next_child = list_pop_head(current->queue);
+        
+        /* Check if this child has been visited */
+        void *visit_state = hash_table_lookup(visited, next_child->cached_name);
+        
+        if (!visit_state) {
+            /* Unvisited node - add to stack and mark as in progress */
+            struct dfs_state *child_state = malloc(sizeof(struct dfs_state));
+            child_state->file = next_child;
+            child_state->queue = list_create();
+            
+            /* Pre-populate child queue with VINE_TEMP type files only */
+            HASH_TABLE_ITERATE(next_child->child_temp_files, child_name, child) {
+                if (child && child->type == VINE_TEMP) {
+                    list_push_tail(child_state->queue, child);
+                }
+            }
+            
+            list_push_head(stack, child_state);
+            hash_table_insert(visited, next_child->cached_name, (void*)VISIT_STATE_IN_PROGRESS);
+        } else if ((visit_state_t)visit_state == VISIT_STATE_IN_PROGRESS) {
+            /* Cycle detected, skip this child (could log cycle warning here) */
+            continue;
+        }
+        /* If completed, we just skip it */
     }
-
-    /* recursively update all downstream files */
-    char *child_file_name;
-    struct vine_file *child_file;
-    HASH_TABLE_ITERATE(f->child_temp_files, child_file_name, child_file)
-    {
-        update_downstream_recovery_metrics(q, child_file);
-    }
+    
+    hash_table_delete(visited);
+    
+    return result;
 }
 
 int vine_checkpoint_evict(struct vine_manager *q, struct vine_file *f)
@@ -165,30 +218,50 @@ int vine_checkpoint_evict(struct vine_manager *q, struct vine_file *f)
     delete_worker_file(q, q->pbb_worker, f->cached_name, 0, 0);
 
     /* update this file's recovery metrics after eviction */
-    uint64_t critical_time = 0;
-    uint64_t total_time = 0;
-    struct vine_file *parent_file;
-    char *parent_file_name;
-    HASH_TABLE_ITERATE(f->parent_temp_files, parent_file_name, parent_file)
-    {
-        critical_time = MAX(critical_time, parent_file->recovery_subgraph_critical_time);
-        total_time += parent_file->recovery_subgraph_total_time;
-    }
-    critical_time += f->producer_task_execution_time;
-    total_time += f->producer_task_execution_time;
+    vine_checkpoint_update_file_penalty(q, f);
 
-    f->recovery_subgraph_critical_time = critical_time;
-    f->recovery_subgraph_total_time = total_time;
-    f->penalty = (uint64_t)(0.5 * total_time + 0.5 * critical_time);
-
-    /* recursively update all downstream files' recovery metrics */
-    struct vine_file *child_file;
-    char *child_file_name;
-    HASH_TABLE_ITERATE(f->child_temp_files, child_file_name, child_file) {
-        update_downstream_recovery_metrics(q, child_file);
+    /* update all downstream files' recovery metrics */
+    struct list *files_in_topo_order = get_reachable_files_by_topo_order(q, f);
+    struct vine_file *current_file;
+    
+    LIST_ITERATE(files_in_topo_order, current_file) {
+        if (!vine_checkpoint_checkpointed(q, current_file)) {
+            /* calculate new recovery metrics from input files */
+            vine_checkpoint_update_file_penalty(q, current_file);
+            
+            /* add to checkpoint queue for potential checkpointing */
+            if (!hash_table_lookup(q->checkpoint_queue, current_file->cached_name)) {
+                hash_table_insert(q->checkpoint_queue, current_file->cached_name, current_file);
+            }
+        }
     }
+    
+    list_delete(files_in_topo_order);
 
     return 1;
+}
+
+void vine_checkpoint_update_file_penalty(struct vine_manager *q, struct vine_file *f)
+{
+    if (!f || f->type != VINE_TEMP) {
+        return;
+    }
+
+    f->recovery_critical_time = 0;
+    f->recovery_total_time = 0;
+    f->penalty = 0;
+
+    struct vine_file *parent_file;
+    char *parent_file_name;
+    HASH_TABLE_ITERATE(f->parent_temp_files, parent_file_name, parent_file) {
+        f->recovery_critical_time = MAX(f->recovery_critical_time, parent_file->recovery_critical_time);
+        f->recovery_total_time += parent_file->recovery_total_time;
+    }
+
+    f->recovery_critical_time += f->producer_task_execution_time;
+    f->recovery_total_time += f->producer_task_execution_time;
+
+    f->penalty = (double)(0.5 * f->recovery_total_time) + (double)(0.5 * f->recovery_critical_time);
 }
 
 int vine_checkpoint_checkpointed(struct vine_manager *q, struct vine_file *f)

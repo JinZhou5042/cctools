@@ -107,8 +107,8 @@ struct vine_file *vine_file_create(const char *source, const char *cached_name, 
 	f->flags = flags;
 
 	f->producer_task_execution_time = 0;
-	f->recovery_subgraph_critical_time = 0;
-	f->recovery_subgraph_total_time = 0;
+	f->recovery_critical_time = 0;
+	f->recovery_total_time = 0;
 	f->penalty = 0;
 
 	if (data) {
@@ -481,37 +481,5 @@ void vine_file_free_consumer_tasks(struct vine_file *f)
     f->consumer_tasks = NULL;
 }
 
-
-void vine_file_producer_task_completes(struct vine_file *f, struct vine_task *t)
-{
-	if (!f || !t)
-		return;
-
-	if (f->type == VINE_TEMP) {
-		f->producer_task_execution_time = t->time_workers_execute_last;
-
-		timestamp_t max_input_critical_time = 0;
-		struct vine_mount *m;
-
-		LIST_ITERATE(t->input_mounts, m)
-		{
-			struct vine_file *input_file = m->file;
-			if (input_file && input_file->recovery_subgraph_critical_time > max_input_critical_time) {
-				max_input_critical_time = input_file->recovery_subgraph_critical_time;
-			}
-		}
-
-		f->recovery_subgraph_critical_time = max_input_critical_time + f->producer_task_execution_time;
-
-		f->recovery_subgraph_total_time += f->producer_task_execution_time;
-		f->penalty = 0.5 * f->recovery_subgraph_total_time + 0.5 * f->recovery_subgraph_critical_time;
-	} else {
-		f->recovery_subgraph_critical_time = 0;
-		f->recovery_subgraph_total_time = 0;
-		f->penalty = 0;
-	}
-
-	return;
-}
 
 /* vim: set noexpandtab tabstop=8: */

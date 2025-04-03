@@ -176,6 +176,7 @@ class DaskVine(Manager):
             self.progress_label = progress_label
             self.wrapper = wrapper
             self.wrapper_proc = wrapper_proc
+            self.when_first_task_completed = None
             self.prune_depth = prune_depth
             self.category_info = defaultdict(lambda: {"num_tasks": 0, "total_execution_time": 0})
             self.max_priority = float('inf')
@@ -288,6 +289,8 @@ class DaskVine(Manager):
 
                 t = self.wait_for_tag(tag, timeout)
                 if t:
+                    if not self.when_first_task_completed:
+                        self.when_first_task_completed = time.time()
                     timeout = 0
                     pending -= 1
                     self.total_completed_tasks += 1
