@@ -40,6 +40,8 @@ struct vine_cache {
 	struct hash_table *table;
 	char *cache_dir;
 	int max_transfer_procs;
+	struct list *pending_transfers;
+	struct list *processing_transfers;
 };
 
 static void vine_cache_wait_for_file(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager);
@@ -54,6 +56,8 @@ struct vine_cache *vine_cache_create(const char *cache_dir, int max_procs)
 	c->cache_dir = strdup(cache_dir);
 	c->table = hash_table_create(0, 0);
 	c->max_transfer_procs = max_procs;
+	c->pending_transfers = list_create();
+	c->processing_transfers = list_create();
 	return c;
 }
 
@@ -168,6 +172,17 @@ void vine_cache_delete(struct vine_cache *c)
 	{
 		vine_cache_kill(c, file, cachename, 0);
 	}
+
+	// clean up processing and pending transfers
+	char *queue_cachename;
+	while ((queue_cachename = list_pop_head(c->pending_transfers))) {
+		free(queue_cachename);
+	}
+	free(c->pending_transfers);
+	while ((queue_cachename = list_pop_head(c->processing_transfers))) {
+		free(queue_cachename);
+	}
+	free(c->processing_transfers);
 
 	hash_table_clear(c->table, (void *)vine_cache_file_delete);
 	hash_table_delete(c->table);
@@ -291,6 +306,9 @@ int vine_cache_add_transfer(struct vine_cache *c, const char *cachename, const c
 
 	hash_table_insert(c->table, cachename, f);
 
+	char *queue_cachename = strdup(cachename);
+	list_push_tail(c->pending_transfers, queue_cachename);
+
 	/* Note metadata is not saved here but when transfer is completed. */
 
 	if (flags & VINE_CACHE_FLAGS_NOW)
@@ -323,6 +341,9 @@ int vine_cache_add_mini_task(struct vine_cache *c, const char *cachename, const 
 
 	hash_table_insert(c->table, cachename, f);
 
+    char *queue_cachename = strdup(cachename);
+    list_push_tail(c->pending_transfers, queue_cachename);
+
 	/* Note metadata is not saved here but when mini task is completed. */
 
 	return 1;
@@ -342,6 +363,29 @@ int vine_cache_remove(struct vine_cache *c, const char *cachename, struct link *
 
 	/* Ensure that any child process associated with the entry is stopped. */
 	vine_cache_kill(c, f, cachename, manager);
+
+	/* Remove the cachename from the pending and processing lists. */
+    void *item;
+    struct list_cursor *cur = list_cursor_create(c->pending_transfers);
+    for (list_seek(cur, 0); list_get(cur, &item); list_next(cur)) {
+        if (strcmp((char *)item, cachename) == 0) {
+            list_drop(cur);
+            free(item);
+            break;
+        }
+    }
+    list_cursor_destroy(cur);
+
+	/* Remove from processing_transfers list if present */
+    cur = list_cursor_create(c->processing_transfers);
+    for (list_seek(cur, 0); list_get(cur, &item); list_next(cur)) {
+        if (strcmp((char *)item, cachename) == 0) {
+            list_drop(cur);
+            free(item);
+            break;
+        }
+    }
+    list_cursor_destroy(cur);
 
 	/* Then remove the disk state associated with the file. */
 	char *data_path = vine_cache_data_path(c, cachename);
@@ -586,6 +630,34 @@ static void vine_cache_worker_process(struct vine_cache_file *f, struct vine_cac
 	exit(result == 0);
 }
 
+int vine_cache_process_pending(struct vine_cache *c)
+{
+	int processed = 0;
+
+	int num_processing = list_size(c->processing_transfers);
+	int num_pending = list_size(c->pending_transfers);
+	printf("num_processing: %d, num_pending: %d\n", num_processing, num_pending);
+    
+    while (list_size(c->processing_transfers) < c->max_transfer_procs && list_size(c->pending_transfers) > 0) {
+        char *queue_cachename = list_pop_head(c->pending_transfers);
+		if (!queue_cachename) {
+			break;
+		}
+		vine_cache_status_t status = vine_cache_ensure(c, queue_cachename);
+		if (status == VINE_CACHE_STATUS_PROCESSING) {
+			char *new_queue_name = strdup(queue_cachename);
+			list_push_tail(c->processing_transfers, new_queue_name);
+			processed++;
+		} else if (status == VINE_CACHE_STATUS_PENDING) {
+			char *new_queue_name = strdup(queue_cachename);
+			list_push_tail(c->pending_transfers, new_queue_name);
+		}
+		free(queue_cachename);
+    }
+    
+    return processed;
+}
+
 /*
 Ensure that a given cached entry is fully materialized in the cache,
 downloading files or executing commands as needed.  If complete, return
@@ -644,19 +716,6 @@ vine_cache_status_t vine_cache_ensure(struct vine_cache *c, const char *cachenam
 			return f->status;
 		}
 		f->process = p;
-	}
-
-	int num_processing = 0;
-	char *table_cachename;
-	struct vine_cache_file *table_f;
-	HASH_TABLE_ITERATE(c->table, table_cachename, table_f)
-	{
-		if (table_f->status == VINE_CACHE_STATUS_PROCESSING) {
-			num_processing++;
-		}
-	}
-	if (num_processing > c->max_transfer_procs) {
-		return VINE_CACHE_STATUS_PENDING;
 	}
 
 	f->pid = fork();
@@ -825,6 +884,17 @@ static void vine_cache_wait_for_file(struct vine_cache *c, struct vine_cache_fil
 		} else if (result < 0) {
 			debug(D_VINE, "cache: wait4 on pid %d returned an error: %s", (int)f->pid, strerror(errno));
 		} else if (result > 0) {
+            void *item;
+            struct list_cursor *cur = list_cursor_create(c->processing_transfers);
+            for (list_seek(cur, 0); list_get(cur, &item); list_next(cur)) {
+                if (strcmp(item, cachename) == 0) {
+                    list_drop(cur);
+                    free(item);
+                    break;
+                }
+            }
+            list_cursor_destroy(cur);
+
 			vine_cache_handle_exit_status(c, f, cachename, status, manager);
 			vine_cache_check_outputs(c, f, cachename, manager);
 		}

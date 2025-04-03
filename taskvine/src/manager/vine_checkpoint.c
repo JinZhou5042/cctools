@@ -42,44 +42,13 @@ struct vine_worker_info *vine_checkpoint_choose_source(struct vine_manager *q, s
     return source;
 }
 
-static int64_t vine_checkpoint_pbb_inuse_cache(struct vine_manager *q)
-{
-    if (!q) {
-        return 0;
-    }
-    if (!q->checkpointed_files) {
-        return 0;
-    }
-    if (!q->pbb_worker) {
-        return 0;
-    }
-    if (!q->pbb_worker->resources) {
-        return 0;
-    }
-
-    int64_t total_checkpointed_bytes = 0;
-    int idx = 0;
-    struct vine_file *candidate;
-    int iter_count = 0;
-    int iter_depth = priority_queue_size(q->checkpointed_files);
-    PRIORITY_QUEUE_BASE_ITERATE(q->checkpointed_files, idx, candidate, iter_count, iter_depth) 
-    {
-        struct vine_file_replica *replica = hash_table_lookup(q->pbb_worker->current_files, candidate->cached_name);
-        if (replica && replica->state == VINE_FILE_REPLICA_STATE_READY) {
-            total_checkpointed_bytes += replica->size;
-        }
-    }
-    return total_checkpointed_bytes;
-}   
-
-
 int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f)
 {
     if (!q || !f) {
         return 0;
     }
 
-    int64_t total_bytes = (int64_t)(q->pbb_worker->resources->disk.total * 1024 * 1024 / 2);
+    int64_t total_bytes = (int64_t)(q->pbb_worker->resources->disk.total * 1024 * 1024 * 0.95);
     int64_t actual_inuse_bytes = q->pbb_actual_inuse_cache;
     int64_t pending_transfer_bytes = q->pbb_worker->inuse_cache - q->pbb_actual_inuse_cache;
 
