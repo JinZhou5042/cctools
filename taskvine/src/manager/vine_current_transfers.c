@@ -207,7 +207,7 @@ int vine_current_transfers_dest_in_use(struct vine_manager *q, struct vine_worke
 // intentionally
 int vine_current_transfers_wipe_worker(struct vine_manager *q, struct vine_worker_info *w)
 {
-	debug(D_VINE, "Removing instances of worker from transfer table");
+	debug(D_VINE, "Removing instances of worker %s (%s) from transfer table", w->hostname, w->addrport);
 
 	int removed = 0;
 	if (!w) {

@@ -624,7 +624,7 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 				if (!hash_table_lookup(q->checkpoint_queue, m_output->file->cached_name)) {
 					hash_table_insert(q->checkpoint_queue, m_output->file->cached_name, m_output->file);
 				}
-				printf("calculated penalty for file %s: %f\n", m_output->file->cached_name, m_output->file->penalty);
+				debug(D_VINE | D_NOTICE, "calculated penalty for file %s: %f\n", m_output->file->cached_name, m_output->file->penalty);
 			}
 		}
 
@@ -1354,6 +1354,20 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 		recall_worker_lost_temp_files(q, w);
 	}
 
+	// traverse the current transfers table and remove the worker from the source_worker field
+	struct list *transfer_ids_to_remove = list_create();
+	char *transfer_id;
+	struct vine_transfer_pair *t;
+	HASH_TABLE_ITERATE(q->current_transfer_table, transfer_id, t) {
+		if (t->source_worker == w) {
+			list_add(transfer_ids_to_remove, transfer_id);
+		}
+	}
+	// remove the transfers from the table
+	list_iterate(transfer_ids_to_remove, transfer_id) {
+		vine_current_transfers_remove(q, transfer_id);
+	}
+	
 	cleanup_worker(q, w);
 
 	vine_manager_factory_worker_leave(q, w);
@@ -3683,11 +3697,7 @@ static void vine_manager_consider_recovery_task(struct vine_manager *q, struct v
 	switch (rt->state) {
 	case VINE_TASK_INITIAL:
 		/* The recovery task has never been run, so submit it now. */
-		if (rt->priority > 0) {
-			rt->priority *= 1.1;
-		} else {
-			rt->priority *= 0.9;
-		}
+		vine_task_set_priority(rt, (double)timestamp_get());
 		vine_submit(q, rt);
 		notice(D_VINE, "Submitted recovery task %d (%s) to re-create lost temporary file %s.", rt->task_id, rt->command_line, lost_file->cached_name);
 		break;
@@ -3702,6 +3712,7 @@ static void vine_manager_consider_recovery_task(struct vine_manager *q, struct v
 		/* Note that the recovery task has already "left" the manager and so we do not manipulate internal state
 		 * here. */
 		vine_task_reset(rt);
+		vine_task_set_priority(rt, (double)timestamp_get());
 		vine_submit(q, rt);
 		notice(D_VINE, "Submitted recovery task %d (%s) to re-create lost temporary file %s.", rt->task_id, rt->command_line, lost_file->cached_name);
 		break;
@@ -3827,26 +3838,16 @@ static int send_one_task(struct vine_manager *q)
 	struct vine_task *t = NULL;
 	int iter_count = 0;
 	int committed = 0;
-	
-	int max_iter = priority_queue_size(q->ready_tasks);
 
-	while (committable_slots > 0 && iter_count < max_iter) {
+	struct list *ineligible_tasks = list_create();
+
+	while (committable_slots > 0 && (t = priority_queue_pop(q->ready_tasks))) {
 
 		iter_count++;
 
-		t = priority_queue_pop(q->ready_tasks);
 		struct vine_worker_info *selected_worker = NULL;
-		if (!t) {
-			break;
-		}
-
 		if (!consider_task(q, t) || !(selected_worker = vine_schedule_task_to_worker(q, t))) {
-			if (t->priority > 0) {
-				t->priority *= 0.9;
-			} else {
-				t->priority *= 1.1;
-			}
-			priority_queue_push(q->ready_tasks, t, t->priority);
+			list_push_tail(ineligible_tasks, t);
 			continue;
 		}
 
@@ -3868,18 +3869,23 @@ static int send_one_task(struct vine_manager *q)
 			break;
 		case VINE_MGR_FAILURE:
 			/* special case, commit had a chained failure. */
-			if (t->priority > 0) {
-				t->priority *= 0.9;
-			} else {
-				t->priority *= 1.1;
-			}
-			priority_queue_push(q->ready_tasks, t, t->priority);
+			list_push_tail(ineligible_tasks, t);
 			break;
 		case VINE_END_OF_LIST:
 			/* shouldn't happen, keep going */
 			break;
 		}
 	}
+
+	LIST_ITERATE(ineligible_tasks, t) {
+		if (t->priority > 0) {
+			t->priority *= 0.9;
+		} else {
+			t->priority *= 1.1;
+		}
+		priority_queue_push(q->ready_tasks, t, t->priority);
+	}
+	list_delete(ineligible_tasks);
 
 	printf("committed %d tasks after %d iterations, left %d tasks\n", committed, iter_count, priority_queue_size(q->ready_tasks));
 

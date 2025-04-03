@@ -5,6 +5,7 @@
 #include "vine_worker_info.h"
 #include "vine_manager_put.h"
 #include "vine_mount.h"
+#include "debug.h"
 #include "vine_checkpoint_queue.h"
 #include "vine_file_replica_table.h"
 
@@ -22,8 +23,10 @@ int vine_checkpoint_persist(struct vine_manager *q, struct vine_worker_info *sou
     char *source_addr = string_format("%s/%s", source->transfer_url, f->cached_name);
     vine_manager_put_url_now(q, q->pbb_worker, source_addr, f);
     free(source_addr);
-    
-    priority_queue_push(q->checkpointed_files, f, -f->penalty / f->size);
+
+    f->recovery_critical_time = 0;
+    f->recovery_total_time = 0;
+    f->penalty = 0;
 
     return 1;
 }
@@ -102,7 +105,7 @@ int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f)
     // otherwise, we can evict the selected files for this file
     LIST_ITERATE(candidates, candidate)
     {
-        printf("Evicting file %s, size: %ld, penalty: %f\n", candidate->cached_name, candidate->size, candidate->penalty);
+        debug(D_VINE | D_NOTICE, "Evicting file %s, size: %ld, penalty: %f\n", candidate->cached_name, candidate->size, candidate->penalty);
         vine_checkpoint_evict(q, candidate);
     }
     list_delete(candidates);
@@ -113,7 +116,7 @@ int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f)
 /* Get all reachable files in topological order from the given starting file */
 static struct list *get_reachable_files_by_topo_order(struct vine_manager *q, struct vine_file *start_file)
 {
-    if (!start_file || start_file->type != VINE_TEMP) {
+    if (!start_file || start_file->type != VINE_TEMP || vine_checkpoint_checkpointed(q, start_file)) {
         return list_create();
     }
 
@@ -181,7 +184,7 @@ static struct list *get_reachable_files_by_topo_order(struct vine_manager *q, st
             
             /* Pre-populate child queue with VINE_TEMP type files only */
             HASH_TABLE_ITERATE(next_child->child_temp_files, child_name, child) {
-                if (child && child->type == VINE_TEMP) {
+                if (child && child->type == VINE_TEMP && !vine_checkpoint_checkpointed(q, child)) {
                     list_push_tail(child_state->queue, child);
                 }
             }
@@ -261,7 +264,7 @@ void vine_checkpoint_update_file_penalty(struct vine_manager *q, struct vine_fil
     f->recovery_critical_time += f->producer_task_execution_time;
     f->recovery_total_time += f->producer_task_execution_time;
 
-    f->penalty = (double)(0.5 * f->recovery_total_time) + (double)(0.5 * f->recovery_critical_time);
+    f->penalty = (double)(0.1 * f->recovery_total_time) + (double)(0.9 * f->recovery_critical_time);
 }
 
 int vine_checkpoint_checkpointed(struct vine_manager *q, struct vine_file *f)
