@@ -73,8 +73,14 @@ static void vine_transfer_process(struct vine_cache *cache)
 	3. Once arrives here, the server is safe to accept a new connection, as the child_count is less than the maximum allowed.
 	4. Upon accepting a connection, fork a new child process to handle it; if timeout, simply continue.
 	5. lnk should be closed in the parent process to prevent file descriptor exhaustion.
+	1. Perform a non-blocking check for any child processes that have exited, this runs very fast.
+	2. If the number of child processes has reached the maximum allowed, perform a blocking wait for a child process to exit.
+	3. Once arrives here, the server is safe to accept a new connection, as the child_count is less than the maximum allowed.
+	4. Upon accepting a connection, fork a new child process to handle it; if timeout, simply continue.
+	5. lnk should be closed in the parent process to prevent file descriptor exhaustion.
 	*/
 	while (1) {
+		printf("outgoing transfer count: %d\n", child_count);
 		/* Do a non-blocking wait for any exited children. */
 		while (waitpid(-1, NULL, WNOHANG) > 0) {
 			child_count--;
@@ -93,6 +99,9 @@ static void vine_transfer_process(struct vine_cache *cache)
 		if (lnk) {
 			pid_t p = fork();
 			if (p == 0) {
+		if (lnk) {
+			pid_t p = fork();
+			if (p == 0) {
 				vine_transfer_handler(lnk, cache);
 				link_close(lnk);
 				_exit(0);
@@ -104,8 +113,21 @@ static void vine_transfer_process(struct vine_cache *cache)
 				link_close(lnk);
 			} else {
 				/* If fork fails, also close the link. */
+				_exit(0);
+			} else if (p > 0) {
+				/* Increment the child count when a new child is successfully forked. */
+				child_count++;
+				/* Also close the link in the parent process, otherwise the opened file descriptors will not be closed.
+				 * This caused a problem where incoming transfers were all failing due to the file descriptor limit per process being reached. */
+				link_close(lnk);
+			} else {
+				/* If fork fails, also close the link. */
 				link_close(lnk);
 			}
+		} else {
+			/* If lnk is NULL, it means link_accept failed to accept a connection.
+			 * This could be due to a timeout or other transient issues. */
+			continue;
 		} else {
 			/* If lnk is NULL, it means link_accept failed to accept a connection.
 			 * This could be due to a timeout or other transient issues. */

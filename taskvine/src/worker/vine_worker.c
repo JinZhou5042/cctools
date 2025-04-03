@@ -1713,6 +1713,7 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		ok &= handle_completed_tasks(manager);
 		ok &= vine_cache_wait(cache_manager, manager);
+		vine_cache_process_pending(cache_manager);
 
 		measure_worker_resources();
 
