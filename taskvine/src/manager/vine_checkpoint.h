@@ -17,7 +17,7 @@ int vine_checkpoint_pbb_available(struct vine_manager *q, struct vine_file *f);
 
 struct vine_worker_info *vine_checkpoint_choose_source(struct vine_manager *q, struct vine_file *f);
 
-int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f);
+int vine_checkpoint_ensure_pbb_space(struct vine_manager *q, struct vine_file *f);
 
 void vine_checkpoint_update_file_penalty(struct vine_manager *q, struct vine_file *f);
 

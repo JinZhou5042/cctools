@@ -52,7 +52,9 @@ char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info
 int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 {
 	struct vine_transfer_pair *p;
-	p = hash_table_remove(q->current_transfer_table, id);
+	char *id2 = strdup(id);
+	p = hash_table_remove(q->current_transfer_table, id2);
+	free(id2);
 	if (p) {
 		vine_transfer_pair_delete(p);
 		return 1;

@@ -156,6 +156,31 @@ int link_keepalive(struct link *link, int onoff)
 	return 1;
 }
 
+int link_is_alive(struct link *link)
+{
+	/* If link is NULL or fd is invalid, it's definitely not alive */
+	if (!link || link->fd < 0) return 0;
+	
+	/* For file type links, assume they're always alive if fd is valid */
+	if (link->type == LINK_TYPE_FILE) {
+		return 1;
+	}
+	
+	/* Use poll to check for HUP or ERR conditions without blocking */
+	struct pollfd pfd = {0};
+	pfd.fd = link->fd;
+	pfd.events = POLLHUP | POLLERR;
+	
+	if (poll(&pfd, 1, 0) > 0) {
+		if (pfd.revents & (POLLHUP | POLLERR)) {
+			return 0; /* Connection has been closed or has an error */
+		}
+	}
+	
+	/* No error conditions detected, link appears to be alive */
+	return 1;
+}
+
 int link_nonblocking(struct link *link, int onoff)
 {
 	int result;
@@ -1007,6 +1032,10 @@ ssize_t link_write(struct link *link, const char *data, size_t count, time_t sto
 	while (count > 0) {
 		chunk = write_aux(link, data, count);
 		if (chunk < 0) {
+			if (errno == EPIPE) {
+				errno = EPIPE;
+				return -1;
+			}
 			if (errno_is_temporary(errno)) {
 				if (link_sleep(link, stoptime, 0, 1)) {
 					continue;

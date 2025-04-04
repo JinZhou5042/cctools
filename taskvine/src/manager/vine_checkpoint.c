@@ -24,9 +24,11 @@ int vine_checkpoint_persist(struct vine_manager *q, struct vine_worker_info *sou
     vine_manager_put_url_now(q, q->pbb_worker, source_addr, f);
     free(source_addr);
 
+    priority_queue_push(q->checkpointed_files, f, -f->penalty / f->size);
+
     f->recovery_critical_time = 0;
     f->recovery_total_time = 0;
-    f->penalty = 0;
+    // f->penalty = 0;
 
     return 1;
 }
@@ -44,7 +46,7 @@ struct vine_worker_info *vine_checkpoint_choose_source(struct vine_manager *q, s
     return source;
 }
 
-int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f)
+int vine_checkpoint_ensure_pbb_space(struct vine_manager *q, struct vine_file *f)
 {
     if (!q || !f) {
         return 0;
@@ -63,8 +65,11 @@ int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f)
 
     // printf("total bytes: %ld, inuse cache: %ld, available bytes: %ld, this file size: %ld\n", total_bytes, actual_inuse_bytes, available_bytes, this_file_size);
 
+    double this_efficiency = f->penalty / f->size;
+
     double candidates_penalty = 0;
     int64_t candidates_size = 0;
+    double candidates_efficiency = 0;
 
     struct list *candidates = list_create();
     struct vine_file *candidate;
@@ -73,29 +78,18 @@ int vine_checkpoint_release_pbb(struct vine_manager *q, struct vine_file *f)
         available_bytes += candidate->size;
         candidates_penalty += candidate->penalty;
         candidates_size += candidate->size;
-        /* now, if the capacity suits, we can stop */
-        if (available_bytes >= (int64_t)f->size) {
+        candidates_efficiency = candidates_penalty / candidates_size;
+        if (candidates_efficiency > this_efficiency) {
+            break;
+        }
+        if (candidates_size + available_bytes >= (int64_t)f->size) {
             break;
         }
     }
 
-    if (list_size(candidates) == 0) {
-        list_delete(candidates);
-        return 0;
-    }
-    if (available_bytes < (int64_t)f->size) {
-        list_delete(candidates);
-        return 0;
-    }
-
-    double this_efficiency = f->penalty / f->size;
-    double candidates_efficiency = candidates_penalty / candidates_size;
-
-    // the cost is too high, we don't want to evict for this file
-    if (candidates_efficiency > this_efficiency) {
-        // pop back the files we popped from the checkpointed_files
-        LIST_ITERATE(candidates, candidate)
-        {
+    // if the size and efficiency of the candidates are not good enough, we don't want to evict for this file
+    if (available_bytes < (int64_t)f->size || candidates_efficiency > this_efficiency) {
+        LIST_ITERATE(candidates, candidate) {
             priority_queue_push(q->checkpointed_files, candidate, -candidate->penalty / candidate->size);
         }
         list_delete(candidates);
@@ -163,9 +157,11 @@ static struct list *get_reachable_files_by_topo_order(struct vine_manager *q, st
             /* All children processed, add to result and mark as completed */
             list_pop_head(stack);
             list_push_tail(result, current->file);
-            hash_table_remove(visited, current->file->cached_name);
+            char *cached_name = strdup(current->file->cached_name);
+            hash_table_remove(visited, cached_name);
             hash_table_insert(visited, current->file->cached_name, (void*)VISIT_STATE_COMPLETED);
             list_delete(current->queue);
+            free(cached_name);
             free(current);
             continue;
         }
