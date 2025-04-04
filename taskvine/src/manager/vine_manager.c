@@ -1366,95 +1366,70 @@ static void release_workers_disk_space(struct vine_manager *q)
 
 static int kill_worker_by_interval(struct vine_manager *q)
 {
-	if (q->kill_worker_interval_s <= 0) {
-		return 0;
-	}
-	if (q->total_tasks_complete == 0) {
+	if (q->kill_worker_interval_s <= 0 || q->total_tasks_complete == 0) {
 		return 0;
 	}
 
-	int all_removed_workers = q->stats->workers_removed;
-	timestamp_t time_manager_start = q->time_manager_start;
 	timestamp_t current_time = timestamp_get();
 	uint64_t current_interval = current_time - q->last_interval_kill_time;
-
 	if (current_interval < (uint64_t)(q->kill_worker_interval_s * 1e6)) {
 		return 0;
 	}
 
 	q->last_interval_kill_time = current_time;
 
-	uint64_t elapsed_time = current_time - time_manager_start;
-	double avg_interval = (all_removed_workers > 0)
-					      ? ((double)elapsed_time / all_removed_workers)
-					      : 1e18;
-
+	uint64_t elapsed_time = current_time - q->time_manager_start;
+	int all_removed_workers = q->stats->workers_removed;
 	double threshold_us = q->kill_worker_interval_s * 1e6;
-
+	double avg_interval = all_removed_workers > 0 ? (double)elapsed_time / all_removed_workers : 1e18;
 	if (avg_interval < threshold_us) {
 		return 0;
 	}
 
-	double expected_removed = (double)elapsed_time / threshold_us;
-	int need_to_remove = (int)(expected_removed - all_removed_workers + 0.5);
+	int need_to_remove = (int)((elapsed_time / threshold_us) - all_removed_workers + 0.5);
 	if (need_to_remove <= 0) {
 		return 0;
 	}
 
-	int killable_workers = 0;
+	struct vine_worker_info **candidates = NULL;
+	int count = 0;
 	char *key;
 	struct vine_worker_info *w;
-	HASH_TABLE_ITERATE(q->worker_table, key, w)
-	{
+
+	HASH_TABLE_ITERATE(q->worker_table, key, w) {
 		if (!w->is_pbb_worker) {
-			killable_workers++;
+			candidates = realloc(candidates, (count + 1) * sizeof(*candidates));
+			if (!candidates) {
+				debug(D_VINE, "Out of memory while collecting kill candidates");
+				return 0;
+			}
+			candidates[count++] = w;
 		}
 	}
 
-	if (killable_workers == 0) {
-		debug(D_VINE, "No available workers to kill (excluding PBB worker)");
+	if (count == 0) {
+		debug(D_VINE, "No workers available to kill (excluding PBB)");
+		free(candidates);
 		return 0;
 	}
 
-	struct vine_worker_info **workers = calloc(killable_workers, sizeof(struct vine_worker_info *));
-	if (!workers) {
-		debug(D_VINE, "Failed to allocate memory for worker array");
-		return 0;
-	}
+	int actually_killed = 0;
+	for (int i = 0; i < need_to_remove && count > 0; i++) {
+		int index = random() % count;
+		struct vine_worker_info *selected = candidates[index];
 
-	int worker_count = 0;
-	HASH_TABLE_ITERATE(q->worker_table, key, w)
-	{
-		if (!w->is_pbb_worker) {
-			if (worker_count >= killable_workers)
-				break;
-			workers[worker_count++] = w;
-		}
-	}
-
-	if (worker_count == 0) {
-		free(workers);
-		return 0;
-	}
-
-	int random_index = (int)(random() % worker_count);
-	struct vine_worker_info *selected = workers[random_index];
-
-	if (hash_table_lookup(q->worker_table, selected->hashkey) && !selected->is_pbb_worker) {
-		if (itable_size(selected->current_tasks) > 0) {
-			debug(D_VINE | D_NOTICE, "Killing busy worker %s (running %d tasks)", selected->addrport, itable_size(selected->current_tasks));
-		} else {
-			debug(D_VINE | D_NOTICE, "Killing idle worker %s", selected->addrport);
-		}
-
+		debug(D_VINE | D_NOTICE, "Killing worker %s (%d tasks)", selected->addrport, itable_size(selected->current_tasks));
 		release_worker(q, selected);
-		free(workers);
-		return 1;
+		actually_killed++;
+
+		// remove selected from list
+		candidates[index] = candidates[--count];
 	}
 
-	free(workers);
-	return 0;
+	free(candidates);
+	return actually_killed;
 }
+
 
 /* Remove a worker from this master by removing all remote state, all local state, and disconnecting. */
 
@@ -1472,13 +1447,11 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	vine_txn_log_write_worker(q, w, 1, reason);
 
-	// 先处理file_worker_table，确保不会有悬挂引用
 	struct list *empty_keys = list_create();
 	char *cached_name;
 	void *value;
 	struct set *workers_copy = NULL;
 
-	// 首先收集所有需要处理的键，避免在迭代时修改
 	HASH_TABLE_ITERATE(q->file_worker_table, cached_name, value)
 	{
 		struct set *workers = (struct set *)value;
@@ -1487,28 +1460,24 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 		}
 	}
 
-	// 然后逐一处理每个键
 	list_first_item(empty_keys);
 	while ((cached_name = list_next_item(empty_keys))) {
 		workers_copy = hash_table_lookup(q->file_worker_table, cached_name);
 		if (workers_copy) {
 			set_remove(workers_copy, w);
 			if (set_size(workers_copy) == 0) {
-				// 如果集合现在为空，将其删除并从表中移除
 				set_delete(workers_copy);
 				hash_table_remove(q->file_worker_table, cached_name);
 			}
 		}
 	}
 
-	// 清理临时列表
 	list_first_item(empty_keys);
 	while ((cached_name = list_next_item(empty_keys))) {
 		free(cached_name);
 	}
 	list_delete(empty_keys);
 
-	// 然后从worker_table和其他表中移除
 	if (hash_table_lookup(q->worker_table, w->hashkey)) {
 		hash_table_remove(q->worker_table, w->hashkey);
 	}
@@ -5879,6 +5848,19 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			}
 		}
 
+		// if new workers, connect n of them
+		BEGIN_ACCUM_TIME(q, time_status_msgs);
+		result = connect_new_workers(q, stoptime, MAX(q->wait_for_workers, q->max_new_workers));
+		END_ACCUM_TIME(q, time_status_msgs);
+
+		if (result) {
+			// accepted at least one worker
+			// reset the rotate cursor on worker connection
+			priority_queue_rotate_reset(q->ready_tasks);
+			events++;
+			continue;
+		}
+
 		// retrieve worker status messages
 		if (poll_active_workers(q, stoptime) > 0) {
 			// at least one worker was removed.
@@ -6019,21 +6001,6 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		vine_blocklist_unblock_all_by_time(q, time(0));
 		END_ACCUM_TIME(q, time_internal);
 
-		// release_workers_disk_space(q);
-
-		// if new workers, connect n of them
-		BEGIN_ACCUM_TIME(q, time_status_msgs);
-		result = connect_new_workers(q, stoptime, MAX(q->wait_for_workers, q->max_new_workers));
-		END_ACCUM_TIME(q, time_status_msgs);
-
-		if (result) {
-			// accepted at least one worker
-			// reset the rotate cursor on worker connection
-			priority_queue_rotate_reset(q->ready_tasks);
-			events++;
-			continue;
-		}
-
 		if (q->process_pending_check) {
 			BEGIN_ACCUM_TIME(q, time_internal);
 			int pending = process_pending();
@@ -6061,6 +6028,8 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 				}
 			}
 		}
+
+		release_workers_disk_space(q);
 
 		timestamp_t current_time = timestamp_get();
 		if (current_time - q->time_last_large_tasks_check >= q->large_task_check_interval) {
