@@ -408,8 +408,6 @@ static struct vine_worker_info *find_worker_by_files(struct vine_manager *q, str
 	{
 		/* Careful: If check_worker_against task fails, then w may no longer be valid. */
 		if (check_worker_against_task(q, w, t)) {
-
-			return w;
 			
 			task_cached_bytes = 0;
 			has_all_files = 1;
@@ -565,13 +563,13 @@ Select the best worker for this task, based on the current scheduling mode.
 
 struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, struct vine_task *t)
 {
+	t->worker_selection_algorithm = VINE_SCHEDULE_FCFS;
+
 	int a = t->worker_selection_algorithm;
 
 	if (a == VINE_SCHEDULE_UNSET) {
 		a = q->worker_selection_algorithm;
 	}
-
-	a = VINE_SCHEDULE_FILES;
 
 	switch (a) {
 	case VINE_SCHEDULE_FILES:

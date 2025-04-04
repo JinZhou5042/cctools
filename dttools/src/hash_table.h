@@ -170,6 +170,12 @@ HASH_TABLE_ITERATE(table,key,value) {
 </pre>
 */
 
+void hash_table_set_shrink_threshold(struct hash_table *h, float threshold);
+float hash_table_load_factor(struct hash_table *h);
+int hash_table_bucket_count(struct hash_table *h);
+int hash_table_remove_batch(struct hash_table *h, const char **keys, int count);
+
+
 #define HASH_TABLE_ITERATE( table, key, value ) hash_table_firstkey(table); while(hash_table_nextkey(table,&key,(void**)&value))
 
 #define HASH_TABLE_ITERATE_RANDOM_START( table, offset_bookkeep, key, value ) hash_table_randomkey(table, &offset_bookkeep); while(hash_table_nextkey_with_offset(table, offset_bookkeep, &key, (void **)&value))

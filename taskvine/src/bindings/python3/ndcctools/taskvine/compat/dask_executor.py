@@ -263,16 +263,20 @@ class DaskVine(Manager):
         rs = dag.set_targets(keys_flatten)
         self._enqueue_dask_calls(dag, tag, rs, self.retries, enqueued_calls)
 
-        timeout = 3
+        timeout = 10
         pending = 0
+        timeout_hit = False
 
         (bar_progress, bar_update) = self._make_progress_bar(dag.left_to_compute())
         with bar_progress:
 
             while not self.empty() or enqueued_calls:
-                total_executing_tasks = self.total_submitted_tasks - self.total_completed_tasks
-                if total_executing_tasks < 3000:
-                    submitted = 0
+                submitted = 0
+                if pending < 3000 or timeout_hit:
+                    if timeout_hit:
+                        should_submit = 1000
+                    else:
+                        should_submit = 3000
                     while (
                         enqueued_calls
                         and (not self.submit_per_cycle or submitted < self.submit_per_cycle)
@@ -281,19 +285,18 @@ class DaskVine(Manager):
                     ):
                         self.submit(enqueued_calls.pop())
                         submitted += 1
-                        self.total_submitted_tasks += 1
                         pending += 1
 
-                        if submitted > 3000:
+                        if submitted > should_submit:
                             break
 
                 t = self.wait_for_tag(tag, timeout)
                 if t:
+                    timeout_hit = False
                     if not self.when_first_task_completed:
                         self.when_first_task_completed = time.time()
                     timeout = 0
                     pending -= 1
-                    self.total_completed_tasks += 1
                     if self.verbose:
                         print(f"{t.key} ran on {t.hostname}")
 
@@ -325,17 +328,23 @@ class DaskVine(Manager):
                             raise Exception(f"tasks for key {t.key} failed permanently")
                     t = None  # drop task reference
                 else:
-                    timeout = 5
+                    timeout = 10
+                    timeout_hit = True
             return self._load_results(dag, indices, keys)
 
     def _make_progress_bar(self, total):
         if rich:
-            from rich.progress import Progress, TextColumn, BarColumn, MofNCompleteColumn, TimeRemainingColumn
+            from rich.progress import (
+                Progress, TextColumn, BarColumn, MofNCompleteColumn,
+                TimeElapsedColumn, TimeRemainingColumn, TaskProgressColumn
+            )
 
             progress = Progress(
                 TextColumn(self.progress_label),
                 BarColumn(),
+                TaskProgressColumn(show_speed=False),
                 MofNCompleteColumn(),
+                TimeElapsedColumn(),
                 TimeRemainingColumn(),
                 disable=self.progress_disable,
             )

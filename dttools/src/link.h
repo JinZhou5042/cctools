@@ -319,6 +319,12 @@ int link_using_ssl(struct link *link);
 
 int link_keepalive(struct link *link, int onoff);
 
+/** Check if a link is still alive and connected.
+@param link The link to examine.
+@return 1 if the link is alive, 0 if it is closed or likely disconnected.
+*/
+int link_is_alive(struct link *link);
+
 int link_nonblocking(struct link *link, int onoff);
 
 

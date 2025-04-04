@@ -52,7 +52,6 @@ int vine_file_replica_table_insert(struct vine_manager *m, struct vine_worker_in
 struct vine_file_replica *vine_file_replica_table_remove(struct vine_manager *m, struct vine_worker_info *w, const char *cachename)
 {
 	if (!w) {
-		// Handle error: invalid pointer
 		return 0;
 	}
 
@@ -60,7 +59,10 @@ struct vine_file_replica *vine_file_replica_table_remove(struct vine_manager *m,
 		return 0;
 	}
 
-	struct vine_file_replica *replica = hash_table_remove(w->current_files, cachename);
+	char *cachename2 = strdup(cachename);
+	char *cachename3 = strdup(cachename);
+
+	struct vine_file_replica *replica = hash_table_remove(w->current_files, cachename2);
 	if (replica) {
 		w->inuse_cache -= replica->size;
 	}
@@ -76,10 +78,13 @@ struct vine_file_replica *vine_file_replica_table_remove(struct vine_manager *m,
 	if (workers) {
 		set_remove(workers, w);
 		if (set_size(workers) < 1) {
-			hash_table_remove(m->file_worker_table, cachename);
+			hash_table_remove(m->file_worker_table, cachename3);
 			set_delete(workers);
 		}
 	}
+
+	free(cachename2);
+	free(cachename3);
 
 	return replica;
 }
@@ -103,47 +108,63 @@ int vine_file_replica_count(struct vine_manager *m, struct vine_file *f)
 // find a worker (randomly) in posession of a specific file, and is ready to transfer it.
 struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager *q, const char *cachename)
 {
-	struct set *workers = hash_table_lookup(q->file_worker_table, cachename);
-	if (!workers) {
-		return 0;
-	}
-
-	int total_count = set_size(workers);
-	if (total_count < 1) {
-		return 0;
-	}
-
-	int random_index = random() % total_count;
-
-	struct vine_worker_info *peer = NULL;
-	struct vine_worker_info *peer_selected = NULL;
-	struct vine_file_replica *replica = NULL;
-
-	int offset_bookkeep;
-	SET_ITERATE_RANDOM_START(workers, offset_bookkeep, peer)
-	{
-		random_index--;
-		if (!peer->transfer_port_active)
-			continue;
-
-		timestamp_t current_time = timestamp_get();
-		if (current_time - peer->last_transfer_failure < q->transient_error_interval) {
-			debug(D_VINE, "Skipping worker source after recent failure : %s", peer->transfer_host);
-			continue;
-		}
-
-		if ((replica = hash_table_lookup(peer->current_files, cachename)) && replica->state == VINE_FILE_REPLICA_STATE_READY) {
-			int current_transfers = vine_current_transfers_source_in_use(q, peer);
-			if (current_transfers < q->worker_source_max_transfers) {
-				peer_selected = peer;
-				if (random_index < 0) {
-					return peer_selected;
-				}
-			}
-		}
-	}
-
-	return peer_selected;
+    if(!q || !cachename) return NULL;
+    
+    struct set *workers = hash_table_lookup(q->file_worker_table, cachename);
+    if(!workers || set_size(workers) < 1) {
+        return NULL;
+    }
+    
+    int total_count = set_size(workers);
+    int random_index = random() % total_count;
+    
+    struct vine_worker_info *peer = NULL;
+    struct vine_worker_info *peer_selected = NULL;
+    struct vine_file_replica *replica = NULL;
+    
+    int offset_bookkeep;
+    SET_ITERATE_RANDOM_START(workers, offset_bookkeep, peer)
+    {
+        // 跳过NULL指针
+        if(!peer) continue;
+        
+        // 验证worker是否仍在worker_table中（额外保险）
+        if(!peer->hashkey || !hash_table_lookup(q->worker_table, peer->hashkey)) {
+            continue;
+        }
+        
+        // 检查传输端口
+        if(!peer->transfer_port_active)
+            continue;
+        
+        timestamp_t current_time = timestamp_get();
+        if(current_time - peer->last_transfer_failure < q->transient_error_interval) {
+            debug(D_VINE, "Skipping worker source after recent failure : %s", 
+                  peer->transfer_host ?: "unknown");
+            continue;
+        }
+        
+        // 安全检查current_files
+        if(!peer->current_files) continue;
+        
+        // 尝试查找replica
+        replica = hash_table_lookup(peer->current_files, cachename);
+        if(!replica || replica->state != VINE_FILE_REPLICA_STATE_READY) {
+            continue;
+        }
+        
+        // 检查当前传输数量
+        int current_transfers = vine_current_transfers_source_in_use(q, peer);
+        if(current_transfers < q->worker_source_max_transfers) {
+            peer_selected = peer;
+            random_index--;
+            if(random_index < 0) {
+                return peer_selected;
+            }
+        }
+    }
+    
+    return peer_selected;
 }
 
 // trigger replications of file to satisfy temp_replica_count

@@ -165,6 +165,8 @@ static void aggregate_workers_resources(
 static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout, const char *tag, int task_id);
 static void release_all_workers(struct vine_manager *q);
 
+static int fetch_outputs_from_worker(struct vine_manager *q, struct vine_worker_info *w, int task_id);
+
 static int vine_manager_check_inputs_available(struct vine_manager *q, struct vine_task *t);
 static void vine_manager_consider_recovery_task(struct vine_manager *q, struct vine_file *lost_file, struct vine_task *rt);
 static int release_worker(struct vine_manager *q, struct vine_worker_info *w);
@@ -191,6 +193,7 @@ static int count_workers(struct vine_manager *q, vine_worker_type_t type)
 
 	return count;
 }
+
 
 /* Round up a resource value based on the overcommit multiplier currently in effect. */
 
@@ -238,6 +241,11 @@ successfully sent. This timestamp is used to determine when to send keepalive ch
 
 __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager *q, struct vine_worker_info *w, const char *fmt, ...)
 {
+	if (!w || !w->link || link_fd(w->link) < 0 || !link_is_alive(w->link)) {
+		debug(D_VINE, "Attempting to send to disconnected worker");
+        return 0;
+	}
+	
 	va_list va;
 	time_t stoptime;
 	buffer_t B[1];
@@ -248,7 +256,7 @@ __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager 
 	va_start(va, fmt);
 	buffer_putvfstring(B, fmt, va);
 	va_end(va);
-
+	
 	debug(D_VINE, "tx to %s (%s): %s", w->hostname, w->addrport, buffer_tostring(B));
 
 	stoptime = time(0) + q->short_timeout;
@@ -624,7 +632,7 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 				if (!hash_table_lookup(q->checkpoint_queue, m_output->file->cached_name)) {
 					hash_table_insert(q->checkpoint_queue, m_output->file->cached_name, m_output->file);
 				}
-				debug(D_VINE | D_NOTICE, "calculated penalty for file %s: %f\n", m_output->file->cached_name, m_output->file->penalty);
+				debug(D_VINE, "calculated penalty for file %s: %f\n", m_output->file->cached_name, m_output->file->penalty);
 			}
 		}
 
@@ -660,6 +668,8 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 		}
 
 		t->sandbox_measured = sandbox_used;
+
+		q->total_tasks_complete++;
 
 		/* Update category disk info */
 		struct category *c = vine_category_lookup_or_create(q, t->category);
@@ -1236,11 +1246,129 @@ static void recall_worker_lost_temp_files(struct vine_manager *q, struct vine_wo
 	}
 }
 
+/* determine if the file is an input to any running tasks on this worker */
+/*
+static int is_input_to_running_tasks(struct vine_manager *q, struct vine_worker_info *w, struct vine_file *f)
+{
+	struct vine_task *t;
+	ITABLE_ITERATE(w->current_tasks, task_id, t) {
+		struct vine_mount *m;
+		LIST_ITERATE(t->input_mounts, m) {
+			if (!m->file) {
+				continue;
+			}
+			if (strcmp(m->file->cached_name, f->cached_name) == 0) {
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+*/
+
+static void release_worker_disk_space_have_replicas(struct vine_manager *q, struct vine_worker_info *w)
+{
+	if (!w || !w->resources) {
+		return;
+	}
+
+	struct list *files_to_delete = list_create();
+
+	char *cached_name;
+	struct vine_file *f;
+	HASH_TABLE_ITERATE(w->current_files, cached_name, f) {
+		if (f->type != VINE_TEMP) {
+			continue;
+		}
+		if (vine_file_replica_count(q, f) > 1) {
+			list_push_tail(files_to_delete, f);
+		}
+	}
+
+	LIST_ITERATE(files_to_delete, f) {
+		delete_worker_file(q, w, f->cached_name, 0, 0);
+	}
+
+	list_delete(files_to_delete);
+}
+
+static void release_worker_disk_space_until_bound(struct vine_manager *q, struct vine_worker_info *w, int64_t disk_upper_bound)
+{
+	if (!w || !w->resources) {
+		return;
+	}
+
+	int64_t to_release = w->resources->disk.inuse - disk_upper_bound;
+	
+	struct list *files_to_delete = list_create();
+	int64_t released_bytes = 0;
+	char *cached_name;
+	struct vine_file *f;
+	HASH_TABLE_ITERATE(w->current_files, cached_name, f) {
+		if (f->type != VINE_TEMP) {
+			continue;
+		}
+		list_push_tail(files_to_delete, f);
+		released_bytes += f->size;
+		if (released_bytes >= to_release) {
+			break;
+		}
+	}
+
+	LIST_ITERATE(files_to_delete, f) {
+		delete_worker_file(q, w, f->cached_name, 0, 0);
+	}
+
+	list_delete(files_to_delete);
+
+}
+
+/* release some space from the worker when the disk is nearly full */
+static void release_worker_disk_space(struct vine_manager *q, struct vine_worker_info *w)
+{
+	if (!w || !w->resources) {
+		return;
+	}
+
+	int64_t disk_upper_bound = (int64_t)(w->resources->disk.total * 0.9);
+	if (w->inuse_cache <= disk_upper_bound) {
+		return;
+	}
+
+	printf("release_worker_disk_space: %s, inuse: %ld, upper_bound: %ld\n", w->addrport, w->resources->disk.inuse, disk_upper_bound);
+	/* try to release space by deleting files with more than one replica */
+	release_worker_disk_space_have_replicas(q, w);
+
+
+	if (w->inuse_cache <= disk_upper_bound) {
+		return;
+	}
+
+	/* try to release space by deleting files that are not in use */
+	release_worker_disk_space_until_bound(q, w, disk_upper_bound);
+
+}
+
+static void release_workers_disk_space(struct vine_manager *q)
+{
+	struct vine_worker_info *w;
+	char *key;
+	HASH_TABLE_ITERATE(q->worker_table, key, w) {
+		if (w->is_pbb_worker) {
+			continue;
+		}
+		release_worker_disk_space(q, w);
+	}
+}
+
 static int kill_worker_by_interval(struct vine_manager *q)
 {
     if (q->kill_worker_interval_s <= 0) {
         return 0;
     }
+	if (q->total_tasks_complete == 0) {
+		return 0;
+	}
 
     int all_removed_workers = q->stats->workers_removed;
     timestamp_t time_manager_start = q->time_manager_start;
@@ -1328,50 +1456,80 @@ static int kill_worker_by_interval(struct vine_manager *q)
 
 void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info *w, vine_worker_disconnect_reason_t reason)
 {
-	if (!q || !w)
-		return;
+    if (!q || !w)
+        return;
 
-	debug(D_VINE, "worker %s (%s) removed", w->hostname, w->addrport);
-	q->total_workers_killed++;
+    debug(D_VINE, "worker %s (%s) removed", w->hostname, w->addrport);
+    q->total_workers_killed++;
 
-	if (w->type == VINE_WORKER_TYPE_WORKER) {
-		q->stats->workers_removed++;
-	}
+    if (w->type == VINE_WORKER_TYPE_WORKER) {
+        q->stats->workers_removed++;
+    }
 
-	vine_txn_log_write_worker(q, w, 1, reason);
+    vine_txn_log_write_worker(q, w, 1, reason);
 
-	hash_table_remove(q->worker_table, w->hashkey);
-	hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
-	hash_table_remove(q->workers_with_complete_tasks, w->hashkey);
+    // 先处理file_worker_table，确保不会有悬挂引用
+    struct list *empty_keys = list_create();
+    char *cached_name;
+    void *value;
+    struct set *workers_copy = NULL;
+    
+    // 首先收集所有需要处理的键，避免在迭代时修改
+    HASH_TABLE_ITERATE(q->file_worker_table, cached_name, value) {
+        struct set *workers = (struct set *)value;
+        if (workers && set_lookup(workers, w)) {
+            list_push_tail(empty_keys, strdup(cached_name));
+        }
+    }
+    
+    // 然后逐一处理每个键
+    list_first_item(empty_keys);
+    while ((cached_name = list_next_item(empty_keys))) {
+        workers_copy = hash_table_lookup(q->file_worker_table, cached_name);
+        if (workers_copy) {
+            set_remove(workers_copy, w);
+            if (set_size(workers_copy) == 0) {
+                // 如果集合现在为空，将其删除并从表中移除
+                set_delete(workers_copy);
+                hash_table_remove(q->file_worker_table, cached_name);
+            }
+        }
+    }
+    
+    // 清理临时列表
+    list_first_item(empty_keys);
+    while ((cached_name = list_next_item(empty_keys))) {
+        free(cached_name);
+    }
+    list_delete(empty_keys);
+    
+    // 然后从worker_table和其他表中移除
+    if (hash_table_lookup(q->worker_table, w->hashkey)) {
+        hash_table_remove(q->worker_table, w->hashkey);
+    }
+    
+    if (hash_table_lookup(q->workers_with_watched_file_updates, w->hashkey)) {
+        hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
+    }
+    
+    if (hash_table_lookup(q->workers_with_complete_tasks, w->hashkey)) {
+        hash_table_remove(q->workers_with_complete_tasks, w->hashkey);
+    }
 
-	if (q->transfer_temps_recovery) {
-		recall_worker_lost_temp_files(q, w);
-	}
-
-	// traverse the current transfers table and remove the worker from the source_worker field
-	struct list *transfer_ids_to_remove = list_create();
-	char *transfer_id;
-	struct vine_transfer_pair *t;
-	HASH_TABLE_ITERATE(q->current_transfer_table, transfer_id, t) {
-		if (t->source_worker == w) {
-			list_add(transfer_ids_to_remove, transfer_id);
-		}
-	}
-	// remove the transfers from the table
-	list_iterate(transfer_ids_to_remove, transfer_id) {
-		vine_current_transfers_remove(q, transfer_id);
-	}
-	
-	cleanup_worker(q, w);
-
-	vine_manager_factory_worker_leave(q, w);
-
-	vine_worker_delete(w);
-
-	/* update the largest worker seen */
-	find_max_worker(q);
-
-	debug(D_VINE, "%d workers connected in total now", count_workers(q, VINE_WORKER_TYPE_WORKER));
+    if (q->transfer_temps_recovery) {
+        recall_worker_lost_temp_files(q, w);
+    }
+    
+    cleanup_worker(q, w);
+    
+    vine_manager_factory_worker_leave(q, w);
+    
+    vine_worker_delete(w);
+    
+    /* update the largest worker seen */
+    find_max_worker(q);
+    
+    debug(D_VINE, "%d workers connected in total now", count_workers(q, VINE_WORKER_TYPE_WORKER));
 }
 
 /* Gently release a worker by sending it a release message, and then removing it. */
@@ -3506,7 +3664,9 @@ static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_inf
 	assert(t->worker == w);
 
 	/* Tell worker to remove the task sandbox (and if necessary, the running process) */
-	vine_manager_send(q, w, "kill %d\n", t->task_id);
+	if (w->link && link_fd(w->link) >= 0 && link_is_alive(w->link)) {
+		vine_manager_send(q, w, "kill %d\n", t->task_id);
+	}
 
 	w->total_task_time += t->time_workers_execute_last;
 
@@ -3780,10 +3940,12 @@ int consider_task(struct vine_manager *q, struct vine_task *t)
 	}
 
 	// Skip if this task failed recently
+	/*	
 	if (t->time_when_last_failure + q->transient_error_interval > now_usecs) {
 		printf("skipping task %d because it failed recently\n", t->task_id);
 		return 0;
 	}
+	*/
 
 	// Skip if category already running maximum allowed tasks
 	struct category *c = vine_category_lookup_or_create(q, t->category);
@@ -3821,7 +3983,7 @@ static int send_one_task(struct vine_manager *q)
 	}
 
 	int committable_slots = 0;
-	uint64_t library_task_id = -1;
+	uint64_t library_task_id = 0;
 	struct vine_task *library_task = NULL;
 	char *key;
 	struct vine_worker_info *w;
@@ -3833,6 +3995,9 @@ static int send_one_task(struct vine_manager *q)
 		if (w->current_libraries && itable_size(w->current_libraries) > 0) {
 			ITABLE_ITERATE(w->current_libraries, library_task_id, library_task)
 			{
+				if (!library_task || !library_task->provides_library) {
+					continue;
+				}
 				committable_slots += (library_task->function_slots_total - library_task->function_slots_inuse);
 			}
 		}
@@ -3847,10 +4012,14 @@ static int send_one_task(struct vine_manager *q)
 	int committed = 0;
 
 	struct list *ineligible_tasks = list_create();
+	int max_iter_count = 400;
 
 	while (committable_slots > 0 && (t = priority_queue_pop(q->ready_tasks))) {
 
-		iter_count++;
+		if (iter_count++ > max_iter_count) {
+			list_push_tail(ineligible_tasks, t);
+			break;
+		}
 
 		struct vine_worker_info *selected_worker = NULL;
 		if (!consider_task(q, t) || !(selected_worker = vine_schedule_task_to_worker(q, t))) {
@@ -3873,6 +4042,7 @@ static int send_one_task(struct vine_manager *q)
 		case VINE_APP_FAILURE:
 		case VINE_WORKER_FAILURE:
 			/* failed to dispatch, commit put the task back in the right place. */
+			list_push_tail(ineligible_tasks, t);
 			break;
 		case VINE_MGR_FAILURE:
 			/* special case, commit had a chained failure. */
@@ -3880,21 +4050,25 @@ static int send_one_task(struct vine_manager *q)
 			break;
 		case VINE_END_OF_LIST:
 			/* shouldn't happen, keep going */
+			list_push_tail(ineligible_tasks, t);
+			break;
+		default:
+			list_push_tail(ineligible_tasks, t);
 			break;
 		}
 	}
 
 	LIST_ITERATE(ineligible_tasks, t) {
 		if (t->priority > 0) {
-			t->priority *= 0.9;
+			t->priority *= 0.95;
 		} else {
-			t->priority *= 1.1;
+			t->priority *= 1.05;
 		}
 		priority_queue_push(q->ready_tasks, t, t->priority);
 	}
 	list_delete(ineligible_tasks);
 
-	printf("committed %d tasks after %d iterations, left %d tasks\n", committed, iter_count, priority_queue_size(q->ready_tasks));
+	printf("committed %d tasks after %d iterations, left %d tasks, still %d committable slots\n", committed, iter_count, priority_queue_size(q->ready_tasks), committable_slots);
 
 	return 1;
 
@@ -4009,8 +4183,10 @@ static int receive_tasks_from_worker(struct vine_manager *q, struct vine_worker_
 	}
 
 	/* Reset the available results table now that the worker is removed */
-	hash_table_remove(q->workers_with_complete_tasks, w->hashkey);
-	hash_table_firstkey(q->workers_with_complete_tasks);
+	char *hashkey5 = strdup(w->hashkey);	
+	hash_table_remove(q->workers_with_complete_tasks, hashkey5);
+	free(hashkey5);
+	// hash_table_firstkey(q->workers_with_complete_tasks);
 
 	/* Now consider all tasks assigned to that worker .*/
 	ITABLE_ITERATE(w->current_tasks, task_id, t)
@@ -4365,6 +4541,8 @@ struct vine_manager *vine_create(int port)
 
 struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert)
 {
+	signal(SIGPIPE, SIG_IGN);
+	
 	struct vine_manager *q = malloc(sizeof(*q));
 	if (!q) {
 		fprintf(stderr, "Error: failed to allocate memory for manager.\n");
@@ -4508,6 +4686,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->proportional_resources = 1;
 	q->time_manager_start = timestamp_get();
+	q->total_tasks_complete = 0;
 
 	/* This option assumes all tasks have similar resource needs.
 	 * Turn off by default. */
@@ -5323,7 +5502,9 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 			vine_cancel_by_task_id(q, library->task_id);
 			library = vine_schedule_find_library(q, w, name);
 		}
-		hash_table_remove(q->library_templates, name);
+		char *library_name = strdup(name);
+		hash_table_remove(q->library_templates, library_name);
+		free(library_name);
 
 		debug(D_VINE, "All instances and the template for library %s have been removed", name);
 	}
@@ -5589,7 +5770,7 @@ static int process_checkpoint_queue(struct vine_manager *q)
 			continue;
 		}
 		/* no available space on PBB */
-		if (!vine_checkpoint_release_pbb(q, f)) {
+		if (!vine_checkpoint_ensure_pbb_space(q, f)) {
 			list_push_tail(to_remove, f);
 			continue;
 		}
@@ -5600,7 +5781,9 @@ static int process_checkpoint_queue(struct vine_manager *q)
 	}
     
 	LIST_ITERATE(to_remove, f) {
-		hash_table_remove(q->checkpoint_queue, f->cached_name);
+		char *cached_name = strdup(f->cached_name);
+		hash_table_remove(q->checkpoint_queue, cached_name);
+		free(cached_name);
 	}
 
 	list_delete(to_remove);
@@ -5705,7 +5888,9 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			HASH_TABLE_ITERATE(q->worker_table, key, w)
 			{
 				get_available_results(q, w);
-				hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
+				char *hashkey6 = strdup(w->hashkey);	
+				hash_table_remove(q->workers_with_watched_file_updates, hashkey6);
+				free(hashkey6);
 			}
 		}
 
@@ -5731,7 +5916,6 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			struct vine_worker_info *w;
 
 			// consider one worker at a time
-
 			hash_table_firstkey(q->workers_with_complete_tasks);
 			if (hash_table_nextkey(q->workers_with_complete_tasks, &key, (void **)&w)) {
 				int retrieved_from_worker = receive_tasks_from_worker(q, w, retrieved_this_cycle);
@@ -5827,6 +6011,8 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		result += shutdown_drained_workers(q);
 		vine_blocklist_unblock_all_by_time(q, time(0));
 		END_ACCUM_TIME(q, time_internal);
+
+		// release_workers_disk_space(q);
 
 		// if new workers, connect n of them
 		BEGIN_ACCUM_TIME(q, time_status_msgs);
@@ -6877,7 +7063,9 @@ void vine_undeclare_file(struct vine_manager *m, struct vine_file *f)
 
 	/* Then, remove the object from our table and delete a reference. */
 	if (hash_table_lookup(m->file_table, f->cached_name)) {
-		hash_table_remove(m->file_table, f->cached_name);
+		char *cached_name = strdup(f->cached_name);
+		hash_table_remove(m->file_table, cached_name);
+		free(cached_name);
 		vine_file_delete(f);
 	}
 
