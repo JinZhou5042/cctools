@@ -320,7 +320,7 @@ class DaskVine(Manager):
             from rich.progress import Progress, TextColumn, BarColumn, MofNCompleteColumn, TimeRemainingColumn
             from rich.console import Console
             import sys
-            
+
             progress = Progress(
                 TextColumn(self.progress_label),
                 BarColumn(),

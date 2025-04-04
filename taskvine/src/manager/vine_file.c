@@ -66,7 +66,6 @@ int vine_file_delete(struct vine_file *f)
 			debug(D_VINE, "vine_file_delete: deleting %s on reference count took: %.03lfs", f->source, (end_time - start_time) / 1000000.00);
 		}
 
-		
 		if (f->consumer_tasks) {
 			list_delete(f->consumer_tasks);
 		}
@@ -468,18 +467,18 @@ int vine_file_add_parent_temp_file(struct vine_file *f, struct vine_file *parent
 
 void vine_file_free_consumer_tasks(struct vine_file *f)
 {
-    if (!f || !f->consumer_tasks) {
+	if (!f || !f->consumer_tasks) {
 		return;
 	}
 
-    int *task_id;
-    LIST_ITERATE(f->consumer_tasks, task_id) {
-        free(task_id);
-    }
-	
-    list_delete(f->consumer_tasks);
-    f->consumer_tasks = NULL;
-}
+	int *task_id;
+	LIST_ITERATE(f->consumer_tasks, task_id)
+	{
+		free(task_id);
+	}
 
+	list_delete(f->consumer_tasks);
+	f->consumer_tasks = NULL;
+}
 
 /* vim: set noexpandtab tabstop=8: */

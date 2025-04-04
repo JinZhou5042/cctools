@@ -268,7 +268,7 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 			}
 		}
 	}
-	
+
 	/* Check if worker is blocked from the manager. */
 	if (vine_blocklist_is_blocked(q, w->hostname)) {
 		printf("worker %s is blocked from the manager\n", w->hostname);
@@ -408,7 +408,7 @@ static struct vine_worker_info *find_worker_by_files(struct vine_manager *q, str
 	{
 		/* Careful: If check_worker_against task fails, then w may no longer be valid. */
 		if (check_worker_against_task(q, w, t)) {
-			
+
 			task_cached_bytes = 0;
 			has_all_files = 1;
 
