@@ -341,8 +341,8 @@ int vine_cache_add_mini_task(struct vine_cache *c, const char *cachename, const 
 
 	hash_table_insert(c->table, cachename, f);
 
-    char *queue_cachename = strdup(cachename);
-    list_push_tail(c->pending_transfers, queue_cachename);
+	char *queue_cachename = strdup(cachename);
+	list_push_tail(c->pending_transfers, queue_cachename);
 
 	/* Note metadata is not saved here but when mini task is completed. */
 
@@ -365,27 +365,27 @@ int vine_cache_remove(struct vine_cache *c, const char *cachename, struct link *
 	vine_cache_kill(c, f, cachename, manager);
 
 	/* Remove the cachename from the pending and processing lists. */
-    void *item;
-    struct list_cursor *cur = list_cursor_create(c->pending_transfers);
-    for (list_seek(cur, 0); list_get(cur, &item); list_next(cur)) {
-        if (strcmp((char *)item, cachename) == 0) {
-            list_drop(cur);
-            free(item);
-            break;
-        }
-    }
-    list_cursor_destroy(cur);
+	void *item;
+	struct list_cursor *cur = list_cursor_create(c->pending_transfers);
+	for (list_seek(cur, 0); list_get(cur, &item); list_next(cur)) {
+		if (strcmp((char *)item, cachename) == 0) {
+			list_drop(cur);
+			free(item);
+			break;
+		}
+	}
+	list_cursor_destroy(cur);
 
 	/* Remove from processing_transfers list if present */
-    cur = list_cursor_create(c->processing_transfers);
-    for (list_seek(cur, 0); list_get(cur, &item); list_next(cur)) {
-        if (strcmp((char *)item, cachename) == 0) {
-            list_drop(cur);
-            free(item);
-            break;
-        }
-    }
-    list_cursor_destroy(cur);
+	cur = list_cursor_create(c->processing_transfers);
+	for (list_seek(cur, 0); list_get(cur, &item); list_next(cur)) {
+		if (strcmp((char *)item, cachename) == 0) {
+			list_drop(cur);
+			free(item);
+			break;
+		}
+	}
+	list_cursor_destroy(cur);
 
 	/* Then remove the disk state associated with the file. */
 	char *data_path = vine_cache_data_path(c, cachename);
@@ -637,9 +637,9 @@ int vine_cache_process_pending(struct vine_cache *c)
 	int num_processing = list_size(c->processing_transfers);
 	int num_pending = list_size(c->pending_transfers);
 	printf("num_processing: %d, num_pending: %d\n", num_processing, num_pending);
-    
-    while (list_size(c->processing_transfers) < c->max_transfer_procs && list_size(c->pending_transfers) > 0) {
-        char *queue_cachename = list_pop_head(c->pending_transfers);
+
+	while (list_size(c->processing_transfers) < c->max_transfer_procs && list_size(c->pending_transfers) > 0) {
+		char *queue_cachename = list_pop_head(c->pending_transfers);
 		if (!queue_cachename) {
 			break;
 		}
@@ -653,9 +653,9 @@ int vine_cache_process_pending(struct vine_cache *c)
 			list_push_tail(c->pending_transfers, new_queue_name);
 		}
 		free(queue_cachename);
-    }
-    
-    return processed;
+	}
+
+	return processed;
 }
 
 /*
@@ -884,16 +884,16 @@ static void vine_cache_wait_for_file(struct vine_cache *c, struct vine_cache_fil
 		} else if (result < 0) {
 			debug(D_VINE, "cache: wait4 on pid %d returned an error: %s", (int)f->pid, strerror(errno));
 		} else if (result > 0) {
-            void *item;
-            struct list_cursor *cur = list_cursor_create(c->processing_transfers);
-            for (list_seek(cur, 0); list_get(cur, &item); list_next(cur)) {
-                if (strcmp(item, cachename) == 0) {
-                    list_drop(cur);
-                    free(item);
-                    break;
-                }
-            }
-            list_cursor_destroy(cur);
+			void *item;
+			struct list_cursor *cur = list_cursor_create(c->processing_transfers);
+			for (list_seek(cur, 0); list_get(cur, &item); list_next(cur)) {
+				if (strcmp(item, cachename) == 0) {
+					list_drop(cur);
+					free(item);
+					break;
+				}
+			}
+			list_cursor_destroy(cur);
 
 			vine_cache_handle_exit_status(c, f, cachename, status, manager);
 			vine_cache_check_outputs(c, f, cachename, manager);
