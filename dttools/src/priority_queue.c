@@ -268,7 +268,7 @@ int priority_queue_push(struct priority_queue *pq, void *data, double priority)
 	}
 
 	hash_table_insert(pq->data_to_idx, key, idx_ptr);
-	free(key); 
+	free(key);
 
 	int new_idx = swim(pq, pq->size - 1);
 
