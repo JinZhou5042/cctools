@@ -76,8 +76,6 @@ void hash_table_set_shrink_threshold(struct hash_table *h, float threshold)
 {
     if (!h) return;
 
-    // 确保缩容阈值合理且与扩容阈值保持安全距离
-    // 缩容阈值不应超过扩容阈值的50%，以避免频繁抖动
     float max_safe_threshold = DEFAULT_LOAD * 0.5;
     
     if (threshold < 0.1) threshold = 0.1;
@@ -86,14 +84,12 @@ void hash_table_set_shrink_threshold(struct hash_table *h, float threshold)
     h->shrink_threshold = threshold;
 }
 
-// 添加批量移除功能，减少频繁缩容
 int hash_table_remove_batch(struct hash_table *h, const char **keys, int count)
 {
     if (!h || !keys || count <= 0) return 0;
     
     int removed = 0;
     
-    // 第一步：移除所有键值对，不触发缩容
     for (int i = 0; i < count; i++) {
         struct entry *e, *f;
         unsigned hash, index;
@@ -122,12 +118,10 @@ int hash_table_remove_batch(struct hash_table *h, const char **keys, int count)
         }
     }
     
-    // 第二步：检查是否需要缩容
     if (removed > 0 && 
         h->bucket_count > DEFAULT_SIZE && 
         ((float)h->size / h->bucket_count) < h->shrink_threshold) {
         
-        // 使用与单个移除相同的防抖动机制
         if ((float)h->size / h->bucket_count < h->shrink_threshold * 0.8) {
             float expected_load = (float)h->size / (h->bucket_count / 2);
             
@@ -142,37 +136,29 @@ int hash_table_remove_batch(struct hash_table *h, const char **keys, int count)
 
 static int hash_table_halve_buckets(struct hash_table *h)
 {
-    // 不要缩小到低于初始默认大小
     if (h->bucket_count <= DEFAULT_SIZE) {
         return 1;
     }
     
-    // 计算新的桶数量（减半）
     int new_bucket_count = h->bucket_count / 2;
     if (new_bucket_count < DEFAULT_SIZE) new_bucket_count = DEFAULT_SIZE;
     
-    // 创建一个新的哈希表，桶数是原来的一半
     struct hash_table *hn = hash_table_create(new_bucket_count, h->hash_func);
     if (!hn) {
         return 0;
     }
     
-    // 从原哈希表中导出所有的键值对
     char *key;
     void *value;
     
-    // 使用firstkey/nextkey接口遍历原哈希表
     hash_table_firstkey(h);
     while (hash_table_nextkey(h, &key, &value)) {
-        // 插入到新哈希表中
         if (!hash_table_insert(hn, key, value)) {
-            // 插入失败，释放新哈希表并退出
             hash_table_delete(hn);
             return 0;
         }
     }
     
-    // 释放原哈希表中所有条目的内存，但不释放值
     for (int i = 0; i < h->bucket_count; i++) {
         struct entry *e = h->buckets[i];
         while (e) {
@@ -183,21 +169,16 @@ static int hash_table_halve_buckets(struct hash_table *h)
         }
     }
     
-    // 释放原桶数组
     free(h->buckets);
     
-    // 用新哈希表的数据更新原哈希表
     h->buckets = hn->buckets;
     h->bucket_count = hn->bucket_count;
     h->size = hn->size;
     
-    // 防止在删除新哈希表时释放桶数组
     hn->buckets = NULL;
     
-    // 释放新哈希表结构体
     free(hn);
     
-    // 重置迭代器状态
     h->ientry = NULL;
     h->ibucket = 0;
     
@@ -260,27 +241,21 @@ int hash_table_size(struct hash_table *h)
 
 static int hash_table_double_buckets(struct hash_table *h)
 {
-    // 创建一个新的哈希表，桶数是原来的两倍
     struct hash_table *hn = hash_table_create(2 * h->bucket_count, h->hash_func);
     if (!hn)
         return 0;
     
-    // 从原哈希表中导出所有的键值对
     char *key;
     void *value;
     
-    // 使用firstkey/nextkey接口遍历原哈希表
     hash_table_firstkey(h);
     while (hash_table_nextkey(h, &key, &value)) {
-        // 插入到新哈希表中
         if (!hash_table_insert(hn, key, value)) {
-            // 插入失败，释放新哈希表并退出
             hash_table_delete(hn);
             return 0;
         }
     }
     
-    // 释放原哈希表中所有条目的内存，但不释放值
     for (int i = 0; i < h->bucket_count; i++) {
         struct entry *e = h->buckets[i];
         while (e) {
@@ -291,21 +266,16 @@ static int hash_table_double_buckets(struct hash_table *h)
         }
     }
     
-    // 释放原桶数组
     free(h->buckets);
     
-    // 用新哈希表的数据更新原哈希表
     h->buckets = hn->buckets;
     h->bucket_count = hn->bucket_count;
     h->size = hn->size;
-    
-    // 防止在删除新哈希表时释放桶数组
+	
     hn->buckets = NULL;
     
-    // 释放新哈希表结构体
     free(hn);
     
-    // 重置迭代器状态
     h->ientry = NULL;
     h->ibucket = 0;
     
@@ -374,21 +344,16 @@ void *hash_table_remove(struct hash_table *h, const char *key)
             free(e);
             h->size--;
             
-            // 检查是否需要缩容
             if (h->bucket_count > DEFAULT_SIZE && 
                 ((float)h->size / h->bucket_count) < h->shrink_threshold) {
                 
-                // 添加防抖动机制
-                // 只有当负载因子远低于阈值时才尝试缩容
                 if ((float)h->size / h->bucket_count < h->shrink_threshold * 0.8) {
-                    // 缩容后的预期负载因子
                     float expected_load = (float)h->size / (h->bucket_count / 2);
                     
-                    // 如果缩容后负载因子会接近扩容阈值，则不缩容以避免抖动
                     if (expected_load < DEFAULT_LOAD * 0.9) {
                         int result = hash_table_halve_buckets(h);
                         if (!result) {
-                            // 缩容失败处理
+							// TODO: handle error
                         }
                     }
                 }
