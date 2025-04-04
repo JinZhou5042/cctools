@@ -4074,7 +4074,7 @@ static int send_one_task(struct vine_manager *q)
 	}
 	list_delete(ineligible_tasks);
 
-	printf("committed %d tasks after %d iterations, left %d tasks, still %d committable slots\n", committed, iter_count, priority_queue_size(q->ready_tasks), committable_slots);
+	// printf("committed %d tasks after %d iterations, left %d tasks, still %d committable slots\n", committed, iter_count, priority_queue_size(q->ready_tasks), committable_slots);
 
 	return 1;
 
