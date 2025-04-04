@@ -50,10 +50,9 @@ char *ptr_to_key(void *ptr)
 	char *key_var = ptr_to_key(ptr); \
 	if (!key_var) { \
 		fprintf(stderr, "Fatal error: Memory allocation failed for key.\n"); \
-		return -1; /* 根据函数返回类型调整 */ \
+		return -1; \
 	}
 
-// 在函数退出前释放键内存的宏
 #define FREE_KEY(key_var) \
 	free(key_var)
 
@@ -254,7 +253,6 @@ int priority_queue_push(struct priority_queue *pq, void *data, double priority)
 	int idx = pq->size - 1;
 	int *idx_ptr = malloc(sizeof(int));
 	if (!idx_ptr) {
-		// 回滚操作
 		pq->size--;
 		free(e);
 		return -1;
@@ -263,7 +261,6 @@ int priority_queue_push(struct priority_queue *pq, void *data, double priority)
 
 	char *key = ptr_to_key(data);
 	if (!key) {
-		// 回滚操作
 		pq->size--;
 		free(e);
 		free(idx_ptr);
@@ -271,7 +268,7 @@ int priority_queue_push(struct priority_queue *pq, void *data, double priority)
 	}
 
 	hash_table_insert(pq->data_to_idx, key, idx_ptr);
-	free(key); // 哈希表已复制键
+	free(key); 
 
 	int new_idx = swim(pq, pq->size - 1);
 
