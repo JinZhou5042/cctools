@@ -125,15 +125,12 @@ struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager
     int offset_bookkeep;
     SET_ITERATE_RANDOM_START(workers, offset_bookkeep, peer)
     {
-        // 跳过NULL指针
         if(!peer) continue;
         
-        // 验证worker是否仍在worker_table中（额外保险）
         if(!peer->hashkey || !hash_table_lookup(q->worker_table, peer->hashkey)) {
             continue;
         }
         
-        // 检查传输端口
         if(!peer->transfer_port_active)
             continue;
         
@@ -144,16 +141,13 @@ struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager
             continue;
         }
         
-        // 安全检查current_files
         if(!peer->current_files) continue;
         
-        // 尝试查找replica
         replica = hash_table_lookup(peer->current_files, cachename);
         if(!replica || replica->state != VINE_FILE_REPLICA_STATE_READY) {
             continue;
         }
         
-        // 检查当前传输数量
         int current_transfers = vine_current_transfers_source_in_use(q, peer);
         if(current_transfers < q->worker_source_max_transfers) {
             peer_selected = peer;

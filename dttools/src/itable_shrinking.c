@@ -29,31 +29,25 @@ struct itable {
 
 static int itable_halve_buckets(struct itable *h)
 {
-    // 防止空指针引用和无效参数
     if (!h || h->bucket_count <= DEFAULT_SIZE) {
         return 1;
     }
     
-    // 计算新的桶数量（减半）
     int new_bucket_count = h->bucket_count / 2;
     if (new_bucket_count < DEFAULT_SIZE) new_bucket_count = DEFAULT_SIZE;
     
-    // 记录当前迭代状态
     int was_iterating = (h->ientry != NULL);
     UINT64_T current_key = 0;
     
     if (was_iterating && h->ientry) {
-        // 保存当前key
         current_key = h->ientry->key;
     }
     
-    // 创建一个新的哈希表
     struct itable *hn = itable_create(new_bucket_count);
     if (!hn) {
         return 0;
     }
     
-    // 移动所有键值对到新哈希表
     UINT64_T key;
     void *value;
     int insert_failed = 0;
@@ -65,43 +59,34 @@ static int itable_halve_buckets(struct itable *h)
         }
     }
     
-    // 如果任何插入失败，中止缩容操作
     if (insert_failed) {
         itable_delete(hn);
         return 0;
     }
     
-    // 确保size一致性
     if (h->size != hn->size) {
         itable_delete(hn);
         return 0;
     }
     
-    // 保存新哈希表的桶和大小信息
     struct entry **old_buckets = h->buckets;
     int old_bucket_count = h->bucket_count;
     
-    // 更新原哈希表
     h->buckets = hn->buckets;
     h->bucket_count = hn->bucket_count;
-    h->size = hn->size;  // 显式设置大小，确保一致性
+    h->size = hn->size;
     
-    // 防止双重释放
     hn->buckets = NULL;
     
-    // 恢复迭代状态
     if (was_iterating && current_key) {
-        // 尝试直接使用哈希函数快速定位
         UINT64_T index = current_key % h->bucket_count;
         h->ibucket = index;
         h->ientry = h->buckets[index];
         
-        // 在桶中查找确切的条目
         while (h->ientry && h->ientry->key != current_key) {
             h->ientry = h->ientry->next;
         }
         
-        // 如果直接查找失败，回退到完整遍历
         if (!h->ientry) {
             itable_firstkey(h);
             UINT64_T next_key;
@@ -109,21 +94,17 @@ static int itable_halve_buckets(struct itable *h)
             
             while (itable_nextkey(h, &next_key, &next_value)) {
                 if (next_key == current_key) {
-                    // 找到当前位置
                     break;
                 }
             }
         }
     } else {
-        // 重置迭代状态
         h->ientry = NULL;
         h->ibucket = 0;
     }
     
-    // 释放临时资源
     free(hn);
     
-    // 释放旧桶中的所有条目
     struct entry *e, *f;
     int i;
     for (i = 0; i < old_bucket_count; i++) {
@@ -310,15 +291,11 @@ void *itable_remove(struct itable *h, UINT64_T key)
             free(e);
             h->size--;
             
-            // 检查是否需要缩容
             if (h->bucket_count > DEFAULT_SIZE && 
-                ((float)h->size / h->bucket_count) < 0.25) { // 使用0.25作为缩容阈值
-                
-                // 添加防抖动机制，避免频繁的扩缩容操作
+                ((float)h->size / h->bucket_count) < 0.25) {
                 if ((float)h->size / h->bucket_count < 0.2) {
                     float expected_load = (float)h->size / (h->bucket_count / 2);
                     
-                    // 如果缩容后负载因子会接近扩容阈值，则不缩容
                     if (expected_load < DEFAULT_LOAD * 0.9) {
                         int result = itable_halve_buckets(h);
                         if (!result) {
