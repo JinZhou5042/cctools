@@ -95,7 +95,6 @@ static void swap_elements(struct priority_queue *pq, int i, int j)
 	if (old_j_val)
 		free(old_j_val);
 
-	// 检查插入是否成功
 	if (!hash_table_insert(pq->data_to_idx, key_i, j_idx)) {
 		free(i_idx);
 		free(j_idx);
@@ -106,7 +105,6 @@ static void swap_elements(struct priority_queue *pq, int i, int j)
 	}
 
 	if (!hash_table_insert(pq->data_to_idx, key_j, i_idx)) {
-		// 回滚第一次插入
 		hash_table_remove(pq->data_to_idx, key_i);
 		free(i_idx);
 		free(j_idx);
