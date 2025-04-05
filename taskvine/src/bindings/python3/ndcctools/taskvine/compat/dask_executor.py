@@ -328,7 +328,7 @@ class DaskVine(Manager):
                             raise Exception(f"tasks for key {t.key} failed permanently")
                     t = None  # drop task reference
                 else:
-                    timeout = 10
+                    timeout = 5
                     timeout_hit = True
             return self._load_results(dag, indices, keys)
 
