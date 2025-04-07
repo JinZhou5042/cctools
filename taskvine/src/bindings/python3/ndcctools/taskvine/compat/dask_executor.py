@@ -273,10 +273,10 @@ class DaskVine(Manager):
             while not self.empty() or enqueued_calls:
                 submitted = 0
                 if pending < 3000 or timeout_hit:
-                    if timeout_hit:
+                    if pending < 3000:
                         should_submit = 1000
                     else:
-                        should_submit = 3000
+                        should_submit = 300
                     while (
                         enqueued_calls
                         and (not self.submit_per_cycle or submitted < self.submit_per_cycle)

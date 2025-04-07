@@ -10,6 +10,7 @@ See the file COPYING for details.
 #define VINE_FILE_SOURCE_MAX_TRANSFERS 1
 #define VINE_WORKER_SOURCE_MAX_TRANSFERS 10
 
+
 char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *to, struct vine_worker_info *source_worker, const char *source_url);
 
 int vine_current_transfers_remove(struct vine_manager *q, const char *id);
@@ -31,3 +32,7 @@ void vine_current_transfers_print_table(struct vine_manager *q);
 void vine_current_transfers_clear( struct vine_manager *q );
 
 int vine_current_transfers_get_table_size(struct vine_manager *q);
+
+struct vine_worker_info *vine_current_transfers_get_to_worker(struct vine_manager *q, const char *id);
+
+struct vine_worker_info *vine_current_transfers_get_source_worker(struct vine_manager *q, const char *id);

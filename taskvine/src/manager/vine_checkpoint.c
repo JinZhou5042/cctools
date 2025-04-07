@@ -8,28 +8,68 @@
 #include "debug.h"
 #include "vine_checkpoint_queue.h"
 #include "vine_file_replica_table.h"
+#include <float.h>
+#include <assert.h>
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
+static struct list *get_reachable_files_by_topo_order(struct vine_manager *q, struct vine_file *start_file);
+
+
 int vine_checkpoint_persist(struct vine_manager *q, struct vine_worker_info *source, struct vine_file *f)
 {
-	if (!q || !f || !source) {
-		return 0;
+    if (!q || !f || !source || !q->pbb_worker || f->type != VINE_TEMP) {
+        return 0;
+    }
+
+	if (source->is_pbb_worker) {
+		priority_queue_push_or_update(q->checkpointed_files, f, -f->penalty / f->size);
+		assert(vine_file_replica_table_lookup(q->pbb_worker, f->cached_name));
 	}
 
-	// printf("Persisting file %s, size: %ld\n", f->cached_name, f->size);
+    if (!vine_file_replica_table_lookup(q->pbb_worker, f->cached_name)) {
+        char *source_addr = string_format("%s/%s", source->transfer_url, f->cached_name);
+        vine_manager_put_url_now(q, q->pbb_worker, source_addr, f);
+        free(source_addr);
+		priority_queue_push_or_update(q->checkpointed_files, f, -f->penalty / f->size);
+    }
 
-	char *source_addr = string_format("%s/%s", source->transfer_url, f->cached_name);
-	vine_manager_put_url_now(q, q->pbb_worker, source_addr, f);
-	free(source_addr);
+    f->recovery_critical_time = 0;
+    f->recovery_total_time = 0;
 
-	priority_queue_push(q->checkpointed_files, f, -f->penalty / f->size);
+    return 1;
+}
 
-	f->recovery_critical_time = 0;
-	f->recovery_total_time = 0;
-	// f->penalty = 0;
+int vine_checkpoint_evict(struct vine_manager *q, struct vine_file *f)
+{
+    if (!q->temp_file_checkpoint || !q || !f || f->type != VINE_TEMP) {
+        return 0;
+    }
 
-	return 1;
+    struct vine_file_replica *replica = vine_file_replica_table_lookup(q->pbb_worker, f->cached_name);
+    if (!replica || replica->state != VINE_FILE_REPLICA_STATE_READY) {
+        return 0;
+    }
+
+    /* update this file's recovery metrics after eviction */
+	vine_checkpoint_update_file_penalty(q, f);
+
+    /* update all downstream files' recovery metrics */
+    struct list *files_in_topo_order = get_reachable_files_by_topo_order(q, f);
+    struct vine_file *current_file;
+    LIST_ITERATE(files_in_topo_order, current_file)
+    {
+        if (current_file && !vine_checkpoint_checkpointed(q, current_file)) {
+            /* calculate new recovery metrics from input files */
+            vine_checkpoint_update_file_penalty(q, current_file);
+        }
+    }
+    list_delete(files_in_topo_order);
+
+	priority_queue_remove_by_key(q->checkpointed_files, f->cached_name);
+    delete_worker_file(q, q->pbb_worker, f->cached_name, 0, 0);
+
+    return 1;
 }
 
 struct vine_worker_info *vine_checkpoint_choose_source(struct vine_manager *q, struct vine_file *f)
@@ -47,64 +87,85 @@ struct vine_worker_info *vine_checkpoint_choose_source(struct vine_manager *q, s
 
 int vine_checkpoint_ensure_pbb_space(struct vine_manager *q, struct vine_file *f)
 {
-	if (!q || !f) {
-		return 0;
+    if (!q || !f || f->type != VINE_TEMP) {
+        return 0;
+    }
+
+    int64_t total_bytes = (int64_t)(q->pbb_worker->resources->disk.total * 1024 * 1024 * 0.95);
+    int64_t available_bytes = total_bytes - q->pbb_worker->inuse_cache;
+    int64_t this_file_size = (int64_t)(f->size);
+
+    if (this_file_size <= available_bytes) {
+        return 1;
+    }
+
+    double this_efficiency = f->penalty / f->size;
+
+    double candidates_penalty = 0;
+    int64_t candidates_size = 0;
+
+    struct list *candidates = list_create();
+    struct list *skipped_files = list_create();
+    struct vine_file *popped_file;
+    struct vine_file_replica *replica;
+    
+    while ((popped_file = priority_queue_pop(q->checkpointed_files))) {
+        replica = vine_file_replica_table_lookup(q->pbb_worker, popped_file->cached_name);
+        if (!replica) {
+            continue;
+        }
+        
+        if (replica->state != VINE_FILE_REPLICA_STATE_READY) {
+            list_push_tail(skipped_files, popped_file);
+            continue;
+        }
+
+        list_push_tail(candidates, popped_file);
+        candidates_penalty += popped_file->penalty;
+        candidates_size += popped_file->size;
+
+        /* do we have enough space after evicting this file? */
+        if (available_bytes + candidates_size >= (int64_t)f->size) {
+            break;
+        }
+    }
+
+    double candidates_efficiency = 0.0;
+    if (candidates_size > 0) {
+        candidates_efficiency = candidates_penalty / (double)candidates_size;
+    } else {
+        candidates_efficiency = DBL_MAX;
+    }
+
+    // if the size and efficiency of the candidates are not good enough, we don't want to evict for this file
+	int ok = 0;
+    if (available_bytes + candidates_size < (int64_t)f->size || candidates_efficiency > this_efficiency) {
+		LIST_ITERATE(candidates, popped_file) {
+			vine_checkpoint_persist(q, q->pbb_worker, popped_file);
+		}
+        ok = 0;
+    } else {
+		// otherwise, we can evict the selected files for this file
+		LIST_ITERATE(candidates, popped_file) {
+			vine_checkpoint_evict(q, popped_file);
+		}
+		debug(D_VINE | D_NOTICE, "evicted %d files, candidates penalty: %f, candidates size: %ld, candidates efficiency: %f, this efficiency: %f", 
+          list_size(candidates), candidates_penalty, candidates_size, candidates_efficiency, this_efficiency);
+		ok = 1;
 	}
 
-	int64_t total_bytes = (int64_t)(q->pbb_worker->resources->disk.total * 1024 * 1024 * 0.95);
-	int64_t actual_inuse_bytes = q->pbb_actual_inuse_cache;
-	int64_t pending_transfer_bytes = q->pbb_worker->inuse_cache - q->pbb_actual_inuse_cache;
-
-	int64_t available_bytes = total_bytes - actual_inuse_bytes - pending_transfer_bytes;
-	int64_t this_file_size = (int64_t)(f->size);
-
-	if (this_file_size <= available_bytes) {
-		return 1;
+	LIST_ITERATE(skipped_files, popped_file) {
+		vine_checkpoint_persist(q, q->pbb_worker, popped_file);
 	}
 
-	// printf("total bytes: %ld, inuse cache: %ld, available bytes: %ld, this file size: %ld\n", total_bytes, actual_inuse_bytes, available_bytes, this_file_size);
-
-	double this_efficiency = f->penalty / f->size;
-
-	double candidates_penalty = 0;
-	int64_t candidates_size = 0;
-	double candidates_efficiency = 0;
-
-	struct list *candidates = list_create();
-	struct vine_file *candidate;
-	while ((candidate = priority_queue_pop(q->checkpointed_files))) {
-		list_push_tail(candidates, candidate);
-		available_bytes += candidate->size;
-		candidates_penalty += candidate->penalty;
-		candidates_size += candidate->size;
-		candidates_efficiency = candidates_penalty / candidates_size;
-		if (candidates_efficiency > this_efficiency) {
-			break;
-		}
-		if (candidates_size + available_bytes >= (int64_t)f->size) {
-			break;
-		}
+	if (skipped_files) {
+		list_delete(skipped_files);
 	}
-
-	// if the size and efficiency of the candidates are not good enough, we don't want to evict for this file
-	if (available_bytes < (int64_t)f->size || candidates_efficiency > this_efficiency) {
-		LIST_ITERATE(candidates, candidate)
-		{
-			priority_queue_push(q->checkpointed_files, candidate, -candidate->penalty / candidate->size);
-		}
+	if (candidates) {
 		list_delete(candidates);
-		return 0;
 	}
 
-	// otherwise, we can evict the selected files for this file
-	LIST_ITERATE(candidates, candidate)
-	{
-		debug(D_VINE | D_NOTICE, "Evicting file %s, size: %ld, penalty: %f\n", candidate->cached_name, candidate->size, candidate->penalty);
-		vine_checkpoint_evict(q, candidate);
-	}
-	list_delete(candidates);
-
-	return 1;
+	return ok;
 }
 
 /* Get all reachable files in topological order from the given starting file */
@@ -201,47 +262,7 @@ static struct list *get_reachable_files_by_topo_order(struct vine_manager *q, st
 	return result;
 }
 
-int vine_checkpoint_evict(struct vine_manager *q, struct vine_file *f)
-{
-	if (!q || !f || f->type != VINE_TEMP) {
-		return 0;
-	}
-	if (!q->temp_file_checkpoint) {
-		return 0;
-	}
 
-	/* skip if not checkpointed */
-	if (!vine_checkpoint_checkpointed(q, f)) {
-		return 0;
-	}
-
-	/* remove from checkpoint storage */
-	delete_worker_file(q, q->pbb_worker, f->cached_name, 0, 0);
-
-	/* update this file's recovery metrics after eviction */
-	vine_checkpoint_update_file_penalty(q, f);
-
-	/* update all downstream files' recovery metrics */
-	struct list *files_in_topo_order = get_reachable_files_by_topo_order(q, f);
-	struct vine_file *current_file;
-
-	LIST_ITERATE(files_in_topo_order, current_file)
-	{
-		if (!vine_checkpoint_checkpointed(q, current_file)) {
-			/* calculate new recovery metrics from input files */
-			vine_checkpoint_update_file_penalty(q, current_file);
-
-			/* add to checkpoint queue for potential checkpointing */
-			if (!hash_table_lookup(q->checkpoint_queue, current_file->cached_name)) {
-				hash_table_insert(q->checkpoint_queue, current_file->cached_name, current_file);
-			}
-		}
-	}
-
-	list_delete(files_in_topo_order);
-
-	return 1;
-}
 
 void vine_checkpoint_update_file_penalty(struct vine_manager *q, struct vine_file *f)
 {
@@ -257,6 +278,9 @@ void vine_checkpoint_update_file_penalty(struct vine_manager *q, struct vine_fil
 	char *parent_file_name;
 	HASH_TABLE_ITERATE(f->parent_temp_files, parent_file_name, parent_file)
 	{
+		if (!parent_file) {
+			continue;
+		}
 		f->recovery_critical_time = MAX(f->recovery_critical_time, parent_file->recovery_critical_time);
 		f->recovery_total_time += parent_file->recovery_total_time;
 	}
@@ -264,10 +288,14 @@ void vine_checkpoint_update_file_penalty(struct vine_manager *q, struct vine_fil
 	f->recovery_critical_time += f->producer_task_execution_time;
 	f->recovery_total_time += f->producer_task_execution_time;
 
-	f->penalty = (double)(0.1 * f->recovery_total_time) + (double)(0.9 * f->recovery_critical_time);
+	f->penalty = (double)(0.3 * f->recovery_total_time) + (double)(0.7 * f->recovery_critical_time);
 }
 
 int vine_checkpoint_checkpointed(struct vine_manager *q, struct vine_file *f)
 {
+	if (!q || !f || !q->pbb_worker || f->type != VINE_TEMP) {
+		return 0;
+	}
+
 	return vine_file_replica_table_lookup(q->pbb_worker, f->cached_name) != NULL;
 }

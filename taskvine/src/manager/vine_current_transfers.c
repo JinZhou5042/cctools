@@ -8,8 +8,9 @@ See the file COPYING for details.
 #include "macros.h"
 #include "vine_blocklist.h"
 #include "vine_manager.h"
+#include "priority_queue.h"
 #include "xxmalloc.h"
-
+#include "vine_file_replica_table.h"
 #include "debug.h"
 
 struct vine_transfer_pair {
@@ -17,6 +18,7 @@ struct vine_transfer_pair {
 	struct vine_worker_info *source_worker;
 	char *source_url;
 };
+
 
 static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *to, struct vine_worker_info *source_worker, const char *source_url)
 {
@@ -61,6 +63,18 @@ int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 	} else {
 		return 0;
 	}
+}
+
+struct vine_worker_info *vine_current_transfers_get_source_worker(struct vine_manager *q, const char *id)
+{
+	struct vine_transfer_pair *p = hash_table_lookup(q->current_transfer_table, id);
+	return p ? p->source_worker : NULL;
+}
+
+struct vine_worker_info *vine_current_transfers_get_to_worker(struct vine_manager *q, const char *id)
+{
+	struct vine_transfer_pair *p = hash_table_lookup(q->current_transfer_table, id);
+	return p ? p->to : NULL;
 }
 
 void set_throttle(struct vine_manager *m, struct vine_worker_info *w, int is_destination)
@@ -166,6 +180,7 @@ void vine_current_transfers_set_success(struct vine_manager *q, char *id)
 // count the number transfers coming from a specific source
 int vine_current_transfers_source_in_use(struct vine_manager *q, struct vine_worker_info *source_worker)
 {
+	return 0;
 	char *id;
 	struct vine_transfer_pair *t;
 	int c = 0;
@@ -194,6 +209,7 @@ int vine_current_transfers_url_in_use(struct vine_manager *q, const char *source
 // count the number of ongoing transfers to a specific worker
 int vine_current_transfers_dest_in_use(struct vine_manager *q, struct vine_worker_info *w)
 {
+	return 0;
 	char *id;
 	struct vine_transfer_pair *t;
 	int c = 0;
@@ -209,6 +225,10 @@ int vine_current_transfers_dest_in_use(struct vine_manager *q, struct vine_worke
 // intentionally
 int vine_current_transfers_wipe_worker(struct vine_manager *q, struct vine_worker_info *w)
 {
+	if (!w || !w->current_files) {
+		return 0;
+	}
+
 	debug(D_VINE, "Removing instances of worker %s (%s) from transfer table", w->hostname, w->addrport);
 
 	int removed = 0;

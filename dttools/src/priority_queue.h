@@ -152,7 +152,7 @@ int priority_queue_update_priority(struct priority_queue *pq, void *data, double
 @param data The pointer to the element to find.
 @return The index of the element if found, -1 on failure.
 */
-int priority_queue_find_idx(struct priority_queue *pq, void *data);
+int priority_queue_find_idx(struct priority_queue *pq, const void *data);
 
 /** Advance the static_cursor to the next element and return the index.
 The static_cursor is used to globally iterate over the elements by sequential index.
@@ -196,10 +196,27 @@ int priority_queue_rotate_next(struct priority_queue *pq);
 */
 int priority_queue_remove(struct priority_queue *pq, int idx);
 
+char *priority_queue_get_key(struct priority_queue *pq, const void *data);
+
+
+typedef char *(*pq_key_generator_t)(const void *data);
+typedef int (*pq_key_comparator_t)(const char *key1, const char *key2);
+struct priority_queue *priority_queue_create_with_custom_key(
+    int init_capacity, 
+    pq_key_generator_t key_generator, 
+    pq_key_comparator_t key_comparator);
+int priority_queue_push_or_update(struct priority_queue *pq, void *data, double priority);
+
 /** Delete a priority queue.
 @param pq A pointer to a priority queue.
 */
 void priority_queue_delete(struct priority_queue *pq);
+int priority_queue_find_idx_by_key(struct priority_queue *pq, const char *key);
+int priority_queue_remove_by_key(struct priority_queue *pq, const char *key);
+
+
+char *file_key_generator(const void *ptr);
+char *task_key_generator(const void *ptr);
 
 /** Utility macro to simplify common case of iterating over a priority queue.
 Use as follows:

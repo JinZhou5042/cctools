@@ -21,4 +21,6 @@ int vine_checkpoint_ensure_pbb_space(struct vine_manager *q, struct vine_file *f
 
 void vine_checkpoint_update_file_penalty(struct vine_manager *q, struct vine_file *f);
 
+void vine_checkpoint_check_consistency(struct vine_manager *q);
+
 #endif /* VINE_CHECKPOINT_H */

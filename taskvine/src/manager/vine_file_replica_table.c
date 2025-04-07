@@ -15,7 +15,8 @@ See the file COPYING for details.
 #include "vine_manager.h"
 #include "vine_manager_put.h"
 #include "vine_worker_info.h"
-
+#include "priority_queue.h"
+#include "vine_checkpoint.h"
 #include "stringtools.h"
 
 #include "debug.h"
@@ -116,12 +117,21 @@ struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager
 		return NULL;
 	}
 
+	struct vine_worker_info *peer_selected = NULL;
+	struct vine_file_replica *replica = NULL;
+
+	if (q->pbb_worker) {
+		replica = vine_file_replica_table_lookup(q->pbb_worker, cachename);
+		if (replica && replica->state == VINE_FILE_REPLICA_STATE_READY) {
+			peer_selected = q->pbb_worker;
+			return peer_selected;
+		}
+	}
+
 	int total_count = set_size(workers);
 	int random_index = random() % total_count;
 
 	struct vine_worker_info *peer = NULL;
-	struct vine_worker_info *peer_selected = NULL;
-	struct vine_file_replica *replica = NULL;
 
 	int offset_bookkeep;
 	SET_ITERATE_RANDOM_START(workers, offset_bookkeep, peer)
@@ -138,7 +148,7 @@ struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager
 
 		timestamp_t current_time = timestamp_get();
 		if (current_time - peer->last_transfer_failure < q->transient_error_interval) {
-			debug(D_VINE, "Skipping worker source after recent failure : %s", peer->transfer_host ?: "unknown");
+			// debug(D_VINE, "Skipping worker source after recent failure : %s", peer->transfer_host ?: "unknown");
 			continue;
 		}
 
@@ -218,7 +228,7 @@ int vine_file_replica_table_replicate(struct vine_manager *m, struct vine_file *
 				continue;
 			}
 
-			debug(D_VINE, "replicating %s from %s to %s", f->cached_name, source->addrport, dest->addrport);
+			// debug(D_VINE, "replicating %s from %s to %s", f->cached_name, source->addrport, dest->addrport);
 
 			vine_manager_put_url_now(m, dest, source_addr, f);
 

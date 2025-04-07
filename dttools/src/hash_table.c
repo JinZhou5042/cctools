@@ -160,7 +160,13 @@ static int hash_table_halve_buckets(struct hash_table *h)
 
 	hash_table_firstkey(h);
 	while (hash_table_nextkey(h, &key, &value)) {
-		if (!hash_table_insert(hn, key, value)) {
+		char *key_copy = strdup(key);
+		if (!key_copy) {
+			hash_table_delete(hn);
+			return 0;
+		}
+		if (!hash_table_insert(hn, key_copy, value)) {
+			free(key_copy);
 			hash_table_delete(hn);
 			return 0;
 		}
@@ -256,7 +262,13 @@ static int hash_table_double_buckets(struct hash_table *h)
 
 	hash_table_firstkey(h);
 	while (hash_table_nextkey(h, &key, &value)) {
-		if (!hash_table_insert(hn, key, value)) {
+		char *key_copy = strdup(key);
+		if (!key_copy) {
+			hash_table_delete(hn);
+			return 0;
+		}
+		if (!hash_table_insert(hn, key_copy, value)) {
+			free(key_copy);
 			hash_table_delete(hn);
 			return 0;
 		}

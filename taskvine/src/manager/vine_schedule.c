@@ -309,7 +309,7 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 
 	/* If the worker has transfer capacity to get this task. */
 	if (q->peer_transfers_enabled && !vine_manager_transfer_capacity_available(q, w, t)) {
-		printf("worker %s has no transfer capacity\n", w->hostname);
+		// printf("worker %s has no transfer capacity\n", w->hostname);
 		return 0;
 	}
 
