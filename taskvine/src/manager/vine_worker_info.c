@@ -47,6 +47,9 @@ struct vine_worker_info *vine_worker_create(struct link *lnk)
 
 	w->is_pbb_worker = 0;
 
+	w->num_incoming_transfers = 0;
+	w->num_outgoing_transfers = 0;
+
 	return w;
 }
 

@@ -26,12 +26,26 @@ static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_i
 	t->to = to;
 	t->source_worker = source_worker;
 	t->source_url = source_url ? xxstrdup(source_url) : 0;
+
+	if (t->to) {
+		t->to->num_incoming_transfers++;
+	}
+	if (t->source_worker) {
+		t->source_worker->num_outgoing_transfers++;
+	}
+
 	return t;
 }
 
 static void vine_transfer_pair_delete(struct vine_transfer_pair *p)
 {
 	if (p) {
+		if (p->to) {
+			p->to->num_incoming_transfers--;
+		}
+		if (p->source_worker) {
+			p->source_worker->num_outgoing_transfers--;
+		}
 		free(p->source_url);
 		free(p);
 	}

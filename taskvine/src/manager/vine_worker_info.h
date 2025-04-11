@@ -94,6 +94,9 @@ struct vine_worker_info {
 	int xfer_total_good_destination_counter;
 	int xfer_total_bad_destination_counter;
 
+	int num_incoming_transfers;
+	int num_outgoing_transfers;
+
 	int is_pbb_worker;
 };
 

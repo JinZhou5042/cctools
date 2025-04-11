@@ -254,6 +254,8 @@ struct vine_manager {
     timestamp_t last_interval_kill_time; /* Last time we killed a worker by interval */
 	timestamp_t time_manager_start;     /* Time manager started */
 	int total_tasks_complete;
+
+	int load_balancing;
 };
 
 /*

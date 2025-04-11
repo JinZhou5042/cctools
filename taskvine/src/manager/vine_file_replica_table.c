@@ -29,6 +29,12 @@ int vine_file_replica_table_insert(struct vine_manager *m, struct vine_worker_in
 		return 0;
 	}
 
+	struct vine_file *f = hash_table_lookup(m->file_table, cachename);
+	if (!f) {
+		return 0;
+	}
+	vine_file_addref(f);
+
 	w->inuse_cache += replica->size;
 	hash_table_insert(w->current_files, cachename, replica);
 

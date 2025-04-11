@@ -269,8 +269,10 @@ struct vine_task *vine_task_copy(const struct vine_task *task)
 
 void vine_task_set_command(struct vine_task *t, const char *cmd)
 {
-	if (t->command_line)
+	if (t->command_line) {
 		free(t->command_line);
+		t->command_line = NULL;
+	}
 	t->command_line = xxstrdup(cmd);
 }
 
