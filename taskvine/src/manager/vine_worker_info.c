@@ -11,6 +11,20 @@ See the file COPYING for details.
 #include "vine_resources.h"
 #include "vine_task.h"
 
+char *vine_worker_key_generator(const void *ptr)
+{
+    if (!ptr) return NULL;
+    
+    const struct vine_worker_info *w = (const struct vine_worker_info *)ptr;
+    if (!w->hostname) return NULL;
+    
+    char *key = malloc(256);
+    if (key) {
+        snprintf(key, 256, "%s:%s", w->hostname, w->addrport);
+    }
+    return key;
+}
+
 struct vine_worker_info *vine_worker_create(struct link *lnk)
 {
 	struct vine_worker_info *w = malloc(sizeof(*w));

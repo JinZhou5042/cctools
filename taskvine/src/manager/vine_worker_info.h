@@ -100,6 +100,8 @@ struct vine_worker_info {
 	int is_pbb_worker;
 };
 
+char *vine_worker_key_generator(const void *ptr);
+
 struct vine_worker_info * vine_worker_create( struct link * lnk );
 void vine_worker_delete( struct vine_worker_info *w );
 

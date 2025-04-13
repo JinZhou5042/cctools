@@ -10,6 +10,8 @@ See the file COPYING for details.
 #include "vine_file.h"
 #include "vine_file_replica.h"
 #include "vine_mount.h"
+#include "vine_worker_info.h"
+#include "vine_file_replica_table.h"
 
 #include "debug.h"
 #include "hash_table.h"
@@ -557,6 +559,70 @@ static struct vine_worker_info *find_worker_by_time(struct vine_manager *q, stru
 	}
 }
 
+static struct vine_worker_info *find_worker_by_load_balance(struct vine_manager *q, struct vine_task *t)
+{
+    if (!q || !t) {
+        return NULL;
+    }
+
+    // Create a priority queue for workers
+    struct priority_queue *worker_queue = priority_queue_create_with_custom_key(0, vine_worker_key_generator, NULL);
+    if (!worker_queue) {
+        return NULL;
+    }
+
+    // Iterate through workers
+    char *key;
+    struct vine_worker_info *w;
+    HASH_TABLE_ITERATE(q->worker_table, key, w) {
+        if (!w || !w->resources || w->is_pbb_worker) {
+            continue;
+        }
+
+        // Calculate total size of inputs that need to be transferred
+        int64_t transfer_size = 0;
+        struct vine_mount *m;
+        LIST_ITERATE(t->input_mounts, m) {
+            if (!m || !m->file) {
+                continue;
+            }
+            
+            // Check if this input file is already on the worker
+            struct vine_file_replica *replica = vine_file_replica_table_lookup(w, m->file->cached_name);
+            if (!replica) {
+                // File needs to be transferred
+                transfer_size += m->file->size;
+            }
+        }
+
+        // Calculate available space after task
+        int64_t total_bytes = (int64_t)(w->resources->disk.total * 1024 * 1024);
+        int64_t available_after_task = total_bytes - w->inuse_cache - transfer_size;
+
+        // Skip workers with insufficient space
+        if (available_after_task <= 0) {
+            continue;
+        }
+
+        // Push worker to priority queue with available space as priority
+        priority_queue_push(worker_queue, w, (double)available_after_task);
+    }
+
+    // Find the best suitable worker
+    struct vine_worker_info *best_worker = NULL;
+    while ((w = priority_queue_pop(worker_queue))) {
+        if (check_worker_against_task(q, w, t)) {
+            best_worker = w;
+            break;
+        }
+    }
+
+    // Clean up
+    priority_queue_delete(worker_queue);
+
+    return best_worker;
+}
+
 /*
 Select the best worker for this task, based on the current scheduling mode.
 */
@@ -571,7 +637,13 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 		a = q->worker_selection_algorithm;
 	}
 
+	if (q->load_balancing) {
+		a = VINE_SCHEDULE_LOAD_BALANCE;
+	}
+
 	switch (a) {
+	case VINE_SCHEDULE_LOAD_BALANCE:
+		return find_worker_by_load_balance(q, t);
 	case VINE_SCHEDULE_FILES:
 		return find_worker_by_files(q, t);
 	case VINE_SCHEDULE_TIME:

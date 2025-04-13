@@ -13,6 +13,7 @@ from ..manager import Manager
 from ..task import PythonTask
 from ..task import FunctionCall
 from ..cvine import VINE_TEMP
+from ..cvine import VINE_SCHEDULE_LOAD_BALANCE, VINE_SCHEDULE_FILES, VINE_SCHEDULE_TIME, VINE_SCHEDULE_WORST, VINE_SCHEDULE_FCFS, VINE_SCHEDULE_RAND
 
 import os
 import time
@@ -134,6 +135,7 @@ class DaskVine(Manager):
             wrapper=None,
             wrapper_proc=print,
             prune_depth=0,
+            worker_scheduler="files",
             hoisting_modules=None,  # Deprecated, use lib_modules
             import_modules=None,    # Deprecated, use lib_modules
             lazy_transfers=True,    # Deprecated, use worker_tranfers
@@ -182,6 +184,8 @@ class DaskVine(Manager):
             self.max_priority = float('inf')
             self.min_priority = float('-inf')
 
+            self.worker_scheduler = worker_scheduler
+
             if submit_per_cycle is not None and submit_per_cycle < 1:
                 submit_per_cycle = None
             self.submit_per_cycle = submit_per_cycle
@@ -213,6 +217,22 @@ class DaskVine(Manager):
 
     def __call__(self, *args, **kwargs):
         return self.get(*args, **kwargs)
+    
+    def _set_worker_scheduler(self, task):
+        if self.worker_scheduler == "load-balance":
+            task.set_scheduler(VINE_SCHEDULE_LOAD_BALANCE)
+        elif self.worker_scheduler == "files":
+            task.set_scheduler(VINE_SCHEDULE_FILES)
+        elif self.worker_scheduler == "time":
+            task.set_scheduler(VINE_SCHEDULE_TIME)
+        elif self.worker_scheduler == "worst":
+            task.set_scheduler(VINE_SCHEDULE_WORST)
+        elif self.worker_scheduler == "fcfs":
+            task.set_scheduler(VINE_SCHEDULE_FCFS)
+        elif self.worker_scheduler == "random":
+            task.set_scheduler(VINE_SCHEDULE_RAND)
+        else:
+            raise ValueError(f"Unknown worker scheduler {self.worker_scheduler}")
 
     def _dask_execute(self, dsk, keys):
         indices = {k: inds for (k, inds) in find_dask_keys(keys)}
@@ -304,6 +324,7 @@ class DaskVine(Manager):
                         self.category_info[t.category]["num_tasks"] += 1
                         self.category_info[t.category]["total_execution_time"] += t.resources_measured.wall_time
                         result_file = DaskVineFile(t.output_file, t.key, dag, self.task_mode)
+                        result_file.set_creation_time(time.time())
                         rs = dag.set_result(t.key, result_file)
                         self._enqueue_dask_calls(dag, tag, rs, self.retries, enqueued_calls)
 
@@ -407,6 +428,21 @@ class DaskVine(Manager):
             elif self.scheduling_mode == 'largest-input-first':
                 # best for saving disk space (with pruing)
                 priority = sum([len(dag.get_result(c)._file) for c in dag.get_children(k)])
+            elif self.scheduling_mode == 'storage-footprint-aware':
+                # with respect to both storage consumption and file retention time
+                storage_footprint = 0
+                for c in dag.get_children(k):
+                    try:
+                        file_result = dag.get_result(c)
+                        if isinstance(file_result, DaskVineFile):
+                            file_size = len(file_result._file)
+                            if file_result._creation_time:
+                                storage_footprint += file_size * file_result.retention_time
+                    except Exception as e:
+                        if self.verbose:
+                            print(f"Error calculating storage footprint for {c}: {e}")
+                print(f"Storage footprint for {k}: {storage_footprint}")
+                priority = storage_footprint
             else:
                 raise ValueError(f"Unknown scheduling mode {self.scheduling_mode}")
 
@@ -497,6 +533,7 @@ class DaskVineFile:
         self._is_target = key in dag.get_targets()
 
         self._checkpointed = False
+        self._creation_time = None
 
         assert file
 
@@ -510,6 +547,17 @@ class DaskVineFile:
                     self._load = self._load['Reason']
             self._loaded = True
         return self._load
+    
+    def set_creation_time(self, creation_time):
+        self._creation_time = creation_time
+
+    @property
+    def get_creation_time(self):
+        return self._creation_time
+    
+    @property
+    def retention_time(self):
+        return time.time() - self._creation_time
 
     @property
     def file(self):

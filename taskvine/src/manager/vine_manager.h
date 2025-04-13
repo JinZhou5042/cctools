@@ -256,6 +256,9 @@ struct vine_manager {
 	int total_tasks_complete;
 
 	int load_balancing;
+	uint64_t load_balancing_interval; /* Interval in microseconds between balancing worker load */
+	double load_balancing_factor; /* Factor to use for balancing worker load */
+	timestamp_t last_load_balancing_time; /* Last time we balanced worker load */
 };
 
 /*

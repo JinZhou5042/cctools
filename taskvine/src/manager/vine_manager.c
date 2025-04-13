@@ -257,21 +257,6 @@ char *vine_task_key_generator(const void *ptr)
     return key;
 }
 
-char *vine_worker_key_generator(const void *ptr)
-{
-    if (!ptr) return NULL;
-    
-    const struct vine_worker_info *w = (const struct vine_worker_info *)ptr;
-    if (!w->hostname) return NULL;
-    
-    char *key = malloc(256);
-    if (key) {
-        snprintf(key, 256, "%s:%s", w->hostname, w->addrport);
-    }
-    return key;
-}
-
-
 /*
 This function sends a message to the worker and records the time the message is
 successfully sent. This timestamp is used to determine when to send keepalive checks.
@@ -1826,6 +1811,10 @@ static int fetch_outputs_from_worker(struct vine_manager *q, struct vine_worker_
 	struct vine_task *t;
 	vine_result_code_t result = VINE_SUCCESS;
 
+	if (!w) {
+		return 0;
+	}
+
 	t = itable_lookup(w->current_tasks, task_id);
 	if (!t) {
 		debug(D_VINE, "Failed to find task %d at worker %s (%s).", task_id, w->hostname, w->addrport);
@@ -1861,6 +1850,12 @@ static int fetch_outputs_from_worker(struct vine_manager *q, struct vine_worker_
 	if (result != VINE_SUCCESS) {
 		debug(D_VINE, "Failed to receive output from worker %s (%s).", w->hostname, w->addrport);
 		handle_failure(q, w, t, result);
+
+		// if (result != VINE_APP_FAILURE) {
+		// 	t->time_when_done = timestamp_get();
+		// 	return 0;
+		// }
+	}
 
 		if (result != VINE_APP_FAILURE) {
 			t->time_when_done = timestamp_get();
@@ -3170,6 +3165,10 @@ struct rmsummary *vine_manager_choose_resources_for_task(struct vine_manager *q,
 {
 	struct rmsummary *limits = rmsummary_create(-1);
 
+	if (!t->resources_requested) {
+		t->resources_requested = rmsummary_create(-1);
+	}
+
 	/* Special case: A function-call task consumes no resources. */
 	/* Return early, otherwise these zeroes are expanded to use the whole worker. */
 
@@ -3203,7 +3202,7 @@ struct rmsummary *vine_manager_choose_resources_for_task(struct vine_manager *q,
 	int use_whole_worker = 1;
 
 	int proportional_whole_tasks = q->proportional_whole_tasks;
-	if (t->resources_requested->memory > -1 || t->resources_requested->disk > -1) {
+	if (t->resources_requested && (t->resources_requested->memory > -1 || t->resources_requested->disk > -1)) {
 		/* if mem or disk are specified explicitely, do not expand resources to fill an integer number of tasks. With this,
 		 * the task is assigned exactly the memory and disk specified. We do not do this for cores and gpus, as the use case
 		 * here is to specify the number of cores and allocated the rest of the resources evenly. */
@@ -3885,7 +3884,8 @@ static void vine_manager_create_recovery_tasks(struct vine_manager *q, struct vi
 	unless it is needed for execution.
 	*/
 
-	vine_task_delete(recovery_task);
+	// temporary fix for recovery task
+	// vine_task_delete(recovery_task);
 }
 
 /*
@@ -4575,6 +4575,165 @@ static struct vine_task *find_task_by_tag(struct vine_manager *q, const char *ta
 	return NULL;
 }
 
+static void load_balancing(struct vine_manager *q)
+{
+    if (!q || !q->worker_table || !q->temp_files_to_replicate) {
+        return;
+    }
+
+	if (!q->load_balancing) {
+		return;
+	}
+
+	timestamp_t current_time = timestamp_get();
+	if (current_time - q->last_load_balancing_time < q->load_balancing_interval) {
+		return;
+	}
+	q->last_load_balancing_time = current_time;
+
+    // Find the most overloaded and most free workers
+    struct vine_worker_info *max_worker = NULL;
+    struct vine_worker_info *min_worker = NULL;
+    int64_t max_inuse = -1;
+    int64_t min_inuse = INT64_MAX;
+
+    char *key;
+    struct vine_worker_info *w;
+    HASH_TABLE_ITERATE(q->worker_table, key, w) {
+        if (!w || !w->resources) {
+            continue;
+        }
+		if (w->is_pbb_worker) {
+			continue;
+		}
+        if (w->inuse_cache > max_inuse) {
+            max_inuse = w->inuse_cache;
+            max_worker = w;
+        }
+        if (w->inuse_cache < min_inuse) {
+            min_inuse = w->inuse_cache;
+            min_worker = w;
+        }
+    }
+
+    if (!max_worker || !min_worker || max_worker == min_worker) {
+        return;
+    }
+
+    // Calculate target consumption threshold
+    int64_t target_consumption = (int64_t)(min_inuse * q->load_balancing_factor);
+    
+    // If max worker is not overloaded enough, skip balancing
+    if (max_inuse <= target_consumption) {
+        return;
+    }
+
+	int64_t size_to_release = max_inuse - target_consumption;
+
+	// printf("Balancing worker %s (usage: %"PRId64") against worker %s (usage: %"PRId64"), target: %"PRId64, max_worker->hostname, max_inuse, min_worker->hostname, min_inuse, target_consumption);
+	timestamp_t start_time = timestamp_get();
+
+    // Create a list of files that can be safely removed
+    struct list *removable_files = list_create();
+    char *filename;
+    struct vine_file_replica *replica;
+    HASH_TABLE_ITERATE(max_worker->current_files, filename, replica) {
+        if (!replica || replica->state != VINE_FILE_REPLICA_STATE_READY) {
+            continue;
+        }
+
+        struct vine_file *f = hash_table_lookup(q->file_table, filename);
+        if (!f || !f->cached_name || f->type != VINE_TEMP) {
+            continue;
+        }
+
+        // Check if file is input of any current task
+        int is_input = 0;
+		uint64_t task_id;
+        struct vine_task *t;
+        ITABLE_ITERATE(max_worker->current_tasks, task_id, t)
+		{
+            struct vine_mount *m;
+            LIST_ITERATE(t->input_mounts, m) {
+				if (!m || !m->file || !m->file->cached_name) {
+					continue;
+				}
+                if (strcmp(m->file->cached_name, filename) == 0) {
+                    is_input = 1;
+                    break;
+                }
+            }
+            if (is_input) break;
+        }
+        if (is_input) continue;
+
+        // Check if file has enough replicas
+        int ready_replicas = 0;
+        struct vine_worker_info *other_w;
+        struct set *workers = hash_table_lookup(q->file_worker_table, filename);
+        if (!workers) continue;
+
+        SET_ITERATE(workers, other_w)
+		{
+            if (!other_w || other_w == max_worker) continue;
+            struct vine_file_replica *other_replica = vine_file_replica_table_lookup(other_w, filename);
+            if (other_replica && other_replica->state == VINE_FILE_REPLICA_STATE_READY) {
+                ready_replicas++;
+            }
+        }
+
+        // Add to removable list if conditions are met
+        if (ready_replicas >= 1) {
+			if (!f->cached_name) continue;
+			char *file_copy_name = xxstrdup(f->cached_name);
+			if (!file_copy_name) continue;
+
+            list_push_tail(removable_files, file_copy_name);
+			size_to_release -= f->size;
+			if (size_to_release <= 0) {
+				break;
+			}
+        }
+    }
+
+    // Remove files until target consumption is reached or no more files can be removed
+    char *file_name;
+    LIST_ITERATE(removable_files, file_name) {
+		if (!file_name) continue;
+
+        if (max_worker->inuse_cache <= target_consumption) {
+            break;
+        }
+
+        // Remove file from worker
+        delete_worker_file(q, max_worker, file_name, 0, 0);
+
+		struct vine_file *f = hash_table_lookup(q->file_table, file_name);
+		if (!f || !f->cached_name) continue;
+
+        // Add to replication queue with correct replica count
+        int replica_demand = temp_file_replica_demand(q, f);
+        if (replica_demand > 0) {
+            priority_queue_push(q->temp_files_to_replicate, f, replica_demand);
+        }
+    }
+
+	LIST_ITERATE(removable_files, file_name) {
+		free(file_name);
+	}
+
+    list_delete(removable_files);
+
+	timestamp_t end_time = timestamp_get();
+	timestamp_t duration = end_time - start_time;
+
+	int64_t bytes_released = max_inuse - max_worker->inuse_cache;
+	printf("Released %"PRId64" bytes in %"PRId64" us", bytes_released, duration);
+
+	// printf("Balanced worker %s: reduced disk usage from %"PRId64" to %"PRId64" (target: %"PRId64")", max_worker->hostname, max_inuse, max_worker->inuse_cache, target_consumption);
+}
+
+
 /******************************************************/
 /************* taskvine public functions *************/
 /******************************************************/
@@ -4791,6 +4950,9 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->total_workers_killed = 0;
 
 	q->load_balancing = 0;
+	q->load_balancing_interval = 2 * 1e6; // 2s
+	q->load_balancing_factor = 1.2;
+	q->last_load_balancing_time = timestamp_get();
 
 	if ((envstring = getenv("VINE_BANDWIDTH"))) {
 		q->bandwidth_limit = string_metric_parse(envstring);
@@ -5223,10 +5385,15 @@ static void push_task_to_ready_tasks(struct vine_manager *q, struct vine_task *t
 		 * the issue in which all 'big' tasks fail because the first
 		 * allocation is too small. */
 		t->priority *= 1.1;
-		priority_queue_push(q->ready_tasks, t, t->priority);
+		// priority_queue_push(q->ready_tasks, t, t->priority);
 	} else {
-		priority_queue_push(q->ready_tasks, t, t->priority);
+		// skip
 	}
+	int idx = priority_queue_find_idx(q->ready_tasks, t);
+	if (idx != -1) {
+		priority_queue_remove(q->ready_tasks, idx);
+	}
+	priority_queue_push(q->ready_tasks, t, t->priority);
 
 	/* If the task has been used before, clear out accumulated state. */
 	vine_task_clean(t);
@@ -6052,6 +6219,10 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			}
 		}
 
+		if (q->load_balancing) {
+		//	load_balancing(q);
+		}
+
 		// Check if any temp files need replication and start replicating
 		BEGIN_ACCUM_TIME(q, time_internal);
 		result = process_replication(q);
@@ -6592,6 +6763,15 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "kill-worker-interval-s")) {
 		q->kill_worker_interval_s = MAX(0, (int)value);
+
+	}  else if (!strcmp(name, "load-balancing")) {
+		q->load_balancing = !!((int)value);
+
+	} else if (!strcmp(name, "load-balancing-interval")) {
+		q->load_balancing_interval = (uint64_t)((int)value * 1e6);
+
+	} else if (!strcmp(name, "load-balancing-factor")) {
+		q->load_balancing_factor = MAX(0, (double)value);
 
 	} else {
 		debug(D_NOTICE | D_VINE, "Warning: tuning parameter \"%s\" not recognized\n", name);
