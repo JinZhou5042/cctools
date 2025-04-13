@@ -1077,6 +1077,15 @@ int temp_file_has_ready_source(struct vine_manager *q, struct vine_file *f)
 	return has_ready_source;
 }
 
+static int rng_initialized = 0;
+int rand_0_to_10000() {
+	if (!rng_initialized) {
+		srand((unsigned int)time(NULL));
+		rng_initialized = 1;
+	}
+	return rand() % 10001;
+}
+
 struct priority_queue *ensure_temp_file_transfer_sources(struct vine_manager *q, struct vine_file *f, int transfer_throttle)
 {
 	if (!f || f->type != VINE_TEMP) {
@@ -1130,7 +1139,8 @@ struct priority_queue *ensure_temp_file_transfer_sources(struct vine_manager *q,
 		if (q->load_balancing) {
 			priority_queue_push(valid_sources, w, (w->resources->disk.total - BYTES_TO_MEGABYTES(w->inuse_cache)));
 		} else {
-			priority_queue_push(valid_sources, w, -w->num_outgoing_transfers);
+			// priority_queue_push(valid_sources, w, -w->num_outgoing_transfers);
+			priority_queue_push(valid_sources, w, rand_0_to_10000());
 		}
 	}
 
@@ -1174,7 +1184,8 @@ struct priority_queue *ensure_temp_file_transfer_destinations(struct vine_manage
 		if (q->load_balancing) {
 			priority_queue_push(valid_destinations, w, (w->resources->disk.total - BYTES_TO_MEGABYTES(w->inuse_cache)));
 		} else {
-			priority_queue_push(valid_destinations, w, -w->num_incoming_transfers);
+			// priority_queue_push(valid_destinations, w, -w->num_incoming_transfers);
+			priority_queue_push(valid_destinations, w, rand_0_to_10000());
 		}
 	}
 
@@ -1593,6 +1604,13 @@ static void add_worker(struct vine_manager *q)
 
 	if (!link_address_remote(link, addr, &port)) {
 		link_close(link);
+		return;
+	}
+
+	// skip worker with ip 10.32.88.144
+	if (strcmp(addr, "10.32.88.144") == 0) {
+		link_close(link);
+		printf("skip worker with ip 10.32.88.144\n");
 		return;
 	}
 
@@ -4971,6 +4989,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->kill_worker_interval_s = 0;
 	q->last_interval_kill_time = timestamp_get();
 
+	q->max_worker_count = 10000000;
+
 	debug(D_VINE, "Manager is listening on port %d.", q->port);
 
 	return q;
@@ -5883,6 +5903,10 @@ static int connect_new_workers(struct vine_manager *q, int stoptime, int max_new
 {
 	int new_workers = 0;
 
+	if (q->max_worker_count > 0 && hash_table_size(q->worker_table) >= q->max_worker_count) {
+		return 0;
+	}
+
 	// If the manager link was awake, then accept at most max_new_workers.
 	// Note we are using the information gathered in poll_active_workers, which
 	// is a little ugly.
@@ -6772,6 +6796,9 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "load-balancing-factor")) {
 		q->load_balancing_factor = MAX(0, (double)value);
+
+	} else if (!strcmp(name, "max-worker-count")) {
+		q->max_worker_count = MAX(0, (int)value);
 
 	} else {
 		debug(D_NOTICE | D_VINE, "Warning: tuning parameter \"%s\" not recognized\n", name);
