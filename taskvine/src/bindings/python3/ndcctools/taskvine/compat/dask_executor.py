@@ -61,6 +61,106 @@ except ImportError:
 #     result = v.compute(resources={"cores": 1}, resources_mode="max", environment=my_env)
 # @endcode
 
+def merge_chain_tasks(dsk, keys):
+    from uuid import uuid4
+    from collections import defaultdict
+
+    def is_mergeable(sexpr):
+        return (
+            isinstance(sexpr, tuple)
+            and callable(sexpr[0])
+        )
+
+    parents = defaultdict(set)
+    children = defaultdict(set)
+    for k, v in dsk.items():
+        if not is_mergeable(v):
+            continue
+        for arg in v[1:]:
+            if isinstance(arg, str) and arg in dsk:
+                parents[k].add(arg)
+                children[arg].add(k)
+
+    new_dsk = dict(dsk)
+    visited = set()
+    rename_map = {}
+
+    def gen_fused_fn(chain_exprs):
+        def fused(val):
+            for fn, *args in chain_exprs:
+                val = fn(val, *args)
+            return val
+        return fused
+
+    merge_count = 0
+
+    for node in list(dsk):
+        if node in visited:
+            continue
+        if not is_mergeable(dsk[node]):
+            print(f"[skip] {node}: not mergeable")
+            continue
+
+        chain = [node]
+        cur = node
+        while (
+            len(children[cur]) == 1
+            and len(parents[list(children[cur])[0]]) == 1
+        ):
+            nxt = list(children[cur])[0]
+            if not is_mergeable(dsk[nxt]):
+                print(f"[break] chain from {cur} to {nxt}: next not mergeable")
+                break
+            chain.append(nxt)
+            cur = nxt
+
+        if len(chain) <= 1:
+            print(f"[skip] {node}: chain too short")
+            continue
+
+        print(f"[merge] {' -> '.join(chain)}")
+
+        fused_key = f"fused-{uuid4()}"
+        chain_exprs = [dsk[n] for n in chain]
+        input_arg = chain_exprs[0][1]
+        new_dsk[fused_key] = (gen_fused_fn(chain_exprs), input_arg)
+
+        for n in chain:
+            visited.add(n)
+            new_dsk.pop(n, None)
+            rename_map[n] = fused_key
+
+        merge_count += len(chain)
+
+    def replace(v):
+        if isinstance(v, list):
+            return [replace(x) for x in v]
+        elif isinstance(v, tuple):
+            return tuple(replace(x) if i > 0 else x for i, x in enumerate(v))
+        elif isinstance(v, str):
+            return rename_map.get(v, v)
+        else:
+            return v
+
+    for k in list(new_dsk):
+        new_dsk[k] = replace(new_dsk[k])
+
+    def replace_key_recursively(obj):
+        if isinstance(obj, list):
+            return [replace_key_recursively(x) for x in obj]
+        elif isinstance(obj, tuple):
+            return tuple(replace_key_recursively(x) for x in obj)
+        elif isinstance(obj, dict):
+            return {k: replace_key_recursively(v) for k, v in obj.items()}
+        elif isinstance(obj, str):
+            return rename_map.get(obj, obj)
+        else:
+            return obj
+
+    new_keys = replace_key_recursively(keys)
+
+    return new_dsk, new_keys
+
 
 class DaskVine(Manager):
     ##
@@ -136,6 +236,7 @@ class DaskVine(Manager):
             wrapper_proc=print,
             prune_depth=0,
             worker_scheduler="files",
+            merge_chains=False,
             hoisting_modules=None,  # Deprecated, use lib_modules
             import_modules=None,    # Deprecated, use lib_modules
             lazy_transfers=True,    # Deprecated, use worker_tranfers
@@ -180,6 +281,7 @@ class DaskVine(Manager):
             self.wrapper_proc = wrapper_proc
             self.when_first_task_completed = None
             self.prune_depth = prune_depth
+            self.merge_chains = merge_chains
             self.category_info = defaultdict(lambda: {"num_tasks": 0, "total_execution_time": 0})
             self.max_priority = float('inf')
             self.min_priority = float('-inf')
@@ -237,6 +339,13 @@ class DaskVine(Manager):
     def _dask_execute(self, dsk, keys):
         indices = {k: inds for (k, inds) in find_dask_keys(keys)}
         keys_flatten = indices.keys()
+
+        if self.merge_chains:
+            print("Merging chain tasks...")
+            dsk, keys = merge_chain_tasks(dsk, keys)
+            print("Chain tasks merged.")
+        else:
+            print("Not merging chain tasks.")
 
         dag = DaskVineDag(dsk, low_memory_mode=self.low_memory_mode, prune_depth=self.prune_depth)
         tag = f"dag-{id(dag)}"
