@@ -221,7 +221,6 @@ struct priority_queue *priority_queue_create_with_custom_key(
     pq->base_cursor = 0;
     pq->rotate_cursor = 0;
     
-    /* 设置自定义键函数，如果未提供则使用默认 */
     pq->key_generator = key_generator ? key_generator : ptr_to_key;
     pq->key_comparator = key_comparator ? key_comparator : NULL;
     
@@ -319,7 +318,6 @@ void *priority_queue_pop(struct priority_queue *pq)
     struct element *e = pq->elements[0];
     void *data = e->data;
 
-    /* 使用自定义键生成器 */
     char *key = pq->key_generator(data);
     if (key) {
         hash_table_remove(pq->data_to_idx, key);
@@ -399,62 +397,49 @@ int priority_queue_update_priority(struct priority_queue *pq, void *data, double
         return -1;  // Invalid input
     }
     
-    // 使用键生成器获取键
     char *key = pq->key_generator ? pq->key_generator(data) : NULL;
     if (!key) {
-        // 没有键生成器或键生成失败，回退到使用指针作为键
         char pointer_key[64];
         snprintf(pointer_key, sizeof(pointer_key), "%p", data);
         key = strdup(pointer_key);
         if (!key) {
-            return -1;  // 内存分配失败
+            return -1;  
         }
     }
     
-    // 从哈希表中查找索引
     int *idx_ptr = hash_table_lookup(pq->data_to_idx, key);
     int idx = idx_ptr ? *idx_ptr : -1;
-    free(key);  // 释放键
+    free(key);  
     
-    // 如果未找到，添加为新元素
     if (idx == -1) {
         return priority_queue_push(pq, data, new_priority);
     }
     
-    // 重要：验证索引是否有效且元素不为NULL
     if (idx < 0 || idx >= pq->size || !pq->elements[idx]) {
         return priority_queue_push(pq, data, new_priority);
     }
     
-    // 索引有效，保存旧优先级
     double old_priority = pq->elements[idx]->priority;
     
-    // 如果优先级没有变化，无需更新
     if (old_priority == new_priority) {
         return idx;
     }
     
-    // 更新优先级
     pq->elements[idx]->priority = new_priority;
     
-    // 根据优先级变化调整堆
     if (new_priority > old_priority) {
-        // 优先级增加，向上调整
         return swim(pq, idx);
     } else {
-        // 优先级减少，向下调整
         return sink(pq, idx);
     }
 }
 
-/* 修改find_idx使用自定义键生成器 */
 int priority_queue_find_idx(struct priority_queue *pq, const void *data)
 {
     if (!pq || !data) {
         return -1;
     }
     
-    /* 使用自定义键生成函数 */
     char *key = pq->key_generator(data);
     if (!key) {
         return -1;
@@ -571,12 +556,10 @@ int priority_queue_remove(struct priority_queue *pq, int idx)
     struct element *to_delete = pq->elements[idx];
     struct element *last_elem = pq->elements[pq->size - 1];
 
-    // 保存优先级信息，避免后面use-after-free
     double old_priority = to_delete->priority;
     double new_priority = last_elem->priority;
     void *data = to_delete->data;
 
-    // 使用自定义键生成器删除哈希表条目
     char *key = pq->key_generator(data);
     if (key) {
         hash_table_remove(pq->data_to_idx, key);
@@ -586,19 +569,15 @@ int priority_queue_remove(struct priority_queue *pq, int idx)
     pq->size--;
     
     if (idx != pq->size) {
-        // 把最后一个元素移到被删除元素的位置
         void *last_data = last_elem->data;
         
-        // 使用自定义键生成器更新最后元素在哈希表中的索引
         char *last_key = pq->key_generator(last_data);
         if (last_key) {
-            // 从哈希表中移除最后元素的旧索引
             int *old_idx_ptr = hash_table_remove(pq->data_to_idx, last_key);
             if (old_idx_ptr) {
                 free(old_idx_ptr);
             }
 
-            // 添加最后元素的新索引
             int *new_idx_ptr = malloc(sizeof(int));
             if (new_idx_ptr) {
                 *new_idx_ptr = idx;
@@ -608,22 +587,18 @@ int priority_queue_remove(struct priority_queue *pq, int idx)
             free(last_key);
         }
 
-        // 将最后元素移到idx位置
         pq->elements[idx] = last_elem;
         pq->elements[pq->size] = NULL;
 
-        // 维护堆性质
         if (new_priority > old_priority) {
             swim(pq, idx);
         } else if (new_priority < old_priority) {
             sink(pq, idx);
         }
     } else {
-        // 如果删除的是最后一个元素，直接设置为NULL
         pq->elements[pq->size] = NULL;
     }
 
-    // 调整游标位置
     if (pq->static_cursor >= pq->size) {
         pq->static_cursor = pq->size > 0 ? pq->size - 1 : 0;
     } else if (pq->static_cursor == idx && pq->static_cursor > 0) {
@@ -646,7 +621,6 @@ int priority_queue_remove(struct priority_queue *pq, int idx)
         priority_queue_rotate_reset(pq);
     }
 
-    // 释放要删除的元素
     free(to_delete);
 
     return 1;
