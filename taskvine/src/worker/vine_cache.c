@@ -636,7 +636,6 @@ int vine_cache_process_pending(struct vine_cache *c)
 
 	int num_processing = list_size(c->processing_transfers);
 	int num_pending = list_size(c->pending_transfers);
-	printf("num_processing: %d, num_pending: %d\n", num_processing, num_pending);
 
 	while (list_size(c->processing_transfers) < c->max_transfer_procs && list_size(c->pending_transfers) > 0) {
 		char *queue_cachename = list_pop_head(c->pending_transfers);

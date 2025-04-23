@@ -76,7 +76,6 @@ static void swap_elements(struct priority_queue *pq, int i, int j)
     *i_idx = j;
     *j_idx = i;
 
-    // 使用自定义键生成器
     char *key_i = pq->key_generator(pq->elements[i]->data);
     char *key_j = pq->key_generator(pq->elements[j]->data);
 
@@ -184,7 +183,6 @@ static int priority_queue_double_capacity(struct priority_queue *pq)
 
 /****** External Methods ******/
 
-/* 实现自定义键生成器的创建函数 */
 struct priority_queue *priority_queue_create_with_custom_key(
     int init_capacity, 
     pq_key_generator_t key_generator, 
@@ -230,7 +228,6 @@ struct priority_queue *priority_queue_create_with_custom_key(
     return pq;
 }
 
-/* 为了向后兼容，原始创建函数调用新函数 */
 struct priority_queue *priority_queue_create(int init_capacity)
 {
     return priority_queue_create_with_custom_key(init_capacity, NULL, NULL);
@@ -245,7 +242,6 @@ int priority_queue_size(struct priority_queue *pq)
 	return pq->size;
 }
 
-/* 实现push_or_update辅助函数 */
 int priority_queue_push_or_update(struct priority_queue *pq, void *data, double priority)
 {
     if (!pq) {
@@ -254,15 +250,12 @@ int priority_queue_push_or_update(struct priority_queue *pq, void *data, double 
     
     int idx = priority_queue_find_idx(pq, data);
     if (idx != -1) {
-        /* 元素已存在，更新其优先级 */
         return priority_queue_update_priority(pq, data, priority);
     } else {
-        /* 元素不存在，添加它 */
         return priority_queue_push(pq, data, priority);
     }
 }
 
-/* 修改push使用自定义键生成器 */
 int priority_queue_push(struct priority_queue *pq, void *data, double priority)
 {
     if (!pq || !data) {
@@ -275,7 +268,6 @@ int priority_queue_push(struct priority_queue *pq, void *data, double priority)
         }
     }
     
-    /* 检查数据是否已在队列中 */
     if (priority_queue_find_idx(pq, data) != -1) {
         return -1;
     }
@@ -298,7 +290,6 @@ int priority_queue_push(struct priority_queue *pq, void *data, double priority)
     }
     *idx_ptr = idx;
     
-    /* 使用自定义键生成函数 */
     char *key = pq->key_generator(data);
     if (!key) {
         pq->size--;
@@ -319,7 +310,6 @@ int priority_queue_push(struct priority_queue *pq, void *data, double priority)
     return new_idx;
 }
 
-/* 同样需要修改pop, remove等操作以使用自定义键生成器... */
 void *priority_queue_pop(struct priority_queue *pq)
 {
     if (!pq || pq->size == 0) {

@@ -31,7 +31,6 @@ static void test_assert(int condition, const char *file, int line, const char *m
 
 #define ASSERT(condition, message) test_assert(condition, __FILE__, __LINE__, message)
 
-// 使用数字key生成函数以减少内存占用
 static char *generate_key(int i) {
     char *key = malloc(24);
     if (!key) return NULL;
@@ -39,7 +38,6 @@ static char *generate_key(int i) {
     return key;
 }
 
-// 打印哈希表当前状态
 static void print_hash_table_stats(struct hash_table *h, const char *stage, int items_processed)
 {
     printf("  [%s - %d items] Size: %d, Buckets: %d, Load factor: %.3f\n", 
@@ -58,12 +56,10 @@ int test_hash_table_basic()
     ASSERT(hash_table_size(h) == 0, "New hash table should have size 0");
     print_hash_table_stats(h, "Initial", 0);
     
-    // 保存指针以便于安全清理
     char **keys = malloc(TEST_SIZE * sizeof(char*));
     char **values = malloc(TEST_SIZE * sizeof(char*));
     ASSERT(keys != NULL && values != NULL, "Memory allocation should succeed");
     
-    // 插入测试元素
     printf("  Inserting %d items...\n", TEST_SIZE);
     
     struct timeval start_time, end_time;
@@ -74,7 +70,6 @@ int test_hash_table_basic()
         values[i] = strdup(keys[i]);
         ASSERT(hash_table_insert(h, keys[i], values[i]), "Insertion should succeed");
         
-        // 每插入一定数量的元素，打印哈希表状态
         if (i == 100 || i == 1000 || i == 10000 || i == 100000 || 
             i == 250000 || i == 500000 || i == 750000 || 
             i == TEST_SIZE-1) {
@@ -90,7 +85,6 @@ int test_hash_table_basic()
     printf("  Successfully inserted all %d items in %.2f seconds (%.0f items/sec)\n", 
            TEST_SIZE, insert_time, TEST_SIZE / insert_time);
     
-    // 验证所有元素都可以被查找
     printf("  Verifying all items...\n");
     gettimeofday(&start_time, NULL);
     
@@ -101,7 +95,6 @@ int test_hash_table_basic()
             verified++;
         }
         
-        // 每验证一定数量的元素，打印进度
         if (i == 100 || i == 1000 || i == 10000 || i == 100000 || 
             i == 250000 || i == 500000 || i == 750000 || 
             i == TEST_SIZE-1) {
@@ -117,7 +110,6 @@ int test_hash_table_basic()
     printf("  Successfully verified %d items in %.2f seconds (%.0f lookups/sec)\n", 
            verified, lookup_time, TEST_SIZE / lookup_time);
     
-    // 测试迭代
     printf("  Testing iteration over all elements...\n");
     gettimeofday(&start_time, NULL);
     
@@ -128,7 +120,6 @@ int test_hash_table_basic()
     hash_table_firstkey(h);
     while (hash_table_nextkey(h, &key, &value)) {
         count++;
-        // 每迭代一定数量的元素，打印进度
         if (count == 100 || count == 1000 || count == 10000 || count == 100000 || 
             count == 250000 || count == 500000 || count == 750000 || 
             count == TEST_SIZE) {
@@ -144,7 +135,6 @@ int test_hash_table_basic()
     printf("  Successfully iterated through all %d items in %.2f seconds (%.0f items/sec)\n", 
            count, iterate_time, TEST_SIZE / iterate_time);
     
-    // 清理内存 - 先从哈希表中移除所有项
     printf("  Cleaning up...\n");
     gettimeofday(&start_time, NULL);
     
@@ -153,7 +143,6 @@ int test_hash_table_basic()
         free(keys[i]);
         free(values[i]);
         
-        // 每移除一定数量的元素，打印哈希表状态
         if (i == 100 || i == 1000 || i == 10000 || i == 100000 || 
             i == 250000 || i == 500000 || i == 750000 || 
             i == TEST_SIZE-1) {
@@ -170,7 +159,6 @@ int test_hash_table_basic()
     free(keys);
     free(values);
     
-    // 删除哈希表
     hash_table_delete(h);
     
     printf("Basic operations test %s.\n", test_failed ? "FAILED" : "PASSED");
@@ -182,7 +170,6 @@ int test_hash_table_dynamic_resize()
     printf("Testing hash_table dynamic resizing behavior...\n");
     test_failed = 0;
     
-    // 创建一个较小初始大小的哈希表
     int initial_size = 10;
     struct hash_table *h = hash_table_create(initial_size, NULL);
     ASSERT(h != NULL, "hash_table_create should return a valid pointer");
@@ -190,13 +177,11 @@ int test_hash_table_dynamic_resize()
     print_hash_table_stats(h, "Initial", 0);
     ASSERT(hash_table_bucket_count(h) == initial_size, "Initial bucket count should match specified size");
     
-    // 保存键值对以便清理
     int test_items = 1000;
     char **keys = malloc(test_items * sizeof(char*));
     char **values = malloc(test_items * sizeof(char*));
     ASSERT(keys != NULL && values != NULL, "Memory allocation should succeed");
     
-    // 监控扩容行为
     printf("  Inserting items to trigger expansion...\n");
     int expansion_count = 0;
     int prev_bucket_count = hash_table_bucket_count(h);
@@ -215,7 +200,6 @@ int test_hash_table_dynamic_resize()
             prev_bucket_count = current_bucket_count;
         }
         
-        // 每插入一定数量的元素，打印哈希表状态
         if (i == 10 || i == 50 || i == 100 || i == 200 || i == 500 || i == test_items-1) {
             print_hash_table_stats(h, "During insertion", i+1);
         }
@@ -227,7 +211,6 @@ int test_hash_table_dynamic_resize()
     ASSERT(expansion_count > 0, "Hash table should have expanded at least once");
     printf("  Hash table expanded %d times during %d insertions\n", expansion_count, test_items);
     
-    // 监控缩容行为
     printf("  Removing items to trigger shrinking...\n");
     int shrink_count = 0;
     prev_bucket_count = hash_table_bucket_count(h);
@@ -245,7 +228,6 @@ int test_hash_table_dynamic_resize()
             prev_bucket_count = current_bucket_count;
         }
         
-        // 每删除一定数量的元素，打印哈希表状态
         if (i == 10 || i == 50 || i == 100 || i == 200 || i == 500 || i == test_items-1) {
             print_hash_table_stats(h, "During removal", test_items - (i+1));
         }
@@ -270,18 +252,15 @@ int test_hash_table_shrinking()
     printf("Testing hash_table dynamic shrinking specifically...\n");
     test_failed = 0;
     
-    // 创建一个较大的哈希表，设置较低的缩容阈值
     int initial_size = 2000;
     struct hash_table *h = hash_table_create(initial_size, NULL);
     ASSERT(h != NULL, "hash_table_create should return a valid pointer");
     
-    // 自定义缩容阈值
     hash_table_set_shrink_threshold(h, 0.2);
     
     print_hash_table_stats(h, "Initial", 0);
     ASSERT(hash_table_bucket_count(h) >= initial_size, "Initial bucket count should be at least the specified size");
     
-    // 首先插入足够多的元素填充哈希表
     int test_items = 1000;
     char **keys = malloc(test_items * sizeof(char*));
     char **values = malloc(test_items * sizeof(char*));
@@ -298,10 +277,8 @@ int test_hash_table_shrinking()
     float initial_load = hash_table_load_factor(h);
     printf("  Initial load factor: %.3f\n", initial_load);
     
-    // 分批测试删除，验证缩容行为
     printf("  Testing batch removal behavior...\n");
     
-    // 准备批量删除的键
     const int batch_sizes[] = {100, 200, 300};
     const int batch_count = sizeof(batch_sizes) / sizeof(batch_sizes[0]);
     
@@ -311,7 +288,6 @@ int test_hash_table_shrinking()
         printf("  Removing batch #%d: %d items (indices %d-%d)...\n", 
                b+1, batch_size, start_idx, start_idx + batch_size - 1);
         
-        // 收集要删除的键
         const char **batch_keys = malloc(batch_size * sizeof(char*));
         ASSERT(batch_keys != NULL, "Memory allocation for batch keys should succeed");
         
@@ -321,14 +297,11 @@ int test_hash_table_shrinking()
             }
         }
         
-        // 获取删除前的桶数
         int before_buckets = hash_table_bucket_count(h);
         float before_load = hash_table_load_factor(h);
         
-        // 执行批量删除
         int removed = hash_table_remove_batch(h, batch_keys, batch_size);
         
-        // 获取删除后的桶数
         int after_buckets = hash_table_bucket_count(h);
         float after_load = hash_table_load_factor(h);
         
@@ -341,7 +314,6 @@ int test_hash_table_shrinking()
                    before_buckets, after_buckets, 
                    100.0 * (before_buckets - after_buckets) / before_buckets);
             
-            // 验证缩容后的负载因子是否合理
             ASSERT(after_load > 0.1 && after_load < 0.4, 
                    "Load factor after shrinking should be in reasonable range");
         }
@@ -350,11 +322,10 @@ int test_hash_table_shrinking()
         print_hash_table_stats(h, "After batch removal", hash_table_size(h));
     }
     
-    // 进行单个元素的逐渐删除，测试渐进式缩容
     printf("  Testing incremental removal behavior...\n");
     
     int remaining_count = hash_table_size(h);
-    int start_idx = batch_count * batch_sizes[0]; // 从批量删除结束的位置开始
+    int start_idx = batch_count * batch_sizes[0];
     int shrink_events = 0;
     int prev_bucket_count = hash_table_bucket_count(h);
     
@@ -367,7 +338,6 @@ int test_hash_table_shrinking()
             remaining_count--;
         }
         
-        // 检测缩容事件
         int current_bucket_count = hash_table_bucket_count(h);
         if (current_bucket_count < prev_bucket_count) {
             shrink_events++;
@@ -377,11 +347,9 @@ int test_hash_table_shrinking()
                    remaining_count, load_factor);
             prev_bucket_count = current_bucket_count;
             
-            // 每次缩容后都打印一下当前状态
             print_hash_table_stats(h, "After shrink", remaining_count);
         }
         
-        // 定期打印状态
         if ((i - start_idx) % 50 == 0 || remaining_count == 0) {
             printf("  Removed %d individual items, %d items remaining\n", 
                    i - start_idx + 1, remaining_count);
@@ -396,14 +364,12 @@ int test_hash_table_shrinking()
     printf("  Final bucket count: %d (vs initial %d)\n", 
            hash_table_bucket_count(h), initial_size);
     
-    // 清理资源
     for (int i = 0; i < test_items; i++) {
         if (keys[i]) free(keys[i]);
     }
     free(keys);
     free(values);
     
-    // 清理哈希表
     hash_table_delete(h);
     
     printf("Dynamic shrinking test %s.\n", test_failed ? "FAILED" : "PASSED");
@@ -415,7 +381,6 @@ int test_hash_table_edge_cases()
     printf("Testing hash_table edge cases...\n");
     test_failed = 0;
     
-    // 测试1: 初始大小为0的哈希表 (应该使用默认大小)
     printf("  Test 1: Creating hash table with size 0...\n");
     struct hash_table *h1 = hash_table_create(0, NULL);
     ASSERT(h1 != NULL, "hash_table_create with size 0 should return a valid pointer");
@@ -423,14 +388,12 @@ int test_hash_table_edge_cases()
     ASSERT(hash_table_bucket_count(h1) == DEFAULT_SIZE, 
            "Hash table with initial size 0 should have default size");
     
-    // 测试空哈希表的基本操作
     void *lookup = hash_table_lookup(h1, "nonexistent");
     ASSERT(lookup == NULL, "Lookup in empty table should return NULL");
     
     void *removed = hash_table_remove(h1, "nonexistent");
     ASSERT(removed == NULL, "Remove from empty table should return NULL");
     
-    // 测试迭代空哈希表
     char *key;
     void *value;
     int count = 0;
@@ -443,13 +406,11 @@ int test_hash_table_edge_cases()
     hash_table_delete(h1);
     printf("  Test 1 passed: Empty hash table behaves correctly\n");
     
-    // 测试2: 初始大小为1的哈希表 (极小情况)
     printf("  Test 2: Creating hash table with size 1...\n");
     struct hash_table *h2 = hash_table_create(1, NULL);
     ASSERT(h2 != NULL, "hash_table_create with size 1 should return a valid pointer");
     print_hash_table_stats(h2, "Size 1 creation", 0);
     
-    // 插入多个元素，测试强制扩容
     printf("  Inserting items into size-1 hash table to force expansion...\n");
     int item_count = 20;
     char **keys = malloc(item_count * sizeof(char*));
@@ -464,13 +425,11 @@ int test_hash_table_edge_cases()
         }
     }
     
-    // 验证所有元素都可以正确查找
     for (int i = 0; i < item_count; i++) {
         void *found = hash_table_lookup(h2, keys[i]);
         ASSERT(found == (void*)(long)i, "Items in expanded table should be retrievable");
     }
     
-    // 清理
     for (int i = 0; i < item_count; i++) {
         free(keys[i]);
     }
@@ -478,18 +437,15 @@ int test_hash_table_edge_cases()
     hash_table_delete(h2);
     printf("  Test 2 passed: Size-1 hash table expands correctly\n");
     
-    // 测试3: 哈希冲突处理
     printf("  Test 3: Testing hash collisions handling...\n");
     
-    // 创建自定义哈希函数，使所有键产生相同的哈希值
     unsigned constant_hash(const char *key) {
-        return 42; // 所有键都返回相同的哈希值
+        return 42;
     }
     
     struct hash_table *h3 = hash_table_create(10, constant_hash);
     ASSERT(h3 != NULL, "hash_table_create with custom hash function should return a valid pointer");
     
-    // 插入使用相同哈希值的多个元素
     int collision_count = 100;
     char **c_keys = malloc(collision_count * sizeof(char*));
     
@@ -502,7 +458,6 @@ int test_hash_table_edge_cases()
     
     print_hash_table_stats(h3, "After collision insertions", collision_count);
     
-    // 验证所有元素都可以正确查找，即使哈希冲突
     printf("  Verifying retrievability with collisions...\n");
     int found_count = 0;
     for (int i = 0; i < collision_count; i++) {
@@ -516,9 +471,7 @@ int test_hash_table_edge_cases()
            "All items should be retrievable despite hash collisions");
     printf("  Successfully found all %d items with identical hash values\n", found_count);
     
-    // 测试冲突情况下的删除
     printf("  Testing removal with collisions...\n");
-    // 移除一半的元素
     for (int i = 0; i < collision_count; i += 2) {
         void *removed = hash_table_remove(h3, c_keys[i]);
         ASSERT(removed == (void*)(long)i, "Removal with collision should return correct value");
@@ -526,7 +479,6 @@ int test_hash_table_edge_cases()
     
     print_hash_table_stats(h3, "After collision removals", hash_table_size(h3));
     
-    // 验证剩余元素可以正确查找
     found_count = 0;
     for (int i = 1; i < collision_count; i += 2) {
         void *found = hash_table_lookup(h3, c_keys[i]);
@@ -539,7 +491,6 @@ int test_hash_table_edge_cases()
     ASSERT(found_count == expected_remaining, 
            "Remaining items should be retrievable after collision removals");
     
-    // 清理
     for (int i = 0; i < collision_count; i++) {
         free(c_keys[i]);
     }
@@ -556,13 +507,11 @@ int test_hash_table_high_load()
     printf("Testing hash_table under high load conditions...\n");
     test_failed = 0;
     
-    // 创建一个哈希表，初始大小足够大以避免立即扩容
     int initial_size = 10000;
     struct hash_table *h = hash_table_create(initial_size, NULL);
     ASSERT(h != NULL, "hash_table_create should return a valid pointer");
     
-    // 插入大量元素，接近但不超过扩容阈值
-    int items_to_insert = (int)(initial_size * DEFAULT_LOAD * 0.95); // 接近扩容阈值
+    int items_to_insert = (int)(initial_size * DEFAULT_LOAD * 0.95);
     printf("  Inserting %d items to achieve high load factor (~0.7)...\n", items_to_insert);
     
     char **keys = malloc(items_to_insert * sizeof(char*));
@@ -571,7 +520,6 @@ int test_hash_table_high_load()
     struct timeval start_time, end_time;
     double duration;
     
-    // 低负载下的插入基准测试 (前10%)
     int benchmark_size = items_to_insert / 10;
     printf("  Benchmark: Inserting first %d items (low load)...\n", benchmark_size);
     
@@ -589,7 +537,6 @@ int test_hash_table_high_load()
     printf("  Low load insertion rate: %.0f items/second\n", low_load_rate);
     print_hash_table_stats(h, "After low-load insertion", benchmark_size);
     
-    // 继续插入剩余元素，达到高负载
     printf("  Continuing insertion to high load...\n");
     
     gettimeofday(&start_time, NULL);
@@ -597,7 +544,6 @@ int test_hash_table_high_load()
         keys[i] = generate_key(i);
         ASSERT(hash_table_insert(h, keys[i], (void*)(long)i), "Insertion should succeed");
         
-        // 周期性打印状态
         if (i == items_to_insert/4 || i == items_to_insert/2 || i == (3*items_to_insert)/4) {
             print_hash_table_stats(h, "During high-load insertion", i+1);
         }
@@ -616,10 +562,8 @@ int test_hash_table_high_load()
     
     print_hash_table_stats(h, "Final high-load state", items_to_insert);
     
-    // 高负载下的查找性能
     printf("  Testing lookup performance under high load...\n");
     
-    // 随机选择要查找的键
     int lookup_count = 10000;
     gettimeofday(&start_time, NULL);
     
@@ -639,7 +583,6 @@ int test_hash_table_high_load()
     ASSERT(found == lookup_count, "All lookups should succeed under high load");
     printf("  High load lookup rate: %.0f lookups/second\n", lookup_count / duration);
     
-    // 测试高负载下的迭代性能
     printf("  Testing iteration performance under high load...\n");
     
     gettimeofday(&start_time, NULL);
@@ -660,7 +603,6 @@ int test_hash_table_high_load()
     ASSERT(count == items_to_insert, "Iteration should visit all items under high load");
     printf("  High load iteration rate: %.0f items/second\n", count / duration);
     
-    // 清理资源
     for (int i = 0; i < items_to_insert; i++) {
         free(keys[i]);
     }
