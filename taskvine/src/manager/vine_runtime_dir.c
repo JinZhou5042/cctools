@@ -100,6 +100,9 @@ int ensure_template(const char *base_path, const char *template_name)
 			if (ch == '\n') {
 				continue;
 			}
+			/* echo input + newline */
+			fprintf(stderr, "%c\n", ch);
+			fflush(stderr);
 			/* confirm */
 			if (ch == 'y' || ch == 'Y') {
 				break;
