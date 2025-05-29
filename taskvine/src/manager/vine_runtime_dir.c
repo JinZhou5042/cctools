@@ -11,6 +11,8 @@ See the file COPYING for details.
 #include <string.h>
 #include <stdio.h>
 #include <limits.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include "assert.h"
 #include "create_dir.h"
@@ -76,21 +78,37 @@ int ensure_template(const char *base_path, const char *template_name)
 	char *template_dir = path_concat(base_path, template_name);
 
 	if (access(template_dir, F_OK) == 0) {
-		char response[8];
+		struct termios oldt, newt;
+		tcgetattr(STDIN_FILENO, &oldt);
+		newt = oldt;
+		newt.c_lflag &= ~(ICANON | ECHO);
+		tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+
 		while (1) {
-			printf("Template directory '%s' already exists. Delete it? (Y/y to confirm): ", template_dir);
-			if (!fgets(response, sizeof(response), stdin)) {
+			fprintf(stderr, "Template directory '%s' already exists. Delete it? (Y/y to confirm): ", template_dir);
+			int ch = getchar();
+			/* skip arrow keys */
+			if (ch == 27) {
+				getchar();
+				getchar();
 				continue;
 			}
-			if (response[0] == '\n') {
+			/* skip enter */
+			if (ch == '\n') {
 				continue;
 			}
-			if (response[0] == 'y' || response[0] == 'Y') {
+			/* confirm */
+			if (ch == 'y' || ch == 'Y') {
 				break;
 			}
+			/* calcel */
+			tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
 			free(template_dir);
 			return 0;
 		}
+
+		tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+
 		if (unlink_recursive(template_dir) != 0) {
 			debug(D_ERROR, "Error deleting existing template directory: %s\n", template_dir);
 			free(template_dir);
@@ -107,6 +125,7 @@ int ensure_template(const char *base_path, const char *template_name)
 	free(template_dir);
 	return 1;
 }
+
 char *vine_runtime_directory_create()
 {
 	/* runtime directories are created at vine_runtime_info_path, which defaults
