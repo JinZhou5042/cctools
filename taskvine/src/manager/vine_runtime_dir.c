@@ -84,8 +84,11 @@ int ensure_template(const char *base_path, const char *template_name)
 		newt.c_lflag &= ~(ICANON | ECHO);
 		tcsetattr(STDIN_FILENO, TCSANOW, &newt);
 
+		/* only output once */
+		fprintf(stderr, "Template directory '%s' already exists. Delete it? (Y/y to confirm): ", template_dir);
+		fflush(stderr);
+
 		while (1) {
-			fprintf(stderr, "Template directory '%s' already exists. Delete it? (Y/y to confirm): ", template_dir);
 			int ch = getchar();
 			/* skip arrow keys */
 			if (ch == 27) {
@@ -101,7 +104,7 @@ int ensure_template(const char *base_path, const char *template_name)
 			if (ch == 'y' || ch == 'Y') {
 				break;
 			}
-			/* calcel */
+			/* cancel */
 			tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
 			free(template_dir);
 			return 0;
