@@ -8,6 +8,9 @@ See the file COPYING for details.
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <string.h>
+#include <stdio.h>
+#include <limits.h>
 
 #include "assert.h"
 #include "create_dir.h"
@@ -18,6 +21,7 @@ See the file COPYING for details.
 #include "unlink_recursive.h"
 #include "vine_manager.h"
 #include "xxmalloc.h"
+#include "debug.h"
 
 static char *vine_runtime_info_path = "vine-run-info";
 static char *vine_runtime_info_template = "%Y-%m-%dT%H%M%S";
@@ -54,6 +58,55 @@ void register_staging_dir(const char *path)
 	list_push_head(known_staging_dirs, xxstrdup(path));
 }
 
+int ensure_template(const char *base_path, const char *template_name)
+{
+	if (!template_name || strchr(template_name, '/')) {
+		debug(D_ERROR, "Error: Invalid template name.\n");
+		return 0;
+	}
+
+	struct stat st;
+	if (stat(base_path, &st) != 0) {
+		if (mkdir(base_path, 0755) != 0) {
+			debug(D_ERROR, "Failed to create base path");
+			return 0;
+		}
+	}
+
+	char *template_dir = path_concat(base_path, template_name);
+
+	if (access(template_dir, F_OK) == 0) {
+		char response[8];
+		while (1) {
+			debug(D_NOTICE, "Template directory '%s' already exists. Delete it? (Y/y to confirm): ", template_dir);
+			if (!fgets(response, sizeof(response), stdin)) {
+				continue;
+			}
+			if (response[0] == '\n') {
+				continue;
+			}
+			if (response[0] == 'y' || response[0] == 'Y') {
+				break;
+			}
+			free(template_dir);
+			return 0;
+		}
+		if (unlink_recursive(template_dir) != 0) {
+			debug(D_ERROR, "Error deleting existing template directory: %s\n", template_dir);
+			free(template_dir);
+			return 0;
+		}
+	}
+
+	if (mkdir(template_dir, 0755) != 0) {
+		debug(D_ERROR, "Error creating template directory: %s\n", template_dir);
+		free(template_dir);
+		return 0;
+	}
+
+	free(template_dir);
+	return 1;
+}
 char *vine_runtime_directory_create()
 {
 	/* runtime directories are created at vine_runtime_info_path, which defaults
@@ -90,7 +143,7 @@ char *vine_runtime_directory_create()
 	}
 
 	setenv("VINE_RUNTIME_INFO_DIR", runtime_dir, 1);
-	if (!create_dir(runtime_dir, 0755)) {
+	if (!ensure_template(vine_runtime_info_path, buf)) {
 		return NULL;
 	}
 
