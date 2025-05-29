@@ -15,6 +15,7 @@ See the file COPYING for details.
 #include "vine_manager.h"
 #include "vine_manager_put.h"
 #include "vine_worker_info.h"
+#include "priority_queue.h"
 
 #include "stringtools.h"
 
@@ -96,50 +97,42 @@ int vine_file_replica_count(struct vine_manager *m, struct vine_file *f)
 	return set_size(hash_table_lookup(m->file_worker_table, f->cached_name));
 }
 
-// find a worker (randomly) in posession of a specific file, and is ready to transfer it.
 struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager *q, const char *cachename)
 {
-	struct set *workers = hash_table_lookup(q->file_worker_table, cachename);
-	if (!workers) {
+	struct set *sources = hash_table_lookup(q->file_worker_table, cachename);
+	if (!sources || set_size(sources) < 1) {
 		return 0;
 	}
 
-	int total_count = set_size(workers);
-	if (total_count < 1) {
-		return 0;
-	}
+	struct priority_queue *sources_pq = priority_queue_create(set_size(sources));
 
-	int random_index = random() % total_count;
-
-	struct vine_worker_info *peer = NULL;
-	struct vine_worker_info *peer_selected = NULL;
+	struct vine_worker_info *source;
 	struct vine_file_replica *replica = NULL;
-
-	int offset_bookkeep;
-	SET_ITERATE_RANDOM_START(workers, offset_bookkeep, peer)
+	SET_ITERATE(sources, source)
 	{
-		random_index--;
-		if (!peer->transfer_port_active)
-			continue;
-
-		timestamp_t current_time = timestamp_get();
-		if (current_time - peer->last_transfer_failure < q->transient_error_interval) {
-			debug(D_VINE, "Skipping worker source after recent failure : %s", peer->transfer_host);
+		replica = hash_table_lookup(source->current_files, cachename);
+		if (!replica) {
 			continue;
 		}
-
-		if ((replica = hash_table_lookup(peer->current_files, cachename)) && replica->state == VINE_FILE_REPLICA_STATE_READY) {
-			int current_transfers = peer->outgoing_xfer_counter;
-			if (current_transfers < q->worker_source_max_transfers) {
-				peer_selected = peer;
-				if (random_index < 0) {
-					return peer_selected;
-				}
-			}
+		if (replica->state != VINE_FILE_REPLICA_STATE_READY) {
+			continue;
 		}
+		if (source->outgoing_xfer_counter >= q->worker_source_max_transfers) {
+			continue;
+		}
+		/* NOTE: We do not check for source's last_transfer_failure as failure isn't rare if file pruning is enabled */
+		priority_queue_push(sources_pq, source, -source->outgoing_xfer_counter);
 	}
 
-	return peer_selected;
+	if (priority_queue_size(sources_pq) < 1) {
+		priority_queue_delete(sources_pq);
+		return 0;
+	}
+
+	struct vine_worker_info *source_selected = priority_queue_pop(sources_pq);
+	priority_queue_delete(sources_pq);
+
+	return source_selected;
 }
 
 // trigger replications of file to satisfy temp_replica_count
