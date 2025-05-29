@@ -78,7 +78,7 @@ int ensure_template(const char *base_path, const char *template_name)
 	if (access(template_dir, F_OK) == 0) {
 		char response[8];
 		while (1) {
-			debug(D_NOTICE, "Template directory '%s' already exists. Delete it? (Y/y to confirm): ", template_dir);
+			printf("Template directory '%s' already exists. Delete it? (Y/y to confirm): ", template_dir);
 			if (!fgets(response, sizeof(response), stdin)) {
 				continue;
 			}
