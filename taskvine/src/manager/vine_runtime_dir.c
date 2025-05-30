@@ -63,7 +63,7 @@ void register_staging_dir(const char *path)
 int ensure_template(const char *base_path, const char *template_name)
 {
 	if (!template_name || strchr(template_name, '/')) {
-		debug(D_ERROR, "Error: Invalid template name '%s'.", template_name);
+		debug(D_ERROR, "Invalid template name '%s'.", template_name);
 		return 0;
 	}
 
@@ -80,14 +80,14 @@ int ensure_template(const char *base_path, const char *template_name)
 	if (access(template_dir, F_OK) == 0) {
 		debug(D_NOTICE, "Template directory '%s' already exists. Deleting it.", template_dir);
 		if (unlink_recursive(template_dir) != 0) {
-			debug(D_ERROR, "Error deleting existing template directory: %s.", template_dir);
+			debug(D_ERROR, "Failed to delete existing template directory: %s.", template_dir);
 			free(template_dir);
 			return 0;
 		}
 	}
 
 	if (mkdir(template_dir, 0755) != 0) {
-		debug(D_ERROR, "Error creating template directory: %s.", template_dir);
+		debug(D_ERROR, "Failed to create template directory: %s.", template_dir);
 		free(template_dir);
 		return 0;
 	}
