@@ -63,14 +63,14 @@ void register_staging_dir(const char *path)
 int ensure_template(const char *base_path, const char *template_name)
 {
 	if (!template_name || strchr(template_name, '/')) {
-		debug(D_ERROR, "Error: Invalid template name.\n");
+		debug(D_ERROR, "Error: Invalid template name '%s'.", template_name);
 		return 0;
 	}
 
 	struct stat st;
 	if (stat(base_path, &st) != 0) {
 		if (mkdir(base_path, 0755) != 0) {
-			debug(D_ERROR, "Failed to create base path");
+			debug(D_ERROR, "Failed to create base path '%s'.", base_path);
 			return 0;
 		}
 	}
@@ -78,52 +78,16 @@ int ensure_template(const char *base_path, const char *template_name)
 	char *template_dir = path_concat(base_path, template_name);
 
 	if (access(template_dir, F_OK) == 0) {
-		struct termios oldt, newt;
-		tcgetattr(STDIN_FILENO, &oldt);
-		newt = oldt;
-		newt.c_lflag &= ~(ICANON | ECHO);
-		tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-
-		/* only output once */
-		fprintf(stderr, "Template directory '%s' already exists. Delete it? (Y/y to confirm): ", template_dir);
-		fflush(stderr);
-
-		while (1) {
-			int ch = getchar();
-			/* skip arrow keys */
-			if (ch == 27) {
-				getchar();
-				getchar();
-				continue;
-			}
-			/* skip enter */
-			if (ch == '\n') {
-				continue;
-			}
-			/* echo input + newline */
-			fprintf(stderr, "%c\n", ch);
-			fflush(stderr);
-			/* confirm */
-			if (ch == 'y' || ch == 'Y') {
-				break;
-			}
-			/* cancel */
-			tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-			free(template_dir);
-			return 0;
-		}
-
-		tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-
+		debug(D_NOTICE, "Template directory '%s' already exists. Deleting it.", template_dir);
 		if (unlink_recursive(template_dir) != 0) {
-			debug(D_ERROR, "Error deleting existing template directory: %s\n", template_dir);
+			debug(D_ERROR, "Error deleting existing template directory: %s.", template_dir);
 			free(template_dir);
 			return 0;
 		}
 	}
 
 	if (mkdir(template_dir, 0755) != 0) {
-		debug(D_ERROR, "Error creating template directory: %s\n", template_dir);
+		debug(D_ERROR, "Error creating template directory: %s.", template_dir);
 		free(template_dir);
 		return 0;
 	}
