@@ -75,35 +75,6 @@ int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 	}
 }
 
-int vine_current_transfers_set_failure(struct vine_manager *q, char *id)
-{
-	struct vine_transfer_pair *p = hash_table_lookup(q->current_transfer_table, id);
-
-	int throttled = 0;
-
-	if (!p) {
-		return throttled;
-	}
-
-	struct vine_worker_info *source_worker = p->source_worker;
-	if (source_worker) {
-		throttled++;
-
-		source_worker->xfer_streak_bad_source_counter++;
-		source_worker->xfer_total_bad_source_counter++;
-	}
-
-	struct vine_worker_info *to = p->to;
-	if (to) {
-		throttled++;
-
-		to->xfer_streak_bad_destination_counter++;
-		to->xfer_total_bad_destination_counter++;
-	}
-
-	return throttled;
-}
-
 // count the number transfers coming from a specific remote url (not a worker)
 int vine_current_transfers_url_in_use(struct vine_manager *q, const char *source)
 {
