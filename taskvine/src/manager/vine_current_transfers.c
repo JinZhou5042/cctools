@@ -75,6 +75,7 @@ int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 	}
 }
 
+<<<<<<< HEAD
 void set_throttle(struct vine_manager *m, struct vine_worker_info *w, int is_destination)
 {
 	if (!w) {
@@ -126,8 +127,9 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id)
 
 	int throttled = 0;
 
-	if (!p)
+	if (!p) {
 		return throttled;
+	}
 
 	struct vine_worker_info *source_worker = p->source_worker;
 	if (source_worker) {
@@ -144,9 +146,6 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id)
 		to->xfer_streak_bad_destination_counter++;
 		to->xfer_total_bad_destination_counter++;
 	}
-
-	set_throttle(q, source_worker, 0);
-	set_throttle(q, to, 1);
 
 	return throttled;
 }
