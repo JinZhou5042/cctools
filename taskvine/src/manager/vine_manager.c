@@ -448,7 +448,6 @@ static int handle_cache_invalid(struct vine_manager *q, struct vine_worker_info 
 
 		/* If the third argument was given, also remove the transfer record */
 		if (n >= 3) {
-			vine_current_transfers_set_failure(q, transfer_id);
 			vine_current_transfers_remove(q, transfer_id);
 		} else {
 			/* throttle workers that could transfer a file */
