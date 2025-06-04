@@ -14,8 +14,6 @@ char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info
 
 int vine_current_transfers_remove(struct vine_manager *q, const char *id);
 
-void vine_current_transfers_set_success(struct vine_manager *q, char *id);
-
 int vine_current_transfers_url_in_use(struct vine_manager *q, const char *source);
 
 int vine_current_transfers_wipe_worker(struct vine_manager *q, struct vine_worker_info *w);

@@ -378,7 +378,6 @@ static int handle_cache_update(struct vine_manager *q, struct vine_worker_info *
 		replica->transfer_time = transfer_time;
 		replica->state = VINE_FILE_REPLICA_STATE_READY;
 
-		vine_current_transfers_set_success(q, id);
 		vine_current_transfers_remove(q, id);
 
 		vine_txn_log_write_cache_update(q, w, size, transfer_time, start_time, cachename);
