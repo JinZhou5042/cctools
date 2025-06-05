@@ -899,40 +899,31 @@ static void cleanup_worker_files(struct vine_manager *q, struct vine_worker_info
 		return;
 	}
 
-	/* get the list of cached files before they are removed by worker disconnect */
+	/* collect files that potentially need recovery */
 	char *cached_name = NULL;
-
-	/* remove all files */
-	for (int i = 0; (cached_name = cached_names_copy[i]); i++) {
-		struct vine_file *f = hash_table_lookup(q->file_table, cached_names_copy[i]);
-		assert(cached_name != NULL);
-
-		/* skip if the file was declared, and we successfully remove it */
-		if (f && delete_worker_file(q, w, cached_name, f->cache_level, VINE_CACHE_LEVEL_WORKFLOW)) {
-			continue;
-		}
-
-		/* otherwise, we enforce a deletion of the file replica */
-		struct vine_file_replica *replica = vine_file_replica_table_remove(q, w, cached_name);
-		if (replica) {
-			vine_file_replica_delete(replica);
+	struct vine_file_replica *replica;
+	struct vine_file *f = NULL;
+	struct list *files_to_recover = list_create();
+	HASH_TABLE_ITERATE(w->current_files, cached_name, replica) {
+		f = hash_table_lookup(q->file_table, cached_name);
+		if (f && f->type == VINE_TEMP && f->state == VINE_FILE_STATE_CREATED && replica->state == VINE_FILE_REPLICA_STATE_READY) {
+			list_push_tail(files_to_recover, f);
 		}
 	}
 
-	/* if the workflow has not finished, and the worker dies unexpectedly, we need
-	 * to submit recovery tasks for all temp files if immediate_recovery is enabled */
-	if (!vine_empty(q) && q->immediate_recovery) {
-		for (int i = 0; (cached_name = cached_names_copy[i]); i++) {
-			struct vine_file *f = hash_table_lookup(q->file_table, cached_names_copy[i]);
-			if (f && f->type == VINE_TEMP && f->state == VINE_FILE_STATE_CREATED && vine_file_replica_table_count_ready_replicas(q, f) == 0) {
+	/* handle worker disconnect for the file replicas before we remove the files */
+	vine_file_replica_table_handle_worker_disconnect(q, w);
+
+	/* process any temp files that might need recovery */
+	if (q->immediate_recovery && files_to_recover) {
+		while ((f = list_pop_head(files_to_recover))) {
+			if (vine_file_replica_table_count_ready_replicas(q, f) == 0) {
 				vine_manager_consider_recovery_task(q, f, f->recovery_task);
 			}
 		}
 	}
 
-	hash_table_free_keys_array(cached_names_copy);
-
-	return;
+	list_delete(files_to_recover);
 }
 
 /*
