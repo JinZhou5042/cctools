@@ -449,6 +449,10 @@ int vine_redundancy_handle_file_creation(struct vine_manager *q, struct vine_fil
 	// assert(pending_replicas == 0);
 	// assert(ready_replicas == 1);
 
+	if (ready_replicas > 0) {
+		return 1;
+	}
+
 	/* skip if the redundancy is not enabled */
 	if (q->temp_replica_count <= 1 && q->checkpoint_threshold < 0) {
 		return 0;
