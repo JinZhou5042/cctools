@@ -929,9 +929,10 @@ class Manager(object):
     # @param add_env         Whether to automatically create and/or add environment to the library
     # @param hoisting_modules  A list of modules imported at the preamble of library, including packages, functions and classes.
     # @param exec_mode       Execution mode that the library should use to run function calls. Either 'direct' or 'fork'
+    # @param infile_load_mode  The mode of loading input files, either 'cloudpickle' or 'text'
     # @param library_context_info   A list containing [library_context_func, library_context_args, library_context_kwargs]. Used to create the library context on remote nodes.
     # @returns               A task to be used with @ref ndcctools.taskvine.manager.Manager.install_library.
-    def create_library_from_functions(self, library_name, *function_list, poncho_env=None, init_command=None, add_env=True, hoisting_modules=None, exec_mode='fork', library_context_info=None):
+    def create_library_from_functions(self, library_name, *function_list, poncho_env=None, init_command=None, add_env=True, hoisting_modules=None, exec_mode='fork', infile_load_mode='cloudpickle', library_context_info=None):
         # Delay loading of poncho until here, to avoid bringing in poncho dependencies unless needed.
         # Ensure poncho python library is available.
         from ndcctools.poncho import package_serverize
@@ -952,6 +953,7 @@ class Manager(object):
                                                                init_command=init_command,
                                                                add_env=add_env,
                                                                exec_mode=exec_mode,
+                                                               infile_load_mode=infile_load_mode,
                                                                hoisting_modules=hoisting_modules,
                                                                library_context_info=library_context_info)
 
@@ -1000,6 +1002,7 @@ class Manager(object):
                                                library_name=library_name,
                                                need_pack=need_pack,
                                                exec_mode=exec_mode,
+                                               infile_load_mode=infile_load_mode,
                                                hoisting_modules=hoisting_modules,
                                                library_context_info=library_context_info)
 

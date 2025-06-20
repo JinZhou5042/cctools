@@ -27,6 +27,7 @@ from ndcctools.taskvine.utils import load_variable_from_library
 # into an I/O event.
 r, w = os.pipe()
 exec_method = None
+infile_load_mode = None
 
 
 # This class captures how results from FunctionCalls are conveyed from
@@ -131,7 +132,12 @@ def start_function(in_pipe_fd, thread_limit=1):
 
                 # parameters are represented as infile.
                 with open("infile", "rb") as f:
-                    event = cloudpickle.load(f)
+                    if infile_load_mode == "cloudpickle":
+                        event = cloudpickle.load(f)
+                    elif infile_load_mode == "text":
+                        event = f.read().decode("utf-8")
+                    else:
+                        raise ValueError(f"Invalid infile load mode: {infile_load_mode}, only 'cloudpickle' and 'text' are supported")
 
                 # output of execution should be dumped to outfile.
                 result = globals()[function_name](event)
@@ -162,7 +168,12 @@ def start_function(in_pipe_fd, thread_limit=1):
             try:
                 arg_infile = os.path.join(function_sandbox, "infile")
                 with open(arg_infile, "rb") as f:
-                    event = cloudpickle.load(f)
+                    if infile_load_mode == "cloudpickle":
+                        event = cloudpickle.load(f)
+                    elif infile_load_mode == "text":
+                        event = f.read().decode("utf-8")
+                    else:
+                        raise ValueError(f"Invalid infile load mode: {infile_load_mode}, only 'cloudpickle' and 'text' are supported")
             except Exception:
                 stdout_timed_message(f"TASK {function_id} error: can't load the arguments from {arg_infile}")
                 return
@@ -382,11 +393,16 @@ def main():
     global exec_method
     exec_method = library_info['exec_mode']
 
+    # set infile load mode of functions in this library
+    global infile_load_mode
+    infile_load_mode = library_info['infile_load_mode']
+
     # send configuration of library, just its name for now
     config = {
         "name": library_info['library_name'],
         "taskid": args.task_id,
         "exec_mode": exec_method,
+        "infile_load_mode": infile_load_mode,
     }
     send_configuration(config, out_pipe_fd, args.worker_pid)
 
