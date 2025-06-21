@@ -52,8 +52,14 @@ class LibraryResponse:
 # A wrapper around functions in library to extract arguments and formulate responses.
 def remote_execute(func):
     def remote_wrapper(event):
-        args = event.get("fn_args", [])
-        kwargs = event.get("fn_kwargs", {})
+        if infile_load_mode == "cloudpickle":
+            args = event.get("fn_args", [])
+            kwargs = event.get("fn_kwargs", {})
+        elif infile_load_mode == "text":
+            args = [event]
+            kwargs = {}
+        else:
+            raise ValueError(f"Invalid infile load mode: {infile_load_mode}, only 'cloudpickle' and 'text' are supported")
 
         # in case of FutureFunctionCall tasks
         new_args = []
@@ -157,7 +163,7 @@ def start_function(in_pipe_fd, thread_limit=1):
 
             except Exception as e:
                 stdout_timed_message(
-                    f"Library code: Function call failed due to {e}",
+                    f"Library code: Function call failed due to {traceback.format_exc()}",
                     file=sys.stderr,
                 )
                 sys.exit(1)
@@ -175,8 +181,8 @@ def start_function(in_pipe_fd, thread_limit=1):
                     else:
                         raise ValueError(f"Invalid infile load mode: {infile_load_mode}, only 'cloudpickle' and 'text' are supported")
             except Exception:
-                stdout_timed_message(f"TASK {function_id} error: can't load the arguments from {arg_infile}")
-                return
+                stdout_timed_message(f"TASK {function_id} error: can't load the arguments from {arg_infile} due to {traceback.format_exc()}")
+                return -1, function_id
             p = os.fork()
             if p == 0:
                 try:
@@ -188,7 +194,7 @@ def start_function(in_pipe_fd, thread_limit=1):
                     try:
                         exit_status = 1
                     except Exception:
-                        stdout_timed_message(f"TASK {function_id} error: can't load the arguments from infile")
+                        stdout_timed_message(f"TASK {function_id} error: can't load the arguments from infile due to {traceback.format_exc()}")
                         exit_status = 2
                         raise
 
@@ -202,14 +208,14 @@ def start_function(in_pipe_fd, thread_limit=1):
 
                         # only redirect the stdout of a specific FunctionCall task into its own stdout fd,
                         # otherwise use the library's stdout
-                        os.dup2(function_stdout_fd, sys.stdout.fileno())
-                        os.dup2(function_stdout_fd, sys.stderr.fileno())
+                        # os.dup2(function_stdout_fd, sys.stdout.fileno())
+                        # os.dup2(function_stdout_fd, sys.stderr.fileno())
                         result = globals()[function_name](event)
 
                         # restore to the library's stdout fd on completion
                         os.dup2(library_fd, sys.stdout.fileno())
                     except Exception:
-                        stdout_timed_message(f"TASK {function_id} error: can't execute this function")
+                        stdout_timed_message(f"TASK {function_id} error: can't execute this function due to {traceback.format_exc()}")
                         exit_status = 3
                         raise
                     finally:
@@ -220,9 +226,9 @@ def start_function(in_pipe_fd, thread_limit=1):
                         with open("outfile", "wb") as f:
                             cloudpickle.dump(result, f)
                     except Exception:
-                        stdout_timed_message(f"TASK {function_id} error: can't load the result from outfile")
+                        stdout_timed_message(f"TASK {function_id} error: can't load the result from outfile due to {traceback.format_exc()}")
                         exit_status = 4
-                        if os.path.exits("outfile"):
+                        if os.path.exists("outfile"):
                             os.remove("outfile")
                         raise
 
@@ -230,7 +236,7 @@ def start_function(in_pipe_fd, thread_limit=1):
                         if not result["Success"]:
                             exit_status = 5
                     except Exception:
-                        stdout_timed_message(f"TASK {function_id} error: the result is invalid")
+                        stdout_timed_message(f"TASK {function_id} error: the result is invalid due to {traceback.format_exc()}")
                         exit_status = 5
                         raise
 
@@ -238,19 +244,16 @@ def start_function(in_pipe_fd, thread_limit=1):
                     stdout_timed_message(f"TASK {function_id} finished successfully")
                     exit_status = 0
                 except Exception as e:
-                    stdout_timed_message(f"TASK {function_id} error: execution failed due to {e}")
+                    stdout_timed_message(f"TASK {function_id} error: execution failed due to {traceback.format_exc()}")
                 finally:
                     os._exit(exit_status)
             elif p < 0:
-                stdout_timed_message(f"TASK {function_id} error: unable to fork to execute {function_name}")
-                return -1
+                stdout_timed_message(f"TASK {function_id} error: unable to fork to execute {function_name} due to {traceback.format_exc()}")
+                return -1, function_id
 
             # return pid and function id of child process to parent.
             else:
                 return p, function_id
-
-    return -1
-
 
 # Send result of a function execution to worker. Wake worker up to do work with SIGCHLD.
 def send_result(out_pipe_fd, worker_pid, task_id, exit_code):

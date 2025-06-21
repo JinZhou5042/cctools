@@ -13,6 +13,7 @@ This module is private to the manager and should not be invoked by the end user.
 */
 
 #include "taskvine.h"
+#include "vine_task_graph.h"
 #include <limits.h>
 
 /*
@@ -109,6 +110,7 @@ struct vine_manager {
 	struct list   *task_info_list;  /* List of last N vine_task_infos for computing capacity. */
 	struct hash_table *categories;  /* Maps category_name -> struct category */
 	struct hash_table *library_templates; /* Maps library name -> vine_task of library with that name. */
+	struct vine_task_graph *task_graph;  /* Graph of tasks and their dependencies. */
 
 	/* Primary data structures for tracking worker state. */
 
