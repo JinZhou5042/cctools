@@ -4126,7 +4126,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->tasks = itable_create(0);
 	q->library_templates = hash_table_create(0, 0);
-	
+
 	q->task_graph = vine_task_graph_create(q);
 
 	q->worker_table = hash_table_create(0, 0);

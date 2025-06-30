@@ -10,10 +10,8 @@ struct vine_task_node {
     char *node_key;          // Unique node key identifier in the graph
     struct vine_task *task;
     int depth;              // Depth of the node in the graph (0 for root nodes)
-    struct hash_table *dependencies;  // Table of node keys this node depends on
-    struct hash_table *dependents;    // Table of node keys that depend on this node
-    int num_pending_dependencies;  // Number of dependencies not yet completed
-    int num_pending_dependents;    // Number of dependents not yet completed
+    struct hash_table *parents;  // Table of node keys this node depends on
+    struct hash_table *children;    // Table of node keys that depend on this node
     int completed;                 // Whether this node has been computed
     
     char *outfile_remote_name;   // Output filename for this node
@@ -31,7 +29,6 @@ struct vine_task_graph {
 struct vine_task_graph *vine_task_graph_create(struct vine_manager *m);
 void vine_task_graph_delete(struct vine_manager *m);
 struct vine_task_node *vine_task_graph_get_node_by_outfile_cachename(struct vine_manager *m, const char *cachename);
-int vine_task_graph_is_file_prunable(struct vine_manager *m, struct vine_file *f);
 struct vine_task_node *vine_task_graph_get_node_by_task_id(struct vine_manager *m, int task_id);
 void vine_task_graph_prune_when_task_done(struct vine_manager *m, struct vine_task *t);
 

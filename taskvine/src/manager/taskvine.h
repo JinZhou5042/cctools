@@ -1552,8 +1552,7 @@ char *vine_get_path_library_log(struct vine_manager *m, const char *path);
 char *vine_get_path_cache(struct vine_manager *m, const char *path);
 
 void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *function_name);
-int vine_task_graph_add_dependency(struct vine_manager *m, const char *dependent_key, const char *dependency_key);
-void vine_task_graph_remove_node(struct vine_manager *m, const char *node_key);
+void vine_task_graph_add_dependency(struct vine_manager *m, const char *child_key, const char *parent_key);
 int vine_task_graph_execute(struct vine_manager *m);
 void vine_task_graph_set_node_outfile_remote_name(struct vine_manager *m, const char *node_key, const char *outfile_remote_name);
 

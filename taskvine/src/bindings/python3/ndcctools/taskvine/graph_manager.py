@@ -228,16 +228,30 @@ class TaskGraph:
             if any(c not in group_set for c in self.children_of[k])
         }
 
-    def get_group_input_paths(self, group_keys):
-        return {
-            k: self.outfile_remote_name[k]
-            for k in self.get_input_keys_of_group(group_keys)
+    def external_input_keys_to_paths(self, group_keys):
+        group_keys = set(group_keys)
+        external_input_keys = {
+            parent
+            for key in group_keys
+            for parent in self.parents_of[key]
+            if parent not in group_keys
         }
 
-    def get_group_output_paths(self, group_keys):
         return {
-            k: self.outfile_remote_name[k]
-            for k in self.get_output_keys_of_group(group_keys)
+            key: self.outfile_remote_name[key]
+            for key in external_input_keys
+        }
+    
+    def external_output_keys_to_paths(self, group_keys):
+        group_keys = set(group_keys)
+        external_output_keys = {
+            k for k in group_keys
+            if any(c not in group_keys for c in self.children_of[k])
+        }
+
+        return {
+            key: self.outfile_remote_name[key]
+            for key in external_output_keys
         }
 
     def get_sexpr_of_group(self, group_keys):
@@ -255,11 +269,9 @@ def compute_group_keys(key):
     keys = [key]
     task_graph = load_variable_from_library('task_graph')
 
-    input_paths = task_graph.get_group_input_paths(keys)
-    output_paths = task_graph.get_group_output_paths(keys)
     values = {}
 
-    for k, path in input_paths.items():
+    for k, path in task_graph.external_input_keys_to_paths(keys).items():
         try:
             with open(path, 'rb') as f:
                 values[k] = cloudpickle.load(f)
@@ -283,7 +295,7 @@ def compute_group_keys(key):
         result = rec_call(task_graph.task_dict[k])
         values[k] = result
 
-    for k, path in output_paths.items():
+    for k, path in task_graph.external_output_keys_to_paths(keys).items():
         with open(path, 'wb') as f:
             cloudpickle.dump(values[k], f)
 
