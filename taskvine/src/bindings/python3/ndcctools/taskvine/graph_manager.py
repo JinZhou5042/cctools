@@ -1,12 +1,15 @@
 from ndcctools.taskvine import cvine
 from ndcctools.taskvine.manager import Manager
 from ndcctools.taskvine.utils import load_variable_from_library
+from ndcctools.taskvine.utils import delete_all_files
 
 import cloudpickle
 import os
 import collections
 import dask
 import types
+import sys
+import shutil
 import hashlib
 import uuid
 
@@ -305,12 +308,20 @@ def compute_group_keys(key):
 class GraphManager(Manager):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        # delete all files in the run info template directory
+        self.run_info_path = kwargs.get('run_info_path')
+        self.run_info_template = kwargs.get('run_info_template')
+        if self.run_info_path and self.run_info_template:
+            delete_all_files(os.path.join(self.run_info_path, self.run_info_template))
+
+        # tune the manager for vine graph optimization
         self.tune("worker-source-max-transfers", 1000)
         self.tune("max-retrievals", -1)
         self.tune("prefer-dispatch", 1)
         self.tune("transient-error-interval", 1)
         self.tune("attempt-schedule-depth", 1000)
-        
+
         self._library_name = "task-graph-library"
         self._node_compute_function_name = "compute_group_keys"
 

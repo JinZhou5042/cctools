@@ -315,8 +315,8 @@ int vine_task_graph_execute(struct vine_manager *m)
 	int num_completed_tasks = 0;
 	timestamp_t start_time = timestamp_get();
 
-	ProgressBar bar;
-	
+	struct ProgressBar *pbar = progress_bar_init("Executing", num_all_tasks, 1);
+
 	while (num_completed_tasks < num_all_tasks) {
 		if (interrupted) {
 			break;
@@ -326,12 +326,7 @@ int vine_task_graph_execute(struct vine_manager *m)
 		if (task) {
 			struct vine_task_node *node = itable_lookup(m->task_graph->task_id_to_node, task->task_id);
 			num_completed_tasks++;
-
-			if (num_completed_tasks % 200 == 0) {
-				timestamp_t end_time = timestamp_get();
-				double duration = (end_time - start_time) / 1e6;
-				printf("completed task count: %d, total time: %fs\n", num_completed_tasks, duration);
-			}
+			progress_bar_update(pbar, 1);
 
 			/* find the children nodes of this node to see if they are ready to run */
 			char *child_key;
