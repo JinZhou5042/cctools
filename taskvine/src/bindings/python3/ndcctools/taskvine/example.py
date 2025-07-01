@@ -25,9 +25,7 @@ def main():
         run_info_path="/users/jzhou24/afs/taskvine-report-tool/logs",
         run_info_template="graph-test-3",
     )
-    # m.tune("watch-library-logfiles", 1)
-    m.init_vine_graph(task_dict, expand_dsk=args.expand_dsk)
-    m.execute(libcores=args.libcores)
+    m.execute(task_dict, expand_dsk=args.expand_dsk, libcores=args.libcores)
 
 if __name__ == "__main__":
     main()

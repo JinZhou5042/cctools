@@ -341,7 +341,7 @@ class GraphManager(Manager):
         self.libtask.set_function_slots(libcores)
         self.install_library(self.libtask)
 
-    def init_vine_graph(self, task_dict, expand_dsk=False, debug=False):
+    def _create_vine_graph(self, task_dict, expand_dsk=False, debug=False):
         # create task graph in the python side
         task_graph = TaskGraph(task_dict, expand_dsk=expand_dsk, debug=debug)
         with open("task_graph.pkl", 'wb') as f:
@@ -359,6 +359,12 @@ class GraphManager(Manager):
         # finalize the task graph in the C side, building dependencies, creating tasks, etc.
         cvine.vine_task_graph_finalize(self._taskvine, self._library_name, self._node_compute_function_name)
 
-    def execute(self, libcores=1, hoisting_modules=[]):
+    def execute(self, task_dict, expand_dsk=False, libcores=1, hoisting_modules=[]):
+        # initialize the vine graph in the C side
+        self._create_vine_graph(task_dict, expand_dsk=expand_dsk)
+
+        # create library task with specified resources
         self._create_library_task(libcores, hoisting_modules)
+
+        # now execute the vine graph
         cvine.vine_task_graph_execute(self._taskvine)
