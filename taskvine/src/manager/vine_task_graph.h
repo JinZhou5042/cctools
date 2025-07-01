@@ -28,8 +28,6 @@ struct vine_task_graph {
 
 struct vine_task_graph *vine_task_graph_create(struct vine_manager *m);
 void vine_task_graph_delete(struct vine_manager *m);
-struct vine_task_node *vine_task_graph_get_node_by_outfile_cachename(struct vine_manager *m, const char *cachename);
-struct vine_task_node *vine_task_graph_get_node_by_task_id(struct vine_manager *m, int task_id);
-void vine_task_graph_prune_when_task_done(struct vine_manager *m, struct vine_task *t);
+void vine_task_graph_handle_task_done(struct vine_manager *m, struct vine_task *t);
 
 #endif // VINE_TASK_GRAPH_H

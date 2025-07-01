@@ -4750,7 +4750,7 @@ static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_t
 		if (t->has_fixed_locations) {
 			q->fixed_location_in_queue--;
 		}
-		vine_task_graph_prune_when_task_done(q, t);
+		vine_task_graph_handle_task_done(q, t);
 		vine_taskgraph_log_write_task(q, t);
 		itable_remove(q->tasks, t->task_id);
 		vine_task_delete(t);

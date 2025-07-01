@@ -23,7 +23,7 @@ def main():
         9124,
         name="graph-optimization",
         run_info_path="/users/jzhou24/afs/taskvine-report-tool/logs",
-        run_info_template="graph-test-1",
+        run_info_template="graph-test-3",
     )
     # m.tune("watch-library-logfiles", 1)
     m.init_vine_graph(task_dict, expand_dsk=args.expand_dsk)

@@ -270,22 +270,6 @@ int is_file_expired(struct vine_manager *m, struct vine_file *f)
 	return 1;
 }
 
-struct vine_task_node *vine_task_graph_get_node_by_outfile_cachename(struct vine_manager *m, const char *cachename)
-{
-	if (!m->task_graph || !cachename) {
-		return NULL;
-	}
-	return hash_table_lookup(m->task_graph->outfile_cachename_to_node, cachename);
-}
-
-struct vine_task_node *vine_task_graph_get_node_by_task_id(struct vine_manager *m, int task_id)
-{
-	if (!m->task_graph || task_id < 0) {
-		return NULL;
-	}
-	return itable_lookup(m->task_graph->task_id_to_node, task_id);
-}
-
 int vine_task_graph_execute(struct vine_manager *m)
 {
 	if (!m || !m->task_graph)
@@ -413,13 +397,13 @@ void vine_task_graph_add_dependency(struct vine_manager *m, const char *child_ke
 	debug(D_VINE, "added dependency: %s -> %s", parent_key, child_key);
 }
 
-void vine_task_graph_prune_when_task_done(struct vine_manager *m, struct vine_task *t)
+void vine_task_graph_handle_task_done(struct vine_manager *m, struct vine_task *t)
 {
-	if (!m->task_graph || !t) {
+	if (!m || !m->task_graph || !t || t->state != VINE_TASK_DONE) {
 		return;
 	}
 
-	struct vine_task_node *node = vine_task_graph_get_node_by_task_id(m, t->task_id);
+	struct vine_task_node *node = itable_lookup(m->task_graph->task_id_to_node, t->task_id);
 	if (!node) {
 		return;
 	}
