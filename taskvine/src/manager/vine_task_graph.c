@@ -5,12 +5,14 @@
 #include <string.h>
 #include "debug.h"
 #include "stringtools.h"
+#include <unistd.h>
 #include "xxmalloc.h"
 #include "hash_table.h"
 #include "list.h"
 #include "vine_task.h"
 #include "timestamp.h"
 #include "vine_mount.h"
+#include "progress_bar.h"
 #include "random.h"
 #include "assert.h"
 #include <signal.h>
@@ -272,8 +274,9 @@ int is_file_expired(struct vine_manager *m, struct vine_file *f)
 
 int vine_task_graph_execute(struct vine_manager *m)
 {
-	if (!m || !m->task_graph)
+	if (!m || !m->task_graph) {
 		return -1;
+	}
 
 	// Enable debug system for C code since it uses a separate debug system instance
 	// from the Python bindings. Use the same function that the manager uses.
@@ -312,6 +315,8 @@ int vine_task_graph_execute(struct vine_manager *m)
 	int num_completed_tasks = 0;
 	timestamp_t start_time = timestamp_get();
 
+	ProgressBar bar;
+	
 	while (num_completed_tasks < num_all_tasks) {
 		if (interrupted) {
 			break;
