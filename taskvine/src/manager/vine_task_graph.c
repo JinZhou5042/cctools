@@ -272,10 +272,10 @@ int is_file_expired(struct vine_manager *m, struct vine_file *f)
 	return 1;
 }
 
-int vine_task_graph_execute(struct vine_manager *m)
+void vine_task_graph_execute(struct vine_manager *m)
 {
 	if (!m || !m->task_graph) {
-		return -1;
+		return;
 	}
 
 	// Enable debug system for C code since it uses a separate debug system instance
@@ -313,9 +313,8 @@ int vine_task_graph_execute(struct vine_manager *m)
 
 	int num_all_tasks = hash_table_size(m->task_graph->nodes);
 	int num_completed_tasks = 0;
-	timestamp_t start_time = timestamp_get();
 
-	struct ProgressBar *pbar = progress_bar_init("Executing", num_all_tasks, 1);
+	struct ProgressBar *pbar = progress_bar_init("Executing Task Graph", num_all_tasks, 1);
 
 	while (num_completed_tasks < num_all_tasks) {
 		if (interrupted) {
@@ -361,9 +360,12 @@ int vine_task_graph_execute(struct vine_manager *m)
 		}
 	}
 
+	progress_bar_finish(pbar);
+
 	hash_table_delete(pending_parents);
 	hash_table_delete(pending_children);
-	return 0;
+
+	return;
 }
 
 void vine_task_graph_add_dependency(struct vine_manager *m, const char *child_key, const char *parent_key)
