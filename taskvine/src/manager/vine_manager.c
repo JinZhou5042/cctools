@@ -4127,7 +4127,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->tasks = itable_create(0);
 	q->library_templates = hash_table_create(0, 0);
 
-	q->task_graph = vine_task_graph_create(q);
+	q->task_graph = vine_task_graph_create();
 
 	q->worker_table = hash_table_create(0, 0);
 	q->file_worker_table = hash_table_create(0, 0);
@@ -4504,7 +4504,7 @@ void vine_delete(struct vine_manager *q)
 	hash_table_clear(q->library_templates, (void *)vine_task_delete);
 	hash_table_delete(q->library_templates);
 
-	vine_task_graph_delete(q);
+	vine_task_graph_delete(q->task_graph);
 
 	/* delete files after deleting tasks so that rc are correctly updated. */
 	hash_table_clear(q->file_table, (void *)vine_file_delete);
@@ -4750,7 +4750,7 @@ static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_t
 		if (t->has_fixed_locations) {
 			q->fixed_location_in_queue--;
 		}
-		vine_task_graph_handle_task_done(q, t);
+		// vine_task_graph_handle_task_done(q, t);
 		vine_taskgraph_log_write_task(q, t);
 		itable_remove(q->tasks, t->task_id);
 		vine_task_delete(t);

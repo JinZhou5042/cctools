@@ -307,13 +307,13 @@ def compute_group_keys(key):
 
 class GraphManager(Manager):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        # delete all files in the run info template directory
+        # delete all files in the run info template directory, do this before super().__init__()
         self.run_info_path = kwargs.get('run_info_path')
         self.run_info_template = kwargs.get('run_info_template')
         if self.run_info_path and self.run_info_template:
             delete_all_files(os.path.join(self.run_info_path, self.run_info_template))
+
+        super().__init__(*args, **kwargs)
 
         # tune the manager for vine graph optimization
         self.tune("worker-source-max-transfers", 1000)
@@ -359,7 +359,7 @@ class GraphManager(Manager):
         # finalize the task graph in the C side, building dependencies, creating tasks, etc.
         cvine.vine_task_graph_finalize(self._taskvine, self._library_name, self._node_compute_function_name)
 
-    def execute(self, task_dict, expand_dsk=False, libcores=1, hoisting_modules=[]):
+    def execute(self, task_dict, expand_dsk=False, libcores=1, hoisting_modules=[], prune_depth=0):
         # initialize the vine graph in the C side
         self._create_vine_graph(task_dict, expand_dsk=expand_dsk)
 
@@ -367,4 +367,4 @@ class GraphManager(Manager):
         self._create_library_task(libcores, hoisting_modules)
 
         # now execute the vine graph
-        cvine.vine_task_graph_execute(self._taskvine)
+        cvine.vine_task_graph_execute(self._taskvine, prune_depth)

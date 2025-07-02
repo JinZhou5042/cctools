@@ -3,11 +3,12 @@
 #include "vine_manager.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include "debug.h"
 #include "stringtools.h"
-#include <unistd.h>
 #include "xxmalloc.h"
 #include "hash_table.h"
+#include "itable.h"
 #include "list.h"
 #include "vine_task.h"
 #include "timestamp.h"
@@ -20,6 +21,8 @@
 #include <unistd.h>
 #include <stdatomic.h>
 
+static void initialize_prune_depth_mappings(struct vine_task_graph *graph, int prune_depth);
+
 static volatile sig_atomic_t interrupted = 0;
 
 static void handle_sigint(int signal)
@@ -27,24 +30,25 @@ static void handle_sigint(int signal)
 	interrupted = 1;
 }
 
-struct vine_task_graph *vine_task_graph_create(struct vine_manager *m)
+struct vine_task_graph *vine_task_graph_create()
 {
 	struct vine_task_graph *graph = xxmalloc(sizeof(struct vine_task_graph));
 	graph->nodes = hash_table_create(0, 0);
 	graph->task_id_to_node = itable_create(0);
 	graph->outfile_cachename_to_node = hash_table_create(0, 0);
+	graph->prune_depth = 0;
 	return graph;
 }
 
-void vine_task_graph_delete(struct vine_manager *m)
+void vine_task_graph_delete(struct vine_task_graph *tg)
 {
-	if (!m->task_graph) {
+	if (!tg) {
 		return;
 	}
 
 	char *node_key;
 	struct vine_task_node *node;
-	HASH_TABLE_ITERATE(m->task_graph->nodes, node_key, node)
+	HASH_TABLE_ITERATE(tg->nodes, node_key, node)
 	{
 		if (node->node_key) {
 			free(node->node_key);
@@ -54,14 +58,14 @@ void vine_task_graph_delete(struct vine_manager *m)
 		}
 		hash_table_delete(node->parents);
 		hash_table_delete(node->children);
+		hash_table_delete(node->reverse_prune_waiters);
 		free(node);
 	}
 
-	hash_table_delete(m->task_graph->nodes);
-	itable_delete(m->task_graph->task_id_to_node);
-	hash_table_delete(m->task_graph->outfile_cachename_to_node);
-	free(m->task_graph);
-	m->task_graph = NULL;
+	hash_table_delete(tg->nodes);
+	itable_delete(tg->task_id_to_node);
+	hash_table_delete(tg->outfile_cachename_to_node);
+	free(tg);
 }
 
 static struct vine_task_node *create_node(struct vine_manager *m, const char *node_key)
@@ -84,6 +88,9 @@ static struct vine_task_node *create_node(struct vine_manager *m, const char *no
 	node->parents = hash_table_create(0, 0);
 	node->children = hash_table_create(0, 0);
 	node->completed = 0;
+	node->prune_depth = 0;
+	node->prune_blocking_children_remaining = 0;
+	node->reverse_prune_waiters = hash_table_create(0, 0);
 	hash_table_insert(m->task_graph->nodes, node_key, node);
 	return node;
 }
@@ -168,7 +175,7 @@ static struct list *get_topological_order(struct vine_task_graph *graph)
 
 void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *function_name)
 {
-	if (!m->task_graph || !m) {
+	if (!m || !m->task_graph) {
 		return;
 	}
 
@@ -208,13 +215,9 @@ void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *
 		/* create infile for this task, which is the node key */
 		char *infile_content = string_format("%s", current_node->node_key);
 		current_node->infile = vine_declare_buffer(m, infile_content, strlen(infile_content), VINE_CACHE_LEVEL_TASK, VINE_UNLINK_WHEN_DONE);
-		if (!current_node->infile) {
-			debug(D_ERROR, "%s: failed to create infile for node %s", __func__, node_key);
-		}
+		free(infile_content);
+
 		vine_task_add_input(current_node->task, current_node->infile, "infile", VINE_TRANSFER_ALWAYS);
-		if (!current_node->infile) {
-			debug(D_ERROR, "%s: failed to add infile for node %s", __func__, node_key);
-		}
 
 		/* create output file for this task */
 		current_node->outfile = vine_declare_temp(m);
@@ -226,16 +229,14 @@ void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *
 		struct vine_task_node *parent_node;
 		HASH_TABLE_ITERATE(current_node->parents, parent_key, parent_node)
 		{
-			if (!parent_node->outfile) {
-				debug(D_ERROR, "%s: failed to add output file for node %s", __func__, node_key);
-			}
 			vine_task_add_input(current_node->task, parent_node->outfile, parent_node->outfile_remote_name, VINE_TRANSFER_ALWAYS);
-			if (!current_node->infile) {
-				debug(D_ERROR, "%s: failed to add infile for node %s", __func__, node_key);
-			}
 		}
 	}
 
+	char *node_key_to_free;
+	while ((node_key_to_free = list_pop_head(topo_order))) {
+		free(node_key_to_free);
+	}
 	list_delete(topo_order);
 
 	return;
@@ -272,11 +273,14 @@ int is_file_expired(struct vine_manager *m, struct vine_file *f)
 	return 1;
 }
 
-void vine_task_graph_execute(struct vine_manager *m)
+void vine_task_graph_execute(struct vine_manager *m, int prune_depth)
 {
 	if (!m || !m->task_graph) {
 		return;
 	}
+
+	printf("prune_depth: %d\n", prune_depth);
+	m->task_graph->prune_depth = prune_depth;
 
 	// Enable debug system for C code since it uses a separate debug system instance
 	// from the Python bindings. Use the same function that the manager uses.
@@ -289,12 +293,16 @@ void vine_task_graph_execute(struct vine_manager *m)
 	struct hash_table *pending_parents = hash_table_create(0, 0);
 	struct hash_table *pending_children = hash_table_create(0, 0);
 
+	/* Initialize prune depth mappings if needed */
+	initialize_prune_depth_mappings(m->task_graph, m->task_graph->prune_depth);
+
 	char *node_key;
 	struct vine_task_node *node;
 	HASH_TABLE_ITERATE(m->task_graph->nodes, node_key, node)
 	{
 		int parents_count = hash_table_size(node->parents);
 		int children_count = hash_table_size(node->children);
+		node->prune_depth = prune_depth;
 		hash_table_insert(pending_parents, node_key, (void *)(intptr_t)parents_count);
 		hash_table_insert(pending_children, node_key, (void *)(intptr_t)children_count);
 	}
@@ -324,6 +332,7 @@ void vine_task_graph_execute(struct vine_manager *m)
 		struct vine_task *task = vine_wait(m, 5);
 		if (task) {
 			struct vine_task_node *node = itable_lookup(m->task_graph->task_id_to_node, task->task_id);
+			node->completed = 1;  /* Mark node as completed */
 			num_completed_tasks++;
 			progress_bar_update(pbar, 1);
 
@@ -342,18 +351,34 @@ void vine_task_graph_execute(struct vine_manager *m)
 				}
 			}
 
-			/* prune stale files */
-			char *parent_key;
-			struct vine_task_node *parent_node;
-			HASH_TABLE_ITERATE(node->parents, parent_key, parent_node)
+			/* prune stale files based on per-node prune_depth settings */
+			char *waiter_key;
+			struct vine_task_node *waiter_node;
+			HASH_TABLE_ITERATE(node->reverse_prune_waiters, waiter_key, waiter_node)
 			{
-				intptr_t pending_children_count = (intptr_t)hash_table_lookup(pending_children, parent_key);
-				pending_children_count--;
-				hash_table_remove(pending_children, parent_key);
-				hash_table_insert(pending_children, parent_key, (void *)pending_children_count);
-				if (pending_children_count == 0) {
-					if (is_file_expired(m, parent_node->outfile)) {
-						vine_prune_file(m, parent_node->outfile);
+				waiter_node->prune_blocking_children_remaining--;
+				if (waiter_node->prune_blocking_children_remaining == 0) {
+					if (is_file_expired(m, waiter_node->outfile)) {
+						vine_prune_file(m, waiter_node->outfile);
+						debug(D_VINE, "Pruned file for node %s (prune_depth=%d)", waiter_key, waiter_node->prune_depth);
+					}
+				}
+			}
+			
+			/* Legacy prune logic for nodes with prune_depth = 0 (immediate parent pruning) */
+			if (prune_depth == 0) {
+				char *parent_key;
+				struct vine_task_node *parent_node;
+				HASH_TABLE_ITERATE(node->parents, parent_key, parent_node)
+				{
+					intptr_t pending_children_count = (intptr_t)hash_table_lookup(pending_children, parent_key);
+					pending_children_count--;
+					hash_table_remove(pending_children, parent_key);
+					hash_table_insert(pending_children, parent_key, (void *)pending_children_count);
+					if (pending_children_count == 0) {
+						if (is_file_expired(m, parent_node->outfile)) {
+							vine_prune_file(m, parent_node->outfile);
+						}
 					}
 				}
 			}
@@ -388,15 +413,83 @@ void vine_task_graph_add_dependency(struct vine_manager *m, const char *child_ke
 	if (hash_table_lookup(child_node->parents, parent_key)) {
 		return;
 	}
-
-	if (!hash_table_lookup(child_node->parents, parent_key)) {
-		hash_table_insert(child_node->parents, parent_key, parent_node);
-	}
-	if (!hash_table_lookup(parent_node->children, child_key)) {
-		hash_table_insert(parent_node->children, child_key, child_node);
-	}
-
+	hash_table_insert(child_node->parents, parent_key, parent_node);
+	hash_table_insert(parent_node->children, child_key, child_node);
 	debug(D_VINE, "added dependency: %s -> %s", parent_key, child_key);
+}
+
+static void initialize_prune_depth_mappings(struct vine_task_graph *graph, int global_prune_depth)
+{
+	struct hash_table *visited = hash_table_create(0, 0);
+	struct list *bfs_nodes = list_create();
+	
+	char *node_key;
+	struct vine_task_node *node;
+	
+	/* For each node P, calculate what downstream nodes it needs to wait for based on P's prune_depth */
+	HASH_TABLE_ITERATE(graph->nodes, node_key, node)
+	{
+		/* Use global_prune_depth as default if node doesn't have its own setting */
+		if (node->prune_depth == 0 && global_prune_depth > 0) {
+			node->prune_depth = global_prune_depth;
+		}
+		
+		/* Skip nodes that don't want pruning */
+		if (node->prune_depth <= 0) {
+			continue;
+		}
+		
+		/* Reset for this node */
+		hash_table_clear(visited, NULL);
+		node->prune_blocking_children_remaining = 0;
+		
+		/* Start BFS from current node's direct children */
+		char *child_key;
+		struct vine_task_node *child_node;
+		HASH_TABLE_ITERATE(node->children, child_key, child_node)
+		{
+			if (!hash_table_lookup(visited, child_key)) {
+				hash_table_insert(visited, child_key, (void*)1);
+				list_push_tail(bfs_nodes, child_node);
+				node->prune_blocking_children_remaining++;
+				
+				/* Add this node P to child's reverse_prune_waiters */
+				hash_table_insert(child_node->reverse_prune_waiters, node_key, node);
+			}
+		}
+		
+		/* BFS to expand to deeper levels within prune_depth */
+		int current_depth = 1;
+		while (list_size(bfs_nodes) > 0 && current_depth < node->prune_depth) {
+			int level_size = list_size(bfs_nodes);
+			
+			for (int i = 0; i < level_size; i++) {
+				struct vine_task_node *current_node = list_pop_head(bfs_nodes);
+				
+				/* Add current_node's children to next level */
+				HASH_TABLE_ITERATE(current_node->children, child_key, child_node)
+				{
+					if (!hash_table_lookup(visited, child_key)) {
+						hash_table_insert(visited, child_key, (void*)(intptr_t)(current_depth + 1));
+						list_push_tail(bfs_nodes, child_node);
+						node->prune_blocking_children_remaining++;
+						
+						/* Add this node P to child's reverse_prune_waiters */
+						hash_table_insert(child_node->reverse_prune_waiters, node_key, node);
+					}
+				}
+			}
+			current_depth++;
+		}
+		
+		/* Clear remaining nodes in bfs_nodes for next iteration */
+		while (list_size(bfs_nodes) > 0) {
+			list_pop_head(bfs_nodes);
+		}
+	}
+	
+	hash_table_delete(visited);
+	list_delete(bfs_nodes);
 }
 
 void vine_task_graph_handle_task_done(struct vine_manager *m, struct vine_task *t)
