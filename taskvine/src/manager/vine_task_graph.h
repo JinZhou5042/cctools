@@ -5,6 +5,8 @@
 #include "hash_table.h"
 #include "vine_manager.h"
 
+
+
 // Node structure for the graph
 struct vine_task_node {
     char *node_key;          // Unique node key identifier in the graph
@@ -27,11 +29,14 @@ struct vine_task_graph {
     struct hash_table *nodes;    // Table of nodes indexed by node_key
     struct itable *task_id_to_node; // Table of task ids indexed by node_key
     struct hash_table *outfile_cachename_to_node;
-    int prune_depth;             // Depth for pruning control (0 = no pruning, 1+ = prune up to depth)
+    int prune_algorithm;         // Algorithm used for pruning (vine_task_graph_prune_algorithm_t)
+    int static_prune_depth;      // Prune depth for STATIC algorithm
 };
 
 struct vine_task_graph *vine_task_graph_create();
 void vine_task_graph_delete(struct vine_task_graph *tg);
 void vine_task_graph_handle_task_done(struct vine_manager *m, struct vine_task *t);
+
+
 
 #endif // VINE_TASK_GRAPH_H

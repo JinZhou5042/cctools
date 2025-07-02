@@ -140,6 +140,17 @@ typedef enum {
 	VINE_ALLOCATION_MODE_EXHAUSTIVE_BUCKETING = CATEGORY_ALLOCATION_MODE_EXHAUSTIVE_BUCKETING
 } vine_category_mode_t;
 
+/** Select pruning algorithm for task graph file pruning. */
+typedef enum {
+	VINE_PRUNE_NO_PRUNE = 0,  /**< No pruning, all nodes keep prune_depth = 0 */
+	VINE_PRUNE_STATIC,        /**< All nodes share a static prune_depth value */
+	/* Future algorithms can be added here:
+	VINE_PRUNE_ADAPTIVE,      / ** Adaptive pruning based on memory usage * /
+	VINE_PRUNE_PRIORITY,      / ** Priority-based pruning * /
+	VINE_PRUNE_CUSTOM         / ** User-defined pruning logic * /
+	*/
+} vine_task_graph_prune_algorithm_t;
+
 /** The type of an input or output file to attach to a task. */
 typedef enum {
 	VINE_FILE = 1,              /**< A file or directory present at the manager. **/
@@ -1553,8 +1564,12 @@ char *vine_get_path_cache(struct vine_manager *m, const char *path);
 
 void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *function_name);
 void vine_task_graph_add_dependency(struct vine_manager *m, const char *child_key, const char *parent_key);
-void vine_task_graph_execute(struct vine_manager *m, int prune_depth);
+void vine_task_graph_execute(struct vine_manager *m);
 void vine_task_graph_set_node_outfile_remote_name(struct vine_manager *m, const char *node_key, const char *outfile_remote_name);
+
+// Task graph pruning configuration
+void vine_task_graph_set_prune_algorithm(struct vine_manager *m, vine_task_graph_prune_algorithm_t algorithm);
+void vine_task_graph_set_static_prune_depth(struct vine_manager *m, int prune_depth);
 
 //@}
 
