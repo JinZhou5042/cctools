@@ -520,8 +520,6 @@ static void initialize_prune_depth_mappings(struct vine_task_graph *graph)
 	hash_table_delete(visited);
 	list_delete(bfs_nodes);
 	list_delete(pending_inserts);
-
-	
 }
 
 void vine_task_graph_handle_task_done(struct vine_manager *m, struct vine_task *t)
