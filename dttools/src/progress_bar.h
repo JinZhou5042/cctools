@@ -15,5 +15,6 @@ struct ProgressBar {
 struct ProgressBar *progress_bar_init(const char *label, int total, int step);
 void progress_bar_update(struct ProgressBar *bar, int increment);
 void progress_bar_finish(struct ProgressBar *bar);
+int progress_bar_completed(struct ProgressBar *bar);
 
 #endif

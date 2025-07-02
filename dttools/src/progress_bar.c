@@ -94,3 +94,18 @@ void progress_bar_finish(struct ProgressBar *bar) {
 
     free(bar);
 }
+
+int progress_bar_completed(struct ProgressBar *bar)
+{
+    if (!bar) {
+        return 0;
+    }
+
+    int completed = bar->current >= bar->total;
+
+    if (completed) {
+        progress_bar_finish(bar);
+    }
+
+    return completed;
+}

@@ -8,8 +8,6 @@ import os
 import collections
 import dask
 import types
-import sys
-import shutil
 import hashlib
 import uuid
 
@@ -17,7 +15,7 @@ import uuid
 class TaskGraph:
     def __init__(self, task_dict, expand_dsk=True, debug=False):
         self.task_dict = self._standardize_keys(task_dict)
-    
+
         if expand_dsk:
             self.task_dict = self._expand_dsk(self.task_dict)
 
@@ -45,7 +43,7 @@ class TaskGraph:
             return True
         except TypeError:
             return False
-        
+
     @staticmethod
     def hash_name(*args):
         out_str = ""
@@ -148,7 +146,7 @@ class TaskGraph:
             try:
                 if args in task_dict:
                     return TaskGraph.hash_name(dsk_key, args)
-            except:
+            except Exception:
                 pass
             if isinstance(args, list):
                 return [_convert_expr_to_task_args(dsk_key, task_dict, item, blockwise_args) for item in args]
@@ -180,7 +178,7 @@ class TaskGraph:
                     exit(1)
             else:
                 expanded_task_dict[k] = sexpr
-        
+
         return expanded_task_dict
 
     def _create_callable_mapping(self, task_dict):
@@ -215,7 +213,7 @@ class TaskGraph:
                 return obj
 
         return {k: recurse(v) for k, v in task_dict.items()}
-    
+
     def get_input_keys_of_group(self, group_keys):
         group_set = set(group_keys)
         return {
@@ -244,7 +242,7 @@ class TaskGraph:
             key: self.outfile_remote_name[key]
             for key in external_input_keys
         }
-    
+
     def external_output_keys_to_paths(self, group_keys):
         group_keys = set(group_keys)
         external_output_keys = {
@@ -260,6 +258,7 @@ class TaskGraph:
     def get_sexpr_of_group(self, group_keys):
         return {k: self.task_dict[k] for k in group_keys}
 
+
 def init_task_graph_context():
     with open("task_graph.pkl", 'rb') as f:
         task_graph = cloudpickle.load(f)
@@ -267,6 +266,7 @@ def init_task_graph_context():
     return {
         'task_graph': task_graph,
     }
+
 
 def compute_group_keys(key):
     keys = [key]
@@ -326,13 +326,12 @@ class GraphManager(Manager):
         self._node_compute_function_name = "compute_group_keys"
 
     def _create_library_task(self, libcores=1, hoisting_modules=[]):
-        hoisting_modules += [os, cloudpickle, TaskGraph, load_variable_from_library,
-                            uuid, hashlib, types, collections]
+        hoisting_modules += [os, cloudpickle, TaskGraph, load_variable_from_library, uuid, hashlib, types, collections]
         self.libtask = self.create_library_from_functions(
-            self._library_name, 
+            self._library_name,
             compute_group_keys,
-            library_context_info=[init_task_graph_context, [], {}], 
-            add_env=False, 
+            library_context_info=[init_task_graph_context, [], {}],
+            add_env=False,
             infile_load_mode="text",
             hoisting_modules=hoisting_modules
         )
@@ -359,15 +358,13 @@ class GraphManager(Manager):
         # finalize the task graph in the C side, building dependencies, creating tasks, etc.
         cvine.vine_task_graph_finalize(self._taskvine, self._library_name, self._node_compute_function_name)
 
-    def execute(self, task_dict, 
-                expand_dsk=False, 
-                libcores=1, 
+    def execute(self, task_dict,
+                expand_dsk=False,
+                libcores=1,
                 hoisting_modules=[],
                 prune_mode="static",
                 static_prune_depth=0,
-        ):
-        # initialize the vine graph in the C side
-        self._create_vine_graph(task_dict, expand_dsk=expand_dsk)
+                ):
 
         # set prune algorithm and static prune depth
         cvine.vine_task_graph_set_static_prune_depth(self._taskvine, static_prune_depth)
@@ -375,6 +372,9 @@ class GraphManager(Manager):
 
         # create library task with specified resources
         self._create_library_task(libcores, hoisting_modules)
+
+        # initialize the vine graph in the C side
+        self._create_vine_graph(task_dict, expand_dsk=expand_dsk)
 
         # now execute the vine graph
         cvine.vine_task_graph_execute(self._taskvine)

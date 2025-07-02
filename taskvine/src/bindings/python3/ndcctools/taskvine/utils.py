@@ -36,6 +36,7 @@ def set_port_range(port):
 def load_variable_from_library(var_name):
     return globals()[var_name]
 
+
 # helper function that deletes all files in a directory
 def delete_all_files(root_dir):
     if not os.path.exists(root_dir):
