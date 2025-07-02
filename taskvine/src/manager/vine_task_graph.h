@@ -31,12 +31,11 @@ struct vine_task_graph {
     struct hash_table *outfile_cachename_to_node;
     int prune_algorithm;         // Algorithm used for pruning (vine_task_graph_prune_algorithm_t)
     int static_prune_depth;      // Prune depth for STATIC algorithm
+    int priority_mode;           // Priority algorithm used for task scheduling
 };
 
 struct vine_task_graph *vine_task_graph_create();
 void vine_task_graph_delete(struct vine_task_graph *tg);
 void vine_task_graph_handle_task_done(struct vine_manager *m, struct vine_task *t);
-
-
 
 #endif // VINE_TASK_GRAPH_H

@@ -29,6 +29,8 @@ struct pending_insert_entry {
 
 static void initialize_pruning(struct vine_task_graph *graph);
 static void prune_node_waiters(struct vine_manager *m, struct vine_task_node *node);
+static double calculate_task_priority(struct vine_manager *m, struct vine_task_node *node);
+static void submit_node(struct vine_manager *m, struct vine_task_node *node);
 
 static volatile sig_atomic_t interrupted = 0;
 
@@ -45,6 +47,7 @@ struct vine_task_graph *vine_task_graph_create()
 	graph->outfile_cachename_to_node = hash_table_create(0, 0);
 	graph->prune_algorithm = VINE_PRUNE_ALGORITHM_DISABLED;
 	graph->static_prune_depth = 0;
+	graph->priority_mode = VINE_TASK_PRIORITY_MODE_FIFO;
 
 	return graph;
 }
@@ -93,8 +96,7 @@ static void submit_node_children(struct vine_manager *m, struct vine_task_node *
 		hash_table_remove(child_node->pending_parents, child_key);
 		hash_table_insert(child_node->pending_parents, child_key, (void *)active_parents_count);
 		if (active_parents_count == 0) {
-			int task_id = vine_submit(m, child_node->task);
-			itable_insert(m->task_graph->task_id_to_node, task_id, child_node);
+			submit_node(m, child_node);
 		}
 	}
 
@@ -359,8 +361,7 @@ void vine_task_graph_execute(struct vine_manager *m)
 	{
 		intptr_t parents_count = (intptr_t)hash_table_lookup(node->pending_parents, node_key);
 		if (parents_count == 0) {
-			int task_id = vine_submit(m, node->task);
-			itable_insert(m->task_graph->task_id_to_node, task_id, node);
+			submit_node(m, node);
 		}
 	}
 
@@ -541,9 +542,24 @@ static void initialize_pruning(struct vine_task_graph *graph)
 	list_delete(pending_inserts);
 }
 
+static void submit_node(struct vine_manager *m, struct vine_task_node *node)
+{
+	if (!m || !m->task_graph || !node) {
+		return;
+	}
+
+	double priority = calculate_task_priority(m, node);
+	vine_task_set_priority(node->task, priority);
+
+	int task_id = vine_submit(m, node->task);
+	itable_insert(m->task_graph->task_id_to_node, task_id, node);
+
+	return;
+}
+
 void vine_task_graph_handle_task_done(struct vine_manager *m, struct vine_task *t)
 {
-	if (!m || !m->task_graph || !t || t->state != VINE_TASK_DONE) {
+	if (!m || !m->task_graph || !t || t->state != VINE_TASK_DONE || t->type != VINE_TASK_TYPE_RECOVERY) {
 		return;
 	}
 
@@ -588,4 +604,83 @@ void vine_task_graph_set_static_prune_depth(struct vine_manager *m, int prune_de
 
 	m->task_graph->static_prune_depth = MAX(prune_depth, 0);
 	debug(D_VINE, "Set static prune depth to %d", m->task_graph->static_prune_depth);
+}
+
+void vine_task_graph_set_priority_mode(struct vine_manager *m, vine_task_priority_mode_t mode)
+{
+	if (!m || !m->task_graph) {
+		return;
+	}
+
+	switch (mode) {
+	case VINE_TASK_PRIORITY_MODE_RANDOM:
+		debug(D_VINE, "Set task priority mode to RANDOM");
+		break;
+	case VINE_TASK_PRIORITY_MODE_DEPTH_FIRST:
+		debug(D_VINE, "Set task priority mode to DEPTH_FIRST");
+		break;
+	case VINE_TASK_PRIORITY_MODE_BREADTH_FIRST:
+		debug(D_VINE, "Set task priority mode to BREADTH_FIRST");
+		break;
+	case VINE_TASK_PRIORITY_MODE_FIFO:
+		debug(D_VINE, "Set task priority mode to FIFO");
+		break;
+	case VINE_TASK_PRIORITY_MODE_LIFO:
+		debug(D_VINE, "Set task priority mode to LIFO");
+		break;
+	case VINE_TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST:
+		debug(D_VINE, "Set task priority mode to LARGEST_INPUT_FIRST");
+		break;
+	default:
+		debug(D_VINE, "Unknown priority mode: %d, falling back to FIFO", mode);
+		mode = VINE_TASK_PRIORITY_MODE_FIFO;
+		break;
+	}
+
+	m->task_graph->priority_mode = mode;
+}
+
+static double calculate_task_priority(struct vine_manager *m, struct vine_task_node *node)
+{
+	if (!m || !m->task_graph || !node) {
+		return 0.0;
+	}
+
+	double priority = 0.0;
+	timestamp_t current_time = timestamp_get();
+
+	switch (m->task_graph->priority_mode) {
+	case VINE_TASK_PRIORITY_MODE_RANDOM:
+		priority = random_double();
+		break;
+	case VINE_TASK_PRIORITY_MODE_DEPTH_FIRST:
+		priority = (double)node->depth;
+		break;
+	case VINE_TASK_PRIORITY_MODE_BREADTH_FIRST:
+		priority = -(double)node->depth;
+		break;
+	case VINE_TASK_PRIORITY_MODE_FIFO:
+		priority = -(double)current_time;
+		break;
+	case VINE_TASK_PRIORITY_MODE_LIFO:
+		priority = (double)current_time;
+		break;
+	case VINE_TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST:
+		priority = 0.0;
+		char *parent_key;
+		struct vine_task_node *parent_node;
+		HASH_TABLE_ITERATE(node->parents, parent_key, parent_node)
+		{
+			if (parent_node->outfile) {
+				priority += (double)vine_file_size(parent_node->outfile);
+				printf("input file size: %ld\n", vine_file_size(parent_node->outfile));
+			}
+		}
+		break;
+	default:
+		priority = 0.0;
+		break;
+	}
+
+	return priority;
 }

@@ -364,11 +364,17 @@ class GraphManager(Manager):
                 hoisting_modules=[],
                 prune_mode="static",
                 static_prune_depth=0,
+                priority_mode="fifo",
                 ):
 
         # set prune algorithm and static prune depth
+        prune_mode = prune_mode.replace("-", "_")
         cvine.vine_task_graph_set_static_prune_depth(self._taskvine, static_prune_depth)
         cvine.vine_task_graph_set_prune_algorithm(self._taskvine, get_c_constant(f"prune_algorithm_{prune_mode}"))
+
+        # set task priority mode
+        priority_mode = priority_mode.replace("-", "_")
+        cvine.vine_task_graph_set_priority_mode(self._taskvine, get_c_constant(f"task_priority_mode_{priority_mode}"))
 
         # create library task with specified resources
         self._create_library_task(libcores, hoisting_modules)

@@ -151,6 +151,16 @@ typedef enum {
 	*/
 } vine_task_graph_prune_algorithm_t;
 
+/** Select priority algorithm for task graph task scheduling. */
+typedef enum {
+    VINE_TASK_PRIORITY_MODE_RANDOM = 0,          /**< Assign random priority to tasks */
+    VINE_TASK_PRIORITY_MODE_DEPTH_FIRST,         /**< Prioritize deeper tasks first */
+    VINE_TASK_PRIORITY_MODE_BREADTH_FIRST,       /**< Prioritize shallower tasks first */
+    VINE_TASK_PRIORITY_MODE_FIFO,                /**< First in, first out priority */
+    VINE_TASK_PRIORITY_MODE_LIFO,                /**< Last in, first out priority */
+    VINE_TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST  /**< Prioritize tasks with larger inputs first */
+} vine_task_priority_mode_t;
+
 /** The type of an input or output file to attach to a task. */
 typedef enum {
 	VINE_FILE = 1,              /**< A file or directory present at the manager. **/
@@ -1567,9 +1577,9 @@ void vine_task_graph_add_dependency(struct vine_manager *m, const char *child_ke
 void vine_task_graph_execute(struct vine_manager *m);
 void vine_task_graph_set_node_outfile_remote_name(struct vine_manager *m, const char *node_key, const char *outfile_remote_name);
 
-// Task graph pruning configuration
 void vine_task_graph_set_prune_algorithm(struct vine_manager *m, vine_task_graph_prune_algorithm_t algorithm);
 void vine_task_graph_set_static_prune_depth(struct vine_manager *m, int prune_depth);
+void vine_task_graph_set_priority_mode(struct vine_manager *m, vine_task_priority_mode_t mode);
 
 //@}
 
