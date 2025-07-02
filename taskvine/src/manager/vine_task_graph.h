@@ -6,7 +6,6 @@
 #include "vine_manager.h"
 
 
-
 // Node structure for the graph
 struct vine_task_node {
     char *node_key;          // Unique node key identifier in the graph

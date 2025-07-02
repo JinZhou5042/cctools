@@ -359,20 +359,19 @@ class GraphManager(Manager):
         # finalize the task graph in the C side, building dependencies, creating tasks, etc.
         cvine.vine_task_graph_finalize(self._taskvine, self._library_name, self._node_compute_function_name)
 
-    def set_prune_algorithm(self, algorithm, static_prune_depth=0):
-        if algorithm == "no_prune":
-            alg_const = get_c_constant("prune_no_prune")
-            cvine.vine_task_graph_set_static_prune_depth(self._taskvine, static_prune_depth)
-        elif algorithm == "static":
-            alg_const = get_c_constant("prune_static")
-        else:
-            raise ValueError(f"Unknown algorithm: {algorithm}. Supported: 'no_prune', 'static'")
-        
-        cvine.vine_task_graph_set_prune_algorithm(self._taskvine, alg_const)
-
-    def execute(self, task_dict, expand_dsk=False, libcores=1, hoisting_modules=[]):
+    def execute(self, task_dict, 
+                expand_dsk=False, 
+                libcores=1, 
+                hoisting_modules=[],
+                prune_mode="static",
+                static_prune_depth=0,
+        ):
         # initialize the vine graph in the C side
         self._create_vine_graph(task_dict, expand_dsk=expand_dsk)
+
+        # set prune algorithm and static prune depth
+        cvine.vine_task_graph_set_static_prune_depth(self._taskvine, static_prune_depth)
+        cvine.vine_task_graph_set_prune_algorithm(self._taskvine, get_c_constant(f"prune_algorithm_{prune_mode}"))
 
         # create library task with specified resources
         self._create_library_task(libcores, hoisting_modules)

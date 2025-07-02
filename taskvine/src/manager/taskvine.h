@@ -142,12 +142,12 @@ typedef enum {
 
 /** Select pruning algorithm for task graph file pruning. */
 typedef enum {
-	VINE_PRUNE_NO_PRUNE = 0,  /**< No pruning, all nodes keep prune_depth = 0 */
-	VINE_PRUNE_STATIC,        /**< All nodes share a static prune_depth value */
+	VINE_PRUNE_ALGORITHM_DISABLED = 0,  /**< No pruning, all nodes keep prune_depth = 0 */
+	VINE_PRUNE_ALGORITHM_STATIC,        /**< All nodes share a static prune_depth value */
 	/* Future algorithms can be added here:
-	VINE_PRUNE_ADAPTIVE,      / ** Adaptive pruning based on memory usage * /
-	VINE_PRUNE_PRIORITY,      / ** Priority-based pruning * /
-	VINE_PRUNE_CUSTOM         / ** User-defined pruning logic * /
+	VINE_PRUNE_ALGORITHM_ADAPTIVE,      / ** Adaptive pruning based on memory usage * /
+	VINE_PRUNE_ALGORITHM_PRIORITY,      / ** Priority-based pruning * /
+	VINE_PRUNE_ALGORITHM_CUSTOM         / ** User-defined pruning logic * /
 	*/
 } vine_task_graph_prune_algorithm_t;
 

@@ -16,6 +16,7 @@
 #include "progress_bar.h"
 #include "random.h"
 #include "assert.h"
+#include "macros.h"
 #include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -41,8 +42,9 @@ struct vine_task_graph *vine_task_graph_create()
 	graph->nodes = hash_table_create(0, 0);
 	graph->task_id_to_node = itable_create(0);
 	graph->outfile_cachename_to_node = hash_table_create(0, 0);
-	graph->prune_algorithm = VINE_PRUNE_NO_PRUNE; // Default to no pruning
-	graph->static_prune_depth = 0;		      // Default static prune depth
+	graph->prune_algorithm = VINE_PRUNE_ALGORITHM_DISABLED;
+	graph->static_prune_depth = 0;
+
 	return graph;
 }
 
@@ -96,31 +98,7 @@ static struct vine_task_node *create_node(struct vine_manager *m, const char *no
 	node->completed = 0;
 	node->prune_blocking_children_remaining = 0;
 	node->reverse_prune_waiters = hash_table_create(0, 0);
-
-	/* Set prune_depth based on current algorithm */
-	switch (m->task_graph->prune_algorithm) {
-	case VINE_PRUNE_NO_PRUNE:
-		/* No pruning, always 0 */
-		node->prune_depth = 0;
-		break;
-
-	case VINE_PRUNE_STATIC:
-		/* Use the graph's static_prune_depth */
-		node->prune_depth = m->task_graph->static_prune_depth;
-		break;
-
-		/* Future algorithms can have different default behaviors */
-		// case VINE_PRUNE_ADAPTIVE:
-		//     node->prune_depth = calculate_adaptive_prune_depth(node);
-		//     break;
-		// case VINE_PRUNE_PRIORITY:
-		//     node->prune_depth = calculate_priority_based_prune_depth(node);
-		//     break;
-
-	default:
-		node->prune_depth = 0;
-		break;
-	}
+	node->prune_depth = 0;
 
 	hash_table_insert(m->task_graph->nodes, node_key, node);
 	return node;
@@ -233,7 +211,7 @@ void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *
 		}
 	}
 
-	/* process nodes in topological order */
+	/* add tasks and files to the graph in topological order */
 	LIST_ITERATE(topo_order, node_key)
 	{
 		struct vine_task_node *current_node = hash_table_lookup(m->task_graph->nodes, node_key);
@@ -425,12 +403,39 @@ void vine_task_graph_add_dependency(struct vine_manager *m, const char *child_ke
 
 static void initialize_prune_depth_mappings(struct vine_task_graph *graph)
 {
+	if (!graph) {
+		return;
+	}
+
+	/* apply prune depth to all nodes */
+	char *node_key;
+	struct vine_task_node *node;
+	switch (graph->prune_algorithm) {
+	case VINE_PRUNE_ALGORITHM_DISABLED:
+		HASH_TABLE_ITERATE(graph->nodes, node_key, node)
+		{
+			node->prune_depth = 0;
+		}
+		break;
+	case VINE_PRUNE_ALGORITHM_STATIC:
+		HASH_TABLE_ITERATE(graph->nodes, node_key, node)
+		{
+			node->prune_depth = graph->static_prune_depth;
+		}
+		break;
+	default:
+		debug(D_VINE, "Unknown pruning algorithm: %d, falling back to DISABLED", graph->prune_algorithm);
+		HASH_TABLE_ITERATE(graph->nodes, node_key, node)
+		{
+			node->prune_depth = 0;
+		}
+		break;
+	}
+
+	/* create mappings of nodes to their prune_depth */
 	struct hash_table *visited = hash_table_create(0, 0);
 	struct list *bfs_nodes = list_create();
 	struct list *pending_inserts = list_create(); /* Store pending reverse_prune_waiters inserts */
-
-	char *node_key;
-	struct vine_task_node *node;
 
 	/* For each node P, calculate what downstream nodes it needs to wait for based on P's prune_depth */
 	HASH_TABLE_ITERATE(graph->nodes, node_key, node)
@@ -440,28 +445,28 @@ static void initialize_prune_depth_mappings(struct vine_task_graph *graph)
 			continue;
 		}
 
-		/* Reset for this node */
+		/* reset for this node */
 		hash_table_clear(visited, NULL);
 		node->prune_blocking_children_remaining = 0;
 
-		/* Clear pending inserts list */
+		/* clear pending inserts list */
 		while (list_size(pending_inserts) > 0) {
 			struct pending_insert_entry *entry = list_pop_head(pending_inserts);
 			free(entry);
 		}
 
-		/* Start BFS from current node's direct children */
+		/* start BFS from current node's direct children */
 		char *child_key;
 		struct vine_task_node *child_node;
 		HASH_TABLE_ITERATE(node->children, child_key, child_node)
 		{
-			/* Only expand nodes that participate in pruning */
+			/* only expand nodes that participate in pruning */
 			if (child_node->prune_depth > 0 && !hash_table_lookup(visited, child_key)) {
 				hash_table_insert(visited, child_key, (void *)1);
 				list_push_tail(bfs_nodes, child_node);
 				node->prune_blocking_children_remaining++;
 
-				/* Store the insert operation for later */
+				/* store the insert operation for later */
 				struct pending_insert_entry *entry = xxmalloc(sizeof(struct pending_insert_entry));
 				entry->target_node = child_node;
 				entry->source_node = node;
@@ -469,7 +474,7 @@ static void initialize_prune_depth_mappings(struct vine_task_graph *graph)
 			}
 		}
 
-		/* BFS to expand to deeper levels within prune_depth */
+		/* BFS to expand to deeper levels within prune_depth, starting from the current node's direct children */
 		int current_depth = 1;
 		while (list_size(bfs_nodes) > 0 && current_depth < node->prune_depth) {
 			int level_size = list_size(bfs_nodes);
@@ -477,16 +482,16 @@ static void initialize_prune_depth_mappings(struct vine_task_graph *graph)
 			for (int i = 0; i < level_size; i++) {
 				struct vine_task_node *current_node = list_pop_head(bfs_nodes);
 
-				/* Add current_node's children to next level */
+				/* add current_node's children to next level */
 				HASH_TABLE_ITERATE(current_node->children, child_key, child_node)
 				{
-					/* Only expand nodes that participate in pruning */
+					/* only expand nodes that participate in pruning */
 					if (child_node->prune_depth > 0 && !hash_table_lookup(visited, child_key)) {
 						hash_table_insert(visited, child_key, (void *)(intptr_t)(current_depth + 1));
 						list_push_tail(bfs_nodes, child_node);
 						node->prune_blocking_children_remaining++;
 
-						/* Store the insert operation for later */
+						/* store the insert operation for later */
 						struct pending_insert_entry *entry = xxmalloc(sizeof(struct pending_insert_entry));
 						entry->target_node = child_node;
 						entry->source_node = node;
@@ -497,7 +502,7 @@ static void initialize_prune_depth_mappings(struct vine_task_graph *graph)
 			current_depth++;
 		}
 
-		/* Now perform all the reverse_prune_waiters inserts */
+		/* perform all the reverse_prune_waiters inserts */
 		struct pending_insert_entry *entry;
 		LIST_ITERATE(pending_inserts, entry)
 		{
@@ -549,52 +554,16 @@ void vine_task_graph_set_prune_algorithm(struct vine_manager *m, vine_task_graph
 		return;
 	}
 
-	struct vine_task_graph *tg = m->task_graph;
-	tg->prune_algorithm = algorithm;
-
-	/* Apply algorithm-specific logic */
-	char *node_key;
-	struct vine_task_node *node;
-
-	switch (algorithm) {
-	case VINE_PRUNE_NO_PRUNE:
-		/* Set all nodes to prune_depth = 0 (no pruning) */
-		HASH_TABLE_ITERATE(tg->nodes, node_key, node)
-		{
-			node->prune_depth = 0;
-		}
-		debug(D_VINE, "Set pruning algorithm to NO_PRUNE, all nodes prune_depth = 0");
-		break;
-
-	case VINE_PRUNE_STATIC:
-		/* For STATIC algorithm, set all existing nodes to use static_prune_depth */
-		HASH_TABLE_ITERATE(tg->nodes, node_key, node)
-		{
-			node->prune_depth = tg->static_prune_depth;
-		}
-		debug(D_VINE, "Set pruning algorithm to STATIC, all nodes prune_depth = %d", tg->static_prune_depth);
-		break;
-
-		/* Future algorithms can be implemented here */
-		// case VINE_PRUNE_ADAPTIVE:
-		//     /* Initialize adaptive pruning state */
-		//     break;
-		// case VINE_PRUNE_PRIORITY:
-		//     /* Initialize priority-based pruning */
-		//     break;
-		// case VINE_PRUNE_CUSTOM:
-		//     /* Initialize custom pruning logic */
-		//     break;
-
-	default:
-		debug(D_VINE, "Unknown pruning algorithm: %d, falling back to NO_PRUNE", algorithm);
-		tg->prune_algorithm = VINE_PRUNE_NO_PRUNE;
-		HASH_TABLE_ITERATE(tg->nodes, node_key, node)
-		{
-			node->prune_depth = 0;
-		}
-		break;
+	if (algorithm == VINE_PRUNE_ALGORITHM_DISABLED) {
+		debug(D_VINE, "Set pruning algorithm to DISABLED");
+	} else if (algorithm == VINE_PRUNE_ALGORITHM_STATIC) {
+		debug(D_VINE, "Set pruning algorithm to STATIC");
+	} else {
+		debug(D_VINE, "Unknown pruning algorithm: %d, falling back to DISABLED", algorithm);
+		return;
 	}
+
+	m->task_graph->prune_algorithm = algorithm;
 }
 
 void vine_task_graph_set_static_prune_depth(struct vine_manager *m, int prune_depth)
@@ -603,24 +572,6 @@ void vine_task_graph_set_static_prune_depth(struct vine_manager *m, int prune_de
 		return;
 	}
 
-	struct vine_task_graph *tg = m->task_graph;
-
-	if (prune_depth < 0) {
-		debug(D_VINE, "Invalid prune_depth %d, must be >= 0", prune_depth);
-		return;
-	}
-
-	tg->static_prune_depth = prune_depth;
-	debug(D_VINE, "Set static_prune_depth to %d", prune_depth);
-
-	/* If currently using STATIC algorithm, update all nodes */
-	if (tg->prune_algorithm == VINE_PRUNE_STATIC) {
-		char *node_key;
-		struct vine_task_node *node;
-		HASH_TABLE_ITERATE(tg->nodes, node_key, node)
-		{
-			node->prune_depth = prune_depth;
-		}
-		debug(D_VINE, "Updated all nodes to prune_depth = %d (STATIC algorithm)", prune_depth);
-	}
+	m->task_graph->static_prune_depth = MAX(prune_depth, 0);
+	debug(D_VINE, "Set static prune depth to %d", m->task_graph->static_prune_depth);
 }
