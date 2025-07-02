@@ -21,7 +21,12 @@
 #include <unistd.h>
 #include <stdatomic.h>
 
-static void initialize_prune_depth_mappings(struct vine_task_graph *graph, int prune_depth);
+struct pending_insert_entry {
+	struct vine_task_node *target_node;
+	struct vine_task_node *source_node;
+};
+
+static void initialize_prune_depth_mappings(struct vine_task_graph *graph);
 
 static volatile sig_atomic_t interrupted = 0;
 
@@ -291,20 +296,16 @@ void vine_task_graph_execute(struct vine_manager *m, int prune_depth)
 	signal(SIGINT, handle_sigint);
 
 	struct hash_table *pending_parents = hash_table_create(0, 0);
-	struct hash_table *pending_children = hash_table_create(0, 0);
 
 	/* Initialize prune depth mappings if needed */
-	initialize_prune_depth_mappings(m->task_graph, m->task_graph->prune_depth);
+	initialize_prune_depth_mappings(m->task_graph);
 
 	char *node_key;
 	struct vine_task_node *node;
 	HASH_TABLE_ITERATE(m->task_graph->nodes, node_key, node)
 	{
 		int parents_count = hash_table_size(node->parents);
-		int children_count = hash_table_size(node->children);
-		node->prune_depth = prune_depth;
 		hash_table_insert(pending_parents, node_key, (void *)(intptr_t)parents_count);
-		hash_table_insert(pending_children, node_key, (void *)(intptr_t)children_count);
 	}
 
 	/* first enqueue those without dependencies */
@@ -332,7 +333,7 @@ void vine_task_graph_execute(struct vine_manager *m, int prune_depth)
 		struct vine_task *task = vine_wait(m, 5);
 		if (task) {
 			struct vine_task_node *node = itable_lookup(m->task_graph->task_id_to_node, task->task_id);
-			node->completed = 1;  /* Mark node as completed */
+			node->completed = 1; /* Mark node as completed */
 			num_completed_tasks++;
 			progress_bar_update(pbar, 1);
 
@@ -352,32 +353,18 @@ void vine_task_graph_execute(struct vine_manager *m, int prune_depth)
 			}
 
 			/* prune stale files based on per-node prune_depth settings */
-			char *waiter_key;
-			struct vine_task_node *waiter_node;
-			HASH_TABLE_ITERATE(node->reverse_prune_waiters, waiter_key, waiter_node)
-			{
-				waiter_node->prune_blocking_children_remaining--;
-				if (waiter_node->prune_blocking_children_remaining == 0) {
-					if (is_file_expired(m, waiter_node->outfile)) {
-						vine_prune_file(m, waiter_node->outfile);
-						debug(D_VINE, "Pruned file for node %s (prune_depth=%d)", waiter_key, waiter_node->prune_depth);
-					}
-				}
-			}
-			
-			/* Legacy prune logic for nodes with prune_depth = 0 (immediate parent pruning) */
-			if (prune_depth == 0) {
-				char *parent_key;
-				struct vine_task_node *parent_node;
-				HASH_TABLE_ITERATE(node->parents, parent_key, parent_node)
+			/* Only trigger pruning logic if the completed node wants to participate in pruning */
+			if (node->prune_depth > 0) {
+				/* notify each node that was waiting on this completed node */
+				char *waiter_key;
+				struct vine_task_node *waiter_node;
+				HASH_TABLE_ITERATE(node->reverse_prune_waiters, waiter_key, waiter_node)
 				{
-					intptr_t pending_children_count = (intptr_t)hash_table_lookup(pending_children, parent_key);
-					pending_children_count--;
-					hash_table_remove(pending_children, parent_key);
-					hash_table_insert(pending_children, parent_key, (void *)pending_children_count);
-					if (pending_children_count == 0) {
-						if (is_file_expired(m, parent_node->outfile)) {
-							vine_prune_file(m, parent_node->outfile);
+					waiter_node->prune_blocking_children_remaining--;
+					if (waiter_node->prune_blocking_children_remaining == 0) {
+						if (is_file_expired(m, waiter_node->outfile)) {
+							vine_prune_file(m, waiter_node->outfile);
+							debug(D_VINE, "Pruned file for node %s (prune_depth=%d)", waiter_key, waiter_node->prune_depth);
 						}
 					}
 				}
@@ -388,7 +375,6 @@ void vine_task_graph_execute(struct vine_manager *m, int prune_depth)
 	progress_bar_finish(pbar);
 
 	hash_table_delete(pending_parents);
-	hash_table_delete(pending_children);
 
 	return;
 }
@@ -418,78 +404,102 @@ void vine_task_graph_add_dependency(struct vine_manager *m, const char *child_ke
 	debug(D_VINE, "added dependency: %s -> %s", parent_key, child_key);
 }
 
-static void initialize_prune_depth_mappings(struct vine_task_graph *graph, int global_prune_depth)
+static void initialize_prune_depth_mappings(struct vine_task_graph *graph)
 {
 	struct hash_table *visited = hash_table_create(0, 0);
 	struct list *bfs_nodes = list_create();
-	
+	struct list *pending_inserts = list_create(); /* Store pending reverse_prune_waiters inserts */
+
 	char *node_key;
 	struct vine_task_node *node;
-	
+
 	/* For each node P, calculate what downstream nodes it needs to wait for based on P's prune_depth */
 	HASH_TABLE_ITERATE(graph->nodes, node_key, node)
 	{
-		/* Use global_prune_depth as default if node doesn't have its own setting */
-		if (node->prune_depth == 0 && global_prune_depth > 0) {
-			node->prune_depth = global_prune_depth;
-		}
-		
 		/* Skip nodes that don't want pruning */
 		if (node->prune_depth <= 0) {
 			continue;
 		}
-		
+
 		/* Reset for this node */
 		hash_table_clear(visited, NULL);
 		node->prune_blocking_children_remaining = 0;
 		
+		/* Clear pending inserts list */
+		while (list_size(pending_inserts) > 0) {
+			struct pending_insert_entry *entry = list_pop_head(pending_inserts);
+			free(entry);
+		}
+
 		/* Start BFS from current node's direct children */
 		char *child_key;
 		struct vine_task_node *child_node;
 		HASH_TABLE_ITERATE(node->children, child_key, child_node)
 		{
-			if (!hash_table_lookup(visited, child_key)) {
-				hash_table_insert(visited, child_key, (void*)1);
+			/* Only expand nodes that participate in pruning */
+			if (child_node->prune_depth > 0 && !hash_table_lookup(visited, child_key)) {
+				hash_table_insert(visited, child_key, (void *)1);
 				list_push_tail(bfs_nodes, child_node);
 				node->prune_blocking_children_remaining++;
 				
-				/* Add this node P to child's reverse_prune_waiters */
-				hash_table_insert(child_node->reverse_prune_waiters, node_key, node);
+				/* Store the insert operation for later */
+				struct pending_insert_entry *entry = xxmalloc(sizeof(struct pending_insert_entry));
+				entry->target_node = child_node;
+				entry->source_node = node;
+				list_push_tail(pending_inserts, entry);
 			}
 		}
-		
+
 		/* BFS to expand to deeper levels within prune_depth */
 		int current_depth = 1;
 		while (list_size(bfs_nodes) > 0 && current_depth < node->prune_depth) {
 			int level_size = list_size(bfs_nodes);
-			
+
 			for (int i = 0; i < level_size; i++) {
 				struct vine_task_node *current_node = list_pop_head(bfs_nodes);
-				
+
 				/* Add current_node's children to next level */
 				HASH_TABLE_ITERATE(current_node->children, child_key, child_node)
 				{
-					if (!hash_table_lookup(visited, child_key)) {
-						hash_table_insert(visited, child_key, (void*)(intptr_t)(current_depth + 1));
+					/* Only expand nodes that participate in pruning */
+					if (child_node->prune_depth > 0 && !hash_table_lookup(visited, child_key)) {
+						hash_table_insert(visited, child_key, (void *)(intptr_t)(current_depth + 1));
 						list_push_tail(bfs_nodes, child_node);
 						node->prune_blocking_children_remaining++;
 						
-						/* Add this node P to child's reverse_prune_waiters */
-						hash_table_insert(child_node->reverse_prune_waiters, node_key, node);
+						/* Store the insert operation for later */
+						struct pending_insert_entry *entry = xxmalloc(sizeof(struct pending_insert_entry));
+						entry->target_node = child_node;
+						entry->source_node = node;
+						list_push_tail(pending_inserts, entry);
 					}
 				}
 			}
 			current_depth++;
 		}
-		
+
+		/* Now perform all the reverse_prune_waiters inserts */
+		struct pending_insert_entry *entry;
+		LIST_ITERATE(pending_inserts, entry)
+		{
+			hash_table_insert(entry->target_node->reverse_prune_waiters, entry->source_node->node_key, entry->source_node);
+		}
+
 		/* Clear remaining nodes in bfs_nodes for next iteration */
 		while (list_size(bfs_nodes) > 0) {
 			list_pop_head(bfs_nodes);
 		}
 	}
-	
+
+	/* Clean up pending inserts */
+	while (list_size(pending_inserts) > 0) {
+		struct pending_insert_entry *entry = list_pop_head(pending_inserts);
+		free(entry);
+	}
+
 	hash_table_delete(visited);
 	list_delete(bfs_nodes);
+	list_delete(pending_inserts);
 }
 
 void vine_task_graph_handle_task_done(struct vine_manager *m, struct vine_task *t)
