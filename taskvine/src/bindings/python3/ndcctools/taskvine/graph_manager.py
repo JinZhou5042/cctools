@@ -319,6 +319,7 @@ class GraphManager(Manager):
         self.tune("worker-source-max-transfers", 1000)
         self.tune("max-retrievals", -1)
         self.tune("prefer-dispatch", 1)
+        self.tune("immediate-recovery", 1)
         self.tune("transient-error-interval", 1)
         self.tune("attempt-schedule-depth", 1000)
 
@@ -365,7 +366,16 @@ class GraphManager(Manager):
                 prune_mode="static",
                 static_prune_depth=0,
                 priority_mode="fifo",
+                scheduling_mode="files",
+                temp_replica_count=1,
+                enable_checkpointing=True,
                 ):
+
+        self.tune("temp-replica-count", temp_replica_count)
+        self.tune("enable-checkpointing", enable_checkpointing)
+
+        # set worker scheduling mode
+        self.set_scheduler(scheduling_mode)
 
         # set prune algorithm and static prune depth
         prune_mode = prune_mode.replace("-", "_")

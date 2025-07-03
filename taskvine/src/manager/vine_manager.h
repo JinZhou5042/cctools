@@ -120,12 +120,13 @@ struct vine_manager {
 	struct hash_table *workers_with_watched_file_updates;  /* Maps link -> vine_worker_info */
 	struct hash_table *current_transfer_table; 	/* Maps uuid -> struct transfer_pair */
 	struct itable     *task_group_table; 	/* Maps group id -> list vine_task */
+	struct list *checkpoint_worker_list; 	/* List of hashkeys of workers that are checkpoint workers */
 
 	/* Primary data structures for tracking files. */
 
 	struct hash_table *file_table;      /* Maps fileid -> struct vine_file.* */
 	struct hash_table *file_worker_table; /* Maps cachename -> struct set of workers with a replica of the file.* */
-	struct hash_table *temp_files_to_replicate; /* Maps cachename -> NULL. Used as a set of temp files to be replicated */
+	struct list *temp_files_to_replicate; /* List of temp files to be replicated */
 
 
 	/* Primary scheduling controls. */
@@ -219,6 +220,7 @@ struct vine_manager {
 	int transfer_temps_recovery;  /* If true, attempt to recover temp files from lost worker to reach threshold required */
 	int transfer_replica_per_cycle;  /* Maximum number of replica to request per temp file per iteration */
 	int temp_replica_count;       /* Number of replicas per temp file */
+	int enable_checkpointing;     /* If true, enable checkpointing */
 
 	double resource_submit_multiplier; /* Factor to permit overcommitment of resources at each worker.  */
 	double bandwidth_limit;            /* Artificial limit on bandwidth of manager<->worker transfers. */

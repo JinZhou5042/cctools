@@ -94,7 +94,16 @@ struct vine_file_replica *vine_file_replica_table_lookup(struct vine_worker_info
 // count the number of in-cluster replicas of a file
 int vine_file_replica_count(struct vine_manager *m, struct vine_file *f)
 {
-	return set_size(hash_table_lookup(m->file_worker_table, f->cached_name));
+	if (!m || !f) {
+		return 0;
+	}
+
+	struct set *workers = hash_table_lookup(m->file_worker_table, f->cached_name);
+	if (!workers) {
+		return 0;
+	}
+
+	return set_size(workers);
 }
 
 // find a worker (randomly) in posession of a specific file, and is ready to transfer it.
@@ -141,90 +150,6 @@ struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager
 	}
 
 	return peer_selected;
-}
-
-// trigger replications of file to satisfy temp_replica_count
-int vine_file_replica_table_replicate(struct vine_manager *m, struct vine_file *f, struct set *sources, int to_find)
-{
-	int nsources = set_size(sources);
-	int round_replication_request_sent = 0;
-
-	/* get the elements of set so we can insert new replicas to sources */
-	struct vine_worker_info **sources_frozen = (struct vine_worker_info **)set_values(sources);
-	struct vine_worker_info *source;
-
-	for (int i = 0; i < nsources; i++) {
-
-		source = sources_frozen[i];
-		int dest_found = 0;
-
-		// skip if the file on the source is not ready to transfer
-		struct vine_file_replica *replica = hash_table_lookup(source->current_files, f->cached_name);
-		if (!replica || replica->state != VINE_FILE_REPLICA_STATE_READY) {
-			continue;
-		}
-
-		char *source_addr = string_format("%s/%s", source->transfer_url, f->cached_name);
-
-		// skip if the source is busy with other transfers
-		if (source->outgoing_xfer_counter >= m->worker_source_max_transfers) {
-			continue;
-		}
-
-		char *id;
-		struct vine_worker_info *dest;
-		int offset_bookkeep;
-
-		HASH_TABLE_ITERATE_RANDOM_START(m->worker_table, offset_bookkeep, id, dest)
-		{
-			// skip if the source and destination are on the same host
-			if (set_lookup(sources, dest) || strcmp(source->hostname, dest->hostname) == 0) {
-				continue;
-			}
-
-			// skip if the destination is not ready to transfer
-			if (!dest->transfer_port_active) {
-				continue;
-			}
-
-			// skip if the destination is draining
-			if (dest->draining) {
-				continue;
-			}
-
-			// skip if the destination is busy with other transfers
-			if (dest->incoming_xfer_counter >= m->worker_source_max_transfers) {
-				continue;
-			}
-
-			debug(D_VINE, "replicating %s from %s to %s", f->cached_name, source->addrport, dest->addrport);
-
-			vine_manager_put_url_now(m, dest, source_addr, f);
-
-			round_replication_request_sent++;
-
-			// break if we have found enough destinations for this source
-			if (++dest_found >= MIN(m->file_source_max_transfers, to_find)) {
-				break;
-			}
-
-			// break if the source becomes busy with transfers
-			if (source->outgoing_xfer_counter >= m->worker_source_max_transfers) {
-				break;
-			}
-		}
-
-		free(source_addr);
-
-		// break if we have sent enough replication requests for this file
-		if (round_replication_request_sent >= to_find) {
-			break;
-		}
-	}
-
-	free(sources_frozen);
-
-	return round_replication_request_sent;
 }
 
 /*

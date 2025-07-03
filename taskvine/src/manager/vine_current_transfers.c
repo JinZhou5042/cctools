@@ -137,11 +137,11 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 	 * not nulled out. This shouldn't happen, but we check and emit an error just in case. */
 	int error = 0;
 	if (!source_worker) {
-		debug(D_ERROR, "vine_current_transfers_set_failure: transfer record for file %s with id %s is found, but source worker is null", cachename, id);
+		debug(D_ERROR, "%s: transfer record for file %s with id %s is found, but source worker is null", __func__, cachename, id);
 		error = 1;
 	}
 	if (!to_worker) {
-		debug(D_ERROR, "vine_current_transfers_set_failure: transfer record for file %s with id %s is found, but destination worker is null", cachename, id);
+		debug(D_ERROR, "%s: transfer record for file %s with id %s is found, but destination worker is null", __func__, cachename, id);
 		error = 1;
 	}
 	if (error) {

@@ -22,6 +22,12 @@ struct vine_task_node {
     char *outfile_remote_name;   // Output filename for this node
     struct vine_file *infile;  // arguments, a list of keys to compute
     struct vine_file *outfile; // output file for this task
+    
+    // Recovery metrics for checkpointing
+    timestamp_t recovery_critical_time;
+    timestamp_t recovery_total_time;
+    double penalty;
+    timestamp_t execution_time;
 };
 
 // Graph structure
