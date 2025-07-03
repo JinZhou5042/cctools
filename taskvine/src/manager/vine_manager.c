@@ -3439,7 +3439,7 @@ static void vine_manager_consider_recovery_task(struct vine_manager *q, struct v
 	case VINE_TASK_INITIAL:
 		/* The recovery task has never been run, so submit it now. */
 		vine_submit(q, rt);
-		// notice(D_VINE, "Submitted recovery task %d (%s) to re-create lost temporary file %s.", rt->task_id, rt->command_line, lost_file->cached_name);
+		debug(D_VINE, "Submitted recovery task %d (%s) to re-create lost temporary file %s.", rt->task_id, rt->command_line, lost_file->cached_name);
 		break;
 	case VINE_TASK_READY:
 	case VINE_TASK_RUNNING:
@@ -3453,7 +3453,7 @@ static void vine_manager_consider_recovery_task(struct vine_manager *q, struct v
 		 * here. */
 		vine_task_reset(rt);
 		vine_submit(q, rt);
-		// notice(D_VINE, "Submitted recovery task %d (%s) to re-create lost temporary file %s.", rt->task_id, rt->command_line, lost_file->cached_name);
+		debug(D_VINE, "Submitted recovery task %d (%s) to re-create lost temporary file %s.", rt->task_id, rt->command_line, lost_file->cached_name);
 		break;
 	}
 }

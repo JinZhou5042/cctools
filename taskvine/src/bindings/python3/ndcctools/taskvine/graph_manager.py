@@ -369,10 +369,12 @@ class GraphManager(Manager):
                 scheduling_mode="files",
                 temp_replica_count=1,
                 enable_checkpointing=True,
+                wait_for_workers=1,
                 ):
 
         self.tune("temp-replica-count", temp_replica_count)
         self.tune("enable-checkpointing", enable_checkpointing)
+        self.tune("wait-for-workers", wait_for_workers)
 
         # set worker scheduling mode
         self.set_scheduler(scheduling_mode)
