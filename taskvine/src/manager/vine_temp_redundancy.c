@@ -143,7 +143,7 @@ static int replicate_file(struct vine_manager *q, struct vine_file *f, struct vi
 	}
 
 	char *source_addr = string_format("%s/%s", source->transfer_url, f->cached_name);
-	vine_manager_put_url_now(q, destination, source_addr, f);
+	vine_manager_put_url_now(q, destination, source, source_addr, f);
 	free(source_addr);
 
 	return 1;
