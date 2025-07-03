@@ -5,6 +5,7 @@ See the file COPYING for details.
 */
 
 #include "vine_cache.h"
+#include "vine_cache_file.h"
 #include "vine_catalog.h"
 #include "vine_file.h"
 #include "vine_gpus.h"
@@ -1059,6 +1060,18 @@ static int do_unlink(struct link *manager, const char *path)
 	int result = 0;
 
 	if (path_within_dir(cached_path, workspace->workspace_dir)) {
+		/* Manager's replica state machine expects a response to every unlink message.
+		 * When arrive here, if not READY or FAILED (which have already sent messages),
+		 * send cache-invalid to prevent the replica state from getting stuck in DELETING. */
+		struct vine_cache_file *f = hash_table_lookup(cache_manager->table, path);
+		vine_cache_status_t status = f ? f->status : VINE_CACHE_STATUS_UNKNOWN;
+
+		if (status != VINE_CACHE_STATUS_READY && status != VINE_CACHE_STATUS_FAILED) {
+			char *msg = string_format("File '%s' unlinked in status %d without completion.", path, status);
+			vine_worker_send_cache_invalid(manager, path, msg);
+			free(msg);
+		}
+
 		vine_cache_remove(cache_manager, path, manager);
 		result = 1;
 	} else {
