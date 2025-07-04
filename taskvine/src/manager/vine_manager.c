@@ -1035,7 +1035,7 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w)
 			t->time_workers_execute_failure += delta_time;
 			t->time_workers_execute_all += delta_time;
 		}
- 
+
 		/* Remove the unfinished task and update data structures. */
 		reap_task_from_worker(q, w, t, VINE_TASK_READY);
 
