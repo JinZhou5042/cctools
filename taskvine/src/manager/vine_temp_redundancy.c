@@ -15,18 +15,18 @@
 
 static int is_checkpoint_worker(struct vine_manager *q, struct vine_worker_info *w)
 {
-    if (!q || !w) {
-        return 0;
-    }
+	if (!q || !w) {
+		return 0;
+	}
 
-    char *key;
-    LIST_ITERATE(q->checkpoint_worker_list, key)
-    {
-        if (strcmp(key, w->hashkey) == 0) {
-            return 1;
-        }
-    }
-    return 0;
+	char *key;
+	LIST_ITERATE(q->checkpoint_worker_list, key)
+	{
+		if (strcmp(key, w->hashkey) == 0) {
+			return 1;
+		}
+	}
+	return 0;
 }
 
 static struct vine_worker_info *get_best_source(struct vine_manager *q, struct vine_file *f)
@@ -121,19 +121,19 @@ static int file_has_checkpointed(struct vine_manager *q, struct vine_file *f)
 		return 0;
 	}
 
-    char *key;
-    struct vine_worker_info *w;
-    LIST_ITERATE(q->checkpoint_worker_list, key)
-    {
-        w = hash_table_lookup(q->worker_table, key);
-        if (!w) {
-            continue;
-        }
-        if (vine_file_replica_table_lookup(w, f->cached_name)) {
-            return 1;
-        }
-    }
-    return 0;
+	char *key;
+	struct vine_worker_info *w;
+	LIST_ITERATE(q->checkpoint_worker_list, key)
+	{
+		w = hash_table_lookup(q->worker_table, key);
+		if (!w) {
+			continue;
+		}
+		if (vine_file_replica_table_lookup(w, f->cached_name)) {
+			return 1;
+		}
+	}
+	return 0;
 }
 
 static int replicate_file(struct vine_manager *q, struct vine_file *f, struct vine_worker_info *source, struct vine_worker_info *destination)
