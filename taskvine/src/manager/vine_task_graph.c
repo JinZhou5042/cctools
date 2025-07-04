@@ -553,7 +553,7 @@ void vine_task_graph_execute(struct vine_manager *m)
 			break;
 		}
 
-		struct vine_task *task = vine_wait(m, 60);
+		struct vine_task *task = vine_wait(m, 15);
 		if (task) {
 			/* get the original node by task id */
 			struct vine_task_node *node = itable_lookup(m->task_graph->task_id_to_node, task->task_id);
