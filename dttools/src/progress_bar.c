@@ -41,6 +41,32 @@ struct ProgressBar *progress_bar_init(const char *label, int total, int step) {
     return bar;
 }
 
+void progress_bar_start(struct ProgressBar *bar) {
+    if (!bar) {
+        return;
+    }
+    
+    bar->current = 0;
+    bar->last_displayed = -1;
+    bar->start_time = time(NULL);
+}
+
+void progress_bar_update_label(struct ProgressBar *bar, const char *new_label) {
+    if (!bar || !new_label) {
+        return;
+    }
+    
+    bar->label = new_label;
+}
+
+void progress_bar_update_total(struct ProgressBar *bar, int new_total) {
+    if (!bar || new_total <= 0) {
+        return;
+    }
+    
+    bar->total = new_total;
+}
+
 void progress_bar_update(struct ProgressBar *bar, int increment) {
     bar->current += increment;
 

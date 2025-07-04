@@ -13,7 +13,10 @@ struct ProgressBar {
 };
 
 struct ProgressBar *progress_bar_init(const char *label, int total, int step);
+void progress_bar_start(struct ProgressBar *bar);
 void progress_bar_update(struct ProgressBar *bar, int increment);
+void progress_bar_update_label(struct ProgressBar *bar, const char *new_label);
+void progress_bar_update_total(struct ProgressBar *bar, int new_total);
 void progress_bar_finish(struct ProgressBar *bar);
 int progress_bar_completed(struct ProgressBar *bar);
 
