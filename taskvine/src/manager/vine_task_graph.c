@@ -18,6 +18,7 @@
 #include "random.h"
 #include "assert.h"
 #include "macros.h"
+#include "set.h"
 #include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -57,11 +58,14 @@ static void submit_node_children(struct vine_manager *m, struct vine_task_node *
 	struct vine_task_node *child_node;
 	HASH_TABLE_ITERATE(node->children, child_key, child_node)
 	{
-		intptr_t active_parents_count = (intptr_t)hash_table_lookup(child_node->pending_parents, child_key);
-		active_parents_count--;
-		hash_table_remove(child_node->pending_parents, child_key);
-		hash_table_insert(child_node->pending_parents, child_key, (void *)active_parents_count);
-		if (active_parents_count == 0) {
+		/* Remove this parent from the child's pending set if it exists */
+		if (child_node->pending_parents) {
+			assert(set_lookup(child_node->pending_parents, node->node_key));
+			set_remove(child_node->pending_parents, node->node_key);
+		}
+
+		/* If no more parents are pending, submit the child */
+		if (!child_node->pending_parents || set_size(child_node->pending_parents) == 0) {
 			submit_node(m, child_node);
 		}
 	}
@@ -90,7 +94,7 @@ static struct vine_task_node *create_node(struct vine_manager *m, const char *no
 	node->children = hash_table_create(0, 0);
 	node->prune_blocking_children_remaining = 0;
 	node->reverse_prune_waiters = hash_table_create(0, 0);
-	node->pending_parents = hash_table_create(0, 0);
+	node->pending_parents = set_create(0);
 	node->prune_depth = 0;
 	node->recovery_critical_time = 0;
 	node->recovery_total_time = 0;
@@ -221,8 +225,6 @@ static timestamp_t compute_upper_subgraph_total_time(struct vine_task_node *node
 
 	return total_time;
 }
-
-
 
 static void prune_node_waiters(struct vine_manager *m, struct vine_task_node *node)
 {
@@ -397,7 +399,7 @@ static void initialize_pruning(struct vine_task_graph *graph)
 			while (list_size(bfs_nodes) > 0) {
 				list_pop_head(bfs_nodes);
 			}
-			
+
 			hash_table_delete(visited);
 		}
 	}
@@ -558,8 +560,7 @@ void vine_task_graph_execute(struct vine_manager *m)
 	struct vine_task_node *node;
 	HASH_TABLE_ITERATE(m->task_graph->nodes, node_key, node)
 	{
-		intptr_t parents_count = (intptr_t)hash_table_lookup(node->pending_parents, node_key);
-		if (parents_count == 0) {
+		if (!node->pending_parents || set_size(node->pending_parents) == 0) {
 			submit_node(m, node);
 		}
 	}
@@ -671,7 +672,14 @@ void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *
 	struct vine_task_node *node;
 	HASH_TABLE_ITERATE(m->task_graph->nodes, node_key, node)
 	{
-		hash_table_insert(node->pending_parents, node_key, (void *)(intptr_t)hash_table_size(node->parents));
+		char *parent_key;
+		struct vine_task_node *parent_node;
+		HASH_TABLE_ITERATE(node->parents, parent_key, parent_node)
+		{
+			if (node->pending_parents) {
+				set_insert(node->pending_parents, parent_key);
+			}
+		}
 	}
 
 	return;
@@ -749,7 +757,9 @@ void vine_task_graph_delete(struct vine_task_graph *tg)
 		hash_table_delete(node->parents);
 		hash_table_delete(node->children);
 		hash_table_delete(node->reverse_prune_waiters);
-		hash_table_delete(node->pending_parents);
+		if (node->pending_parents) {
+			set_delete(node->pending_parents);
+		}
 		free(node);
 	}
 

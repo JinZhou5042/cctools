@@ -4,6 +4,7 @@
 #include "vine_task.h"
 #include "hash_table.h"
 #include "vine_manager.h"
+#include "set.h"
 
 
 // Node structure for the graph
@@ -17,7 +18,7 @@ struct vine_task_node {
     int prune_depth;               // Prune depth for this node (0 = no pruning, 1+ = prune after depth)
     int prune_blocking_children_remaining;  // Number of downstream nodes within prune_depth that haven't completed
     struct hash_table *reverse_prune_waiters;  // Table of nodes that are waiting for this node to complete (for pruning)
-    struct hash_table *pending_parents;  // Table of nodes that are waiting for this node to complete (for pruning)
+    struct set *pending_parents;  // Set of parent keys that this node is waiting for
     
     char *outfile_remote_name;   // Output filename for this node
     struct vine_file *infile;  // arguments, a list of keys to compute
