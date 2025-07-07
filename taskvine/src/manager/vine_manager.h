@@ -127,7 +127,7 @@ struct vine_manager {
 
 	struct hash_table *file_table;      /* Maps fileid -> struct vine_file.* */
 	struct hash_table *file_worker_table; /* Maps cachename -> struct set of workers with a replica of the file.* */
-	struct list *temp_files_to_replicate; /* List of temp files to be replicated */
+	struct priority_queue *temp_files_to_replicate; /* List of temp files to be replicated */
 
 
 	/* Primary scheduling controls. */

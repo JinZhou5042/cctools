@@ -6,6 +6,7 @@
 #include "macros.h"
 #include "stringtools.h"
 #include "vine_manager.h"
+#include "debug.h"
 #include "vine_manager_put.h"
 #include "xxmalloc.h"
 
@@ -29,7 +30,7 @@ static int is_checkpoint_worker(struct vine_manager *q, struct vine_worker_info 
 	return 0;
 }
 
-static struct vine_worker_info *get_best_source(struct vine_manager *q, struct vine_file *f)
+static struct vine_worker_info *get_best_source_worker(struct vine_manager *q, struct vine_file *f)
 {
 	if (!q || !f || f->type != VINE_TEMP) {
 		return NULL;
@@ -71,7 +72,7 @@ static struct vine_worker_info *get_best_source(struct vine_manager *q, struct v
 	return best_source;
 }
 
-static struct vine_worker_info *get_best_destination(struct vine_manager *q, struct vine_file *f)
+static struct vine_worker_info *get_best_destination_worker(struct vine_manager *q, struct vine_file *f)
 {
 	if (!q || !f || f->type != VINE_TEMP) {
 		return NULL;
@@ -115,9 +116,9 @@ static struct vine_worker_info *get_best_destination(struct vine_manager *q, str
 	return best_destination;
 }
 
-static int file_has_checkpointed(struct vine_manager *q, struct vine_file *f)
+static int file_has_been_checkpointed(struct vine_manager *q, struct vine_file *f)
 {
-	if (!f || f->type != VINE_TEMP || !q->enable_checkpointing || list_size(q->checkpoint_worker_list) == 0) {
+	if (!q || !f || f->type != VINE_TEMP || !q->enable_checkpointing || list_size(q->checkpoint_worker_list) == 0) {
 		return 0;
 	}
 
@@ -127,6 +128,7 @@ static int file_has_checkpointed(struct vine_manager *q, struct vine_file *f)
 	{
 		w = hash_table_lookup(q->worker_table, key);
 		if (!w) {
+			debug(D_NOTICE, "checkpoint worker %s has been removed", key);
 			continue;
 		}
 		if (vine_file_replica_table_lookup(w, f->cached_name)) {
@@ -136,15 +138,31 @@ static int file_has_checkpointed(struct vine_manager *q, struct vine_file *f)
 	return 0;
 }
 
-static int replicate_file(struct vine_manager *q, struct vine_file *f, struct vine_worker_info *source, struct vine_worker_info *destination)
+static int replicate_file(struct vine_manager *q, struct vine_file *f, struct vine_worker_info *source_worker, struct vine_worker_info *destination_worker)
 {
-	if (!q || !f || f->type != VINE_TEMP || !source || !destination) {
+	if (!q || !f || f->type != VINE_TEMP || !source_worker || !destination_worker) {
 		return 0;
 	}
 
-	char *source_addr = string_format("%s/%s", source->transfer_url, f->cached_name);
-	vine_manager_put_url_now(q, destination, source, source_addr, f);
+	char *source_addr = string_format("%s/%s", source_worker->transfer_url, f->cached_name);
+	vine_manager_put_url_now(q, destination_worker, source_worker, source_addr, f);
 	free(source_addr);
+
+	return 1;
+}
+
+static int enqueue_file_for_replication(struct vine_manager *q, struct vine_file *f)
+{
+	if (!q || !f || f->type != VINE_TEMP || f->state != VINE_FILE_STATE_CREATED) {
+		return 0;
+	}
+
+	int current_replica_count = vine_file_replica_count(q, f);
+	if (current_replica_count == 0 || current_replica_count >= q->temp_replica_count) {
+		return 0;
+	}
+
+	priority_queue_push(q->temp_files_to_replicate, f, -current_replica_count);
 
 	return 1;
 }
@@ -155,23 +173,16 @@ static int replicate_file(struct vine_manager *q, struct vine_file *f, struct vi
 
 int vine_temp_redundancy_enqueue_file_for_replication(struct vine_manager *q, char *cachename)
 {
-	if (!q || !cachename) {
+	if (!q || !cachename || q->temp_replica_count <= 1) {
 		return 0;
 	}
 
 	struct vine_file *f = hash_table_lookup(q->file_table, cachename);
-	if (!f || f->type != VINE_TEMP) {
+	if (!f || f->type != VINE_TEMP || f->state != VINE_FILE_STATE_CREATED) {
 		return 0;
 	}
 
-	int current_replica_count = vine_file_replica_count(q, f);
-	if (current_replica_count == 0 || current_replica_count >= q->temp_replica_count) {
-		return 0;
-	}
-
-	list_push_tail(q->temp_files_to_replicate, f);
-
-	return 1;
+	return enqueue_file_for_replication(q, f);
 }
 
 int vine_temp_redundancy_consider_replication(struct vine_manager *q)
@@ -182,16 +193,17 @@ int vine_temp_redundancy_consider_replication(struct vine_manager *q)
 
 	int processed = 0;
 	int iter_count = 0;
-	int iter_depth = MIN(q->attempt_schedule_depth, list_size(q->temp_files_to_replicate));
+	int iter_depth = MIN(q->attempt_schedule_depth, priority_queue_size(q->temp_files_to_replicate));
+	struct list *skipped = list_create();
 
 	struct vine_file *f;
-	while ((f = list_pop_head(q->temp_files_to_replicate)) && iter_count++ < iter_depth) {
-		if (!f || f->type != VINE_TEMP) {
+	while ((f = priority_queue_pop(q->temp_files_to_replicate)) && iter_count++ < iter_depth) {
+		if (!f || f->type != VINE_TEMP || f->state != VINE_FILE_STATE_CREATED) {
 			continue;
 		}
 
 		/* skip if the file has been checkpointed */
-		if (file_has_checkpointed(q, f)) {
+		if (file_has_been_checkpointed(q, f)) {
 			continue;
 		}
 
@@ -207,20 +219,29 @@ int vine_temp_redundancy_consider_replication(struct vine_manager *q)
 		}
 
 		/* if reach here, it means the file needs to be replicated and there is at least one ready replica. */
-		struct vine_worker_info *source = get_best_source(q, f);
-		if (!source) {
-			list_push_tail(q->temp_files_to_replicate, f);
+		struct vine_worker_info *source_worker = get_best_source_worker(q, f);
+		if (!source_worker) {
+			list_push_tail(skipped, f);
 			continue;
 		}
-		struct vine_worker_info *destination = get_best_destination(q, f);
-		if (!destination) {
-			list_push_tail(q->temp_files_to_replicate, f);
+		struct vine_worker_info *destination_worker = get_best_destination_worker(q, f);
+		if (!destination_worker) {
+			list_push_tail(skipped, f);
 			continue;
 		}
 
-		replicate_file(q, f, source, destination);
+		replicate_file(q, f, source_worker, destination_worker);
 		processed++;
+
+		/* push back and keep evaluating the same file with a lower priority, until no more source
+		 * or destination workers are available, or the file has enough replicas. */
+		enqueue_file_for_replication(q, f);
 	}
+
+	while ((f = list_pop_head(skipped))) {
+		enqueue_file_for_replication(q, f);
+	}
+	list_delete(skipped);
 
 	return processed;
 }

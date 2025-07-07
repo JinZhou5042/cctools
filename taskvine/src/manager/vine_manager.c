@@ -426,7 +426,9 @@ static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_w
 			f->size = size;
 
 			/* enqueue the file for replication as needed. */
-			vine_temp_redundancy_enqueue_file_for_replication(q, cachename);
+			if (f->type == VINE_TEMP && *id == 'X') {
+				vine_temp_redundancy_enqueue_file_for_replication(q, cachename);
+			}
 		}
 	}
 
@@ -4054,7 +4056,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->worker_table = hash_table_create(0, 0);
 	q->file_worker_table = hash_table_create(0, 0);
-	q->temp_files_to_replicate = list_create();
+	q->temp_files_to_replicate = priority_queue_create(0);
 	q->worker_blocklist = hash_table_create(0, 0);
 
 	q->file_table = hash_table_create(0, 0);
@@ -4435,7 +4437,7 @@ void vine_delete(struct vine_manager *q)
 	hash_table_clear(q->file_table, (void *)vine_file_delete);
 	hash_table_delete(q->file_table);
 
-	list_delete(q->temp_files_to_replicate);
+	priority_queue_delete(q->temp_files_to_replicate);
 
 	hash_table_clear(q->categories, (void *)category_free);
 	hash_table_delete(q->categories);

@@ -60,6 +60,7 @@ static void submit_node_children(struct vine_manager *m, struct vine_task_node *
 	{
 		/* Remove this parent from the child's pending set if it exists */
 		if (child_node->pending_parents) {
+			/* Assert that this parent is indeed pending for the child */
 			assert(set_lookup(child_node->pending_parents, node->node_key));
 			set_remove(child_node->pending_parents, node->node_key);
 		}
@@ -578,7 +579,7 @@ void vine_task_graph_execute(struct vine_manager *m)
 
 			/* record execution time and update recovery metrics */
 			node->execution_time = task->time_workers_execute_last;
-			// update_node_recovery_metrics(m, node);
+			update_node_recovery_metrics(m, node);
 
 			/* mark node as completed */
 			progress_bar_update(pbar, 1);
@@ -677,7 +678,8 @@ void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *
 		HASH_TABLE_ITERATE(node->parents, parent_key, parent_node)
 		{
 			if (node->pending_parents) {
-				set_insert(node->pending_parents, parent_key);
+				/* Use parent_node->node_key to ensure pointer consistency */
+				set_insert(node->pending_parents, parent_node->node_key);
 			}
 		}
 	}
