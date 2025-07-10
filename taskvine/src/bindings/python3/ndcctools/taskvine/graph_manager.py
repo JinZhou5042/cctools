@@ -341,7 +341,7 @@ class GraphManager(Manager):
         self.libtask.set_function_slots(libcores)
         self.install_library(self.libtask)
 
-    def _create_vine_graph(self, task_dict, expand_dsk=False, debug=False):
+    def _create_vine_graph(self, task_dict, expand_dsk=False, debug=False, persistence_percentage=0.0, checkpoint_percentage=0.0):
         # create task graph in the python side
         task_graph = TaskGraph(task_dict, expand_dsk=expand_dsk, debug=debug)
         with open("task_graph.pkl", 'wb') as f:
@@ -357,32 +357,32 @@ class GraphManager(Manager):
             cvine.vine_task_graph_set_node_outfile_remote_name(self._taskvine, k, outfile_remote_name)
 
         # finalize the task graph in the C side, building dependencies, creating tasks, etc.
-        cvine.vine_task_graph_finalize(self._taskvine, self._library_name, self._node_compute_function_name)
+        cvine.vine_task_graph_finalize(self._taskvine, self._library_name, self._node_compute_function_name, persistence_percentage, checkpoint_percentage)
 
     def execute(self, task_dict,
                 expand_dsk=False,
                 libcores=1,
                 hoisting_modules=[],
-                prune_mode="static",
                 static_prune_depth=0,
                 priority_mode="fifo",
                 scheduling_mode="files",
                 temp_replica_count=1,
-                enable_checkpointing=True,
                 wait_for_workers=1,
+                max_workers=None,
+                checkpoint_percentage=0.0,
+                persistence_percentage=0.0,
                 ):
 
         self.tune("temp-replica-count", temp_replica_count)
-        self.tune("enable-checkpointing", enable_checkpointing)
         self.tune("wait-for-workers", wait_for_workers)
+        if max_workers:
+            self.tune("max-workers", max_workers)
 
         # set worker scheduling mode
         self.set_scheduler(scheduling_mode)
 
-        # set prune algorithm and static prune depth
-        prune_mode = prune_mode.replace("-", "_")
+        # set static prune depth
         cvine.vine_task_graph_set_static_prune_depth(self._taskvine, static_prune_depth)
-        cvine.vine_task_graph_set_prune_algorithm(self._taskvine, get_c_constant(f"prune_algorithm_{prune_mode}"))
 
         # set task priority mode
         priority_mode = priority_mode.replace("-", "_")
@@ -392,7 +392,7 @@ class GraphManager(Manager):
         self._create_library_task(libcores, hoisting_modules)
 
         # initialize the vine graph in the C side
-        self._create_vine_graph(task_dict, expand_dsk=expand_dsk)
+        self._create_vine_graph(task_dict, expand_dsk=expand_dsk, persistence_percentage=persistence_percentage, checkpoint_percentage=checkpoint_percentage)
 
         # now execute the vine graph
         cvine.vine_task_graph_execute(self._taskvine)

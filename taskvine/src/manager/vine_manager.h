@@ -121,14 +121,13 @@ struct vine_manager {
 	struct hash_table *workers_with_watched_file_updates;  /* Maps link -> vine_worker_info */
 	struct hash_table *current_transfer_table; 	/* Maps uuid -> struct transfer_pair */
 	struct itable     *task_group_table; 	/* Maps group id -> list vine_task */
-	struct list *checkpoint_worker_list; 	/* List of hashkeys of workers that are checkpoint workers */
 
 	/* Primary data structures for tracking files. */
 
 	struct hash_table *file_table;      /* Maps fileid -> struct vine_file.* */
 	struct hash_table *file_worker_table; /* Maps cachename -> struct set of workers with a replica of the file.* */
-	struct priority_queue *temp_files_to_replicate; /* List of temp files to be replicated */
-
+	struct priority_queue *temp_files_to_replicate;
+	struct list *temp_files_to_checkpoint;
 
 	/* Primary scheduling controls. */
 
@@ -218,10 +217,10 @@ struct vine_manager {
 	int immediate_recovery;       /* If true, recovery tasks for tmp files are created as soon as the worker that had them
 																	 disconnects. Otherwise, create them only when a tasks needs then as inputs (this is
 																	 the default). */
+	int return_recovery_tasks;    /* If true, recovery tasks are returned by vine_wait to the user. By default they are handled internally. */
 	int transfer_temps_recovery;  /* If true, attempt to recover temp files from lost worker to reach threshold required */
 	int transfer_replica_per_cycle;  /* Maximum number of replica to request per temp file per iteration */
 	int temp_replica_count;       /* Number of replicas per temp file */
-	int enable_checkpointing;     /* If true, enable checkpointing */
 
 	double resource_submit_multiplier; /* Factor to permit overcommitment of resources at each worker.  */
 	double bandwidth_limit;            /* Artificial limit on bandwidth of manager<->worker transfers. */
@@ -247,6 +246,11 @@ struct vine_manager {
 	/* Testing mode parameters */
 	timestamp_t enforce_worker_eviction_interval;   /* Enforce worker eviction interval in seconds */
 	timestamp_t time_start_worker_eviction;         /* Track the time when we start evicting workers */
+
+	timestamp_t time_spent_on_calculating_recovery_metrics;
+	timestamp_t time_spent_on_file_pruning;
+
+	int num_submitted_recovery_tasks;
 };
 
 /*
@@ -295,6 +299,8 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 /* Check if the worker is able to transfer the necessary files for this task. */
 int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
+
+int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const char *filename, vine_cache_level_t cache_level, vine_cache_level_t delete_upto_level);
 
 /* The expected format of files created by the resource monitor.*/
 #define RESOURCE_MONITOR_TASK_LOCAL_NAME "vine-task-%d"

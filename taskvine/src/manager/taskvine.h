@@ -140,16 +140,7 @@ typedef enum {
 	VINE_ALLOCATION_MODE_EXHAUSTIVE_BUCKETING = CATEGORY_ALLOCATION_MODE_EXHAUSTIVE_BUCKETING
 } vine_category_mode_t;
 
-/** Select pruning algorithm for task graph file pruning. */
-typedef enum {
-	VINE_PRUNE_ALGORITHM_DISABLED = 0,  /**< No pruning, all nodes keep prune_depth = 0 */
-	VINE_PRUNE_ALGORITHM_STATIC,        /**< All nodes share a static prune_depth value */
-	/* Future algorithms can be added here:
-	VINE_PRUNE_ALGORITHM_ADAPTIVE,      / ** Adaptive pruning based on memory usage * /
-	VINE_PRUNE_ALGORITHM_PRIORITY,      / ** Priority-based pruning * /
-	VINE_PRUNE_ALGORITHM_CUSTOM         / ** User-defined pruning logic * /
-	*/
-} vine_task_graph_prune_algorithm_t;
+
 
 /** Select priority algorithm for task graph task scheduling. */
 typedef enum {
@@ -1137,6 +1128,14 @@ int vine_enable_peer_transfers(struct vine_manager *m);
 /** Disable taskvine peer transfers to be scheduled by the manager **/
 int vine_disable_peer_transfers(struct vine_manager *m);
 
+/** Enable recovery tasks to be returned by vine_wait.
+By default, recovery tasks are handled internally by the manager. **/
+int vine_enable_return_recovery_tasks(struct vine_manager *m);
+
+/** Disable recovery tasks from being returned by vine_wait.
+Recovery tasks will be handled internally by the manager. **/
+int vine_disable_return_recovery_tasks(struct vine_manager *m);
+
 /** When enabled, resources to tasks in are assigned in proportion to the size
 of the worker. If a resource is specified (e.g. with @ref vine_task_set_cores),
 proportional resources never go below explicit specifications. This mode is most
@@ -1572,12 +1571,11 @@ char *vine_get_path_library_log(struct vine_manager *m, const char *path);
 */
 char *vine_get_path_cache(struct vine_manager *m, const char *path);
 
-void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *function_name);
+void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *function_name, double persistence_percentage, double checkpoint_percentage);
 void vine_task_graph_add_dependency(struct vine_manager *m, const char *child_key, const char *parent_key);
 void vine_task_graph_execute(struct vine_manager *m);
 void vine_task_graph_set_node_outfile_remote_name(struct vine_manager *m, const char *node_key, const char *outfile_remote_name);
 
-void vine_task_graph_set_prune_algorithm(struct vine_manager *m, vine_task_graph_prune_algorithm_t algorithm);
 void vine_task_graph_set_static_prune_depth(struct vine_manager *m, int prune_depth);
 void vine_task_graph_set_priority_mode(struct vine_manager *m, vine_task_priority_mode_t mode);
 

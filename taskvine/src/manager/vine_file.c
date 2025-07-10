@@ -93,6 +93,10 @@ struct vine_file *vine_file_create(const char *source, const char *cached_name, 
 	f->cache_level = cache_level;
 	f->flags = flags;
 
+	f->needs_replication = 0;
+	f->needs_checkpointing = 0;
+	f->graph_recovery_time = 0;
+
 	if (data) {
 		/* Terminate with a null, just in case the user tries to treat this as a C string. */
 		f->data = malloc(size + 1);
@@ -131,6 +135,8 @@ struct vine_file *vine_file_create(const char *source, const char *cached_name, 
 	}
 
 	f->refcount = 1;
+	f->needs_replication = 0;
+	f->needs_checkpointing = 0;
 	vine_counters.file.created++;
 
 	return f;

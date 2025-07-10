@@ -15,7 +15,6 @@ struct vine_task_node {
     struct hash_table *parents;  // Table of node keys this node depends on
     struct hash_table *children;    // Table of node keys that depend on this node
     int completed;                 // Whether this node has been computed
-    int prune_depth;               // Prune depth for this node (0 = no pruning, 1+ = prune after depth)
     int prune_blocking_children_remaining;  // Number of downstream nodes within prune_depth that haven't completed
     struct hash_table *reverse_prune_waiters;  // Table of nodes that are waiting for this node to complete (for pruning)
     struct set *pending_parents;  // Set of parent keys that this node is waiting for
@@ -24,25 +23,27 @@ struct vine_task_node {
     struct vine_file *infile;  // arguments, a list of keys to compute
     struct vine_file *outfile; // output file for this task
     
-    // Recovery metrics for checkpointing
-    timestamp_t recovery_critical_time;
-    timestamp_t recovery_total_time;
-    double penalty;
-    timestamp_t execution_time;
+    timestamp_t critical_time;
+    
+    int needs_checkpointing;
+    int needs_replication;
+    int needs_persistency;
+
+    int active;
 };
 
 // Graph structure
 struct vine_task_graph {
-    struct hash_table *nodes;    // Table of nodes indexed by node_key
-    struct itable *task_id_to_node; // Table of task ids indexed by node_key
-    struct hash_table *outfile_cachename_to_node;
-    int prune_algorithm;         // Algorithm used for pruning (vine_task_graph_prune_algorithm_t)
-    int static_prune_depth;      // Prune depth for STATIC algorithm
-    int priority_mode;           // Priority algorithm used for task scheduling
+	struct hash_table *nodes;
+	struct itable *task_id_to_node;
+	struct hash_table *outfile_cachename_to_node;
+	int static_prune_depth;
+	vine_task_priority_mode_t priority_mode;
 };
 
 struct vine_task_graph *vine_task_graph_create();
 void vine_task_graph_delete(struct vine_task_graph *tg);
-void vine_task_graph_handle_task_done(struct vine_manager *m, struct vine_task *t);
+void handle_checkpoint_worker_stagein(struct vine_manager *m, struct vine_worker_info *w, const char *cachename);
+
 
 #endif // VINE_TASK_GRAPH_H
