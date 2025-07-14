@@ -10,6 +10,7 @@
 #include "debug.h"
 #include "stringtools.h"
 #include "xxmalloc.h"
+#include <sys/stat.h>
 #include "hash_table.h"
 #include "itable.h"
 #include "list.h"
@@ -31,12 +32,10 @@ struct pending_insert_entry {
 	struct vine_task_node *source_node;
 };
 
-static void initialize_pruning(struct vine_task_graph *graph);
-static double calculate_task_priority(struct vine_manager *m, struct vine_task_node *node);
-static void submit_node(struct vine_manager *m, struct vine_task_node *node);
-
-static int is_file_expired(struct vine_manager *m, struct vine_file *f);
-
+static void submit_node_task(struct vine_task_graph *tg, struct vine_task_node *node);
+static void resubmit_node_task(struct vine_task_graph *tg, struct vine_task_node *node);
+static void delete_node_task(struct vine_task_node *node);
+static void create_node_task(struct vine_task_graph *tg, struct vine_task_node *node);
 static volatile sig_atomic_t interrupted = 0;
 
 /*************************************************************/
@@ -48,9 +47,9 @@ static void handle_sigint(int signal)
 	interrupted = 1;
 }
 
-static void submit_node_children(struct vine_manager *m, struct vine_task_node *node)
+static void submit_node_children(struct vine_task_graph *tg, struct vine_task_node *node)
 {
-	if (!m || !m->task_graph || !node) {
+	if (!tg || !node) {
 		return;
 	}
 
@@ -67,20 +66,20 @@ static void submit_node_children(struct vine_manager *m, struct vine_task_node *
 
 		/* If no more parents are pending, submit the child */
 		if (!child_node->pending_parents || set_size(child_node->pending_parents) == 0) {
-			submit_node(m, child_node);
+			submit_node_task(tg, child_node);
 		}
 	}
 
 	return;
 }
 
-static struct vine_task_node *create_node(struct vine_manager *m, const char *node_key)
+static struct vine_task_node *create_node(struct vine_task_graph *tg, const char *node_key)
 {
-	if (!m || !node_key) {
+	if (!tg || !node_key) {
 		return NULL;
 	}
 
-	struct vine_task_node *node = hash_table_lookup(m->task_graph->nodes, node_key);
+	struct vine_task_node *node = hash_table_lookup(tg->nodes, node_key);
 	if (node) {
 		return node;
 	}
@@ -102,7 +101,7 @@ static struct vine_task_node *create_node(struct vine_manager *m, const char *no
 	node->needs_persistency = 0;
 	node->active = 1;
 
-	hash_table_insert(m->task_graph->nodes, node_key, node);
+	hash_table_insert(tg->nodes, node_key, node);
 	return node;
 }
 
@@ -169,61 +168,30 @@ static struct list *get_topological_order(struct vine_task_graph *graph)
 	return topo_order;
 }
 
-static void prune_nls_file(struct vine_manager *q, struct vine_file *f)
+static void prune_nls_file(struct vine_task_graph *tg, struct vine_file *f)
 {
-	if (!q || !q->task_graph || !f) {
+	if (!tg || !f) {
 		return;
 	}
 
 	/* delete all of the replicas present at remote workers. */
-	struct set *source_workers = hash_table_lookup(q->file_worker_table, f->cached_name);
+	struct set *source_workers = hash_table_lookup(tg->manager->file_worker_table, f->cached_name);
 	if (source_workers && set_size(source_workers) > 0) {
 		struct vine_worker_info *w;
 		SET_ITERATE(source_workers, w)
 		{
 			/* skip if a checkpoint worker */
-			if (is_checkpoint_worker(q, w)) {
+			if (is_checkpoint_worker(tg->manager, w)) {
 				continue;
 			}
-			delete_worker_file(q, w, f->cached_name, 0, 0);
+			delete_worker_file(tg->manager, w, f->cached_name, 0, 0);
 		}
 	}
 }
 
-static int is_file_expired(struct vine_manager *q, struct vine_file *f)
+static void prune_node_waiters(struct vine_task_graph *tg, struct vine_task_node *node)
 {
-	if (!q->task_graph || !f) {
-		return 0;
-	}
-
-	struct vine_task_node *node = hash_table_lookup(q->task_graph->outfile_cachename_to_node, f->cached_name);
-	if (!node) {
-		return 0;
-	}
-
-	/* a file is expired if its outfile is no longer needed by any child node:
-	 * 1. it has no pending dependents
-	 * 2. all completed dependents have also completed their corresponding recovery tasks, if any */
-	char *parent_key;
-	struct vine_task_node *child_node;
-	HASH_TABLE_ITERATE(node->children, parent_key, child_node)
-	{
-		/* if a task is not deleted, it means it is still running */
-		if (child_node->task && child_node->task->state != VINE_TASK_DONE) {
-			return 0;
-		}
-		struct vine_task *child_node_recovery_task = child_node->outfile->recovery_task;
-		if (child_node_recovery_task && (child_node_recovery_task->state != VINE_TASK_INITIAL && child_node_recovery_task->state != VINE_TASK_DONE)) {
-			return 0;
-		}
-	}
-
-	return 1;
-}
-
-static void prune_node_waiters(struct vine_manager *q, struct vine_task_node *node)
-{
-	if (!q || !q->task_graph || !node) {
+	if (!tg || !node) {
 		return;
 	}
 
@@ -234,11 +202,11 @@ static void prune_node_waiters(struct vine_manager *q, struct vine_task_node *no
 	HASH_TABLE_ITERATE(node->reverse_prune_waiters, waiter_key, waiter_node)
 	{
 		waiter_node->prune_blocking_children_remaining--;
-		if (waiter_node->prune_blocking_children_remaining == 0 && q->task_graph->static_prune_depth > 0) {
+		if (waiter_node->prune_blocking_children_remaining == 0 && tg->nls_prune_depth > 0) {
 			if (waiter_node->needs_checkpointing) {
 				continue;
 			}
-			prune_nls_file(q, waiter_node->outfile);
+			prune_nls_file(tg, waiter_node->outfile);
 		}
 	}
 
@@ -252,7 +220,7 @@ static void initialize_pruning(struct vine_task_graph *graph)
 	}
 
 	/* Skip if global prune depth is not set */
-	if (graph->static_prune_depth <= 0) {
+	if (graph->nls_prune_depth <= 0) {
 		return;
 	}
 
@@ -268,7 +236,7 @@ static void initialize_pruning(struct vine_task_graph *graph)
 		node->prune_blocking_children_remaining = 0;
 
 		/* Fast path for prune_depth=1: only check direct children */
-		if (graph->static_prune_depth == 1) {
+		if (graph->nls_prune_depth == 1) {
 			char *child_key;
 			struct vine_task_node *child_node;
 			HASH_TABLE_ITERATE(node->children, child_key, child_node)
@@ -306,7 +274,7 @@ static void initialize_pruning(struct vine_task_graph *graph)
 
 			/* BFS to expand to deeper levels within prune_depth, starting from the current node's direct children */
 			int current_depth = 1;
-			while (list_size(bfs_nodes) > 0 && current_depth < graph->static_prune_depth) {
+			while (list_size(bfs_nodes) > 0 && current_depth < graph->nls_prune_depth) {
 				int level_size = list_size(bfs_nodes);
 
 				for (int i = 0; i < level_size; i++) {
@@ -358,16 +326,31 @@ static void initialize_pruning(struct vine_task_graph *graph)
 	list_delete(pending_inserts);
 }
 
-static double calculate_task_priority(struct vine_manager *m, struct vine_task_node *node)
+static int vine_file_exists_on_local(struct vine_task_graph *tg, struct vine_file *f)
 {
-	if (!m || !m->task_graph || !node) {
+	if (!tg || !f || f->type != VINE_FILE) {
+		return 0;
+	}
+
+	struct stat local_info;
+
+	if (stat(f->source, &local_info) == 0) {
+		return 1;
+	} else {
+		return 0;
+	}
+}
+
+static double calculate_task_priority(struct vine_task_graph *tg, struct vine_task_node *node)
+{
+	if (!tg || !node) {
 		return 0.0;
 	}
 
 	double priority = 0.0;
 	timestamp_t current_time = timestamp_get();
 
-	switch (m->task_graph->priority_mode) {
+	switch (tg->priority_mode) {
 	case VINE_TASK_PRIORITY_MODE_RANDOM:
 		priority = random_double();
 		break;
@@ -399,29 +382,40 @@ static double calculate_task_priority(struct vine_manager *m, struct vine_task_n
 	return priority;
 }
 
-static void submit_node(struct vine_manager *m, struct vine_task_node *node)
+static void submit_node_task(struct vine_task_graph *tg, struct vine_task_node *node)
 {
-	if (!m || !m->task_graph || !node) {
+	if (!tg || !node) {
 		return;
 	}
 
-	double priority = calculate_task_priority(m, node);
+	double priority = calculate_task_priority(tg, node);
 	vine_task_set_priority(node->task, priority);
 
-	int task_id = vine_submit(m, node->task);
-	itable_insert(m->task_graph->task_id_to_node, task_id, node);
+	int task_id = vine_submit(tg->manager, node->task);
+	itable_insert(tg->task_id_to_node, task_id, node);
 
 	return;
 }
 
-static void replicate_node(struct vine_manager *q, struct vine_task_node *node)
+static void resubmit_node_task(struct vine_task_graph *tg, struct vine_task_node *node)
 {
-	if (!q || !q->task_graph || !node) {
+	if (!tg || !node) {
+		return;
+	}
+
+	delete_node_task(node);
+	create_node_task(tg, node);
+	submit_node_task(tg, node);
+}
+
+static void replicate_node(struct vine_task_graph *tg, struct vine_task_node *node)
+{
+	if (!tg || !node) {
 		return;
 	}
 
 	node->outfile->needs_replication = 1;
-	vine_temp_redundancy_replicate_file(q, node->outfile);
+	vine_temp_redundancy_replicate_file(tg->manager, node->outfile);
 }
 
 static void update_node_critical_time(struct vine_task_node *node, timestamp_t execution_time)
@@ -438,30 +432,30 @@ static void update_node_critical_time(struct vine_task_node *node, timestamp_t e
 	node->critical_time = max_parent_critical_time + execution_time;
 }
 
-static void checkpoint_node(struct vine_manager *q, struct vine_task_node *node)
+static void checkpoint_node(struct vine_task_graph *tg, struct vine_task_node *node)
 {
-	if (!q || !q->task_graph || !node) {
+	if (!tg || !node) {
 		return;
 	}
 
 	node->outfile->needs_checkpointing = 1;
-	vine_temp_redundancy_checkpoint_file(q, node->outfile);
+	vine_temp_redundancy_checkpoint_file(tg->manager, node->outfile);
 }
 
 /*************************************************************/
 /* Public APIs */
 /*************************************************************/
 
-void handle_checkpoint_worker_stagein(struct vine_manager *m, struct vine_worker_info *w, const char *cachename)
+struct set *handle_checkpoint_worker_stagein(struct vine_task_graph *tg, struct vine_worker_info *w, const char *cachename)
 {
-	if (!m || !m->task_graph || !w || !cachename) {
-		return;
+	if (!tg || !w || !cachename) {
+		return NULL;
 	}
 
 	/* find the node that corresponds to this cached file */
-	struct vine_task_node *this_node = hash_table_lookup(m->task_graph->outfile_cachename_to_node, cachename);
+	struct vine_task_node *this_node = hash_table_lookup(tg->outfile_cachename_to_node, cachename);
 	if (!this_node) {
-		return;
+		return NULL;
 	}
 
 	timestamp_t start_time = timestamp_get();
@@ -512,6 +506,8 @@ void handle_checkpoint_worker_stagein(struct vine_manager *m, struct vine_worker
 		}
 	}
 
+	struct set *files_to_prune = set_create(0);
+
 	/* mark all nodes in the visited set as inactive */
 	struct vine_task_node *visited_node;
 	SET_ITERATE(visited_nodes, visited_node)
@@ -520,27 +516,29 @@ void handle_checkpoint_worker_stagein(struct vine_manager *m, struct vine_worker
 			continue;
 		}
 		visited_node->active = 0;
-		vine_prune_file(m, visited_node->outfile);
+		set_insert(files_to_prune, visited_node->outfile);
 	}
 
 	list_delete(bfs_nodes);
 	set_delete(visited_nodes);
 
-	m->time_spent_on_file_pruning += timestamp_get() - start_time;
+	tg->time_spent_on_file_pruning += timestamp_get() - start_time;
+
+	return files_to_prune;
 }
 
-void vine_task_graph_set_static_prune_depth(struct vine_manager *m, int prune_depth)
+void vine_task_graph_set_nls_prune_depth(struct vine_task_graph *tg, int nls_prune_depth)
 {
-	if (!m || !m->task_graph) {
+	if (!tg) {
 		return;
 	}
 
-	m->task_graph->static_prune_depth = MAX(prune_depth, 0);
+	tg->nls_prune_depth = MAX(nls_prune_depth, 0);
 }
 
-void vine_task_graph_set_priority_mode(struct vine_manager *m, vine_task_priority_mode_t mode)
+void vine_task_graph_set_priority_mode(struct vine_task_graph *tg, vine_task_priority_mode_t mode)
 {
-	if (!m || !m->task_graph) {
+	if (!tg) {
 		return;
 	}
 
@@ -569,32 +567,32 @@ void vine_task_graph_set_priority_mode(struct vine_manager *m, vine_task_priorit
 		break;
 	}
 
-	m->task_graph->priority_mode = mode;
+	tg->priority_mode = mode;
 }
 
-void vine_task_graph_execute(struct vine_manager *m)
+void vine_task_graph_execute(struct vine_task_graph *tg)
 {
-	if (!m || !m->task_graph) {
+	if (!tg) {
 		return;
 	}
 
 	/* enable return recovery tasks */
-	vine_enable_return_recovery_tasks(m);
+	vine_enable_return_recovery_tasks(tg->manager);
 
 	signal(SIGINT, handle_sigint);
 
 	/* enqueue those without dependencies */
 	char *node_key;
 	struct vine_task_node *node;
-	HASH_TABLE_ITERATE(m->task_graph->nodes, node_key, node)
+	HASH_TABLE_ITERATE(tg->nodes, node_key, node)
 	{
 		if (!node->pending_parents || set_size(node->pending_parents) == 0) {
-			submit_node(m, node);
+			submit_node_task(tg, node);
 		}
 	}
 
 	struct ProgressBar *pbar = progress_bar_init("Executing Tasks");
-	struct ProgressBarPart *regular_tasks_part = progress_bar_part_create("Regular", hash_table_size(m->task_graph->nodes));
+	struct ProgressBarPart *regular_tasks_part = progress_bar_part_create("Regular", hash_table_size(tg->nodes));
 	struct ProgressBarPart *recovery_tasks_part = progress_bar_part_create("Recovery", 0);
 	progress_bar_add_part(pbar, regular_tasks_part);
 	progress_bar_add_part(pbar, recovery_tasks_part);
@@ -604,8 +602,8 @@ void vine_task_graph_execute(struct vine_manager *m)
 			break;
 		}
 
-		struct vine_task *task = vine_wait(m, 15);
-		progress_bar_update_part_total(pbar, recovery_tasks_part, m->num_submitted_recovery_tasks);
+		struct vine_task *task = vine_wait(tg->manager, 15);
+		progress_bar_update_part_total(pbar, recovery_tasks_part, tg->manager->num_submitted_recovery_tasks);
 		if (task) {
 			/* skip recovery tasks */
 			if (task->type == VINE_TASK_TYPE_RECOVERY) {
@@ -613,13 +611,29 @@ void vine_task_graph_execute(struct vine_manager *m)
 				continue;
 			}
 
+			/* get the original node by task id */
+			struct vine_task_node *node = itable_lookup(tg->task_id_to_node, task->task_id);
+
+			/* in case of failure, resubmit this task */
+			if (task->result != VINE_RESULT_SUCCESS || task->exit_code != 0) {
+				debug(D_VINE | D_NOTICE, "task %d failed, resubmitting", task->task_id);
+				resubmit_node_task(tg, node);
+				continue;
+			}
+
+			/* check if the output file exists on local */
+			if (node->outfile->type == VINE_FILE) {
+				if (!vine_file_exists_on_local(tg, node->outfile)) {
+					debug(D_VINE | D_NOTICE, "file %s does not exist on local, resubmitting", node->outfile->cached_name);
+					resubmit_node_task(tg, node);
+					continue;
+				}
+			}
+
 			/* set the start time to the submit time of the first regular task */
 			if (regular_tasks_part->current == 0) {
 				progress_bar_reset_start_time(pbar, task->time_when_submitted);
 			}
-
-			/* get the original node by task id */
-			struct vine_task_node *node = itable_lookup(m->task_graph->task_id_to_node, task->task_id);
 
 			/* update critical time */
 			update_node_critical_time(node, task->time_workers_execute_last);
@@ -629,17 +643,17 @@ void vine_task_graph_execute(struct vine_manager *m)
 
 			/* enqueue the output file for replication or checkpointing */
 			if (node->needs_checkpointing) {
-				checkpoint_node(m, node);
+				checkpoint_node(tg, node);
 			} else if (node->needs_replication) {
-				replicate_node(m, node);
+				replicate_node(tg, node);
 			}
 
 			timestamp_t start_time = timestamp_get();
-			prune_node_waiters(m, node);
-			m->time_spent_on_file_pruning += timestamp_get() - start_time;
+			prune_node_waiters(tg, node);
+			tg->time_spent_on_file_pruning += timestamp_get() - start_time;
 
 			/* submit children nodes with dependencies all resolved */
-			submit_node_children(m, node);
+			submit_node_children(tg, node);
 		} else {
 			progress_bar_advance_part_current(pbar, recovery_tasks_part, 0);
 		}
@@ -648,43 +662,92 @@ void vine_task_graph_execute(struct vine_manager *m)
 	progress_bar_finish(pbar);
 	progress_bar_delete(pbar);
 
-	printf("time spent on file pruning: %ld\n", m->time_spent_on_file_pruning);
+	printf("time spent on file pruning: %ld\n", tg->time_spent_on_file_pruning);
 
 	return;
 }
 
-void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *function_name, double persistence_percentage, double checkpoint_percentage)
+static void delete_node_task(struct vine_task_node *node)
 {
-	if (!m || !m->task_graph) {
+	if (!node) {
 		return;
 	}
 
-	if (persistence_percentage < 0.0) {
-		persistence_percentage = 0.0;
-	} else if (persistence_percentage > 1.0) {
-		persistence_percentage = 1.0;
+	vine_task_delete(node->task);
+	node->task = NULL;
+
+	if (node->infile) {
+		vine_file_delete(node->infile);
+		node->infile = NULL;
 	}
 
-	if (checkpoint_percentage < 0.0) {
-		checkpoint_percentage = 0.0;
-	} else if (checkpoint_percentage > 1.0) {
-		checkpoint_percentage = 1.0;
+	if (node->outfile) {
+		vine_file_delete(node->outfile);
+		node->outfile = NULL;
 	}
 
-	if (persistence_percentage + checkpoint_percentage > 1.0) {
-		double total = persistence_percentage + checkpoint_percentage;
-		persistence_percentage = persistence_percentage / total;
-		checkpoint_percentage = checkpoint_percentage / total;
+	return;
+}
+
+static void create_node_task(struct vine_task_graph *tg, struct vine_task_node *node)
+{
+	if (!tg || !node) {
+		return;
+	}
+
+	node->task = vine_task_create(tg->function_name);
+	vine_task_set_priority(node->task, node->depth);
+	vine_task_set_library_required(node->task, tg->library_name);
+
+	char *infile_content = string_format("%s", node->node_key);
+	node->infile = vine_declare_buffer(tg->manager, infile_content, strlen(infile_content), VINE_CACHE_LEVEL_TASK, VINE_UNLINK_WHEN_DONE);
+	free(infile_content);
+
+	vine_task_add_input(node->task, node->infile, "infile", VINE_TRANSFER_ALWAYS);
+
+	if (node->needs_persistency) {
+		char *persistent_path = string_format("/tmp/jzhou/vine-staging/outputs/%s", node->outfile_remote_name);
+		node->outfile = vine_declare_file(tg->manager, persistent_path, VINE_CACHE_LEVEL_WORKFLOW, 0);
+		free(persistent_path);
+	} else {
+		node->outfile = vine_declare_temp(tg->manager);
+	}
+
+	if (!hash_table_lookup(tg->outfile_cachename_to_node, node->outfile->cached_name)) {
+		hash_table_insert(tg->outfile_cachename_to_node, node->outfile->cached_name, node);
+	}
+	vine_task_add_output(node->task, node->outfile, node->outfile_remote_name, VINE_TRANSFER_ALWAYS);
+
+	char *parent_key;
+	struct vine_task_node *parent_node;
+	HASH_TABLE_ITERATE(node->parents, parent_key, parent_node)
+	{
+		vine_task_add_input(node->task, parent_node->outfile, parent_node->outfile_remote_name, VINE_TRANSFER_ALWAYS);
+	}
+
+	return;
+}
+
+void vine_task_graph_finalize(struct vine_task_graph *tg, double nls_percentage, double checkpoint_percentage, double persistence_percentage)
+{
+	if (!tg) {
+		return;
+	}
+
+	/* Check if the sum of percentages is valid */
+	if (nls_percentage + checkpoint_percentage + persistence_percentage != 1.0) {
+		debug(D_ERROR, "nls_percentage (%.2f) + checkpoint_percentage (%.2f) + persistence_percentage (%.2f) != 1.0", nls_percentage, checkpoint_percentage, persistence_percentage);
+		return;
 	}
 
 	/* enable debug system for C code since it uses a separate debug system instance
 	 * from the Python bindings. Use the same function that the manager uses. */
-	char *debug_tmp = string_format("%s/vine-logs/debug", m->runtime_directory);
+	char *debug_tmp = string_format("%s/vine-logs/debug", tg->manager->runtime_directory);
 	vine_enable_debug_log(debug_tmp);
 	free(debug_tmp);
 
 	/* get nodes in topological order */
-	struct list *topo_order = get_topological_order(m->task_graph);
+	struct list *topo_order = get_topological_order(tg);
 	if (!topo_order) {
 		return;
 	}
@@ -693,7 +756,7 @@ void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *
 	char *node_key;
 	LIST_ITERATE(topo_order, node_key)
 	{
-		struct vine_task_node *node = hash_table_lookup(m->task_graph->nodes, node_key);
+		struct vine_task_node *node = hash_table_lookup(tg->nodes, node_key);
 		node->depth = 0;
 
 		char *parent_key;
@@ -714,7 +777,7 @@ void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *
 	int task_index = 0;
 	LIST_ITERATE(topo_order, node_key)
 	{
-		struct vine_task_node *current_node = hash_table_lookup(m->task_graph->nodes, node_key);
+		struct vine_task_node *current_node = hash_table_lookup(tg->nodes, node_key);
 
 		if (task_index < tasks_to_replicate) {
 			current_node->needs_replication = 1;
@@ -729,35 +792,7 @@ void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *
 
 	LIST_ITERATE(topo_order, node_key)
 	{
-		struct vine_task_node *current_node = hash_table_lookup(m->task_graph->nodes, node_key);
-
-		current_node->task = vine_task_create(function_name);
-		vine_task_set_priority(current_node->task, current_node->depth);
-		vine_task_set_library_required(current_node->task, library_name);
-
-		char *infile_content = string_format("%s", current_node->node_key);
-		current_node->infile = vine_declare_buffer(m, infile_content, strlen(infile_content), VINE_CACHE_LEVEL_TASK, VINE_UNLINK_WHEN_DONE);
-		free(infile_content);
-
-		vine_task_add_input(current_node->task, current_node->infile, "infile", VINE_TRANSFER_ALWAYS);
-
-		if (current_node->needs_persistency) {
-			char *persistent_path = string_format("/tmp/jzhou/vine-staging/outputs/%s", current_node->outfile_remote_name);
-			current_node->outfile = vine_declare_file(m, persistent_path, VINE_CACHE_LEVEL_WORKFLOW, 0);
-			free(persistent_path);
-		} else {
-			current_node->outfile = vine_declare_temp(m);
-		}
-
-		hash_table_insert(m->task_graph->outfile_cachename_to_node, current_node->outfile->cached_name, current_node);
-		vine_task_add_output(current_node->task, current_node->outfile, current_node->outfile_remote_name, VINE_TRANSFER_ALWAYS);
-
-		char *parent_key;
-		struct vine_task_node *parent_node;
-		HASH_TABLE_ITERATE(current_node->parents, parent_key, parent_node)
-		{
-			vine_task_add_input(current_node->task, parent_node->outfile, parent_node->outfile_remote_name, VINE_TRANSFER_ALWAYS);
-		}
+		create_node_task(tg, hash_table_lookup(tg->nodes, node_key));
 	}
 
 	while ((node_key = list_pop_head(topo_order))) {
@@ -766,11 +801,11 @@ void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *
 	list_delete(topo_order);
 
 	/* initialize prune depth mappings */
-	initialize_pruning(m->task_graph);
+	initialize_pruning(tg);
 
 	/* initialize pending_parents for all nodes */
 	struct vine_task_node *node;
-	HASH_TABLE_ITERATE(m->task_graph->nodes, node_key, node)
+	HASH_TABLE_ITERATE(tg->nodes, node_key, node)
 	{
 		char *parent_key;
 		struct vine_task_node *parent_node;
@@ -786,24 +821,28 @@ void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *
 	return;
 }
 
-struct vine_task_graph *vine_task_graph_create()
+struct vine_task_graph *vine_task_graph_create(struct vine_manager *q)
 {
-	struct vine_task_graph *graph = xxmalloc(sizeof(struct vine_task_graph));
-	graph->nodes = hash_table_create(0, 0);
-	graph->task_id_to_node = itable_create(0);
-	graph->outfile_cachename_to_node = hash_table_create(0, 0);
-	graph->static_prune_depth = 0;
-	graph->priority_mode = VINE_TASK_PRIORITY_MODE_FIFO;
+	struct vine_task_graph *tg = xxmalloc(sizeof(struct vine_task_graph));
+	tg->nodes = hash_table_create(0, 0);
+	tg->task_id_to_node = itable_create(0);
+	tg->outfile_cachename_to_node = hash_table_create(0, 0);
+	tg->nls_prune_depth = 0;
+	tg->priority_mode = VINE_TASK_PRIORITY_MODE_FIFO;
+	tg->library_name = xxstrdup("task-graph-library");
+	tg->function_name = xxstrdup("compute_group_keys");
+	tg->time_spent_on_file_pruning = 0;
+	tg->manager = q;
 
-	return graph;
+	return tg;
 }
 
-void vine_task_graph_set_node_outfile_remote_name(struct vine_manager *m, const char *node_key, const char *outfile_remote_name)
+void vine_task_graph_set_node_outfile_remote_name(struct vine_task_graph *tg, const char *node_key, const char *outfile_remote_name)
 {
-	if (!m->task_graph || !node_key || !outfile_remote_name) {
+	if (!tg || !node_key || !outfile_remote_name) {
 		return;
 	}
-	struct vine_task_node *node = hash_table_lookup(m->task_graph->nodes, node_key);
+	struct vine_task_node *node = hash_table_lookup(tg->nodes, node_key);
 	if (!node) {
 		return;
 	}
@@ -813,20 +852,20 @@ void vine_task_graph_set_node_outfile_remote_name(struct vine_manager *m, const 
 	node->outfile_remote_name = xxstrdup(outfile_remote_name);
 }
 
-void vine_task_graph_add_dependency(struct vine_manager *m, const char *child_key, const char *parent_key)
+void vine_task_graph_add_dependency(struct vine_task_graph *tg, const char *parent_key, const char *child_key)
 {
-	if (!m->task_graph || !child_key || !parent_key) {
+	if (!tg || !parent_key || !child_key) {
 		return;
 	}
 
-	struct vine_task_node *child_node = hash_table_lookup(m->task_graph->nodes, child_key);
-	struct vine_task_node *parent_node = hash_table_lookup(m->task_graph->nodes, parent_key);
+	struct vine_task_node *child_node = hash_table_lookup(tg->nodes, child_key);
+	struct vine_task_node *parent_node = hash_table_lookup(tg->nodes, parent_key);
 
 	if (!child_node) {
-		child_node = create_node(m, child_key);
+		child_node = create_node(tg, child_key);
 	}
 	if (!parent_node) {
-		parent_node = create_node(m, parent_key);
+		parent_node = create_node(tg, parent_key);
 	}
 
 	/* check if dependency already exists */
@@ -836,6 +875,14 @@ void vine_task_graph_add_dependency(struct vine_manager *m, const char *child_ke
 	hash_table_insert(child_node->parents, parent_key, parent_node);
 	hash_table_insert(parent_node->children, child_key, child_node);
 	debug(D_VINE, "added dependency: %s -> %s", parent_key, child_key);
+}
+
+const char *vine_task_graph_get_library_name(const struct vine_task_graph *tg)
+{
+	if (!tg) {
+		return NULL;
+	}
+	return tg->library_name;
 }
 
 void vine_task_graph_delete(struct vine_task_graph *tg)
@@ -854,6 +901,7 @@ void vine_task_graph_delete(struct vine_task_graph *tg)
 		if (node->outfile_remote_name) {
 			free(node->outfile_remote_name);
 		}
+		delete_node_task(node);
 		hash_table_delete(node->parents);
 		hash_table_delete(node->children);
 		hash_table_delete(node->reverse_prune_waiters);
@@ -862,6 +910,8 @@ void vine_task_graph_delete(struct vine_task_graph *tg)
 		}
 		free(node);
 	}
+	free(tg->library_name);
+	free(tg->function_name);
 
 	hash_table_delete(tg->nodes);
 	itable_delete(tg->task_id_to_node);

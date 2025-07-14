@@ -247,7 +247,7 @@ class TaskGraph:
         group_keys = set(group_keys)
         external_output_keys = {
             k for k in group_keys
-            if any(c not in group_keys for c in self.children_of[k])
+            if len(self.children_of[k]) == 0 or any(c not in group_keys for c in self.children_of[k])
         }
 
         return {
@@ -315,11 +315,12 @@ class GraphManager(Manager):
 
         super().__init__(*args, **kwargs)
 
+        self._task_graph = cvine.vine_task_graph_create(self._taskvine)
+
         # tune the manager for vine graph optimization
         self.tune("worker-source-max-transfers", 1000)
         self.tune("max-retrievals", -1)
         self.tune("prefer-dispatch", 1)
-        self.tune("immediate-recovery", 1)
         self.tune("transient-error-interval", 1)
         self.tune("attempt-schedule-depth", 1000)
 
@@ -341,7 +342,7 @@ class GraphManager(Manager):
         self.libtask.set_function_slots(libcores)
         self.install_library(self.libtask)
 
-    def _create_vine_graph(self, task_dict, expand_dsk=False, debug=False, persistence_percentage=0.0, checkpoint_percentage=0.0):
+    def _create_vine_graph(self, task_dict, expand_dsk=False, debug=False):
         # create task graph in the python side
         task_graph = TaskGraph(task_dict, expand_dsk=expand_dsk, debug=debug)
         with open("task_graph.pkl", 'wb') as f:
@@ -350,49 +351,50 @@ class GraphManager(Manager):
         # create dependenciy mapping in the C side
         for k, pks in task_graph.parents_of.items():
             for pk in pks:
-                cvine.vine_task_graph_add_dependency(self._taskvine, k, pk)
+                cvine.vine_task_graph_add_dependency(self._task_graph, pk, k)
 
         # set output file remote name in the C side
         for k, outfile_remote_name in task_graph.outfile_remote_name.items():
-            cvine.vine_task_graph_set_node_outfile_remote_name(self._taskvine, k, outfile_remote_name)
-
-        # finalize the task graph in the C side, building dependencies, creating tasks, etc.
-        cvine.vine_task_graph_finalize(self._taskvine, self._library_name, self._node_compute_function_name, persistence_percentage, checkpoint_percentage)
+            cvine.vine_task_graph_set_node_outfile_remote_name(self._task_graph, k, outfile_remote_name)
 
     def execute(self, task_dict,
                 expand_dsk=False,
                 libcores=1,
                 hoisting_modules=[],
-                static_prune_depth=0,
+                nls_prune_depth=0,
                 priority_mode="fifo",
                 scheduling_mode="files",
-                temp_replica_count=1,
-                wait_for_workers=1,
-                max_workers=None,
+                nls_percentage=1.0,
                 checkpoint_percentage=0.0,
                 persistence_percentage=0.0,
+                **kwargs
                 ):
 
-        self.tune("temp-replica-count", temp_replica_count)
-        self.tune("wait-for-workers", wait_for_workers)
-        if max_workers:
-            self.tune("max-workers", max_workers)
+        for key, value in kwargs.items():
+            self.tune(key.replace("_", "-"), value)
 
         # set worker scheduling mode
         self.set_scheduler(scheduling_mode)
 
-        # set static prune depth
-        cvine.vine_task_graph_set_static_prune_depth(self._taskvine, static_prune_depth)
+        # set NLS prune depth
+        cvine.vine_task_graph_set_nls_prune_depth(self._task_graph, nls_prune_depth)
 
         # set task priority mode
         priority_mode = priority_mode.replace("-", "_")
-        cvine.vine_task_graph_set_priority_mode(self._taskvine, get_c_constant(f"task_priority_mode_{priority_mode}"))
+        cvine.vine_task_graph_set_priority_mode(self._task_graph, get_c_constant(f"task_priority_mode_{priority_mode}"))
 
         # create library task with specified resources
         self._create_library_task(libcores, hoisting_modules)
 
         # initialize the vine graph in the C side
-        self._create_vine_graph(task_dict, expand_dsk=expand_dsk, persistence_percentage=persistence_percentage, checkpoint_percentage=checkpoint_percentage)
+        self._create_vine_graph(task_dict, expand_dsk=expand_dsk)
+
+        # finalize the task graph in the C side, building dependencies, creating tasks, etc.
+        cvine.vine_task_graph_finalize(self._task_graph, nls_percentage, checkpoint_percentage, persistence_percentage)
 
         # now execute the vine graph
-        cvine.vine_task_graph_execute(self._taskvine)
+        cvine.vine_task_graph_execute(self._task_graph)
+
+    def __del__(self):
+        super().__del__()
+        cvine.vine_task_graph_delete(self._task_graph)

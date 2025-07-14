@@ -15,6 +15,7 @@ See the file COPYING for details.
 struct vine_manager;
 struct vine_task;
 struct vine_file;
+struct vine_task_graph;
 
 /** @file taskvine.h The public API for the taskvine distributed application framework.
 A taskvine application consists of a manager process and a larger number of worker
@@ -1571,14 +1572,17 @@ char *vine_get_path_library_log(struct vine_manager *m, const char *path);
 */
 char *vine_get_path_cache(struct vine_manager *m, const char *path);
 
-void vine_task_graph_finalize(struct vine_manager *m, char *library_name, char *function_name, double persistence_percentage, double checkpoint_percentage);
-void vine_task_graph_add_dependency(struct vine_manager *m, const char *child_key, const char *parent_key);
-void vine_task_graph_execute(struct vine_manager *m);
-void vine_task_graph_set_node_outfile_remote_name(struct vine_manager *m, const char *node_key, const char *outfile_remote_name);
+struct vine_task_graph *vine_task_graph_create(struct vine_manager *q);
+void vine_task_graph_delete(struct vine_task_graph *tg);
 
-void vine_task_graph_set_static_prune_depth(struct vine_manager *m, int prune_depth);
-void vine_task_graph_set_priority_mode(struct vine_manager *m, vine_task_priority_mode_t mode);
+void vine_task_graph_finalize(struct vine_task_graph *tg, double nls_percentage, double checkpoint_percentage, double persistence_percentage);
+void vine_task_graph_add_dependency(struct vine_task_graph *tg, const char *parent_key, const char *child_key);
+void vine_task_graph_execute(struct vine_task_graph *tg);
+void vine_task_graph_set_node_outfile_remote_name(struct vine_task_graph *tg, const char *node_key, const char *outfile_remote_name);
 
+void vine_task_graph_set_nls_prune_depth(struct vine_task_graph *tg, int nls_prune_depth);
+void vine_task_graph_set_priority_mode(struct vine_task_graph *tg, vine_task_priority_mode_t mode);
+const char *vine_task_graph_get_library_name(const struct vine_task_graph *tg);
 //@}
 
 #endif

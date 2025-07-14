@@ -248,7 +248,6 @@ struct vine_manager {
 	timestamp_t time_start_worker_eviction;         /* Track the time when we start evicting workers */
 
 	timestamp_t time_spent_on_calculating_recovery_metrics;
-	timestamp_t time_spent_on_file_pruning;
 
 	int num_submitted_recovery_tasks;
 };

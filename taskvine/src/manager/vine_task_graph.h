@@ -6,7 +6,6 @@
 #include "vine_manager.h"
 #include "set.h"
 
-
 // Node structure for the graph
 struct vine_task_node {
     char *node_key;          // Unique node key identifier in the graph
@@ -37,13 +36,17 @@ struct vine_task_graph {
 	struct hash_table *nodes;
 	struct itable *task_id_to_node;
 	struct hash_table *outfile_cachename_to_node;
-	int static_prune_depth;
+	int nls_prune_depth;
+    struct vine_manager *manager;
 	vine_task_priority_mode_t priority_mode;
+
+    timestamp_t time_spent_on_file_pruning;
+
+    char *library_name;
+    char *function_name;
 };
 
-struct vine_task_graph *vine_task_graph_create();
-void vine_task_graph_delete(struct vine_task_graph *tg);
-void handle_checkpoint_worker_stagein(struct vine_manager *m, struct vine_worker_info *w, const char *cachename);
+struct set *handle_checkpoint_worker_stagein(struct vine_task_graph *tg, struct vine_worker_info *w, const char *cachename);
 
 
 #endif // VINE_TASK_GRAPH_H

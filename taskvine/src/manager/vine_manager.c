@@ -30,7 +30,6 @@ See the file COPYING for details.
 #include "vine_txn_log.h"
 #include "vine_worker_info.h"
 #include "vine_temp_redundancy.h"
-#include "vine_task_graph.h"
 
 #include "address.h"
 #include "buffer.h"
@@ -426,7 +425,13 @@ static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_w
 			f->size = size;
 
 			if (is_checkpoint_worker(q, w)) {
-				handle_checkpoint_worker_stagein(q, w, cachename);
+				struct set *files_to_prune = handle_checkpoint_worker_stagein(q->task_graph, w, cachename);
+				struct vine_file *file_to_prune;
+				SET_ITERATE(files_to_prune, file_to_prune)
+				{
+					vine_prune_file(q, file_to_prune);
+				}
+				set_delete(files_to_prune);
 			}
 		}
 	}
@@ -4043,8 +4048,6 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->tasks = itable_create(0);
 	q->library_templates = hash_table_create(0, 0);
 
-	q->task_graph = vine_task_graph_create();
-
 	q->worker_table = hash_table_create(0, 0);
 	q->file_worker_table = hash_table_create(0, 0);
 	q->temp_files_to_replicate = priority_queue_create(0);
@@ -4438,8 +4441,6 @@ void vine_delete(struct vine_manager *q)
 
 	hash_table_clear(q->library_templates, (void *)vine_task_delete);
 	hash_table_delete(q->library_templates);
-
-	vine_task_graph_delete(q->task_graph);
 
 	/* delete files after deleting tasks so that rc are correctly updated. */
 	hash_table_clear(q->file_table, (void *)vine_file_delete);
