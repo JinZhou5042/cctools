@@ -39,14 +39,14 @@ struct vine_task_graph {
 	int nls_prune_depth;
     struct vine_manager *manager;
 	vine_task_priority_mode_t priority_mode;
-
+    double nls_percentage;
+    double checkpoint_percentage;
+    double persistence_percentage;
     timestamp_t time_spent_on_file_pruning;
 
     char *library_name;
     char *function_name;
 };
-
-struct set *handle_checkpoint_worker_stagein(struct vine_task_graph *tg, struct vine_worker_info *w, const char *cachename);
 
 
 #endif // VINE_TASK_GRAPH_H

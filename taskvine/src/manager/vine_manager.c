@@ -425,13 +425,7 @@ static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_w
 			f->size = size;
 
 			if (is_checkpoint_worker(q, w)) {
-				struct set *files_to_prune = handle_checkpoint_worker_stagein(q->task_graph, w, cachename);
-				struct vine_file *file_to_prune;
-				SET_ITERATE(files_to_prune, file_to_prune)
-				{
-					vine_prune_file(q, file_to_prune);
-				}
-				set_delete(files_to_prune);
+				list_push_tail(q->new_checkpointed_files, f);
 			}
 		}
 	}
@@ -476,7 +470,6 @@ static vine_msg_code_t handle_cache_invalid(struct vine_manager *q, struct vine_
 		debug(D_VINE, "%s (%s) invalidated %s with error: %s", w->hostname, w->addrport, cachename, message);
 		free(message);
 
-		/* the replica is definitely not on the dest worker */
 		process_replica_on_event(q, w, cachename, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_CACHE_INVALID);
 
 		/* If the third argument was given, also remove the transfer record */
@@ -4162,8 +4155,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->enforce_worker_eviction_interval = 0;
 	q->time_start_worker_eviction = 0;
 
-	q->time_spent_on_calculating_recovery_metrics = 0;
 	q->num_submitted_recovery_tasks = 0;
+	q->new_checkpointed_files = list_create();
 
 	if ((envstring = getenv("VINE_BANDWIDTH"))) {
 		q->bandwidth_limit = string_metric_parse(envstring);
@@ -4505,6 +4498,8 @@ void vine_delete(struct vine_manager *q)
 	free(q->runtime_directory);
 	free(q->stats);
 	free(q->stats_measure);
+
+	list_delete(q->new_checkpointed_files);
 
 	vine_counters_debug();
 

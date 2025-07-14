@@ -36,6 +36,8 @@ static void submit_node_task(struct vine_task_graph *tg, struct vine_task_node *
 static void resubmit_node_task(struct vine_task_graph *tg, struct vine_task_node *node);
 static void delete_node_task(struct vine_task_node *node);
 static void create_node_task(struct vine_task_graph *tg, struct vine_task_node *node);
+static void vine_task_graph_finalize(struct vine_task_graph *tg);
+static void vine_task_graph_set_priority_mode(struct vine_task_graph *tg, vine_task_priority_mode_t mode);
 static volatile sig_atomic_t interrupted = 0;
 
 /*************************************************************/
@@ -446,16 +448,16 @@ static void checkpoint_node(struct vine_task_graph *tg, struct vine_task_node *n
 /* Public APIs */
 /*************************************************************/
 
-struct set *handle_checkpoint_worker_stagein(struct vine_task_graph *tg, struct vine_worker_info *w, const char *cachename)
+static void handle_checkpoint_worker_stagein(struct vine_task_graph *tg, struct vine_file *f)
 {
-	if (!tg || !w || !cachename) {
-		return NULL;
+	if (!tg || !f) {
+		return;
 	}
 
 	/* find the node that corresponds to this cached file */
-	struct vine_task_node *this_node = hash_table_lookup(tg->outfile_cachename_to_node, cachename);
+	struct vine_task_node *this_node = hash_table_lookup(tg->outfile_cachename_to_node, f->cached_name);
 	if (!this_node) {
-		return NULL;
+		return;
 	}
 
 	timestamp_t start_time = timestamp_get();
@@ -506,8 +508,6 @@ struct set *handle_checkpoint_worker_stagein(struct vine_task_graph *tg, struct 
 		}
 	}
 
-	struct set *files_to_prune = set_create(0);
-
 	/* mark all nodes in the visited set as inactive */
 	struct vine_task_node *visited_node;
 	SET_ITERATE(visited_nodes, visited_node)
@@ -516,27 +516,16 @@ struct set *handle_checkpoint_worker_stagein(struct vine_task_graph *tg, struct 
 			continue;
 		}
 		visited_node->active = 0;
-		set_insert(files_to_prune, visited_node->outfile);
+		vine_prune_file(tg->manager, visited_node->outfile);
 	}
 
 	list_delete(bfs_nodes);
 	set_delete(visited_nodes);
 
 	tg->time_spent_on_file_pruning += timestamp_get() - start_time;
-
-	return files_to_prune;
 }
 
-void vine_task_graph_set_nls_prune_depth(struct vine_task_graph *tg, int nls_prune_depth)
-{
-	if (!tg) {
-		return;
-	}
-
-	tg->nls_prune_depth = MAX(nls_prune_depth, 0);
-}
-
-void vine_task_graph_set_priority_mode(struct vine_task_graph *tg, vine_task_priority_mode_t mode)
+static void vine_task_graph_set_priority_mode(struct vine_task_graph *tg, vine_task_priority_mode_t mode)
 {
 	if (!tg) {
 		return;
@@ -575,6 +564,9 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 	if (!tg) {
 		return;
 	}
+
+	/* finalize the task graph */
+	vine_task_graph_finalize(tg);
 
 	/* enable return recovery tasks */
 	vine_enable_return_recovery_tasks(tg->manager);
@@ -657,6 +649,11 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 		} else {
 			progress_bar_advance_part_current(pbar, recovery_tasks_part, 0);
 		}
+
+		struct vine_file *new_checkpointed_file;
+		while ((new_checkpointed_file = list_pop_head(tg->manager->new_checkpointed_files))) {
+			handle_checkpoint_worker_stagein(tg, new_checkpointed_file);
+		}
 	}
 
 	progress_bar_finish(pbar);
@@ -728,15 +725,9 @@ static void create_node_task(struct vine_task_graph *tg, struct vine_task_node *
 	return;
 }
 
-void vine_task_graph_finalize(struct vine_task_graph *tg, double nls_percentage, double checkpoint_percentage, double persistence_percentage)
+static void vine_task_graph_finalize(struct vine_task_graph *tg)
 {
 	if (!tg) {
-		return;
-	}
-
-	/* Check if the sum of percentages is valid */
-	if (nls_percentage + checkpoint_percentage + persistence_percentage != 1.0) {
-		debug(D_ERROR, "nls_percentage (%.2f) + checkpoint_percentage (%.2f) + persistence_percentage (%.2f) != 1.0", nls_percentage, checkpoint_percentage, persistence_percentage);
 		return;
 	}
 
@@ -770,8 +761,8 @@ void vine_task_graph_finalize(struct vine_task_graph *tg, double nls_percentage,
 	}
 
 	int total_tasks = list_size(topo_order);
-	int tasks_to_persist = (int)(total_tasks * persistence_percentage);
-	int tasks_to_checkpoint = (int)(total_tasks * checkpoint_percentage);
+	int tasks_to_persist = (int)(total_tasks * tg->persistence_percentage);
+	int tasks_to_checkpoint = (int)(total_tasks * tg->checkpoint_percentage);
 	int tasks_to_replicate = total_tasks - tasks_to_persist - tasks_to_checkpoint;
 
 	int task_index = 0;
@@ -821,14 +812,28 @@ void vine_task_graph_finalize(struct vine_task_graph *tg, double nls_percentage,
 	return;
 }
 
-struct vine_task_graph *vine_task_graph_create(struct vine_manager *q)
+struct vine_task_graph *vine_task_graph_create(struct vine_manager *q,
+		int nls_prune_depth,
+		vine_task_priority_mode_t priority_mode,
+		double nls_percentage,
+		double checkpoint_percentage,
+		double persistence_percentage)
 {
 	struct vine_task_graph *tg = xxmalloc(sizeof(struct vine_task_graph));
 	tg->nodes = hash_table_create(0, 0);
 	tg->task_id_to_node = itable_create(0);
 	tg->outfile_cachename_to_node = hash_table_create(0, 0);
-	tg->nls_prune_depth = 0;
-	tg->priority_mode = VINE_TASK_PRIORITY_MODE_FIFO;
+	tg->nls_prune_depth = MAX(nls_prune_depth, 0);
+
+	tg->nls_percentage = nls_percentage;
+	tg->checkpoint_percentage = checkpoint_percentage;
+	tg->persistence_percentage = persistence_percentage;
+	if (tg->nls_percentage + tg->checkpoint_percentage + tg->persistence_percentage != 1.0) {
+		debug(D_ERROR, "nls_percentage (%.2f) + checkpoint_percentage (%.2f) + persistence_percentage (%.2f) != 1.0", tg->nls_percentage, tg->checkpoint_percentage, tg->persistence_percentage);
+		exit(1);
+	}
+
+	vine_task_graph_set_priority_mode(tg, priority_mode);
 	tg->library_name = xxstrdup("task-graph-library");
 	tg->function_name = xxstrdup("compute_group_keys");
 	tg->time_spent_on_file_pruning = 0;
@@ -883,6 +888,14 @@ const char *vine_task_graph_get_library_name(const struct vine_task_graph *tg)
 		return NULL;
 	}
 	return tg->library_name;
+}
+
+const char *vine_task_graph_get_function_name(const struct vine_task_graph *tg)
+{
+	if (!tg) {
+		return NULL;
+	}
+	return tg->function_name;
 }
 
 void vine_task_graph_delete(struct vine_task_graph *tg)

@@ -7,6 +7,7 @@ import cloudpickle
 import os
 import collections
 import dask
+import inspect
 import types
 import hashlib
 import uuid
@@ -306,31 +307,57 @@ def compute_group_keys(key):
 
 
 class GraphManager(Manager):
-    def __init__(self, *args, **kwargs):
+    def __init__(self,
+                 *args,
+                 nls_prune_depth=0,
+                 priority_mode="fifo",
+                 scheduling_mode="files",
+                 nls_percentage=1.0,
+                 checkpoint_percentage=0.0,
+                 persistence_percentage=0.0,
+                 libcores=1,
+                 hoisting_modules=[],
+                 **kwargs):
         # delete all files in the run info template directory, do this before super().__init__()
         self.run_info_path = kwargs.get('run_info_path')
         self.run_info_template = kwargs.get('run_info_template')
         if self.run_info_path and self.run_info_template:
             delete_all_files(os.path.join(self.run_info_path, self.run_info_template))
 
-        super().__init__(*args, **kwargs)
+        # initialize the manager
+        super_params = set(inspect.signature(super().__init__).parameters)
+        super_kwargs = {k: v for k, v in kwargs.items() if k in super_params}
+        super().__init__(*args, **super_kwargs)
 
-        self._task_graph = cvine.vine_task_graph_create(self._taskvine)
-
-        # tune the manager for vine graph optimization
+        # tune the manager
+        leftover_kwargs = {k: v for k, v in kwargs.items() if k not in super_params}
+        for key, value in leftover_kwargs.items():
+            self.tune(key.replace("_", "-"), value)
         self.tune("worker-source-max-transfers", 1000)
         self.tune("max-retrievals", -1)
         self.tune("prefer-dispatch", 1)
         self.tune("transient-error-interval", 1)
         self.tune("attempt-schedule-depth", 1000)
 
-        self._library_name = "task-graph-library"
-        self._node_compute_function_name = "compute_group_keys"
+        # initialize the task graph
+        self._task_graph = cvine.vine_task_graph_create(self._taskvine,
+                                                        nls_prune_depth,
+                                                        get_c_constant(f"task_priority_mode_{priority_mode.replace('-', '_')}"),
+                                                        nls_percentage,
+                                                        checkpoint_percentage,
+                                                        persistence_percentage,
+                                                        )
+
+        self.set_scheduler(scheduling_mode)
+
+        # create library task with specified resources
+        self._create_library_task(libcores, hoisting_modules)
 
     def _create_library_task(self, libcores=1, hoisting_modules=[]):
+        assert cvine.vine_task_graph_get_function_name(self._task_graph) == compute_group_keys.__name__
         hoisting_modules += [os, cloudpickle, TaskGraph, load_variable_from_library, uuid, hashlib, types, collections]
         self.libtask = self.create_library_from_functions(
-            self._library_name,
+            cvine.vine_task_graph_get_library_name(self._task_graph),
             compute_group_keys,
             library_context_info=[init_task_graph_context, [], {}],
             add_env=False,
@@ -359,38 +386,10 @@ class GraphManager(Manager):
 
     def execute(self, task_dict,
                 expand_dsk=False,
-                libcores=1,
-                hoisting_modules=[],
-                nls_prune_depth=0,
-                priority_mode="fifo",
-                scheduling_mode="files",
-                nls_percentage=1.0,
-                checkpoint_percentage=0.0,
-                persistence_percentage=0.0,
-                **kwargs
                 ):
-
-        for key, value in kwargs.items():
-            self.tune(key.replace("_", "-"), value)
-
-        # set worker scheduling mode
-        self.set_scheduler(scheduling_mode)
-
-        # set NLS prune depth
-        cvine.vine_task_graph_set_nls_prune_depth(self._task_graph, nls_prune_depth)
-
-        # set task priority mode
-        priority_mode = priority_mode.replace("-", "_")
-        cvine.vine_task_graph_set_priority_mode(self._task_graph, get_c_constant(f"task_priority_mode_{priority_mode}"))
-
-        # create library task with specified resources
-        self._create_library_task(libcores, hoisting_modules)
 
         # initialize the vine graph in the C side
         self._create_vine_graph(task_dict, expand_dsk=expand_dsk)
-
-        # finalize the task graph in the C side, building dependencies, creating tasks, etc.
-        cvine.vine_task_graph_finalize(self._task_graph, nls_percentage, checkpoint_percentage, persistence_percentage)
 
         # now execute the vine graph
         cvine.vine_task_graph_execute(self._task_graph)
