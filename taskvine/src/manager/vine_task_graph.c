@@ -75,38 +75,6 @@ static void submit_node_children(struct vine_task_graph *tg, struct vine_task_no
 	return;
 }
 
-static struct vine_task_node *create_node(struct vine_task_graph *tg, const char *node_key)
-{
-	if (!tg || !node_key) {
-		return NULL;
-	}
-
-	struct vine_task_node *node = hash_table_lookup(tg->nodes, node_key);
-	if (node) {
-		return node;
-	}
-
-	node = xxmalloc(sizeof(struct vine_task_node));
-	node->node_key = xxstrdup(node_key);
-	char buf[33];
-	random_hex(buf, sizeof(buf));
-	node->outfile_remote_name = xxstrdup(buf);
-	node->depth = -1;
-	node->parents = hash_table_create(0, 0);
-	node->children = hash_table_create(0, 0);
-	node->prune_blocking_children_remaining = 0;
-	node->reverse_prune_waiters = hash_table_create(0, 0);
-	node->pending_parents = set_create(0);
-	node->critical_time = 0;
-	node->needs_checkpointing = 0;
-	node->needs_replication = 0;
-	node->needs_persistency = 0;
-	node->active = 1;
-
-	hash_table_insert(tg->nodes, node_key, node);
-	return node;
-}
-
 static struct list *get_topological_order(struct vine_task_graph *graph)
 {
 	if (!graph) {
@@ -857,20 +825,50 @@ void vine_task_graph_set_node_outfile_remote_name(struct vine_task_graph *tg, co
 	node->outfile_remote_name = xxstrdup(outfile_remote_name);
 }
 
+void vine_task_graph_create_node(struct vine_task_graph *tg, const char *node_key, const char *outfile_remote_name)
+{
+	if (!tg || !node_key) {
+		return;
+	}
+
+	struct vine_task_node *node = hash_table_lookup(tg->nodes, node_key);
+	if (node) {
+		return;
+	}
+
+	node = xxmalloc(sizeof(struct vine_task_node));
+	node->node_key = xxstrdup(node_key);
+	node->outfile_remote_name = xxstrdup(outfile_remote_name);
+	node->depth = -1;
+	node->parents = hash_table_create(0, 0);
+	node->children = hash_table_create(0, 0);
+	node->prune_blocking_children_remaining = 0;
+	node->reverse_prune_waiters = hash_table_create(0, 0);
+	node->pending_parents = set_create(0);
+	node->critical_time = 0;
+	node->needs_checkpointing = 0;
+	node->needs_replication = 0;
+	node->needs_persistency = 0;
+	node->active = 1;
+
+	hash_table_insert(tg->nodes, node_key, node);
+}
+
 void vine_task_graph_add_dependency(struct vine_task_graph *tg, const char *parent_key, const char *child_key)
 {
 	if (!tg || !parent_key || !child_key) {
 		return;
 	}
 
-	struct vine_task_node *child_node = hash_table_lookup(tg->nodes, child_key);
 	struct vine_task_node *parent_node = hash_table_lookup(tg->nodes, parent_key);
-
-	if (!child_node) {
-		child_node = create_node(tg, child_key);
-	}
+	struct vine_task_node *child_node = hash_table_lookup(tg->nodes, child_key);
 	if (!parent_node) {
-		parent_node = create_node(tg, parent_key);
+		debug(D_ERROR, "parent node %s not found", parent_key);
+		exit(1);
+	}
+	if (!child_node) {
+		debug(D_ERROR, "child node %s not found", child_key);
+		exit(1);
 	}
 
 	/* check if dependency already exists */

@@ -1581,6 +1581,8 @@ struct vine_task_graph *vine_task_graph_create(struct vine_manager *q,
 void vine_task_graph_delete(struct vine_task_graph *tg);
 void vine_task_graph_add_dependency(struct vine_task_graph *tg, const char *parent_key, const char *child_key);
 void vine_task_graph_set_node_outfile_remote_name(struct vine_task_graph *tg, const char *node_key, const char *outfile_remote_name);
+void vine_task_graph_create_node(struct vine_task_graph *tg, const char *node_key, const char *outfile_remote_name);
+
 const char *vine_task_graph_get_library_name(const struct vine_task_graph *tg);
 const char *vine_task_graph_get_function_name(const struct vine_task_graph *tg);
 void vine_task_graph_execute(struct vine_task_graph *tg);

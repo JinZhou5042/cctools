@@ -8,6 +8,7 @@ import os
 import collections
 import dask
 import inspect
+from collections import deque
 import types
 import hashlib
 import uuid
@@ -259,6 +260,25 @@ class TaskGraph:
     def get_sexpr_of_group(self, group_keys):
         return {k: self.task_dict[k] for k in group_keys}
 
+    def get_topological_order(self):
+        in_degree = {key: len(self.parents_of[key]) for key in self.task_dict.keys()}
+        queue = deque([key for key, degree in in_degree.items() if degree == 0])
+        topo_order = []
+
+        while queue:
+            current = queue.popleft()
+            topo_order.append(current)
+
+            for child in self.children_of[current]:
+                in_degree[child] -= 1
+                if in_degree[child] == 0:
+                    queue.append(child)
+
+        if len(topo_order) != len(self.task_dict):
+            raise ValueError("Task graph contains cycles - no valid topological order exists")
+
+        return topo_order
+
 
 def init_task_graph_context():
     with open("task_graph.pkl", 'rb') as f:
@@ -369,27 +389,15 @@ class GraphManager(Manager):
         self.libtask.set_function_slots(libcores)
         self.install_library(self.libtask)
 
-    def _create_vine_graph(self, task_dict, expand_dsk=False, debug=False):
+    def execute(self, task_dict, expand_dsk=False, debug=False):
         # create task graph in the python side
         task_graph = TaskGraph(task_dict, expand_dsk=expand_dsk, debug=debug)
+        for k in task_graph.get_topological_order():
+            cvine.vine_task_graph_create_node(self._task_graph, k, task_graph.outfile_remote_name[k])
+            for pk in task_graph.parents_of.get(k, []):
+                cvine.vine_task_graph_add_dependency(self._task_graph, pk, k)
         with open("task_graph.pkl", 'wb') as f:
             cloudpickle.dump(task_graph, f)
-
-        # create dependenciy mapping in the C side
-        for k, pks in task_graph.parents_of.items():
-            for pk in pks:
-                cvine.vine_task_graph_add_dependency(self._task_graph, pk, k)
-
-        # set output file remote name in the C side
-        for k, outfile_remote_name in task_graph.outfile_remote_name.items():
-            cvine.vine_task_graph_set_node_outfile_remote_name(self._task_graph, k, outfile_remote_name)
-
-    def execute(self, task_dict,
-                expand_dsk=False,
-                ):
-
-        # initialize the vine graph in the C side
-        self._create_vine_graph(task_dict, expand_dsk=expand_dsk)
 
         # now execute the vine graph
         cvine.vine_task_graph_execute(self._task_graph)
