@@ -168,18 +168,12 @@ def start_function(in_pipe_fd, thread_limit=1):
                 return
             p = os.fork()
             if p == 0:
+                exit_status = None
                 try:
                     # change the working directory to the function's sandbox
                     os.chdir(function_sandbox)
 
                     stdout_timed_message(f"TASK {function_id} {function_name} arrives, starting to run in process {os.getpid()}")
-
-                    try:
-                        exit_status = 1
-                    except Exception:
-                        stdout_timed_message(f"TASK {function_id} error: can't load the arguments from infile")
-                        exit_status = 2
-                        raise
 
                     try:
                         # setup stdout/err for a function call so we can capture them.
@@ -223,9 +217,11 @@ def start_function(in_pipe_fd, thread_limit=1):
                         exit_status = 5
                         raise
 
-                    # nothing failed
-                    stdout_timed_message(f"TASK {function_id} finished successfully")
-                    exit_status = 0
+                    if exit_status is None:
+                        stdout_timed_message(f"TASK {function_id} finished successfully")
+                        exit_status = 0
+                    else:
+                        raise
                 except Exception as e:
                     stdout_timed_message(f"TASK {function_id} error: execution failed due to {e}")
                 finally:
