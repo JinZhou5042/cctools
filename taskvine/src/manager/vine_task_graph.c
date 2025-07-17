@@ -37,12 +37,10 @@ struct pending_insert_entry {
 };
 
 static void submit_node_task(struct vine_task_graph *tg, struct vine_task_node *node);
-static void resubmit_node_task(struct vine_task_graph *tg, struct vine_task_node *node);
-static void delete_node_task(struct vine_task_graph *tg, struct vine_task_node *node);
-static void create_node_task(struct vine_task_graph *tg, struct vine_task_node *node);
 static void vine_task_graph_finalize(struct vine_task_graph *tg);
 static void vine_task_graph_print_node_info(struct vine_task_node *node);
 static void vine_task_graph_set_priority_mode(struct vine_task_graph *tg, vine_task_priority_mode_t mode);
+static int node_outfile_exists(struct vine_task_graph *tg, struct vine_task_node *node);
 static volatile sig_atomic_t interrupted = 0;
 
 /*************************************************************/
@@ -77,52 +75,6 @@ static void submit_node_children(struct vine_task_graph *tg, struct vine_task_no
 	}
 
 	return;
-}
-
-static int vine_node_outfile_exists_on_shared_file_system(struct vine_task_node *node)
-{
-	if (!node || !node->outfile_remote_name) {
-		return 0;
-	}
-
-	if (node->output_store_location != VINE_OUTPUT_STORE_LOCATION_SHARED_FILE_SYSTEM) {
-		return 0;
-	}
-
-	struct stat info;
-	int result = stat(node->outfile_remote_name, &info);
-
-	if (result == 0) {
-		return 1; // file exists
-	} else {
-		debug(D_VINE, "shared FS stat failed for %s", node->outfile_remote_name);
-		return 0;
-	}
-}
-
-static int vine_file_exists_on_staging_dir(struct vine_file *f)
-{
-	if (!f) {
-		return 0;
-	}
-
-	if (f->type != VINE_FILE) {
-		return 0;
-	}
-
-	if (!f->source) {
-		return 0;
-	}
-
-	struct stat local_info;
-	int result = stat(f->source, &local_info);
-
-	if (result == 0) {
-		return 1; // file exists
-	} else {
-		debug(D_VINE, "local stat failed for %s", f->source);
-		return 0;
-	}
 }
 
 static double compute_lex_priority(const char *key)
@@ -291,17 +243,13 @@ static int node_is_prunable(struct vine_task_graph *tg, struct vine_task_node *n
 		if (child_node->task && child_node->task->state != VINE_TASK_DONE) {
 			return 0;
 		}
-		/* the child taks completed, and it's outfile is stored to the shared file system, this child is safe */
-		if (child_node->output_store_location == VINE_OUTPUT_STORE_LOCATION_SHARED_FILE_SYSTEM) {
-			continue;
-		}
-		/* the child taks completed, and it's outfile is stored to the staging directory, check if it exists on local */
-		if (child_node->output_store_location == VINE_OUTPUT_STORE_LOCATION_STAGING_DIR && !vine_file_exists_on_staging_dir(child_node->outfile)) {
-			return 0;
-		}
 		/* if the recovery task is running, the parent is not prunable */
 		struct vine_task *child_node_recovery_task = child_node->outfile->recovery_task;
 		if (child_node_recovery_task && (child_node_recovery_task->state != VINE_TASK_INITIAL && child_node_recovery_task->state != VINE_TASK_DONE)) {
+			return 0;
+		}
+		/* if the output file does not exist, the parent cannot be pruned */
+		if (!node_outfile_exists(tg, child_node)) {
 			return 0;
 		}
 	}
@@ -537,17 +485,6 @@ static void submit_node_task(struct vine_task_graph *tg, struct vine_task_node *
 	return;
 }
 
-static void resubmit_node_task(struct vine_task_graph *tg, struct vine_task_node *node)
-{
-	if (!tg || !node) {
-		return;
-	}
-
-	delete_node_task(tg, node);
-	create_node_task(tg, node);
-	submit_node_task(tg, node);
-}
-
 static void replicate_node(struct vine_task_graph *tg, struct vine_task_node *node)
 {
 	if (!tg || !node) {
@@ -710,6 +647,58 @@ static void vine_task_graph_set_priority_mode(struct vine_task_graph *tg, vine_t
 	tg->priority_mode = mode;
 }
 
+static int node_outfile_exists(struct vine_task_graph *tg, struct vine_task_node *node)
+{
+	if (!node) {
+		return 0;
+	}
+	
+	struct stat local_info;
+
+	switch (node->output_store_location) {
+	case VINE_OUTPUT_STORE_LOCATION_STAGING_DIR:
+		if (stat(node->outfile->source, &local_info) != 0) {
+			debug(D_VINE | D_NOTICE, "file %s does not exist on staging directory, resubmitting task %d", node->outfile->cached_name, node->task->task_id);
+			return 0;
+		}
+		break;
+	case VINE_OUTPUT_STORE_LOCATION_SHARED_FILE_SYSTEM:
+		if (stat(node->outfile_remote_name, &local_info) != 0) {
+			debug(D_VINE | D_NOTICE, "file %s does not exist on shared file system, resubmitting task %d", node->outfile_remote_name, node->task->task_id);
+			return 0;
+		}
+		break;
+	case VINE_OUTPUT_STORE_LOCATION_CHECKPOINT:
+	case VINE_OUTPUT_STORE_LOCATION_TEMP:
+		if (vine_file_replica_table_count_replicas(tg->manager, node->outfile->cached_name, VINE_FILE_REPLICA_STATE_READY) == 0) {
+			debug(D_VINE | D_NOTICE, "file %s does not exist on NLS, resubmitting task %d", node->outfile->cached_name, node->task->task_id);
+			return 0;
+		}
+		break;
+	}
+
+	return 1;
+}
+
+static int is_node_completed_successfully(struct vine_task_graph *tg, struct vine_task_node *node)
+{
+	if (!tg || !node) {
+		return 0;
+	}
+
+	/* in case of failure, resubmit this task */
+	if (node->task && (node->task->result != VINE_RESULT_SUCCESS || node->task->exit_code != 0)) {
+		debug(D_VINE | D_NOTICE, "task %d failed with result %d and exit code %d\n", node->task->task_id, node->task->result, node->task->exit_code);
+		return 0;
+	}
+
+	if (!node_outfile_exists(tg, node)) {
+		return 0;
+	}
+
+	return 1;
+}
+
 void vine_task_graph_execute(struct vine_task_graph *tg)
 {
 	if (!tg) {
@@ -751,36 +740,14 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 			/* get the original node by task id */
 			struct vine_task_node *node = get_node_by_task(tg, task);
 			if (!node) {
-				debug(D_ERROR, "fatal: task %d could not be mapped to a task node", task->task_id);
-				assert(0 && "get_node_by_task() returned NULL — this indicates a serious bug.");
+				debug(D_ERROR, "fatal: task %d could not be mapped to a task node, this indicates a serious bug.", task->task_id);
 				exit(1);
 			}
 
-			/* in case of failure, resubmit this task */
-			if (task->result != VINE_RESULT_SUCCESS || task->exit_code != 0) {
-				debug(D_VINE | D_NOTICE, "task %d failed with result %d and exit code %d, resubmitting", task->task_id, task->result, task->exit_code);
-				resubmit_node_task(tg, node);
-				continue;
-			}
-
-			/* check if the output file exists on the staging directory */
-			if (node->output_store_location == VINE_OUTPUT_STORE_LOCATION_STAGING_DIR && !vine_file_exists_on_staging_dir(node->outfile)) {
-				debug(D_VINE | D_NOTICE, "file %s does not exist on staging directory, resubmitting task %d", node->outfile->cached_name, task->task_id);
-				resubmit_node_task(tg, node);
-				continue;
-			}
-
-			/* check if the output file exists on the shared file system */
-			if (node->output_store_location == VINE_OUTPUT_STORE_LOCATION_SHARED_FILE_SYSTEM && !vine_node_outfile_exists_on_shared_file_system(node)) {
-				debug(D_VINE | D_NOTICE, "file %s does not exist on shared file system, resubmitting task %d", node->outfile_remote_name, task->task_id);
-				resubmit_node_task(tg, node);
-				continue;
-			}
-
-			/* check if the output file exists on the NLS */
-			if (node->output_store_location == VINE_OUTPUT_STORE_LOCATION_TEMP && vine_file_replica_table_count_replicas(tg->manager, node->outfile->cached_name, VINE_FILE_REPLICA_STATE_READY) == 0) {
-				debug(D_VINE | D_NOTICE, "file %s does not exist on NLS, resubmitting task %d", node->outfile->cached_name, task->task_id);
-				resubmit_node_task(tg, node);
+			/* skip if the node is not completed successfully */
+			if (!is_node_completed_successfully(tg, node)) {
+				vine_task_clean(node->task);
+				submit_node_task(tg, node);
 				continue;
 			}
 
@@ -855,6 +822,7 @@ static void delete_node_task(struct vine_task_graph *tg, struct vine_task_node *
 
 	if (node->outfile) {
 		vine_prune_file(tg->manager, node->outfile);
+		hash_table_remove(tg->outfile_cachename_to_node, node->outfile->cached_name);
 		hash_table_remove(tg->manager->file_table, node->outfile->cached_name);
 		vine_file_delete(node->outfile);
 		node->outfile = NULL;
