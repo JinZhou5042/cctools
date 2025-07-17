@@ -19,12 +19,13 @@
 #include "vine_task.h"
 #include <math.h>
 #include "timestamp.h"
+#include "vine_file.h"
+#include "set.h"
 #include "vine_mount.h"
 #include "progress_bar.h"
 #include "random.h"
 #include "assert.h"
 #include "macros.h"
-#include "set.h"
 #include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -37,7 +38,7 @@ struct pending_insert_entry {
 
 static void submit_node_task(struct vine_task_graph *tg, struct vine_task_node *node);
 static void resubmit_node_task(struct vine_task_graph *tg, struct vine_task_node *node);
-static void delete_node_task(struct vine_task_node *node);
+static void delete_node_task(struct vine_task_graph *tg, struct vine_task_node *node);
 static void create_node_task(struct vine_task_graph *tg, struct vine_task_node *node);
 static void vine_task_graph_finalize(struct vine_task_graph *tg);
 static void vine_task_graph_print_node_info(struct vine_task_node *node);
@@ -542,7 +543,7 @@ static void resubmit_node_task(struct vine_task_graph *tg, struct vine_task_node
 		return;
 	}
 
-	delete_node_task(node);
+	delete_node_task(tg, node);
 	create_node_task(tg, node);
 	submit_node_task(tg, node);
 }
@@ -836,7 +837,7 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 	return;
 }
 
-static void delete_node_task(struct vine_task_node *node)
+static void delete_node_task(struct vine_task_graph *tg, struct vine_task_node *node)
 {
 	if (!node) {
 		return;
@@ -846,11 +847,15 @@ static void delete_node_task(struct vine_task_node *node)
 	node->task = NULL;
 
 	if (node->infile) {
+		vine_prune_file(tg->manager, node->infile);
+		hash_table_remove(tg->manager->file_table, node->infile->cached_name);
 		vine_file_delete(node->infile);
 		node->infile = NULL;
 	}
 
 	if (node->outfile) {
+		vine_prune_file(tg->manager, node->outfile);
+		hash_table_remove(tg->manager->file_table, node->outfile->cached_name);
 		vine_file_delete(node->outfile);
 		node->outfile = NULL;
 	}
@@ -1157,7 +1162,7 @@ void vine_task_graph_delete(struct vine_task_graph *tg)
 		if (node->outfile_remote_name) {
 			free(node->outfile_remote_name);
 		}
-		delete_node_task(node);
+		delete_node_task(tg, node);
 		list_delete(node->parents);
 		list_delete(node->children);
 		list_delete(node->reverse_prune_waiters);

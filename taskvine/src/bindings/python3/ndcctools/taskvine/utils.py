@@ -44,6 +44,9 @@ def delete_all_files(root_dir):
     for dirpath, dirnames, filenames in os.walk(root_dir):
         for filename in filenames:
             file_path = os.path.join(dirpath, filename)
-            os.remove(file_path)
+            try:
+                os.remove(file_path)
+            except FileNotFoundError:
+                print(f"Failed to delete file {file_path}")
 
 # vim: set sts=4 sw=4 ts=4 expandtab ft=python:

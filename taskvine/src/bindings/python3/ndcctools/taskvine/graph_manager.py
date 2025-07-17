@@ -421,4 +421,3 @@ class GraphManager(Manager):
 
     def __del__(self):
         cvine.vine_task_graph_delete(self._task_graph)
-        super().__del__()
