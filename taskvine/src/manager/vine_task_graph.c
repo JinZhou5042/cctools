@@ -757,7 +757,7 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 
 			/* in case of failure, resubmit this task */
 			if (task->result != VINE_RESULT_SUCCESS || task->exit_code != 0) {
-				debug(D_VINE | D_NOTICE, "task %d failed, resubmitting", task->task_id);
+				debug(D_VINE | D_NOTICE, "task %d failed with result %d and exit code %d, resubmitting", task->task_id, task->result, task->exit_code);
 				resubmit_node_task(tg, node);
 				continue;
 			}
