@@ -6,6 +6,7 @@ from ndcctools.taskvine.utils import delete_all_files, get_c_constant
 import cloudpickle
 import os
 import collections
+import random
 import dask
 import inspect
 from collections import deque
@@ -27,9 +28,6 @@ class TaskGraph:
         self.parents_of = collections.defaultdict(set)
         self.children_of = collections.defaultdict(set)
         self._build_dependencies()
-
-        self.depth_of = collections.defaultdict(int)
-        self._compute_depths()
 
         self.outfile_remote_name = {key: f"{uuid.uuid4()}.pkl" for key in self.task_dict.keys()}
         self.output_vine_file_of = {key: None for key in self.task_dict.keys()}
@@ -53,6 +51,9 @@ class TaskGraph:
             out_str += str(arg)
         return hashlib.sha256(out_str.encode('utf-8')).hexdigest()[:20]
 
+    def set_outfile_remote_name_of(self, key, outfile_remote_name):
+        self.outfile_remote_name[key] = outfile_remote_name
+
     def _standardize_keys(self, task_dict):
         key_mapping = {k: TaskGraph.hash_name(k) for k in task_dict.keys()}
 
@@ -72,22 +73,6 @@ class TaskGraph:
             new_task_dict[new_k] = replace_keys(sexpr)
 
         return new_task_dict
-
-    def _compute_depths(self):
-        visited = set()
-
-        def dfs(key):
-            if key in visited:
-                return self.depth_of[key]
-            visited.add(key)
-            if not self.parents_of[key]:
-                self.depth_of[key] = 0
-            else:
-                self.depth_of[key] = 1 + max(dfs(p) for p in self.parents_of[key])
-            return self.depth_of[key]
-
-        for key in self.task_dict:
-            dfs(key)
 
     def _build_dependencies(self):
         def _find_parents(sexpr):
@@ -319,24 +304,30 @@ def compute_group_keys(key):
         result = rec_call(task_graph.task_dict[k])
         values[k] = result
 
+    result_paths = set()
+
     for k, path in task_graph.external_output_keys_to_paths(keys).items():
         with open(path, 'wb') as f:
             cloudpickle.dump(values[k], f)
+        if not os.path.exists(path):
+            raise Exception(f"Output file {path} does not exist after writing")
+        if os.stat(path).st_size == 0:
+            raise Exception(f"Output file {path} is empty after writing")
+        result_paths.add(path)
 
-    return True
+    return result_paths
 
 
 class GraphManager(Manager):
     def __init__(self,
                  *args,
                  nls_prune_depth=0,
-                 priority_mode="fifo",
+                 priority_mode="largest-input-first",
                  scheduling_mode="files",
-                 nls_percentage=1.0,
-                 checkpoint_percentage=0.0,
-                 persistence_percentage=0.0,
                  libcores=1,
                  hoisting_modules=[],
+                 staging_dir="/project01/ndcms/jzhou24/staging",
+                 shared_file_system_dir="/project01/ndcms/jzhou24/shared_file_system",
                  **kwargs):
         # delete all files in the run info template directory, do this before super().__init__()
         self.run_info_path = kwargs.get('run_info_path')
@@ -345,7 +336,7 @@ class GraphManager(Manager):
             delete_all_files(os.path.join(self.run_info_path, self.run_info_template))
 
         # initialize the manager
-        super_params = set(inspect.signature(super().__init__).parameters)
+        super_params = set(inspect.signature(Manager.__init__).parameters)
         super_kwargs = {k: v for k, v in kwargs.items() if k in super_params}
         super().__init__(*args, **super_kwargs)
 
@@ -363,12 +354,14 @@ class GraphManager(Manager):
         self._task_graph = cvine.vine_task_graph_create(self._taskvine,
                                                         nls_prune_depth,
                                                         get_c_constant(f"task_priority_mode_{priority_mode.replace('-', '_')}"),
-                                                        nls_percentage,
-                                                        checkpoint_percentage,
-                                                        persistence_percentage,
+                                                        staging_dir,
                                                         )
 
         self.set_scheduler(scheduling_mode)
+
+        # ensure the dir exists
+        os.makedirs(shared_file_system_dir, exist_ok=True)
+        self.shared_file_system_dir = shared_file_system_dir
 
         # create library task with specified resources
         self._create_library_task(libcores, hoisting_modules)
@@ -389,13 +382,37 @@ class GraphManager(Manager):
         self.libtask.set_function_slots(libcores)
         self.install_library(self.libtask)
 
-    def execute(self, task_dict, expand_dsk=False, debug=False):
+    def execute(self,
+                task_dict,
+                expand_dsk=False,
+                debug=False,
+                output_store_location={
+                    "temp": 1.0,
+                    "checkpoint": 0.0,
+                    "staging_dir": 0.0,
+                    "shared_file_system": 0.0,
+                }
+                ):
+
         # create task graph in the python side
         task_graph = TaskGraph(task_dict, expand_dsk=expand_dsk, debug=debug)
-        for k in task_graph.get_topological_order():
-            cvine.vine_task_graph_create_node(self._task_graph, k, task_graph.outfile_remote_name[k])
+        topo_order = task_graph.get_topological_order()
+
+        # calculate the number of tasks to store to each location
+        choices = list(output_store_location.keys())
+        weights = list(output_store_location.values())
+        assert sum(weights) == 1.0
+
+        # create task graph in the python side
+        for k in topo_order:
+            choice = random.choices(choices, weights)[0]
+            store_output_location_str = f"OUTPUT_STORE_LOCATION_{choice.upper()}"
+            if choice == "shared_file_system":
+                task_graph.set_outfile_remote_name_of(k, os.path.join(self.shared_file_system_dir, task_graph.outfile_remote_name[k]))
+            cvine.vine_task_graph_create_node(self._task_graph, k, task_graph.outfile_remote_name[k], get_c_constant(store_output_location_str))
             for pk in task_graph.parents_of.get(k, []):
                 cvine.vine_task_graph_add_dependency(self._task_graph, pk, k)
+
         with open("task_graph.pkl", 'wb') as f:
             cloudpickle.dump(task_graph, f)
 
@@ -403,5 +420,5 @@ class GraphManager(Manager):
         cvine.vine_task_graph_execute(self._task_graph)
 
     def __del__(self):
-        super().__del__()
         cvine.vine_task_graph_delete(self._task_graph)
+        super().__del__()

@@ -3279,6 +3279,7 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 		} else if (m->file->type == VINE_TEMP) {
 			//  debug(D_VINE,"task %lld has no ready transfer source for temp %s",(long
 			//  long)t->task_id,m->file->cached_name);
+			printf("task %lld has no ready transfer source for temp %s\n", (long long)t->task_id, m->file->cached_name);
 			return 0;
 		} else if (m->file->type == VINE_MINI_TASK) {
 			if (!vine_manager_transfer_capacity_available(q, w, m->file->mini_task)) {
@@ -3289,7 +3290,6 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 		}
 	}
 
-	debug(D_VINE, "task %lld has a ready transfer source for all files", (long long)t->task_id);
 	return 1;
 }
 
@@ -3431,27 +3431,32 @@ int consider_task(struct vine_manager *q, struct vine_task *t)
 
 	// Skip task if min requested start time not met.
 	if (t->resources_requested->start > now_secs) {
+		printf("task %d has not met min requested start time\n", t->task_id);
 		return 0;
 	}
 
 	// Skip if this task failed recently
 	if (t->time_when_last_failure + q->transient_error_interval > now_usecs) {
+		printf("task %d has failed recently\n", t->task_id);
 		return 0;
 	}
 
 	// Skip if category already running maximum allowed tasks
 	struct category *c = vine_category_lookup_or_create(q, t->category);
 	if (c->max_concurrent > -1 && c->max_concurrent <= c->vine_stats->tasks_running) {
+		printf("task %d has max concurrent tasks\n", t->task_id);
 		return 0;
 	}
 
 	// Skip task if temp input files have not been materialized.
 	if (!vine_manager_check_inputs_available(q, t)) {
+		printf("task %d has no available inputs\n", t->task_id);
 		return 0;
 	}
 
 	// Skip function call task if no suitable library template was installed.
 	if (!vine_manager_check_library_for_function_call(q, t)) {
+		printf("task %d has no suitable library\n", t->task_id);
 		return 0;
 	}
 
