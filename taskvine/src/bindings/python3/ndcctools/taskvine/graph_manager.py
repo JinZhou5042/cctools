@@ -321,7 +321,7 @@ def compute_group_keys(key):
 class GraphManager(Manager):
     def __init__(self,
                  *args,
-                 nls_prune_depth=0,
+                 prune_depth=0,
                  priority_mode="largest-input-first",
                  scheduling_mode="files",
                  libcores=1,
@@ -350,12 +350,12 @@ class GraphManager(Manager):
         self.tune("transient-error-interval", 1)
         self.tune("attempt-schedule-depth", 1000)
 
+        self.priority_mode = get_c_constant(f"task_priority_mode_{priority_mode.replace('-', '_')}")
+        self.prune_depth = prune_depth
+        self.staging_dir = staging_dir
+
         # initialize the task graph
-        self._task_graph = cvine.vine_task_graph_create(self._taskvine,
-                                                        nls_prune_depth,
-                                                        get_c_constant(f"task_priority_mode_{priority_mode.replace('-', '_')}"),
-                                                        staging_dir,
-                                                        )
+        self._task_graph = cvine.vine_task_graph_create(self._taskvine)
 
         self.set_scheduler(scheduling_mode)
 
@@ -409,7 +409,13 @@ class GraphManager(Manager):
             store_output_location_str = f"OUTPUT_STORE_LOCATION_{choice.upper()}"
             if choice == "shared_file_system":
                 task_graph.set_outfile_remote_name_of(k, os.path.join(self.shared_file_system_dir, task_graph.outfile_remote_name[k]))
-            cvine.vine_task_graph_create_node(self._task_graph, k, task_graph.outfile_remote_name[k], get_c_constant(store_output_location_str))
+            cvine.vine_task_graph_create_node(self._task_graph, 
+                                              k,
+                                              task_graph.outfile_remote_name[k],
+                                              self.staging_dir,
+                                              self.prune_depth,
+                                              self.priority_mode, 
+                                              get_c_constant(store_output_location_str))
             for pk in task_graph.parents_of.get(k, []):
                 cvine.vine_task_graph_add_dependency(self._task_graph, pk, k)
 

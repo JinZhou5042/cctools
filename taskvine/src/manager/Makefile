@@ -29,6 +29,7 @@ SOURCES = \
 	vine_fair.c \
 	vine_runtime_dir.c \
 	vine_task_groups.c \
+	vine_task_node.c \
 	vine_task_graph.c \
 	vine_temp_redundancy.c
 
