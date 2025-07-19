@@ -42,9 +42,8 @@ static void submit_node_task(struct vine_task_graph *tg, struct vine_task_node *
 		return;
 	}
 
-	vine_task_node_update_priority(node);
-	vine_submit(tg->manager, node->task);
-	itable_insert(tg->task_id_to_node, node->task->task_id, node);
+	int task_id = vine_task_node_submit(node);
+	itable_insert(tg->task_id_to_node, task_id, node);
 
 	return;
 }
