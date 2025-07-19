@@ -637,6 +637,19 @@ void *list_next_item(struct list *list)
 	return item;
 }
 
+void list_last_item(struct list *list)
+{
+	list_seek(list->iter, -1);
+}
+
+void *list_prev_item(struct list *list)
+{
+	void *item = NULL;
+	list_get(list->iter, &item);
+	list_prev(list->iter);
+	return item;
+}
+
 struct list *list_duplicate(struct list *src)
 {
 	void *item;
