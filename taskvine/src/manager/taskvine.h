@@ -141,18 +141,6 @@ typedef enum {
 	VINE_ALLOCATION_MODE_EXHAUSTIVE_BUCKETING = CATEGORY_ALLOCATION_MODE_EXHAUSTIVE_BUCKETING
 } vine_category_mode_t;
 
-
-
-/** Select priority algorithm for task graph task scheduling. */
-typedef enum {
-    VINE_TASK_PRIORITY_MODE_RANDOM = 0,          /**< Assign random priority to tasks */
-    VINE_TASK_PRIORITY_MODE_DEPTH_FIRST,         /**< Prioritize deeper tasks first */
-    VINE_TASK_PRIORITY_MODE_BREADTH_FIRST,       /**< Prioritize shallower tasks first */
-    VINE_TASK_PRIORITY_MODE_FIFO,                /**< First in, first out priority */
-    VINE_TASK_PRIORITY_MODE_LIFO,                /**< Last in, first out priority */
-    VINE_TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST  /**< Prioritize tasks with larger inputs first */
-} vine_task_node_priority_mode_t;
-
 /** The type of an input or output file to attach to a task. */
 typedef enum {
 	VINE_FILE = 1,              /**< A file or directory present at the manager. **/
@@ -1572,12 +1560,22 @@ char *vine_get_path_library_log(struct vine_manager *m, const char *path);
 */
 char *vine_get_path_cache(struct vine_manager *m, const char *path);
 
+/** Select the type of the output file. */
 typedef enum {
-	VINE_OUTPUT_STORE_LOCATION_STAGING_DIR = 0,
-    VINE_OUTPUT_STORE_LOCATION_TEMP,
-    VINE_OUTPUT_STORE_LOCATION_CHECKPOINT,
-    VINE_OUTPUT_STORE_LOCATION_SHARED_FILE_SYSTEM,
-} vine_task_graph_node_output_store_location_t;
+	VINE_NODE_OUTFILE_TYPE_FILE = 0,
+    VINE_NODE_OUTFILE_TYPE_TEMP,
+    VINE_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM,
+} vine_task_node_outfile_type_t;
+
+/** Select priority algorithm for task graph task scheduling. */
+typedef enum {
+    VINE_TASK_PRIORITY_MODE_RANDOM = 0,          /**< Assign random priority to tasks */
+    VINE_TASK_PRIORITY_MODE_DEPTH_FIRST,         /**< Prioritize deeper tasks first */
+    VINE_TASK_PRIORITY_MODE_BREADTH_FIRST,       /**< Prioritize shallower tasks first */
+    VINE_TASK_PRIORITY_MODE_FIFO,                /**< First in, first out priority */
+    VINE_TASK_PRIORITY_MODE_LIFO,                /**< Last in, first out priority */
+    VINE_TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST  /**< Prioritize tasks with larger inputs first */
+} vine_task_node_priority_mode_t;
 
 struct vine_task_graph *vine_task_graph_create(struct vine_manager *q);
 void vine_task_graph_delete(struct vine_task_graph *tg);
@@ -1588,7 +1586,7 @@ struct vine_task_node *vine_task_graph_create_node(struct vine_task_graph *tg,
 	const char *staging_dir,
 	int prune_depth,
 	vine_task_node_priority_mode_t priority_mode,
-	vine_task_graph_node_output_store_location_t store_output_location);
+	vine_task_node_outfile_type_t outfile_type);
 
 const char *vine_task_graph_get_library_name(const struct vine_task_graph *tg);
 const char *vine_task_graph_get_function_name(const struct vine_task_graph *tg);

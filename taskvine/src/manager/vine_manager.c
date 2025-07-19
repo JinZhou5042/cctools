@@ -3433,7 +3433,6 @@ int consider_task(struct vine_manager *q, struct vine_task *t)
 
 	// Skip task if min requested start time not met.
 	if (t->resources_requested->start > now_secs) {
-		printf("task %d has not met min requested start time\n", t->task_id);
 		return 0;
 	}
 
@@ -3446,7 +3445,6 @@ int consider_task(struct vine_manager *q, struct vine_task *t)
 	// Skip if category already running maximum allowed tasks
 	struct category *c = vine_category_lookup_or_create(q, t->category);
 	if (c->max_concurrent > -1 && c->max_concurrent <= c->vine_stats->tasks_running) {
-		printf("task %d has max concurrent tasks\n", t->task_id);
 		return 0;
 	}
 
@@ -3458,7 +3456,6 @@ int consider_task(struct vine_manager *q, struct vine_task *t)
 
 	// Skip function call task if no suitable library template was installed.
 	if (!vine_manager_check_library_for_function_call(q, t)) {
-		printf("task %d has no suitable library\n", t->task_id);
 		return 0;
 	}
 

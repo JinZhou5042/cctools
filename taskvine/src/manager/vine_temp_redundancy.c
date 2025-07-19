@@ -168,15 +168,12 @@ int file_has_been_checkpointed(struct vine_manager *q, struct vine_file *f)
 	struct vine_worker_info *source_worker;
 	SET_ITERATE(source_workers, source_worker)
 	{
-		/* is it checkpoint worker? */
+		/* skip if not a checkpoint worker */
 		if (!is_checkpoint_worker(q, source_worker)) {
 			continue;
 		}
-		/* is it already checkpointed? */
-		struct vine_file_replica *replica = vine_file_replica_table_lookup(source_worker, f->cached_name);
-		if (replica) {
-			return 1;
-		}
+		/* it is already checkpointed */
+		return 1;
 	}
 
 	return 0;

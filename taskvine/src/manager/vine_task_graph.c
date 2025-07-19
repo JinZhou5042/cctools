@@ -48,7 +48,7 @@ static void submit_node_task(struct vine_task_graph *tg, struct vine_task_node *
 	return;
 }
 
-static void submit_node_children(struct vine_task_graph *tg, struct vine_task_node *node)
+static void submit_node_ready_children(struct vine_task_graph *tg, struct vine_task_node *node)
 {
 	if (!tg || !node) {
 		return;
@@ -181,9 +181,7 @@ static void handle_checkpoint_worker_stagein(struct vine_task_graph *tg, struct 
 		return;
 	}
 
-	this_node->persisted_status = PERSISTED_STATUS_PERSISTED;
-
-	vine_task_node_prune_ancestors_of_temp_node(this_node);
+	vine_task_node_prune_ancestors(this_node);
 }
 
 void vine_task_graph_execute(struct vine_task_graph *tg)
@@ -238,10 +236,8 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 				continue;
 			}
 
-			/* mark the node as persisted if staging or shared file system */
-			if (node->output_store_location == VINE_OUTPUT_STORE_LOCATION_STAGING_DIR || node->output_store_location == VINE_OUTPUT_STORE_LOCATION_SHARED_FILE_SYSTEM) {
-				node->persisted_status = PERSISTED_STATUS_PERSISTED;
-			}
+			/* mark the node as completed */
+			node->completed = 1;
 
 			/* prune nodes on task completion */
 			vine_task_node_prune_ancestors(node);
@@ -264,20 +260,17 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 			progress_bar_advance_part_current(pbar, regular_tasks_part, 1);
 
 			/* enqueue the output file for replication or checkpointing */
-			switch (node->output_store_location) {
-			case VINE_OUTPUT_STORE_LOCATION_TEMP:
+			switch (node->outfile_type) {
+			case VINE_NODE_OUTFILE_TYPE_TEMP:
 				vine_task_node_replicate_outfile(node);
 				break;
-			case VINE_OUTPUT_STORE_LOCATION_CHECKPOINT:
-				vine_task_node_checkpoint_outfile(node);
-				break;
-			case VINE_OUTPUT_STORE_LOCATION_STAGING_DIR:
-			case VINE_OUTPUT_STORE_LOCATION_SHARED_FILE_SYSTEM:
+			case VINE_NODE_OUTFILE_TYPE_FILE:
+			case VINE_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
 				break;
 			}
 
 			/* submit children nodes with dependencies all resolved */
-			submit_node_children(tg, node);
+			submit_node_ready_children(tg, node);
 		} else {
 			progress_bar_advance_part_current(pbar, recovery_tasks_part, 0);
 		}
@@ -378,7 +371,7 @@ struct vine_task_graph *vine_task_graph_create(struct vine_manager *q)
 	tg->task_id_to_node = itable_create(0);
 	tg->outfile_cachename_to_node = hash_table_create(0, 0);
 
-	tg->library_name = xxstrdup("task-graph-library");
+	tg->library_name = xxstrdup("vine_task_graph_library");
 	tg->function_name = xxstrdup("compute_group_keys");
 	tg->manager = q;
 
@@ -392,7 +385,7 @@ struct vine_task_node *vine_task_graph_create_node(
 		const char *staging_dir,
 		int prune_depth,
 		vine_task_node_priority_mode_t priority_mode,
-		vine_task_graph_node_output_store_location_t output_store_location)
+		vine_task_node_outfile_type_t outfile_type)
 {
 	if (!tg || !node_key) {
 		return NULL;
@@ -408,7 +401,7 @@ struct vine_task_node *vine_task_graph_create_node(
 				outfile_remote_name,
 				prune_depth,
 				priority_mode,
-				output_store_location);
+				outfile_type);
 		hash_table_insert(tg->nodes, node_key, node);
 		if (node->outfile) {
 			hash_table_insert(tg->outfile_cachename_to_node, node->outfile->cached_name, node);
