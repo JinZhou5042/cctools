@@ -10,6 +10,7 @@
 #include "stringtools.h"
 #include "xxmalloc.h"
 #include "priority_queue.h"
+#include <math.h>
 #include "hash_table.h"
 #include "itable.h"
 #include "list.h"
@@ -293,11 +294,146 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 		total_time_spent_on_prune_ancestors_of_temp_node += node->time_spent_on_prune_ancestors_of_temp_node;
 		total_time_spent_on_prune_ancestors_of_persisted_node += node->time_spent_on_prune_ancestors_of_persisted_node;
 	}
-	printf("time spent on unlink local files: %ld\n", total_time_spent_on_unlink_local_files);
-	printf("time spent on prune ancestors of temp node: %ld\n", total_time_spent_on_prune_ancestors_of_temp_node);
-	printf("time spent on prune ancestors of persisted node: %ld\n", total_time_spent_on_prune_ancestors_of_persisted_node);
 
 	return;
+}
+
+static struct list *extract_weakly_connected_components(struct vine_task_graph *tg)
+{
+	if (!tg) {
+		return NULL;
+	}
+
+    struct set *visited = set_create(0);
+    struct list *components = list_create();
+
+	char *node_key;
+    struct vine_task_node *node;
+    HASH_TABLE_ITERATE(tg->nodes, node_key, node)
+	{
+        if (set_lookup(visited, node)) {
+            continue;
+        }
+
+        struct list *component = list_create();
+        struct list *queue = list_create();
+
+        list_push_tail(queue, node);
+        set_insert(visited, node);
+        list_push_tail(component, node);
+
+        while (list_size(queue) > 0) {
+            struct vine_task_node *curr = list_pop_head(queue);
+
+            struct vine_task_node *p;
+            LIST_ITERATE(curr->parents, p)
+			{
+                if (!set_lookup(visited, p)) {
+                    list_push_tail(queue, p);
+                    set_insert(visited, p);
+                    list_push_tail(component, p);
+                }
+            }
+
+            struct vine_task_node *c;
+            LIST_ITERATE(curr->children, c)
+			{
+                if (!set_lookup(visited, c)) {
+                    list_push_tail(queue, c);
+                    set_insert(visited, c);
+                    list_push_tail(component, c);
+                }
+            }
+        }
+
+        list_push_tail(components, component);
+        list_delete(queue);
+    }
+
+    set_delete(visited);
+    return components;
+}
+
+static void compute_eigenvector_centrality(struct vine_task_graph *tg, struct list *topo_order)
+{
+    int n = list_size(topo_order);
+    if (n == 0) {
+        return;
+    }
+
+	timestamp_t start_time = timestamp_get();
+
+    double *curr = calloc(n, sizeof(double));
+    double *next = calloc(n, sizeof(double));
+    struct vine_task_node **index_map = malloc(sizeof(*index_map) * n);
+    struct hash_table *node_to_index = hash_table_create(0, 0);  // default string-based, but we’ll use pointer cast
+
+    const double damping = 0.85;
+    const double base = 1.0 - damping;
+
+    int i = 0;
+    struct vine_task_node *node;
+    LIST_ITERATE(topo_order, node) {
+        curr[i] = 1.0;
+        index_map[i] = node;
+        int *index_ptr = malloc(sizeof(int));
+        *index_ptr = i;
+        hash_table_insert(node_to_index, (const char *)node, index_ptr);  // cast node* to const char*
+        i++;
+    }
+
+    for (int iter = 0; iter < 100; iter++) {
+        double norm = 0.0;
+
+        for (int i = 0; i < n; i++) {
+            struct vine_task_node *node = index_map[i];
+            double sum = 0.0;
+
+            struct vine_task_node *parent;
+            LIST_ITERATE(node->parents, parent)
+			{
+                int *parent_index_ptr = (int *)hash_table_lookup(node_to_index, (const char *)parent);
+                sum += curr[*parent_index_ptr];
+            }
+
+            next[i] = base + damping * sum;
+            norm += next[i] * next[i];
+        }
+
+        norm = sqrt(norm);
+        if (norm < 1e-10) {
+            break;
+        }
+
+        double diff = 0.0;
+        for (int i = 0; i < n; i++) {
+            next[i] /= norm;
+            diff += fabs(next[i] - curr[i]);
+            curr[i] = next[i];
+        }
+
+        if (diff < 1e-6) {
+            break;
+        }
+    }
+
+    for (int i = 0; i < n; i++) {
+        index_map[i]->eigenvector_centrality = curr[i];
+		printf("node %s eigenvector_centrality: %f\n", index_map[i]->node_key, curr[i]);
+    }
+
+    char *key;
+    void *value;
+    HASH_TABLE_ITERATE(node_to_index, key, value) {
+        free(value);
+    }
+    hash_table_delete(node_to_index);
+    free(curr);
+    free(next);
+    free(index_map);
+
+	timestamp_t end_time = timestamp_get();
+	printf("time spent on compute eigenvector centrality: %ld\n", end_time - start_time);
 }
 
 static void vine_task_graph_finalize(struct vine_task_graph *tg)
@@ -306,22 +442,74 @@ static void vine_task_graph_finalize(struct vine_task_graph *tg)
 		return;
 	}
 
-	/* enable debug system for C code since it uses a separate debug system instance
-	 * from the Python bindings. Use the same function that the manager uses. */
-	char *debug_tmp = string_format("%s/vine-logs/debug", tg->manager->runtime_directory);
-	vine_enable_debug_log(debug_tmp);
-	free(debug_tmp);
-
 	/* get nodes in topological order */
 	struct list *topo_order = get_topological_order(tg);
 	if (!topo_order) {
 		return;
 	}
 
+	char *node_key;
 	struct vine_task_node *node;
+	struct vine_task_node *parent_node;
+	struct vine_task_node *child_node;
+
+	/* compute the upstream and downstream counts for each node */
+	struct hash_table *upstream_map = hash_table_create(0, 0);
+	struct hash_table *downstream_map = hash_table_create(0, 0);
+	HASH_TABLE_ITERATE(tg->nodes, node_key, node)
+	{
+		struct set *upstream = set_create(0);
+		struct set *downstream = set_create(0);
+		hash_table_insert(upstream_map, node_key, upstream);
+		hash_table_insert(downstream_map, node_key, downstream);
+	}
 	LIST_ITERATE(topo_order, node)
 	{
-		struct vine_task_node *parent_node;
+		struct set *upstream = hash_table_lookup(upstream_map, node->node_key);
+		LIST_ITERATE(node->parents, parent_node)
+		{
+			struct set *parent_upstream = hash_table_lookup(upstream_map, parent_node->node_key);
+			set_union(upstream, parent_upstream);
+			set_insert(upstream, parent_node);
+		}
+	}
+	LIST_ITERATE_REVERSE(topo_order, node)
+	{
+		struct set *downstream = hash_table_lookup(downstream_map, node->node_key);
+		LIST_ITERATE(node->children, child_node)
+		{
+			struct set *child_downstream = hash_table_lookup(downstream_map, child_node->node_key);
+			set_union(downstream, child_downstream);
+			set_insert(downstream, child_node);
+		}
+	}
+	LIST_ITERATE(topo_order, node)
+	{
+		node->upstream_subgraph_size = set_size(hash_table_lookup(upstream_map, node->node_key));
+		node->downstream_subgraph_size = set_size(hash_table_lookup(downstream_map, node->node_key));
+		node->fan_in = list_size(node->parents);
+		node->fan_out = list_size(node->children);
+		set_delete(hash_table_lookup(upstream_map, node->node_key));
+		set_delete(hash_table_lookup(downstream_map, node->node_key));
+	}
+	hash_table_delete(upstream_map);
+	hash_table_delete(downstream_map);
+
+	/* extract weakly connected components */
+	struct list *weakly_connected_components = extract_weakly_connected_components(tg);
+	struct list *component;
+	int component_index = 0;
+	debug(D_VINE, "graph has %d weakly connected components\n", list_size(weakly_connected_components));
+	LIST_ITERATE(weakly_connected_components, component)
+	{
+		debug(D_VINE, "component %d size: %d\n", component_index, list_size(component));
+		component_index++;
+	}
+	list_delete(weakly_connected_components);
+
+	/* compute the depth of the node */
+	LIST_ITERATE(topo_order, node)
+	{
 		/* compute the depth of the node */
 		node->depth = 0;
 		LIST_ITERATE(node->parents, parent_node)
@@ -330,7 +518,13 @@ static void vine_task_graph_finalize(struct vine_task_graph *tg)
 				node->depth = parent_node->depth + 1;
 			}
 		}
-		/* add the parents' outfiles as inputs to the task */
+	}
+
+	// compute_eigenvector_centrality(tg, topo_order);
+
+	/* add the parents' outfiles as inputs to the task */
+	LIST_ITERATE(topo_order, node)
+	{
 		LIST_ITERATE(node->parents, parent_node)
 		{
 			if (parent_node->outfile) {
@@ -342,10 +536,8 @@ static void vine_task_graph_finalize(struct vine_task_graph *tg)
 	list_delete(topo_order);
 
 	/* initialize pending_parents for all nodes */
-	char *node_key;
 	HASH_TABLE_ITERATE(tg->nodes, node_key, node)
 	{
-		struct vine_task_node *parent_node;
 		LIST_ITERATE(node->parents, parent_node)
 		{
 			if (node->pending_parents) {
@@ -374,6 +566,12 @@ struct vine_task_graph *vine_task_graph_create(struct vine_manager *q)
 	tg->library_name = xxstrdup("vine_task_graph_library");
 	tg->function_name = xxstrdup("compute_group_keys");
 	tg->manager = q;
+
+	/* enable debug system for C code since it uses a separate debug system instance
+	 * from the Python bindings. Use the same function that the manager uses. */
+	char *debug_tmp = string_format("%s/vine-logs/debug", tg->manager->runtime_directory);
+	vine_enable_debug_log(debug_tmp);
+	free(debug_tmp);
 
 	return tg;
 }
