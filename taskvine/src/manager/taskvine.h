@@ -1582,14 +1582,15 @@ void vine_task_graph_delete(struct vine_task_graph *tg);
 void vine_task_graph_add_dependency(struct vine_task_graph *tg, const char *parent_key, const char *child_key);
 struct vine_task_node *vine_task_graph_create_node(struct vine_task_graph *tg,
 	const char *node_key,
-	const char *outfile_remote_name,
 	const char *staging_dir,
 	int prune_depth,
-	vine_task_node_priority_mode_t priority_mode,
-	vine_task_node_outfile_type_t outfile_type);
+	vine_task_node_priority_mode_t priority_mode);
 
+void vine_task_graph_set_node_outfile(struct vine_task_graph *tg, const char *node_key, vine_task_node_outfile_type_t outfile_type, const char *outfile_remote_name);
+void vine_task_graph_finalize_metrics(struct vine_task_graph *tg);
 const char *vine_task_graph_get_library_name(const struct vine_task_graph *tg);
 const char *vine_task_graph_get_function_name(const struct vine_task_graph *tg);
+double vine_task_graph_get_node_heavy_score(const struct vine_task_graph *tg, const char *node_key);
 void vine_task_graph_execute(struct vine_task_graph *tg);
 //@}
 
