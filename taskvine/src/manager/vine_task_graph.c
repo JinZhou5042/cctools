@@ -12,6 +12,7 @@
 #include "priority_queue.h"
 #include <math.h>
 #include "hash_table.h"
+#include <sys/stat.h>
 #include "itable.h"
 #include "list.h"
 #include "vine_task.h"
@@ -266,6 +267,25 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 				continue;
 			}
 
+			/* if the outfile is set to save on the sharedfs, stat to get the size of the file */
+			switch (node->outfile_type) {
+			case VINE_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
+				struct stat info;
+				int result = stat(node->outfile_remote_name, &info);
+				if (result < 0) {
+					vine_task_clean(node->task);
+					submit_node_task(tg, node);
+					continue;
+				}
+				node->outfile_size_bytes = info.st_size;
+				break;
+			case VINE_NODE_OUTFILE_TYPE_FILE:
+			case VINE_NODE_OUTFILE_TYPE_TEMP:
+				node->outfile_size_bytes = node->outfile->size;
+				break;
+			}
+			debug(D_VINE, "outfile %s size: %ld bytes", node->outfile_remote_name, node->outfile_size_bytes);
+
 			/* mark the node as completed */
 			node->completed = 1;
 
@@ -277,10 +297,10 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 				progress_bar_advance_part_current(pbar, recovery_tasks_part, 1);
 				continue;
 			}
-
+			
 			/* set the start time to the submit time of the first regular task */
 			if (regular_tasks_part->current == 0) {
-				progress_bar_reset_start_time(pbar, task->time_when_submitted);
+				progress_bar_reset_start_time(pbar, task->time_when_commit_start);
 			}
 
 			/* update critical time */
@@ -327,9 +347,12 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 	total_time_spent_on_prune_ancestors_of_temp_node /= 1e6;
 	total_time_spent_on_prune_ancestors_of_persisted_node /= 1e6;
 
-	printf("total time spent on prune ancestors of temp node: %.4f seconds\n", total_time_spent_on_prune_ancestors_of_temp_node);
-	printf("total time spent on prune ancestors of persisted node: %.4f seconds\n", total_time_spent_on_prune_ancestors_of_persisted_node);
-	printf("total time spent on unlink local files: %.4f seconds\n", total_time_spent_on_unlink_local_files);
+	printf("total time spent on prune ancestors of temp node: %.6f seconds\n", total_time_spent_on_prune_ancestors_of_temp_node);
+	printf("total time spent on prune ancestors of persisted node: %.6f seconds\n", total_time_spent_on_prune_ancestors_of_persisted_node);
+	printf("total time spent on unlink local files: %.6f seconds\n", total_time_spent_on_unlink_local_files);
+
+	double total_transfer_bandwidth_mbps = (double)(tg->manager->total_transfer_bytes / 1024.0 / 1024.0) / (double)(tg->manager->total_transfer_time / 1000000.0);
+	printf("total transfer bandwidth: %.6f MB/s\n", total_transfer_bandwidth_mbps);
 
 	return;
 }

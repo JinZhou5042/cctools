@@ -411,6 +411,10 @@ static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_w
 
 		w->resources->disk.inuse += BYTES_TO_MEGABYTES(size);
 
+		/* Update transfer statistics */
+		q->total_transfer_time += (timestamp_t)transfer_time;
+		q->total_transfer_bytes += (size_t)size;
+
 		/* If the replica corresponds to a declared file. */
 
 		struct vine_file *f = hash_table_lookup(q->file_table, cachename);
@@ -4158,6 +4162,9 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->enforce_worker_eviction_interval = 0;
 	q->time_start_worker_eviction = 0;
+
+	q->total_transfer_time = 0;
+	q->total_transfer_bytes = 0;
 
 	q->num_submitted_recovery_tasks = 0;
 	q->new_checkpointed_files = list_create();
