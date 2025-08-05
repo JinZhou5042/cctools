@@ -158,6 +158,8 @@ double vine_task_node_calculate_priority(struct vine_task_node *node)
 	double priority = 0;
 	timestamp_t current_time = timestamp_get();
 
+	struct vine_task_node *parent_node;
+
 	switch (node->priority_mode) {
 	case VINE_TASK_PRIORITY_MODE_RANDOM:
 		priority = random_double();
@@ -175,13 +177,22 @@ double vine_task_node_calculate_priority(struct vine_task_node *node)
 		priority = (double)current_time;
 		break;
 	case VINE_TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST:
-		struct vine_task_node *parent_node;
 		LIST_ITERATE(node->parents, parent_node)
 		{
 			if (!parent_node->outfile) {
 				continue;
 			}
 			priority += (double)vine_file_size(parent_node->outfile);
+		}
+		break;
+	case VINE_TASK_PRIORITY_MODE_LARGEST_STORAGE_FOOTPRINT_FIRST:
+		LIST_ITERATE(node->parents, parent_node)
+		{
+			if (!parent_node->outfile) {
+				continue;
+			}
+			timestamp_t parent_task_completion_time = parent_node->task->time_workers_execute_last;
+			priority += (double)vine_file_size(parent_node->outfile) * (double)parent_task_completion_time;
 		}
 		break;
 	}
