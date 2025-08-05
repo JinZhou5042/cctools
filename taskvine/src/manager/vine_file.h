@@ -47,8 +47,6 @@ struct vine_file {
 	int change_message_shown; // True if error message already shown.
 	int refcount;       // Number of references from a task object, delete when zero.
 
-	int needs_replication;
-	int needs_checkpointing;
 	timestamp_t graph_recovery_time;
 };
 
