@@ -1577,7 +1577,8 @@ typedef enum {
     VINE_TASK_PRIORITY_MODE_BREADTH_FIRST,       /**< Prioritize shallower tasks first */
     VINE_TASK_PRIORITY_MODE_FIFO,                /**< First in, first out priority */
     VINE_TASK_PRIORITY_MODE_LIFO,                /**< Last in, first out priority */
-    VINE_TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST  /**< Prioritize tasks with larger inputs first */
+    VINE_TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST, /**< Prioritize tasks with larger inputs first */
+    VINE_TASK_PRIORITY_MODE_LARGEST_STORAGE_FOOTPRINT_FIRST /**< Prioritize tasks with larger storage footprint first */
 } vine_task_node_priority_mode_t;
 
 struct vine_task_graph *vine_task_graph_create(struct vine_manager *q);
