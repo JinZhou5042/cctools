@@ -423,8 +423,18 @@ static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_w
 			f->state = VINE_FILE_STATE_CREATED;
 			f->size = size;
 
+			/* If the replica's type was a URL, it means the manager expected the source worker to download it
+			 * from elsewhere. Now that it's physically present, we can resolve its type back to the original */
+			if (replica->type == VINE_URL) {
+				replica->type = f->type;
+			}
+
 			if (is_checkpoint_worker(q, w)) {
 				list_push_tail(q->new_checkpointed_files, f);
+			}
+
+			if (f->type == VINE_TEMP) {
+				vine_temp_redundancy_replicate_file(q, f);
 			}
 		}
 	}
@@ -3285,7 +3295,7 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 		} else if (m->file->type == VINE_TEMP) {
 			//  debug(D_VINE,"task %lld has no ready transfer source for temp %s",(long
 			//  long)t->task_id,m->file->cached_name);
-			printf("task %lld has no ready transfer source for temp %s\n", (long long)t->task_id, m->file->cached_name);
+			// printf("task %lld has no ready transfer source for temp %s\n", (long long)t->task_id, m->file->cached_name);
 			return 0;
 		} else if (m->file->type == VINE_MINI_TASK) {
 			if (!vine_manager_transfer_capacity_available(q, w, m->file->mini_task)) {
@@ -3442,7 +3452,7 @@ int consider_task(struct vine_manager *q, struct vine_task *t)
 
 	// Skip if this task failed recently
 	if (t->time_when_last_failure + q->transient_error_interval > now_usecs) {
-		printf("task %d has failed recently\n", t->task_id);
+		// printf("task %d has failed recently\n", t->task_id);
 		return 0;
 	}
 
@@ -3454,7 +3464,7 @@ int consider_task(struct vine_manager *q, struct vine_task *t)
 
 	// Skip task if temp input files have not been materialized.
 	if (!vine_manager_check_inputs_available(q, t)) {
-		printf("task %d has no available inputs\n", t->task_id);
+		// printf("task %d has no available inputs\n", t->task_id);
 		return 0;
 	}
 

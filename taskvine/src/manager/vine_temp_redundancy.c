@@ -209,10 +209,6 @@ static int consider_replication(struct vine_manager *q)
 			continue;
 		}
 
-		if (!f->needs_replication) {
-			continue;
-		}
-
 		/* skip if the file has enough replicas or no replicas */
 		int current_replica_count = vine_file_replica_count(q, f);
 		if (current_replica_count >= q->temp_replica_count || current_replica_count == 0) {
@@ -265,10 +261,6 @@ static int consider_checkpointing(struct vine_manager *q)
 	struct vine_file *f;
 	while ((f = list_pop_head(q->temp_files_to_checkpoint)) && (iter_count++ < iter_depth)) {
 		if (!f || f->type != VINE_TEMP || f->state != VINE_FILE_STATE_CREATED) {
-			continue;
-		}
-
-		if (!f->needs_checkpointing) {
 			continue;
 		}
 
@@ -362,12 +354,9 @@ int vine_temp_redundancy_handle_file_lost(struct vine_manager *q, char *cachenam
 		return 0;
 	}
 
-	if (f->needs_replication) {
-		enqueue_file_for_replication(q, f);
-	}
-	if (f->needs_checkpointing) {
-		enqueue_file_for_checkpointing(q, f);
-	}
+	enqueue_file_for_replication(q, f);
+
+	// enqueue_file_for_checkpointing(q, f);
 
 	return 1;
 }
