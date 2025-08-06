@@ -355,6 +355,14 @@ int vine_cache_add_transfer(struct vine_cache *c, const char *cachename, const c
 
 	f = vine_cache_file_create(VINE_CACHE_TRANSFER, source, 0);
 
+	/*
+	XXX Note that original_type might be VINE_URL b/c puturl may be used to
+	perform a worker-to-worker transfer of an object that was initially of
+	another type. We don't need to consider the initial type here, as the
+	actual type will be determined by the manager once the transfer is complete
+	and the corresponding cache-update message is received.
+	*/
+
 	f->original_type = original_type;
 	f->cache_level = level;
 	f->mode = mode;
