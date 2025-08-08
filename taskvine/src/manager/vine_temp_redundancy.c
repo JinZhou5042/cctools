@@ -7,6 +7,7 @@
 #include "stringtools.h"
 #include "vine_manager.h"
 #include "debug.h"
+#include "random.h"
 #include "vine_manager_put.h"
 #include "xxmalloc.h"
 
@@ -101,6 +102,17 @@ static struct vine_worker_info *get_best_destination_worker(struct vine_manager 
 		}
 		/* workers with more available disk space are preferred */
 		priority_queue_push(valid_destinations, w, available_disk_space);
+		switch (q->replica_placement_policy) {
+		case VINE_REPLICA_PLACEMENT_POLICY_RANDOM:
+			priority_queue_push(valid_destinations, w, random_double());
+			break;
+		case VINE_REPLICA_PLACEMENT_POLICY_DISK_LOAD:
+			priority_queue_push(valid_destinations, w, available_disk_space);
+			break;
+		case VINE_REPLICA_PLACEMENT_POLICY_TRANSFER_LOAD:
+			priority_queue_push(valid_destinations, w, -w->incoming_xfer_counter);
+			break;
+		}
 	}
 
 	struct vine_worker_info *best_destination = priority_queue_pop(valid_destinations);
@@ -372,4 +384,27 @@ int vine_temp_redundancy_process(struct vine_manager *q)
 	processed += consider_checkpointing(q);
 
 	return processed;
+}
+
+void vine_set_replica_placement_policy(struct vine_manager *q, vine_replica_placement_policy_t policy)
+{
+	if (!q) {
+		return;
+	}
+
+	switch (policy) {
+	case VINE_REPLICA_PLACEMENT_POLICY_RANDOM:
+		debug(D_VINE, "Setting replica placement policy to RANDOM");
+		q->replica_placement_policy = policy;
+		break;
+	case VINE_REPLICA_PLACEMENT_POLICY_DISK_LOAD:
+		debug(D_VINE, "Setting replica placement policy to DISK_LOAD");
+		q->replica_placement_policy = policy;
+		break;
+	case VINE_REPLICA_PLACEMENT_POLICY_TRANSFER_LOAD:
+		q->replica_placement_policy = policy;
+		break;
+	default:
+		debug(D_ERROR, "Invalid replica placement policy: %d", policy);
+	}
 }

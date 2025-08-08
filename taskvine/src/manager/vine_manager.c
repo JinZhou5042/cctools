@@ -4179,6 +4179,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->num_submitted_recovery_tasks = 0;
 	q->new_checkpointed_files = list_create();
 
+	vine_set_replica_placement_policy(q, VINE_REPLICA_PLACEMENT_POLICY_RANDOM);
+
 	if ((envstring = getenv("VINE_BANDWIDTH"))) {
 		q->bandwidth_limit = string_metric_parse(envstring);
 		if (q->bandwidth_limit < 0) {
@@ -5910,10 +5912,12 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "max-library-retries")) {
 		q->max_library_retries = MIN(1, value);
+
 	} else if (!strcmp(name, "disk-proportion-available-to-task")) {
 		if (value < 1 && value > 0) {
 			q->disk_proportion_available_to_task = value;
 		}
+
 	} else if (!strcmp(name, "enforce-worker-eviction-interval")) {
 		q->enforce_worker_eviction_interval = (timestamp_t)(MAX(0, (int)value) * ONE_SECOND);
 

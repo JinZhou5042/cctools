@@ -82,6 +82,12 @@ typedef enum {
 	VINE_SCHEDULE_DISK       /**< Select the worker with the largest free disk space. */
 } vine_schedule_t;
 
+typedef enum {
+	VINE_REPLICA_PLACEMENT_POLICY_RANDOM = 0,        /* select a random worker */
+	VINE_REPLICA_PLACEMENT_POLICY_DISK_LOAD,         /* select a worker with the most free disk space */
+	VINE_REPLICA_PLACEMENT_POLICY_TRANSFER_LOAD      /* select a worker with the least incoming transfer load */
+} vine_replica_placement_policy_t;
+
 /** Possible outcomes for a task, returned by @ref vine_task_get_result.
 These results can be converted to a string with @ref vine_result_string.
 */
@@ -1590,6 +1596,7 @@ struct vine_task_node *vine_task_graph_create_node(struct vine_task_graph *tg,
 	int prune_depth,
 	vine_task_node_priority_mode_t priority_mode);
 
+void vine_set_replica_placement_policy(struct vine_manager *q, vine_replica_placement_policy_t policy);
 void vine_task_graph_set_node_outfile(struct vine_task_graph *tg, const char *node_key, vine_task_node_outfile_type_t outfile_type, const char *outfile_remote_name);
 void vine_task_graph_finalize_metrics(struct vine_task_graph *tg);
 const char *vine_task_graph_get_library_name(const struct vine_task_graph *tg);

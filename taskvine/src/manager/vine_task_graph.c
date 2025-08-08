@@ -297,7 +297,7 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 				progress_bar_advance_part_current(pbar, recovery_tasks_part, 1);
 				continue;
 			}
-			
+
 			/* set the start time to the submit time of the first regular task */
 			if (regular_tasks_part->current == 0) {
 				progress_bar_reset_start_time(pbar, task->time_when_commit_start);

@@ -250,6 +250,8 @@ struct vine_manager {
 
 	int num_submitted_recovery_tasks;
 	struct list *new_checkpointed_files;
+
+	vine_replica_placement_policy_t replica_placement_policy; /* Mode for selecting best worker for placing a new replica of a temp file */
 };
 
 /*

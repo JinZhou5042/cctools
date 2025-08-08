@@ -457,6 +457,8 @@ int vine_task_node_submit(struct vine_task_node *node)
 	double priority = vine_task_node_calculate_priority(node);
 	vine_task_set_priority(node->task, priority);
 
+	debug(D_VINE, "node %s: priority_mode=%d, depth=%d, calculated_priority=%.6f", node->node_key, node->priority_mode, node->depth, priority);
+
 	return vine_submit(node->manager, node->task);
 }
 
@@ -523,6 +525,8 @@ void vine_task_node_prune_ancestors(struct vine_task_node *node)
 		return;
 	}
 
+	timestamp_t start_time = timestamp_get();
+
 	int pruned_replica_count = 0;
 
 	if (_node_outfile_is_persisted(node)) {
@@ -531,7 +535,9 @@ void vine_task_node_prune_ancestors(struct vine_task_node *node)
 		pruned_replica_count = _prune_ancestors_of_temp_node(node);
 	}
 
-	debug(D_VINE, "pruned %d ancestors of node %s", pruned_replica_count, node->node_key);
+	timestamp_t elapsed_time = timestamp_get() - start_time;
+
+	debug(D_VINE, "pruned %d ancestors of node %s in %.6f seconds", pruned_replica_count, node->node_key, elapsed_time / 1000000.0);
 }
 
 void vine_task_node_replicate_outfile(struct vine_task_node *node)

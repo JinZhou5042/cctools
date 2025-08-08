@@ -5,8 +5,17 @@ import dask
 import cloudpickle
 import collections
 import uuid
+import time
 from ndcctools.taskvine.utils import load_variable_from_library
 from collections import deque
+
+
+class GraphKeyResult:
+    # extra_size_mb is used to allocate more space for this object in testing mode to evaluate storage consumption
+    # and peer transfer performance across all workers.
+    def __init__(self, result, extra_size_mb=None):
+        self.result = result
+        self.extra_obj = bytearray(int(extra_size_mb * 1024 * 1024)) if extra_size_mb and extra_size_mb > 0 else None
 
 
 class TaskGraph:
@@ -25,6 +34,9 @@ class TaskGraph:
 
         self.outfile_remote_name = {key: f"{uuid.uuid4()}.pkl" for key in self.task_dict.keys()}
         self.output_vine_file_of = {key: None for key in self.task_dict.keys()}
+
+        self.extra_size_mb_of = {key: 0 for key in self.task_dict.keys()}
+        self.extra_sleep_time_of = {key: 0 for key in self.task_dict.keys()}
 
         if debug:
             self._write_task_dependencies()
@@ -195,6 +207,20 @@ class TaskGraph:
 
         return {k: recurse(v) for k, v in task_dict.items()}
 
+    def save_result_of_key(self, key, result):
+        with open(self.outfile_remote_name[key], "wb") as f:
+            result_obj = GraphKeyResult(result, extra_size_mb=self.extra_size_mb_of[key])
+            cloudpickle.dump(result_obj, f)
+
+    def load_result_of_key(self, key):
+        try:
+            with open(self.outfile_remote_name[key], "rb") as f:
+                result_obj = cloudpickle.load(f)
+                assert isinstance(result_obj, GraphKeyResult), "Loaded object is not of type GraphKeyResult"
+                return result_obj.result
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Output file for key {key} not found at {self.outfile_remote_name[key]}")
+
     def get_input_keys_of_group(self, group_keys):
         group_set = set(group_keys)
         return {
@@ -275,11 +301,7 @@ def compute_group_keys(key):
     values = {}
 
     for k, path in task_graph.external_input_keys_to_paths(keys).items():
-        try:
-            with open(path, 'rb') as f:
-                values[k] = cloudpickle.load(f)
-        except Exception as e:
-            raise Exception(f"Error loading input {k} from {path}: {e}")
+        values[k] = task_graph.load_result_of_key(k)
 
     def rec_call(expr):
         try:
@@ -301,12 +323,13 @@ def compute_group_keys(key):
     result_paths = set()
 
     for k, path in task_graph.external_output_keys_to_paths(keys).items():
-        with open(path, 'wb') as f:
-            cloudpickle.dump(values[k], f)
+        task_graph.save_result_of_key(k, values[k])
         if not os.path.exists(path):
             raise Exception(f"Output file {path} does not exist after writing")
         if os.stat(path).st_size == 0:
             raise Exception(f"Output file {path} is empty after writing")
         result_paths.add(path)
+
+    time.sleep(task_graph.extra_sleep_time_of.get(key, 0))
 
     return result_paths

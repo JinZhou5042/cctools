@@ -1,7 +1,7 @@
 from ndcctools.taskvine import cvine
 from ndcctools.taskvine.manager import Manager
 from ndcctools.taskvine.utils import load_variable_from_library, delete_all_files, get_c_constant
-from ndcctools.taskvine.graph_definition import TaskGraph, init_task_graph_context, compute_group_keys
+from ndcctools.taskvine.graph_definition import GraphKeyResult, TaskGraph, init_task_graph_context, compute_group_keys
 
 import cloudpickle
 import os
@@ -9,6 +9,8 @@ import collections
 import inspect
 import types
 import hashlib
+import time
+import random
 import uuid
 
 
@@ -22,6 +24,7 @@ class GraphExecutor(Manager):
                  hoisting_modules=[],
                  staging_dir="/project01/ndcms/jzhou24/staging",
                  shared_file_system_dir="/project01/ndcms/jzhou24/shared_file_system",
+                 replica_placement_policy="random",
                  **kwargs):
 
         # delete all files in the run info template directory, do this before super().__init__()
@@ -33,6 +36,8 @@ class GraphExecutor(Manager):
         # initialize the manager
         super_params = set(inspect.signature(Manager.__init__).parameters)
         super_kwargs = {k: v for k, v in kwargs.items() if k in super_params}
+
+        print("Creating taskvine manager...")
         super().__init__(*args, **super_kwargs)
 
         # tune the manager
@@ -46,6 +51,9 @@ class GraphExecutor(Manager):
         self.tune("attempt-schedule-depth", 1000)
 
         self.priority_mode = get_c_constant(f"task_priority_mode_{priority_mode.replace('-', '_')}")
+        self.replica_placement_policy = get_c_constant(f"replica_placement_policy_{replica_placement_policy.replace('-', '_')}")
+        cvine.vine_set_replica_placement_policy(self._taskvine, self.replica_placement_policy)
+
         self.prune_depth = prune_depth
         self.staging_dir = staging_dir
 
@@ -63,7 +71,7 @@ class GraphExecutor(Manager):
 
     def _create_library_task(self, libcores=1, hoisting_modules=[]):
         assert cvine.vine_task_graph_get_function_name(self._task_graph) == compute_group_keys.__name__
-        hoisting_modules += [os, cloudpickle, TaskGraph, load_variable_from_library, uuid, hashlib, types, collections]
+        hoisting_modules += [os, cloudpickle, GraphKeyResult, TaskGraph, load_variable_from_library, uuid, hashlib, types, collections, time]
         self.libtask = self.create_library_from_functions(
             cvine.vine_task_graph_get_library_name(self._task_graph),
             compute_group_keys,
@@ -128,6 +136,11 @@ class GraphExecutor(Manager):
                                                    get_c_constant(outfile_type_str),
                                                    task_graph.outfile_remote_name[k])
 
+        # set the extra output file size for each node to monitor storage consumption
+        for k in task_graph.task_dict.keys():
+            task_graph.extra_size_mb_of[k] = random.uniform(0.0, 32.0)
+            task_graph.extra_sleep_time_of[k] = 0.0
+
         # save the task graph to a pickle file, will be sent to the remote workers
         with open("task_graph.pkl", 'wb') as f:
             cloudpickle.dump(task_graph, f)
@@ -136,4 +149,5 @@ class GraphExecutor(Manager):
         cvine.vine_task_graph_execute(self._task_graph)
 
     def __del__(self):
-        cvine.vine_task_graph_delete(self._task_graph)
+        if hasattr(self, '_task_graph') and self._task_graph:
+            cvine.vine_task_graph_delete(self._task_graph)
