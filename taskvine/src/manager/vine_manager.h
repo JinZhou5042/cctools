@@ -252,6 +252,11 @@ struct vine_manager {
 	struct list *new_checkpointed_files;
 
 	vine_replica_placement_policy_t replica_placement_policy; /* Mode for selecting best worker for placing a new replica of a temp file */
+	int balance_worker_disk_load; /* If true, offload replicas from workers that are overloaded with temp files. */
+	struct vine_worker_info *min_available_disk_worker;
+	struct vine_worker_info *max_available_disk_worker;
+	timestamp_t when_last_offloaded;
+	timestamp_t total_time_spent_on_offloading;
 };
 
 /*
@@ -302,6 +307,8 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
 
 int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const char *filename, vine_cache_level_t cache_level, vine_cache_level_t delete_upto_level);
+
+int64_t get_worker_available_disk_bytes(struct vine_worker_info *w);
 
 /* The expected format of files created by the resource monitor.*/
 #define RESOURCE_MONITOR_TASK_LOCAL_NAME "vine-task-%d"

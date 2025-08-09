@@ -13,7 +13,7 @@
 #include "debug.h"
 #include "assert.h"
 #include "vine_worker_info.h"
-#include "vine_temp_redundancy.h"
+#include "vine_temp.h"
 #include "random.h"
 
 double compute_lex_priority(const char *key)
@@ -546,7 +546,7 @@ void vine_task_node_replicate_outfile(struct vine_task_node *node)
 		return;
 	}
 
-	vine_temp_redundancy_replicate_file(node->manager, node->outfile);
+	vine_temp_replicate_file_later(node->manager, node->outfile);
 }
 
 void vine_task_node_checkpoint_outfile(struct vine_task_node *node)
@@ -555,7 +555,7 @@ void vine_task_node_checkpoint_outfile(struct vine_task_node *node)
 		return;
 	}
 
-	vine_temp_redundancy_checkpoint_file(node->manager, node->outfile);
+	vine_temp_checkpoint_file_later(node->manager, node->outfile);
 }
 
 int vine_task_node_set_outfile_size_bytes(struct vine_task_node *node, size_t outfile_size_bytes)

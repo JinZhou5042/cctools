@@ -25,7 +25,8 @@ See the file COPYING for details.
 int vine_file_replica_table_insert(struct vine_manager *m, struct vine_worker_info *w, const char *cachename, struct vine_file_replica *replica)
 {
 	if (hash_table_lookup(w->current_files, cachename)) {
-		return 0;
+		// delete the previous replcia because the replica's size might have changed
+		vine_file_replica_table_remove(m, w, cachename);
 	}
 
 	double prev_available = w->resources->disk.total - BYTES_TO_MEGABYTES(w->inuse_cache);
@@ -38,13 +39,23 @@ int vine_file_replica_table_insert(struct vine_manager *m, struct vine_worker_in
 		m->current_max_worker->disk = w->resources->disk.total - BYTES_TO_MEGABYTES(w->inuse_cache);
 	}
 
+	if (m->min_available_disk_worker ||
+			get_worker_available_disk_bytes(w) < get_worker_available_disk_bytes(m->min_available_disk_worker)) {
+		m->min_available_disk_worker = w;
+	}
+
 	struct set *workers = hash_table_lookup(m->file_worker_table, cachename);
 	if (!workers) {
-		workers = set_create(4);
+		workers = set_create(0);
 		hash_table_insert(m->file_worker_table, cachename, workers);
 	}
 
 	set_insert(workers, w);
+
+	struct set *temp_source_workers = hash_table_lookup(m->file_worker_table, cachename);
+	if (!temp_source_workers || set_size(temp_source_workers) == 0) {
+		debug(D_ERROR, "WHAT THE HELL, the source worker set is NULL \n");
+	}
 
 	return 1;
 }
@@ -70,6 +81,11 @@ struct vine_file_replica *vine_file_replica_table_remove(struct vine_manager *m,
 	if (available > m->current_max_worker->disk) {
 		/* the current worker has more space than we knew before for all workers, so we update it. */
 		m->current_max_worker->disk = available;
+	}
+
+	if (m->max_available_disk_worker ||
+			get_worker_available_disk_bytes(w) > get_worker_available_disk_bytes(m->max_available_disk_worker)) {
+		m->max_available_disk_worker = w;
 	}
 
 	struct set *workers = hash_table_lookup(m->file_worker_table, cachename);
@@ -212,6 +228,12 @@ struct vine_file_replica *vine_file_replica_table_get_or_create(struct vine_mana
 		replica->mtime = mtime;
 		replica->type = type;
 		replica->cache_level = cache_level;
+
+		struct set *temp_source_workers = hash_table_lookup(m->file_worker_table, cachename);
+		if (!temp_source_workers || set_size(temp_source_workers) == 0) {
+			debug(D_ERROR, "WHAT? The replica is found but the set is NULL! \n");
+		}
+
 		return replica;
 	}
 

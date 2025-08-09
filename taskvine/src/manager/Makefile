@@ -31,7 +31,7 @@ SOURCES = \
 	vine_task_groups.c \
 	vine_task_node.c \
 	vine_task_graph.c \
-	vine_temp_redundancy.c
+	vine_temp.c
 
 PUBLIC_HEADERS = taskvine.h
 

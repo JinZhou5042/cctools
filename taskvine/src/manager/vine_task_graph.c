@@ -351,9 +351,6 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 	printf("total time spent on prune ancestors of persisted node: %.6f seconds\n", total_time_spent_on_prune_ancestors_of_persisted_node);
 	printf("total time spent on unlink local files: %.6f seconds\n", total_time_spent_on_unlink_local_files);
 
-	double total_transfer_bandwidth_mbps = (double)(tg->manager->total_transfer_bytes / 1024.0 / 1024.0) / (double)(tg->manager->total_transfer_time / 1000000.0);
-	printf("total transfer bandwidth: %.6f MB/s\n", total_transfer_bandwidth_mbps);
-
 	return;
 }
 

@@ -260,7 +260,7 @@ static void batch_queue_vine_option_update(struct batch_queue *q, const char *wh
 		} else if (!strcmp(value, "fcfs")) {
 			vine_set_scheduler(q->tv_manager, VINE_SCHEDULE_FCFS);
 		} else if (!strcmp(value, "random")) {
-			vine_set_scheduler(q->tv_manager, VINE_SCHEDULE_RAND);
+			vine_set_scheduler(q->tv_manager, VINE_SCHEDULE_RANDOM);
 		} else if (!strcmp(value, "worst")) {
 			vine_set_scheduler(q->tv_manager, VINE_SCHEDULE_WORST);
 		} else {

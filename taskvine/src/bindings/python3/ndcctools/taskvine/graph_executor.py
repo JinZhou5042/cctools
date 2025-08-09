@@ -25,6 +25,7 @@ class GraphExecutor(Manager):
                  staging_dir="/project01/ndcms/jzhou24/staging",
                  shared_file_system_dir="/project01/ndcms/jzhou24/shared_file_system",
                  replica_placement_policy="random",
+                 balance_worker_disk_load=0,
                  **kwargs):
 
         # delete all files in the run info template directory, do this before super().__init__()
@@ -50,6 +51,12 @@ class GraphExecutor(Manager):
         self.tune("transient-error-interval", 1)
         self.tune("attempt-schedule-depth", 1000)
 
+        if balance_worker_disk_load:
+            self.tune("balance-worker-disk-load", balance_worker_disk_load)
+            self.set_scheduler("worst")
+        else:
+            self.set_scheduler(scheduling_mode)
+
         self.priority_mode = get_c_constant(f"task_priority_mode_{priority_mode.replace('-', '_')}")
         self.replica_placement_policy = get_c_constant(f"replica_placement_policy_{replica_placement_policy.replace('-', '_')}")
         cvine.vine_set_replica_placement_policy(self._taskvine, self.replica_placement_policy)
@@ -59,8 +66,6 @@ class GraphExecutor(Manager):
 
         # initialize the task graph
         self._task_graph = cvine.vine_task_graph_create(self._taskvine)
-
-        self.set_scheduler(scheduling_mode)
 
         # ensure the dir exists
         os.makedirs(shared_file_system_dir, exist_ok=True)
@@ -138,7 +143,7 @@ class GraphExecutor(Manager):
 
         # set the extra output file size for each node to monitor storage consumption
         for k in task_graph.task_dict.keys():
-            task_graph.extra_size_mb_of[k] = random.uniform(0.0, 32.0)
+            task_graph.extra_size_mb_of[k] = random.uniform(0.0, 20.0)
             task_graph.extra_sleep_time_of[k] = 0.0
 
         # save the task graph to a pickle file, will be sent to the remote workers

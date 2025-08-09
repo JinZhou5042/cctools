@@ -29,7 +29,7 @@ See the file COPYING for details.
 #include "vine_taskgraph_log.h"
 #include "vine_txn_log.h"
 #include "vine_worker_info.h"
-#include "vine_temp_redundancy.h"
+#include "vine_temp.h"
 
 #include "address.h"
 #include "buffer.h"
@@ -170,6 +170,8 @@ static int release_worker(struct vine_manager *q, struct vine_worker_info *w);
 
 struct vine_task *send_library_to_worker(struct vine_manager *q, struct vine_worker_info *w, const char *name);
 static void enqueue_ready_task(struct vine_manager *q, struct vine_task *t);
+
+static void update_min_max_available_disk_worker(struct vine_manager *q);
 
 /* Return the number of workers matching a given type: WORKER, STATUS, etc */
 
@@ -371,6 +373,45 @@ static int process_replica_on_event(struct vine_manager *q, struct vine_worker_i
 	return 1;
 }
 
+static struct set *get_worker_busy_files(struct vine_worker_info *w)
+{
+	if (!w) {
+		return NULL;
+	}
+
+	struct set *busy_files = set_create(0);
+
+	uint64_t task_id;
+	struct vine_task *task;
+	ITABLE_ITERATE(w->current_tasks, task_id, task)
+	{
+		struct vine_mount *input_mount;
+		LIST_ITERATE(task->input_mounts, input_mount)
+		{
+			set_insert(busy_files, input_mount->file);
+		}
+	}
+
+	return busy_files;
+}
+
+static int is_file_busy(struct vine_manager *q, struct vine_worker_info *w, struct vine_file *f)
+{
+	if (!q || !w || !f) {
+		return 0;
+	}
+
+	struct set *busy_files = get_worker_busy_files(w);
+	if (!busy_files) {
+		debug(D_ERROR, "Failed to get busy files for worker %s", w->hostname);
+		return 0;
+	}
+
+	int is_busy = set_lookup(busy_files, f);
+	set_delete(busy_files);
+	return is_busy;
+}
+
 /*
 A cache-update message coming from the worker means that a requested
 remote transfer or command was successful, and know we know the size
@@ -434,7 +475,38 @@ static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_w
 			}
 
 			if (f->type == VINE_TEMP) {
-				vine_temp_redundancy_replicate_file(q, f);
+				vine_temp_replicate_file_later(q, f);
+			}
+
+			if (q->balance_worker_disk_load && f->type == VINE_TEMP) {
+				struct set *source_workers = hash_table_lookup(q->file_worker_table, f->cached_name);
+				if (!source_workers) {
+					// no surprise - a cache-update may trigger a file deletion!
+					return VINE_MSG_PROCESSED;
+				}
+				struct vine_worker_info *source_worker = NULL;
+				int replicas_to_remove = set_size(source_workers) - q->temp_replica_count;
+
+				if (replicas_to_remove > 0) {
+					return VINE_MSG_PROCESSED;
+				}
+
+				timestamp_t time_start = timestamp_get();
+				struct priority_queue *offload_from_workers = priority_queue_create(0);
+				SET_ITERATE(source_workers, source_worker)
+				{
+					if (is_file_busy(q, source_worker, f)) {
+						continue; // skip if the file is currently used on this worker
+					}
+					// workers with less available disk are prioritized for removing
+					priority_queue_push(offload_from_workers, source_worker, -get_worker_available_disk_bytes(source_worker));
+				}
+				struct vine_worker_info *offload_from_worker = NULL;
+				while (replicas_to_remove-- > 0 && (offload_from_worker = priority_queue_pop(offload_from_workers))) {
+					delete_worker_file(q, offload_from_worker, f->cached_name, 0, 0);
+				}
+				priority_queue_delete(offload_from_workers);
+				q->total_time_spent_on_offloading += (timestamp_get() - time_start);
 			}
 		}
 	}
@@ -491,7 +563,7 @@ static vine_msg_code_t handle_cache_invalid(struct vine_manager *q, struct vine_
 		}
 
 		/* If the creation failed, we may want to backup the file somewhere else. */
-		vine_temp_redundancy_handle_file_lost(q, cachename);
+		vine_temp_handle_file_lost(q, cachename);
 
 		/* Successfully processed this message. */
 		return VINE_MSG_PROCESSED;
@@ -1067,7 +1139,7 @@ static void recall_worker_lost_temp_files(struct vine_manager *q, struct vine_wo
 	// Iterate over files we want might want to recover
 	HASH_TABLE_ITERATE(w->current_files, cached_name, info)
 	{
-		vine_temp_redundancy_handle_file_lost(q, cached_name);
+		vine_temp_handle_file_lost(q, cached_name);
 	}
 }
 
@@ -1101,6 +1173,8 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	/* update the largest worker seen */
 	find_max_worker(q);
+
+	update_min_max_available_disk_worker(q);
 
 	debug(D_VINE, "%d workers connected in total now", count_workers(q, VINE_WORKER_TYPE_WORKER));
 }
@@ -1175,6 +1249,8 @@ static void add_worker(struct vine_manager *q)
 	w->addrport = string_format("%s:%d", addr, port);
 
 	hash_table_insert(q->worker_table, w->hashkey, w);
+
+	update_min_max_available_disk_worker(q);
 }
 
 /* Delete a single file on a remote worker except those with greater delete_upto_level cache level */
@@ -2459,6 +2535,9 @@ static vine_msg_code_t handle_resources(struct vine_manager *q, struct vine_work
 	/* Record the update into the transaction log. */
 	vine_txn_log_write_worker_resources(q, w);
 
+	/* Update the min/max available disk worker. */
+	update_min_max_available_disk_worker(q);
+
 	return VINE_MSG_PROCESSED;
 }
 
@@ -2491,6 +2570,125 @@ static vine_msg_code_t handle_feature(struct vine_manager *q, struct vine_worker
 	hash_table_insert(w->features, fdec, (void **)1);
 
 	return VINE_MSG_PROCESSED;
+}
+
+/*
+Get the available disk space in bytes for a worker.
+*/
+
+int64_t get_worker_available_disk_bytes(struct vine_worker_info *w)
+{
+	if (!w || !w->resources) {
+		return 0;
+	}
+
+	return (int64_t)MEGABYTES_TO_BYTES(w->resources->disk.total) - w->inuse_cache;
+}
+
+/*
+Iterate over all workers to find the one with the most available disk.
+*/
+
+static void update_min_max_available_disk_worker(struct vine_manager *q)
+{
+	int64_t min_available_disk = INT64_MAX;
+	int64_t max_available_disk = -1;
+
+	char *key;
+	struct vine_worker_info *w;
+	HASH_TABLE_ITERATE(q->worker_table, key, w)
+	{
+		if (!w->transfer_port_active || w->draining) {
+			continue;
+		}
+		if (!w->resources) {
+			continue;
+		}
+		if (w->resources->tag < 0 || w->resources->disk.total < 1 || w->end_time < 0) {
+			continue;
+		}
+		int64_t this_available_disk = get_worker_available_disk_bytes(w);
+		if (this_available_disk > max_available_disk) {
+			max_available_disk = this_available_disk;
+			q->max_available_disk_worker = w;
+		}
+		if (this_available_disk < min_available_disk) {
+			min_available_disk = this_available_disk;
+			q->min_available_disk_worker = w;
+		}
+	}
+}
+
+static void offload_min_available_disk_worker(struct vine_manager *q)
+{
+	if (!q->min_available_disk_worker) {
+		return;
+	}
+	if (q->min_available_disk_worker == q->max_available_disk_worker) {
+		// No need to offload if both workers are the same.
+		return;
+	}
+
+	int64_t min_available_disk = get_worker_available_disk_bytes(q->min_available_disk_worker);
+	int64_t max_available_disk = get_worker_available_disk_bytes(q->max_available_disk_worker);
+
+	if (max_available_disk < 1) {
+		return;
+	}
+	if (max_available_disk < min_available_disk * 1.2) {
+		// No need to offload if the max available disk is not significantly larger than the min.
+		return;
+	}
+
+	int64_t bytes_to_offload = (q->min_available_disk_worker->inuse_cache - q->max_available_disk_worker->inuse_cache) / 2;
+
+	if (bytes_to_offload < 1) {
+		return;
+	}
+
+	struct set *busy_files = get_worker_busy_files(q->min_available_disk_worker);
+	if (!busy_files) {
+		debug(D_ERROR, "Failed to get busy files for worker %s", q->min_available_disk_worker->hostname);
+	}
+
+	struct list *files_to_offload = list_create();
+	int64_t offloaded_bytes = 0;
+
+	char *cachename;
+	struct vine_file_replica *replica;
+	HASH_TABLE_ITERATE(q->min_available_disk_worker->current_files, cachename, replica)
+	{
+		if (replica->type != VINE_TEMP) {
+			continue;
+		}
+		if (replica->state != VINE_FILE_REPLICA_STATE_READY) {
+			continue;
+		}
+		if (vine_file_replica_table_lookup(q->max_available_disk_worker, cachename)) {
+			// The file is already present on the max available disk worker.
+			continue;
+		}
+		struct vine_file *f = hash_table_lookup(q->file_table, cachename);
+		if (!f) {
+			continue;
+		}
+		if (set_lookup(busy_files, f)) {
+			continue;
+		}
+
+		list_push_tail(files_to_offload, f);
+		offloaded_bytes += replica->size;
+		if (offloaded_bytes >= bytes_to_offload) {
+			break;
+		}
+	}
+
+	struct vine_file *fto;
+	while ((fto = list_pop_head(files_to_offload))) {
+		vine_temp_replicate_file_now(q, fto, q->min_available_disk_worker, q->max_available_disk_worker);
+	}
+
+	list_delete(files_to_offload);
 }
 
 /*
@@ -4180,6 +4378,11 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->new_checkpointed_files = list_create();
 
 	vine_set_replica_placement_policy(q, VINE_REPLICA_PLACEMENT_POLICY_RANDOM);
+	q->balance_worker_disk_load = 0;
+	q->total_time_spent_on_offloading = 0;
+	q->when_last_offloaded = 0;
+	q->min_available_disk_worker = NULL;
+	q->max_available_disk_worker = NULL;
 
 	if ((envstring = getenv("VINE_BANDWIDTH"))) {
 		q->bandwidth_limit = string_metric_parse(envstring);
@@ -5385,9 +5588,17 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			}
 		}
 
+		if (q->balance_worker_disk_load && (timestamp_get() - q->when_last_offloaded > 1e6)) {
+			timestamp_t time_start = timestamp_get();
+			offload_min_available_disk_worker(q);
+			q->when_last_offloaded = timestamp_get();
+			q->total_time_spent_on_offloading += (timestamp_get() - time_start);
+			debug(D_VINE, "Total time spent on offloading overloaded worker: %ld", q->total_time_spent_on_offloading);
+		}
+
 		// Check if any temp files need replication and start replicating
 		BEGIN_ACCUM_TIME(q, time_internal);
-		result = vine_temp_redundancy_process(q);
+		result = vine_temp_start_replication(q);
 		END_ACCUM_TIME(q, time_internal);
 		if (result) {
 			// recovered at least one temp file
@@ -5920,6 +6131,9 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "enforce-worker-eviction-interval")) {
 		q->enforce_worker_eviction_interval = (timestamp_t)(MAX(0, (int)value) * ONE_SECOND);
+
+	} else if (!strcmp(name, "balance-worker-disk-load")) {
+		q->balance_worker_disk_load = 1;
 
 	} else {
 		debug(D_NOTICE | D_VINE, "Warning: tuning parameter \"%s\" not recognized\n", name);

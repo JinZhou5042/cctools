@@ -473,7 +473,7 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 			break;
 		case VINE_SCHEDULE_FCFS:
 			/* Deprecated, same as random */
-		case VINE_SCHEDULE_RAND:
+		case VINE_SCHEDULE_RANDOM:
 		default:
 			/* Default to random selection. */
 			priority = random_double();
