@@ -253,8 +253,6 @@ struct vine_manager {
 
 	vine_replica_placement_policy_t replica_placement_policy; /* Mode for selecting best worker for placing a new replica of a temp file */
 	int balance_worker_disk_load; /* If true, offload replicas from workers that are overloaded with temp files. */
-	struct vine_worker_info *min_available_disk_worker;
-	struct vine_worker_info *max_available_disk_worker;
 	timestamp_t when_last_offloaded;
 	timestamp_t total_time_spent_on_offloading;
 };

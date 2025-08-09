@@ -39,11 +39,6 @@ int vine_file_replica_table_insert(struct vine_manager *m, struct vine_worker_in
 		m->current_max_worker->disk = w->resources->disk.total - BYTES_TO_MEGABYTES(w->inuse_cache);
 	}
 
-	if (m->min_available_disk_worker ||
-			get_worker_available_disk_bytes(w) < get_worker_available_disk_bytes(m->min_available_disk_worker)) {
-		m->min_available_disk_worker = w;
-	}
-
 	struct set *workers = hash_table_lookup(m->file_worker_table, cachename);
 	if (!workers) {
 		workers = set_create(0);
@@ -81,11 +76,6 @@ struct vine_file_replica *vine_file_replica_table_remove(struct vine_manager *m,
 	if (available > m->current_max_worker->disk) {
 		/* the current worker has more space than we knew before for all workers, so we update it. */
 		m->current_max_worker->disk = available;
-	}
-
-	if (m->max_available_disk_worker ||
-			get_worker_available_disk_bytes(w) > get_worker_available_disk_bytes(m->max_available_disk_worker)) {
-		m->max_available_disk_worker = w;
 	}
 
 	struct set *workers = hash_table_lookup(m->file_worker_table, cachename);

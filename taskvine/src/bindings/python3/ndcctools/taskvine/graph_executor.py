@@ -143,7 +143,7 @@ class GraphExecutor(Manager):
 
         # set the extra output file size for each node to monitor storage consumption
         for k in task_graph.task_dict.keys():
-            task_graph.extra_size_mb_of[k] = random.uniform(0.0, 20.0)
+            task_graph.extra_size_mb_of[k] = random.uniform(0.0, 32.0)
             task_graph.extra_sleep_time_of[k] = 0.0
 
         # save the task graph to a pickle file, will be sent to the remote workers
