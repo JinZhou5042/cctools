@@ -171,6 +171,8 @@ static int release_worker(struct vine_manager *q, struct vine_worker_info *w);
 struct vine_task *send_library_to_worker(struct vine_manager *q, struct vine_worker_info *w, const char *name);
 static void enqueue_ready_task(struct vine_manager *q, struct vine_task *t);
 
+static void clean_redundant_replicas(struct vine_manager *q, struct vine_file *f);
+
 /* Return the number of workers matching a given type: WORKER, STATUS, etc */
 
 static int count_workers(struct vine_manager *q, vine_worker_type_t type)
@@ -457,46 +459,12 @@ static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_w
 
 			if (f->type == VINE_TEMP) {
 				vine_temp_replicate_file_later(q, f);
-			}
 
-			if (q->balance_worker_disk_load && f->type == VINE_TEMP) {
-				// remove excess replicas of temporary files
-				struct set *source_workers = hash_table_lookup(q->file_worker_table, f->cached_name);
-				if (!source_workers) {
-					// no surprise - a cache-update may trigger a file deletion!
-					return VINE_MSG_PROCESSED;
+				if (q->balance_worker_disk_load) {
+					timestamp_t time_start = timestamp_get();
+					clean_redundant_replicas(q, f);
+					q->total_time_spent_on_offloading += (timestamp_get() - time_start);
 				}
-				int replicas_to_remove = set_size(source_workers) - q->temp_replica_count;
-				if (replicas_to_remove <= 0) {
-					return VINE_MSG_PROCESSED;
-				}
-				// note that this replica can be a source to a peer transfer, if this is unlinked,
-				// a corresponding transfer may fail and result in a forsaken task
-				// therefore, we need to wait until all replicas are ready
-				if (vine_file_replica_table_count_replicas(q, cachename, VINE_FILE_REPLICA_STATE_READY) != set_size(source_workers)) {
-					return VINE_MSG_PROCESSED;
-				}
-
-				timestamp_t time_start = timestamp_get();
-				struct priority_queue *offload_from_workers = priority_queue_create(0);
-
-				struct vine_worker_info *source_worker = NULL;
-				SET_ITERATE(source_workers, source_worker)
-				{
-					// workers with more used disk are prioritized for removing
-					if (is_file_busy(q, source_worker, f)) {
-						continue;
-					}
-
-					priority_queue_push(offload_from_workers, source_worker, source_worker->inuse_cache);
-				}
-
-				struct vine_worker_info *offload_from_worker = NULL;
-				while (replicas_to_remove-- > 0 && (offload_from_worker = priority_queue_pop(offload_from_workers))) {
-					delete_worker_file(q, offload_from_worker, f->cached_name, 0, 0);
-				}
-				priority_queue_delete(offload_from_workers);
-				q->total_time_spent_on_offloading += (timestamp_get() - time_start);
 			}
 		}
 	}
@@ -728,6 +696,15 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 	change_task_state(q, t, VINE_TASK_WAITING_RETRIEVAL);
 	itable_remove(q->running_table, t->task_id);
 	vine_task_set_result(t, task_status);
+
+	/* Clean redundant replicas for the inputs */
+	struct vine_mount *input_mount;
+	LIST_ITERATE(t->input_mounts, input_mount)
+	{
+		if (input_mount->file && input_mount->file->type == VINE_TEMP) {
+			clean_redundant_replicas(q, input_mount->file);
+		}
+	}
 
 	return VINE_SUCCESS;
 }
@@ -2566,6 +2543,51 @@ int64_t get_worker_available_disk_bytes(struct vine_worker_info *w)
 	}
 
 	return (int64_t)MEGABYTES_TO_BYTES(w->resources->disk.total) - w->inuse_cache;
+}
+
+static void clean_redundant_replicas(struct vine_manager *q, struct vine_file *f)
+{
+	if (!f || f->type != VINE_TEMP) {
+		return;
+	}
+
+	// remove excess replicas of temporary files
+	struct set *source_workers = hash_table_lookup(q->file_worker_table, f->cached_name);
+	if (!source_workers) {
+		// no surprise - a cache-update may trigger a file deletion!
+		return;
+	}
+	int replicas_to_remove = set_size(source_workers) - q->temp_replica_count;
+	if (replicas_to_remove <= 0) {
+		return;
+	}
+	// note that this replica can be a source to a peer transfer, if this is unlinked,
+	// a corresponding transfer may fail and result in a forsaken task
+	// therefore, we need to wait until all replicas are ready
+	if (vine_file_replica_table_count_replicas(q, f->cached_name, VINE_FILE_REPLICA_STATE_READY) != set_size(source_workers)) {
+		return;
+	}
+
+	struct priority_queue *offload_from_workers = priority_queue_create(0);
+
+	struct vine_worker_info *source_worker = NULL;
+	SET_ITERATE(source_workers, source_worker)
+	{
+		// workers with more used disk are prioritized for removing
+		if (is_file_busy(q, source_worker, f)) {
+			continue;
+		}
+
+		priority_queue_push(offload_from_workers, source_worker, source_worker->inuse_cache);
+	}
+
+	struct vine_worker_info *offload_from_worker = NULL;
+	while (replicas_to_remove-- > 0 && (offload_from_worker = priority_queue_pop(offload_from_workers))) {
+		delete_worker_file(q, offload_from_worker, f->cached_name, 0, 0);
+	}
+	priority_queue_delete(offload_from_workers);
+
+	return;
 }
 
 static void rebalance_worker_disk_usage(struct vine_manager *q)
