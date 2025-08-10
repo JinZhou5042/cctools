@@ -56,8 +56,9 @@ struct vine_task_node *vine_task_node_create(
 	node->children = list_create();
 	node->pending_parents = set_create(0);
 	node->completed = 0;
-	node->outfile_size_bytes = 0;
+	node->prune_depth = prune_depth;
 
+	node->outfile_size_bytes = 0;
 	node->depth = -1;
 	node->height = -1;
 	node->upstream_subgraph_size = -1;
@@ -71,7 +72,8 @@ struct vine_task_node *vine_task_node_create(
 	node->time_spent_on_prune_ancestors_of_persisted_node = 0;
 
 	node->critical_time = -1;
-	node->prune_depth = prune_depth;
+
+	debug(D_VINE, "node info: key=%s, staging_dir=%s, priority_mode=%d, prune_depth=%d", node->node_key, node->staging_dir, node->priority_mode, node->prune_depth);
 
 	/* create the task */
 	node->task = vine_task_create(function_name);

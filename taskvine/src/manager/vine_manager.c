@@ -698,11 +698,13 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 	vine_task_set_result(t, task_status);
 
 	/* Clean redundant replicas for the inputs */
-	struct vine_mount *input_mount;
-	LIST_ITERATE(t->input_mounts, input_mount)
-	{
-		if (input_mount->file && input_mount->file->type == VINE_TEMP) {
-			clean_redundant_replicas(q, input_mount->file);
+	if (q->balance_worker_disk_load) {
+		struct vine_mount *input_mount;
+		LIST_ITERATE(t->input_mounts, input_mount)
+		{
+			if (input_mount->file && input_mount->file->type == VINE_TEMP) {
+				clean_redundant_replicas(q, input_mount->file);
+			}
 		}
 	}
 

@@ -26,6 +26,8 @@ class GraphExecutor(Manager):
                  shared_file_system_dir="/project01/ndcms/jzhou24/shared_file_system",
                  replica_placement_policy="random",
                  balance_worker_disk_load=0,
+                 extra_task_sleep_time=[0, 0],
+                 extra_task_output_size_mb=[0, 0],
                  **kwargs):
 
         # delete all files in the run info template directory, do this before super().__init__()
@@ -73,6 +75,11 @@ class GraphExecutor(Manager):
 
         # create library task with specified resources
         self._create_library_task(libcores, hoisting_modules)
+
+        self.extra_task_sleep_time = extra_task_sleep_time
+        self.extra_task_output_size_mb = extra_task_output_size_mb
+        assert isinstance(self.extra_task_sleep_time, list) and len(self.extra_task_sleep_time) == 2 and self.extra_task_sleep_time[0] <= self.extra_task_sleep_time[1]
+        assert isinstance(self.extra_task_output_size_mb, list) and len(self.extra_task_output_size_mb) == 2 and self.extra_task_output_size_mb[0] <= self.extra_task_output_size_mb[1]
 
     def _create_library_task(self, libcores=1, hoisting_modules=[]):
         assert cvine.vine_task_graph_get_function_name(self._task_graph) == compute_group_keys.__name__
@@ -143,8 +150,8 @@ class GraphExecutor(Manager):
 
         # set the extra output file size for each node to monitor storage consumption
         for k in task_graph.task_dict.keys():
-            task_graph.extra_size_mb_of[k] = random.uniform(0.0, 32.0)
-            task_graph.extra_sleep_time_of[k] = 0.0
+            task_graph.extra_size_mb_of[k] = random.uniform(self.extra_task_output_size_mb[0], self.extra_task_output_size_mb[1])
+            task_graph.extra_sleep_time_of[k] = random.uniform(self.extra_task_sleep_time[0], self.extra_task_sleep_time[1])
 
         # save the task graph to a pickle file, will be sent to the remote workers
         with open("task_graph.pkl", 'wb') as f:

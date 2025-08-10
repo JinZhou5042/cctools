@@ -36,7 +36,7 @@ class TaskGraph:
         self.output_vine_file_of = {key: None for key in self.task_dict.keys()}
 
         self.extra_size_mb_of = {key: 0 for key in self.task_dict.keys()}
-        self.extra_sleep_time_of = {key: 0 for key in self.task_dict.keys()}
+        self.extra_sleep_time_of = {key: 0 for key in self.task_dict.keys()}  # in microseconds
 
         if debug:
             self._write_task_dependencies()
@@ -330,6 +330,6 @@ def compute_group_keys(key):
             raise Exception(f"Output file {path} is empty after writing")
         result_paths.add(path)
 
-    time.sleep(task_graph.extra_sleep_time_of.get(key, 0))
+    time.sleep(task_graph.extra_sleep_time_of.get(key, 0) / 1_000_000)
 
     return result_paths
