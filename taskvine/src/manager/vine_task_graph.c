@@ -245,14 +245,19 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 	progress_bar_add_part(pbar, regular_tasks_part);
 	progress_bar_add_part(pbar, recovery_tasks_part);
 
+	int wait_timeout = 2;
+
 	while (regular_tasks_part->current < regular_tasks_part->total) {
 		if (interrupted) {
 			break;
 		}
 
-		struct vine_task *task = vine_wait(tg->manager, 5);
+		struct vine_task *task = vine_wait(tg->manager, wait_timeout);
 		progress_bar_update_part_total(pbar, recovery_tasks_part, tg->manager->num_submitted_recovery_tasks);
 		if (task) {
+			/* retrieve all possible tasks */
+			wait_timeout = 0;
+
 			/* get the original node by task id */
 			struct vine_task_node *node = get_node_by_task(tg, task);
 			if (!node) {
@@ -262,7 +267,8 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 
 			/* in case of failure, resubmit this task */
 			if (node->task->result != VINE_RESULT_SUCCESS || node->task->exit_code != 0) {
-				vine_task_clean(node->task);
+				debug(D_VINE | D_NOTICE, "Task %d failed with result %d and exit code %d, resubmitting...", task->task_id, node->task->result, node->task->exit_code);
+				vine_task_reset(node->task);
 				submit_node_task(tg, node);
 				continue;
 			}
@@ -273,7 +279,8 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 				struct stat info;
 				int result = stat(node->outfile_remote_name, &info);
 				if (result < 0) {
-					vine_task_clean(node->task);
+					debug(D_VINE | D_NOTICE, "Task %d succeeded but output file %s does not exist on the shared file system", task->task_id, node->outfile_remote_name);
+					vine_task_reset(node->task);
 					submit_node_task(tg, node);
 					continue;
 				}
@@ -322,6 +329,7 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 			/* submit children nodes with dependencies all resolved */
 			submit_node_ready_children(tg, node);
 		} else {
+			wait_timeout = 2;
 			progress_bar_advance_part_current(pbar, recovery_tasks_part, 0);
 		}
 
