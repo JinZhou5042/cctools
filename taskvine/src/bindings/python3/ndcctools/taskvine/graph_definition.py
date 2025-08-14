@@ -5,14 +5,31 @@ import dask
 import cloudpickle
 import collections
 import uuid
-import time
+import random
 from ndcctools.taskvine.utils import load_variable_from_library
 from collections import deque
 
+
 try:
     import dask._task_spec as dts
-except ModuleNotFoundError:
+except Exception:
     dts = None
+    pass
+
+
+def hash_name(*args):
+    out_str = ""
+    for arg in args:
+        out_str += str(arg)
+    return hashlib.sha256(out_str.encode('utf-8')).hexdigest()[:32]
+
+
+def hashable(s):
+    try:
+        hash(s)
+        return True
+    except TypeError:
+        return False
 
 
 class GraphKeyResult:
@@ -24,49 +41,50 @@ class GraphKeyResult:
 
 
 class TaskGraph:
-    def __init__(self, task_dict, expand_dsk=False, debug=False):
+    def __init__(self, task_dict, expand_dsk=False, extra_task_output_size_mb=[0, 0], extra_task_sleep_time=[0, 0]):
         self.task_dict = task_dict
 
-        self.task_dict = dts.convert_legacy_graph(self.task_dict)
+        if hasattr(dask, "_task_spec"):
+            self.task_dict = dask._task_spec.convert_legacy_graph(self.task_dict)
 
         if expand_dsk:
-            self.task_dict = self._expand_dsk(self.task_dict)
+            self.task_dict = self._expand_legacy_dsk(self.task_dict)
 
-        self.map_id_to_callable = {}  # id -> fn
-        self.task_dict = self._create_callable_mapping(self.task_dict)
+        if dts:
+            for k, v in self.task_dict.items():
+                assert isinstance(v, (dts.Alias, dts.Task, dts.DataNode)), f"Unsupported task type for key {k}: {v.__class__}"
 
-        self.task_dict = self._standardize_keys(self.task_dict)
-
-        self.parents_of = collections.defaultdict(set)
-        self.children_of = collections.defaultdict(set)
-        self._build_dependencies()
-
-        self.outfile_remote_name = {key: f"{uuid.uuid4()}.pkl" for key in self.task_dict.keys()}
-        self.output_vine_file_of = {key: None for key in self.task_dict.keys()}
-
-        self.extra_size_mb_of = {key: 0 for key in self.task_dict.keys()}
-        self.extra_sleep_time_of = {key: 0 for key in self.task_dict.keys()}  # in microseconds
-
+        self.parents_of, self.children_of = self._build_dependencies(self.task_dict)
         self.depth_of = self._calculate_depths()
 
-        if debug:
-            self._write_task_dependencies()
-            self._visualize_task_dependencies()
+        self.vine_key_of = {k: hash_name(k) for k in task_dict.keys()}
+        self.key_of_vine_key = {hash_name(k): k for k in task_dict.keys()}
 
-    @staticmethod
-    def hashable(s):
-        try:
-            hash(s)
-            return True
-        except TypeError:
-            return False
+        self.outfile_remote_name = {key: f"{uuid.uuid4()}.pkl" for key in self.task_dict.keys()}
 
-    @staticmethod
-    def hash_name(*args):
-        out_str = ""
-        for arg in args:
-            out_str += str(arg)
-        return hashlib.sha256(out_str.encode('utf-8')).hexdigest()[:20]
+        # testing params
+        self.extra_task_output_size_mb = self._calculate_extra_size_mb_of(extra_task_output_size_mb)
+        self.extra_sleep_time_of = self._calculate_extra_sleep_time_of(extra_task_sleep_time)
+
+    def _calculate_extra_size_mb_of(self, extra_task_output_size_mb):
+        assert isinstance(extra_task_output_size_mb, list) and len(extra_task_output_size_mb) == 2 and extra_task_output_size_mb[0] <= extra_task_output_size_mb[1]
+        max_depth = max(depth for depth in self.depth_of.values())
+        extra_size_mb_of = {}
+        for k in self.task_dict.keys():
+            if self.depth_of[k] == max_depth or self.depth_of[k] == max_depth - 1:
+                extra_size_mb_of[k] = 0
+                continue
+            extra_size_mb_of[k] = random.uniform(extra_task_output_size_mb[0], extra_task_output_size_mb[1])
+
+        return extra_size_mb_of
+
+    def _calculate_extra_sleep_time_of(self, extra_task_sleep_time):
+        assert isinstance(extra_task_sleep_time, list) and len(extra_task_sleep_time) == 2 and extra_task_sleep_time[0] <= extra_task_sleep_time[1]
+        extra_sleep_time_of = {}
+        for k in self.task_dict.keys():
+            extra_sleep_time_of[k] = random.uniform(extra_task_sleep_time[0], extra_task_sleep_time[1])
+
+        return extra_sleep_time_of
 
     def _calculate_depths(self):
         depth_of = {key: 0 for key in self.task_dict.keys()}
@@ -83,41 +101,15 @@ class TaskGraph:
     def set_outfile_remote_name_of(self, key, outfile_remote_name):
         self.outfile_remote_name[key] = outfile_remote_name
 
-    def _standardize_keys(self, task_dict):
-        key_mapping = {k: TaskGraph.hash_name(k) for k in task_dict.keys()}
-
-        def replace_expr_keys(expr):
-            if TaskGraph.hashable(expr) and expr in key_mapping:
-                return key_mapping[expr]
-            elif isinstance(expr, (list, tuple)):
-                return type(expr)(replace_expr_keys(e) for e in expr)
-            elif isinstance(expr, dict):
-                return {replace_expr_keys(k): replace_expr_keys(v) for k, v in expr.items()}
-            else:
-                return expr
-
-        new_task_dict = {}
-        for k, v in task_dict.items():
-            new_k = key_mapping[k]
-            if self.is_dts_task(v):
-                new_dependencies = set()
-                for dep in v.dependencies:
-                    new_dependencies.add(key_mapping[dep])
-                v._dependencies = frozenset(new_dependencies)
-                new_task_dict[new_k] = v
-            else:
-                new_task_dict[new_k] = replace_expr_keys(v)
-
-        return new_task_dict
-
-    def is_dts_task(self, value):
-        if not dts:
+    def is_dts_key(self, k):
+        if not hasattr(dask, "_task_spec"):
             return False
-        return value.__class__.__module__ == dts.__name__
+        import dask._task_spec as dts
+        return isinstance(self.task_dict[k], (dts.Task, dts.TaskRef, dts.Alias, dts.DataNode, dts.NestedContainer))
 
-    def _build_dependencies(self):
+    def _build_dependencies(self, task_dict):
         def _find_sexpr_parents(sexpr):
-            if TaskGraph.hashable(sexpr) and sexpr in self.task_dict.keys():
+            if hashable(sexpr) and sexpr in task_dict.keys():
                 return {sexpr}
             elif isinstance(sexpr, (list, tuple)):
                 deps = set()
@@ -133,48 +125,26 @@ class TaskGraph:
             else:
                 return set()
 
-        for key, value in self.task_dict.items():
-            if self.is_dts_task(value):
+        parents_of = collections.defaultdict(set)
+        children_of = collections.defaultdict(set)
+
+        for k, value in task_dict.items():
+            if self.is_dts_key(k):
                 # in the new Dask expression, each value is an object from dask._task_spec, could be
                 # a Task, Alias, TaskRef, etc., but they all share the same base class the dependencies
                 # field is of type frozenset(), without recursive ancestor dependencies involved
-                self.parents_of[key] = value.dependencies
+                parents_of[k] = value.dependencies
             else:
                 # the value could be a sexpr, e.g., the old Dask representation
-                self.parents_of[key] = _find_sexpr_parents(value)
+                parents_of[k] = _find_sexpr_parents(value)
 
-        for key, deps in self.parents_of.items():
+        for k, deps in parents_of.items():
             for dep in deps:
-                self.children_of[dep].add(key)
+                children_of[dep].add(k)
 
-    def _write_task_dependencies(self):
-        self.key_to_idx = {k: i + 1 for i, k in enumerate(self.task_dict.keys())}
-        with open("task_dependencies.txt", "w") as f:
-            for key, parents in self.parents_of.items():
-                if parents:
-                    for parent in parents:
-                        if parent != key:
-                            f.write(f"{self.key_to_idx[parent]} -> {self.key_to_idx[key]}\n")
-                else:
-                    f.write(f"None -> {self.key_to_idx[key]}\n")
+        return parents_of, children_of
 
-    def _visualize_task_dependencies(self, input_file="task_dependencies.txt", output_file="task_graph"):
-        from graphviz import Digraph
-        dot = Digraph(format='svg')
-        with open(input_file) as f:
-            for line in f:
-                parts = line.strip().split("->")
-                if len(parts) != 2:
-                    continue
-                parent = parts[0].strip()
-                child = parts[1].strip()
-                if parent != "None":
-                    dot.edge(parent, child)
-                else:
-                    dot.node(child)  # ensure orphan nodes appear
-        dot.render(output_file, cleanup=True)
-
-    def _expand_dsk(self, task_dict, save_dir="./"):
+    def _expand_legacy_dsk(self, task_dict, save_dir="./"):
         assert os.path.exists(save_dir)
 
         def _convert_expr_to_task_args(dsk_key, task_dict, args, blockwise_args):
@@ -216,42 +186,9 @@ class TaskGraph:
 
         return expanded_task_dict
 
-    def _create_callable_mapping(self, task_dict):
-        _callable_to_id = {}
-
-        def _get_callable_id(fn):
-            if fn in _callable_to_id:
-                return _callable_to_id[fn]
-
-            try:
-                callable_id = f"{fn.__module__}.{fn.__name__}"
-            except AttributeError:
-                pickled = cloudpickle.dumps(fn)
-                callable_id = "callable_" + hashlib.md5(pickled).hexdigest()
-
-            _callable_to_id[fn] = callable_id
-            self.map_id_to_callable[callable_id] = fn
-            return callable_id
-
-        def recurse(obj):
-            if isinstance(obj, dict):
-                return {k: recurse(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [recurse(e) for e in obj]
-            elif isinstance(obj, tuple):
-                if callable(obj[0]):
-                    callable_id = _get_callable_id(obj[0])
-                    return (callable_id,) + tuple(recurse(e) for e in obj[1:])
-                else:
-                    return tuple(recurse(e) for e in obj)
-            else:
-                return obj
-
-        return {k: recurse(v) for k, v in task_dict.items()}
-
     def save_result_of_key(self, key, result):
         with open(self.outfile_remote_name[key], "wb") as f:
-            result_obj = GraphKeyResult(result, extra_size_mb=self.extra_size_mb_of[key])
+            result_obj = GraphKeyResult(result, extra_size_mb=self.extra_task_output_size_mb[key])
             cloudpickle.dump(result_obj, f)
 
     def load_result_of_key(self, key):
@@ -262,50 +199,6 @@ class TaskGraph:
                 return result_obj.result
         except FileNotFoundError:
             raise FileNotFoundError(f"Output file for key {key} not found at {self.outfile_remote_name[key]}")
-
-    def get_input_keys_of_group(self, group_keys):
-        group_set = set(group_keys)
-        return {
-            p for k in group_keys
-            for p in self.parents_of[k]
-            if p not in group_set
-        }
-
-    def get_output_keys_of_group(self, group_keys):
-        group_set = set(group_keys)
-        return {
-            k for k in group_keys
-            if any(c not in group_set for c in self.children_of[k])
-        }
-
-    def external_input_keys_to_paths(self, group_keys):
-        group_keys = set(group_keys)
-        external_input_keys = {
-            parent
-            for key in group_keys
-            for parent in self.parents_of[key]
-            if parent not in group_keys
-        }
-
-        return {
-            key: self.outfile_remote_name[key]
-            for key in external_input_keys
-        }
-
-    def external_output_keys_to_paths(self, group_keys):
-        group_keys = set(group_keys)
-        external_output_keys = {
-            k for k in group_keys
-            if len(self.children_of[k]) == 0 or any(c not in group_keys for c in self.children_of[k])
-        }
-
-        return {
-            key: self.outfile_remote_name[key]
-            for key in external_output_keys
-        }
-
-    def get_sexpr_of_group(self, group_keys):
-        return {k: self.task_dict[k] for k in group_keys}
 
     def get_topological_order(self):
         in_degree = {key: len(self.parents_of[key]) for key in self.task_dict.keys()}
@@ -338,49 +231,65 @@ def init_task_graph_context():
     }
 
 
-def compute_group_keys(key):
-    keys = [key]
-    task_graph = load_variable_from_library('task_graph')
+def compute_dts_key(task_graph, k, v):
+    try:
+        import dask._task_spec as dts
+    except ImportError:
+        raise ImportError("Dask is not installed")
 
-    resolved_values = {}
+    input_dict = {dep: task_graph.load_result_of_key(dep) for dep in v.dependencies}
 
-    for k, path in task_graph.external_input_keys_to_paths(keys).items():
-        resolved_values[k] = task_graph.load_result_of_key(k)
+    try:
+        if isinstance(v, dts.Alias):
+            assert len(v.dependencies) == 1, "Expected exactly one dependency"
+            return task_graph.load_result_of_key(next(iter(v.dependencies)))
+        elif isinstance(v, dts.Task):
+            return v(input_dict)
+        elif isinstance(v, dts.DataNode):
+            return v.value
+        else:
+            raise TypeError(f"unexpected node type: {type(v)} for key {k}")
+    except Exception as e:
+        raise Exception(f"Error while executing task {k}: {e}")
+
+
+def compute_sexpr_key(task_graph, k, v):
+    input_dict = {parent: task_graph.load_result_of_key(parent) for parent in task_graph.parents_of[k]}
 
     def _rec_call(expr):
         try:
-            if expr in resolved_values:
-                return resolved_values[expr]
+            if expr in input_dict.keys():
+                return input_dict[expr]
         except TypeError:
             pass
         if isinstance(expr, list):
             return [_rec_call(e) for e in expr]
-        if isinstance(expr, tuple) and isinstance(expr[0], str) and expr[0] in task_graph.map_id_to_callable:
-            fn = task_graph.map_id_to_callable[expr[0]]
-            res = fn(*[_rec_call(a) for a in expr[1:]])
+        if isinstance(expr, tuple) and isinstance(expr[0], str) and callable(expr[0]):
+            res = expr[0](*[_rec_call(a) for a in expr[1:]])
             return res
         return expr
 
-    for k in keys:
-        v = task_graph.task_dict[k]
-        # new Dask expression
-        if task_graph.is_dts_task(v):
-            result = v(resolved_values)
-        # old Dask expression
-        else:
-            result = _rec_call(v)
-        resolved_values[k] = result
+    try:
+        return _rec_call(v)
+    except Exception as e:
+        raise Exception(f"Failed to invoke _rec_call(): {e}")
 
-    result_paths = set()
 
-    for k, path in task_graph.external_output_keys_to_paths(keys).items():
-        task_graph.save_result_of_key(k, resolved_values[k])
-        if not os.path.exists(path):
-            raise Exception(f"Output file {path} does not exist after writing")
-        if os.stat(path).st_size == 0:
-            raise Exception(f"Output file {path} is empty after writing")
-        result_paths.add(path)
+def compute_single_key(vine_key):
+    task_graph = load_variable_from_library('task_graph')
 
-    time.sleep(task_graph.extra_sleep_time_of.get(key, 0))
+    k = task_graph.key_of_vine_key[vine_key]
+    v = task_graph.task_dict[k]
 
-    return result_paths
+    if task_graph.is_dts_key(k):
+        result = compute_dts_key(task_graph, k, v)
+    else:
+        result = compute_sexpr_key(task_graph, k, v)
+
+    task_graph.save_result_of_key(k, result)
+    if not os.path.exists(task_graph.outfile_remote_name[k]):
+        raise Exception(f"Output file {task_graph.outfile_remote_name[k]} does not exist after writing")
+    if os.stat(task_graph.outfile_remote_name[k]).st_size == 0:
+        raise Exception(f"Output file {task_graph.outfile_remote_name[k]} is empty after writing")
+
+    return True

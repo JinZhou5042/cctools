@@ -544,7 +544,7 @@ struct vine_task_graph *vine_task_graph_create(struct vine_manager *q)
 	tg->outfile_cachename_to_node = hash_table_create(0, 0);
 
 	tg->library_name = xxstrdup("vine_task_graph_library");
-	tg->function_name = xxstrdup("compute_group_keys");
+	tg->function_name = xxstrdup("compute_single_key");
 	tg->manager = q;
 
 	/* enable debug system for C code since it uses a separate debug system instance

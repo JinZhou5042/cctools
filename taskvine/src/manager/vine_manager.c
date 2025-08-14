@@ -3350,7 +3350,7 @@ static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_inf
 	/* if t is a function task, t->library_task should not be invalidated, and we decrement the reference count of the library task.
 	 * if t->library_task is NULL or it had been released before, then something is going wrong. */
 	if (t->needs_library && t->library_task) {
-		if (t->exit_code != 0 && q->watch_library_logfiles) {
+		if (!q->shutting_down && t->exit_code != 0 && q->watch_library_logfiles) {
 			debug(D_NOTICE, "Task %d failed with exit code %d, check library log file %s for details", t->task_id, t->exit_code, t->library_task->library_log_path);
 		}
 
@@ -4354,6 +4354,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->total_time_spent_on_offloading = 0;
 	q->when_last_offloaded = 0;
 
+	q->shutting_down = 0;
+
 	if ((envstring = getenv("VINE_BANDWIDTH"))) {
 		q->bandwidth_limit = string_metric_parse(envstring);
 		if (q->bandwidth_limit < 0) {
@@ -4587,6 +4589,8 @@ void vine_delete(struct vine_manager *q)
 	/* now that the manager is shutting down, worker removals are not an invalid event, so we
 	 * disable the immediate recovery to avoid submitting recovery tasks for lost files */
 	q->immediate_recovery = 0;
+
+	q->shutting_down = 1;
 
 	vine_fair_write_workflow_info(q);
 

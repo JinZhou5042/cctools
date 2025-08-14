@@ -204,7 +204,9 @@ def start_function(in_pipe_fd, thread_limit=1):
                         # otherwise use the library's stdout
                         # os.dup2(function_stdout_fd, sys.stdout.fileno())
                         # os.dup2(function_stdout_fd, sys.stderr.fileno())
+                        stdout_timed_message(f"TASK {function_id} {function_name} is starting")
                         result = globals()[function_name](event)
+                        stdout_timed_message(f"TASK {function_id} {function_name} finished, result size: {sys.getsizeof(result)}")
 
                         # restore to the library's stdout fd on completion
                         os.dup2(library_fd, sys.stdout.fileno())
@@ -446,6 +448,7 @@ def main():
                 else:
                     pid, func_id = start_function(in_pipe_fd, thread_limit)
                     pid_to_func_id[pid] = func_id
+                    stdout_timed_message(f"Task {func_id} started in process {pid}")
             else:
                 # at least 1 child exits, reap all.
                 # read only once as os.read is blocking if there's nothing to read.
@@ -455,6 +458,7 @@ def main():
                 while len(pid_to_func_id) > 0:
                     c_pid, c_exit_status = os.waitpid(-1, os.WNOHANG)
                     if c_pid > 0:
+                        stdout_timed_message(f"Task {pid_to_func_id[c_pid]} exited with status {c_exit_status}")
                         send_result(
                             out_pipe_fd,
                             args.worker_pid,

@@ -1,9 +1,10 @@
 from ndcctools.taskvine import cvine
 from ndcctools.taskvine.manager import Manager
 from ndcctools.taskvine.utils import load_variable_from_library, delete_all_files, get_c_constant
-from ndcctools.taskvine.graph_definition import GraphKeyResult, TaskGraph, init_task_graph_context, compute_group_keys
+from ndcctools.taskvine.graph_definition import GraphKeyResult, TaskGraph, init_task_graph_context, compute_dts_key, compute_sexpr_key, compute_single_key, hash_name, hashable
 
 import cloudpickle
+import dask
 import os
 import collections
 import inspect
@@ -18,17 +19,8 @@ import uuid
 class GraphExecutor(Manager):
     def __init__(self,
                  *args,
-                 prune_depth=1,
-                 priority_mode="largest-input-first",
-                 scheduling_mode="files",
                  libcores=1,
                  hoisting_modules=[],
-                 staging_dir="/project01/ndcms/jzhou24/staging",
-                 shared_file_system_dir="/project01/ndcms/jzhou24/shared_file_system",
-                 replica_placement_policy="random",
-                 balance_worker_disk_load=0,
-                 extra_task_sleep_time=[0, 0],
-                 extra_task_output_size_mb=[0, 0],
                  libtask_env_files={},
                  **kwargs):
 
@@ -45,55 +37,36 @@ class GraphExecutor(Manager):
         super_params = set(inspect.signature(Manager.__init__).parameters)
         super_kwargs = {k: v for k, v in kwargs.items() if k in super_params}
 
-        print("Creating taskvine manager")
         super().__init__(*args, **super_kwargs)
-        print(f"TaskVine manager listening on port {self.port}")
+        print(f"TaskVine manager {self.name} listening on port {self.port}")
 
         # tune the manager
         leftover_kwargs = {k: v for k, v in kwargs.items() if k not in super_params}
         for key, value in leftover_kwargs.items():
-            self.tune(key.replace("_", "-"), value)
+            try:
+                self.tune(key.replace("_", "-"), value)
+            except Exception as e:
+                print(f"Failed to tune {key} with value {value}: {e}")
+                exit(1)
         self.tune("worker-source-max-transfers", 1000)
         self.tune("max-retrievals", -1)
         self.tune("prefer-dispatch", 1)
         self.tune("transient-error-interval", 1)
         self.tune("attempt-schedule-depth", 1000)
 
-        if balance_worker_disk_load:
-            self.tune("balance-worker-disk-load", balance_worker_disk_load)
-            self.set_scheduler("worst")
-        else:
-            self.set_scheduler(scheduling_mode)
-
-        self.priority_mode = get_c_constant(f"task_priority_mode_{priority_mode.replace('-', '_')}")
-        self.replica_placement_policy = get_c_constant(f"replica_placement_policy_{replica_placement_policy.replace('-', '_')}")
-        cvine.vine_set_replica_placement_policy(self._taskvine, self.replica_placement_policy)
-
-        self.prune_depth = prune_depth
-        self.staging_dir = staging_dir
-
         # initialize the task graph
         self._task_graph = cvine.vine_task_graph_create(self._taskvine)
-
-        # ensure the dir exists
-        os.makedirs(shared_file_system_dir, exist_ok=True)
-        self.shared_file_system_dir = shared_file_system_dir
 
         # create library task with specified resources
         self._create_library_task(libcores, hoisting_modules, libtask_env_files)
 
-        self.extra_task_sleep_time = extra_task_sleep_time
-        self.extra_task_output_size_mb = extra_task_output_size_mb
-        assert isinstance(self.extra_task_sleep_time, list) and len(self.extra_task_sleep_time) == 2 and self.extra_task_sleep_time[0] <= self.extra_task_sleep_time[1]
-        assert isinstance(self.extra_task_output_size_mb, list) and len(self.extra_task_output_size_mb) == 2 and self.extra_task_output_size_mb[0] <= self.extra_task_output_size_mb[1]
-
     def _create_library_task(self, libcores=1, hoisting_modules=[], libtask_env_files={}):
-        print("Initializing library task")
-        assert cvine.vine_task_graph_get_function_name(self._task_graph) == compute_group_keys.__name__
-        hoisting_modules += [os, cloudpickle, GraphKeyResult, TaskGraph, load_variable_from_library, uuid, hashlib, types, collections, time]
+        assert cvine.vine_task_graph_get_function_name(self._task_graph) == compute_single_key.__name__
+        hoisting_modules += [os, cloudpickle, GraphKeyResult, TaskGraph, uuid, hashlib, random, types, collections, time, dask, hash_name, hashable,
+                             load_variable_from_library, compute_dts_key, compute_sexpr_key, compute_single_key]
         self.libtask = self.create_library_from_functions(
             cvine.vine_task_graph_get_library_name(self._task_graph),
-            compute_group_keys,
+            compute_single_key,
             library_context_info=[init_task_graph_context, [], {}],
             add_env=False,
             infile_load_mode="text",
@@ -109,66 +82,75 @@ class GraphExecutor(Manager):
     def run(self,
             task_dict,
             expand_dsk=False,
-            debug=False,
+            replica_placement_policy="random",
+            priority_mode="largest-input-first",
+            extra_task_output_size_mb=[0, 0],
+            extra_task_sleep_time=[0, 0],
+            prune_depth=1,
+            shared_file_system_dir="/project01/ndcms/jzhou24/shared_file_system",
+            staging_dir="/project01/ndcms/jzhou24/staging",
+            balance_worker_disk_load=0,
+            scheduling_mode="files",
             outfile_type={
                 "temp": 1.0,
                 "shared-file-system": 0.0,
             }):
 
+        if balance_worker_disk_load:
+            self.tune("balance-worker-disk-load", balance_worker_disk_load)
+            self.set_scheduler("worst")
+        else:
+            self.set_scheduler(scheduling_mode)
+
         # create task graph in the python side
         print("Initializing TaskGraph object")
-        task_graph = TaskGraph(task_dict, expand_dsk=expand_dsk, debug=debug)
+        task_graph = TaskGraph(task_dict,
+                               expand_dsk=expand_dsk,
+                               extra_task_output_size_mb=extra_task_output_size_mb,
+                               extra_task_sleep_time=extra_task_sleep_time)
         topo_order = task_graph.get_topological_order()
 
         # the sum of the values in outfile_type must be 1.0
         assert sum(list(outfile_type.values())) == 1.0
 
+        # set replica placement policy
+        cvine.vine_set_replica_placement_policy(self._taskvine, get_c_constant(f"replica_placement_policy_{replica_placement_policy.replace('-', '_')}"))
+
         # create task graph in the python side
         print("Initializing task graph in TaskVine")
         for k in topo_order:
             cvine.vine_task_graph_create_node(self._task_graph,
-                                              k,
-                                              self.staging_dir,
-                                              self.prune_depth,
-                                              self.priority_mode)
+                                              task_graph.vine_key_of[k],
+                                              staging_dir,
+                                              prune_depth,
+                                              get_c_constant(f"task_priority_mode_{priority_mode.replace('-', '_')}"))
             for pk in task_graph.parents_of.get(k, []):
-                cvine.vine_task_graph_add_dependency(self._task_graph, pk, k)
+                cvine.vine_task_graph_add_dependency(self._task_graph, task_graph.vine_key_of[pk], task_graph.vine_key_of[k])
 
         # we must finalize the graph in c side after all nodes and dependencies are added
         # this includes computing various metrics for each node, such as depth, height, heavy score, etc.
         cvine.vine_task_graph_finalize_metrics(self._task_graph)
 
         # then we can use the heavy score to sort the nodes and specify their outfile remote names
-        print("Computing heavy scores for each node")
         heavy_scores = {}
         for k in task_graph.task_dict.keys():
-            heavy_scores[k] = cvine.vine_task_graph_get_node_heavy_score(self._task_graph, k)
-        # keys with larger heavy score are in the front of the list
-        sorted_keys = sorted(heavy_scores, key=lambda x: heavy_scores[x], reverse=True)
+            heavy_scores[k] = cvine.vine_task_graph_get_node_heavy_score(self._task_graph, task_graph.vine_key_of[k])
 
         # keys with larger heavy score should be stored into the shared file system
-        print("Determining outputs to be writen into the shared file system")
+        os.makedirs(shared_file_system_dir, exist_ok=True)
+        sorted_keys = sorted(heavy_scores, key=lambda x: heavy_scores[x], reverse=True)
         shared_file_system_size = round(len(sorted_keys) * outfile_type["shared-file-system"])
         for i, k in enumerate(sorted_keys):
             if i < shared_file_system_size:
                 choice = "shared-file-system"
-                task_graph.set_outfile_remote_name_of(k, os.path.join(self.shared_file_system_dir, task_graph.outfile_remote_name[k]))
+                task_graph.set_outfile_remote_name_of(task_graph.vine_key_of[k], os.path.join(shared_file_system_dir, task_graph.outfile_remote_name[k]))
             else:
                 choice = "temp"
             outfile_type_str = f"NODE_OUTFILE_TYPE_{choice.upper().replace('-', '_')}"
             cvine.vine_task_graph_set_node_outfile(self._task_graph,
-                                                   k,
+                                                   task_graph.vine_key_of[k],
                                                    get_c_constant(outfile_type_str),
                                                    task_graph.outfile_remote_name[k])
-
-        # set the extra output file size for each node to monitor storage consumption
-        max_depth = max(depth for depth in task_graph.depth_of.values())
-        for k in task_graph.task_dict.keys():
-            # skip if the node is the final merging node or the output node for each branch
-            if task_graph.depth_of[k] == max_depth or task_graph.depth_of[k] == max_depth - 1:
-                continue
-            task_graph.extra_size_mb_of[k] = random.uniform(self.extra_task_output_size_mb[0], self.extra_task_output_size_mb[1])
-            task_graph.extra_sleep_time_of[k] = random.uniform(self.extra_task_sleep_time[0], self.extra_task_sleep_time[1])
 
         # save the task graph to a pickle file, will be sent to the remote workers
         with open("task_graph.pkl", 'wb') as f:
