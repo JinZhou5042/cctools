@@ -286,7 +286,7 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 				}
 				node->outfile_size_bytes = info.st_size;
 				break;
-			case VINE_NODE_OUTFILE_TYPE_FILE:
+			case VINE_NODE_OUTFILE_TYPE_LOCAL:
 			case VINE_NODE_OUTFILE_TYPE_TEMP:
 				node->outfile_size_bytes = node->outfile->size;
 				break;
@@ -321,7 +321,7 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 			case VINE_NODE_OUTFILE_TYPE_TEMP:
 				vine_task_node_replicate_outfile(node);
 				break;
-			case VINE_NODE_OUTFILE_TYPE_FILE:
+			case VINE_NODE_OUTFILE_TYPE_LOCAL:
 			case VINE_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
 				break;
 			}
@@ -634,6 +634,26 @@ double vine_task_graph_get_node_heavy_score(const struct vine_task_graph *tg, co
 	}
 
 	return node->heavy_score;
+}
+
+const char *vine_task_graph_get_node_local_outfile_source(const struct vine_task_graph *tg, const char *node_key)
+{
+	if (!tg || !node_key) {
+		return NULL;
+	}
+
+	struct vine_task_node *node = hash_table_lookup(tg->nodes, node_key);
+	if (!node) {
+		debug(D_ERROR, "node %s not found", node_key);
+		exit(1);
+	}
+
+	if (node->outfile_type != VINE_NODE_OUTFILE_TYPE_LOCAL) {
+		debug(D_ERROR, "node %s is not a local output file", node_key);
+		exit(1);
+	}
+
+	return node->outfile->source;
 }
 
 void vine_task_graph_set_node_outfile(struct vine_task_graph *tg, const char *node_key, vine_task_node_outfile_type_t outfile_type, const char *outfile_remote_name)

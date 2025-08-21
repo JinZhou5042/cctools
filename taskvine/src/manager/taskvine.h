@@ -1571,7 +1571,7 @@ char *vine_get_path_cache(struct vine_manager *m, const char *path);
 
 /** Select the type of the output file. */
 typedef enum {
-	VINE_NODE_OUTFILE_TYPE_FILE = 0,
+	VINE_NODE_OUTFILE_TYPE_LOCAL = 0,
     VINE_NODE_OUTFILE_TYPE_TEMP,
     VINE_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM,
 } vine_task_node_outfile_type_t;
@@ -1603,6 +1603,7 @@ const char *vine_task_graph_get_library_name(const struct vine_task_graph *tg);
 const char *vine_task_graph_get_function_name(const struct vine_task_graph *tg);
 double vine_task_graph_get_node_heavy_score(const struct vine_task_graph *tg, const char *node_key);
 void vine_task_graph_execute(struct vine_task_graph *tg);
+const char *vine_task_graph_get_node_local_outfile_source(const struct vine_task_graph *tg, const char *node_key);
 //@}
 
 #endif

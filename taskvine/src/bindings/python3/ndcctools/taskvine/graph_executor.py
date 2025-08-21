@@ -16,6 +16,10 @@ import uuid
 
 try:
     import dask
+except ImportError:
+    dask = None
+
+try:
     from dask.base import is_dask_collection
 except ImportError:
     is_dask_collection = None
@@ -80,7 +84,7 @@ class GraphExecutor(Manager):
         super_kwargs = {k: v for k, v in kwargs.items() if k in super_params}
 
         super().__init__(*args, **super_kwargs)
-        print(f"TaskVine manager {self.name} listening on port {self.port}")
+        print(f"TaskVine manager \033[92m{self.name}\033[0m listening on port \033[92m{self.port}\033[0m")
 
         # tune the manager
         leftover_kwargs = {k: v for k, v in kwargs.items() if k not in super_params}
@@ -111,8 +115,10 @@ class GraphExecutor(Manager):
         self.task_graph_pkl_file_local_path = self.task_graph_pkl_file_name
         self.task_graph_pkl_file_remote_path = self.task_graph_pkl_file_name
 
-        hoisting_modules += [os, cloudpickle, GraphKeyResult, TaskGraph, uuid, hashlib, random, types, collections, time, dask,
+        hoisting_modules += [os, cloudpickle, GraphKeyResult, TaskGraph, uuid, hashlib, random, types, collections, time,
                              load_variable_from_library, compute_dts_key, compute_sexpr_key, compute_single_key, hash_name, hashable]
+        if dask:
+            hoisting_modules += [dask]
         self.libtask = self.create_library_from_functions(
             cvine.vine_task_graph_get_library_name(self._vine_task_graph),
             compute_single_key,
@@ -130,7 +136,7 @@ class GraphExecutor(Manager):
 
     def run(self,
             collection_dict,
-            expand_dsk=False,
+            target_keys=[],
             replica_placement_policy="random",
             priority_mode="largest-input-first",
             scheduling_mode="files",
@@ -144,8 +150,8 @@ class GraphExecutor(Manager):
                 "temp": 1.0,
                 "shared-file-system": 0.0,
             }):
+        self.target_keys = target_keys
         self.task_dict = ensure_task_dict(collection_dict)
-        self.shared_file_system_dir = shared_file_system_dir
 
         self.tune("balance-worker-disk-load", balance_worker_disk_load)
 
@@ -157,9 +163,11 @@ class GraphExecutor(Manager):
 
         # create task graph in the python side
         print("Initializing TaskGraph object")
+        self.shared_file_system_dir = shared_file_system_dir
+        self.staging_dir = staging_dir
         self.task_graph = TaskGraph(self.task_dict,
-                                    expand_dsk=expand_dsk,
-                                    shared_file_system_dir=shared_file_system_dir,
+                                    staging_dir=self.staging_dir,
+                                    shared_file_system_dir=self.shared_file_system_dir,
                                     extra_task_output_size_mb=extra_task_output_size_mb,
                                     extra_task_sleep_time=extra_task_sleep_time)
         topo_order = self.task_graph.get_topological_order()
@@ -175,7 +183,7 @@ class GraphExecutor(Manager):
         for k in topo_order:
             cvine.vine_task_graph_create_node(self._vine_task_graph,
                                               self.task_graph.vine_key_of[k],
-                                              staging_dir,
+                                              self.staging_dir,
                                               prune_depth,
                                               get_c_constant(f"task_priority_mode_{priority_mode.replace('-', '_')}"))
             for pk in self.task_graph.parents_of.get(k, []):
@@ -194,11 +202,14 @@ class GraphExecutor(Manager):
         sorted_keys = sorted(heavy_scores, key=lambda x: heavy_scores[x], reverse=True)
         shared_file_system_size = round(len(sorted_keys) * outfile_type["shared-file-system"])
         for i, k in enumerate(sorted_keys):
-            if i < shared_file_system_size:
-                choice = "shared-file-system"
-                self.task_graph.redirect_outfile_to_shared_fs(k)
+            if k in self.target_keys:
+                choice = "local"
             else:
-                choice = "temp"
+                if i < shared_file_system_size:
+                    choice = "shared-file-system"
+                else:
+                    choice = "temp"
+            self.task_graph.set_outfile_type_of(k, choice)
             outfile_type_str = f"NODE_OUTFILE_TYPE_{choice.upper().replace('-', '_')}"
             cvine.vine_task_graph_set_node_outfile(self._vine_task_graph,
                                                    self.task_graph.vine_key_of[k],
@@ -212,6 +223,16 @@ class GraphExecutor(Manager):
         # now execute the vine graph
         print(f"Executing task graph, logs will be written into {self.run_info_path_absolute}")
         cvine.vine_task_graph_execute(self._vine_task_graph)
+
+        # after execution, we need to load results of target keys
+        results = {}
+        for k in self.target_keys:
+            local_outfile_path = cvine.vine_task_graph_get_node_local_outfile_source(self._vine_task_graph, self.task_graph.vine_key_of[k])
+            with open(local_outfile_path, 'rb') as f:
+                result_obj = cloudpickle.load(f)
+                assert isinstance(result_obj, GraphKeyResult), "Loaded object is not of type GraphKeyResult"
+                results[k] = result_obj.result
+        return results
 
     def _on_sigint(self, signum, frame):
         self.__del__()

@@ -2,15 +2,17 @@ from ndcctools.taskvine.utils import load_variable_from_library
 
 import os
 import hashlib
-import types
 import time
-import dask
 import cloudpickle
 import collections
 import uuid
 import random
 from collections import deque
 
+try:
+    import dask
+except ImportError:
+    dask = None
 
 try:
     import dask._task_spec as dts
@@ -42,14 +44,17 @@ class GraphKeyResult:
 
 
 class TaskGraph:
-    def __init__(self, task_dict, expand_dsk=False, shared_file_system_dir=None, extra_task_output_size_mb=[0, 0], extra_task_sleep_time=[0, 0]):
+    def __init__(self, task_dict,
+                 shared_file_system_dir=None,
+                 staging_dir=None,
+                 extra_task_output_size_mb=[0, 0],
+                 extra_task_sleep_time=[0, 0]):
         self.task_dict = task_dict
         self.shared_file_system_dir = shared_file_system_dir
+        self.staging_dir = staging_dir
+
         if self.shared_file_system_dir:
             os.makedirs(self.shared_file_system_dir, exist_ok=True)
-
-        if expand_dsk:
-            self.task_dict = self._expand_legacy_dsk(self.task_dict)
 
         if dts:
             for k, v in self.task_dict.items():
@@ -63,15 +68,17 @@ class TaskGraph:
         self.key_of_vine_key = {hash_name(k): k for k in task_dict.keys()}
 
         self.outfile_remote_name = {key: f"{uuid.uuid4()}.pkl" for key in self.task_dict.keys()}
-        self.outfile_type = {key: "temp" for key in self.task_dict.keys()}
+        self.outfile_type = {key: None for key in self.task_dict.keys()}
 
         # testing params
         self.extra_task_output_size_mb = self._calculate_extra_size_mb_of(extra_task_output_size_mb)
         self.extra_sleep_time_of = self._calculate_extra_sleep_time_of(extra_task_sleep_time)
 
-    def redirect_outfile_to_shared_fs(self, k):
-        self.outfile_remote_name[k] = os.path.join(self.shared_file_system_dir, self.outfile_remote_name[k])
-        self.outfile_type[k] = "shared-file-system"
+    def set_outfile_type_of(self, k, outfile_type_str):
+        assert outfile_type_str in ["local", "shared-file-system", "temp"]
+        self.outfile_type[k] = outfile_type_str
+        if outfile_type_str == "shared-file-system":
+            self.outfile_remote_name[k] = os.path.join(self.shared_file_system_dir, self.outfile_remote_name[k])
 
     def _calculate_extra_size_mb_of(self, extra_task_output_size_mb):
         assert isinstance(extra_task_output_size_mb, list) and len(extra_task_output_size_mb) == 2 and extra_task_output_size_mb[0] <= extra_task_output_size_mb[1]
@@ -150,48 +157,6 @@ class TaskGraph:
                 children_of[dep].add(k)
 
         return parents_of, children_of
-
-    def _expand_legacy_dsk(self, task_dict, save_dir="./"):
-        assert os.path.exists(save_dir)
-
-        def _convert_expr_to_task_args(dsk_key, task_dict, args, blockwise_args):
-            try:
-                if args in task_dict:
-                    return TaskGraph.hash_name(dsk_key, args)
-            except Exception:
-                pass
-            if isinstance(args, list):
-                return [_convert_expr_to_task_args(dsk_key, task_dict, item, blockwise_args) for item in args]
-            elif isinstance(args, tuple):
-                # nested tuple is not allowed
-                return tuple(_convert_expr_to_task_args(dsk_key, task_dict, item, blockwise_args) for item in args)
-            else:
-                if isinstance(args, str) and args.startswith('__dask_blockwise__'):
-                    blockwise_arg_idx = int(args.split('__')[-1])
-                    return blockwise_args[blockwise_arg_idx]
-                return args
-
-        expanded_task_dict = {}
-
-        for k, sexpr in task_dict.items():
-            if isinstance(sexpr, (tuple, list)) and len(sexpr) > 0:
-                callable = sexpr[0]
-                args = sexpr[1:]
-
-                if isinstance(callable, dask.optimization.SubgraphCallable):
-                    expanded_task_dict[k] = TaskGraph.hash_name(k, callable.outkey)
-                    for sub_key, sub_sexpr in callable.dsk.items():
-                        unique_key = TaskGraph.hash_name(k, sub_key)
-                        expanded_task_dict[unique_key] = _convert_expr_to_task_args(k, callable.dsk, sub_sexpr, args)
-                elif isinstance(callable, types.FunctionType):
-                    expanded_task_dict[k] = sexpr
-                else:
-                    print(f"ERROR: unexpected type: {type(callable)}")
-                    exit(1)
-            else:
-                expanded_task_dict[k] = sexpr
-
-        return expanded_task_dict
 
     def save_result_of_key(self, key, result):
         with open(self.outfile_remote_name[key], "wb") as f:
@@ -283,7 +248,7 @@ def compute_sexpr_key(task_graph, k, v):
             pass
         if isinstance(expr, list):
             return [_rec_call(e) for e in expr]
-        if isinstance(expr, tuple) and isinstance(expr[0], str) and callable(expr[0]):
+        if isinstance(expr, tuple) and len(expr) > 0 and callable(expr[0]):
             res = expr[0](*[_rec_call(a) for a in expr[1:]])
             return res
         return expr
