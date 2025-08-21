@@ -106,13 +106,16 @@ void vine_task_node_set_outfile(struct vine_task_node *node, vine_task_node_outf
 		char *persistent_path = string_format("%s/outputs/%s", node->staging_dir, node->outfile_remote_name);
 		node->outfile = vine_declare_file(node->manager, persistent_path, VINE_CACHE_LEVEL_WORKFLOW, 0);
 		free(persistent_path);
+		debug(D_VINE, "node %s: outfile type = VINE_NODE_OUTFILE_TYPE_FILE, outfile = %s", node->node_key, node->outfile->cached_name);
 		break;
 	case VINE_NODE_OUTFILE_TYPE_TEMP:
 		node->outfile = vine_declare_temp(node->manager);
+		debug(D_VINE, "node %s: outfile type = VINE_NODE_OUTFILE_TYPE_TEMP, outfile = %s", node->node_key, node->outfile->cached_name);
 		break;
 	case VINE_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
 		/* no explicit output file declaration needed */
 		node->outfile = NULL;
+		debug(D_VINE, "node %s: outfile type = VINE_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM", node->node_key);
 		break;
 	}
 	if (node->outfile) {

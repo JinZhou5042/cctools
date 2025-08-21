@@ -1,20 +1,21 @@
+from ndcctools.taskvine.utils import load_variable_from_library
+
 import os
 import hashlib
 import types
+import time
 import dask
 import cloudpickle
 import collections
 import uuid
 import random
-from ndcctools.taskvine.utils import load_variable_from_library
 from collections import deque
 
 
 try:
     import dask._task_spec as dts
-except Exception:
+except ImportError:
     dts = None
-    pass
 
 
 def hash_name(*args):
@@ -41,18 +42,19 @@ class GraphKeyResult:
 
 
 class TaskGraph:
-    def __init__(self, task_dict, expand_dsk=False, extra_task_output_size_mb=[0, 0], extra_task_sleep_time=[0, 0]):
+    def __init__(self, task_dict, expand_dsk=False, shared_file_system_dir=None, extra_task_output_size_mb=[0, 0], extra_task_sleep_time=[0, 0]):
         self.task_dict = task_dict
-
-        if hasattr(dask, "_task_spec"):
-            self.task_dict = dask._task_spec.convert_legacy_graph(self.task_dict)
+        self.shared_file_system_dir = shared_file_system_dir
+        if self.shared_file_system_dir:
+            os.makedirs(self.shared_file_system_dir, exist_ok=True)
 
         if expand_dsk:
             self.task_dict = self._expand_legacy_dsk(self.task_dict)
 
         if dts:
             for k, v in self.task_dict.items():
-                assert isinstance(v, (dts.Alias, dts.Task, dts.DataNode)), f"Unsupported task type for key {k}: {v.__class__}"
+                if isinstance(v, dts.GraphNode):
+                    assert isinstance(v, (dts.Alias, dts.Task, dts.DataNode)), f"Unsupported task type for key {k}: {v.__class__}"
 
         self.parents_of, self.children_of = self._build_dependencies(self.task_dict)
         self.depth_of = self._calculate_depths()
@@ -61,10 +63,15 @@ class TaskGraph:
         self.key_of_vine_key = {hash_name(k): k for k in task_dict.keys()}
 
         self.outfile_remote_name = {key: f"{uuid.uuid4()}.pkl" for key in self.task_dict.keys()}
+        self.outfile_type = {key: "temp" for key in self.task_dict.keys()}
 
         # testing params
         self.extra_task_output_size_mb = self._calculate_extra_size_mb_of(extra_task_output_size_mb)
         self.extra_sleep_time_of = self._calculate_extra_sleep_time_of(extra_task_sleep_time)
+
+    def redirect_outfile_to_shared_fs(self, k):
+        self.outfile_remote_name[k] = os.path.join(self.shared_file_system_dir, self.outfile_remote_name[k])
+        self.outfile_type[k] = "shared-file-system"
 
     def _calculate_extra_size_mb_of(self, extra_task_output_size_mb):
         assert isinstance(extra_task_output_size_mb, list) and len(extra_task_output_size_mb) == 2 and extra_task_output_size_mb[0] <= extra_task_output_size_mb[1]
@@ -221,9 +228,21 @@ class TaskGraph:
 
         return topo_order
 
+    def __del__(self):
+        if hasattr(self, 'outfile_remote_name') and self.outfile_remote_name:
+            for k in self.outfile_remote_name.keys():
+                if self.outfile_type.get(k) == "shared-file-system" and os.path.exists(self.outfile_remote_name[k]):
+                    os.remove(self.outfile_remote_name[k])
 
-def init_task_graph_context():
-    with open("task_graph.pkl", 'rb') as f:
+
+def init_task_graph_context(task_graph_path=None):
+    if task_graph_path is None:
+
+        raise ValueError("task_graph_path must be provided to initialize the task graph context")
+    if not os.path.exists(task_graph_path):
+        raise FileNotFoundError(f"Task graph file not found at {task_graph_path}")
+
+    with open(task_graph_path, 'rb') as f:
         task_graph = cloudpickle.load(f)
 
     return {
@@ -291,5 +310,7 @@ def compute_single_key(vine_key):
         raise Exception(f"Output file {task_graph.outfile_remote_name[k]} does not exist after writing")
     if os.stat(task_graph.outfile_remote_name[k]).st_size == 0:
         raise Exception(f"Output file {task_graph.outfile_remote_name[k]} is empty after writing")
+
+    time.sleep(task_graph.extra_sleep_time_of[k])
 
     return True

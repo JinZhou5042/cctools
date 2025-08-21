@@ -161,7 +161,7 @@ def start_function(in_pipe_fd, thread_limit=1):
                 except Exception:
                     raise
 
-            except Exception as e:
+            except Exception:
                 stdout_timed_message(
                     f"Library code: Function call failed due to {traceback.format_exc()}",
                     file=sys.stderr,
@@ -240,7 +240,7 @@ def start_function(in_pipe_fd, thread_limit=1):
                     if exit_status is None:
                         stdout_timed_message(f"TASK {function_id} finished successfully")
                         exit_status = 0
-                except Exception as e:
+                except Exception:
                     stdout_timed_message(f"TASK {function_id} error: execution failed due to {traceback.format_exc()}")
                 finally:
                     os._exit(exit_status)
@@ -251,6 +251,7 @@ def start_function(in_pipe_fd, thread_limit=1):
             # return pid and function id of child process to parent.
             else:
                 return p, function_id
+
 
 # Send result of a function execution to worker. Wake worker up to do work with SIGCHLD.
 def send_result(out_pipe_fd, worker_pid, task_id, exit_code):

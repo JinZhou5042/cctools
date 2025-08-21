@@ -255,6 +255,7 @@ struct vine_manager {
 	int balance_worker_disk_load; /* If true, offload replicas from workers that are overloaded with temp files. */
 	timestamp_t when_last_offloaded;
 	timestamp_t total_time_spent_on_offloading;
+	int64_t peak_used_cache;
 
 	int shutting_down;
 };

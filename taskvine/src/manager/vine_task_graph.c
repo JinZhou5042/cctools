@@ -291,7 +291,7 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 				node->outfile_size_bytes = node->outfile->size;
 				break;
 			}
-			debug(D_VINE, "outfile %s size: %ld bytes", node->outfile_remote_name, node->outfile_size_bytes);
+			debug(D_VINE, "Node %s completed with outfile %s size: %ld bytes", node->node_key, node->outfile_remote_name, node->outfile_size_bytes);
 
 			/* mark the node as completed */
 			node->completed = 1;
@@ -355,9 +355,9 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 	total_time_spent_on_prune_ancestors_of_temp_node /= 1e6;
 	total_time_spent_on_prune_ancestors_of_persisted_node /= 1e6;
 
-	printf("total time spent on prune ancestors of temp node: %.6f seconds\n", total_time_spent_on_prune_ancestors_of_temp_node);
-	printf("total time spent on prune ancestors of persisted node: %.6f seconds\n", total_time_spent_on_prune_ancestors_of_persisted_node);
-	printf("total time spent on unlink local files: %.6f seconds\n", total_time_spent_on_unlink_local_files);
+	debug(D_VINE | D_NOTICE, "total time spent on prune ancestors of temp node: %.6f seconds\n", total_time_spent_on_prune_ancestors_of_temp_node);
+	debug(D_VINE | D_NOTICE, "total time spent on prune ancestors of persisted node: %.6f seconds\n", total_time_spent_on_prune_ancestors_of_persisted_node);
+	debug(D_VINE | D_NOTICE, "total time spent on unlink local files: %.6f seconds\n", total_time_spent_on_unlink_local_files);
 
 	return;
 }

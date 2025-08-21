@@ -2614,27 +2614,38 @@ static void rebalance_worker_disk_usage(struct vine_manager *q)
 		if (!w->resources) {
 			continue;
 		}
-		if (w->resources->tag < 0 || w->resources->disk.total < 1 || w->end_time < 0) {
+		if (w->resources->tag < 0 || w->resources->disk.total < 1) {
 			continue;
 		}
 		if (!worker_with_min_disk_usage || w->inuse_cache < worker_with_min_disk_usage->inuse_cache) {
-			worker_with_min_disk_usage = w;
+			if (w->incoming_xfer_counter < q->worker_source_max_transfers) {
+				worker_with_min_disk_usage = w;
+			}
 		}
 		if (!worker_with_max_disk_usage || w->inuse_cache > worker_with_max_disk_usage->inuse_cache) {
-			worker_with_max_disk_usage = w;
+			if (w->outgoing_xfer_counter < q->worker_source_max_transfers) {
+				worker_with_max_disk_usage = w;
+			}
 		}
 	}
 
-	if (!worker_with_min_disk_usage || !worker_with_max_disk_usage) {
+	if (!worker_with_min_disk_usage || !worker_with_max_disk_usage || worker_with_min_disk_usage == worker_with_max_disk_usage) {
 		return;
 	}
 
-	if (worker_with_min_disk_usage->inuse_cache * 1.2 < worker_with_max_disk_usage->inuse_cache) {
-		debug(D_VINE, "No need to offload: min disk usage is less than 20%% of max disk usage");
+	int64_t min_inuse_cache = worker_with_min_disk_usage->inuse_cache;
+	int64_t max_inuse_cache = worker_with_max_disk_usage->inuse_cache;
+
+	if (min_inuse_cache * 1.2 >= max_inuse_cache) {
 		return;
 	}
 
-	int64_t bytes_to_offload = (worker_with_max_disk_usage->inuse_cache - worker_with_min_disk_usage->inuse_cache) / 2;
+	if (max_inuse_cache <= q->peak_used_cache) {
+		return;
+	}
+	q->peak_used_cache = max_inuse_cache;
+
+	int64_t bytes_to_offload = (int64_t)((max_inuse_cache - min_inuse_cache) / 2);
 
 	char *cachename;
 	struct vine_file_replica *replica;
@@ -2647,13 +2658,20 @@ static void rebalance_worker_disk_usage(struct vine_manager *q)
 		if (!f) {
 			continue;
 		}
-
-		if (!vine_temp_replicate_file_now(q, f)) {
+		if (vine_file_replica_table_lookup(worker_with_min_disk_usage, cachename)) {
 			continue;
 		}
 
+		vine_temp_start_peer_transfer(q, f, worker_with_max_disk_usage, worker_with_min_disk_usage);
 		bytes_to_offload -= replica->size;
 		if (bytes_to_offload <= 0) {
+			break;
+		}
+
+		if (worker_with_min_disk_usage->incoming_xfer_counter >= q->worker_source_max_transfers) {
+			break;
+		}
+		if (worker_with_max_disk_usage->outgoing_xfer_counter >= q->worker_source_max_transfers) {
 			break;
 		}
 	}
@@ -4353,6 +4371,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->balance_worker_disk_load = 0;
 	q->total_time_spent_on_offloading = 0;
 	q->when_last_offloaded = 0;
+	q->peak_used_cache = 0;
 
 	q->shutting_down = 0;
 
@@ -5562,7 +5581,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			}
 		}
 
-		if (q->balance_worker_disk_load && (timestamp_get() - q->when_last_offloaded > 1e6)) {
+		if (q->balance_worker_disk_load && (timestamp_get() - q->when_last_offloaded > 5 * 1e6)) {
 			timestamp_t time_start = timestamp_get();
 			rebalance_worker_disk_usage(q);
 			q->when_last_offloaded = timestamp_get();
@@ -6107,7 +6126,7 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 		q->enforce_worker_eviction_interval = (timestamp_t)(MAX(0, (int)value) * ONE_SECOND);
 
 	} else if (!strcmp(name, "balance-worker-disk-load")) {
-		q->balance_worker_disk_load = 1;
+		q->balance_worker_disk_load = !!((int)value);
 
 	} else {
 		debug(D_NOTICE | D_VINE, "Warning: tuning parameter \"%s\" not recognized\n", name);
