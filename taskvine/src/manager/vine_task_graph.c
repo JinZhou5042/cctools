@@ -311,25 +311,25 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 				continue;
 			}
 
-			/* inject failure */
-			if (tg->failure_injection_step_percent > 0) {
-				double progress = (double)regular_tasks_part->current / (double)regular_tasks_part->total;
-				if (progress >= next_failure_threshold) {
-					evict_random_worker(tg->manager);
-					next_failure_threshold += tg->failure_injection_step_percent / 100.0;
-				}
-			}
-
 			/* set the start time to the submit time of the first regular task */
 			if (regular_tasks_part->current == 0) {
 				progress_bar_reset_start_time(pbar, task->time_when_commit_start);
 			}
-
+			
 			/* update critical time */
 			vine_task_node_update_critical_time(node, task->time_workers_execute_last);
-
-			/* mark node as completed */
+			
+			/* mark this regular task as completed */
 			progress_bar_advance_part_current(pbar, regular_tasks_part, 1);
+
+			/* inject failure */
+			if (tg->failure_injection_step_percent > 0) {
+				double progress = (double)regular_tasks_part->current / (double)regular_tasks_part->total;
+				if (progress >= next_failure_threshold && evict_random_worker(tg->manager)) {
+					debug(D_VINE, "evicted a worker at %.2f%% (threshold %.2f%%)", progress * 100, next_failure_threshold * 100);
+					next_failure_threshold += tg->failure_injection_step_percent / 100.0;
+				}
+			}
 
 			/* enqueue the output file for replication or checkpointing */
 			switch (node->outfile_type) {

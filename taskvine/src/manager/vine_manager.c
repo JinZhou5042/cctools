@@ -999,6 +999,10 @@ int evict_random_worker(struct vine_manager *q)
 		return 0;
 	}
 
+	if (hash_table_size(q->worker_table) == 0) {
+		return 0;
+	}
+
 	int removed = 0;
 
 	/* collect removable workers */
@@ -1007,17 +1011,15 @@ int evict_random_worker(struct vine_manager *q)
 	struct vine_worker_info *w;
 	HASH_TABLE_ITERATE(q->worker_table, key, w)
 	{
-		if (w->type != VINE_WORKER_TYPE_WORKER) {
-			continue;
-		}
-		if (is_checkpoint_worker(q, w)) {
-			continue;
-		}
 		list_push_tail(candidates_list, w);
 	}
 
 	/* release a random worker if any */
-	int index = (int)(random_int64() % list_size(candidates_list));
+	int random_number = random_int64();
+	if (random_number < 0) {
+		random_number = -random_number;
+	}
+	int index = (int)(random_number % list_size(candidates_list));
 	int i = 0;
 	while ((w = list_pop_head(candidates_list))) {
 		if (i++ == index) {
@@ -1028,8 +1030,8 @@ int evict_random_worker(struct vine_manager *q)
 			break;
 		}
 	}
-	list_delete(candidates_list);
 
+	list_delete(candidates_list);
 	return removed;
 }
 
