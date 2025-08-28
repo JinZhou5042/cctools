@@ -16,6 +16,8 @@ struct vine_task_graph {
 
     char *library_name;
     char *function_name;
+
+    double failure_injection_step_percent;  // 0 - 100, the percentage of steps to inject failure
 };
 
 

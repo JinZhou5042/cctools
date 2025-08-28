@@ -1604,6 +1604,7 @@ const char *vine_task_graph_get_function_name(const struct vine_task_graph *tg);
 double vine_task_graph_get_node_heavy_score(const struct vine_task_graph *tg, const char *node_key);
 void vine_task_graph_execute(struct vine_task_graph *tg);
 const char *vine_task_graph_get_node_local_outfile_source(const struct vine_task_graph *tg, const char *node_key);
+void vine_task_graph_set_failure_injection_step_percent(struct vine_task_graph *tg, double percent);
 //@}
 
 #endif

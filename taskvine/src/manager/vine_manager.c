@@ -993,6 +993,46 @@ static void cleanup_worker_files(struct vine_manager *q, struct vine_worker_info
 	hash_table_free_keys_array(cachenames);
 }
 
+int evict_random_worker(struct vine_manager *q)
+{
+	if (!q) {
+		return 0;
+	}
+
+	int removed = 0;
+
+	/* collect removable workers */
+	struct list *candidates_list = list_create();
+	char *key;
+	struct vine_worker_info *w;
+	HASH_TABLE_ITERATE(q->worker_table, key, w)
+	{
+		if (w->type != VINE_WORKER_TYPE_WORKER) {
+			continue;
+		}
+		if (is_checkpoint_worker(q, w)) {
+			continue;
+		}
+		list_push_tail(candidates_list, w);
+	}
+
+	/* release a random worker if any */
+	int index = (int)(random_int64() % list_size(candidates_list));
+	int i = 0;
+	while ((w = list_pop_head(candidates_list))) {
+		if (i++ == index) {
+			/* evict this worker */
+			debug(D_VINE | D_NOTICE, "Intentionally evicting worker %s", w->hostname);
+			release_worker(q, w);
+			removed = 1;
+			break;
+		}
+	}
+	list_delete(candidates_list);
+
+	return removed;
+}
+
 /*
 This function enforces a target worker eviction rate (1 every X seconds).
 If the observed eviction interval is shorter than the desired one, we randomly evict one worker
@@ -1031,34 +1071,8 @@ static int enforce_worker_eviction_interval(struct vine_manager *q)
 		return 0;
 	}
 
-	/* collect removable workers */
-	struct list *candidates_list = list_create();
-	char *key;
-	struct vine_worker_info *w;
-	HASH_TABLE_ITERATE(q->worker_table, key, w)
-	{
-		if (w->type != VINE_WORKER_TYPE_WORKER) {
-			continue;
-		}
-		if (is_checkpoint_worker(q, w)) {
-			continue;
-		}
-		list_push_tail(candidates_list, w);
-	}
-
-	/* release a random worker if any */
-	int index = (int)(random_int64() % list_size(candidates_list));
-	int i = 0;
-	while ((w = list_pop_head(candidates_list))) {
-		if (i++ == index) {
-			/* evict this worker */
-			debug(D_VINE | D_NOTICE, "Intentionally evicting worker %s", w->hostname);
-			release_worker(q, w);
-		}
-	}
-	list_delete(candidates_list);
-
-	return 1;
+	/* evict a random worker if any */
+	return evict_random_worker(q);
 }
 
 /* Remove all tasks and other associated state from a given worker. */

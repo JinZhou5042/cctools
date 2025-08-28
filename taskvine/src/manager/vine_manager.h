@@ -311,6 +311,9 @@ int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const
 
 int64_t get_worker_available_disk_bytes(struct vine_worker_info *w);
 
+/* Evict a random worker to simulate a worker failure. */
+int evict_random_worker(struct vine_manager *q);
+
 /* The expected format of files created by the resource monitor.*/
 #define RESOURCE_MONITOR_TASK_LOCAL_NAME "vine-task-%d"
 #define RESOURCE_MONITOR_REMOTE_NAME "cctools-monitor"

@@ -239,6 +239,12 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 		}
 	}
 
+	/* calculate steps to inject failure */
+	double next_failure_threshold = -1.0;
+	if (tg->failure_injection_step_percent > 0) {
+		next_failure_threshold = tg->failure_injection_step_percent / 100.0;
+	}
+
 	struct ProgressBar *pbar = progress_bar_init("Executing Tasks");
 	struct ProgressBarPart *regular_tasks_part = progress_bar_part_create("Regular", hash_table_size(tg->nodes));
 	struct ProgressBarPart *recovery_tasks_part = progress_bar_part_create("Recovery", 0);
@@ -305,6 +311,15 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 				continue;
 			}
 
+			/* inject failure */
+			if (tg->failure_injection_step_percent > 0) {
+				double progress = (double)regular_tasks_part->current / (double)regular_tasks_part->total;
+				if (progress >= next_failure_threshold) {
+					evict_random_worker(tg->manager);
+					next_failure_threshold += tg->failure_injection_step_percent / 100.0;
+				}
+			}
+
 			/* set the start time to the submit time of the first regular task */
 			if (regular_tasks_part->current == 0) {
 				progress_bar_reset_start_time(pbar, task->time_when_commit_start);
@@ -355,9 +370,9 @@ void vine_task_graph_execute(struct vine_task_graph *tg)
 	total_time_spent_on_prune_ancestors_of_temp_node /= 1e6;
 	total_time_spent_on_prune_ancestors_of_persisted_node /= 1e6;
 
-	debug(D_VINE | D_NOTICE, "total time spent on prune ancestors of temp node: %.6f seconds\n", total_time_spent_on_prune_ancestors_of_temp_node);
-	debug(D_VINE | D_NOTICE, "total time spent on prune ancestors of persisted node: %.6f seconds\n", total_time_spent_on_prune_ancestors_of_persisted_node);
-	debug(D_VINE | D_NOTICE, "total time spent on unlink local files: %.6f seconds\n", total_time_spent_on_unlink_local_files);
+	debug(D_VINE, "total time spent on prune ancestors of temp node: %.6f seconds\n", total_time_spent_on_prune_ancestors_of_temp_node);
+	debug(D_VINE, "total time spent on prune ancestors of persisted node: %.6f seconds\n", total_time_spent_on_prune_ancestors_of_persisted_node);
+	debug(D_VINE, "total time spent on unlink local files: %.6f seconds\n", total_time_spent_on_unlink_local_files);
 
 	return;
 }
@@ -547,6 +562,8 @@ struct vine_task_graph *vine_task_graph_create(struct vine_manager *q)
 	tg->function_name = xxstrdup("compute_single_key");
 	tg->manager = q;
 
+	tg->failure_injection_step_percent = -1.0;
+
 	/* enable debug system for C code since it uses a separate debug system instance
 	 * from the Python bindings. Use the same function that the manager uses. */
 	char *debug_tmp = string_format("%s/vine-logs/debug", tg->manager->runtime_directory);
@@ -556,6 +573,20 @@ struct vine_task_graph *vine_task_graph_create(struct vine_manager *q)
 	signal(SIGINT, handle_sigint);
 
 	return tg;
+}
+
+void vine_task_graph_set_failure_injection_step_percent(struct vine_task_graph *tg, double percent)
+{
+	if (!tg) {
+		return;
+	}
+
+	if (percent <= 0 || percent > 100) {
+		return;
+	}
+
+	debug(D_VINE, "setting failure injection step percent to %lf", percent);
+	tg->failure_injection_step_percent = percent;
 }
 
 struct vine_task_node *vine_task_graph_create_node(

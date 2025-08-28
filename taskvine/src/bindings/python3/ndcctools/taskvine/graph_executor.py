@@ -145,6 +145,7 @@ class GraphExecutor(Manager):
             prune_depth=1,
             shared_file_system_dir="/project01/ndcms/jzhou24/shared_file_system",
             staging_dir="/project01/ndcms/jzhou24/staging",
+            failure_injection_step_percent=-1,
             balance_worker_disk_load=0,
             outfile_type={
                 "temp": 1.0,
@@ -154,6 +155,8 @@ class GraphExecutor(Manager):
         self.task_dict = ensure_task_dict(collection_dict)
 
         self.tune("balance-worker-disk-load", balance_worker_disk_load)
+
+        cvine.vine_task_graph_set_failure_injection_step_percent(self._vine_task_graph, failure_injection_step_percent)
 
         if balance_worker_disk_load:
             replica_placement_policy = "disk-load"
@@ -228,6 +231,9 @@ class GraphExecutor(Manager):
         results = {}
         for k in self.target_keys:
             local_outfile_path = cvine.vine_task_graph_get_node_local_outfile_source(self._vine_task_graph, self.task_graph.vine_key_of[k])
+            if not os.path.exists(local_outfile_path):
+                results[k] = "NOT_FOUND"
+                continue
             with open(local_outfile_path, 'rb') as f:
                 result_obj = cloudpickle.load(f)
                 assert isinstance(result_obj, GraphKeyResult), "Loaded object is not of type GraphKeyResult"
