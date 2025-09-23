@@ -35,6 +35,48 @@ def hashable(s):
         return False
 
 
+def dist_func(mode, low, high):
+    if not mode:
+        return 0
+
+    assert mode in ["uniform", "normal", "lognormal", "pareto", "mix"]
+    # uniform distribution, flat spread
+    def uniform_dist():
+        return random.uniform(low, high)
+
+    # normal distribution, centered in the middle
+    def normal_dist():
+        mu, sigma = (low + high) / 2, (high - low) / 6
+        return min(max(random.gauss(mu, sigma), low), high)
+
+    # lognormal distribution, long tail
+    def lognormal_dist():
+        val = random.lognormvariate(0, 1)
+        val = val / (1 + val)
+        return low + (high - low) * val
+
+    # pareto distribution, very heavy tail
+    def pareto_dist(alpha=2.0):
+        val = random.paretovariate(alpha)
+        val = val / (1 + val)
+        return low + (high - low) * val
+
+    # mixture: most small values, few large ones
+    def mix_dist():
+        if random.random() < 0.9:
+            return random.uniform(low, (low + high) / 2)
+        else:
+            return random.uniform((low + high) / 2, high)
+
+    return {
+        "uniform": uniform_dist,
+        "normal": normal_dist,
+        "lognormal": lognormal_dist,
+        "pareto": pareto_dist,
+        "mix": mix_dist,
+    }[mode]()
+
+
 class GraphKeyResult:
     # extra_size_mb is used to allocate more space for this object in testing mode to evaluate storage consumption
     # and peer transfer performance across all workers.
@@ -47,8 +89,8 @@ class TaskGraph:
     def __init__(self, task_dict,
                  shared_file_system_dir=None,
                  staging_dir=None,
-                 extra_task_output_size_mb=[0, 0],
-                 extra_task_sleep_time=[0, 0]):
+                 extra_task_output_size_mb=["uniform", 0, 0],
+                 extra_task_sleep_time=["uniform", 0, 0]):
         self.task_dict = task_dict
         self.shared_file_system_dir = shared_file_system_dir
         self.staging_dir = staging_dir
@@ -81,22 +123,30 @@ class TaskGraph:
             self.outfile_remote_name[k] = os.path.join(self.shared_file_system_dir, self.outfile_remote_name[k])
 
     def _calculate_extra_size_mb_of(self, extra_task_output_size_mb):
-        assert isinstance(extra_task_output_size_mb, list) and len(extra_task_output_size_mb) == 2 and extra_task_output_size_mb[0] <= extra_task_output_size_mb[1]
+        assert isinstance(extra_task_output_size_mb, list) and len(extra_task_output_size_mb) == 3
+        mode, low, high = extra_task_output_size_mb
+        low, high = int(low), int(high)
+        assert low <= high
+
         max_depth = max(depth for depth in self.depth_of.values())
         extra_size_mb_of = {}
         for k in self.task_dict.keys():
             if self.depth_of[k] == max_depth or self.depth_of[k] == max_depth - 1:
                 extra_size_mb_of[k] = 0
                 continue
-            extra_size_mb_of[k] = random.uniform(extra_task_output_size_mb[0], extra_task_output_size_mb[1])
+            extra_size_mb_of[k] = dist_func(mode, low, high)
 
         return extra_size_mb_of
 
     def _calculate_extra_sleep_time_of(self, extra_task_sleep_time):
-        assert isinstance(extra_task_sleep_time, list) and len(extra_task_sleep_time) == 2 and extra_task_sleep_time[0] <= extra_task_sleep_time[1]
+        assert isinstance(extra_task_sleep_time, list) and len(extra_task_sleep_time) == 3
+        mode, low, high = extra_task_sleep_time
+        low, high = int(low), int(high)
+        assert low <= high
+
         extra_sleep_time_of = {}
         for k in self.task_dict.keys():
-            extra_sleep_time_of[k] = random.uniform(extra_task_sleep_time[0], extra_task_sleep_time[1])
+            extra_sleep_time_of[k] = dist_func(mode, low, high)
 
         return extra_sleep_time_of
 

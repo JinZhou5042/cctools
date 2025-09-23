@@ -84,6 +84,8 @@ class Manager(object):
                  ssl=None,
                  init_fn=None,
                  status_display_interval=None):
+        self.task_dict = {}
+        self.file_to_task = {}
         self._shutdown = shutdown
         self._taskvine = None
         self._stats = None
@@ -880,6 +882,35 @@ class Manager(object):
     # @param self   Reference to the current manager object.
     # @param task   A task description created from @ref ndcctools.taskvine.task.Task.
     def submit(self, task):
+        self.file_to_task[task.output_file] = task
+        func, args, kwargs = task._fn_def
+        converted_args = []
+        for arg in args:
+            if isinstance(arg, list):
+                converted_list = []
+                for item in arg:
+                    if isinstance(item, str) and item.startswith("file."):
+                        # file.x refers to the remote name of a input file
+                        assert item in task.input_files, f"input file {item} not found in task input_files {task.input_files}"
+                        infile = task.input_files[item]
+                        converted_list.append(infile.producer_task._id)
+                        print(f"====== arg {item} converted to {infile.producer_task._id}")
+                    else:
+                        converted_list.append(item)
+                converted_args.append(converted_list)
+            else:
+                converted_args.append(arg)
+
+        sexpr = (func,) + tuple(converted_args)
+        if kwargs:
+            sexpr += (kwargs,)
+        
+        print("submitting sexpr:", sexpr)
+        self.task_dict[task._id] = sexpr
+        import cloudpickle
+        with open("/users/jzhou24/graph_optimization/topeft.pkl", "wb") as f:
+            cloudpickle.dump(self.task_dict, f)
+
         task.manager = self
         task.submit_finalize()
         task_id = cvine.vine_submit(self._taskvine, task._task)

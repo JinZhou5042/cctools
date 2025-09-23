@@ -22,6 +22,7 @@ import io
 class File(object):
     def __init__(self, internal_file):
         self._file = internal_file
+        self.producer_task = None
 
     def __bool__(self):
         # We need this because the len of some files is 0, which would evaluate

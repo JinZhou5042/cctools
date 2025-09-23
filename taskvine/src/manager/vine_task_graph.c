@@ -46,6 +46,13 @@ static void submit_node_task(struct vine_task_graph *tg, struct vine_task_node *
 	int task_id = vine_task_node_submit(node);
 	itable_insert(tg->task_id_to_node, task_id, node);
 
+	node->retry_attempts_left--;
+	if (node->retry_attempts_left < 0) {
+		debug(D_ERROR, "Aborting, node %s has exhausted all retry attempts", node->node_key);
+		vine_task_graph_delete(tg);
+		exit(1);
+	}
+
 	return;
 }
 

@@ -57,6 +57,7 @@ struct vine_task_node *vine_task_node_create(
 	node->pending_parents = set_create(0);
 	node->completed = 0;
 	node->prune_depth = prune_depth;
+	node->retry_attempts_left = 1;
 
 	node->outfile_size_bytes = 0;
 	node->depth = -1;

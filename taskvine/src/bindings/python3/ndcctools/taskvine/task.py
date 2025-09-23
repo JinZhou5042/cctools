@@ -37,6 +37,9 @@ class Task(object):
     def __init__(self, command, **task_info):
         self._task = None
 
+        self.input_files = {}
+        self.output_files = {}
+
         self._manager = None  # set when task is submitted
 
         if isinstance(command, dict):
@@ -351,6 +354,9 @@ class Task(object):
     # >>> task.add_input(f,"data")
     # @endcode
     def add_input(self, file, remote_name, strict_input=False, mount_symlink=False):
+        assert isinstance(file, File), f"{file} is not a TaskVine file"
+        self.input_files[remote_name] = file
+
         # SWIG expects strings
         if not isinstance(remote_name, str):
             raise TypeError(f"remote_name {remote_name} is not a str")
@@ -376,6 +382,10 @@ class Task(object):
     # >>> task.add_output(file,"out")
     # @endcode
     def add_output(self, file, remote_name, watch=False, failure_only=None, success_only=None):
+        assert isinstance(file, File), f"{file} is not a TaskVine file"
+        self.output_files[remote_name] = file
+        file.producer_task = self
+
         # SWIG expects strings
         if not isinstance(remote_name, str):
             raise TypeError(f"remote_name {remote_name} is not a str")

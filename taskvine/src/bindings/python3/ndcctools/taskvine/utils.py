@@ -5,6 +5,7 @@
 from . import cvine
 
 import os
+import random
 
 
 def get_c_constant(constant):
@@ -48,5 +49,6 @@ def delete_all_files(root_dir):
                 os.remove(file_path)
             except FileNotFoundError:
                 print(f"Failed to delete file {file_path}")
+
 
 # vim: set sts=4 sw=4 ts=4 expandtab ft=python:

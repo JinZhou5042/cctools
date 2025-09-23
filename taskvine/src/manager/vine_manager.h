@@ -256,6 +256,8 @@ struct vine_manager {
 	timestamp_t when_last_offloaded;
 	timestamp_t total_time_spent_on_offloading;
 	int64_t peak_used_cache;
+	int prioritize_recovery_tasks;
+	int consecutive_empty_cycles;
 
 	int shutting_down;
 };

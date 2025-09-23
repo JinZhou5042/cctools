@@ -3753,11 +3753,24 @@ static int send_one_task(struct vine_manager *q, int *tasks_ready_left_to_consid
 	int committed_tasks = 0;
 	int tasks_considered = 0;
 	int tasks_to_consider = MIN(priority_queue_size(q->ready_tasks), q->attempt_schedule_depth);
+	tasks_to_consider = priority_queue_size(q->ready_tasks);
 
 	/* temporarily skipped tasks that are runnable but cannot fit on any current worker */
 	struct list *skipped_tasks = list_create();
 
 	struct vine_task *t;
+
+	
+	if (q->prioritize_recovery_tasks) {
+		int64_t random_int = random_int64();
+		if (random_int < 0) {
+			random_int = -random_int;
+		}
+		int delay_ms = (int)(random_int % 100);
+		int delay_us = delay_ms * 1000;
+		usleep(delay_us);
+	}
+	
 
 	while (tasks_considered < tasks_to_consider) {
 		t = priority_queue_pop(q->ready_tasks);
@@ -3769,6 +3782,7 @@ static int send_one_task(struct vine_manager *q, int *tasks_ready_left_to_consid
 		/* this task is not runnable at all, put it back in the pending queue */
 		if (!consider_task(q, t)) {
 			list_push_tail(q->pending_tasks, t);
+			// list_push_tail(skipped_tasks, t);
 			continue;
 		}
 
@@ -4388,6 +4402,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->total_time_spent_on_offloading = 0;
 	q->when_last_offloaded = 0;
 	q->peak_used_cache = 0;
+	q->prioritize_recovery_tasks = 1;
+	q->consecutive_empty_cycles = 0;
 
 	q->shutting_down = 0;
 
@@ -5034,7 +5050,11 @@ int vine_submit(struct vine_manager *q, struct vine_task *t)
 	 * Additionally, we incorporate the priority of the original task, so not all recovery tasks receive the same priority,
 	 * this distinction is important when many files are lost and the workflow is effectively rerun from scratch. */
 	if (t->type == VINE_TASK_TYPE_RECOVERY) {
-		vine_task_set_priority(t, t->priority + priority_queue_get_top_priority(q->ready_tasks) + 1);
+		if (q->prioritize_recovery_tasks) {
+			vine_task_set_priority(t, t->priority + priority_queue_get_top_priority(q->ready_tasks) + 1);
+		} else {
+			vine_task_set_priority(t, -(t->priority + priority_queue_get_top_priority(q->ready_tasks) + 1));
+		}
 		q->num_submitted_recovery_tasks++;
 	}
 
@@ -5593,6 +5613,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 				// sent at least one task
 				events++;
 				sent_in_previous_cycle = 1;
+				q->consecutive_empty_cycles = 0;
 				continue;
 			}
 		}
@@ -5681,6 +5702,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		// the next time around, or return retrieved tasks if there some available.
 		if (tasks_ready_left_to_consider < 1) {
 			q->nothing_happened_last_wait_cycle = 1;
+			q->consecutive_empty_cycles++;
 			tasks_ready_left_to_consider = priority_queue_size(q->ready_tasks);
 		}
 	}
@@ -6143,6 +6165,10 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "balance-worker-disk-load")) {
 		q->balance_worker_disk_load = !!((int)value);
+
+	} else if (!strcmp(name, "prioritize-recovery-tasks")) {
+		q->prioritize_recovery_tasks = !!((int)value);
+		printf("prioritize_recovery_tasks: %d\n", q->prioritize_recovery_tasks);
 
 	} else {
 		debug(D_NOTICE | D_VINE, "Warning: tuning parameter \"%s\" not recognized\n", name);

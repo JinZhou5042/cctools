@@ -29,6 +29,7 @@ struct vine_task_node {
     struct list *children;
     struct set *pending_parents;
     
+    int retry_attempts_left;
     int completed;
     int prune_depth;
 

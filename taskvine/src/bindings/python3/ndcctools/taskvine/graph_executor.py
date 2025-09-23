@@ -111,7 +111,7 @@ class GraphExecutor(Manager):
     def _create_library_task(self, libcores=1, hoisting_modules=[], libtask_env_files={}):
         assert cvine.vine_task_graph_get_function_name(self._vine_task_graph) == compute_single_key.__name__
 
-        self.task_graph_pkl_file_name = f"task-graph-{uuid.uuid4()}.pkl"
+        self.task_graph_pkl_file_name = f"library-task-graph-{uuid.uuid4()}.pkl"
         self.task_graph_pkl_file_local_path = self.task_graph_pkl_file_name
         self.task_graph_pkl_file_remote_path = self.task_graph_pkl_file_name
 
@@ -140,8 +140,8 @@ class GraphExecutor(Manager):
             replica_placement_policy="random",
             priority_mode="largest-input-first",
             scheduling_mode="files",
-            extra_task_output_size_mb=[0, 0],
-            extra_task_sleep_time=[0, 0],
+            extra_task_output_size_mb=["uniform", 0, 0],
+            extra_task_sleep_time=["uniform", 0, 0],
             prune_depth=1,
             shared_file_system_dir="/project01/ndcms/jzhou24/shared_file_system",
             staging_dir="/project01/ndcms/jzhou24/staging",
