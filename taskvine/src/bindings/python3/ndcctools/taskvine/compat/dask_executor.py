@@ -138,10 +138,9 @@ class DaskVine(Manager):
             hoisting_modules=None,  # Deprecated, use lib_modules
             import_modules=None,    # Deprecated, use lib_modules
             lazy_transfers=True,    # Deprecated, use worker_tranfers
-            extra_serialize_time_sec=0,
+            extra_task_sleep_time=(0, 0),
             ):
         try:
-            self.extra_serialize_time_sec = extra_serialize_time_sec
             self.set_property("framework", "dask")
             if retries and retries < 1:
                 raise ValueError("retries should be larger than 0")
@@ -181,6 +180,9 @@ class DaskVine(Manager):
             self.wrapper = wrapper
             self.wrapper_proc = wrapper_proc
             self.prune_depth = prune_depth
+            if not isinstance(extra_task_sleep_time, (list, tuple)) or len(extra_task_sleep_time) != 2:
+                raise ValueError("extra_task_sleep_time should be a list/tuple with exactly 2 values")
+            self.extra_task_sleep_time = [float(extra_task_sleep_time[0]), float(extra_task_sleep_time[1])]
             self.category_info = defaultdict(lambda: {"num_tasks": 0, "total_execution_time": 0})
             self.max_priority = float('inf')
             self.min_priority = float('-inf')
@@ -268,6 +270,9 @@ class DaskVine(Manager):
 
         timeout = 5
         pending = 0
+        throughput_completed_tasks = 0
+        time_first_task_dispatched = None
+        last_throughput_print_time = 0.0
 
         (bar_progress, bar_update) = self._make_progress_bar(dag.left_to_compute())
         with bar_progress:
@@ -277,14 +282,17 @@ class DaskVine(Manager):
                     enqueued_calls
                     and (not self.submit_per_cycle or submitted < self.submit_per_cycle)
                     and (not self.max_pending or pending < self.max_pending)
-                    and self.hungry()
+                    # and self.hungry()
                 ):
                     self.submit(enqueued_calls.pop())
+                    if time_first_task_dispatched is None:
+                        time_first_task_dispatched = time.time()
                     submitted += 1
                     pending += 1
 
                 t = self.wait_for_tag(tag, timeout)
                 if t:
+                    throughput_completed_tasks += 1
                     timeout = 0
                     pending -= 1
                     if self.verbose:
@@ -319,6 +327,14 @@ class DaskVine(Manager):
                     t = None  # drop task reference
                 else:
                     timeout = 5
+
+                if throughput_completed_tasks > 0 and time_first_task_dispatched is not None:
+                    now = time.time()
+                    if last_throughput_print_time == 0.0 or (now - last_throughput_print_time) >= 1.0:
+                        elapsed_sec = now - time_first_task_dispatched
+                        throughput = (throughput_completed_tasks / elapsed_sec) if elapsed_sec > 0.0 else 0.0
+                        print(f"throughput: {throughput:.0f} tasks/s")
+                        last_throughput_print_time = now
             return self._load_results(dag, indices, keys)
 
     def _make_progress_bar(self, total):
@@ -421,7 +437,8 @@ class DaskVine(Manager):
                                    env_vars=self.env_vars,
                                    retries=retries,
                                    worker_transfers=lazy,
-                                   wrapper=self.wrapper)
+                                   wrapper=self.wrapper,
+                                   extra_task_sleep_time=self.extra_task_sleep_time)
 
                 t.set_priority(priority)
                 if self.env_per_task:
@@ -443,7 +460,7 @@ class DaskVine(Manager):
                                      retries=retries,
                                      worker_transfers=lazy,
                                      wrapper=self.wrapper,
-                                     extra_serialize_time_sec=self.extra_serialize_time_sec)
+                                     extra_task_sleep_time=self.extra_task_sleep_time)
 
                 t.set_priority(priority)
                 t.set_tag(tag)  # tag that identifies this dag
@@ -564,8 +581,7 @@ class PythonTaskDask(PythonTask):
                  retries=5,
                  worker_transfers=False,
                  wrapper=None,
-                 extra_serialize_time_sec=0):
-        time.sleep(extra_serialize_time_sec)
+                 extra_task_sleep_time=(0, 0)):
         self._key = key
         self._sexpr = sexpr
 
@@ -583,7 +599,7 @@ class PythonTaskDask(PythonTask):
         keys_of_files = list(args.keys())
         args = args_raw | args
 
-        super().__init__(execute_graph_vertex, wrapper, key, sexpr, args, keys_of_files)
+        super().__init__(execute_graph_vertex, wrapper, key, sexpr, args, keys_of_files, extra_task_sleep_time)
         if wrapper:
             wo = m.declare_buffer()
             self.add_output(wo, "wrapper.output")
@@ -667,9 +683,7 @@ class FunctionCallDask(FunctionCall):
                  retries=5,
                  worker_transfers=False,
                  wrapper=None,
-                 extra_serialize_time_sec=0):
-        time.sleep(extra_serialize_time_sec)
-
+                 extra_task_sleep_time=(0, 0)):
         self._key = key
         self.resources = resources
         self._sexpr = sexpr
@@ -684,7 +698,7 @@ class FunctionCallDask(FunctionCall):
         self._wrapper_output_file = None
         self._wrapper_output = None
 
-        super().__init__(f'Dask-Library-{id(dag)}', 'execute_graph_vertex', wrapper, key, sexpr, args, keys_of_files)
+        super().__init__(f'Dask-Library-{id(dag)}', 'execute_graph_vertex', wrapper, key, sexpr, args, keys_of_files, extra_task_sleep_time)
         if wrapper:
             wo = m.declare_buffer()
             self.add_output(wo, "wrapper.output")
@@ -729,10 +743,12 @@ class FunctionCallDask(FunctionCall):
         return self._wrapper_output
 
 
-def execute_graph_vertex(wrapper, key, sexpr, args, keys_of_files):
+def execute_graph_vertex(wrapper, key, sexpr, args, keys_of_files, extra_task_sleep_time):
     import traceback
     import cloudpickle
     from ndcctools.taskvine.compat import DaskVineDag
+
+    time.sleep(random.uniform(extra_task_sleep_time[0], extra_task_sleep_time[1]))
 
     def rec_call(sexpr):
         if DaskVineDag.keyp(sexpr) and sexpr in args:

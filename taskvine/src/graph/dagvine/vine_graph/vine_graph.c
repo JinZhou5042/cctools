@@ -1456,6 +1456,8 @@ void vine_graph_execute(struct vine_graph *vg)
 	}
 
 	int wait_timeout = 1;
+	uint64_t throughput_completed_tasks = 0;
+	timestamp_t last_throughput_print_time = 0;
 	struct vine_node *node;
 	while (user_tasks_part->current < user_tasks_part->total) {
 		if (interrupted) {
@@ -1502,6 +1504,11 @@ void vine_graph_execute(struct vine_graph *vg)
 				exit(1);
 			}
 
+			if (task->time_when_commit_end > 0) {
+				vg->time_first_task_dispatched = MIN(vg->time_first_task_dispatched, task->time_when_commit_end);
+			}
+			throughput_completed_tasks++;
+
 			/* in case of failure, resubmit this task */
 			if (node->task->result != VINE_RESULT_SUCCESS || node->task->exit_code != 0) {
 				enqueue_resubmit_node(vg, node);
@@ -1510,7 +1517,6 @@ void vine_graph_execute(struct vine_graph *vg)
 			}
 
 			/* update time metrics */
-			vg->time_first_task_dispatched = MIN(vg->time_first_task_dispatched, task->time_when_commit_end);
 			vg->time_last_task_retrieved = MAX(vg->time_last_task_retrieved, task->time_when_retrieval);
 			if (vg->time_last_task_retrieved < vg->time_first_task_dispatched) {
 				debug(D_ERROR, "task %d time_last_task_retrieved < time_first_task_dispatched: %" PRIu64 " < %" PRIu64, task->task_id, vg->time_last_task_retrieved, vg->time_first_task_dispatched);
@@ -1597,6 +1603,16 @@ void vine_graph_execute(struct vine_graph *vg)
 			node->postprocessing_time = time_when_postprocessing_end - time_when_postprocessing_start;
 		} else {
 			wait_timeout = 1;
+		}
+
+		if (throughput_completed_tasks > 0 && vg->time_first_task_dispatched != UINT64_MAX && vg->time_first_task_dispatched > 0) {
+			timestamp_t now = timestamp_get();
+			if (last_throughput_print_time == 0 || (now - last_throughput_print_time) >= 1000000) {
+				double elapsed_sec = (now > vg->time_first_task_dispatched) ? ((double)(now - vg->time_first_task_dispatched) / 1000000.0) : 0.0;
+				double throughput = elapsed_sec > 0.0 ? (throughput_completed_tasks / elapsed_sec) : 0.0;
+				printf("throughput: %.0f tasks/s\n", throughput);
+				last_throughput_print_time = now;
+			}
 		}
 	}
 

@@ -285,6 +285,9 @@ class DaskVine(Manager):
 
         timeout = 5
         pending = 0
+        throughput_completed_tasks = 0
+        time_first_task_dispatched = None
+        last_throughput_print_time = 0.0
         (bar_progress, bar_update) = self._make_progress_bar(dag.left_to_compute())
         with bar_progress:
             while not self.empty() or enqueued_calls:
@@ -297,11 +300,14 @@ class DaskVine(Manager):
                 ):
                     t = enqueued_calls.pop()
                     self.submit(t)
+                    if time_first_task_dispatched is None:
+                        time_first_task_dispatched = time.time()
                     submitted += 1
                     pending += 1
 
                 t = self.wait_for_tag(tag, timeout)
                 if t:
+                    throughput_completed_tasks += 1
                     timeout = 0
                     pending -= 1
                     if self.verbose:
@@ -337,6 +343,14 @@ class DaskVine(Manager):
                     t = None  # drop task reference
                 else:
                     timeout = 5
+
+                if throughput_completed_tasks > 0 and time_first_task_dispatched is not None:
+                    now = time.time()
+                    if last_throughput_print_time == 0.0 or (now - last_throughput_print_time) >= 1.0:
+                        elapsed_sec = now - time_first_task_dispatched
+                        throughput = (throughput_completed_tasks / elapsed_sec) if elapsed_sec > 0.0 else 0.0
+                        print(f"throughput: {throughput:.0f} tasks/s")
+                        last_throughput_print_time = now
             return self._load_results(dag, indices, keys)
 
     def _make_progress_bar(self, total):
