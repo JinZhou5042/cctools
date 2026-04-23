@@ -3,8 +3,34 @@
 # See the file COPYING for details.
 
 
-from ndcctools.taskvine.utils import load_variable_from_library
 import time
+
+from ndcctools.taskvine.utils import load_variable_from_library
+
+
+def _resolve_nested_legacy_tasks(obj):
+    """Evaluate nested legacy Dask tasks encoded as plain ``(func, *args)`` tuples."""
+    if type(obj) is tuple and obj and callable(obj[0]):
+        func = obj[0]
+        args = tuple(_resolve_nested_legacy_tasks(v) for v in obj[1:])
+        return func(*args)
+
+    if isinstance(obj, list):
+        return [_resolve_nested_legacy_tasks(v) for v in obj]
+
+    if type(obj) is tuple:
+        return tuple(_resolve_nested_legacy_tasks(v) for v in obj)
+
+    if isinstance(obj, dict):
+        return {k: _resolve_nested_legacy_tasks(v) for k, v in obj.items()}
+
+    if isinstance(obj, set):
+        return {_resolve_nested_legacy_tasks(v) for v in obj}
+
+    if isinstance(obj, frozenset):
+        return frozenset(_resolve_nested_legacy_tasks(v) for v in obj)
+
+    return obj
 
 
 def compute_task(bg, task_expr):
@@ -35,11 +61,14 @@ def compute_task(bg, task_expr):
     r_args = bg._visit_task_output_refs(args, on_ref, rewrite=True)
     r_kwargs = bg._visit_task_output_refs(kwargs, on_ref, rewrite=True)
 
+    r_args = _resolve_nested_legacy_tasks(r_args)
+    r_kwargs = _resolve_nested_legacy_tasks(r_kwargs)
+
     return func(*r_args, **r_kwargs)
 
 
 def compute_single_key(vine_key):
-    bg = load_variable_from_library('graph')
+    bg = load_variable_from_library("graph")
 
     task_key = bg.cid2pykey[vine_key]
     task_expr = bg.task_dict[task_key]

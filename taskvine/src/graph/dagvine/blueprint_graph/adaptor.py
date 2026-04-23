@@ -1,3 +1,4 @@
+import hashlib
 from collections.abc import Mapping
 
 try:
@@ -20,6 +21,70 @@ except Exception:
     dts = None
 
 from ndcctools.taskvine.dagvine.blueprint_graph.blueprint_graph import TaskOutputRef, BlueprintGraph
+
+
+def _legacy_subgraph_key(*parts):
+    """Stable short key for expanded subgraph tasks (matches legacy TaskGraph.hash_name)."""
+    return hashlib.sha256("".join(str(p) for p in parts).encode("utf-8")).hexdigest()[:20]
+
+
+def _expand_legacy_subgraph_dsk(task_dict):
+    """Inline `dask.optimization.SubgraphCallable` layers into a flat legacy dsk.
+
+    Only used when TaskSpec (`dask._task_spec`) is unavailable: fused blockwise/subgraphs
+    appear as SubgraphCallable heads and must be expanded before Blueprint conversion.
+    """
+    if not task_dict or dask is None:
+        return task_dict
+    try:
+        from dask.optimization import SubgraphCallable
+    except ImportError:
+        return task_dict
+
+    def _convert_expr_to_task_args(dsk_key, inner_dsk, expr, blockwise_args):
+        try:
+            if expr in inner_dsk:
+                return _legacy_subgraph_key(dsk_key, expr)
+        except Exception:
+            pass
+        # numpy scalars vs Python int keys in inner_dsk (expr in inner_dsk can fail spuriously)
+        if hasattr(expr, "item") and callable(expr.item):
+            try:
+                it = expr.item()
+                if it in inner_dsk:
+                    return _legacy_subgraph_key(dsk_key, it)
+            except Exception:
+                pass
+        if isinstance(expr, list):
+            return [_convert_expr_to_task_args(dsk_key, inner_dsk, item, blockwise_args) for item in expr]
+        if isinstance(expr, tuple):
+            return tuple(_convert_expr_to_task_args(dsk_key, inner_dsk, item, blockwise_args) for item in expr)
+        if isinstance(expr, str) and expr.startswith("__dask_blockwise__"):
+            idx = int(expr.split("__")[-1])
+            return blockwise_args[idx]
+        return expr
+
+    out = {}
+    for k, sexpr in task_dict.items():
+        if isinstance(sexpr, (tuple, list)) and sexpr:
+            head = sexpr[0]
+            tail = sexpr[1:]
+            if isinstance(head, SubgraphCallable):
+                out[k] = _legacy_subgraph_key(k, head.outkey)
+                for sub_key, sub_sexpr in head.dsk.items():
+                    uk = _legacy_subgraph_key(k, sub_key)
+                    out[uk] = _convert_expr_to_task_args(k, head.dsk, sub_sexpr, tail)
+            elif callable(head):
+                out[k] = sexpr
+            else:
+                raise TypeError(
+                    f"Legacy dsk task {k!r} has non-callable head {type(head).__name__}; "
+                    "expected SubgraphCallable or a callable."
+                )
+        else:
+            out[k] = sexpr
+
+    return out
 
 
 def _identity(value):
@@ -74,11 +139,13 @@ class Adaptor:
 
     _LEAF_TYPES = (str, bytes, bytearray, memoryview, int, float, bool, type(None))
 
-    def __init__(self, task_dict):
+    def __init__(self, task_dict, expand_subgraphs=False):
 
         if isinstance(task_dict, BlueprintGraph):
             self.converted = task_dict
             return
+
+        self._expand_subgraphs = expand_subgraphs
 
         # TaskSpec-only state used to "lift" inline Tasks that cannot be reduced to
         # a pure Python value (or would be unsafe/expensive to inline).
@@ -92,6 +159,11 @@ class Adaptor:
 
         normalized = self._normalize_task_dict(task_dict)
         self.converted = self._convert_to_blueprint_tasks(normalized)
+
+    @property
+    def task_dict(self):
+        """Same as ``converted``: normalized ``{key: (func, args, kwargs)}`` blueprint tasks."""
+        return self.converted
 
     def _normalize_task_dict(self, task_dict):
         """Collapse every supported input style into a classic `{key: sexpr or TaskSpec}` mapping."""
@@ -108,11 +180,8 @@ class Adaptor:
             # convention as a positional dict argument, breaking sexpr semantics.
             task_dict = dict(task_dict)
 
-        # Only ask Dask to rewrite legacy graphs when we *know* the input came
-        # from a Dask collection/HLG. This keeps classic DAGVine sexprs stable
-        # even in environments where dask._task_spec is installed.
-        if from_dask_collection and dts and hasattr(dts, "convert_legacy_graph"):
-            task_dict = dts.convert_legacy_graph(task_dict)
+        if self._expand_subgraphs and not dts and task_dict:
+            task_dict = _expand_legacy_subgraph_dsk(task_dict)
 
         return task_dict
 
@@ -223,6 +292,12 @@ class Adaptor:
 
     def _convert_sexpr_task(self, sexpr, task_keys):
         """Handle legacy sexpr-style nodes by replacing embedded task keys with `TaskOutputRef`."""
+        try:
+            if not isinstance(sexpr, (list, tuple)) and sexpr in task_keys:
+                return self._build_expr(_identity, [TaskOutputRef(sexpr)], {})
+        except TypeError:
+            pass
+
         if not isinstance(sexpr, (list, tuple)) or not sexpr:
             raise TypeError(f"Task definition must be a non-empty tuple/list, got {type(sexpr)}")
 
@@ -239,22 +314,42 @@ class Adaptor:
 
         return func, args, kwargs
 
+    def _resolve_graph_key_if_task(self, obj, task_keys):
+        """If ``obj`` denotes another task key in ``task_keys``, return the canonical key; else None.
+
+        Dask graph keys may be str, tuple, int, bytes, or numpy scalars that compare equal to a key.
+        Previously only str was recognized for leaf values, which dropped dependencies after
+        SubgraphCallable expansion.
+        """
+        if isinstance(obj, TaskOutputRef):
+            return None
+        try:
+            if obj in task_keys:
+                return obj
+        except TypeError:
+            pass
+        if hasattr(obj, "item") and callable(obj.item):
+            try:
+                it = obj.item()
+                if it in task_keys:
+                    return it
+            except Exception:
+                pass
+        return None
+
     def _wrap_dependency(self, obj, task_keys):
         """Wrap nested objects inside a sexpr when they point at other tasks."""
         if isinstance(obj, TaskOutputRef):
             return obj
 
-        if self._should_wrap(obj, task_keys):
-            return TaskOutputRef(obj)
+        k = self._resolve_graph_key_if_task(obj, task_keys)
+        if k is not None:
+            return TaskOutputRef(k)
 
         if isinstance(obj, list):
             return [self._wrap_dependency(v, task_keys) for v in obj]
 
         if isinstance(obj, tuple):
-            if obj and callable(obj[0]):
-                head = obj[0]
-                tail = tuple(self._wrap_dependency(v, task_keys) for v in obj[1:])
-                return (head, *tail)
             return tuple(self._wrap_dependency(v, task_keys) for v in obj)
 
         if isinstance(obj, Mapping):
@@ -267,19 +362,6 @@ class Adaptor:
             return frozenset(self._wrap_dependency(v, task_keys) for v in obj)
 
         return obj
-
-    def _should_wrap(self, obj, task_keys):
-        """Decide whether a value should become a `TaskOutputRef`."""
-        if isinstance(obj, self._LEAF_TYPES):
-            if isinstance(obj, str):
-                hit = obj in task_keys
-                return hit
-            return False
-        try:
-            hit = obj in task_keys
-            return hit
-        except TypeError:
-            return False
 
     # Flatten Dask collections into the dict-of-tasks structure the rest of the
     # pipeline expects. DAGVine clients often hand us a dict like
@@ -304,6 +386,7 @@ class Adaptor:
             hlg = HighLevelGraph.merge(*sub_hlgs).to_dict()
         else:
             hlg = dask.base.collections_to_dsk(task_dict.values())
+            hlg = hlg.to_dict()
 
         return ensure_dict(hlg)
 
@@ -438,14 +521,16 @@ class Adaptor:
         for candidate in ("alias_of", "target", "source", "ref"):
             if candidate in fields:
                 raw_value = getattr(alias_node, candidate, None)
-                if self._should_wrap(raw_value, task_keys):
-                    return TaskOutputRef(raw_value, path)
+                k = self._resolve_graph_key_if_task(raw_value, task_keys)
+                if k is not None:
+                    return TaskOutputRef(k, path)
 
         deps = getattr(alias_node, "dependencies", None)
         if deps:
             deps = list(deps)
             if len(deps) == 1:
-                return TaskOutputRef(deps[0], path)
+                k = self._resolve_graph_key_if_task(deps[0], task_keys)
+                return TaskOutputRef(k if k is not None else deps[0], path)
 
         return None
 

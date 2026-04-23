@@ -46,18 +46,25 @@ struct vine_graph {
 	 * as long as the manager can access it. */
 	char *output_dir;
 
-	/* Python-side proxy library name. The context_graph runtime owns this library and sends calls into the vine graph
-	 * so the manager can execute them through the proxy function. */
+	/* Name of the generated proxy library used to run Python work on workers. */
 	char *proxy_library_name;
 
-	/* The proxy function lives inside that library. It receives vine node IDs, looks up the
-	 * Python callable and arguments inside the context_graph runtime, and executes the work. The runtime generates the name
-	 * and shares it with the vine graph. */
+	/* Entry point inside that library. */
 	char *proxy_function_name;
 
-	/* The depth of the pruning strategy. 0 means no pruning, 1 means the most aggressive pruning. */
-	int prune_depth;
 	double checkpoint_fraction; /* 0 - 1, the fraction of intermediate results to checkpoint */
+
+	/* TEMP-only early release knob.
+	 * 0 disables it. 1 means children only. Larger values wait for more
+	 * descendants to complete, so they are more conservative.
+	 * This is weaker than cut and may require later recovery to recompute. */
+	int prune_depth;
+
+	/* Time spent in cut propagation, in microseconds. */
+	timestamp_t time_spent_on_cut_propagation;
+
+	/* Bytes currently live on the shared file system. */
+	uint64_t pfs_usage_bytes;
 
 	task_priority_mode_t task_priority_mode; /* priority mode for task graph task scheduling */
 	double failure_injection_step_percent;	 /* 0 - 100, the percentage of steps to inject failure */
@@ -70,14 +77,13 @@ struct vine_graph {
 	int enable_debug_log;	 /* whether to enable debug log */
 	int print_graph_details; /* whether to print the graph details */
 
-	int auto_recovery; /* whether to enable auto recovery */
-
 	int max_retry_attempts;	   /* the maximum number of times to retry a task */
 	double retry_interval_sec; /* the interval between retries in seconds, 0 means no retry interval */
 
 	timestamp_t time_first_task_dispatched; /* the time when the first task is dispatched */
 	timestamp_t time_last_task_retrieved;	/* the time when the last task is retrieved */
 	timestamp_t makespan_us;		/* the makespan of the vine graph in microseconds */
+	uint64_t completed_recovery_tasks; /* recovery tasks seen complete in vine_graph_execute */
 };
 
 /* Public APIs for operating the vine graph */
@@ -182,5 +188,17 @@ int vine_graph_tune(struct vine_graph *vg, const char *name, const char *value);
 @return The makespan in microseconds.
 */
 uint64_t vine_graph_get_makespan_us(const struct vine_graph *vg);
+
+/** Get the total number of recovery tasks submitted by the manager.
+@param vg Reference to the vine graph.
+@return Total submitted recovery tasks.
+*/
+uint64_t vine_graph_get_total_recovery_tasks(const struct vine_graph *vg);
+
+/** Get the number of recovery tasks completed while executing this graph.
+@param vg Reference to the vine graph.
+@return Completed recovery tasks.
+*/
+uint64_t vine_graph_get_completed_recovery_tasks(const struct vine_graph *vg);
 
 #endif // VINE_GRAPH_H

@@ -28,6 +28,40 @@ try:
 except ImportError:
     rich = None
 
+
+def _rep_key(k, r):
+    """Match DAGVine._rep_key: first replica keeps original keys."""
+    return k if r == 0 else ("__rep", r, k)
+
+
+def _rewrite_dask_sexpr(sexpr, orig_keys, r):
+    """Rewrite dependency keys inside a dask value for replica index r."""
+    # Only hashable values can be graph keys; `list in set` raises TypeError.
+    if DaskVineDag.hashable(sexpr) and sexpr in orig_keys:
+        return _rep_key(sexpr, r)
+    if DaskVineDag.taskp(sexpr):
+        return (sexpr[0],) + tuple(_rewrite_dask_sexpr(a, orig_keys, r) for a in sexpr[1:])
+    if DaskVineDag.listp(sexpr):
+        return [_rewrite_dask_sexpr(a, orig_keys, r) for a in sexpr]
+    return sexpr
+
+
+def replicate_legacy_dask_graph(dsk, keys_flatten, repeats):
+    """Replicate a tuple-based dask graph like DAGVine._replicate_graph."""
+    if repeats <= 1:
+        return dsk, list(keys_flatten)
+    orig_keys = set(dsk.keys())
+    expanded = {}
+    for r in range(repeats):
+        for k, v in dsk.items():
+            nk = _rep_key(k, r)
+            expanded[nk] = _rewrite_dask_sexpr(v, orig_keys, r)
+    vine_targets = list(keys_flatten)
+    for rr in range(1, repeats):
+        vine_targets.extend(_rep_key(k, rr) for k in keys_flatten if k in dsk)
+    return expanded, vine_targets
+
+
 ##
 # @class ndcctools.taskvine.dask_executor.DaskVine
 #
@@ -108,6 +142,8 @@ class DaskVine(Manager):
     #                      Should return a tuple of (wrapper result, dask call result). Use for debugging.
     # @param wrapper_proc  Function to process results from wrapper on completion. (default is print)
     # @param prune_depth Control pruning behavior: 0 (default) - no pruning, 1 - only check direct consumers, 2+ - check consumers up to specified depth
+    # @param repeats     Replicate the entire graph this many times (like DAGVine.run(repeats=...)).
+    #                      Extra replicas use keys ("__rep", r, k). Only the first replica's results are returned for keys.
     def get(self, dsk, keys, *,
             environment=None,
             extra_files=None,
@@ -139,11 +175,17 @@ class DaskVine(Manager):
             import_modules=None,    # Deprecated, use lib_modules
             lazy_transfers=True,    # Deprecated, use worker_tranfers
             extra_task_sleep_time=(0, 0),
+            repeats=1,
             ):
         try:
             self.set_property("framework", "dask")
             if retries and retries < 1:
                 raise ValueError("retries should be larger than 0")
+            if repeats is None:
+                repeats = 1
+            repeats = int(repeats)
+            if repeats < 1:
+                raise ValueError("repeats should be >= 1")
 
             if isinstance(environment, str):
                 self.environment = self.declare_poncho(environment, cache=True)
@@ -206,7 +248,7 @@ class DaskVine(Manager):
                 self.environment_name = os.path.basename(environment)
                 self.environment = None
 
-            return self._dask_execute(dsk, keys)
+            return self._dask_execute(dsk, keys, repeats=repeats)
         except Exception as e:
             # unhandled exceptions for now
             raise e
@@ -216,10 +258,13 @@ class DaskVine(Manager):
     def __call__(self, *args, **kwargs):
         return self.get(*args, **kwargs)
 
-    def _dask_execute(self, dsk, keys):
+    def _dask_execute(self, dsk, keys, repeats=1):
 
         indices = {k: inds for (k, inds) in find_dask_keys(keys)}
-        keys_flatten = indices.keys()
+        keys_flatten = list(indices.keys())
+
+        if repeats > 1:
+            dsk, keys_flatten = replicate_legacy_dask_graph(dsk, keys_flatten, repeats)
 
         time_start = time.time()
         dag = DaskVineDag(dsk, low_memory_mode=self.low_memory_mode, prune_depth=self.prune_depth)
@@ -270,11 +315,10 @@ class DaskVine(Manager):
 
         timeout = 5
         pending = 0
-        throughput_completed_tasks = 0
         time_first_task_dispatched = None
-        last_throughput_print_time = 0.0
+        total_user_tasks = dag.left_to_compute()
 
-        (bar_progress, bar_update) = self._make_progress_bar(dag.left_to_compute())
+        (bar_progress, bar_update) = self._make_progress_bar(total_user_tasks)
         with bar_progress:
             while not self.empty() or enqueued_calls:
                 submitted = 0
@@ -292,7 +336,6 @@ class DaskVine(Manager):
 
                 t = self.wait_for_tag(tag, timeout)
                 if t:
-                    throughput_completed_tasks += 1
                     timeout = 0
                     pending -= 1
                     if self.verbose:
@@ -308,8 +351,9 @@ class DaskVine(Manager):
                         if self.wrapper:
                             self.wrapper_proc(t.load_wrapper_output(self))
 
-                        if t.key in dsk:
-                            bar_update(advance=1)
+                        # Advance once per successfully completed DAG task (do not gate on `key in dsk`:
+                        # that can miss vertices for several graph shapes, e.g. low_memory_mode uuid keys).
+                        bar_update(advance=1)
 
                         if self.prune_depth > 0:
                             for p in dag.pending_producers[t.key]:
@@ -328,13 +372,13 @@ class DaskVine(Manager):
                 else:
                     timeout = 5
 
-                if throughput_completed_tasks > 0 and time_first_task_dispatched is not None:
-                    now = time.time()
-                    if last_throughput_print_time == 0.0 or (now - last_throughput_print_time) >= 1.0:
-                        elapsed_sec = now - time_first_task_dispatched
-                        throughput = (throughput_completed_tasks / elapsed_sec) if elapsed_sec > 0.0 else 0.0
-                        print(f"throughput: {throughput:.0f} tasks/s")
-                        last_throughput_print_time = now
+            total_recovery_tasks = self.stats.tasks_recovery
+            total_tasks_completed = total_user_tasks + total_recovery_tasks
+            makespan_s = round((time.time() - time_first_task_dispatched), 6) if time_first_task_dispatched is not None else 0.0
+            throughput_tps = round(total_tasks_completed / makespan_s, 6) if makespan_s > 0.0 else 0.0
+            print(f"=== Makespan: {makespan_s:.6f} seconds")
+            print(f"=== Total tasks completed: {total_tasks_completed}")
+            print(f"=== Throughput: {throughput_tps:.6f} tasks/s")
             return self._load_results(dag, indices, keys)
 
     def _make_progress_bar(self, total):

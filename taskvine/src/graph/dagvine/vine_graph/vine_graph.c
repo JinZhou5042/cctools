@@ -84,20 +84,20 @@ static double calculate_task_priority(struct vine_node *node, task_priority_mode
 	case TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST:
 		LIST_ITERATE(node->parents, parent_node)
 		{
-			if (!parent_node->outfile) {
+			if (!parent_node->fn_return_file) {
 				continue;
 			}
-			priority += (double)vine_file_size(parent_node->outfile);
+			priority += (double)vine_file_size(parent_node->fn_return_file);
 		}
 		break;
 	case TASK_PRIORITY_MODE_LARGEST_STORAGE_FOOTPRINT_FIRST:
 		LIST_ITERATE(node->parents, parent_node)
 		{
-			if (!parent_node->outfile) {
+			if (!parent_node->fn_return_file) {
 				continue;
 			}
 			timestamp_t parent_task_completion_time = parent_node->task->time_workers_execute_last;
-			priority += (double)vine_file_size(parent_node->outfile) * (double)parent_task_completion_time;
+			priority += (double)vine_file_size(parent_node->fn_return_file) * (double)parent_task_completion_time;
 		}
 		break;
 	}
@@ -350,14 +350,14 @@ static void assign_node_outfile_local(struct vine_graph *vg, struct vine_node *n
 {
 	node->outfile_type = NODE_OUTFILE_TYPE_LOCAL;
 	char *local_outfile_path = string_format("%s/%s", vg->output_dir, node->outfile_remote_name);
-	node->outfile = vine_declare_file(vg->manager, local_outfile_path, VINE_CACHE_LEVEL_WORKFLOW, 0);
+	node->fn_return_file = vine_declare_file(vg->manager, local_outfile_path, VINE_CACHE_LEVEL_WORKFLOW, 0);
 	free(local_outfile_path);
 }
 
 static void assign_node_outfile_temp(struct vine_graph *vg, struct vine_node *node)
 {
 	node->outfile_type = NODE_OUTFILE_TYPE_TEMP;
-	node->outfile = vine_declare_temp(vg->manager);
+	node->fn_return_file = vine_declare_temp(vg->manager);
 }
 
 /**
@@ -432,10 +432,10 @@ static void compute_upstream_downstream_and_heavy_scores(struct vine_graph *vg, 
 }
 
 /**
- * Map a TaskVine task back to its vine node.
+ * Map a task object reported by the manager back to the owning graph node.
  * @param vg Reference to the vine graph.
- * @param task Task reported by the manager.
- * @return Matching node.
+ * @param task Task handle as returned from the wait API.
+ * @return Matching node, or NULL.
  */
 static struct vine_node *get_node_by_task(struct vine_graph *vg, struct vine_task *task)
 {
@@ -447,8 +447,8 @@ static struct vine_node *get_node_by_task(struct vine_graph *vg, struct vine_tas
 		/* standard tasks are mapped directly to a node */
 		return itable_lookup(vg->task_id_to_node, (uint64_t)task->task_id);
 	} else if (task->type == VINE_TASK_TYPE_RECOVERY) {
-		/* note that recovery tasks are not mapped to any node but we still need the original node for pruning,
-		 * so we look up the outfile of the task, then map it back to get the original node */
+		/* Recovery tasks are not in the per-node task-id map; recover the
+		 * producer by following the file’s original producer id. */
 		struct vine_mount *mount;
 		LIST_ITERATE(task->output_mounts, mount)
 		{
@@ -464,210 +464,325 @@ static struct vine_node *get_node_by_task(struct vine_graph *vg, struct vine_tas
 	return NULL;
 }
 
-/**
- * Prune the ancestors of a persisted node. This is only used for persisted nodes that produce persisted files.
- * All ancestors we consider here include both temp nodes and persisted nodes, because data written to the shared file system
- * is safe and can definitely trigger upstream data redundancy to be released.
- * @param vg Reference to the vine graph.
- * @param node Reference to the node object.
- * @return The number of pruned replicas.
- */
-static int prune_ancestors_of_persisted_node(struct vine_graph *vg, struct vine_node *node)
+/* Shared-FS byte accounting.
+ * vg->pfs_usage_bytes should equal the sum of node->pfs_credited_bytes.
+ * We update it when a PFS output is observed on success, and when that
+ * path is later deleted. */
+
+/* Update the global PFS byte count after stat'ing a node's output. */
+static void pfs_account_write(struct vine_graph *vg, struct vine_node *n, size_t new_size)
 {
-	if (!vg || !node) {
-		return -1;
+	if (!vg || !n) {
+		return;
 	}
 
-	timestamp_t time_start = timestamp_get();
-
-	/* find all safe ancestors */
-	struct set *safe_ancestors = vine_node_find_safe_ancestors(node);
-	if (!safe_ancestors) {
-		return 0;
+	size_t prev = n->pfs_credited_bytes;
+	if (new_size == prev) {
+		return;
 	}
 
-	int pruned_replica_count = 0;
-
-	/* prune all safe ancestors */
-	struct vine_node *ancestor_node;
-	SET_ITERATE(safe_ancestors, ancestor_node)
-	{
-		switch (ancestor_node->outfile_type) {
-		case NODE_OUTFILE_TYPE_LOCAL:
-			/* do not prune the local file */
-			break;
-		case NODE_OUTFILE_TYPE_TEMP:
-			/* prune the temp file */
-			vine_prune_file(vg->manager, ancestor_node->outfile);
-			break;
-		case NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
-			/* unlink directly from the shared file system */
-			unlink(ancestor_node->outfile_remote_name);
-			break;
-		}
-		ancestor_node->prune_status = PRUNE_STATUS_SAFE;
-		pruned_replica_count++;
+	if (new_size > prev) {
+		vg->pfs_usage_bytes += (new_size - prev);
+	} else {
+		vg->pfs_usage_bytes -= (prev - new_size);
 	}
+	n->pfs_credited_bytes = new_size;
 
-	set_delete(safe_ancestors);
-
-	node->time_spent_on_prune_ancestors_of_persisted_node += timestamp_get() - time_start;
-
-	return pruned_replica_count;
+	debug(D_VINE,
+			"pfs write: node %" PRIu64 " size=%zu (prev=%zu) usage=%" PRIu64,
+			n->node_id,
+			new_size,
+			prev,
+			vg->pfs_usage_bytes);
 }
 
-/**
- * Prune the ancestors of a temp node.
- * This function opportunistically releases upstream temporary files
- * that are no longer needed once this temp-producing node has completed.
- *
- * Only ancestors producing temporary outputs are considered here.
- * Files stored in the shared filesystem are never pruned by this function,
- * because temp outputs are not considered sufficiently safe to trigger
- * deletion of persisted data upstream.
- * @param vg Reference to the vine graph.
- * @param node Reference to the node object.
- * @return The number of pruned replicas.
- */
-static int prune_ancestors_of_temp_node(struct vine_graph *vg, struct vine_node *node)
+/* Remove this node's credited PFS bytes from the global total. */
+static void pfs_account_delete(struct vine_graph *vg, struct vine_node *n)
 {
-	if (!vg || !node || !node->outfile || node->prune_depth <= 0) {
+	if (!vg || !n) {
+		return;
+	}
+
+	size_t credited = n->pfs_credited_bytes;
+	if (credited == 0) {
+		return;
+	}
+
+	vg->pfs_usage_bytes -= credited;
+	n->pfs_credited_bytes = 0;
+
+	debug(D_VINE,
+			"pfs delete: node %" PRIu64 " size=%zu usage=%" PRIu64,
+			n->node_id,
+			credited,
+			vg->pfs_usage_bytes);
+}
+
+/* Cut propagation.
+ * anchored(n): completed and on LOCAL/PFS, so recovery does not walk past it.
+ * cut(n): completed, and every child is anchored or already cut.
+ * Once a non-target node is cut, its return can be deleted. TEMP goes through
+ * vine_prune_file(); LOCAL/PFS unlink the path directly. */
+
+/* Return 1 if this node is complete and on durable storage. */
+static int node_is_anchored(const struct vine_node *n)
+{
+	if (!n || !n->completed) {
+		return 0;
+	}
+	return n->outfile_type == NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM || n->outfile_type == NODE_OUTFILE_TYPE_LOCAL;
+}
+
+/* TEMP output is being regenerated by recovery; don't treat it as settled yet. */
+static int node_is_mid_recovery(const struct vine_node *n)
+{
+	if (!n || !n->fn_return_file || n->fn_return_file->type != VINE_TEMP) {
+		return 0;
+	}
+	struct vine_task *rt = n->fn_return_file->recovery_task;
+	if (!rt) {
+		return 0;
+	}
+	/* INITIAL = never submitted, DONE = last run finished successfully.
+	 * Everything else (READY, RUNNING, WAITING_RETRIEVAL, RETRIEVED)
+	 * means the manager has (re-)submitted the task and is currently
+	 * depending on N's inputs. */
+	return rt->state != VINE_TASK_INITIAL && rt->state != VINE_TASK_DONE;
+}
+
+/* Delete this node's return path. Caller must already know it is safe. */
+static void delete_node_return_file(struct vine_graph *vg, struct vine_node *n)
+{
+	if (!vg || !n) {
+		return;
+	}
+
+	switch (n->outfile_type) {
+	case NODE_OUTFILE_TYPE_TEMP:
+		/* Temp outputs live on workers; go through the manager so every
+		 * replica (and cached_name bookkeeping) is released consistently. */
+		if (n->fn_return_file) {
+			vine_prune_file(vg->manager, n->fn_return_file);
+		}
+		break;
+	case NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
+		/* For PFS nodes, outfile_remote_name is the full path. Debit
+		 * accounting first so the counters stay consistent even if
+		 * unlink() fails (the data is considered dispensable and will
+		 * be rewritten on any future re-run). */
+		pfs_account_delete(vg, n);
+		if (n->outfile_remote_name) {
+			unlink(n->outfile_remote_name);
+		}
+		break;
+	case NODE_OUTFILE_TYPE_LOCAL:
+		/* For LOCAL nodes the physical path is outfile->source
+		 * (<output_dir>/<outfile_remote_name>); prefer that over
+		 * reconstructing the path ourselves. */
+		if (n->fn_return_file && n->fn_return_file->source) {
+			unlink(n->fn_return_file->source);
+		}
+		break;
+	}
+}
+
+/* Try to cut a node. Returns 1 only on a new transition to cut. */
+static int try_cut_node(struct vine_graph *vg, struct vine_node *n)
+{
+	if (!vg || !n || n->cut || !n->completed) {
 		return 0;
 	}
 
-	timestamp_t start_time = timestamp_get();
-
-	int pruned_replica_count = 0;
-
-	struct list *parents = vine_node_find_parents_by_depth(node, node->prune_depth);
-
-	struct vine_node *parent_node;
-	LIST_ITERATE(parents, parent_node)
+	struct vine_node *c;
+	LIST_ITERATE(n->children, c)
 	{
-		/* skip if the parent does not produce a temp file */
-		if (parent_node->outfile_type != NODE_OUTFILE_TYPE_TEMP) {
-			continue;
+		/* child must be anchored or cut, and not in the middle of recovery */
+		if ((!node_is_anchored(c) && !c->cut) || node_is_mid_recovery(c)) {
+			return 0;
 		}
+	}
 
-		/* a file is prunable if its outfile is no longer needed by any child node:
-		 * 1. it has no pending dependents
-		 * 2. all completed dependents have also completed their corresponding recovery tasks, if any */
-		int all_children_completed = 1;
-		struct vine_node *child_node;
-		LIST_ITERATE(parent_node->children, child_node)
-		{
-			/* break early if the child node is not completed */
-			if (!child_node->completed) {
-				all_children_completed = 0;
-				break;
+	n->cut = 1;
+
+	debug(D_VINE, "cut: node %" PRIu64 " outfile_type=%d is_target=%d", n->node_id, n->outfile_type, n->is_target);
+
+	/* Keep target outputs around. */
+	if (!n->is_target) {
+		delete_node_return_file(vg, n);
+	}
+
+	return 1;
+}
+
+/* Re-check `start`, then walk upward until cut state stops changing. */
+static void propagate_cut_from(struct vine_graph *vg, struct vine_node *start)
+{
+	if (!vg || !start || !start->completed) {
+		return;
+	}
+
+	timestamp_t t0 = timestamp_get();
+
+	try_cut_node(vg, start);
+
+	struct list *worklist = list_create();
+	struct vine_node *p;
+	LIST_ITERATE(start->parents, p)
+	{
+		list_push_tail(worklist, p);
+	}
+
+	while (list_size(worklist) > 0) {
+		struct vine_node *m = list_pop_head(worklist);
+		if (try_cut_node(vg, m)) {
+			LIST_ITERATE(m->parents, p)
+			{
+				list_push_tail(worklist, p);
 			}
-			/* if the task produces a temp file and the recovery task is running, the parent is not prunable */
-			if (child_node->outfile && child_node->outfile->type == VINE_TEMP) {
-				struct vine_task *child_node_recovery_task = child_node->outfile->recovery_task;
-				if (child_node_recovery_task && (child_node_recovery_task->state != VINE_TASK_INITIAL && child_node_recovery_task->state != VINE_TASK_DONE)) {
-					all_children_completed = 0;
+		}
+	}
+
+	list_delete(worklist);
+
+	vg->time_spent_on_cut_propagation += timestamp_get() - t0;
+}
+
+/* prune-depth release.
+ * TEMP only. If a completed non-target node has every descendant within k child
+ * hops completed, we may drop its TEMP return before cut would allow it.
+ * This is weaker than cut and may force later recovery to recompute the node.
+ * LOCAL/PFS are not touched here. */
+
+/* Level-order walk. Returns 0 if any descendant is incomplete or mid-recovery. */
+static int all_descendants_within_depth_completed(struct vine_node *a, int depth)
+{
+	if (!a || depth <= 0) {
+		return 1;
+	}
+
+	struct set *visited = set_create(0);
+	struct list *current = list_create();
+	list_push_tail(current, a);
+	set_insert(visited, a);
+
+	int ok = 1;
+	for (int d = 0; d < depth && ok; d++) {
+		struct list *next = list_create();
+		struct vine_node *n;
+		LIST_ITERATE(current, n)
+		{
+			struct vine_node *c;
+			LIST_ITERATE(n->children, c)
+			{
+				if (set_lookup(visited, c)) {
+					continue;
+				}
+				set_insert(visited, c);
+				/* mid-recovery still counts as unsettled */
+				if (!c->completed || node_is_mid_recovery(c)) {
+					ok = 0;
 					break;
 				}
+				list_push_tail(next, c);
+			}
+			if (!ok) {
+				break;
 			}
 		}
-		if (!all_children_completed) {
-			continue;
-		}
-
-		pruned_replica_count += vine_prune_file(vg->manager, parent_node->outfile);
-		/* this parent is pruned because a successor that produces a temp file is completed, it is unsafe because the
-		 * manager may submit a recovery task to bring it back in case of worker failures. */
-		parent_node->prune_status = PRUNE_STATUS_UNSAFE;
+		list_delete(current);
+		current = next;
 	}
 
-	list_delete(parents);
-
-	node->time_spent_on_prune_ancestors_of_temp_node += timestamp_get() - start_time;
-
-	return pruned_replica_count;
+	list_delete(current);
+	set_delete(visited);
+	return ok;
 }
 
-/**
- * Prune the ancestors of a node when it is completed.
- * @param node Reference to the node object.
- */
-static void prune_ancestors_of_node(struct vine_graph *vg, struct vine_node *node)
+/* Early-release one TEMP node if it now meets prune-depth. */
+static void try_prune_depth_release(struct vine_graph *vg, struct vine_node *a)
+{
+	if (!vg || !a) {
+		return;
+	}
+	if (a->prune_depth_pruned) {
+		return;
+	}
+	if (a->outfile_type != NODE_OUTFILE_TYPE_TEMP) {
+		return;
+	}
+	if (a->is_target) {
+		return;
+	}
+	if (!a->completed || !a->fn_return_file) {
+		return;
+	}
+	if (!all_descendants_within_depth_completed(a, vg->prune_depth)) {
+		return;
+	}
+
+	delete_node_return_file(vg, a);
+	a->prune_depth_pruned = 1;
+
+	debug(D_VINE, "prune-depth release: node %" PRIu64 " depth=%d", a->node_id, vg->prune_depth);
+}
+
+/* After a completion, re-check this node and ancestors out to k hops. */
+static void apply_prune_depth_from(struct vine_graph *vg, struct vine_node *node)
 {
 	if (!vg || !node) {
 		return;
 	}
-
-	/* do not prune if the node has not completed */
-	if (!node->completed) {
+	int k = vg->prune_depth;
+	if (k <= 0) {
 		return;
 	}
 
-	timestamp_t start_time = timestamp_get();
+	try_prune_depth_release(vg, node);
 
-	int pruned_replica_count = 0;
+	struct set *visited = set_create(0);
+	struct list *current = list_create();
+	list_push_tail(current, node);
+	set_insert(visited, node);
 
-	switch (node->outfile_type) {
-	case NODE_OUTFILE_TYPE_LOCAL:
-	case NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
-		/* If the outfile was declared as a VINE_FILE or was written to the shared fs, then it is guaranteed to be persisted
-		 * and there is no chance that it will be lost unexpectedly. So we can safely prune all ancestors of this node. */
-		pruned_replica_count = prune_ancestors_of_persisted_node(vg, node);
-		break;
-	case NODE_OUTFILE_TYPE_TEMP:
-		/* Otherwise, if the node outfile is a temp file, we need to be careful about pruning, because temp files are prone
-		 * to failures, while means they can be lost due to node evictions or failures. */
-		pruned_replica_count = prune_ancestors_of_temp_node(vg, node);
-		break;
+	for (int d = 1; d <= k; d++) {
+		struct list *next = list_create();
+		struct vine_node *n;
+		LIST_ITERATE(current, n)
+		{
+			struct vine_node *p;
+			LIST_ITERATE(n->parents, p)
+			{
+				if (set_lookup(visited, p)) {
+					continue;
+				}
+				set_insert(visited, p);
+				list_push_tail(next, p);
+				try_prune_depth_release(vg, p);
+			}
+		}
+		list_delete(current);
+		current = next;
 	}
 
-	timestamp_t elapsed_time = timestamp_get() - start_time;
-
-	debug(D_VINE, "pruned %d ancestors of node %" PRIu64 " in %.6f seconds", pruned_replica_count, node->node_id, elapsed_time / 1000000.0);
-
-	return;
+	list_delete(current);
+	set_delete(visited);
 }
 
-/**
- * Print the time metrics of the vine graph to a csv file.
- * @param vg Reference to the vine graph.
- * @param filename Reference to the filename of the csv file.
- */
-static void print_time_metrics(struct vine_graph *vg, const char *filename)
-{
-	if (!vg) {
-		return;
-	}
+/* Per-iteration cap on how many queued nodes resubmit processing will handle.
+ * Prevents a single pass from monopolizing the main loop when a large batch of
+ * tasks fails at once; the remainder is picked up on the next iteration. */
+#define RESUBMIT_SCAN_LIMIT 100
 
-	/* first delete the file if it exists */
-	if (access(filename, F_OK) != -1) {
-		unlink(filename);
-	}
-
-	/* print the header as a csv file */
-	FILE *fp = fopen(filename, "w");
-	if (!fp) {
-		debug(D_ERROR, "failed to open file %s", filename);
-		return;
-	}
-	fprintf(fp, "node_id,submission_time_us,commit_time_us,execution_time_us,retrieval_time_us,postprocessing_time_us\n");
-
-	uint64_t nid;
-	struct vine_node *node;
-	ITABLE_ITERATE(vg->nodes, nid, node)
-	{
-		fprintf(fp, "%" PRIu64 "," TIMESTAMP_FORMAT "," TIMESTAMP_FORMAT "," TIMESTAMP_FORMAT "," TIMESTAMP_FORMAT "," TIMESTAMP_FORMAT "\n", node->node_id, node->submission_time, node->commit_time, node->execution_time, node->retrieval_time, node->postprocessing_time);
-	}
-	fclose(fp);
-
-	return;
-}
+/* Minimum delay (in microseconds) between a node's failure and its next retry.
+ * Smooths out transient failures (e.g. worker evictions clustered in time) and
+ * avoids hot-looping on a deterministically-failing task. */
+#define RESUBMIT_COOLDOWN_USECS ((timestamp_t)1000000)
 
 /**
- * Enqueue a node to be resubmitted later.
- * @param vg Reference to the vine graph.
- * @param node Reference to the node.
+ * Queue a node to be retried later. Idempotent: a node already on the queue
+ * is left in place, preserving its original failure timestamp.
  */
-static void enqueue_resubmit_node(struct vine_graph *vg, struct vine_node *node)
+static void queue_node_for_retry(struct vine_graph *vg, struct vine_node *node)
 {
 	if (!vg || !node) {
 		return;
@@ -682,81 +797,92 @@ static void enqueue_resubmit_node(struct vine_graph *vg, struct vine_node *node)
 	node->in_resubmit_queue = 1;
 }
 
-/* Try to resubmit a previously failed node.
- * @return 1 if a node was actually resubmitted (reset + submit invoked), 0 otherwise. */
-static int try_resubmitting_node(struct vine_graph *vg)
+/* Drain the resubmit queue: reset + resubmit up to RESUBMIT_SCAN_LIMIT nodes,
+ * skipping any whose cooldown has not yet elapsed.
+ *
+ * FIFO invariant: nodes are pushed at enqueue time with monotonically-increasing
+ * timestamps, so the head is always the oldest failure. If the head is still in
+ * cooldown, every later entry is younger and also in cooldown, so we can stop
+ * scanning immediately.
+ *
+ * When a wait call returns a completed task, the task object is in DONE
+ * state, so resetting it for a fresh submit is safe.  Input-missing and
+ * temp recovery are handled inside the manager; this path only covers
+ * application-level outcomes the manager surfaces as completed tasks
+ * (failed results, bad exits, missing artifacts on shared storage, etc.). */
+static void drain_resubmit_queue(struct vine_graph *vg)
 {
 	if (!vg) {
-		return 0;
+		return;
 	}
 
-	struct vine_node *node = list_pop_head(vg->resubmit_queue);
-	if (!node) {
-		return 0;
-	}
-	node->in_resubmit_queue = 0;
+	timestamp_t now = timestamp_get();
+	int queued = list_size(vg->resubmit_queue);
+	int budget = queued < RESUBMIT_SCAN_LIMIT ? queued : RESUBMIT_SCAN_LIMIT;
 
-	/* if the task failed due to inputs missing, we must submit the producer tasks for the lost data */
-	int all_inputs_ready = 1;
-	if (node->task->result == VINE_RESULT_INPUT_MISSING) {
-		struct vine_mount *m;
-		struct list *missing_input_files = list_create();
-		LIST_ITERATE(node->task->input_mounts, m)
-		{
-			struct vine_file *f = m->file;
-			/* this is a temp file, it has a producer task id and the task pointer is null */
-			if (f->type != VINE_TEMP) {
-				continue;
-			}
-			if (vine_temp_exists_somewhere(vg->manager, f)) {
-				continue;
-			}
-			if (itable_lookup(vg->manager->tasks, f->original_producer_task_id)) {
-				continue;
-			}
-			/* get the original producer node by task id */
-			struct vine_node *original_producer_node = itable_lookup(vg->task_id_to_node, f->original_producer_task_id);
-			if (!original_producer_node) {
-				continue;
-			}
-			enqueue_resubmit_node(vg, original_producer_node);
-			all_inputs_ready = 0;
-			list_push_tail(missing_input_files, f);
+	for (int i = 0; i < budget; i++) {
+		struct vine_node *node = list_peek_head(vg->resubmit_queue);
+		if (!node) {
+			break;
 		}
-		if (list_size(missing_input_files) > 0) {
-			char *missing_input_files_str = xxstrdup("");
-			struct vine_file *f;
-			while ((f = list_pop_head(missing_input_files))) {
-				missing_input_files_str = string_format("%s%s%s", missing_input_files_str, f->cached_name, " ");
-			}
-			debug(D_DEBUG, "node %" PRIu64 " has missing input files: %s", node->node_id, missing_input_files_str);
-			free(missing_input_files_str);
+		if (now - node->last_failure_time < RESUBMIT_COOLDOWN_USECS) {
+			break;
 		}
-		list_delete(missing_input_files);
-	}
 
-	/* if not all inputs are ready, enqueue the node and consider later */
-	if (!all_inputs_ready) {
-		enqueue_resubmit_node(vg, node);
+		list_pop_head(vg->resubmit_queue);
+		node->in_resubmit_queue = 0;
+
+		if (--node->retry_attempts_left < 0) {
+			debug(D_ERROR, "node %" PRIu64 " has no retries left. Aborting.", node->node_id);
+			vine_graph_delete(vg);
+			exit(1);
+		}
+
+		debug(D_VINE, "Resubmitting node %" PRIu64 " (remaining=%d)", node->node_id, node->retry_attempts_left);
+		vine_task_reset(node->task);
+		submit_node_task(vg, node);
+	}
+}
+
+/* Decide whether a just-retrieved task is successful and, on any kind of
+ * failure, enqueue its node for resubmission. Returns 1 on success, 0 on
+ * failure (caller must skip post-processing and continue the main loop).
+ *
+ * Two failure modes are handled uniformly:
+ *   1. Manager-reported failure: non-SUCCESS result code or non-zero exit.
+ *   2. Output-missing failure: for sharedfs outputs, the declared output
+ *      file cannot be stat()-ed (worker reported success but no artifact).
+ *
+ * On success, `outfile_size_bytes` is filled from the on-disk size for PFS
+ * returns, or from the in-memory size recorded on the return object for
+ * local/temp storage. */
+static int validate_task_or_enqueue(struct vine_graph *vg, struct vine_node *node)
+{
+	struct vine_task *task = node->task;
+
+	if (task->result != VINE_RESULT_SUCCESS || task->exit_code != 0) {
+		debug(D_VINE, "Task %d failed (result=%d, exit=%d)", task->task_id, task->result, task->exit_code);
+		queue_node_for_retry(vg, node);
 		return 0;
 	}
 
-	timestamp_t interval = timestamp_get() - node->last_failure_time;
-
-	if (interval <= vg->retry_interval_sec * 1e6) {
-		enqueue_resubmit_node(vg, node);
-		return 0;
+	switch (node->outfile_type) {
+	case NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM: {
+		struct stat info;
+		if (stat(node->outfile_remote_name, &info) < 0) {
+			debug(D_VINE, "Task %d succeeded but missing sharedfs output %s", task->task_id, node->outfile_remote_name);
+			queue_node_for_retry(vg, node);
+			return 0;
+		}
+		node->outfile_size_bytes = info.st_size;
+		pfs_account_write(vg, node, (size_t)info.st_size);
+		break;
 	}
-
-	if (node->retry_attempts_left-- <= 0) {
-		debug(D_ERROR, "node %" PRIu64 " has no retries left. Aborting.", node->node_id);
-		vine_graph_delete(vg);
-		exit(1);
+	case NODE_OUTFILE_TYPE_LOCAL:
+	case NODE_OUTFILE_TYPE_TEMP:
+		node->outfile_size_bytes = node->fn_return_file->size;
+		break;
 	}
-
-	debug(D_VINE, "Resubmitting node %" PRIu64 " (remaining=%d)", node->node_id, node->retry_attempts_left);
-	vine_task_reset(node->task);
-	submit_node_task(vg, node);
 
 	return 1;
 }
@@ -811,7 +937,12 @@ int vine_graph_tune(struct vine_graph *vg, const char *name, const char *value)
 		vg->output_dir = xxstrdup(value);
 
 	} else if (strcmp(name, "prune-depth") == 0) {
-		vg->prune_depth = atoi(value);
+		int k = atoi(value);
+		if (k < 0) {
+			debug(D_ERROR, "invalid prune-depth: %s (must be >= 0; 0 disables prune-depth release)", value);
+			return -1;
+		}
+		vg->prune_depth = k;
 
 	} else if (strcmp(name, "checkpoint-fraction") == 0) {
 		double fraction = atof(value);
@@ -882,14 +1013,8 @@ int vine_graph_tune(struct vine_graph *vg, const char *name, const char *value)
 			debug_close();
 		}
 
-	} else if (strcmp(name, "auto-recovery") == 0) {
-		vg->auto_recovery = (atoi(value) == 1) ? 1 : 0;
-
 	} else if (strcmp(name, "max-retry-attempts") == 0) {
 		vg->max_retry_attempts = MAX(0, atoi(value));
-
-	} else if (strcmp(name, "retry-interval-sec") == 0) {
-		vg->retry_interval_sec = MAX(0.0, atof(value));
 
 	} else if (strcmp(name, "print-graph-details") == 0) {
 		vg->print_graph_details = (atoi(value) == 1) ? 1 : 0;
@@ -1057,7 +1182,7 @@ const char *vine_graph_get_node_local_outfile_source(const struct vine_graph *vg
 		exit(1);
 	}
 
-	return node->outfile->source;
+	return node->fn_return_file->source;
 }
 
 /**
@@ -1136,7 +1261,7 @@ void vine_graph_finalize(struct vine_graph *vg)
 		int assigned_checkpoint_count = 0;
 		while ((node = priority_queue_pop(sorted_nodes))) {
 			if (node->is_target) {
-				/* declare the output file as a vine_file so that it can be retrieved by the manager as usual */
+				/* declare the return as a normal managed file for retrieval as usual */
 				assign_node_outfile_local(vg, node);
 				continue;
 			}
@@ -1146,7 +1271,7 @@ void vine_graph_finalize(struct vine_graph *vg)
 				char *shared_file_system_outfile_path = string_format("%s/%s", vg->checkpoint_dir, node->outfile_remote_name);
 				free(node->outfile_remote_name);
 				node->outfile_remote_name = shared_file_system_outfile_path;
-				node->outfile = NULL;
+				node->fn_return_file = NULL;
 				assigned_checkpoint_count++;
 			} else {
 				/* other nodes will be declared as temp files to leverage node-local storage */
@@ -1166,11 +1291,11 @@ void vine_graph_finalize(struct vine_graph *vg)
 		}
 	}
 
-	/* track the output dependencies of user and vine_temp nodes */
+	/* track outputs for all nodes that carry a return object */
 	LIST_ITERATE(topo_order, node)
 	{
-		if (node->outfile) {
-			vine_task_add_output(node->task, node->outfile, node->outfile_remote_name, VINE_TRANSFER_ALWAYS);
+		if (node->fn_return_file) {
+			vine_task_add_output(node->task, node->fn_return_file, node->outfile_remote_name, VINE_TRANSFER_ALWAYS);
 		}
 	}
 
@@ -1200,8 +1325,8 @@ void vine_graph_finalize(struct vine_graph *vg)
 	/* create mappings from task IDs and outfile cache names to nodes */
 	LIST_ITERATE(topo_order, node)
 	{
-		if (node->outfile) {
-			hash_table_insert(vg->outfile_cachename_to_node, node->outfile->cached_name, node);
+		if (node->fn_return_file) {
+			hash_table_insert(vg->outfile_cachename_to_node, node->fn_return_file->cached_name, node);
 		}
 	}
 
@@ -1211,8 +1336,8 @@ void vine_graph_finalize(struct vine_graph *vg)
 		struct vine_node *parent_node;
 		LIST_ITERATE(node->parents, parent_node)
 		{
-			if (parent_node->outfile) {
-				vine_task_add_input(node->task, parent_node->outfile, parent_node->outfile_remote_name, VINE_TRANSFER_ALWAYS);
+			if (parent_node->fn_return_file) {
+				vine_task_add_input(node->task, parent_node->fn_return_file, parent_node->outfile_remote_name, VINE_TRANSFER_ALWAYS);
 			}
 		}
 	}
@@ -1233,7 +1358,6 @@ void vine_graph_finalize(struct vine_graph *vg)
 
 	/* enable return recovery tasks */
 	vine_enable_return_recovery_tasks(vg->manager);
-	vg->manager->auto_recovery = vg->auto_recovery;
 
 	list_delete(topo_order);
 
@@ -1285,14 +1409,11 @@ uint64_t vine_graph_add_node(struct vine_graph *vg)
 	vine_task_set_library_required(node->task, vg->proxy_library_name);
 	vine_task_addref(node->task);
 
-	/* construct the task arguments and declare the infile */
+	/* JSON args for the library proxy; worker mount name remains "infile". */
 	char *task_arguments = vine_node_construct_task_arguments(node);
-	node->infile = vine_declare_buffer(vg->manager, task_arguments, strlen(task_arguments), VINE_CACHE_LEVEL_TASK, VINE_UNLINK_WHEN_DONE);
+	node->proxy_arg_file = vine_declare_buffer(vg->manager, task_arguments, strlen(task_arguments), VINE_CACHE_LEVEL_TASK, VINE_UNLINK_WHEN_DONE);
 	free(task_arguments);
-	vine_task_add_input(node->task, node->infile, "infile", VINE_TRANSFER_ALWAYS);
-
-	/* initialize the pruning depth of each node, currently statically set to the global prune depth */
-	node->prune_depth = vg->prune_depth;
+	vine_task_add_input(node->task, node->proxy_arg_file, "infile", VINE_TRANSFER_ALWAYS);
 
 	node->retry_attempts_left = vg->max_retry_attempts;
 
@@ -1348,7 +1469,15 @@ struct vine_graph *vine_graph_create(struct vine_manager *q)
 
 	vg->proxy_function_name = NULL;
 
+	/* Default prune-depth: release a TEMP node as soon as all of its
+	 * direct children have completed. Set to 0 via tune("prune-depth") to
+	 * disable and rely exclusively on cut-propagation. */
 	vg->prune_depth = 1;
+
+	vg->time_spent_on_cut_propagation = 0;
+
+	vg->pfs_usage_bytes = 0;
+
 	vg->print_graph_details = 0;
 
 	vg->task_priority_mode = TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST;
@@ -1367,16 +1496,11 @@ struct vine_graph *vine_graph_create(struct vine_manager *q)
 	vg->enable_debug_log = 1;
 
 	vg->max_retry_attempts = 15;
-	vg->retry_interval_sec = 1.0;
-
-	/* disable auto recovery so that the graph executor can handle all tasks with missing inputs
-	 * this ensures that no recovery tasks are created automatically by the taskvine manager and that
-	 * we can be in control of when to recreate what lost data. */
-	vg->auto_recovery = 0;
 
 	vg->time_first_task_dispatched = UINT64_MAX;
 	vg->time_last_task_retrieved = 0;
 	vg->makespan_us = 0;
+	vg->completed_recovery_tasks = 0;
 
 	return vg;
 }
@@ -1427,6 +1551,24 @@ uint64_t vine_graph_get_makespan_us(const struct vine_graph *vg)
 	return (uint64_t)vg->makespan_us;
 }
 
+uint64_t vine_graph_get_total_recovery_tasks(const struct vine_graph *vg)
+{
+	if (!vg || !vg->manager || !vg->manager->stats) {
+		return 0;
+	}
+
+	return (uint64_t)vg->manager->stats->tasks_recovery;
+}
+
+uint64_t vine_graph_get_completed_recovery_tasks(const struct vine_graph *vg)
+{
+	if (!vg) {
+		return 0;
+	}
+
+	return vg->completed_recovery_tasks;
+}
+
 /**
  * Execute the vine graph. This must be called after all nodes and dependencies are added and the topology metrics are computed.
  * @param vg Reference to the vine graph.
@@ -1443,6 +1585,7 @@ void vine_graph_execute(struct vine_graph *vg)
 
 	struct ProgressBar *pbar = progress_bar_init("Executing Tasks");
 	progress_bar_set_update_interval(pbar, vg->progress_bar_update_interval_sec);
+	vg->completed_recovery_tasks = 0;
 
 	struct ProgressBarPart *user_tasks_part = progress_bar_create_part("User", itable_size(vg->nodes));
 	struct ProgressBarPart *recovery_tasks_part = progress_bar_create_part("Recovery", 0);
@@ -1456,35 +1599,17 @@ void vine_graph_execute(struct vine_graph *vg)
 	}
 
 	int wait_timeout = 1;
-	uint64_t throughput_completed_tasks = 0;
-	timestamp_t last_throughput_print_time = 0;
-	struct vine_node *node;
 	while (user_tasks_part->current < user_tasks_part->total) {
 		if (interrupted) {
 			break;
 		}
 
-		/* Always process graph-level resubmissions (this affects correctness),
-		 * but the Recovery progress bar source depends on auto_recovery:
-		 * - auto_recovery==1: Recovery tracks manager-created recovery tasks only
-		 * - auto_recovery==0: Recovery tracks graph resubmit queue only */
-		int did_resubmit = try_resubmitting_node(vg);
+		/* Process graph-level resubmissions (non-INPUT_MISSING retries only;
+		 * all temp-file recovery is done inside the manager). */
+		drain_resubmit_queue(vg);
 
-		if (vg->manager->auto_recovery) {
-			/* Recovery progress reflects manager recovery tasks. */
-			(void)did_resubmit;
-			progress_bar_set_part_total(pbar, recovery_tasks_part, (uint64_t)vg->manager->stats->tasks_recovery);
-			progress_bar_update_part(pbar, recovery_tasks_part, 0);
-		} else {
-			/* Recovery progress reflects graph-level resubmissions:
-			 * total = (already attempted resubmits) + (currently queued resubmits). */
-			if (did_resubmit) {
-				progress_bar_update_part(pbar, recovery_tasks_part, 1);
-			}
-			uint64_t queued_resubmits = (uint64_t)list_size(vg->resubmit_queue);
-			progress_bar_set_part_total(pbar, recovery_tasks_part, recovery_tasks_part->current + queued_resubmits);
-			progress_bar_update_part(pbar, recovery_tasks_part, 0);
-		}
+		/* Recovery bar tracks manager-created recovery tasks. */
+		progress_bar_set_part_total(pbar, recovery_tasks_part, vine_graph_get_total_recovery_tasks(vg));
 
 		struct vine_task *task = vine_wait(vg->manager, wait_timeout);
 		if (task) {
@@ -1492,9 +1617,12 @@ void vine_graph_execute(struct vine_graph *vg)
 			wait_timeout = 0;
 			timestamp_t time_when_postprocessing_start = timestamp_get();
 
-			/* If auto_recovery is enabled, recovery tasks should be reflected in the Recovery progress bar. */
-			if (vg->manager->auto_recovery && task->type == VINE_TASK_TYPE_RECOVERY) {
-				progress_bar_update_part(pbar, recovery_tasks_part, 1);
+			if (task->type == VINE_TASK_TYPE_RECOVERY) {
+				vg->completed_recovery_tasks++;
+				progress_bar_update_part(
+					pbar,
+					recovery_tasks_part,
+					vg->completed_recovery_tasks - recovery_tasks_part->current);
 			}
 
 			/* get the original node by task id */
@@ -1507,12 +1635,11 @@ void vine_graph_execute(struct vine_graph *vg)
 			if (task->time_when_commit_end > 0) {
 				vg->time_first_task_dispatched = MIN(vg->time_first_task_dispatched, task->time_when_commit_end);
 			}
-			throughput_completed_tasks++;
 
-			/* in case of failure, resubmit this task */
-			if (node->task->result != VINE_RESULT_SUCCESS || node->task->exit_code != 0) {
-				enqueue_resubmit_node(vg, node);
-				debug(D_VINE, "Task %d failed (result=%d, exit=%d)", task->task_id, node->task->result, node->task->exit_code);
+			/* Unified success check: handles both manager-reported failures and
+			 * sharedfs output-missing failures. On failure the node is already
+			 * enqueued for resubmission; skip all post-processing. */
+			if (!validate_task_or_enqueue(vg, node)) {
 				continue;
 			}
 
@@ -1524,24 +1651,6 @@ void vine_graph_execute(struct vine_graph *vg)
 			}
 			vg->makespan_us = vg->time_last_task_retrieved - vg->time_first_task_dispatched;
 
-			/* if the outfile is set to save on the sharedfs, stat to get the size of the file */
-			switch (node->outfile_type) {
-			case NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM: {
-				struct stat info;
-				int result = stat(node->outfile_remote_name, &info);
-				if (result < 0) {
-					debug(D_VINE, "Task %d succeeded but missing sharedfs output %s", task->task_id, node->outfile_remote_name);
-					enqueue_resubmit_node(vg, node);
-					continue;
-				}
-				node->outfile_size_bytes = info.st_size;
-				break;
-			}
-			case NODE_OUTFILE_TYPE_LOCAL:
-			case NODE_OUTFILE_TYPE_TEMP:
-				node->outfile_size_bytes = node->outfile->size;
-				break;
-			}
 			debug(D_VINE, "Node %" PRIu64 " completed with outfile %s size: %zu bytes", node->node_id, node->outfile_remote_name, node->outfile_size_bytes);
 
 			/* mark the node as completed
@@ -1553,12 +1662,31 @@ void vine_graph_execute(struct vine_graph *vg)
 			node->execution_time = task->time_workers_execute_last;
 			node->retrieval_time = task->time_when_done - task->time_when_retrieval;
 
-			/* prune nodes on task completion */
-			prune_ancestors_of_node(vg, node);
+			/* A recovery completion regenerates a previously-released TEMP
+			 * output. Clear any prior cut / prune-depth verdict on this
+			 * node so the rules below can re-evaluate from scratch and,
+			 * if conditions still hold, release the freshly-produced data
+			 * again. First completions are a no-op here because the flags
+			 * are already 0 at that point. */
+			if (task->type == VINE_TASK_TYPE_RECOVERY) {
+				node->cut = 0;
+				node->prune_depth_pruned = 0;
+			}
 
-			/* skip manager-created recovery tasks.
-			 * - If auto_recovery==1, we already accounted for them in the Recovery bar above.
-			 * - If auto_recovery==0, Recovery bar tracks graph resubmits only. */
+			/* Walk the cut-propagation upward from this freshly-completed
+			 * node so any upstream data that is no longer needed gets
+			 * dropped as early as possible. */
+			propagate_cut_from(vg, node);
+
+			/* Separately, apply the prune-depth release window. This is
+			 * orthogonal to cut: it targets only TEMP data on workers and
+			 * willingly trades some recovery resilience for earlier
+			 * worker-local storage reclamation. Controlled by the
+			 * `prune-depth` tune knob (0 disables). */
+			apply_prune_depth_from(vg, node);
+
+			/* Recovery tasks were already counted in the Recovery bar above; they are
+			 * not user-submitted nodes, so skip the user-progress bookkeeping. */
 			if (task->type == VINE_TASK_TYPE_RECOVERY) {
 				continue;
 			}
@@ -1589,7 +1717,7 @@ void vine_graph_execute(struct vine_graph *vg)
 			switch (node->outfile_type) {
 			case NODE_OUTFILE_TYPE_TEMP:
 				/* replicate the outfile of the temp node */
-				vine_temp_queue_for_replication(vg->manager, node->outfile);
+				vine_temp_queue_for_replication(vg->manager, node->fn_return_file);
 				break;
 			case NODE_OUTFILE_TYPE_LOCAL:
 			case NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
@@ -1604,43 +1732,12 @@ void vine_graph_execute(struct vine_graph *vg)
 		} else {
 			wait_timeout = 1;
 		}
-
-		if (throughput_completed_tasks > 0 && vg->time_first_task_dispatched != UINT64_MAX && vg->time_first_task_dispatched > 0) {
-			timestamp_t now = timestamp_get();
-			if (last_throughput_print_time == 0 || (now - last_throughput_print_time) >= 1000000) {
-				double elapsed_sec = (now > vg->time_first_task_dispatched) ? ((double)(now - vg->time_first_task_dispatched) / 1000000.0) : 0.0;
-				double throughput = elapsed_sec > 0.0 ? (throughput_completed_tasks / elapsed_sec) : 0.0;
-				printf("throughput: %.0f tasks/s\n", throughput);
-				last_throughput_print_time = now;
-			}
-		}
 	}
 
 	progress_bar_finish(pbar);
 	progress_bar_delete(pbar);
 
-	double total_time_spent_on_unlink_local_files = 0;
-	double total_time_spent_on_prune_ancestors_of_temp_node = 0;
-	double total_time_spent_on_prune_ancestors_of_persisted_node = 0;
-
-	uint64_t nid_iter;
-	ITABLE_ITERATE(vg->nodes, nid_iter, node)
-	{
-		total_time_spent_on_unlink_local_files += node->time_spent_on_unlink_local_files;
-		total_time_spent_on_prune_ancestors_of_temp_node += node->time_spent_on_prune_ancestors_of_temp_node;
-		total_time_spent_on_prune_ancestors_of_persisted_node += node->time_spent_on_prune_ancestors_of_persisted_node;
-	}
-	total_time_spent_on_unlink_local_files /= 1e6;
-	total_time_spent_on_prune_ancestors_of_temp_node /= 1e6;
-	total_time_spent_on_prune_ancestors_of_persisted_node /= 1e6;
-
-	debug(D_VINE, "total time spent on prune ancestors of temp node: %.6f seconds\n", total_time_spent_on_prune_ancestors_of_temp_node);
-	debug(D_VINE, "total time spent on prune ancestors of persisted node: %.6f seconds\n", total_time_spent_on_prune_ancestors_of_persisted_node);
-	debug(D_VINE, "total time spent on unlink local files: %.6f seconds\n", total_time_spent_on_unlink_local_files);
-
-	if (vg->time_metrics_filename) {
-		// print_time_metrics(vg, vg->time_metrics_filename);
-	}
+	debug(D_VINE, "total time spent on cut propagation: %.6f seconds\n", vg->time_spent_on_cut_propagation / 1e6);
 
 	signal(SIGINT, previous_sigint_handler);
 	if (interrupted) {
@@ -1664,17 +1761,16 @@ void vine_graph_delete(struct vine_graph *vg)
 	struct vine_node *node;
 	ITABLE_ITERATE(vg->nodes, nid, node)
 	{
-		if (node->infile) {
-			vine_prune_file(vg->manager, node->infile);
-			hash_table_remove(vg->manager->file_table, node->infile->cached_name);
+		if (node->proxy_arg_file) {
+			vine_prune_file(vg->manager, node->proxy_arg_file);
 		}
-		if (node->outfile) {
-			vine_prune_file(vg->manager, node->outfile);
-			hash_table_remove(vg->outfile_cachename_to_node, node->outfile->cached_name);
-			hash_table_remove(vg->manager->file_table, node->outfile->cached_name);
+		delete_node_return_file(vg, node);
+		if (node->proxy_arg_file) {
+			hash_table_remove(vg->manager->file_table, node->proxy_arg_file->cached_name);
 		}
-		if (node->outfile_type == NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM) {
-			unlink(node->outfile_remote_name);
+		if (node->fn_return_file) {
+			hash_table_remove(vg->outfile_cachename_to_node, node->fn_return_file->cached_name);
+			hash_table_remove(vg->manager->file_table, node->fn_return_file->cached_name);
 		}
 		vine_node_delete(node);
 	}

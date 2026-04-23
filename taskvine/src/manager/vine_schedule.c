@@ -153,8 +153,23 @@ int check_worker_have_enough_disk_with_inputs(struct vine_manager *q, struct vin
 	return ok;
 }
 
-/* Count the number of committable cores for all workers. */
-int vine_schedule_count_committable_cores(struct vine_manager *q)
+/*
+ * Aggregate committable units cluster-wide (library free slots + free overcommitted cores).
+ *
+ * Cache (q->cluster_committable_cores, q->committable_cores_dirty): recompute only when dirty.
+ * Invalidate via vine_schedule_committable_cache_invalidate() after worker state changes that
+ * affect the sum (count_worker_resources, worker removal, library removal, resource_submit_multiplier).
+ */
+
+void vine_schedule_committable_cache_invalidate(struct vine_manager *q)
+{
+	if (!q) {
+		return;
+	}
+	q->committable_cores_dirty = 1;
+}
+
+static int vine_schedule_compute_committable_sum(struct vine_manager *q)
 {
 	int count = 0;
 
@@ -162,15 +177,12 @@ int vine_schedule_count_committable_cores(struct vine_manager *q)
 	struct vine_worker_info *w;
 	HASH_TABLE_ITERATE(q->worker_table, key, w)
 	{
-		/* skip if the worker hasn't reported any resources yet */
 		if (!w->resources) {
 			continue;
 		}
-		/* skip if the worker has no cores or gpus */
 		if (w->resources->cores.total <= 0 && w->resources->gpus.total <= 0) {
 			continue;
 		}
-		/* count the number of free slots on running libraries */
 		if (w->current_libraries && itable_size(w->current_libraries) > 0) {
 			uint64_t library_task_id = 0;
 			struct vine_task *library_task = NULL;
@@ -184,11 +196,9 @@ int vine_schedule_count_committable_cores(struct vine_manager *q)
 				}
 			}
 		}
-		/* count the number of free cores */
 		if (w->resources->cores.total > 0 && overcommitted_resource_total(q, w->resources->cores.total) > w->resources->cores.inuse) {
 			count += overcommitted_resource_total(q, w->resources->cores.total) - w->resources->cores.inuse;
 		}
-		/* count the number of free gpus */
 		if (w->resources->gpus.total > 0 && overcommitted_resource_total(q, w->resources->gpus.total) > w->resources->gpus.inuse) {
 			// Don't count gpus for now, because the manager has not yet fully supported scheduling tasks to GPUs.
 			// count += overcommitted_resource_total(q, w->resources->gpus.total) - w->resources->gpus.inuse;
@@ -196,6 +206,18 @@ int vine_schedule_count_committable_cores(struct vine_manager *q)
 	}
 
 	return count;
+}
+
+int vine_schedule_count_committable_cores(struct vine_manager *q)
+{
+	if (!q) {
+		return 0;
+	}
+	if (q->committable_cores_dirty) {
+		q->cluster_committable_cores = vine_schedule_compute_committable_sum(q);
+		q->committable_cores_dirty = 0;
+	}
+	return q->cluster_committable_cores;
 }
 
 /* Check if this worker has committable resources for any type of task.

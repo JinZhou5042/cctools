@@ -203,6 +203,9 @@ struct vine_manager {
 	int wait_for_workers;         /* Wait for these many workers to connect before dispatching tasks at start of execution. */
 	int max_workers;              /* Specify the maximum number of workers to use during execution. */
 	int attempt_schedule_depth;   /* number of submitted tasks to attempt scheduling before we continue to retrievals */
+	/* Lazy cache for vine_schedule_count_committable_cores (see vine_schedule.c); no per-worker fields. */
+	int cluster_committable_cores;
+	int committable_cores_dirty; /* non-zero: cache must be recomputed on next read */
 	int max_retrievals;           /* Do at most this number of task retrievals of either receive_one_task or receive_all_tasks_from_worker. If less
                                      than 1, prefer to receive all completed tasks before submitting new tasks. */
 	int worker_retrievals;        /* retrieve all completed tasks from a worker as opposed to recieving one of any completed task*/
@@ -238,7 +241,6 @@ struct vine_manager {
 	double disk_proportion_available_to_task;   /* intentionally reduces disk allocation for tasks to reserve some space for cache growth. */
 
 	int return_recovery_tasks; /* If true, recovery tasks are returned by vine_wait to the user. By default they are handled internally. */
-	int auto_recovery;         /* If true, recovery tasks are created automatically internally. */
 	int balance_worker_disk_load; /* If true, offload replicas from workers that are overloaded with temp files. */
 	timestamp_t when_last_offloaded;
 	int64_t peak_used_cache;
@@ -257,7 +259,6 @@ struct vine_manager {
 
 	timestamp_t time_start_execution;  // TMEP HACK
 	timestamp_t time_end_execution;    // TMEP HACK
-	int max_cores;                     // TMEP HACK
 };
 
 /*

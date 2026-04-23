@@ -202,14 +202,6 @@ class BlueprintGraph:
 
         return order
 
-    def verify_topo(g, topo):
-        pos = {k: i for i, k in enumerate(topo)}
-        for child, parents in g.parents_of.items():
-            for p in parents:
-                if pos[p] > pos[child]:
-                    raise AssertionError(f"bad topo: parent {p} after child {child}")
-        print("topo verified: ok")
-
     def finalize(self):
         # build the dependencies determined by files produced and consumed
         for file, producer in self.producer_of.items():

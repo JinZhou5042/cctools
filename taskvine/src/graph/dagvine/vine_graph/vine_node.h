@@ -16,13 +16,6 @@ typedef enum {
 	NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM, /* Node-output file will be stored in the persistent shared file system */
 } node_outfile_type_t;
 
-/** The status of an output file of a node. */
-typedef enum {
-	PRUNE_STATUS_NOT_PRUNED = 0,
-	PRUNE_STATUS_SAFE,
-	PRUNE_STATUS_UNSAFE
-} prune_status_t;
-
 /** The vine node object. */
 struct vine_node {
 	/* Identity */
@@ -31,30 +24,36 @@ struct vine_node {
 
 	/* Task and files */
 	struct vine_task *task;
-	struct vine_file *infile;
-	struct vine_file *outfile;
+	/* JSON args for the proxy call; parent outputs are separate task inputs. */
+	struct vine_file *proxy_arg_file;
+	/* Return file for TEMP/LOCAL outputs; NULL when the output is PFS-only. */
+	struct vine_file *fn_return_file;
 	char *outfile_remote_name;
 	size_t outfile_size_bytes;
 	node_outfile_type_t outfile_type;
+	/* Bytes currently credited to vg->pfs_usage_bytes for this node. */
+	size_t pfs_credited_bytes;
 
 	/* Graph relationships */
 	struct list *parents;
 	struct list *children;
 
 	/* Execution and scheduling state */
-	/* Number of unresolved parent dependencies. This is initialized to the in-degree
-	 * (list_size(parents)) before execution starts, and decremented exactly once per
-	 * parent->child edge when the parent first completes. */
+	/* Parent edges not yet satisfied for scheduling. */
 	int remaining_parents_count;
-	/* Edge-fired guard: tracks which parent edges have already been consumed for this child. */
+	/* Parent edges already counted for this child. */
 	struct set *fired_parents;
 	int completed;
-	prune_status_t prune_status;
+	/* Return was released by cut; cleared if recovery recreates the output. */
+	int cut;
+	/* TEMP return was released by prune-depth; also cleared on recovery. */
+	int prune_depth_pruned;
 	int retry_attempts_left;
 	int in_resubmit_queue;
+	/* Time of the last failure that put this node on the retry queue. */
+	timestamp_t last_failure_time;
 
 	/* Structural metrics */
-	int prune_depth;
 	int depth;
 	int height;
 	int upstream_subgraph_size;
@@ -65,9 +64,6 @@ struct vine_node {
 
 	/* Time metrics */
 	timestamp_t critical_path_time;
-	timestamp_t time_spent_on_unlink_local_files;
-	timestamp_t time_spent_on_prune_ancestors_of_temp_node;
-	timestamp_t time_spent_on_prune_ancestors_of_persisted_node;
 
 	timestamp_t submission_time;
 	timestamp_t scheduling_time;
@@ -75,8 +71,6 @@ struct vine_node {
 	timestamp_t execution_time;
 	timestamp_t retrieval_time;
 	timestamp_t postprocessing_time;
-
-	timestamp_t last_failure_time;
 };
 
 /** Create a new vine node.
@@ -100,19 +94,6 @@ void vine_node_delete(struct vine_node *node);
 @param node Reference to the vine node.
 */
 void vine_node_debug_print(struct vine_node *node);
-
-/** Find all safe ancestors of a vine node.
-@param start_node Reference to the start node.
-@return The set of safe ancestors.
-*/
-struct set *vine_node_find_safe_ancestors(struct vine_node *start_node);
-
-/** Find all parents of a vine node at a specific depth.
-@param node Reference to the node.
-@param depth Reference to the depth.
-@return The list of parents.
-*/
-struct list *vine_node_find_parents_by_depth(struct vine_node *node, int depth);
 
 /** Update the critical path time of a vine node.
 @param node Reference to the vine node.

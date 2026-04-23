@@ -370,8 +370,6 @@ static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_in
 		vine_manager_factory_worker_arrive(q, w, value);
 	} else if (string_prefix_is(field, "library-update")) {
 		handle_library_update(q, w, value);
-	} else if (string_prefix_is(field, "transfer_port_bind_failed")) {
-		notice(D_VINE, "Worker %s (%s) could not bind transfer port; peer transfers disabled.", w->hostname, w->addrport);
 	}
 
 	// Note we always mark info messages as processed, as they are optional.
@@ -1164,6 +1162,8 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	vine_txn_log_write_worker(q, w, 1, reason);
 
+	vine_schedule_committable_cache_invalidate(q);
+
 	hash_table_remove(q->worker_table, w->hashkey);
 	hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
 
@@ -1550,10 +1550,6 @@ static int retrieve_ready_task(struct vine_manager *q, struct vine_task *t, doub
 			debug(D_VINE, "task %d does not have a needed fixed location input file", t->task_id);
 			result = VINE_RESULT_FIXED_LOCATION_MISSING;
 		}
-	}
-	if (!q->auto_recovery && !vine_manager_check_inputs_available(q, t)) {
-		debug(D_VINE, "task %d has missing input files", t->task_id);
-		result = VINE_RESULT_INPUT_MISSING;
 	}
 
 	/* If any of the reasons fired, then expire the task and put in the retrieved queue. */
@@ -2991,6 +2987,7 @@ static void count_worker_resources(struct vine_manager *q, struct vine_worker_in
 	update_max_worker(q, w);
 
 	if (w->resources->workers.total < 1) {
+		vine_schedule_committable_cache_invalidate(q);
 		return;
 	}
 
@@ -3009,6 +3006,8 @@ static void count_worker_resources(struct vine_manager *q, struct vine_worker_in
 	}
 
 	w->resources->disk.inuse += BYTES_TO_MEGABYTES(w->inuse_cache);
+
+	vine_schedule_committable_cache_invalidate(q);
 }
 
 static void update_max_worker(struct vine_manager *q, struct vine_worker_info *w)
@@ -3295,6 +3294,10 @@ and change the task state.
 
 static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, vine_task_state_t new_state)
 {
+	if (!t || !w) {
+		return;
+	}
+
 	/* hotfix: do not reap the task if it has been reaped before */
 	if (!t->worker) {
 		return;
@@ -3497,10 +3500,6 @@ static void vine_manager_consider_recovery_task(struct vine_manager *q, struct v
 		return;
 	}
 
-	if (!q->auto_recovery) {
-		return;
-	}
-
 	/* Prevent race between original task and recovery task after worker crash.
 	 * Example: Task T completes on worker W, creates file F, T moves to WAITING_RETRIEVAL.
 	 * W crashes before stdout retrieval, T gets rescheduled to READY, F is lost and triggers
@@ -3634,23 +3633,6 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 
 	int iter_count = 0;
 
-	/* skip if we have reached the maximum number of concurrent cores  TEMP HACK */
-	int total_inuse_cores = 0;
-	char *t_k;
-	struct vine_worker_info *t_w;
-	HASH_TABLE_ITERATE(q->worker_table, t_k, t_w)
-	{
-		uint64_t libtask_id;
-		struct vine_task *libtask;
-		ITABLE_ITERATE(t_w->current_libraries, libtask_id, libtask)
-		{
-			total_inuse_cores += libtask->function_slots_inuse;
-			if (total_inuse_cores >= q->max_cores) {
-				return 0;
-			}
-		}
-	}
-
 	SKIP_LIST_ITERATE(cur, t)
 	{
 		if (iter_count >= iter_depth) {
@@ -3699,7 +3681,6 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 			switch (result) {
 			case VINE_SUCCESS: /* return on successful commit. */ {
 				committable_cores--;
-				total_inuse_cores++;
 				skip_list_remove_here(cur);
 				break;
 			}
@@ -3716,7 +3697,7 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 			}
 		}
 
-		if (committable_cores <= 0 || total_inuse_cores >= q->max_cores) {
+		if (committable_cores <= 0) {
 			break;
 		}
 	}
@@ -3752,6 +3733,10 @@ static int receive_tasks_from_worker(struct vine_manager *q, struct vine_worker_
 	uint64_t task_id;
 
 	int tasks_received = 0;
+
+	if (!q || !w) {
+		return 0;
+	}
 
 	/* if the function was called, receive at least one task */
 	int max_to_receive = MAX(1, q->max_retrievals - count_received_so_far);
@@ -4234,6 +4219,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->wait_for_workers = 0;
 	q->max_workers = -1;
 	q->attempt_schedule_depth = 100;
+	q->cluster_committable_cores = 0;
+	q->committable_cores_dirty = 1;
 
 	q->max_retrievals = 1;
 	q->worker_retrievals = 1;
@@ -4293,7 +4280,6 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->time_start_worker_eviction = 0;
 
 	q->return_recovery_tasks = 0;
-	q->auto_recovery = 1;
 	q->balance_worker_disk_load = 0;
 	q->when_last_offloaded = 0;
 	q->peak_used_cache = 0;
@@ -4316,7 +4302,6 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->time_start_execution = UINT64_MAX; // TMEP HACK
 	q->time_end_execution = 0;	      // TMEP HACK
-	q->max_cores = INT_MAX;		      // TMEP HACK
 
 	debug(D_VINE, "Manager is listening on port %d.", q->port);
 
@@ -5100,6 +5085,8 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 
 		debug(D_VINE, "All instances and the template for library %s have been removed", name);
 	}
+
+	vine_schedule_committable_cache_invalidate(q);
 }
 
 struct vine_task *vine_manager_find_library_template(struct vine_manager *q, const char *library_name)
@@ -5476,6 +5463,18 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			if (!head) {
 				// there are no tasks to be received
 				break;
+			}
+
+			/* Should not happen: WAITING_RETRIEVAL implies the task was on a worker. */
+			if (!head->worker) {
+				debug(D_ERROR,
+						"task %d is WAITING_RETRIEVAL but has no worker; moving to retrieved (FORSAKEN)",
+						head->task_id);
+				list_remove(q->waiting_retrieval_list, head);
+				vine_task_set_result(head, VINE_RESULT_FORSAKEN);
+				change_task_state(q, head, VINE_TASK_RETRIEVED);
+				events++;
+				continue;
 			}
 
 			struct vine_worker_info *w = head->worker;
@@ -6015,6 +6014,7 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "resource-submit-multiplier") || !strcmp(name, "asynchrony-multiplier")) {
 		q->resource_submit_multiplier = MAX(value, 1.0);
+		vine_schedule_committable_cache_invalidate(q);
 
 	} else if (!strcmp(name, "short-timeout")) {
 		q->short_timeout = MAX(1, (int)value);
@@ -6102,9 +6102,6 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "shift-disk-load")) {
 		q->shift_disk_load = !!((int)value);
-
-	} else if (!strcmp(name, "max-cores")) {
-		q->max_cores = MAX(1, (int)value);
 
 	} else if (strcmp(name, "enable-debug-log") == 0) {
 		if ((int)value == 0) {

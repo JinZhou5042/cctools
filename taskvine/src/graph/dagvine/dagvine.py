@@ -7,17 +7,17 @@ from ndcctools.taskvine.manager import Manager
 
 from ndcctools.taskvine.dagvine.blueprint_graph.adaptor import Adaptor
 from ndcctools.taskvine.dagvine.blueprint_graph.proxy_library import ProxyLibrary
-from ndcctools.taskvine.dagvine.blueprint_graph.proxy_functions import compute_single_key
+from ndcctools.taskvine.dagvine.blueprint_graph.proxy_functions import compute_single_key, compute_task
 from ndcctools.taskvine.dagvine.blueprint_graph.blueprint_graph import BlueprintGraph, TaskOutputRef, TaskOutputWrapper
 from ndcctools.taskvine.dagvine.vine_graph.vine_graph_client import VineGraphClient
 
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeRemainingColumn
+
 import cloudpickle
 import os
-import signal
-import json
 import random
+import signal
 import time
-from pympler import asizeof
 
 
 def context_loader_func(graph_pkl):
@@ -29,7 +29,7 @@ def context_loader_func(graph_pkl):
 
 
 def delete_all_files(root_dir):
-    """Clean the run-info template directory between runs so stale files never leak into a new DAG."""
+    """Remove files under the run-info template directory."""
     if not os.path.exists(root_dir):
         return
     for dirpath, dirnames, filenames in os.walk(root_dir):
@@ -41,16 +41,15 @@ def delete_all_files(root_dir):
                 print(f"Failed to delete file {file_path}")
 
 
-# Nicely format terminal output when printing manager metadata.
 def color_text(text, color_code):
-    """Render a colored string for the friendly status banners Vineyard prints at start-up."""
+    """Return text wrapped in an ANSI color code."""
     return f"\033[{color_code}m{text}\033[0m"
 
 
 class GraphParams:
     def __init__(self):
-        """Hold all tweakable knobs (manager-side, vine_graph-side, and misc)."""
-        # Manager-level knobs: fed into `Manager.tune(...)` before execution.
+        """Store DAGVine tuning parameters."""
+        # Passed to Manager.tune() before execution.
         self.vine_manager_tuning_params = {
             "worker-source-max-transfers": 100,
             "max-retrievals": -1,
@@ -61,9 +60,8 @@ class GraphParams:
             "enforce-worker-eviction-interval": -1,
             "shift-disk-load": 0,
             "clean-redundant-replicas": 0,
-            "max-cores": 1000000,
         }
-        # VineGraph-level knobs: forwarded to the underlying vine graph via VineGraphClient.
+        # Passed through VineGraphClient to the C vine graph.
         self.vine_graph_tuning_params = {
             "failure-injection-step-percent": -1,
             "task-priority-mode": "largest-input-first",
@@ -74,27 +72,22 @@ class GraphParams:
             "progress-bar-update-interval-sec": 0.1,
             "time-metrics-filename": 0,
             "enable-debug-log": 1,
-            "auto-recovery": 1,
             "max-retry-attempts": 15,
-            "retry-interval-sec": 1,
             "print-graph-details": 0,
         }
-        # Misc knobs used purely on the Python side (e.g., generate fake outputs).
+        # Python-only knobs.
         self.other_params = {
             "schedule": "worst",
             "libcores": 16,
             "failure-injection-step-percent": -1,
             "extra-task-output-size-mb": [0, 0],
             "extra-task-sleep-time": [0, 0],
+            # 1 = run Blueprint in-process (topological order), no workers / no proxy library; stdout stays on frontend.
+            "local-execute": 0,
         }
 
-    def print_params(self):
-        """Dump current knob values to stdout for debugging."""
-        all_params = {**self.vine_manager_tuning_params, **self.vine_graph_tuning_params, **self.other_params}
-        print(json.dumps(all_params, indent=4))
-
     def update_param(self, param_name, new_value):
-        """Update a single knob, falling back to manager-level if unknown."""
+        """Update one parameter."""
         if param_name in self.vine_manager_tuning_params:
             self.vine_manager_tuning_params[param_name] = new_value
         elif param_name in self.vine_graph_tuning_params:
@@ -105,7 +98,7 @@ class GraphParams:
             self.vine_manager_tuning_params[param_name] = new_value
 
     def get_value_of(self, param_name):
-        """Helper so DAGVine can pull a knob value without caring where it lives."""
+        """Return the current value for a parameter."""
         if param_name in self.vine_manager_tuning_params:
             return self.vine_manager_tuning_params[param_name]
         elif param_name in self.vine_graph_tuning_params:
@@ -120,14 +113,12 @@ class DAGVine(Manager):
     def __init__(self,
                  *args,
                  **kwargs):
-        """Spin up a TaskVine manager that knows how to mirror a Python DAG into the C orchestration layer."""
+        """Create a DAGVine manager."""
 
-        # React to Ctrl+C so we can tear down the graphs cleanly.
         signal.signal(signal.SIGINT, self._on_sigint)
 
         self.params = GraphParams()
 
-        # Ensure run-info templates don't accumulate garbage between runs.
         run_info_path = kwargs.get("run_info_path", None)
         run_info_template = kwargs.get("run_info_template", None)
 
@@ -135,7 +126,7 @@ class DAGVine(Manager):
         if self.run_info_template_path:
             delete_all_files(self.run_info_template_path)
 
-        # Boot the underlying TaskVine manager. The TaskVine manager keeps alive until the dagvine object is destroyed
+        # Manager lifetime is tied to this object.
         super().__init__(*args, **kwargs)
         self.runtime_directory = cvine.vine_get_runtime_directory(self._taskvine)
 
@@ -145,23 +136,17 @@ class DAGVine(Manager):
         self._sigint_received = False
 
     def param(self, param_name):
-        """Convenience accessor so callers can read tuned parameters at runtime."""
+        """Return a parameter value."""
         return self.params.get_value_of(param_name)
 
     def update_params(self, new_params):
-        """Apply a batch of overrides before constructing graphs.
-
-        All parameter dictionaries—whether set via `update_params()` or passed
-        to `run(..., params={...})`—flow through here. We funnel each key into
-        the appropriate bucket (manager/vine_graph/misc). Subsequent runs can override
-        them by calling this again.
-        """
+        """Apply a batch of parameter overrides."""
         assert isinstance(new_params, dict), "new_params must be a dict"
         for k, new_v in new_params.items():
             self.params.update_param(k, new_v)
 
     def tune_manager(self):
-        """Push our manager-side tuning knobs into the C layer."""
+        """Apply manager-side tuning."""
         for k, v in self.params.vine_manager_tuning_params.items():
             try:
                 self.tune(k, v)
@@ -169,7 +154,7 @@ class DAGVine(Manager):
                 raise ValueError(f"Unrecognized parameter: {k}")
 
     def tune_vine_graph(self, vine_graph):
-        """Push VineGraph-specific tuning knobs before we build the graph."""
+        """Apply vine-graph tuning."""
         for k, v in self.params.vine_graph_tuning_params.items():
             vine_graph.tune(k, str(v))
 
@@ -232,20 +217,18 @@ class DAGVine(Manager):
         return bg
 
     def build_vine_graph(self, py_graph, target_keys):
-        """Mirror the Python graph into VineGraph, preserving ordering and targets."""
+        """Build the C vine graph from the Python graph."""
         assert py_graph is not None, "Python graph must be built before building the VineGraph"
 
         vine_graph = VineGraphClient(self._taskvine)
 
         vine_graph.set_proxy_function(compute_single_key)
 
-        # Tune both manager and vine_graph before we start adding nodes/edges.
         self.tune_manager()
         self.tune_vine_graph(vine_graph)
 
         topo_order = py_graph.get_topological_order()
 
-        # Build the cross-language mapping as we walk the topo order.
         for k in topo_order:
             node_id = vine_graph.add_node(k)
             py_graph.pykey2cid[k] = node_id
@@ -253,7 +236,6 @@ class DAGVine(Manager):
             for pk in py_graph.parents_of[k]:
                 vine_graph.add_dependency(pk, k)
 
-        # Now that every node is present, mark which ones are final outputs.
         for k in target_keys:
             vine_graph.set_target(k)
 
@@ -262,25 +244,23 @@ class DAGVine(Manager):
         return vine_graph
 
     def build_graphs(self, task_dict, target_keys):
-        """Create both the python side graph and its C counterpart, wiring outputs for later use."""
-        # Build the python side graph.
+        """Build the Python graph and its C mirror."""
         py_graph = self.build_blueprint_graph(task_dict)
 
-        # filter out target keys that are not in the collection dict
+        # Ignore requested targets that are not in the graph.
         missing_keys = [k for k in target_keys if k not in py_graph.task_dict]
         if missing_keys:
             print(f"=== Warning: the following target keys are not in the graph: {','.join(map(str, missing_keys))}")
         target_keys = list(set(target_keys) - set(missing_keys))
 
-        # Build the c side graph.
         vine_graph = self.build_vine_graph(py_graph, target_keys)
 
-        # Cross-fill the outfile locations so the runtime graph knows where to read/write.
+        # Save output locations back into the Python graph.
         for k in py_graph.pykey2cid:
             outfile_remote_name = vine_graph.get_node_outfile_remote_name(k)
             py_graph.outfile_remote_name[k] = outfile_remote_name
 
-        # For each task, declare the input and output files in the vine graph
+        # Declare graph-level file dependencies in the C graph.
         for filename in py_graph.producer_of:
             task_key = py_graph.producer_of[filename]
             vine_graph.add_task_output(task_key, filename)
@@ -291,7 +271,7 @@ class DAGVine(Manager):
         return py_graph, vine_graph
 
     def create_proxy_library(self, py_graph, vine_graph, hoisting_modules, env_files):
-        """Package up the python side graph as a TaskVine library."""
+        """Build the TaskVine proxy library."""
         proxy_library = ProxyLibrary(self)
         proxy_library.add_hoisting_modules(hoisting_modules)
         proxy_library.add_env_files(env_files)
@@ -301,50 +281,91 @@ class DAGVine(Manager):
 
         return proxy_library
 
-    def run(self, task_dict, target_keys=[], params={}, hoisting_modules=[], env_files={}, adapt_dask=False, repeats=1):
-        """High-level entry point: normalise input, build graphs, ship the library, execute, and return results."""
-        time_start = time.time()
+    def _execute_blueprint_local(self, py_graph):
+        """Run the blueprint graph locally in topological order."""
+        out_dir = os.path.abspath(self.param("output-dir"))
+        os.makedirs(out_dir, exist_ok=True)
+        prev_cwd = os.getcwd()
+        os.chdir(out_dir)
+        t0 = time.time()
+        try:
+            order = py_graph.get_topological_order()
+            interval = float(self.param("progress-bar-update-interval-sec"))
+            if interval <= 0:
+                interval = 0.1
+            refresh_per_second = min(30.0, max(1.0, 1.0 / interval))
 
-        # first update the params so that they can be used for the following construction
+            n = len(order)
+            if n == 0:
+                return time.time() - t0
+
+            with Progress(
+                TextColumn("[bold]Executing Tasks"),
+                TextColumn("•"),
+                TextColumn("[cyan]User"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TimeRemainingColumn(),
+                refresh_per_second=refresh_per_second,
+                transient=False,
+            ) as progress:
+                bar_id = progress.add_task("User", total=n)
+                for k in order:
+                    out = compute_task(py_graph, py_graph.task_dict[k])
+                    py_graph.save_task_output(k, out)
+                    progress.advance(bar_id)
+        finally:
+            os.chdir(prev_cwd)
+        return time.time() - t0
+
+    def run(self, task_dict, target_keys=[], params={}, hoisting_modules=[], env_files={}, from_dask=False, expand_subgraphs=False, repeats=1):
+        """Build the graph, run it, and return the requested results."""
         self.update_params(params)
 
-        if adapt_dask:
-            task_dict = Adaptor(task_dict).converted
+        if from_dask:
+            task_dict = Adaptor(task_dict, expand_subgraphs=expand_subgraphs).converted
 
         result_keys = list(target_keys)
         task_dict, target_keys = self._replicate_graph(task_dict, target_keys, repeats)
 
-        # Build both the Python DAG and its C mirror.
         py_graph, vine_graph = self.build_graphs(task_dict, target_keys)
-
-        # set extra task output size and sleep time for each task
+        # Optional synthetic output size / sleep for testing.
         for k in py_graph.task_dict:
             py_graph.extra_task_output_size_mb[k] = random.uniform(*self.param("extra-task-output-size-mb"))
             py_graph.extra_task_sleep_time[k] = random.uniform(*self.param("extra-task-sleep-time"))
 
-        # Ship the execution context to workers via a proxy library
-        proxy_library = self.create_proxy_library(py_graph, vine_graph, hoisting_modules, env_files)
-        proxy_library.install()
+        local_execute = bool(self.param("local-execute"))
+        proxy_library = None
 
         try:
-            print(f"=== Library size: {asizeof.asizeof(proxy_library) / 1024 / 1024} MB")
-            print(f"=== Frontend Overhead: {time.time() - time_start:.6f} seconds")
+            if local_execute:
+                print("=== local-execute: running Blueprint in process (no workers)", flush=True)
+                makespan_s = self._execute_blueprint_local(py_graph)
+                completed_recovery_tasks = 0
+            else:
+                proxy_library = self.create_proxy_library(py_graph, vine_graph, hoisting_modules, env_files)
+                proxy_library.install()
+                vine_graph.execute()
+                makespan_s = round(vine_graph.get_makespan_us() / 1e6, 6)
+                completed_recovery_tasks = vine_graph.get_completed_recovery_tasks()
 
-            vine_graph.execute()
+            total_tasks_completed = len(py_graph.task_dict) + completed_recovery_tasks
+            throughput_tps = round(total_tasks_completed / makespan_s, 6) if makespan_s > 0 else 0.0
+            print(f"=== Makespan: {makespan_s:.6f} seconds")
+            print(f"=== Total tasks completed: {total_tasks_completed}")
+            print(f"=== Throughput: {throughput_tps:.6f} tasks/s")
+
             results = {}
             for k in result_keys:
                 if k not in py_graph.task_dict:
                     continue
                 outfile_path = os.path.join(self.param("output-dir"), py_graph.outfile_remote_name[k])
                 results[k] = TaskOutputWrapper.load_from_path(outfile_path)
-            makespan_s = round(vine_graph.get_makespan_us() / 1e6, 6)
-            throughput_tps = round(len(py_graph.task_dict) / makespan_s, 6)
-            results["Makespan"] = makespan_s
-            results["Throughput"] = throughput_tps
             return results
         finally:
             try:
-                proxy_library.uninstall()
+                if proxy_library is not None:
+                    proxy_library.uninstall()
             finally:
                 vine_graph.delete()
 
