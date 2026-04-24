@@ -2957,12 +2957,17 @@ static vine_result_code_t start_one_task(struct vine_manager *q, struct vine_wor
 		command_line = xxstrdup(t->command_line);
 	}
 
-	// timestamp_t start_time = timestamp_get();
+	timestamp_t task_dispatch_t0 = 0;
+	if (q->task_dispatch_log) {
+		task_dispatch_t0 = timestamp_get();
+	}
 	vine_result_code_t result = vine_manager_put_task(q, w, t, command_line, limits, 0);
-	// timestamp_t end_time = timestamp_get();
-	// printf("time to send task %d to worker: %.6f seconds\n",
-	// 		t->task_id,
-	// 		((double) (end_time - start_time)) / 1000000.0);
+	if (q->task_dispatch_log && result == VINE_SUCCESS) {
+		/* Elapsed time of vine_manager_put_task; timestamp_get is in us (timestamp.h). */
+		timestamp_t du = timestamp_get() - task_dispatch_t0;
+		fprintf(q->task_dispatch_log, UINT64_FORMAT "\n", (uint64_t)du);
+		fflush(q->task_dispatch_log);
+	}
 
 	free(command_line);
 
@@ -4070,6 +4075,34 @@ static struct vine_task *find_task_by_tag(struct vine_manager *q, const char *ta
 /************* taskvine public functions *************/
 /******************************************************/
 
+void vine_set_task_dispatch_time_log_path(struct vine_manager *q, const char *task_dispatch_time_log_path)
+{
+	if (!q) {
+		return;
+	}
+	if (q->task_dispatch_log) {
+		fclose(q->task_dispatch_log);
+		q->task_dispatch_log = NULL;
+	}
+	if (q->task_dispatch_time_log_path) {
+		free(q->task_dispatch_time_log_path);
+		q->task_dispatch_time_log_path = NULL;
+	}
+	if (!task_dispatch_time_log_path || !task_dispatch_time_log_path[0]) {
+		return;
+	}
+	if (!create_dir_parents(task_dispatch_time_log_path, 0777)) {
+		fatal("could not create parent directories for task dispatch log: %s", task_dispatch_time_log_path);
+	}
+	q->task_dispatch_time_log_path = xxstrdup(task_dispatch_time_log_path);
+	q->task_dispatch_log = fopen(task_dispatch_time_log_path, "w");
+	if (!q->task_dispatch_log) {
+		free(q->task_dispatch_time_log_path);
+		q->task_dispatch_time_log_path = NULL;
+		fatal("could not open %s for task dispatch log: %s", task_dispatch_time_log_path, strerror(errno));
+	}
+}
+
 struct vine_manager *vine_create(int port)
 {
 	return vine_ssl_create(port, NULL, NULL);
@@ -4630,6 +4663,8 @@ void vine_delete(struct vine_manager *q)
 		vine_taskgraph_log_write_footer(q);
 		fclose(q->graph_logfile);
 	}
+
+	vine_set_task_dispatch_time_log_path(q, NULL);
 
 	free(q->runtime_directory);
 	free(q->stats);

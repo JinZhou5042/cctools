@@ -20,6 +20,22 @@ import signal
 import time
 
 
+def _current_process_rss_bytes():
+    """Resident set size of this process in bytes, or None if unavailable."""
+    try:
+        with open("/proc/self/status", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss
+    except Exception:
+        return None
+
+
 def context_loader_func(graph_pkl):
     graph = cloudpickle.loads(graph_pkl)
 
@@ -84,6 +100,11 @@ class GraphParams:
             "extra-task-sleep-time": [0, 0],
             # 1 = run Blueprint in-process (topological order), no workers / no proxy library; stdout stays on frontend.
             "local-execute": 0,
+            # If set, each file line is one integer duration in microseconds (dispatch: C; creation: add_node in Python).
+            "task-dispatch-time-log-path": None,
+            "task-creation-time-log-path": None,
+            "measure-memory-usage-and-exit": 0,
+            "measure-frontend-overhead-and-exit": 0,
         }
 
     def update_param(self, param_name, new_value):
@@ -229,12 +250,28 @@ class DAGVine(Manager):
 
         topo_order = py_graph.get_topological_order()
 
-        for k in topo_order:
-            node_id = vine_graph.add_node(k)
-            py_graph.pykey2cid[k] = node_id
-            py_graph.cid2pykey[node_id] = k
-            for pk in py_graph.parents_of[k]:
-                vine_graph.add_dependency(pk, k)
+        creation_time_log_path = self.param("task-creation-time-log-path")
+        _creation_fp = None
+        if creation_time_log_path:
+            _d = os.path.dirname(os.path.abspath(creation_time_log_path))
+            if _d:
+                os.makedirs(_d, exist_ok=True)
+            _creation_fp = open(creation_time_log_path, "w", encoding="utf-8")
+        try:
+            for k in topo_order:
+                t0_ns = time.perf_counter_ns()
+                node_id = vine_graph.add_node(k)
+                t1_ns = time.perf_counter_ns()
+                if _creation_fp is not None:
+                    # Integer microseconds, same unit as task dispatch time log (C timestamp_get delta).
+                    _creation_fp.write(f"{(t1_ns - t0_ns) // 1000}\n")
+                py_graph.pykey2cid[k] = node_id
+                py_graph.cid2pykey[node_id] = k
+                for pk in py_graph.parents_of[k]:
+                    vine_graph.add_dependency(pk, k)
+        finally:
+            if _creation_fp is not None:
+                _creation_fp.close()
 
         for k in target_keys:
             vine_graph.set_target(k)
@@ -320,6 +357,8 @@ class DAGVine(Manager):
 
     def run(self, task_dict, target_keys=[], params={}, hoisting_modules=[], env_files={}, from_dask=False, expand_subgraphs=False, repeats=1):
         """Build the graph, run it, and return the requested results."""
+
+        _frontend_overhead_start_ns = time.perf_counter_ns()
         self.update_params(params)
 
         if from_dask:
@@ -335,6 +374,9 @@ class DAGVine(Manager):
             py_graph.extra_task_sleep_time[k] = random.uniform(*self.param("extra-task-sleep-time"))
 
         local_execute = bool(self.param("local-execute"))
+        task_dispatch_time_log_path = self.param("task-dispatch-time-log-path")
+        if task_dispatch_time_log_path:
+            cvine.vine_set_task_dispatch_time_log_path(self._taskvine, task_dispatch_time_log_path)
         proxy_library = None
 
         try:
@@ -343,8 +385,19 @@ class DAGVine(Manager):
                 makespan_s = self._execute_blueprint_local(py_graph)
                 completed_recovery_tasks = 0
             else:
+                _rss0 = _current_process_rss_bytes()
                 proxy_library = self.create_proxy_library(py_graph, vine_graph, hoisting_modules, env_files)
+                _rss1 = _current_process_rss_bytes()
+                print(f"=== current process RSS: {_rss1} bytes", flush=True)
+                print(f"=== create_proxy_library RSS: {int(_rss1 - _rss0)} bytes", flush=True)
+                if self.param("measure-memory-usage-and-exit"):
+                    os._exit(0)
                 proxy_library.install()
+                _frontend_overhead_end_ns = time.perf_counter_ns()
+                _frontend_overhead_us = (_frontend_overhead_end_ns - _frontend_overhead_start_ns) // 1000
+                print(f"=== frontend overhead: {_frontend_overhead_us} microseconds", flush=True)
+                if self.param("measure-frontend-overhead-and-exit"):
+                    os._exit(0)
                 vine_graph.execute()
                 makespan_s = round(vine_graph.get_makespan_us() / 1e6, 6)
                 completed_recovery_tasks = vine_graph.get_completed_recovery_tasks()

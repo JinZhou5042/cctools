@@ -8,6 +8,7 @@
 # This software is distributed under the GNU General Public License.
 # See the file COPYING for details.
 
+from .. import cvine
 from ..compat.dask_dag import DaskVineDag
 from ..manager import Manager
 from ..task import PythonTask
@@ -144,6 +145,9 @@ class DaskVine(Manager):
     # @param prune_depth Control pruning behavior: 0 (default) - no pruning, 1 - only check direct consumers, 2+ - check consumers up to specified depth
     # @param repeats     Replicate the entire graph this many times (like DAGVine.run(repeats=...)).
     #                      Extra replicas use keys ("__rep", r, k). Only the first replica's results are returned for keys.
+    # @param task_creation_time_log_path If set (and task_mode is function-calls), each line is one integer in
+    #                      microseconds: duration of FunctionCall.submit_finalize (pickle args, declare infile/outfile,
+    #                      add_input/add_output for infile and outfile). One line per successful submit; retries add lines.
     def get(self, dsk, keys, *,
             environment=None,
             extra_files=None,
@@ -176,6 +180,9 @@ class DaskVine(Manager):
             lazy_transfers=True,    # Deprecated, use worker_tranfers
             extra_task_sleep_time=(0, 0),
             repeats=1,
+            task_creation_time_log_path=None,
+            task_dispatch_time_log_path=None,
+            measure_frontend_overhead_and_exit=False,
             ):
         try:
             self.set_property("framework", "dask")
@@ -228,6 +235,8 @@ class DaskVine(Manager):
             self.category_info = defaultdict(lambda: {"num_tasks": 0, "total_execution_time": 0})
             self.max_priority = float('inf')
             self.min_priority = float('-inf')
+            self._measure_frontend_overhead_and_exit = measure_frontend_overhead_and_exit
+            self._frontend_overhead_start_ns = time.perf_counter_ns()
 
             if submit_per_cycle is not None and submit_per_cycle < 1:
                 submit_per_cycle = None
@@ -248,6 +257,11 @@ class DaskVine(Manager):
                 self.environment_name = os.path.basename(environment)
                 self.environment = None
 
+            self._task_creation_time_log_path = task_creation_time_log_path
+            self._task_dispatch_time_log_path = task_dispatch_time_log_path
+            if self._task_dispatch_time_log_path:
+                cvine.vine_set_task_dispatch_time_log_path(self._taskvine, self._task_dispatch_time_log_path)
+
             return self._dask_execute(dsk, keys, repeats=repeats)
         except Exception as e:
             # unhandled exceptions for now
@@ -258,128 +272,165 @@ class DaskVine(Manager):
     def __call__(self, *args, **kwargs):
         return self.get(*args, **kwargs)
 
+    def submit(self, task):
+        # Same as Manager.submit, but when logging creation time for function-calls, measure
+        # FunctionCall.submit_finalize only (infile/outfile; excludes vine_submit to C).
+        task.manager = self
+        fp = getattr(self, "_task_creation_time_log_fp", None)
+        if fp is not None and self.task_mode == "function-calls" and isinstance(task, FunctionCall):
+            t0_ns = time.perf_counter_ns()
+            task.submit_finalize()
+            t1_ns = time.perf_counter_ns()
+            fp.write(f"{(t1_ns - t0_ns) // 1000}\n")
+        else:
+            task.submit_finalize()
+        task_id = cvine.vine_submit(self._taskvine, task._task)
+        if task_id == 0:
+            raise ValueError("invalid task description")
+        self._task_table[task_id] = task
+        return task_id
+
     def _dask_execute(self, dsk, keys, repeats=1):
+        _creation_fp = None
+        path = getattr(self, "_task_creation_time_log_path", None)
+        # Log only records FunctionCall.submit_finalize; meaningful for function-calls only.
+        if path and self.task_mode == "function-calls":
+            _d = os.path.dirname(os.path.abspath(path))
+            if _d:
+                os.makedirs(_d, exist_ok=True)
+            _creation_fp = open(path, "w", encoding="utf-8")
+        self._task_creation_time_log_fp = _creation_fp
+        try:
+            indices = {k: inds for (k, inds) in find_dask_keys(keys)}
+            keys_flatten = list(indices.keys())
 
-        indices = {k: inds for (k, inds) in find_dask_keys(keys)}
-        keys_flatten = list(indices.keys())
+            if repeats > 1:
+                dsk, keys_flatten = replicate_legacy_dask_graph(dsk, keys_flatten, repeats)
 
-        if repeats > 1:
-            dsk, keys_flatten = replicate_legacy_dask_graph(dsk, keys_flatten, repeats)
+            time_start = time.time()
+            dag = DaskVineDag(dsk, low_memory_mode=self.low_memory_mode, prune_depth=self.prune_depth)
+            print(f"Time taken to enqueue tasks: {time.time() - time_start:.6f} seconds")
+            tag = f"dag-{id(dag)}"
 
-        time_start = time.time()
-        dag = DaskVineDag(dsk, low_memory_mode=self.low_memory_mode, prune_depth=self.prune_depth)
-        print(f"Time taken to enqueue tasks: {time.time() - time_start:.6f} seconds")
-        tag = f"dag-{id(dag)}"
+            # create Library if using 'function-calls' task mode.
+            if self.task_mode == 'function-calls':
+                functions = [execute_graph_vertex]
+                if self.lib_extra_functions:
+                    functions.extend(self.lib_extra_functions)
+                libtask = self.create_library_from_functions(f'Dask-Library-{id(dag)}',
+                                                             *functions,
+                                                             poncho_env="dummy-value",
+                                                             add_env=False,
+                                                             init_command=self.lib_command,
+                                                             hoisting_modules=self.lib_modules)
 
-        # create Library if using 'function-calls' task mode.
-        if self.task_mode == 'function-calls':
-            functions = [execute_graph_vertex]
-            if self.lib_extra_functions:
-                functions.extend(self.lib_extra_functions)
-            libtask = self.create_library_from_functions(f'Dask-Library-{id(dag)}',
-                                                         *functions,
-                                                         poncho_env="dummy-value",
-                                                         add_env=False,
-                                                         init_command=self.lib_command,
-                                                         hoisting_modules=self.lib_modules)
+                if self.environment:
+                    libtask.add_environment(self.environment)
 
-            if self.environment:
-                libtask.add_environment(self.environment)
+                if self.lib_resources:
+                    if 'cores' in self.lib_resources:
+                        libtask.set_cores(self.lib_resources['cores'])
+                        libtask.set_function_slots(self.lib_resources['cores'])  # use cores as  fallback for slots
+                    if 'memory' in self.lib_resources:
+                        libtask.set_memory(self.lib_resources['memory'])
+                    if 'disk' in self.lib_resources:
+                        libtask.set_disk(self.lib_resources['disk'])
+                    if 'slots' in self.lib_resources:
+                        libtask.set_function_slots(self.lib_resources['slots'])
+                    if self.env_vars:
+                        for k, v in self.env_vars.items():
+                            if callable(v):
+                                s = v(self, libtask)
+                            else:
+                                s = v
+                            libtask.set_env_var(k, s)
+                    if self.extra_files:
+                        for f, name in self.extra_files.items():
+                            libtask.add_input(f, name)
 
-            if self.lib_resources:
-                if 'cores' in self.lib_resources:
-                    libtask.set_cores(self.lib_resources['cores'])
-                    libtask.set_function_slots(self.lib_resources['cores'])  # use cores as  fallback for slots
-                if 'memory' in self.lib_resources:
-                    libtask.set_memory(self.lib_resources['memory'])
-                if 'disk' in self.lib_resources:
-                    libtask.set_disk(self.lib_resources['disk'])
-                if 'slots' in self.lib_resources:
-                    libtask.set_function_slots(self.lib_resources['slots'])
-                if self.env_vars:
-                    for k, v in self.env_vars.items():
-                        if callable(v):
-                            s = v(self, libtask)
+                self.install_library(libtask)
+
+            enqueued_calls = []
+            rs = dag.set_targets(keys_flatten)
+            self._enqueue_dask_calls(dag, tag, rs, self.retries, enqueued_calls)
+
+            timeout = 5
+            pending = 0
+            time_first_task_dispatched = None
+            total_user_tasks = dag.left_to_compute()
+
+            self._frontend_overhead_end_ns = time.perf_counter_ns()
+            self._frontend_overhead_us = (self._frontend_overhead_end_ns - self._frontend_overhead_start_ns) // 1000
+            print(f"=== frontend overhead: {self._frontend_overhead_us} microseconds", flush=True)
+            if self._measure_frontend_overhead_and_exit:
+                os._exit(0)
+
+            (bar_progress, bar_update) = self._make_progress_bar(total_user_tasks)
+            with bar_progress:
+                while not self.empty() or enqueued_calls:
+                    submitted = 0
+                    while (
+                        enqueued_calls
+                        and (not self.submit_per_cycle or submitted < self.submit_per_cycle)
+                        and (not self.max_pending or pending < self.max_pending)
+                        # and self.hungry()
+                    ):
+                        self.submit(enqueued_calls.pop())
+                        if time_first_task_dispatched is None:
+                            time_first_task_dispatched = time.time()
+                        submitted += 1
+                        pending += 1
+
+                    t = self.wait_for_tag(tag, timeout)
+                    if t:
+                        timeout = 0
+                        pending -= 1
+                        if self.verbose:
+                            print(f"{t.key} ran on {t.hostname}")
+
+                        if t.successful():
+                            self.category_info[t.category]["num_tasks"] += 1
+                            self.category_info[t.category]["total_execution_time"] += t.resources_measured.wall_time
+                            result_file = DaskVineFile(t.output_file, t.key, dag, self.task_mode)
+                            rs = dag.set_result(t.key, result_file)
+                            self._enqueue_dask_calls(dag, tag, rs, self.retries, enqueued_calls)
+
+                            if self.wrapper:
+                                self.wrapper_proc(t.load_wrapper_output(self))
+
+                            # Advance once per successfully completed DAG task (do not gate on `key in dsk`:
+                            # that can miss vertices for several graph shapes, e.g. low_memory_mode uuid keys).
+                            bar_update(advance=1)
+
+                            if self.prune_depth > 0:
+                                for p in dag.pending_producers[t.key]:
+                                    dag.pending_consumers[p] -= 1
+                                    if dag.pending_consumers[p] == 0:
+                                        p_result = dag.get_result(p)
+                                        self.prune_file(p_result._file)
                         else:
-                            s = v
-                        libtask.set_env_var(k, s)
-                if self.extra_files:
-                    for f, name in self.extra_files.items():
-                        libtask.add_input(f, name)
-
-            self.install_library(libtask)
-
-        enqueued_calls = []
-        rs = dag.set_targets(keys_flatten)
-        self._enqueue_dask_calls(dag, tag, rs, self.retries, enqueued_calls)
-
-        timeout = 5
-        pending = 0
-        time_first_task_dispatched = None
-        total_user_tasks = dag.left_to_compute()
-
-        (bar_progress, bar_update) = self._make_progress_bar(total_user_tasks)
-        with bar_progress:
-            while not self.empty() or enqueued_calls:
-                submitted = 0
-                while (
-                    enqueued_calls
-                    and (not self.submit_per_cycle or submitted < self.submit_per_cycle)
-                    and (not self.max_pending or pending < self.max_pending)
-                    # and self.hungry()
-                ):
-                    self.submit(enqueued_calls.pop())
-                    if time_first_task_dispatched is None:
-                        time_first_task_dispatched = time.time()
-                    submitted += 1
-                    pending += 1
-
-                t = self.wait_for_tag(tag, timeout)
-                if t:
-                    timeout = 0
-                    pending -= 1
-                    if self.verbose:
-                        print(f"{t.key} ran on {t.hostname}")
-
-                    if t.successful():
-                        self.category_info[t.category]["num_tasks"] += 1
-                        self.category_info[t.category]["total_execution_time"] += t.resources_measured.wall_time
-                        result_file = DaskVineFile(t.output_file, t.key, dag, self.task_mode)
-                        rs = dag.set_result(t.key, result_file)
-                        self._enqueue_dask_calls(dag, tag, rs, self.retries, enqueued_calls)
-
-                        if self.wrapper:
-                            self.wrapper_proc(t.load_wrapper_output(self))
-
-                        # Advance once per successfully completed DAG task (do not gate on `key in dsk`:
-                        # that can miss vertices for several graph shapes, e.g. low_memory_mode uuid keys).
-                        bar_update(advance=1)
-
-                        if self.prune_depth > 0:
-                            for p in dag.pending_producers[t.key]:
-                                dag.pending_consumers[p] -= 1
-                                if dag.pending_consumers[p] == 0:
-                                    p_result = dag.get_result(p)
-                                    self.prune_file(p_result._file)
+                            retries_left = t.decrement_retry()
+                            print(f"task id {t.id} key {t.key} failed: {t.result}. {retries_left} attempts left.\n{t.std_output}")
+                            if retries_left > 0:
+                                self._enqueue_dask_calls(dag, tag, [(t.key, t.sexpr)], retries_left, enqueued_calls)
+                            else:
+                                raise Exception(f"tasks for key {t.key} failed permanently")
+                        t = None  # drop task reference
                     else:
-                        retries_left = t.decrement_retry()
-                        print(f"task id {t.id} key {t.key} failed: {t.result}. {retries_left} attempts left.\n{t.std_output}")
-                        if retries_left > 0:
-                            self._enqueue_dask_calls(dag, tag, [(t.key, t.sexpr)], retries_left, enqueued_calls)
-                        else:
-                            raise Exception(f"tasks for key {t.key} failed permanently")
-                    t = None  # drop task reference
-                else:
-                    timeout = 5
+                        timeout = 5
 
-            total_recovery_tasks = self.stats.tasks_recovery
-            total_tasks_completed = total_user_tasks + total_recovery_tasks
-            makespan_s = round((time.time() - time_first_task_dispatched), 6) if time_first_task_dispatched is not None else 0.0
-            throughput_tps = round(total_tasks_completed / makespan_s, 6) if makespan_s > 0.0 else 0.0
-            print(f"=== Makespan: {makespan_s:.6f} seconds")
-            print(f"=== Total tasks completed: {total_tasks_completed}")
-            print(f"=== Throughput: {throughput_tps:.6f} tasks/s")
-            return self._load_results(dag, indices, keys)
+                total_recovery_tasks = self.stats.tasks_recovery
+                total_tasks_completed = total_user_tasks + total_recovery_tasks
+                makespan_s = round((time.time() - time_first_task_dispatched), 6) if time_first_task_dispatched is not None else 0.0
+                throughput_tps = round(total_tasks_completed / makespan_s, 6) if makespan_s > 0.0 else 0.0
+                print(f"=== Makespan: {makespan_s:.6f} seconds")
+                print(f"=== Total tasks completed: {total_tasks_completed}")
+                print(f"=== Throughput: {throughput_tps:.6f} tasks/s")
+                return self._load_results(dag, indices, keys)
+        finally:
+            if _creation_fp is not None:
+                _creation_fp.close()
+            self._task_creation_time_log_fp = None
 
     def _make_progress_bar(self, total):
         if rich:

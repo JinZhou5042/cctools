@@ -1471,6 +1471,9 @@ a times series, if this feature is enabled. See @ref vine_enable_monitoring.
 */
 int vine_tune(struct vine_manager *m, const char *name, double value);
 
+/** When enabled, each line is one task dispatch wall duration in integer microseconds. */
+void vine_set_task_dispatch_time_log_path(struct vine_manager *m, const char *task_dispatch_time_log_path);
+
 /** Sets the maximum resources a task without an explicit category ("default" category).
 rm specifies the maximum resources a task in the default category may use.
 @param m  Reference to the current manager object.
