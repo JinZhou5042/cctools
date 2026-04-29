@@ -2,7 +2,7 @@ include ../../../../config.mk
 
 MODULE_DIR  := $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/dagvine
 SUBDIRS     := executor
-PY_SOURCES  := __init__.py dagvine.py workflow.py
+PY_SOURCES  := __init__.py dagvine.py utils.py workflow.py
 PY_PACKAGES := dask_adaptor task_runner
 PY_PACKAGE_SOURCES := $(foreach pkg,$(PY_PACKAGES),$(wildcard $(pkg)/*.py))
 

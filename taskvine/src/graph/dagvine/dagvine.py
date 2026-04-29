@@ -9,6 +9,7 @@ from ndcctools.taskvine.dagvine.dask_adaptor import DaskAdaptor
 from ndcctools.taskvine.dagvine.task_runner import TaskRunnerLibrary, compute_task, run_task_key
 from ndcctools.taskvine.dagvine.workflow import Workflow, TaskOutputRef, TaskOutputWrapper
 from ndcctools.taskvine.dagvine.executor.graph import ExecutorGraph
+from ndcctools.taskvine.dagvine.utils import color_text, context_loader_func, delete_all_files
 
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeRemainingColumn
 
@@ -19,37 +20,10 @@ import signal
 import time
 
 
-def context_loader_func(graph_pkl):
-    graph = cloudpickle.loads(graph_pkl)
-
-    return {
-        "graph": graph,
-    }
-
-
-def delete_all_files(root_dir):
-    """Remove files under the run-info template directory."""
-    if not os.path.exists(root_dir):
-        return
-    for dirpath, dirnames, filenames in os.walk(root_dir):
-        for filename in filenames:
-            file_path = os.path.join(dirpath, filename)
-            try:
-                os.remove(file_path)
-            except FileNotFoundError:
-                print(f"Failed to delete file {file_path}")
-
-
-def color_text(text, color_code):
-    """Return text wrapped in an ANSI color code."""
-    return f"\033[{color_code}m{text}\033[0m"
-
-
-class GraphParams:
+class DAGVineConfig:
     def __init__(self):
-        """Store DAGVine tuning parameters."""
-        # Passed to Manager.tune() before execution.
-        self.vine_manager_tuning_params = {
+        """Store DAGVine configuration by the layer that consumes it."""
+        self.manager_tuning = {
             "worker-source-max-transfers": 100,
             "max-retrievals": -1,
             "prefer-dispatch": 1,
@@ -60,8 +34,7 @@ class GraphParams:
             "shift-disk-load": 0,
             "clean-redundant-replicas": 0,
         }
-        # Passed through ExecutorGraph to the C executor graph.
-        self.executor_tuning_params = {
+        self.executor_tuning = {
             "failure-injection-step-percent": -1,
             "task-priority-mode": "largest-input-first",
             "prune-depth": 1,
@@ -74,38 +47,40 @@ class GraphParams:
             "max-retry-attempts": 15,
             "print-graph-details": 0,
         }
-        # Python-only knobs.
-        self.other_params = {
-            "schedule": "worst",
+        self.task_runner = {
             "libcores": 16,
-            "failure-injection-step-percent": -1,
+        }
+        self.execution = {
+            "schedule": "worst",
             "extra-task-output-size-mb": [0, 0],
             "extra-task-sleep-time": [0, 0],
             # 1 = run Workflow in-process (topological order), no workers / no task runner library; stdout stays on frontend.
             "local-execute": 0,
         }
 
+    def _sections(self):
+        return (
+            self.manager_tuning,
+            self.executor_tuning,
+            self.task_runner,
+            self.execution,
+        )
+
     def update_param(self, param_name, new_value):
         """Update one parameter."""
-        if param_name in self.vine_manager_tuning_params:
-            self.vine_manager_tuning_params[param_name] = new_value
-        elif param_name in self.executor_tuning_params:
-            self.executor_tuning_params[param_name] = new_value
-        elif param_name in self.other_params:
-            self.other_params[param_name] = new_value
-        else:
-            self.vine_manager_tuning_params[param_name] = new_value
+        for section in self._sections():
+            if param_name in section:
+                section[param_name] = new_value
+                return
+        # Unknown parameters are assumed to be TaskVine manager tuning knobs.
+        self.manager_tuning[param_name] = new_value
 
     def get_value_of(self, param_name):
         """Return the current value for a parameter."""
-        if param_name in self.vine_manager_tuning_params:
-            return self.vine_manager_tuning_params[param_name]
-        elif param_name in self.executor_tuning_params:
-            return self.executor_tuning_params[param_name]
-        elif param_name in self.other_params:
-            return self.other_params[param_name]
-        else:
-            raise ValueError(f"Invalid param name: {param_name}")
+        for section in self._sections():
+            if param_name in section:
+                return section[param_name]
+        raise ValueError(f"Invalid param name: {param_name}")
 
 
 class DAGVine(Manager):
@@ -116,7 +91,7 @@ class DAGVine(Manager):
 
         signal.signal(signal.SIGINT, self._on_sigint)
 
-        self.params = GraphParams()
+        self.params = DAGVineConfig()
 
         run_info_path = kwargs.get("run_info_path", None)
         run_info_template = kwargs.get("run_info_template", None)
@@ -146,7 +121,7 @@ class DAGVine(Manager):
 
     def tune_manager(self):
         """Apply manager-side tuning."""
-        for k, v in self.params.vine_manager_tuning_params.items():
+        for k, v in self.params.manager_tuning.items():
             try:
                 self.tune(k, v)
             except Exception:
@@ -154,7 +129,7 @@ class DAGVine(Manager):
 
     def tune_executor(self, executor):
         """Apply executor-graph tuning."""
-        for k, v in self.params.executor_tuning_params.items():
+        for k, v in self.params.executor_tuning.items():
             executor.tune(k, str(v))
 
     def _rep_key(self, k, r):
