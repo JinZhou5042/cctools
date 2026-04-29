@@ -1,7 +1,1 @@
-*.a
-*.so
-*.o
-*_wrap.c
-*_wrap.0
 build/
-context_graph/

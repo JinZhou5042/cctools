@@ -2,6 +2,6 @@
 # This software is distributed under the GNU General Public License.
 # See the file COPYING for details.
 
-from .dagvine import DAGVine
+from .manager import DAGVine
 
 __all__ = ["DAGVine"]
