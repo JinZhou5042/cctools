@@ -1,5 +1,5 @@
-#ifndef EXECUTOR_GRAPH_H
-#define EXECUTOR_GRAPH_H
+#ifndef DAGVINE_GRAPH_H
+#define DAGVINE_GRAPH_H
 
 #include <stdint.h>
 
@@ -25,7 +25,7 @@ typedef enum {
 } task_priority_mode_t;
 
 /** The executor graph (logical scheduling layer). */
-struct executor_graph {
+struct graph {
 	struct vine_manager *manager;
 	struct itable *nodes;
 	struct itable *task_id_to_node;
@@ -83,7 +83,7 @@ struct executor_graph {
 	timestamp_t time_first_task_dispatched; /* the time when the first task is dispatched */
 	timestamp_t time_last_task_retrieved;	/* the time when the last task is retrieved */
 	timestamp_t makespan_us;		/* the makespan of the executor graph in microseconds */
-	uint64_t completed_recovery_tasks;	/* recovery tasks seen complete in executor_graph_execute */
+	uint64_t completed_recovery_tasks;	/* recovery tasks seen complete in graph_execute */
 };
 
 /* Public APIs for operating the executor graph */
@@ -92,113 +92,113 @@ struct executor_graph {
 @param q Reference to the current manager object.
 @return A new executor graph.
 */
-struct executor_graph *executor_graph_create(struct vine_manager *q);
+struct graph *graph_create(struct vine_manager *q);
 
 /** Create a new node in the executor graph.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @return The auto-assigned node id.
 */
-uint64_t executor_graph_add_node(struct executor_graph *eg);
+uint64_t graph_add_node(struct graph *g);
 
 /** Mark a node as a retrieval target.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @param node_id Identifier of the node to mark as target.
 */
-void executor_graph_set_target(struct executor_graph *eg, uint64_t node_id);
+void graph_set_target(struct graph *g, uint64_t node_id);
 
 /** Add a dependency between two nodes in the executor graph.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @param parent_id Identifier of the parent node.
 @param child_id Identifier of the child node.
 */
-void executor_graph_add_dependency(struct executor_graph *eg, uint64_t parent_id, uint64_t child_id);
+void graph_add_dependency(struct graph *g, uint64_t parent_id, uint64_t child_id);
 
 /** Finalize the metrics of the executor graph.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 */
-void executor_graph_finalize(struct executor_graph *eg);
+void graph_finalize(struct graph *g);
 
 /** Get the heavy score of a node in the executor graph.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @param node_id Identifier of the node.
 @return The heavy score.
 */
-double executor_graph_get_node_heavy_score(const struct executor_graph *eg, uint64_t node_id);
+double graph_get_node_heavy_score(const struct graph *g, uint64_t node_id);
 
 /** Execute the task graph.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 */
-void executor_graph_execute(struct executor_graph *eg);
+void graph_execute(struct graph *g);
 
 /** Get the outfile remote name of a node in the executor graph.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @param node_id Identifier of the node.
 @return The outfile remote name.
 */
-const char *executor_graph_get_node_outfile_remote_name(const struct executor_graph *eg, uint64_t node_id);
+const char *graph_get_node_outfile_remote_name(const struct graph *g, uint64_t node_id);
 
 /** Get the local outfile source of a node in the executor graph.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @param node_id Identifier of the node.
 @return The local outfile source, or NULL if the node does not produce a local file.
 */
-const char *executor_graph_get_node_local_outfile_source(const struct executor_graph *eg, uint64_t node_id);
+const char *graph_get_node_local_outfile_source(const struct graph *g, uint64_t node_id);
 
 /** Delete an executor graph.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 */
-void executor_graph_delete(struct executor_graph *eg);
+void graph_delete(struct graph *g);
 
 /** Get the task runner library name of the executor graph.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @return The task runner library name.
 */
-const char *executor_graph_get_task_runner_library_name(const struct executor_graph *eg);
+const char *graph_get_task_runner_library_name(const struct graph *g);
 
 /** Add an input file to a task. The input file will be declared as a temp file.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @param task_id Identifier of the task.
 @param filename Reference to the filename.
 */
-void executor_graph_add_task_input(struct executor_graph *eg, uint64_t task_id, const char *filename);
+void graph_add_task_input(struct graph *g, uint64_t task_id, const char *filename);
 
 /** Add an output file to a task. The output file will be declared as a temp file.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @param task_id Identifier of the task.
 @param filename Reference to the filename.
 */
-void executor_graph_add_task_output(struct executor_graph *eg, uint64_t task_id, const char *filename);
+void graph_add_task_output(struct graph *g, uint64_t task_id, const char *filename);
 
 /** Set the task runner function name of the executor graph.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @param task_runner_function_name Reference to the task runner function name.
 */
-void executor_graph_set_task_runner_function_name(struct executor_graph *eg, const char *task_runner_function_name);
+void graph_set_task_runner_function_name(struct graph *g, const char *task_runner_function_name);
 
 /** Tune the executor graph.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @param name Reference to the name of the parameter to tune.
 @param value Reference to the value of the parameter to tune.
 @return 0 on success, -1 on failure.
 */
-int executor_graph_tune(struct executor_graph *eg, const char *name, const char *value);
+int graph_tune(struct graph *g, const char *name, const char *value);
 
 /** Get the makespan of the executor graph in microseconds.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @return The makespan in microseconds.
 */
-uint64_t executor_graph_get_makespan_us(const struct executor_graph *eg);
+uint64_t graph_get_makespan_us(const struct graph *g);
 
 /** Get the total number of recovery tasks submitted by the manager.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @return Total submitted recovery tasks.
 */
-uint64_t executor_graph_get_total_recovery_tasks(const struct executor_graph *eg);
+uint64_t graph_get_total_recovery_tasks(const struct graph *g);
 
 /** Get the number of recovery tasks completed while executing this graph.
-@param eg Reference to the executor graph.
+@param g Reference to the executor graph.
 @return Completed recovery tasks.
 */
-uint64_t executor_graph_get_completed_recovery_tasks(const struct executor_graph *eg);
+uint64_t graph_get_completed_recovery_tasks(const struct graph *g);
 
-#endif // EXECUTOR_GRAPH_H
+#endif // DAGVINE_GRAPH_H
