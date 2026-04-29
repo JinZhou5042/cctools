@@ -56,14 +56,14 @@ class ExecutorGraph:
             self._c_graph, self._key_to_id[key]
         )
 
-    def get_proxy_library_name(self):
-        """Return the generated proxy library name."""
-        return graph_capi.executor_graph_get_proxy_library_name(self._c_graph)
+    def get_task_runner_library_name(self):
+        """Return the generated task runner library name."""
+        return graph_capi.executor_graph_get_task_runner_library_name(self._c_graph)
 
-    def set_proxy_function(self, proxy_function):
-        """Set the worker-side proxy entry point."""
-        graph_capi.executor_graph_set_proxy_function_name(
-            self._c_graph, proxy_function.__name__
+    def set_task_runner_function(self, task_runner_function):
+        """Set the worker-side task runner entry point."""
+        graph_capi.executor_graph_set_task_runner_function_name(
+            self._c_graph, task_runner_function.__name__
         )
 
     def add_task_input(self, task_key, filename):

@@ -207,9 +207,9 @@ void node_delete(struct node *node)
 	vine_task_delete(node->task);
 	node->task = NULL;
 
-	if (node->proxy_arg_file) {
-		vine_file_delete(node->proxy_arg_file);
-		node->proxy_arg_file = NULL;
+	if (node->task_runner_arg_file) {
+		vine_file_delete(node->task_runner_arg_file);
+		node->task_runner_arg_file = NULL;
 	}
 	if (node->fn_return_file) {
 		vine_file_delete(node->fn_return_file);

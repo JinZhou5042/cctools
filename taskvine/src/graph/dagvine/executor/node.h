@@ -24,8 +24,8 @@ struct node {
 
 	/* Task and files */
 	struct vine_task *task;
-	/* JSON args for the proxy call; parent outputs are separate task inputs. */
-	struct vine_file *proxy_arg_file;
+	/* JSON args for the task runner call; parent outputs are separate task inputs. */
+	struct vine_file *task_runner_arg_file;
 	/* Return file for TEMP/LOCAL outputs; NULL when the output is PFS-only. */
 	struct vine_file *fn_return_file;
 	char *outfile_remote_name;

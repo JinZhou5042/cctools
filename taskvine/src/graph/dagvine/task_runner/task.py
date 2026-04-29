@@ -67,7 +67,7 @@ def compute_task(workflow, task_expr):
     return func(*r_args, **r_kwargs)
 
 
-def compute_single_key(vine_key):
+def run_task_key(vine_key):
     workflow = load_variable_from_library("graph")
 
     task_key = workflow.cid2pykey[vine_key]

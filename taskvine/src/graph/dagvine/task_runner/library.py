@@ -12,11 +12,11 @@ import hashlib
 import collections
 
 from ndcctools.taskvine.dagvine.workflow import Workflow, TaskOutputRef, TaskOutputWrapper
-from ndcctools.taskvine.dagvine.proxy_functions import compute_single_key
+from ndcctools.taskvine.dagvine.task_runner.task import run_task_key
 from ndcctools.taskvine.utils import load_variable_from_library
 
 
-class ProxyLibrary:
+class TaskRunnerLibrary:
     def __init__(self, py_manager):
         self.py_manager = py_manager
 
@@ -29,7 +29,7 @@ class ProxyLibrary:
         # using the loaded context without importing them over and over again
         self.hoisting_modules = [
             os, cloudpickle, Workflow, TaskOutputRef, TaskOutputWrapper, uuid, hashlib, random, types, collections, time,
-            load_variable_from_library, compute_single_key
+            load_variable_from_library, run_task_key
         ]
 
         # environment files serve as additional inputs to the library task, where each key is the local path and the value is the remote path
@@ -69,7 +69,7 @@ class ProxyLibrary:
 
         self.libtask = self.py_manager.create_library_from_functions(
             self.name,
-            compute_single_key,
+            run_task_key,
             library_context_info=[self.context_loader_func, self.context_loader_args, self.context_loader_kwargs],
             add_env=False,
             function_infile_load_mode="json",

@@ -1047,17 +1047,17 @@ const char *executor_graph_get_node_outfile_remote_name(const struct executor_gr
 }
 
 /**
- * Get the proxy library name of the executor graph.
+ * Get the task runner library name of the executor graph.
  * @param eg Reference to the executor graph.
- * @return The proxy library name.
+ * @return The task runner library name.
  */
-const char *executor_graph_get_proxy_library_name(const struct executor_graph *eg)
+const char *executor_graph_get_task_runner_library_name(const struct executor_graph *eg)
 {
 	if (!eg) {
 		return NULL;
 	}
 
-	return eg->proxy_library_name;
+	return eg->task_runner_library_name;
 }
 
 /**
@@ -1121,21 +1121,21 @@ void executor_graph_add_task_output(struct executor_graph *eg, uint64_t task_id,
 }
 
 /**
- * Set the proxy function name of the executor graph.
+ * Set the task runner function name of the executor graph.
  * @param eg Reference to the executor graph.
- * @param proxy_function_name Reference to the proxy function name.
+ * @param task_runner_function_name Reference to the task runner function name.
  */
-void executor_graph_set_proxy_function_name(struct executor_graph *eg, const char *proxy_function_name)
+void executor_graph_set_task_runner_function_name(struct executor_graph *eg, const char *task_runner_function_name)
 {
-	if (!eg || !proxy_function_name) {
+	if (!eg || !task_runner_function_name) {
 		return;
 	}
 
-	if (eg->proxy_function_name) {
-		free(eg->proxy_function_name);
+	if (eg->task_runner_function_name) {
+		free(eg->task_runner_function_name);
 	}
 
-	eg->proxy_function_name = xxstrdup(proxy_function_name);
+	eg->task_runner_function_name = xxstrdup(task_runner_function_name);
 }
 
 /**
@@ -1392,28 +1392,28 @@ uint64_t executor_graph_add_node(struct executor_graph *eg)
 		exit(1);
 	}
 
-	if (!eg->proxy_function_name) {
-		debug(D_ERROR, "proxy function name is not set");
+	if (!eg->task_runner_function_name) {
+		debug(D_ERROR, "task runner function name is not set");
 		executor_graph_delete(eg);
 		exit(1);
 	}
 
-	if (!eg->proxy_library_name) {
-		debug(D_ERROR, "proxy library name is not set");
+	if (!eg->task_runner_library_name) {
+		debug(D_ERROR, "task runner library name is not set");
 		executor_graph_delete(eg);
 		exit(1);
 	}
 
 	/* create node task */
-	node->task = vine_task_create(eg->proxy_function_name);
-	vine_task_set_library_required(node->task, eg->proxy_library_name);
+	node->task = vine_task_create(eg->task_runner_function_name);
+	vine_task_set_library_required(node->task, eg->task_runner_library_name);
 	vine_task_addref(node->task);
 
-	/* JSON args for the library proxy; worker mount name remains "infile". */
+	/* JSON args for the task runner; worker mount name remains "infile". */
 	char *task_arguments = node_construct_task_arguments(node);
-	node->proxy_arg_file = vine_declare_buffer(eg->manager, task_arguments, strlen(task_arguments), VINE_CACHE_LEVEL_TASK, VINE_UNLINK_WHEN_DONE);
+	node->task_runner_arg_file = vine_declare_buffer(eg->manager, task_arguments, strlen(task_arguments), VINE_CACHE_LEVEL_TASK, VINE_UNLINK_WHEN_DONE);
 	free(task_arguments);
-	vine_task_add_input(node->task, node->proxy_arg_file, "infile", VINE_TRANSFER_ALWAYS);
+	vine_task_add_input(node->task, node->task_runner_arg_file, "infile", VINE_TRANSFER_ALWAYS);
 
 	node->retry_attempts_left = eg->max_retry_attempts;
 
@@ -1463,11 +1463,11 @@ struct executor_graph *executor_graph_create(struct vine_manager *q)
 	eg->inout_filename_to_cached_name = hash_table_create(0, 0);
 	eg->resubmit_queue = list_create();
 
-	cctools_uuid_t proxy_library_name_id;
-	cctools_uuid_create(&proxy_library_name_id);
-	eg->proxy_library_name = xxstrdup(proxy_library_name_id.str);
+	cctools_uuid_t task_runner_library_name_id;
+	cctools_uuid_create(&task_runner_library_name_id);
+	eg->task_runner_library_name = xxstrdup(task_runner_library_name_id.str);
 
-	eg->proxy_function_name = NULL;
+	eg->task_runner_function_name = NULL;
 
 	/* Default prune-depth: release a TEMP node as soon as all of its
 	 * direct children have completed. Set to 0 via tune("prune-depth") to
@@ -1761,12 +1761,12 @@ void executor_graph_delete(struct executor_graph *eg)
 	struct node *node;
 	ITABLE_ITERATE(eg->nodes, nid, node)
 	{
-		if (node->proxy_arg_file) {
-			vine_prune_file(eg->manager, node->proxy_arg_file);
+		if (node->task_runner_arg_file) {
+			vine_prune_file(eg->manager, node->task_runner_arg_file);
 		}
 		delete_node_return_file(eg, node);
-		if (node->proxy_arg_file) {
-			hash_table_remove(eg->manager->file_table, node->proxy_arg_file->cached_name);
+		if (node->task_runner_arg_file) {
+			hash_table_remove(eg->manager->file_table, node->task_runner_arg_file->cached_name);
 		}
 		if (node->fn_return_file) {
 			hash_table_remove(eg->outfile_cachename_to_node, node->fn_return_file->cached_name);
@@ -1777,8 +1777,8 @@ void executor_graph_delete(struct executor_graph *eg)
 
 	list_delete(eg->resubmit_queue);
 
-	free(eg->proxy_library_name);
-	free(eg->proxy_function_name);
+	free(eg->task_runner_library_name);
+	free(eg->task_runner_function_name);
 
 	itable_delete(eg->nodes);
 	itable_delete(eg->task_id_to_node);

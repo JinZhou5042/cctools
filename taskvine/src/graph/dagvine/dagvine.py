@@ -5,9 +5,8 @@
 from ndcctools.taskvine import cvine
 from ndcctools.taskvine.manager import Manager
 
-from ndcctools.taskvine.dagvine.adaptor import Adaptor
-from ndcctools.taskvine.dagvine.proxy_library import ProxyLibrary
-from ndcctools.taskvine.dagvine.proxy_functions import compute_single_key, compute_task
+from ndcctools.taskvine.dagvine.dask_adaptor import DaskAdaptor
+from ndcctools.taskvine.dagvine.task_runner import TaskRunnerLibrary, compute_task, run_task_key
 from ndcctools.taskvine.dagvine.workflow import Workflow, TaskOutputRef, TaskOutputWrapper
 from ndcctools.taskvine.dagvine.executor.graph import ExecutorGraph
 
@@ -82,7 +81,7 @@ class GraphParams:
             "failure-injection-step-percent": -1,
             "extra-task-output-size-mb": [0, 0],
             "extra-task-sleep-time": [0, 0],
-            # 1 = run Workflow in-process (topological order), no workers / no proxy library; stdout stays on frontend.
+            # 1 = run Workflow in-process (topological order), no workers / no task runner library; stdout stays on frontend.
             "local-execute": 0,
         }
 
@@ -222,7 +221,7 @@ class DAGVine(Manager):
 
         executor = ExecutorGraph(self._taskvine)
 
-        executor.set_proxy_function(compute_single_key)
+        executor.set_task_runner_function(run_task_key)
 
         self.tune_manager()
         self.tune_executor(executor)
@@ -270,16 +269,16 @@ class DAGVine(Manager):
 
         return py_graph, executor
 
-    def create_proxy_library(self, py_graph, executor, hoisting_modules, env_files):
-        """Build the TaskVine proxy library."""
-        proxy_library = ProxyLibrary(self)
-        proxy_library.add_hoisting_modules(hoisting_modules)
-        proxy_library.add_env_files(env_files)
-        proxy_library.set_context_loader(context_loader_func, context_loader_args=[cloudpickle.dumps(py_graph)])
-        proxy_library.set_libcores(self.param("libcores"))
-        proxy_library.set_name(executor.get_proxy_library_name())
+    def create_task_runner_library(self, py_graph, executor, hoisting_modules, env_files):
+        """Build the TaskVine task runner library."""
+        task_runner_library = TaskRunnerLibrary(self)
+        task_runner_library.add_hoisting_modules(hoisting_modules)
+        task_runner_library.add_env_files(env_files)
+        task_runner_library.set_context_loader(context_loader_func, context_loader_args=[cloudpickle.dumps(py_graph)])
+        task_runner_library.set_libcores(self.param("libcores"))
+        task_runner_library.set_name(executor.get_task_runner_library_name())
 
-        return proxy_library
+        return task_runner_library
 
     def _execute_workflow_local(self, py_graph):
         """Run the workflow locally in topological order."""
@@ -323,7 +322,7 @@ class DAGVine(Manager):
         self.update_params(params)
 
         if from_dask:
-            task_dict = Adaptor(task_dict, expand_subgraphs=expand_subgraphs).converted
+            task_dict = DaskAdaptor(task_dict, expand_subgraphs=expand_subgraphs).converted
 
         result_keys = list(target_keys)
         task_dict, target_keys = self._replicate_graph(task_dict, target_keys, repeats)
@@ -335,7 +334,7 @@ class DAGVine(Manager):
             py_graph.extra_task_sleep_time[k] = random.uniform(*self.param("extra-task-sleep-time"))
 
         local_execute = bool(self.param("local-execute"))
-        proxy_library = None
+        task_runner_library = None
 
         try:
             if local_execute:
@@ -343,8 +342,8 @@ class DAGVine(Manager):
                 makespan_s = self._execute_workflow_local(py_graph)
                 completed_recovery_tasks = 0
             else:
-                proxy_library = self.create_proxy_library(py_graph, executor, hoisting_modules, env_files)
-                proxy_library.install()
+                task_runner_library = self.create_task_runner_library(py_graph, executor, hoisting_modules, env_files)
+                task_runner_library.install()
                 executor.execute()
                 makespan_s = round(executor.get_makespan_us() / 1e6, 6)
                 completed_recovery_tasks = executor.get_completed_recovery_tasks()
@@ -364,8 +363,8 @@ class DAGVine(Manager):
             return results
         finally:
             try:
-                if proxy_library is not None:
-                    proxy_library.uninstall()
+                if task_runner_library is not None:
+                    task_runner_library.uninstall()
             finally:
                 executor.delete()
 

@@ -46,11 +46,11 @@ struct executor_graph {
 	 * as long as the manager can access it. */
 	char *output_dir;
 
-	/* Name of the generated proxy library used to run Python work on workers. */
-	char *proxy_library_name;
+	/* Name of the generated task runner library used to run Python work on workers. */
+	char *task_runner_library_name;
 
 	/* Entry point inside that library. */
-	char *proxy_function_name;
+	char *task_runner_function_name;
 
 	double checkpoint_fraction; /* 0 - 1, the fraction of intermediate results to checkpoint */
 
@@ -149,11 +149,11 @@ const char *executor_graph_get_node_local_outfile_source(const struct executor_g
 */
 void executor_graph_delete(struct executor_graph *eg);
 
-/** Get the proxy library name of the executor graph.
+/** Get the task runner library name of the executor graph.
 @param eg Reference to the executor graph.
-@return The proxy library name.
+@return The task runner library name.
 */
-const char *executor_graph_get_proxy_library_name(const struct executor_graph *eg);
+const char *executor_graph_get_task_runner_library_name(const struct executor_graph *eg);
 
 /** Add an input file to a task. The input file will be declared as a temp file.
 @param eg Reference to the executor graph.
@@ -169,11 +169,11 @@ void executor_graph_add_task_input(struct executor_graph *eg, uint64_t task_id, 
 */
 void executor_graph_add_task_output(struct executor_graph *eg, uint64_t task_id, const char *filename);
 
-/** Set the proxy function name of the executor graph.
+/** Set the task runner function name of the executor graph.
 @param eg Reference to the executor graph.
-@param proxy_function_name Reference to the proxy function name.
+@param task_runner_function_name Reference to the task runner function name.
 */
-void executor_graph_set_proxy_function_name(struct executor_graph *eg, const char *proxy_function_name);
+void executor_graph_set_task_runner_function_name(struct executor_graph *eg, const char *task_runner_function_name);
 
 /** Tune the executor graph.
 @param eg Reference to the executor graph.
