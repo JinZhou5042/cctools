@@ -1620,9 +1620,9 @@ void vine_graph_execute(struct vine_graph *vg)
 			if (task->type == VINE_TASK_TYPE_RECOVERY) {
 				vg->completed_recovery_tasks++;
 				progress_bar_update_part(
-					pbar,
-					recovery_tasks_part,
-					vg->completed_recovery_tasks - recovery_tasks_part->current);
+						pbar,
+						recovery_tasks_part,
+						vg->completed_recovery_tasks - recovery_tasks_part->current);
 			}
 
 			/* get the original node by task id */

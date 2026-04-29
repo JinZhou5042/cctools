@@ -83,7 +83,7 @@ struct vine_graph {
 	timestamp_t time_first_task_dispatched; /* the time when the first task is dispatched */
 	timestamp_t time_last_task_retrieved;	/* the time when the last task is retrieved */
 	timestamp_t makespan_us;		/* the makespan of the vine graph in microseconds */
-	uint64_t completed_recovery_tasks; /* recovery tasks seen complete in vine_graph_execute */
+	uint64_t completed_recovery_tasks;	/* recovery tasks seen complete in vine_graph_execute */
 };
 
 /* Public APIs for operating the vine graph */

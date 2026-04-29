@@ -1,18 +1,15 @@
 include ../../../../../config.mk
-include ../../../../../rules.mk
 
-PROJECT_NAME = dagvine
+PROJECT_NAME := dagvine
 
-SOURCE_DIR = $(CCTOOLS_HOME)/taskvine/src/graph/$(PROJECT_NAME)/blueprint_graph
-MODULE_ROOT = $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/$(PROJECT_NAME)
-MODULE_DIR = $(MODULE_ROOT)/blueprint_graph
+SOURCE_DIR := $(CCTOOLS_HOME)/taskvine/src/graph/$(PROJECT_NAME)/blueprint_graph
+MODULE_DIR := $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/$(PROJECT_NAME)/blueprint_graph
 
-PY_SOURCES = $(wildcard $(SOURCE_DIR)/*.py)
+PY_SOURCES := $(wildcard $(SOURCE_DIR)/*.py)
 
-.PHONY: all install clean lint format
+.PHONY: all install clean lint format test
 
-all:
-	@true
+all format test:
 
 install:
 	mkdir -p $(MODULE_DIR)
@@ -25,7 +22,3 @@ lint:
 	flake8 --ignore=$(CCTOOLS_FLAKE8_IGNORE_ERRORS) \
 		--exclude=$(CCTOOLS_FLAKE8_IGNORE_FILES) \
 		$(SOURCE_DIR)/
-
-format:
-	@true
-

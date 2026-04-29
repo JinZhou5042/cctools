@@ -1,48 +1,29 @@
 include ../../../../../config.mk
 include ../../../../../rules.mk
 
-PROJECT_NAME = dagvine
+PROJECT_NAME := dagvine
+SOURCE_DIR   := $(CCTOOLS_HOME)/taskvine/src/graph/$(PROJECT_NAME)/vine_graph
+BUILD_DIR    := ../build
+MODULE_DIR   := $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/$(PROJECT_NAME)/vine_graph
+MODULE_NAME  := vine_graph_capi
 
-LOCAL_LINKAGE+=${CCTOOLS_HOME}/taskvine/src/manager/libtaskvine.a ${CCTOOLS_HOME}/dttools/src/libdttools.a
-LOCAL_CCFLAGS+=-I ${CCTOOLS_HOME}/taskvine/src/manager
-LOCAL_CCFLAGS+=-I ${CCTOOLS_HOME}/taskvine/src/graph/$(PROJECT_NAME)/vine_graph
+SOURCES   := vine_node.c vine_graph.c
+OBJECTS   := $(SOURCES:%.c=%.o)
+SWIG_WRAP := $(BUILD_DIR)/vine_graph_wrap.c
+WRAP_OBJ  := $(BUILD_DIR)/vine_graph_wrap.o
+PYMODULE  := $(BUILD_DIR)/_$(MODULE_NAME).$(CCTOOLS_DYNAMIC_SUFFIX)
 
-SOURCE_DIR = $(CCTOOLS_HOME)/taskvine/src/graph/$(PROJECT_NAME)/vine_graph
-MODULE_ROOT = $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/$(PROJECT_NAME)
-MODULE_DIR = $(MODULE_ROOT)/vine_graph
+LOCAL_LINKAGE += $(CCTOOLS_HOME)/taskvine/src/manager/libtaskvine.a $(CCTOOLS_HOME)/dttools/src/libdttools.a
+LOCAL_CCFLAGS += -I $(CCTOOLS_HOME)/taskvine/src/manager -I $(SOURCE_DIR)
 
-SOURCES = vine_node.c vine_graph.c
-OBJECTS = $(SOURCES:%.c=%.o)
+.PHONY: all install clean lint format test
 
-BUILD_DIR := ../build
-
-# put SWIG generated sources and Python extension artifacts into ../build/
-SWIG_I = vine_graph.i
-
-WRAP_NAME = vine_graph_wrap
-MODULE_NAME = vine_graph_capi
-
-SWIG_WRAP = $(BUILD_DIR)/$(WRAP_NAME).c
-WRAP_OBJ = $(BUILD_DIR)/$(WRAP_NAME).o
-PYMODULE = $(BUILD_DIR)/_$(MODULE_NAME).$(CCTOOLS_DYNAMIC_SUFFIX)
-
-LIBRARIES =
-PYDEPS = $(WRAP_OBJ) $(OBJECTS)
-PYLINK_INPUT = $(WRAP_OBJ) $(OBJECTS)
-PROGRAMS =
-SCRIPTS =
-TARGETS = $(LIBRARIES) $(PYMODULE) $(PROGRAMS)
-
-.PHONY: all install clean lint format
-
-all: $(TARGETS)
-
-$(PROGRAMS): $(EXTERNALS)
+all: $(PYMODULE)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(SWIG_WRAP): $(SWIG_I) vine_graph.h | $(BUILD_DIR)
+$(SWIG_WRAP): vine_graph.i vine_graph.h | $(BUILD_DIR)
 	$(CCTOOLS_SWIG) -python -threads -relativeimport \
 		-I$(CCTOOLS_HOME)/taskvine/src/manager \
 		-I$(CCTOOLS_HOME)/dttools/src \
@@ -50,20 +31,15 @@ $(SWIG_WRAP): $(SWIG_I) vine_graph.h | $(BUILD_DIR)
 		-I$(CCTOOLS_HOME)/taskvine/src/graph/$(PROJECT_NAME)/vine_graph \
 		-outdir $(BUILD_DIR) -o $@ $<
 
-# Build Python module (mimic bindings: silence SWIG warnings and build PIC)
 $(WRAP_OBJ): $(SWIG_WRAP)
 	$(CCTOOLS_CC) -o $@ -c $(CCTOOLS_INTERNAL_CCFLAGS) $(LOCAL_CCFLAGS) $(CCTOOLS_PYTHON3_CCFLAGS) -w -fPIC -DNDEBUG $<
 
-$(PYMODULE): $(PYDEPS)
-ifeq ($(CCTOOLS_STATIC),1)
-	$(CCTOOLS_LD) -o $@ $(CCTOOLS_DYNAMIC_FLAG) $(CCTOOLS_INTERNAL_LDFLAGS) $(LOCAL_LDFLAGS) $(PYLINK_INPUT) $(LOCAL_LINKAGE) $(CCTOOLS_PYTHON3_LDFLAGS) $(CCTOOLS_EXTERNAL_LINKAGE)
-else
-	$(CCTOOLS_LD) -o $@ $(CCTOOLS_DYNAMIC_FLAG) $(CCTOOLS_INTERNAL_LDFLAGS) $(LOCAL_LDFLAGS) $(PYLINK_INPUT) $(LOCAL_LINKAGE) $(CCTOOLS_PYTHON3_LDFLAGS) $(CCTOOLS_EXTERNAL_LINKAGE)
-endif
+$(PYMODULE): $(WRAP_OBJ) $(OBJECTS)
+	$(CCTOOLS_LD) -o $@ $(CCTOOLS_DYNAMIC_FLAG) $(CCTOOLS_INTERNAL_LDFLAGS) $(LOCAL_LDFLAGS) $^ $(LOCAL_LINKAGE) $(CCTOOLS_PYTHON3_LDFLAGS) $(CCTOOLS_EXTERNAL_LINKAGE)
 
 install: all
 	mkdir -p $(CCTOOLS_INSTALL_DIR)/graph/$(PROJECT_NAME)/include
-	cp ${CCTOOLS_HOME}/taskvine/src/manager/taskvine.h $(CCTOOLS_INSTALL_DIR)/graph/$(PROJECT_NAME)/include/
+	cp $(CCTOOLS_HOME)/taskvine/src/manager/taskvine.h $(CCTOOLS_INSTALL_DIR)/graph/$(PROJECT_NAME)/include/
 	mkdir -p $(MODULE_DIR)
 	cp $(PYMODULE) $(MODULE_DIR)
 	cp $(BUILD_DIR)/$(MODULE_NAME).py $(MODULE_DIR)
@@ -71,20 +47,13 @@ install: all
 	cp $(SOURCE_DIR)/vine_graph_client.py $(MODULE_DIR)
 
 clean:
-	rm -f $(PROGRAMS) $(OBJECTS) $(WRAP_OBJ)
-	rm -f $(PYMODULE) $(BUILD_DIR)/$(MODULE_NAME).py
+	rm -f $(OBJECTS)
 	rm -rf $(BUILD_DIR)
 
 lint:
-	if ( ! clang-format -Werror --dry-run --style='file:${CCTOOLS_HOME}/.clang-format' $(SOURCE_DIR)/*.c $(SOURCE_DIR)/*.h); \
-	then \
-		echo  "========================================================"; \
-		echo  "NOTICE: Run \`make format\` to format your latest changes."; \
-		echo  "========================================================"; \
-		exit 1; \
-	fi
+	clang-format -Werror --dry-run --style='file:$(CCTOOLS_HOME)/.clang-format' $(SOURCE_DIR)/*.[ch]
 
 format:
-	clang-format -i $(SOURCE_DIR)/*.c $(SOURCE_DIR)/*.h
+	clang-format -i $(SOURCE_DIR)/*.[ch]
 
-
+test:
