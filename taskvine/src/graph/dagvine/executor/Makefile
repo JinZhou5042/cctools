@@ -7,7 +7,7 @@ BUILD_DIR    := ../build
 MODULE_DIR   := $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/$(PROJECT_NAME)/executor
 MODULE_NAME  := graph_capi
 
-SOURCES   := node.c graph.c
+SOURCES   := node.c graph.c executor.c
 OBJECTS   := $(SOURCES:%.c=$(BUILD_DIR)/%.o)
 SWIG_WRAP := $(BUILD_DIR)/graph_wrap.c
 WRAP_OBJ  := $(BUILD_DIR)/graph_wrap.o
@@ -23,7 +23,7 @@ all: $(PYMODULE)
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(SWIG_WRAP): graph.i graph.h | $(BUILD_DIR)
+$(SWIG_WRAP): graph.i graph.h executor.h | $(BUILD_DIR)
 	$(CCTOOLS_SWIG) -python -threads -relativeimport \
 		-I$(CCTOOLS_HOME)/taskvine/src/manager \
 		-I$(CCTOOLS_HOME)/dttools/src \
@@ -34,7 +34,7 @@ $(SWIG_WRAP): graph.i graph.h | $(BUILD_DIR)
 $(WRAP_OBJ): $(SWIG_WRAP)
 	$(CCTOOLS_CC) -o $@ -c $(CCTOOLS_INTERNAL_CCFLAGS) $(LOCAL_CCFLAGS) $(CCTOOLS_PYTHON3_CCFLAGS) -w -fPIC -DNDEBUG $<
 
-$(BUILD_DIR)/%.o: %.c graph.h node.h | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: %.c graph.h executor.h node.h | $(BUILD_DIR)
 	$(CCTOOLS_CC) -o $@ -c $(CCTOOLS_INTERNAL_CCFLAGS) $(LOCAL_CCFLAGS) -fPIC -DNDEBUG $<
 
 $(PYMODULE): $(WRAP_OBJ) $(OBJECTS)

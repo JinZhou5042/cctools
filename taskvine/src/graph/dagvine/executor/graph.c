@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "priority_queue.h"
 #include "list.h"
@@ -25,172 +26,13 @@
 
 #include "node.h"
 #include "graph.h"
-#include "vine_manager.h"
-#include "vine_worker_info.h"
 #include "vine_task.h"
 #include "vine_file.h"
-#include "vine_mount.h"
 #include "taskvine.h"
-#include "vine_temp.h"
-
-static volatile sig_atomic_t interrupted = 0;
 
 /*************************************************************/
 /* Private Functions */
 /*************************************************************/
-
-/**
- * Handle the SIGINT signal.
- * @param signal Reference to the signal.
- */
-static void handle_sigint(int signal)
-{
-	interrupted = 1;
-}
-
-/**
- * Calculate the priority of a node given the priority mode.
- * @param node Reference to the node object.
- * @param priority_mode Reference to the priority mode.
- * @return The priority.
- */
-static double calculate_task_priority(struct node *node, task_priority_mode_t priority_mode)
-{
-	if (!node) {
-		return 0;
-	}
-
-	double priority = 0;
-	timestamp_t current_time = timestamp_get();
-
-	struct node *parent_node;
-
-	switch (priority_mode) {
-	case TASK_PRIORITY_MODE_RANDOM:
-		priority = random_double();
-		break;
-	case TASK_PRIORITY_MODE_DEPTH_FIRST:
-		priority = (double)node->depth;
-		break;
-	case TASK_PRIORITY_MODE_BREADTH_FIRST:
-		priority = -(double)node->depth;
-		break;
-	case TASK_PRIORITY_MODE_FIFO:
-		priority = -(double)current_time;
-		break;
-	case TASK_PRIORITY_MODE_LIFO:
-		priority = (double)current_time;
-		break;
-	case TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST:
-		LIST_ITERATE(node->parents, parent_node)
-		{
-			if (!parent_node->fn_return_file) {
-				continue;
-			}
-			priority += (double)vine_file_size(parent_node->fn_return_file);
-		}
-		break;
-	case TASK_PRIORITY_MODE_LARGEST_STORAGE_FOOTPRINT_FIRST:
-		LIST_ITERATE(node->parents, parent_node)
-		{
-			if (!parent_node->fn_return_file) {
-				continue;
-			}
-			timestamp_t parent_task_completion_time = parent_node->task->time_workers_execute_last;
-			priority += (double)vine_file_size(parent_node->fn_return_file) * (double)parent_task_completion_time;
-		}
-		break;
-	}
-
-	return priority;
-}
-
-/**
- * Submit a node to the TaskVine manager via the executor graph.
- * @param g Reference to the executor graph.
- * @param node Reference to the node.
- */
-static void submit_node_task(struct graph *g, struct node *node)
-{
-	if (!g || !node) {
-		return;
-	}
-
-	if (!node->task) {
-		debug(D_ERROR, "submit_node_task: node %" PRIu64 " has no task", node->node_id);
-		return;
-	}
-
-	/* Avoid double-submitting the same task object. This should never be needed
-	 * for correctness and leads to task_id mapping corruption if it happens. */
-	if (node->task->state != VINE_TASK_INITIAL) {
-		debug(D_VINE, "submit_node_task: skipping node %" PRIu64 " (task already submitted, state=%d, task_id=%d)", node->node_id, node->task->state, node->task->task_id);
-		return;
-	}
-
-	/* calculate the priority of the node */
-	double priority = calculate_task_priority(node, g->task_priority_mode);
-	vine_task_set_priority(node->task, priority);
-
-	/* submit the task to the manager */
-	timestamp_t time_start = timestamp_get();
-	int task_id = vine_submit(g->manager, node->task);
-	node->submission_time = timestamp_get() - time_start;
-
-	if (task_id <= 0) {
-		debug(D_ERROR, "submit_node_task: failed to submit node %" PRIu64 " (returned task_id=%d)", node->node_id, task_id);
-		return;
-	}
-
-	/* insert the task id to the task id to node map */
-	itable_insert(g->task_id_to_node, (uint64_t)task_id, node);
-
-	debug(D_VINE, "submitted node %" PRIu64 " with task id %d", node->node_id, task_id);
-
-	return;
-}
-
-/**
- * Submit the children of a node once every dependency has completed.
- * @param g Reference to the executor graph.
- * @param node Reference to the node.
- */
-static void submit_unblocked_children(struct graph *g, struct node *node)
-{
-	if (!g || !node) {
-		return;
-	}
-
-	struct node *child_node;
-	LIST_ITERATE(node->children, child_node)
-	{
-		if (!child_node) {
-			continue;
-		}
-
-		/* Edge-fired dependency resolution: each parent->child edge is consumed at most once.
-		 * This is critical for recomputation/resubmission, where a parent may "complete" multiple times. */
-		if (!child_node->fired_parents) {
-			child_node->fired_parents = set_create(0);
-		}
-		if (set_lookup(child_node->fired_parents, node)) {
-			continue;
-		}
-		set_insert(child_node->fired_parents, node);
-
-		if (child_node->remaining_parents_count > 0) {
-			child_node->remaining_parents_count--;
-		}
-
-		/* If no more parents are remaining, submit the child (if it is not already done / in-flight). */
-		if (child_node->remaining_parents_count == 0 && !child_node->completed && child_node->task &&
-				child_node->task->state == VINE_TASK_INITIAL) {
-			submit_node_task(g, child_node);
-		}
-	}
-
-	return;
-}
 
 /**
  * Compute a topological ordering of the executor graph.
@@ -346,18 +188,14 @@ static double compute_node_heavy_score(struct node *node)
 	return up_score / (down_score + 1);
 }
 
-static void assign_node_outfile_local(struct graph *g, struct node *node)
+static void assign_node_outfile_local(struct node *node)
 {
 	node->outfile_type = NODE_OUTFILE_TYPE_LOCAL;
-	char *local_outfile_path = string_format("%s/%s", g->output_dir, node->outfile_remote_name);
-	node->fn_return_file = vine_declare_file(g->manager, local_outfile_path, VINE_CACHE_LEVEL_WORKFLOW, 0);
-	free(local_outfile_path);
 }
 
-static void assign_node_outfile_temp(struct graph *g, struct node *node)
+static void assign_node_outfile_temp(struct node *node)
 {
 	node->outfile_type = NODE_OUTFILE_TYPE_TEMP;
-	node->fn_return_file = vine_declare_temp(g->manager);
 }
 
 /**
@@ -431,462 +269,6 @@ static void compute_upstream_downstream_and_heavy_scores(struct graph *g, struct
 	}
 }
 
-/**
- * Map a task object reported by the manager back to the owning graph node.
- * @param g Reference to the executor graph.
- * @param task Task handle as returned from the wait API.
- * @return Matching node, or NULL.
- */
-static struct node *get_node_by_task(struct graph *g, struct vine_task *task)
-{
-	if (!g || !task) {
-		return NULL;
-	}
-
-	if (task->type == VINE_TASK_TYPE_STANDARD) {
-		/* standard tasks are mapped directly to a node */
-		return itable_lookup(g->task_id_to_node, (uint64_t)task->task_id);
-	} else if (task->type == VINE_TASK_TYPE_RECOVERY) {
-		/* Recovery tasks are not in the per-node task-id map; recover the
-		 * producer by following the file’s original producer id. */
-		struct vine_mount *mount;
-		LIST_ITERATE(task->output_mounts, mount)
-		{
-			uint64_t original_producer_task_id = mount->file->original_producer_task_id;
-			if (original_producer_task_id > 0) {
-				return itable_lookup(g->task_id_to_node, original_producer_task_id);
-			}
-		}
-	}
-
-	debug(D_ERROR, "task %d has no original producer task id", task->task_id);
-
-	return NULL;
-}
-
-/* Shared-FS byte accounting.
- * g->pfs_usage_bytes should equal the sum of node->pfs_credited_bytes.
- * We update it when a PFS output is observed on success, and when that
- * path is later deleted. */
-
-/* Update the global PFS byte count after stat'ing a node's output. */
-static void pfs_account_write(struct graph *g, struct node *n, size_t new_size)
-{
-	if (!g || !n) {
-		return;
-	}
-
-	size_t prev = n->pfs_credited_bytes;
-	if (new_size == prev) {
-		return;
-	}
-
-	if (new_size > prev) {
-		g->pfs_usage_bytes += (new_size - prev);
-	} else {
-		g->pfs_usage_bytes -= (prev - new_size);
-	}
-	n->pfs_credited_bytes = new_size;
-
-	debug(D_VINE,
-			"pfs write: node %" PRIu64 " size=%zu (prev=%zu) usage=%" PRIu64,
-			n->node_id,
-			new_size,
-			prev,
-			g->pfs_usage_bytes);
-}
-
-/* Remove this node's credited PFS bytes from the global total. */
-static void pfs_account_delete(struct graph *g, struct node *n)
-{
-	if (!g || !n) {
-		return;
-	}
-
-	size_t credited = n->pfs_credited_bytes;
-	if (credited == 0) {
-		return;
-	}
-
-	g->pfs_usage_bytes -= credited;
-	n->pfs_credited_bytes = 0;
-
-	debug(D_VINE,
-			"pfs delete: node %" PRIu64 " size=%zu usage=%" PRIu64,
-			n->node_id,
-			credited,
-			g->pfs_usage_bytes);
-}
-
-/* Cut propagation.
- * anchored(n): completed and on LOCAL/PFS, so recovery does not walk past it.
- * cut(n): completed, and every child is anchored or already cut.
- * Once a non-target node is cut, its return can be deleted. TEMP goes through
- * vine_prune_file(); LOCAL/PFS unlink the path directly. */
-
-/* Return 1 if this node is complete and on durable storage. */
-static int node_is_anchored(const struct node *n)
-{
-	if (!n || !n->completed) {
-		return 0;
-	}
-	return n->outfile_type == NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM || n->outfile_type == NODE_OUTFILE_TYPE_LOCAL;
-}
-
-/* TEMP output is being regenerated by recovery; don't treat it as settled yet. */
-static int node_is_mid_recovery(const struct node *n)
-{
-	if (!n || !n->fn_return_file || n->fn_return_file->type != VINE_TEMP) {
-		return 0;
-	}
-	struct vine_task *rt = n->fn_return_file->recovery_task;
-	if (!rt) {
-		return 0;
-	}
-	/* INITIAL = never submitted, DONE = last run finished successfully.
-	 * Everything else (READY, RUNNING, WAITING_RETRIEVAL, RETRIEVED)
-	 * means the manager has (re-)submitted the task and is currently
-	 * depending on N's inputs. */
-	return rt->state != VINE_TASK_INITIAL && rt->state != VINE_TASK_DONE;
-}
-
-/* Delete this node's return path. Caller must already know it is safe. */
-static void delete_node_return_file(struct graph *g, struct node *n)
-{
-	if (!g || !n) {
-		return;
-	}
-
-	switch (n->outfile_type) {
-	case NODE_OUTFILE_TYPE_TEMP:
-		/* Temp outputs live on workers; go through the manager so every
-		 * replica (and cached_name bookkeeping) is released consistently. */
-		if (n->fn_return_file) {
-			vine_prune_file(g->manager, n->fn_return_file);
-		}
-		break;
-	case NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
-		/* For PFS nodes, outfile_remote_name is the full path. Debit
-		 * accounting first so the counters stay consistent even if
-		 * unlink() fails (the data is considered dispensable and will
-		 * be rewritten on any future re-run). */
-		pfs_account_delete(g, n);
-		if (n->outfile_remote_name) {
-			unlink(n->outfile_remote_name);
-		}
-		break;
-	case NODE_OUTFILE_TYPE_LOCAL:
-		/* For LOCAL nodes the physical path is outfile->source
-		 * (<output_dir>/<outfile_remote_name>); prefer that over
-		 * reconstructing the path ourselves. */
-		if (n->fn_return_file && n->fn_return_file->source) {
-			unlink(n->fn_return_file->source);
-		}
-		break;
-	}
-}
-
-/* Try to cut a node. Returns 1 only on a new transition to cut. */
-static int try_cut_node(struct graph *g, struct node *n)
-{
-	if (!g || !n || n->cut || !n->completed) {
-		return 0;
-	}
-
-	struct node *c;
-	LIST_ITERATE(n->children, c)
-	{
-		/* child must be anchored or cut, and not in the middle of recovery */
-		if ((!node_is_anchored(c) && !c->cut) || node_is_mid_recovery(c)) {
-			return 0;
-		}
-	}
-
-	n->cut = 1;
-
-	debug(D_VINE, "cut: node %" PRIu64 " outfile_type=%d is_target=%d", n->node_id, n->outfile_type, n->is_target);
-
-	/* Keep target outputs around. */
-	if (!n->is_target) {
-		delete_node_return_file(g, n);
-	}
-
-	return 1;
-}
-
-/* Re-check `start`, then walk upward until cut state stops changing. */
-static void propagate_cut_from(struct graph *g, struct node *start)
-{
-	if (!g || !start || !start->completed) {
-		return;
-	}
-
-	timestamp_t t0 = timestamp_get();
-
-	try_cut_node(g, start);
-
-	struct list *worklist = list_create();
-	struct node *p;
-	LIST_ITERATE(start->parents, p)
-	{
-		list_push_tail(worklist, p);
-	}
-
-	while (list_size(worklist) > 0) {
-		struct node *m = list_pop_head(worklist);
-		if (try_cut_node(g, m)) {
-			LIST_ITERATE(m->parents, p)
-			{
-				list_push_tail(worklist, p);
-			}
-		}
-	}
-
-	list_delete(worklist);
-
-	g->time_spent_on_cut_propagation += timestamp_get() - t0;
-}
-
-/* prune-depth release.
- * TEMP only. If a completed non-target node has every descendant within k child
- * hops completed, we may drop its TEMP return before cut would allow it.
- * This is weaker than cut and may force later recovery to recompute the node.
- * LOCAL/PFS are not touched here. */
-
-/* Level-order walk. Returns 0 if any descendant is incomplete or mid-recovery. */
-static int all_descendants_within_depth_completed(struct node *a, int depth)
-{
-	if (!a || depth <= 0) {
-		return 1;
-	}
-
-	struct set *visited = set_create(0);
-	struct list *current = list_create();
-	list_push_tail(current, a);
-	set_insert(visited, a);
-
-	int ok = 1;
-	for (int d = 0; d < depth && ok; d++) {
-		struct list *next = list_create();
-		struct node *n;
-		LIST_ITERATE(current, n)
-		{
-			struct node *c;
-			LIST_ITERATE(n->children, c)
-			{
-				if (set_lookup(visited, c)) {
-					continue;
-				}
-				set_insert(visited, c);
-				/* mid-recovery still counts as unsettled */
-				if (!c->completed || node_is_mid_recovery(c)) {
-					ok = 0;
-					break;
-				}
-				list_push_tail(next, c);
-			}
-			if (!ok) {
-				break;
-			}
-		}
-		list_delete(current);
-		current = next;
-	}
-
-	list_delete(current);
-	set_delete(visited);
-	return ok;
-}
-
-/* Early-release one TEMP node if it now meets prune-depth. */
-static void try_prune_depth_release(struct graph *g, struct node *a)
-{
-	if (!g || !a) {
-		return;
-	}
-	if (a->prune_depth_pruned) {
-		return;
-	}
-	if (a->outfile_type != NODE_OUTFILE_TYPE_TEMP) {
-		return;
-	}
-	if (a->is_target) {
-		return;
-	}
-	if (!a->completed || !a->fn_return_file) {
-		return;
-	}
-	if (!all_descendants_within_depth_completed(a, g->prune_depth)) {
-		return;
-	}
-
-	delete_node_return_file(g, a);
-	a->prune_depth_pruned = 1;
-
-	debug(D_VINE, "prune-depth release: node %" PRIu64 " depth=%d", a->node_id, g->prune_depth);
-}
-
-/* After a completion, re-check this node and ancestors out to k hops. */
-static void apply_prune_depth_from(struct graph *g, struct node *node)
-{
-	if (!g || !node) {
-		return;
-	}
-	int k = g->prune_depth;
-	if (k <= 0) {
-		return;
-	}
-
-	try_prune_depth_release(g, node);
-
-	struct set *visited = set_create(0);
-	struct list *current = list_create();
-	list_push_tail(current, node);
-	set_insert(visited, node);
-
-	for (int d = 1; d <= k; d++) {
-		struct list *next = list_create();
-		struct node *n;
-		LIST_ITERATE(current, n)
-		{
-			struct node *p;
-			LIST_ITERATE(n->parents, p)
-			{
-				if (set_lookup(visited, p)) {
-					continue;
-				}
-				set_insert(visited, p);
-				list_push_tail(next, p);
-				try_prune_depth_release(g, p);
-			}
-		}
-		list_delete(current);
-		current = next;
-	}
-
-	list_delete(current);
-	set_delete(visited);
-}
-
-/* Per-iteration cap on how many queued nodes resubmit processing will handle.
- * Prevents a single pass from monopolizing the main loop when a large batch of
- * tasks fails at once; the remainder is picked up on the next iteration. */
-#define RESUBMIT_SCAN_LIMIT 100
-
-/* Minimum delay (in microseconds) between a node's failure and its next retry.
- * Smooths out transient failures (e.g. worker evictions clustered in time) and
- * avoids hot-looping on a deterministically-failing task. */
-#define RESUBMIT_COOLDOWN_USECS ((timestamp_t)1000000)
-
-/**
- * Queue a node to be retried later. Idempotent: a node already on the queue
- * is left in place, preserving its original failure timestamp.
- */
-static void queue_node_for_retry(struct graph *g, struct node *node)
-{
-	if (!g || !node) {
-		return;
-	}
-
-	if (node->in_resubmit_queue) {
-		return;
-	}
-
-	node->last_failure_time = timestamp_get();
-	list_push_tail(g->resubmit_queue, node);
-	node->in_resubmit_queue = 1;
-}
-
-/* Drain the resubmit queue: reset + resubmit up to RESUBMIT_SCAN_LIMIT nodes,
- * skipping any whose cooldown has not yet elapsed.
- *
- * FIFO invariant: nodes are pushed at enqueue time with monotonically-increasing
- * timestamps, so the head is always the oldest failure. If the head is still in
- * cooldown, every later entry is younger and also in cooldown, so we can stop
- * scanning immediately.
- *
- * When a wait call returns a completed task, the task object is in DONE
- * state, so resetting it for a fresh submit is safe.  Input-missing and
- * temp recovery are handled inside the manager; this path only covers
- * application-level outcomes the manager surfaces as completed tasks
- * (failed results, bad exits, missing artifacts on shared storage, etc.). */
-static void drain_resubmit_queue(struct graph *g)
-{
-	if (!g) {
-		return;
-	}
-
-	timestamp_t now = timestamp_get();
-	int queued = list_size(g->resubmit_queue);
-	int budget = queued < RESUBMIT_SCAN_LIMIT ? queued : RESUBMIT_SCAN_LIMIT;
-
-	for (int i = 0; i < budget; i++) {
-		struct node *node = list_peek_head(g->resubmit_queue);
-		if (!node) {
-			break;
-		}
-		if (now - node->last_failure_time < RESUBMIT_COOLDOWN_USECS) {
-			break;
-		}
-
-		list_pop_head(g->resubmit_queue);
-		node->in_resubmit_queue = 0;
-
-		if (--node->retry_attempts_left < 0) {
-			debug(D_ERROR, "node %" PRIu64 " has no retries left. Aborting.", node->node_id);
-			graph_delete(g);
-			exit(1);
-		}
-
-		debug(D_VINE, "Resubmitting node %" PRIu64 " (remaining=%d)", node->node_id, node->retry_attempts_left);
-		vine_task_reset(node->task);
-		submit_node_task(g, node);
-	}
-}
-
-/* Decide whether a just-retrieved task is successful and, on any kind of
- * failure, enqueue its node for resubmission. Returns 1 on success, 0 on
- * failure (caller must skip post-processing and continue the main loop).
- *
- * Two failure modes are handled uniformly:
- *   1. Manager-reported failure: non-SUCCESS result code or non-zero exit.
- *   2. Output-missing failure: for sharedfs outputs, the declared output
- *      file cannot be stat()-ed (worker reported success but no artifact).
- *
- * On success, `outfile_size_bytes` is filled from the on-disk size for PFS
- * returns, or from the in-memory size recorded on the return object for
- * local/temp storage. */
-static int validate_task_or_enqueue(struct graph *g, struct node *node)
-{
-	struct vine_task *task = node->task;
-
-	if (task->result != VINE_RESULT_SUCCESS || task->exit_code != 0) {
-		debug(D_VINE, "Task %d failed (result=%d, exit=%d)", task->task_id, task->result, task->exit_code);
-		queue_node_for_retry(g, node);
-		return 0;
-	}
-
-	switch (node->outfile_type) {
-	case NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM: {
-		struct stat info;
-		if (stat(node->outfile_remote_name, &info) < 0) {
-			debug(D_VINE, "Task %d succeeded but missing sharedfs output %s", task->task_id, node->outfile_remote_name);
-			queue_node_for_retry(g, node);
-			return 0;
-		}
-		node->outfile_size_bytes = info.st_size;
-		pfs_account_write(g, node, (size_t)info.st_size);
-		break;
-	}
-	case NODE_OUTFILE_TYPE_LOCAL:
-	case NODE_OUTFILE_TYPE_TEMP:
-		node->outfile_size_bytes = node->fn_return_file->size;
-		break;
-	}
-
-	return 1;
-}
-
 /*************************************************************/
 /* Public APIs */
 /*************************************************************/
@@ -903,30 +285,7 @@ int graph_tune(struct graph *g, const char *name, const char *value)
 		return -1;
 	}
 
-	if (strcmp(name, "failure-injection-step-percent") == 0) {
-		g->failure_injection_step_percent = atof(value);
-
-	} else if (strcmp(name, "task-priority-mode") == 0) {
-		if (strcmp(value, "random") == 0) {
-			g->task_priority_mode = TASK_PRIORITY_MODE_RANDOM;
-		} else if (strcmp(value, "depth-first") == 0) {
-			g->task_priority_mode = TASK_PRIORITY_MODE_DEPTH_FIRST;
-		} else if (strcmp(value, "breadth-first") == 0) {
-			g->task_priority_mode = TASK_PRIORITY_MODE_BREADTH_FIRST;
-		} else if (strcmp(value, "fifo") == 0) {
-			g->task_priority_mode = TASK_PRIORITY_MODE_FIFO;
-		} else if (strcmp(value, "lifo") == 0) {
-			g->task_priority_mode = TASK_PRIORITY_MODE_LIFO;
-		} else if (strcmp(value, "largest-input-first") == 0) {
-			g->task_priority_mode = TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST;
-		} else if (strcmp(value, "largest-storage-footprint-first") == 0) {
-			g->task_priority_mode = TASK_PRIORITY_MODE_LARGEST_STORAGE_FOOTPRINT_FIRST;
-		} else {
-			debug(D_ERROR, "invalid priority mode: %s", value);
-			return -1;
-		}
-
-	} else if (strcmp(name, "output-dir") == 0) {
+	if (strcmp(name, "output-dir") == 0) {
 		if (g->output_dir) {
 			free(g->output_dir);
 		}
@@ -961,60 +320,6 @@ int graph_tune(struct graph *g, const char *name, const char *value)
 			return -1;
 		}
 		g->checkpoint_dir = xxstrdup(value);
-
-	} else if (strcmp(name, "progress-bar-update-interval-sec") == 0) {
-		double val = atof(value);
-		g->progress_bar_update_interval_sec = (val > 0.0) ? val : 0.1;
-
-	} else if (strcmp(name, "time-metrics-filename") == 0) {
-		if (value == NULL || strcmp(value, "0") == 0) {
-			g->time_metrics_filename = NULL;
-			return 0;
-		}
-
-		if (g->time_metrics_filename) {
-			free(g->time_metrics_filename);
-		}
-
-		g->time_metrics_filename = xxstrdup(value);
-
-		/** Extract parent directory inline **/
-		const char *slash = strrchr(g->time_metrics_filename, '/');
-		if (slash) {
-			size_t len = slash - g->time_metrics_filename;
-			char *parent = malloc(len + 1);
-			memcpy(parent, g->time_metrics_filename, len);
-			parent[len] = '\0';
-
-			/** Ensure the parent directory exists **/
-			if (mkdir(parent, 0777) != 0 && errno != EEXIST) {
-				debug(D_ERROR, "failed to mkdir %s (errno=%d)", parent, errno);
-				free(parent);
-				return -1;
-			}
-			free(parent);
-		}
-
-		/** Truncate or create the file **/
-		FILE *fp = fopen(g->time_metrics_filename, "w");
-		if (!fp) {
-			debug(D_ERROR, "failed to create file %s (errno=%d)", g->time_metrics_filename, errno);
-			return -1;
-		}
-		fclose(fp);
-
-	} else if (strcmp(name, "enable-debug-log") == 0) {
-		if (g->enable_debug_log == 0) {
-			return -1;
-		}
-		g->enable_debug_log = (atoi(value) == 1) ? 1 : 0;
-		if (g->enable_debug_log == 0) {
-			debug_flags_clear();
-			debug_close();
-		}
-
-	} else if (strcmp(name, "max-retry-attempts") == 0) {
-		g->max_retry_attempts = MAX(0, atoi(value));
 
 	} else if (strcmp(name, "print-graph-details") == 0) {
 		g->print_graph_details = (atoi(value) == 1) ? 1 : 0;
@@ -1061,66 +366,6 @@ const char *graph_get_task_runner_library_name(const struct graph *g)
 }
 
 /**
- * Add an input file to a task. The input file will be declared as a temp file.
- * @param g Reference to the executor graph.
- * @param task_id Reference to the task id.
- * @param filename Reference to the filename.
- */
-void graph_add_task_input(struct graph *g, uint64_t task_id, const char *filename)
-{
-	if (!g || !task_id || !filename) {
-		return;
-	}
-
-	struct node *node = itable_lookup(g->nodes, task_id);
-	if (!node) {
-		return;
-	}
-
-	struct vine_file *f = NULL;
-	const char *cached_name = hash_table_lookup(g->inout_filename_to_cached_name, filename);
-
-	if (cached_name) {
-		f = vine_manager_lookup_file(g->manager, cached_name);
-	} else {
-		f = vine_declare_temp(g->manager);
-		hash_table_insert(g->inout_filename_to_cached_name, filename, xxstrdup(f->cached_name));
-	}
-
-	vine_task_add_input(node->task, f, filename, VINE_TRANSFER_ALWAYS);
-}
-
-/**
- * Add an output file to a task. The output file will be declared as a temp file.
- * @param g Reference to the executor graph.
- * @param task_id Reference to the task id.
- * @param filename Reference to the filename.
- */
-void graph_add_task_output(struct graph *g, uint64_t task_id, const char *filename)
-{
-	if (!g || !task_id || !filename) {
-		return;
-	}
-
-	struct node *node = itable_lookup(g->nodes, task_id);
-	if (!node) {
-		return;
-	}
-
-	struct vine_file *f = NULL;
-	const char *cached_name = hash_table_lookup(g->inout_filename_to_cached_name, filename);
-
-	if (cached_name) {
-		f = vine_manager_lookup_file(g->manager, cached_name);
-	} else {
-		f = vine_declare_temp(g->manager);
-		hash_table_insert(g->inout_filename_to_cached_name, filename, xxstrdup(f->cached_name));
-	}
-
-	vine_task_add_output(node->task, f, filename, VINE_TRANSFER_ALWAYS);
-}
-
-/**
  * Set the task runner function name of the executor graph.
  * @param g Reference to the executor graph.
  * @param task_runner_function_name Reference to the task runner function name.
@@ -1156,33 +401,6 @@ double graph_get_node_heavy_score(const struct graph *g, uint64_t node_id)
 	}
 
 	return node->heavy_score;
-}
-
-/**
- * Get the local outfile source of a node in the executor graph, only valid for local output files.
- * The source of a local output file is the path on the local filesystem.
- * @param g Reference to the executor graph.
- * @param node_id Reference to the node id.
- * @return The local outfile source.
- */
-const char *graph_get_node_local_outfile_source(const struct graph *g, uint64_t node_id)
-{
-	if (!g) {
-		return NULL;
-	}
-
-	struct node *node = itable_lookup(g->nodes, node_id);
-	if (!node) {
-		debug(D_ERROR, "node %" PRIu64 " not found", node_id);
-		exit(1);
-	}
-
-	if (node->outfile_type != NODE_OUTFILE_TYPE_LOCAL) {
-		debug(D_ERROR, "node %" PRIu64 " is not a local output file", node_id);
-		exit(1);
-	}
-
-	return node->fn_return_file->source;
 }
 
 /**
@@ -1262,7 +480,7 @@ void graph_finalize(struct graph *g)
 		while ((node = priority_queue_pop(sorted_nodes))) {
 			if (node->is_target) {
 				/* declare the return as a normal managed file for retrieval as usual */
-				assign_node_outfile_local(g, node);
+				assign_node_outfile_local(node);
 				continue;
 			}
 			if (assigned_checkpoint_count < checkpoint_count) {
@@ -1271,11 +489,11 @@ void graph_finalize(struct graph *g)
 				char *shared_file_system_outfile_path = string_format("%s/%s", g->checkpoint_dir, node->outfile_remote_name);
 				free(node->outfile_remote_name);
 				node->outfile_remote_name = shared_file_system_outfile_path;
-				node->fn_return_file = NULL;
+				node->outfile = NULL;
 				assigned_checkpoint_count++;
 			} else {
 				/* other nodes will be declared as temp files to leverage node-local storage */
-				assign_node_outfile_temp(g, node);
+				assign_node_outfile_temp(node);
 			}
 		}
 		priority_queue_delete(sorted_nodes);
@@ -1284,18 +502,10 @@ void graph_finalize(struct graph *g)
 		LIST_ITERATE(topo_order, node)
 		{
 			if (node->is_target) {
-				assign_node_outfile_local(g, node);
+				assign_node_outfile_local(node);
 			} else {
-				assign_node_outfile_temp(g, node);
+				assign_node_outfile_temp(node);
 			}
-		}
-	}
-
-	/* track outputs for all nodes that carry a return object */
-	LIST_ITERATE(topo_order, node)
-	{
-		if (node->fn_return_file) {
-			vine_task_add_output(node->task, node->fn_return_file, node->outfile_remote_name, VINE_TRANSFER_ALWAYS);
 		}
 	}
 
@@ -1321,43 +531,6 @@ void graph_finalize(struct graph *g)
 			node_debug_print(node);
 		}
 	}
-
-	/* create mappings from task IDs and outfile cache names to nodes */
-	LIST_ITERATE(topo_order, node)
-	{
-		if (node->fn_return_file) {
-			hash_table_insert(g->outfile_cachename_to_node, node->fn_return_file->cached_name, node);
-		}
-	}
-
-	/* add the parents' outfiles as inputs to the task */
-	LIST_ITERATE(topo_order, node)
-	{
-		struct node *parent_node;
-		LIST_ITERATE(node->parents, parent_node)
-		{
-			if (parent_node->fn_return_file) {
-				vine_task_add_input(node->task, parent_node->fn_return_file, parent_node->outfile_remote_name, VINE_TRANSFER_ALWAYS);
-			}
-		}
-	}
-
-	/* initialize remaining_parents_count for all nodes */
-	LIST_ITERATE(topo_order, node)
-	{
-		node->remaining_parents_count = list_size(node->parents);
-	}
-
-	/* enqueue those without unresolved dependencies */
-	LIST_ITERATE(topo_order, node)
-	{
-		if (node->remaining_parents_count == 0) {
-			submit_node_task(g, node);
-		}
-	}
-
-	/* enable return recovery tasks */
-	vine_enable_return_recovery_tasks(g->manager);
 
 	list_delete(topo_order);
 
@@ -1409,14 +582,6 @@ uint64_t graph_add_node(struct graph *g)
 	vine_task_set_library_required(node->task, g->task_runner_library_name);
 	vine_task_addref(node->task);
 
-	/* JSON args for the task runner; worker mount name remains "infile". */
-	char *task_arguments = node_construct_task_arguments(node);
-	node->task_runner_arg_file = vine_declare_buffer(g->manager, task_arguments, strlen(task_arguments), VINE_CACHE_LEVEL_TASK, VINE_UNLINK_WHEN_DONE);
-	free(task_arguments);
-	vine_task_add_input(node->task, node->task_runner_arg_file, "infile", VINE_TRANSFER_ALWAYS);
-
-	node->retry_attempts_left = g->max_retry_attempts;
-
 	itable_insert(g->nodes, node_id, node);
 
 	return node_id;
@@ -1440,28 +605,24 @@ void graph_set_target(struct graph *g, uint64_t node_id)
 }
 
 /**
- * Create a new executor graph and bind a manager to it.
- * @param q Reference to the manager object.
+ * Create a new executor graph using graph-owned path configuration.
+ * @param runtime_dir Runtime directory used as the default path root.
  * @return A new executor graph instance.
  */
-struct graph *graph_create(struct vine_manager *q)
+struct graph *graph_create(const char *runtime_dir)
 {
-	if (!q) {
+	if (!runtime_dir) {
 		return NULL;
 	}
 
 	struct graph *g = xxmalloc(sizeof(struct graph));
 
-	g->manager = q;
-
-	g->checkpoint_dir = xxstrdup(g->manager->runtime_directory); // default to current working directory
-	g->output_dir = xxstrdup(g->manager->runtime_directory);     // default to current working directory
+	g->checkpoint_dir = xxstrdup(runtime_dir); // default to current working directory
+	g->output_dir = xxstrdup(runtime_dir);	   // default to current working directory
 
 	g->nodes = itable_create(0);
-	g->task_id_to_node = itable_create(0);
 	g->outfile_cachename_to_node = hash_table_create(0, 0);
 	g->inout_filename_to_cached_name = hash_table_create(0, 0);
-	g->resubmit_queue = list_create();
 
 	cctools_uuid_t task_runner_library_name_id;
 	cctools_uuid_create(&task_runner_library_name_id);
@@ -1474,33 +635,7 @@ struct graph *graph_create(struct vine_manager *q)
 	 * disable and rely exclusively on cut-propagation. */
 	g->prune_depth = 1;
 
-	g->time_spent_on_cut_propagation = 0;
-
-	g->pfs_usage_bytes = 0;
-
 	g->print_graph_details = 0;
-
-	g->task_priority_mode = TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST;
-	g->failure_injection_step_percent = -1.0;
-
-	g->progress_bar_update_interval_sec = 0.1;
-
-	/* enable debug system for C code since it uses a separate debug system instance
-	 * from the Python bindings. Use the same function that the manager uses. */
-	char *debug_tmp = string_format("%s/vine-logs/debug", g->manager->runtime_directory);
-	vine_enable_debug_log(debug_tmp);
-	free(debug_tmp);
-
-	g->time_metrics_filename = NULL;
-
-	g->enable_debug_log = 1;
-
-	g->max_retry_attempts = 15;
-
-	g->time_first_task_dispatched = UINT64_MAX;
-	g->time_last_task_retrieved = 0;
-	g->makespan_us = 0;
-	g->completed_recovery_tasks = 0;
 
 	return g;
 }
@@ -1542,211 +677,6 @@ void graph_add_dependency(struct graph *g, uint64_t parent_id, uint64_t child_id
 	return;
 }
 
-uint64_t graph_get_makespan_us(const struct graph *g)
-{
-	if (!g) {
-		return 0;
-	}
-
-	return (uint64_t)g->makespan_us;
-}
-
-uint64_t graph_get_total_recovery_tasks(const struct graph *g)
-{
-	if (!g || !g->manager || !g->manager->stats) {
-		return 0;
-	}
-
-	return (uint64_t)g->manager->stats->tasks_recovery;
-}
-
-uint64_t graph_get_completed_recovery_tasks(const struct graph *g)
-{
-	if (!g) {
-		return 0;
-	}
-
-	return g->completed_recovery_tasks;
-}
-
-/**
- * Execute the executor graph. This must be called after all nodes and dependencies are added and the topology metrics are computed.
- * @param g Reference to the executor graph.
- */
-void graph_execute(struct graph *g)
-{
-	if (!g) {
-		return;
-	}
-
-	void (*previous_sigint_handler)(int) = signal(SIGINT, handle_sigint);
-
-	debug(D_VINE, "start executing executor graph");
-
-	struct ProgressBar *pbar = progress_bar_init("Executing Tasks");
-	progress_bar_set_update_interval(pbar, g->progress_bar_update_interval_sec);
-	g->completed_recovery_tasks = 0;
-
-	struct ProgressBarPart *user_tasks_part = progress_bar_create_part("User", itable_size(g->nodes));
-	struct ProgressBarPart *recovery_tasks_part = progress_bar_create_part("Recovery", 0);
-	progress_bar_bind_part(pbar, user_tasks_part);
-	progress_bar_bind_part(pbar, recovery_tasks_part);
-
-	/* calculate steps to inject failure */
-	double next_failure_threshold = -1.0;
-	if (g->failure_injection_step_percent > 0) {
-		next_failure_threshold = g->failure_injection_step_percent / 100.0;
-	}
-
-	int wait_timeout = 1;
-	while (user_tasks_part->current < user_tasks_part->total) {
-		if (interrupted) {
-			break;
-		}
-
-		/* Process graph-level resubmissions (non-INPUT_MISSING retries only;
-		 * all temp-file recovery is done inside the manager). */
-		drain_resubmit_queue(g);
-
-		/* Recovery bar tracks manager-created recovery tasks. */
-		progress_bar_set_part_total(pbar, recovery_tasks_part, graph_get_total_recovery_tasks(g));
-
-		struct vine_task *task = vine_wait(g->manager, wait_timeout);
-		if (task) {
-			/* retrieve all possible tasks */
-			wait_timeout = 0;
-			timestamp_t time_when_postprocessing_start = timestamp_get();
-
-			if (task->type == VINE_TASK_TYPE_RECOVERY) {
-				g->completed_recovery_tasks++;
-				progress_bar_update_part(
-						pbar,
-						recovery_tasks_part,
-						g->completed_recovery_tasks - recovery_tasks_part->current);
-			}
-
-			/* get the original node by task id */
-			struct node *node = get_node_by_task(g, task);
-			if (!node) {
-				debug(D_ERROR, "fatal: task %d could not be mapped to a task node, this indicates a serious bug.", task->task_id);
-				exit(1);
-			}
-
-			if (task->time_when_commit_end > 0) {
-				g->time_first_task_dispatched = MIN(g->time_first_task_dispatched, task->time_when_commit_end);
-			}
-
-			/* Unified success check: handles both manager-reported failures and
-			 * sharedfs output-missing failures. On failure the node is already
-			 * enqueued for resubmission; skip all post-processing. */
-			if (!validate_task_or_enqueue(g, node)) {
-				continue;
-			}
-
-			/* update time metrics */
-			g->time_last_task_retrieved = MAX(g->time_last_task_retrieved, task->time_when_retrieval);
-			if (g->time_last_task_retrieved < g->time_first_task_dispatched) {
-				debug(D_ERROR, "task %d time_last_task_retrieved < time_first_task_dispatched: %" PRIu64 " < %" PRIu64, task->task_id, g->time_last_task_retrieved, g->time_first_task_dispatched);
-				g->time_last_task_retrieved = g->time_first_task_dispatched;
-			}
-			g->makespan_us = g->time_last_task_retrieved - g->time_first_task_dispatched;
-
-			debug(D_VINE, "Node %" PRIu64 " completed with outfile %s size: %zu bytes", node->node_id, node->outfile_remote_name, node->outfile_size_bytes);
-
-			/* mark the node as completed
-			 * Note: a node may complete multiple times due to resubmission/recomputation.
-			 * Only the first completion should advance the "User" progress. */
-			int first_completion = !node->completed;
-			node->completed = 1;
-			node->commit_time = task->time_when_commit_end - task->time_when_commit_start;
-			node->execution_time = task->time_workers_execute_last;
-			node->retrieval_time = task->time_when_done - task->time_when_retrieval;
-
-			/* A recovery completion regenerates a previously-released TEMP
-			 * output. Clear any prior cut / prune-depth verdict on this
-			 * node so the rules below can re-evaluate from scratch and,
-			 * if conditions still hold, release the freshly-produced data
-			 * again. First completions are a no-op here because the flags
-			 * are already 0 at that point. */
-			if (task->type == VINE_TASK_TYPE_RECOVERY) {
-				node->cut = 0;
-				node->prune_depth_pruned = 0;
-			}
-
-			/* Walk the cut-propagation upward from this freshly-completed
-			 * node so any upstream data that is no longer needed gets
-			 * dropped as early as possible. */
-			propagate_cut_from(g, node);
-
-			/* Separately, apply the prune-depth release window. This is
-			 * orthogonal to cut: it targets only TEMP data on workers and
-			 * willingly trades some recovery resilience for earlier
-			 * worker-local storage reclamation. Controlled by the
-			 * `prune-depth` tune knob (0 disables). */
-			apply_prune_depth_from(g, node);
-
-			/* Recovery tasks were already counted in the Recovery bar above; they are
-			 * not user-submitted nodes, so skip the user-progress bookkeeping. */
-			if (task->type == VINE_TASK_TYPE_RECOVERY) {
-				continue;
-			}
-
-			if (first_completion) {
-				/* set the start time to the submit time of the first user task */
-				if (user_tasks_part->current == 0) {
-					progress_bar_set_start_time(pbar, task->time_when_commit_start);
-				}
-
-				/* update critical time */
-				node_update_critical_path_time(node, node->execution_time);
-
-				/* mark this user task as completed */
-				progress_bar_update_part(pbar, user_tasks_part, 1);
-			}
-
-			/* inject failure */
-			if (g->failure_injection_step_percent > 0) {
-				double progress = (double)user_tasks_part->current / (double)user_tasks_part->total;
-				if (progress >= next_failure_threshold && release_random_worker(g->manager)) {
-					debug(D_VINE, "released a random worker at %.2f%% (threshold %.2f%%)", progress * 100, next_failure_threshold * 100);
-					next_failure_threshold += g->failure_injection_step_percent / 100.0;
-				}
-			}
-
-			/* enqueue the output file for replication */
-			switch (node->outfile_type) {
-			case NODE_OUTFILE_TYPE_TEMP:
-				/* replicate the outfile of the temp node */
-				vine_temp_queue_for_replication(g->manager, node->fn_return_file);
-				break;
-			case NODE_OUTFILE_TYPE_LOCAL:
-			case NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
-				break;
-			}
-
-			/* submit children nodes with dependencies all resolved */
-			submit_unblocked_children(g, node);
-
-			timestamp_t time_when_postprocessing_end = timestamp_get();
-			node->postprocessing_time = time_when_postprocessing_end - time_when_postprocessing_start;
-		} else {
-			wait_timeout = 1;
-		}
-	}
-
-	progress_bar_finish(pbar);
-	progress_bar_delete(pbar);
-
-	debug(D_VINE, "total time spent on cut propagation: %.6f seconds\n", g->time_spent_on_cut_propagation / 1e6);
-
-	signal(SIGINT, previous_sigint_handler);
-	if (interrupted) {
-		raise(SIGINT);
-	}
-
-	return;
-}
-
 /**
  * Delete an executor graph instance.
  * @param g Reference to the executor graph.
@@ -1761,27 +691,13 @@ void graph_delete(struct graph *g)
 	struct node *node;
 	ITABLE_ITERATE(g->nodes, nid, node)
 	{
-		if (node->task_runner_arg_file) {
-			vine_prune_file(g->manager, node->task_runner_arg_file);
-		}
-		delete_node_return_file(g, node);
-		if (node->task_runner_arg_file) {
-			hash_table_remove(g->manager->file_table, node->task_runner_arg_file->cached_name);
-		}
-		if (node->fn_return_file) {
-			hash_table_remove(g->outfile_cachename_to_node, node->fn_return_file->cached_name);
-			hash_table_remove(g->manager->file_table, node->fn_return_file->cached_name);
-		}
 		node_delete(node);
 	}
-
-	list_delete(g->resubmit_queue);
 
 	free(g->task_runner_library_name);
 	free(g->task_runner_function_name);
 
 	itable_delete(g->nodes);
-	itable_delete(g->task_id_to_node);
 	hash_table_delete(g->outfile_cachename_to_node);
 
 	hash_table_clear(g->inout_filename_to_cached_name, (void *)free);

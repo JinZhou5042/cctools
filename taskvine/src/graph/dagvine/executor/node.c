@@ -56,7 +56,11 @@ struct node *node_create(uint64_t node_id)
 	node->is_target = 0;
 	node->node_id = node_id;
 
+	node->task = NULL;
+	node->task_runner_arg_file = NULL;
+	node->outfile = NULL;
 	node->outfile_remote_name = string_format("outfile_node_%" PRIu64, node->node_id);
+	node->outfile_type = NODE_OUTFILE_TYPE_TEMP;
 
 	node->parents = list_create();
 	node->children = list_create();
@@ -129,9 +133,9 @@ void node_debug_print(struct node *node)
 		debug(D_VINE, "outfile_remote_name: %s", node->outfile_remote_name);
 	}
 
-	if (node->fn_return_file) {
+	if (node->outfile) {
 		const char *type_str = "UNKNOWN";
-		switch (node->fn_return_file->type) {
+		switch (node->outfile->type) {
 		case VINE_FILE:
 			type_str = "VINE_FILE";
 			break;
@@ -149,7 +153,7 @@ void node_debug_print(struct node *node)
 			break;
 		}
 		debug(D_VINE, "outfile_type: %s", type_str);
-		debug(D_VINE, "outfile_cached_name: %s", node->fn_return_file->cached_name ? node->fn_return_file->cached_name : "(null)");
+		debug(D_VINE, "outfile_cached_name: %s", node->outfile->cached_name ? node->outfile->cached_name : "(null)");
 	} else {
 		debug(D_VINE, "outfile_type: SHARED_FILE_SYSTEM or none");
 	}
@@ -211,9 +215,9 @@ void node_delete(struct node *node)
 		vine_file_delete(node->task_runner_arg_file);
 		node->task_runner_arg_file = NULL;
 	}
-	if (node->fn_return_file) {
-		vine_file_delete(node->fn_return_file);
-		node->fn_return_file = NULL;
+	if (node->outfile) {
+		vine_file_delete(node->outfile);
+		node->outfile = NULL;
 	}
 
 	list_delete(node->parents);

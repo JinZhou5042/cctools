@@ -213,8 +213,6 @@ class DAGVine(Manager):
         for k in target_keys:
             executor.set_target(k)
 
-        executor.compute_topology_metrics()
-
         return executor
 
     def build_graphs(self, task_dict, target_keys):
@@ -229,11 +227,6 @@ class DAGVine(Manager):
 
         executor = self.build_executor(py_graph, target_keys)
 
-        # Save output locations back into the Python graph.
-        for k in py_graph.pykey2cid:
-            outfile_remote_name = executor.get_node_outfile_remote_name(k)
-            py_graph.outfile_remote_name[k] = outfile_remote_name
-
         # Declare graph-level file dependencies in the C graph.
         for filename in py_graph.producer_of:
             task_key = py_graph.producer_of[filename]
@@ -241,6 +234,13 @@ class DAGVine(Manager):
         for filename in py_graph.consumers_of:
             for task_key in py_graph.consumers_of[filename]:
                 executor.add_task_input(task_key, filename)
+
+        executor.compute_topology_metrics()
+
+        # Save output locations back into the Python graph after finalize may adjust checkpoint paths.
+        for k in py_graph.pykey2cid:
+            outfile_remote_name = executor.get_node_outfile_remote_name(k)
+            py_graph.outfile_remote_name[k] = outfile_remote_name
 
         return py_graph, executor
 

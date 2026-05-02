@@ -4,6 +4,7 @@
 %{
 #include "int_sizes.h"
 #include "graph.h"
+#include "executor.h"
 %}
 
 %include "stdint.i"
@@ -13,3 +14,4 @@
 %import "../../bindings/python3/taskvine.i"
 
 %include "graph.h"
+%include "executor.h"

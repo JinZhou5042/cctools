@@ -1797,7 +1797,6 @@ This seems awfully complicated and could be simplified.
 
 static vine_result_code_t get_stdout(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, int64_t output_length)
 {
-
 	int64_t retrieved_output_length;
 	timestamp_t effective_stoptime = 0;
 	time_t stoptime;
@@ -2957,12 +2956,7 @@ static vine_result_code_t start_one_task(struct vine_manager *q, struct vine_wor
 		command_line = xxstrdup(t->command_line);
 	}
 
-	// timestamp_t start_time = timestamp_get();
 	vine_result_code_t result = vine_manager_put_task(q, w, t, command_line, limits, 0);
-	// timestamp_t end_time = timestamp_get();
-	// printf("time to send task %d to worker: %.6f seconds\n",
-	// 		t->task_id,
-	// 		((double) (end_time - start_time)) / 1000000.0);
 
 	free(command_line);
 
@@ -3294,10 +3288,6 @@ and change the task state.
 
 static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, vine_task_state_t new_state)
 {
-	if (!t || !w) {
-		return;
-	}
-
 	/* hotfix: do not reap the task if it has been reaped before */
 	if (!t->worker) {
 		return;

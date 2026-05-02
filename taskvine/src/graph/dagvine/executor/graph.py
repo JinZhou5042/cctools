@@ -12,17 +12,18 @@ class ExecutorGraph:
 
     def __init__(self, c_taskvine):
         """Create the backing C executor graph."""
-        self._c_graph = graph_capi.graph_create(c_taskvine)
+        self._c_graph = graph_capi.executor_graph_create(c_taskvine)
+        self._c_executor = graph_capi.executor_create(c_taskvine, self._c_graph)
         self._key_to_id = {}
         self._id_to_key = {}
 
     def tune(self, name, value):
-        """Forward a tuning parameter to the C graph."""
-        graph_capi.graph_tune(self._c_graph, name, value)
+        """Forward a tuning parameter to the C executor."""
+        graph_capi.executor_tune(self._c_executor, name, value)
 
     def add_node(self, key, is_target=None):
         """Create a C node and record its Python key."""
-        node_id = graph_capi.graph_add_node(self._c_graph)
+        node_id = graph_capi.executor_add_node(self._c_executor)
         self._key_to_id[key] = node_id
         self._id_to_key[node_id] = key
         if is_target is not None and bool(is_target):
@@ -46,7 +47,7 @@ class ExecutorGraph:
 
     def compute_topology_metrics(self):
         """Finalize the C graph and compute topology metrics."""
-        graph_capi.graph_finalize(self._c_graph)
+        graph_capi.executor_finalize(self._c_executor)
 
     def get_node_outfile_remote_name(self, key):
         """Return the output path assigned by the C graph."""
@@ -71,31 +72,34 @@ class ExecutorGraph:
         task_id = self._key_to_id.get(task_key)
         if task_id is None:
             raise KeyError(f"Task key not found: {task_key}")
-        graph_capi.graph_add_task_input(self._c_graph, task_id, filename)
+        graph_capi.executor_add_task_input(self._c_executor, task_id, filename)
 
     def add_task_output(self, task_key, filename):
         """Add an output file to a task."""
         task_id = self._key_to_id.get(task_key)
         if task_id is None:
             raise KeyError(f"Task key not found: {task_key}")
-        graph_capi.graph_add_task_output(self._c_graph, task_id, filename)
+        graph_capi.executor_add_task_output(self._c_executor, task_id, filename)
 
     def execute(self):
         """Execute the graph."""
-        graph_capi.graph_execute(self._c_graph)
+        graph_capi.executor_execute(self._c_executor)
 
     def get_makespan_us(self):
         """Return the graph makespan in microseconds."""
-        return graph_capi.graph_get_makespan_us(self._c_graph)
+        return graph_capi.executor_get_makespan_us(self._c_executor)
 
     def get_total_recovery_tasks(self):
         """Return the total number of submitted recovery tasks."""
-        return graph_capi.graph_get_total_recovery_tasks(self._c_graph)
+        return graph_capi.executor_get_total_recovery_tasks(self._c_executor)
 
     def get_completed_recovery_tasks(self):
         """Return the number of completed recovery tasks."""
-        return graph_capi.graph_get_completed_recovery_tasks(self._c_graph)
+        return graph_capi.executor_get_completed_recovery_tasks(self._c_executor)
 
     def delete(self):
         """Delete the backing C graph."""
+        graph_capi.executor_delete(self._c_executor)
+        self._c_executor = None
         graph_capi.graph_delete(self._c_graph)
+        self._c_graph = None

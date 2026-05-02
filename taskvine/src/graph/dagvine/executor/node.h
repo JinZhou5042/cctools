@@ -26,8 +26,8 @@ struct node {
 	struct vine_task *task;
 	/* JSON args for the task runner call; parent outputs are separate task inputs. */
 	struct vine_file *task_runner_arg_file;
-	/* Return file for TEMP/LOCAL outputs; NULL when the output is PFS-only. */
-	struct vine_file *fn_return_file;
+	/* Vine file for TEMP/LOCAL outputs; NULL when the output is PFS-only. */
+	struct vine_file *outfile;
 	char *outfile_remote_name;
 	size_t outfile_size_bytes;
 	node_outfile_type_t outfile_type;
