@@ -1,7 +1,5 @@
 #include <inttypes.h>
-#include <errno.h>
 #include <signal.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -44,10 +42,8 @@ static void executor_init_runtime(struct executor *e)
 	e->task_priority_mode = TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST;
 	e->failure_injection_step_percent = -1.0;
 	e->progress_bar_update_interval_sec = 0.1;
-	e->time_metrics_filename = NULL;
 	e->enable_debug_log = 1;
 	e->max_retry_attempts = 15;
-	e->retry_interval_sec = 0.0;
 }
 
 static void executor_clear_runtime(struct executor *e)
@@ -132,7 +128,6 @@ void executor_delete(struct executor *e)
 			}
 		}
 	}
-	free(e->time_metrics_filename);
 	executor_clear_runtime(e);
 	free(e);
 }
@@ -328,36 +323,8 @@ int executor_tune(struct executor *e, const char *name, const char *value)
 		e->progress_bar_update_interval_sec = (val > 0.0) ? val : 0.1;
 
 	} else if (strcmp(name, "time-metrics-filename") == 0) {
-		if (strcmp(value, "0") == 0) {
-			free(e->time_metrics_filename);
-			e->time_metrics_filename = NULL;
-			return 0;
-		}
-
-		free(e->time_metrics_filename);
-		e->time_metrics_filename = xxstrdup(value);
-
-		const char *slash = strrchr(e->time_metrics_filename, '/');
-		if (slash) {
-			size_t len = slash - e->time_metrics_filename;
-			char *parent = malloc(len + 1);
-			memcpy(parent, e->time_metrics_filename, len);
-			parent[len] = '\0';
-
-			if (mkdir(parent, 0777) != 0 && errno != EEXIST) {
-				debug(D_ERROR, "failed to mkdir %s (errno=%d)", parent, errno);
-				free(parent);
-				return -1;
-			}
-			free(parent);
-		}
-
-		FILE *fp = fopen(e->time_metrics_filename, "w");
-		if (!fp) {
-			debug(D_ERROR, "failed to create file %s (errno=%d)", e->time_metrics_filename, errno);
-			return -1;
-		}
-		fclose(fp);
+		/* Deprecated no-op: per-node timing fields are no longer collected. */
+		return 0;
 
 	} else if (strcmp(name, "enable-debug-log") == 0) {
 		if (e->enable_debug_log == 0) {
@@ -454,9 +421,7 @@ static void submit_node_task(struct executor *e, struct node *node)
 	double priority = calculate_task_priority(node, e->task_priority_mode);
 	vine_task_set_priority(node->task, priority);
 
-	timestamp_t time_start = timestamp_get();
 	int task_id = vine_submit(e->manager, node->task);
-	node->submission_time = timestamp_get() - time_start;
 
 	if (task_id <= 0) {
 		debug(D_ERROR, "submit_node_task: failed to submit node %" PRIu64 " (returned task_id=%d)", node->node_id, task_id);
@@ -957,7 +922,6 @@ void executor_execute(struct executor *e)
 		struct vine_task *task = vine_wait(e->manager, wait_timeout);
 		if (task) {
 			wait_timeout = 0;
-			timestamp_t time_when_postprocessing_start = timestamp_get();
 
 			struct node *node = get_node_by_task(e, task);
 			if (!node) {
@@ -984,9 +948,6 @@ void executor_execute(struct executor *e)
 				node->prune_depth_pruned = 0;
 				propagate_cut_from(e, node);
 				apply_prune_depth_from(e, node);
-
-				timestamp_t time_when_postprocessing_end = timestamp_get();
-				node->postprocessing_time = time_when_postprocessing_end - time_when_postprocessing_start;
 				continue;
 			}
 
@@ -1005,9 +966,6 @@ void executor_execute(struct executor *e)
 
 			int first_completion = !node->completed;
 			node->completed = 1;
-			node->commit_time = task->time_when_commit_end - task->time_when_commit_start;
-			node->execution_time = task->time_workers_execute_last;
-			node->retrieval_time = task->time_when_done - task->time_when_retrieval;
 
 			propagate_cut_from(e, node);
 			apply_prune_depth_from(e, node);
@@ -1017,7 +975,7 @@ void executor_execute(struct executor *e)
 					progress_bar_set_start_time(pbar, task->time_when_commit_start);
 				}
 
-				node_update_critical_path_time(node, node->execution_time);
+				node_update_critical_path_time(node, task->time_workers_execute_last);
 				progress_bar_update_part(pbar, user_tasks_part, 1);
 			}
 
@@ -1039,9 +997,6 @@ void executor_execute(struct executor *e)
 			}
 
 			submit_unblocked_children(e, node);
-
-			timestamp_t time_when_postprocessing_end = timestamp_get();
-			node->postprocessing_time = time_when_postprocessing_end - time_when_postprocessing_start;
 		} else {
 			wait_timeout = 1;
 		}

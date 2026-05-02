@@ -73,13 +73,6 @@ struct node *node_create(uint64_t node_id)
 	node->fan_out = -1;
 	node->heavy_score = -1;
 
-	node->submission_time = 0;
-	node->scheduling_time = 0;
-	node->commit_time = 0;
-	node->execution_time = 0;
-	node->retrieval_time = 0;
-	node->postprocessing_time = 0;
-
 	node->critical_path_time = -1;
 
 	return node;

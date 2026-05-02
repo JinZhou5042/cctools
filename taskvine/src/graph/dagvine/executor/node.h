@@ -64,13 +64,6 @@ struct node {
 
 	/* Time metrics */
 	timestamp_t critical_path_time;
-
-	timestamp_t submission_time;
-	timestamp_t scheduling_time;
-	timestamp_t commit_time;
-	timestamp_t execution_time;
-	timestamp_t retrieval_time;
-	timestamp_t postprocessing_time;
 };
 
 /** Create a new node.
