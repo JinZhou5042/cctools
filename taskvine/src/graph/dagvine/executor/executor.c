@@ -149,6 +149,30 @@ static void executor_prepare_task_runner_arg(struct executor *e, struct node *no
 	vine_task_add_input(node->task, node->task_runner_arg_file, "infile", VINE_TRANSFER_ALWAYS);
 }
 
+static void executor_create_node_task(struct executor *e, struct node *node)
+{
+	struct graph *g = e ? e->graph : NULL;
+	if (!g || !node || node->task) {
+		return;
+	}
+
+	if (!g->task_runner_function_name) {
+		debug(D_ERROR, "task runner function name is not set");
+		graph_delete(g);
+		exit(1);
+	}
+
+	if (!g->task_runner_library_name) {
+		debug(D_ERROR, "task runner library name is not set");
+		graph_delete(g);
+		exit(1);
+	}
+
+	node->task = vine_task_create(g->task_runner_function_name);
+	vine_task_set_library_required(node->task, g->task_runner_library_name);
+	vine_task_addref(node->task);
+}
+
 static void executor_declare_node_outfile(struct executor *e, struct node *node)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -179,6 +203,7 @@ uint64_t executor_add_node(struct executor *e)
 
 	uint64_t node_id = graph_add_node(e->graph);
 	struct node *node = itable_lookup(e->graph->nodes, node_id);
+	executor_create_node_task(e, node);
 	executor_prepare_task_runner_arg(e, node);
 	if (node) {
 		node->retry_attempts_left = e->max_retry_attempts;

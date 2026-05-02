@@ -2,9 +2,6 @@
 #include <string.h>
 #include <stdint.h>
 #include <inttypes.h>
-#include <assert.h>
-#include <math.h>
-#include <signal.h>
 #include <errno.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -16,19 +13,12 @@
 #include "itable.h"
 #include "xxmalloc.h"
 #include "stringtools.h"
-#include "random.h"
 #include "hash_table.h"
 #include "set.h"
-#include "timestamp.h"
-#include "progress_bar.h"
-#include "macros.h"
 #include "uuid.h"
 
 #include "node.h"
 #include "graph.h"
-#include "vine_task.h"
-#include "vine_file.h"
-#include "taskvine.h"
 
 /*************************************************************/
 /* Private Functions */
@@ -489,7 +479,6 @@ void graph_finalize(struct graph *g)
 				char *shared_file_system_outfile_path = string_format("%s/%s", g->checkpoint_dir, node->outfile_remote_name);
 				free(node->outfile_remote_name);
 				node->outfile_remote_name = shared_file_system_outfile_path;
-				node->outfile = NULL;
 				assigned_checkpoint_count++;
 			} else {
 				/* other nodes will be declared as temp files to leverage node-local storage */
@@ -564,23 +553,6 @@ uint64_t graph_add_node(struct graph *g)
 		graph_delete(g);
 		exit(1);
 	}
-
-	if (!g->task_runner_function_name) {
-		debug(D_ERROR, "task runner function name is not set");
-		graph_delete(g);
-		exit(1);
-	}
-
-	if (!g->task_runner_library_name) {
-		debug(D_ERROR, "task runner library name is not set");
-		graph_delete(g);
-		exit(1);
-	}
-
-	/* create node task */
-	node->task = vine_task_create(g->task_runner_function_name);
-	vine_task_set_library_required(node->task, g->task_runner_library_name);
-	vine_task_addref(node->task);
 
 	itable_insert(g->nodes, node_id, node);
 
@@ -696,6 +668,8 @@ void graph_delete(struct graph *g)
 
 	free(g->task_runner_library_name);
 	free(g->task_runner_function_name);
+	free(g->checkpoint_dir);
+	free(g->output_dir);
 
 	itable_delete(g->nodes);
 	hash_table_delete(g->outfile_cachename_to_node);

@@ -1,13 +1,13 @@
 #ifndef NODE_H
 #define NODE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
-#include "vine_task.h"
-#include "hash_table.h"
 #include "list.h"
 #include "set.h"
-#include "taskvine.h"
+#include "timestamp.h"
+#include "vine_task.h"
 
 /** The storage type of the node's output file. */
 typedef enum {

@@ -5,7 +5,6 @@
 
 #include "hash_table.h"
 #include "itable.h"
-#include "list.h"
 #include "node.h"
 
 struct graph {

@@ -1,26 +1,16 @@
-#include <assert.h>
 #include <inttypes.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 
 #include "xxmalloc.h"
 #include "stringtools.h"
 #include "timestamp.h"
+#include "list.h"
 #include "set.h"
-#include "hash_table.h"
 #include "debug.h"
-#include "random.h"
-#include "uuid.h"
 
 #include "vine_file.h"
 #include "vine_task.h"
-#include "vine_worker_info.h"
-#include "vine_temp.h"
 #include "node.h"
-#include "taskvine.h"
 
 /*************************************************************/
 /* Public APIs */
