@@ -1,5 +1,5 @@
 /* taskvine.i */
-%module(package="ndcctools.taskvine") cvine
+%module cvine
 
 %include carrays.i
 %array_functions(struct rmsummary *, rmsummayArray);

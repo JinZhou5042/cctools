@@ -28,40 +28,6 @@ try:
 except ImportError:
     rich = None
 
-
-def _rep_key(k, r):
-    """Match DAGVine._rep_key: first replica keeps original keys."""
-    return k if r == 0 else ("__rep", r, k)
-
-
-def _rewrite_dask_sexpr(sexpr, orig_keys, r):
-    """Rewrite dependency keys inside a dask value for replica index r."""
-    # Only hashable values can be graph keys; `list in set` raises TypeError.
-    if DaskVineDag.hashable(sexpr) and sexpr in orig_keys:
-        return _rep_key(sexpr, r)
-    if DaskVineDag.taskp(sexpr):
-        return (sexpr[0],) + tuple(_rewrite_dask_sexpr(a, orig_keys, r) for a in sexpr[1:])
-    if DaskVineDag.listp(sexpr):
-        return [_rewrite_dask_sexpr(a, orig_keys, r) for a in sexpr]
-    return sexpr
-
-
-def replicate_legacy_dask_graph(dsk, keys_flatten, repeats):
-    """Replicate a tuple-based dask graph like DAGVine._replicate_graph."""
-    if repeats <= 1:
-        return dsk, list(keys_flatten)
-    orig_keys = set(dsk.keys())
-    expanded = {}
-    for r in range(repeats):
-        for k, v in dsk.items():
-            nk = _rep_key(k, r)
-            expanded[nk] = _rewrite_dask_sexpr(v, orig_keys, r)
-    vine_targets = list(keys_flatten)
-    for rr in range(1, repeats):
-        vine_targets.extend(_rep_key(k, rr) for k in keys_flatten if k in dsk)
-    return expanded, vine_targets
-
-
 ##
 # @class ndcctools.taskvine.dask_executor.DaskVine
 #
@@ -142,8 +108,6 @@ class DaskVine(Manager):
     #                      Should return a tuple of (wrapper result, dask call result). Use for debugging.
     # @param wrapper_proc  Function to process results from wrapper on completion. (default is print)
     # @param prune_depth Control pruning behavior: 0 (default) - no pruning, 1 - only check direct consumers, 2+ - check consumers up to specified depth
-    # @param repeats     Replicate the entire graph this many times (like DAGVine.run(repeats=...)).
-    #                      Extra replicas use keys ("__rep", r, k). Only the first replica's results are returned for keys.
     def get(self, dsk, keys, *,
             environment=None,
             extra_files=None,
@@ -174,18 +138,11 @@ class DaskVine(Manager):
             hoisting_modules=None,  # Deprecated, use lib_modules
             import_modules=None,    # Deprecated, use lib_modules
             lazy_transfers=True,    # Deprecated, use worker_tranfers
-            extra_task_sleep_time=(0, 0),
-            repeats=1,
             ):
         try:
             self.set_property("framework", "dask")
             if retries and retries < 1:
                 raise ValueError("retries should be larger than 0")
-            if repeats is None:
-                repeats = 1
-            repeats = int(repeats)
-            if repeats < 1:
-                raise ValueError("repeats should be >= 1")
 
             if isinstance(environment, str):
                 self.environment = self.declare_poncho(environment, cache=True)
@@ -222,9 +179,6 @@ class DaskVine(Manager):
             self.wrapper = wrapper
             self.wrapper_proc = wrapper_proc
             self.prune_depth = prune_depth
-            if not isinstance(extra_task_sleep_time, (list, tuple)) or len(extra_task_sleep_time) != 2:
-                raise ValueError("extra_task_sleep_time should be a list/tuple with exactly 2 values")
-            self.extra_task_sleep_time = [float(extra_task_sleep_time[0]), float(extra_task_sleep_time[1])]
             self.category_info = defaultdict(lambda: {"num_tasks": 0, "total_execution_time": 0})
             self.max_priority = float('inf')
             self.min_priority = float('-inf')
@@ -248,7 +202,7 @@ class DaskVine(Manager):
                 self.environment_name = os.path.basename(environment)
                 self.environment = None
 
-            return self._dask_execute(dsk, keys, repeats=repeats)
+            return self._dask_execute(dsk, keys)
         except Exception as e:
             # unhandled exceptions for now
             raise e
@@ -258,17 +212,11 @@ class DaskVine(Manager):
     def __call__(self, *args, **kwargs):
         return self.get(*args, **kwargs)
 
-    def _dask_execute(self, dsk, keys, repeats=1):
-
+    def _dask_execute(self, dsk, keys):
         indices = {k: inds for (k, inds) in find_dask_keys(keys)}
-        keys_flatten = list(indices.keys())
+        keys_flatten = indices.keys()
 
-        if repeats > 1:
-            dsk, keys_flatten = replicate_legacy_dask_graph(dsk, keys_flatten, repeats)
-
-        time_start = time.time()
         dag = DaskVineDag(dsk, low_memory_mode=self.low_memory_mode, prune_depth=self.prune_depth)
-        print(f"Time taken to enqueue tasks: {time.time() - time_start:.6f} seconds")
         tag = f"dag-{id(dag)}"
 
         # create Library if using 'function-calls' task mode.
@@ -315,10 +263,8 @@ class DaskVine(Manager):
 
         timeout = 5
         pending = 0
-        time_first_task_dispatched = None
-        total_user_tasks = dag.left_to_compute()
 
-        (bar_progress, bar_update) = self._make_progress_bar(total_user_tasks)
+        (bar_progress, bar_update) = self._make_progress_bar(dag.left_to_compute())
         with bar_progress:
             while not self.empty() or enqueued_calls:
                 submitted = 0
@@ -326,11 +272,9 @@ class DaskVine(Manager):
                     enqueued_calls
                     and (not self.submit_per_cycle or submitted < self.submit_per_cycle)
                     and (not self.max_pending or pending < self.max_pending)
-                    # and self.hungry()
+                    and self.hungry()
                 ):
                     self.submit(enqueued_calls.pop())
-                    if time_first_task_dispatched is None:
-                        time_first_task_dispatched = time.time()
                     submitted += 1
                     pending += 1
 
@@ -351,9 +295,8 @@ class DaskVine(Manager):
                         if self.wrapper:
                             self.wrapper_proc(t.load_wrapper_output(self))
 
-                        # Advance once per successfully completed DAG task (do not gate on `key in dsk`:
-                        # that can miss vertices for several graph shapes, e.g. low_memory_mode uuid keys).
-                        bar_update(advance=1)
+                        if t.key in dsk:
+                            bar_update(advance=1)
 
                         if self.prune_depth > 0:
                             for p in dag.pending_producers[t.key]:
@@ -371,14 +314,6 @@ class DaskVine(Manager):
                     t = None  # drop task reference
                 else:
                     timeout = 5
-
-            total_recovery_tasks = self.stats.tasks_recovery
-            total_tasks_completed = total_user_tasks + total_recovery_tasks
-            makespan_s = round((time.time() - time_first_task_dispatched), 6) if time_first_task_dispatched is not None else 0.0
-            throughput_tps = round(total_tasks_completed / makespan_s, 6) if makespan_s > 0.0 else 0.0
-            print(f"=== Makespan: {makespan_s:.6f} seconds")
-            print(f"=== Total tasks completed: {total_tasks_completed}")
-            print(f"=== Throughput: {throughput_tps:.6f} tasks/s")
             return self._load_results(dag, indices, keys)
 
     def _make_progress_bar(self, total):
@@ -481,8 +416,7 @@ class DaskVine(Manager):
                                    env_vars=self.env_vars,
                                    retries=retries,
                                    worker_transfers=lazy,
-                                   wrapper=self.wrapper,
-                                   extra_task_sleep_time=self.extra_task_sleep_time)
+                                   wrapper=self.wrapper)
 
                 t.set_priority(priority)
                 if self.env_per_task:
@@ -503,8 +437,7 @@ class DaskVine(Manager):
                                      extra_files=self.extra_files,
                                      retries=retries,
                                      worker_transfers=lazy,
-                                     wrapper=self.wrapper,
-                                     extra_task_sleep_time=self.extra_task_sleep_time)
+                                     wrapper=self.wrapper)
 
                 t.set_priority(priority)
                 t.set_tag(tag)  # tag that identifies this dag
@@ -624,8 +557,7 @@ class PythonTaskDask(PythonTask):
                  env_vars=None,
                  retries=5,
                  worker_transfers=False,
-                 wrapper=None,
-                 extra_task_sleep_time=(0, 0)):
+                 wrapper=None):
         self._key = key
         self._sexpr = sexpr
 
@@ -643,7 +575,7 @@ class PythonTaskDask(PythonTask):
         keys_of_files = list(args.keys())
         args = args_raw | args
 
-        super().__init__(execute_graph_vertex, wrapper, key, sexpr, args, keys_of_files, extra_task_sleep_time)
+        super().__init__(execute_graph_vertex, wrapper, key, sexpr, args, keys_of_files)
         if wrapper:
             wo = m.declare_buffer()
             self.add_output(wo, "wrapper.output")
@@ -726,8 +658,8 @@ class FunctionCallDask(FunctionCall):
                  extra_files=None,
                  retries=5,
                  worker_transfers=False,
-                 wrapper=None,
-                 extra_task_sleep_time=(0, 0)):
+                 wrapper=None):
+
         self._key = key
         self.resources = resources
         self._sexpr = sexpr
@@ -742,7 +674,7 @@ class FunctionCallDask(FunctionCall):
         self._wrapper_output_file = None
         self._wrapper_output = None
 
-        super().__init__(f'Dask-Library-{id(dag)}', 'execute_graph_vertex', wrapper, key, sexpr, args, keys_of_files, extra_task_sleep_time)
+        super().__init__(f'Dask-Library-{id(dag)}', 'execute_graph_vertex', wrapper, key, sexpr, args, keys_of_files)
         if wrapper:
             wo = m.declare_buffer()
             self.add_output(wo, "wrapper.output")
@@ -787,12 +719,10 @@ class FunctionCallDask(FunctionCall):
         return self._wrapper_output
 
 
-def execute_graph_vertex(wrapper, key, sexpr, args, keys_of_files, extra_task_sleep_time):
+def execute_graph_vertex(wrapper, key, sexpr, args, keys_of_files):
     import traceback
     import cloudpickle
     from ndcctools.taskvine.compat import DaskVineDag
-
-    time.sleep(random.uniform(extra_task_sleep_time[0], extra_task_sleep_time[1]))
 
     def rec_call(sexpr):
         if DaskVineDag.keyp(sexpr) and sexpr in args:
