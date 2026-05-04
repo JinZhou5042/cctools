@@ -3716,10 +3716,6 @@ static int receive_tasks_from_worker(struct vine_manager *q, struct vine_worker_
 
 	int tasks_received = 0;
 
-	if (!q || !w) {
-		return 0;
-	}
-
 	/* if the function was called, receive at least one task */
 	int max_to_receive = MAX(1, q->max_retrievals - count_received_so_far);
 
@@ -4261,12 +4257,6 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->enforce_worker_eviction_interval = 0;
 	q->time_start_worker_eviction = 0;
 
-	q->return_recovery_tasks = 0;
-	q->balance_worker_disk_load = 0;
-	q->when_last_offloaded = 0;
-	q->peak_used_cache = 0;
-	q->shutting_down = 0;
-
 	if ((envstring = getenv("VINE_BANDWIDTH"))) {
 		q->bandwidth_limit = string_metric_parse(envstring);
 		if (q->bandwidth_limit < 0) {
@@ -4500,8 +4490,6 @@ void vine_delete(struct vine_manager *q)
 	/* now that the manager is shutting down, worker removals are not an invalid event, so we
 	 * disable the immediate recovery to avoid submitting recovery tasks for lost files */
 	q->immediate_recovery = 0;
-
-	q->shutting_down = 1;
 
 	vine_fair_write_workflow_info(q);
 
