@@ -172,7 +172,6 @@ static void delete_uncacheable_files(struct vine_manager *q, struct vine_worker_
 static int release_worker(struct vine_manager *q, struct vine_worker_info *w);
 
 struct vine_task *send_library_to_worker(struct vine_manager *q, struct vine_worker_info *w, const char *name);
-static void push_task_to_ready_tasks(struct vine_manager *q, struct vine_task *t);
 
 /*
 Log timezone context at manager startup so timestamp-based logs can be
@@ -3538,7 +3537,6 @@ static int vine_manager_check_inputs_available(struct vine_manager *q, struct vi
 			all_available = 0;
 		}
 	}
-
 	return all_available;
 }
 
@@ -3651,7 +3649,7 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 			}
 
 			switch (result) {
-			case VINE_SUCCESS:
+			case VINE_SUCCESS:     /* return on successful commit. */
 			case VINE_APP_FAILURE: /* failed to dispatch, commit put the task back in the right place. */
 			case VINE_WORKER_FAILURE:
 			case VINE_END_OF_LIST: /* shouldn't happen */
@@ -4677,6 +4675,7 @@ char *vine_monitor_wrap(struct vine_manager *q, struct vine_worker_info *w, stru
 }
 
 /* Put a given task on the ready list, taking into account the task priority and the manager schedule. */
+
 static void push_task_to_ready_tasks(struct vine_manager *q, struct vine_task *t)
 {
 	vine_priority_t manager_priority = VINE_PRIORITY_NORMAL;
@@ -5135,7 +5134,6 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 	// promptly dispatch tasks, while avoiding wasting cpu cycles when the
 	// state of the system cannot be advanced.
 	int msec = q->nothing_happened_last_wait_cycle ? 1000 : 0;
-
 	if (stoptime) {
 		msec = MIN(msec, (stoptime - time(0)) * 1000);
 	}

@@ -126,7 +126,6 @@ struct vine_task {
 
 	timestamp_t time_workers_execute_last_start;           /**< The time when the last complete execution for this task started at a worker. */
 	timestamp_t time_workers_execute_last_end;             /**< The time when the last complete execution for this task ended at a worker. */
-
 	timestamp_t time_workers_execute_last;                 /**< Duration of the last complete execution for this task. */
 	timestamp_t time_workers_execute_all;                  /**< Accumulated time for executing the command on any worker, regardless of whether the task completed (i.e., this includes time running on workers that disconnected). */
 	timestamp_t time_workers_execute_exhaustion;           /**< Accumulated time spent in attempts that exhausted resources. */

@@ -91,7 +91,6 @@ void vine_task_clean(struct vine_task *t)
 {
 	t->time_when_commit_start = 0;
 	t->time_when_commit_end = 0;
-
 	t->time_when_retrieval = 0;
 	t->time_when_done = 0;
 

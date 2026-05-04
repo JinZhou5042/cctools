@@ -149,6 +149,7 @@ typedef enum {
 	VINE_MINI_TASK,             /**< A file obtained by executing a Unix command line. */
 } vine_file_type_t;
 
+
 /** Statistics describing a manager. */
 struct vine_stats {
 	/* Stats for the current state of workers: */

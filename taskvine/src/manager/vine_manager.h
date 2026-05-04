@@ -222,6 +222,7 @@ struct vine_manager {
 	int temp_replica_count;       /* Number of replicas per temp file */
 	int clean_redundant_replicas; /* If true, remove redundant replicas of temp files to save disk space. */
 	int shift_disk_load;          /* If true, shift storage burden to more available workers to minimize disk usage peaks. */
+	int return_recovery_tasks; /* If true, recovery tasks are returned by vine_wait to the user. By default they are handled internally. */
 
 	double resource_submit_multiplier; /* Factor to permit overcommitment of resources at each worker.  */
 	double bandwidth_limit;            /* Artificial limit on bandwidth of manager<->worker transfers. */
@@ -236,8 +237,6 @@ struct vine_manager {
 
 	double sandbox_grow_factor;         /* When task disk sandboxes are exhausted, increase the allocation using their measured valued times this factor */
 	double disk_proportion_available_to_task;   /* intentionally reduces disk allocation for tasks to reserve some space for cache growth. */
-
-	int return_recovery_tasks; /* If true, recovery tasks are returned by vine_wait to the user. By default they are handled internally. */
 
 	/* todo: confirm datatype. int or int64 */
 	int max_task_stdout_storage;	/* Maximum size of standard output from task.  (If larger, send to a separate file.) */
