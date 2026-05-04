@@ -1161,8 +1161,6 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	vine_txn_log_write_worker(q, w, 1, reason);
 
-	vine_schedule_committable_cache_invalidate(q);
-
 	hash_table_remove(q->worker_table, w->hashkey);
 	hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
 
@@ -2973,7 +2971,6 @@ static void count_worker_resources(struct vine_manager *q, struct vine_worker_in
 	update_max_worker(q, w);
 
 	if (w->resources->workers.total < 1) {
-		vine_schedule_committable_cache_invalidate(q);
 		return;
 	}
 
@@ -2992,8 +2989,6 @@ static void count_worker_resources(struct vine_manager *q, struct vine_worker_in
 	}
 
 	w->resources->disk.inuse += BYTES_TO_MEGABYTES(w->inuse_cache);
-
-	vine_schedule_committable_cache_invalidate(q);
 }
 
 static void update_max_worker(struct vine_manager *q, struct vine_worker_info *w)
@@ -3604,11 +3599,6 @@ the task to the worker.
 
 static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor *cur, int iter_depth, double now_secs)
 {
-	int committable_cores = vine_schedule_count_committable_cores(q);
-	if (committable_cores <= 0) {
-		return 0;
-	}
-
 	struct vine_task *t;
 
 	int task_unready = 0; // set to 1 if at least one task was moved from ready_list
@@ -3661,11 +3651,7 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 			}
 
 			switch (result) {
-			case VINE_SUCCESS: /* return on successful commit. */ {
-				committable_cores--;
-				skip_list_remove_here(cur);
-				break;
-			}
+			case VINE_SUCCESS:
 			case VINE_APP_FAILURE: /* failed to dispatch, commit put the task back in the right place. */
 			case VINE_WORKER_FAILURE:
 			case VINE_END_OF_LIST: /* shouldn't happen */
@@ -3677,10 +3663,6 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 				push_task_to_ready_tasks(q, t);
 				break;
 			}
-		}
-
-		if (committable_cores <= 0) {
-			break;
 		}
 	}
 
@@ -4197,8 +4179,6 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->wait_for_workers = 0;
 	q->max_workers = -1;
 	q->attempt_schedule_depth = 100;
-	q->cluster_committable_cores = 0;
-	q->committable_cores_dirty = 1;
 
 	q->max_retrievals = 1;
 	q->worker_retrievals = 1;
@@ -5047,8 +5027,6 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 
 		debug(D_VINE, "All instances and the template for library %s have been removed", name);
 	}
-
-	vine_schedule_committable_cache_invalidate(q);
 }
 
 struct vine_task *vine_manager_find_library_template(struct vine_manager *q, const char *library_name)
@@ -5964,7 +5942,6 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "resource-submit-multiplier") || !strcmp(name, "asynchrony-multiplier")) {
 		q->resource_submit_multiplier = MAX(value, 1.0);
-		vine_schedule_committable_cache_invalidate(q);
 
 	} else if (!strcmp(name, "short-timeout")) {
 		q->short_timeout = MAX(1, (int)value);
