@@ -195,9 +195,8 @@ static void compute_upstream_downstream_and_heavy_scores(struct graph *g, struct
 	struct node *parent_node;
 	struct node *child_node;
 
-	/* compute the upstream and downstream counts for each node */
-	struct itable *upstream_map = itable_create(0);
-	struct itable *downstream_map = itable_create(0);
+	struct itable *upstream_map = itable_create(0);	  // reachable ancestors per node
+	struct itable *downstream_map = itable_create(0); // reachable descendants per node
 	uint64_t nid_tmp;
 	ITABLE_ITERATE(g->nodes, nid_tmp, node)
 	{
@@ -213,8 +212,7 @@ static void compute_upstream_downstream_and_heavy_scores(struct graph *g, struct
 		LIST_ITERATE(node->parents, parent_node)
 		{
 			struct set *parent_upstream = itable_lookup(upstream_map, parent_node->node_id);
-			/* set_union() returns a NEW set (allocates); we want an in-place union. */
-			set_insert_set(upstream, parent_upstream);
+			set_insert_set(upstream, parent_upstream); // in-place union, not set_union
 			set_insert(upstream, parent_node);
 		}
 	}
@@ -225,8 +223,7 @@ static void compute_upstream_downstream_and_heavy_scores(struct graph *g, struct
 		LIST_ITERATE(node->children, child_node)
 		{
 			struct set *child_downstream = itable_lookup(downstream_map, child_node->node_id);
-			/* set_union() returns a NEW set (allocates); we want an in-place union. */
-			set_insert_set(downstream, child_downstream);
+			set_insert_set(downstream, child_downstream); // in-place union, not set_union
 			set_insert(downstream, child_node);
 		}
 	}
@@ -244,10 +241,9 @@ static void compute_upstream_downstream_and_heavy_scores(struct graph *g, struct
 	itable_delete(upstream_map);
 	itable_delete(downstream_map);
 
-	/* compute the heavy score for each node */
 	LIST_ITERATE(topo_order, node)
 	{
-		node->heavy_score = compute_node_heavy_score(node);
+		node->heavy_score = compute_node_heavy_score(node); // ranks checkpoint candidates
 	}
 }
 
@@ -256,10 +252,10 @@ static void compute_upstream_downstream_and_heavy_scores(struct graph *g, struct
 /*************************************************************/
 
 /** Tune the executor graph.
- *@param g Reference to the executor graph.
- *@param name Reference to the name of the parameter to tune.
- *@param value Reference to the value of the parameter to tune.
- *@return 0 on success, -1 on failure.
+ * @param g Reference to the executor graph.
+ * @param name Reference to the name of the parameter to tune.
+ * @param value Reference to the value of the parameter to tune.
+ * @return 0 on success, -1 on failure.
  */
 int graph_tune(struct graph *g, const char *name, const char *value)
 {
@@ -396,8 +392,7 @@ void graph_finalize(struct graph *g)
 		return;
 	}
 
-	/* get nodes in topological order */
-	struct list *topo_order = get_topological_order(g);
+	struct list *topo_order = get_topological_order(g); // required for all metric passes
 	if (!topo_order) {
 		return;
 	}
@@ -406,7 +401,7 @@ void graph_finalize(struct graph *g)
 	struct node *parent_node;
 	struct node *child_node;
 
-	/* compute the depth of the node */
+	/* Longest path from any source in topo order. */
 	LIST_ITERATE(topo_order, node)
 	{
 		node->depth = 0;
@@ -418,7 +413,7 @@ void graph_finalize(struct graph *g)
 		}
 	}
 
-	/* compute the height of the node */
+	/* Longest path to any sink in reverse topo order. */
 	LIST_ITERATE_REVERSE(topo_order, node)
 	{
 		node->height = 0;
@@ -439,59 +434,58 @@ void graph_finalize(struct graph *g)
 		}
 	}
 
-	/* Calculate the number of intermediate nodes to checkpoint.
-	 * If this is zero, skip heavy-score computation and sorting entirely. */
+	/*
+	 * Pick how many non-target nodes become shared-filesystem checkpoints.
+	 * If zero, skip heavy-score passes entirely.
+	 */
 	int checkpoint_count = (int)((total_nodes - total_target_nodes) * g->checkpoint_fraction);
 	if (checkpoint_count < 0) {
 		checkpoint_count = 0;
 	}
 
 	if (checkpoint_count > 0) {
-		/* Only pay the (large) transitive-closure-like cost when we will use it. */
-		compute_upstream_downstream_and_heavy_scores(g, topo_order);
+		compute_upstream_downstream_and_heavy_scores(g, topo_order); // expensive, only if ranking needed
 
-		/* sort nodes using priority queue */
 		struct priority_queue *sorted_nodes = priority_queue_create(total_nodes);
 		LIST_ITERATE(topo_order, node)
 		{
 			priority_queue_push(sorted_nodes, node, node->heavy_score);
 		}
 
-		/* assign outfile types to each node */
 		int assigned_checkpoint_count = 0;
 		while ((node = priority_queue_pop(sorted_nodes))) {
 			if (node->is_target) {
-				/* declare the return as a normal managed file for retrieval as usual */
-				assign_node_outfile_local(node);
+				assign_node_outfile_local(node); // targets keep managed local returns
 				continue;
 			}
 			if (assigned_checkpoint_count < checkpoint_count) {
-				/* checkpointed files will be written directly to the shared file system, no need to manage them in the manager */
+				/*
+				 * Top heavy_score nodes checkpoint to shared storage under checkpoint_dir.
+				 * No vine_file handle for that mode.
+				 */
 				node->outfile_type = NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM;
 				char *shared_file_system_outfile_path = string_format("%s/%s", g->checkpoint_dir, node->outfile_remote_name);
 				free(node->outfile_remote_name);
 				node->outfile_remote_name = shared_file_system_outfile_path;
 				assigned_checkpoint_count++;
 			} else {
-				/* other nodes will be declared as temp files to leverage node-local storage */
-				assign_node_outfile_temp(node);
+				assign_node_outfile_temp(node); // remaining nodes use temp storage
 			}
 		}
 		priority_queue_delete(sorted_nodes);
 	} else {
-		/* Fast path: no checkpointing means no heavy-score computation/sorting. */
 		LIST_ITERATE(topo_order, node)
 		{
 			if (node->is_target) {
 				assign_node_outfile_local(node);
 			} else {
-				assign_node_outfile_temp(node);
+				assign_node_outfile_temp(node); // no checkpoint budget, all non-targets are temp
 			}
 		}
 	}
 
-	/* extract weakly connected components (could be expensive) */
 	if (g->print_graph_details) {
+		// weakly connected components and node_debug_print, debug only
 		struct list *weakly_connected_components = extract_weakly_connected_components(g);
 		struct list *component;
 		int component_index = 0;
@@ -503,10 +497,7 @@ void graph_finalize(struct graph *g)
 			component_index++;
 		}
 		list_delete(weakly_connected_components);
-	}
 
-	/* print the node details if enabled */
-	if (g->print_graph_details) {
 		LIST_ITERATE(topo_order, node)
 		{
 			node_debug_print(node);
@@ -529,16 +520,14 @@ uint64_t graph_add_node(struct graph *g)
 		return 0;
 	}
 
-	/* assign a new id based on current node count, ensure uniqueness */
 	uint64_t candidate_id = itable_size(g->nodes);
-	candidate_id += 1;
+	candidate_id += 1; // skip zero, search upward until unused
 	while (itable_lookup(g->nodes, candidate_id)) {
 		candidate_id++;
 	}
 	uint64_t node_id = candidate_id;
 
-	/* create the backing node (defaults to non-target) */
-	struct node *node = node_create(node_id);
+	struct node *node = node_create(node_id); // defaults to non-target
 
 	if (!node) {
 		debug(D_ERROR, "failed to create node %" PRIu64, node_id);

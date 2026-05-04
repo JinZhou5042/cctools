@@ -11,49 +11,35 @@
 
 /** The storage type of the node's output file. */
 typedef enum {
-	NODE_OUTFILE_TYPE_LOCAL = 0,	      /* Node-output file will be stored locally on the local staging directory */
-	NODE_OUTFILE_TYPE_TEMP,		      /* Node-output file will be stored in the temporary node-local storage */
-	NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM, /* Node-output file will be stored in the persistent shared file system */
+	NODE_OUTFILE_TYPE_LOCAL = 0,	      // staged file under graph output_dir
+	NODE_OUTFILE_TYPE_TEMP,		      // TaskVine temp blob
+	NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM, // path on shared storage, no vine_file
 } node_outfile_type_t;
 
 /** The node object. */
 struct node {
-	/* Identity */
-	uint64_t node_id; /* Unique identifier assigned by the graph when the node is created. */
-	int is_target;	  /* If true, the output of the node is retrieved when the task finishes. */
+	uint64_t node_id; // graph assigned id
+	int is_target;	  // if set, output is retrieved when the task completes
 
-	/* Task and files */
 	struct vine_task *task;
-	/* JSON args for the task runner call; parent outputs are separate task inputs. */
-	struct vine_file *task_runner_arg_file;
-	/* Vine file for TEMP/LOCAL outputs; NULL when the output is PFS-only. */
-	struct vine_file *outfile;
+	struct vine_file *task_runner_arg_file; // JSON args buffer for the runner
+	struct vine_file *outfile;		// NULL when output is PFS only
 	char *outfile_remote_name;
 	size_t outfile_size_bytes;
 	node_outfile_type_t outfile_type;
-	/* Bytes currently credited to the executor graph's pfs_usage_bytes. */
-	size_t pfs_credited_bytes;
+	size_t pfs_credited_bytes; // contribution to executor pfs_usage_bytes
 
-	/* Graph relationships */
 	struct list *parents;
 	struct list *children;
 
-	/* Execution and scheduling state */
-	/* Parent edges not yet satisfied for scheduling. */
-	int remaining_parents_count;
-	/* Parent edges already counted for this child. */
-	struct set *fired_parents;
+	int remaining_parents_count; // parents not yet satisfied for scheduling
+	struct set *fired_parents;   // parents already counted toward that count
 	int completed;
-	/* Return was released by cut; cleared if recovery recreates the output. */
-	int cut;
-	/* TEMP return was released by prune-depth; also cleared on recovery. */
-	int prune_depth_pruned;
-	int retry_attempts_left;
+	int cut;		// return released by cut, cleared if recovery restores file
+	int prune_depth_pruned; // temp released by prune-depth
 	int in_resubmit_queue;
-	/* Time of the last failure that put this node on the retry queue. */
-	timestamp_t last_failure_time;
+	timestamp_t last_failure_time; // last enqueue to resubmit queue
 
-	/* Structural metrics */
 	int depth;
 	int height;
 	int upstream_subgraph_size;
@@ -62,7 +48,6 @@ struct node {
 	int fan_out;
 	double heavy_score;
 
-	/* Time metrics */
 	timestamp_t critical_path_time;
 };
 

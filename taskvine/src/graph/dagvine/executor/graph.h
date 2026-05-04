@@ -22,7 +22,7 @@ struct graph {
 	int print_graph_details;
 };
 
-/* Public APIs for operating the executor graph */
+// Public graph API (declarations below)
 
 /** Create an executor graph and return it.
 @param runtime_dir Runtime directory used for default graph output paths.

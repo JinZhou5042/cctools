@@ -20,6 +20,7 @@
 
 static volatile sig_atomic_t interrupted = 0;
 
+/* Initialize runtime fields and default tuning values for a new executor. */
 static void executor_init_runtime(struct executor *e)
 {
 	if (!e) {
@@ -28,7 +29,7 @@ static void executor_init_runtime(struct executor *e)
 
 	e->task_id_to_node = itable_create(0);
 	e->resubmit_queue = list_create();
-	e->time_first_task_dispatched = UINT64_MAX;
+	e->time_first_task_dispatched = UINT64_MAX; // sentinel until first task commit time
 	e->time_last_task_retrieved = 0;
 	e->makespan_us = 0;
 	e->completed_recovery_tasks = 0;
@@ -38,9 +39,9 @@ static void executor_init_runtime(struct executor *e)
 	e->failure_injection_step_percent = -1.0;
 	e->progress_bar_update_interval_sec = 0.1;
 	e->enable_debug_log = 1;
-	e->max_retry_attempts = 15;
 }
 
+/* Release the task-id lookup table and the resubmit queue. */
 static void executor_clear_runtime(struct executor *e)
 {
 	if (!e) {
@@ -57,6 +58,7 @@ static void executor_clear_runtime(struct executor *e)
 	}
 }
 
+/* Allocate an executor bound to the given manager and graph. */
 struct executor *executor_create(struct vine_manager *manager, struct graph *graph)
 {
 	if (!manager || !graph) {
@@ -74,13 +76,13 @@ struct executor *executor_create(struct vine_manager *manager, struct graph *gra
 	return e;
 }
 
+/* Create a new graph for the manager and enable debug logging under the runtime directory. */
 struct graph *executor_graph_create(struct vine_manager *manager)
 {
 	if (!manager) {
 		return NULL;
 	}
 
-	/* Match the manager debug log path when the Python bindings initialize the executor. */
 	char *debug_tmp = string_format("%s/vine-logs/debug", manager->runtime_directory);
 	vine_enable_debug_log(debug_tmp);
 	free(debug_tmp);
@@ -88,6 +90,7 @@ struct graph *executor_graph_create(struct vine_manager *manager)
 	return graph_create(manager->runtime_directory);
 }
 
+/* Undeclare managed files, remove local outputs, and free the executor. */
 void executor_delete(struct executor *e)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -97,7 +100,7 @@ void executor_delete(struct executor *e)
 		ITABLE_ITERATE(g->nodes, nid, node)
 		{
 			if (node->task_runner_arg_file) {
-				vine_undeclare_file(e->manager, node->task_runner_arg_file);
+				vine_undeclare_file(e->manager, node->task_runner_arg_file); // before graph free to avoid double free
 				node->task_runner_arg_file = NULL;
 			}
 			switch (node->outfile_type) {
@@ -125,6 +128,7 @@ void executor_delete(struct executor *e)
 	free(e);
 }
 
+/* Attach buffer input "infile" carrying JSON arguments for the task runner on the worker. */
 static void executor_prepare_task_runner_arg(struct executor *e, struct node *node)
 {
 	if (!e || !node || node->task_runner_arg_file) {
@@ -137,6 +141,7 @@ static void executor_prepare_task_runner_arg(struct executor *e, struct node *no
 	vine_task_add_input(node->task, node->task_runner_arg_file, "infile", VINE_TRANSFER_ALWAYS);
 }
 
+/* Create the vine_task for a node and retain a reference for the submit and wait cycle. */
 static void executor_create_node_task(struct executor *e, struct node *node)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -158,9 +163,13 @@ static void executor_create_node_task(struct executor *e, struct node *node)
 
 	node->task = vine_task_create(g->task_runner_function_name);
 	vine_task_set_library_required(node->task, g->task_runner_library_name);
-	vine_task_addref(node->task);
+	vine_task_addref(node->task); // keep alive across vine_submit and vine_wait
 }
 
+/*
+ * Declare the output vine_file for this node from outfile_type.
+ * Shared filesystem outputs may leave outfile unset.
+ */
 static void executor_declare_node_outfile(struct executor *e, struct node *node)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -183,6 +192,7 @@ static void executor_declare_node_outfile(struct executor *e, struct node *node)
 	}
 }
 
+/* Add a graph node and attach a prepared vine_task and runner argument file. */
 uint64_t executor_add_node(struct executor *e)
 {
 	if (!e || !e->graph) {
@@ -193,12 +203,13 @@ uint64_t executor_add_node(struct executor *e)
 	struct node *node = itable_lookup(e->graph->nodes, node_id);
 	executor_create_node_task(e, node);
 	executor_prepare_task_runner_arg(e, node);
-	if (node) {
-		node->retry_attempts_left = e->max_retry_attempts;
-	}
 	return node_id;
 }
 
+/*
+ * Finalize the graph: declare outputs with cached_name registration,
+ * attach parent inputs, and set remaining parent counts for scheduling.
+ */
 void executor_finalize(struct executor *e)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -208,6 +219,11 @@ void executor_finalize(struct executor *e)
 
 	graph_finalize(g);
 
+	/*
+	 * Two passes. Declare outputs and cached_name map first so parent
+	 * vine_file objects exist. Then attach inputs and parent counts for
+	 * ready-queue logic.
+	 */
 	uint64_t nid;
 	struct node *node;
 	ITABLE_ITERATE(g->nodes, nid, node)
@@ -232,6 +248,7 @@ void executor_finalize(struct executor *e)
 	}
 }
 
+/* Add a named input, reusing a declared file when the logical filename was already mapped. */
 void executor_add_task_input(struct executor *e, uint64_t task_id, const char *filename)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -250,13 +267,14 @@ void executor_add_task_input(struct executor *e, uint64_t task_id, const char *f
 	if (cached_name) {
 		f = vine_manager_lookup_file(e->manager, cached_name);
 	} else {
-		f = vine_declare_temp(e->manager);
+		f = vine_declare_temp(e->manager); // first use of logical name, record cache key for paired mounts
 		hash_table_insert(g->inout_filename_to_cached_name, filename, xxstrdup(f->cached_name));
 	}
 
 	vine_task_add_input(node->task, f, filename, VINE_TRANSFER_ALWAYS);
 }
 
+/* Add a named output, linking logical filename to a cache name for paired producer and consumer tasks. */
 void executor_add_task_output(struct executor *e, uint64_t task_id, const char *filename)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -275,13 +293,14 @@ void executor_add_task_output(struct executor *e, uint64_t task_id, const char *
 	if (cached_name) {
 		f = vine_manager_lookup_file(e->manager, cached_name);
 	} else {
-		f = vine_declare_temp(e->manager);
+		f = vine_declare_temp(e->manager); // pair with matching input on consumer tasks
 		hash_table_insert(g->inout_filename_to_cached_name, filename, xxstrdup(f->cached_name));
 	}
 
-	vine_task_add_output(node->task, f, filename, VINE_TRANSFER_ALWAYS);
+	vine_task_add_output(node->task, f, filename, VINE_TRANSFER_ALWAYS); // same vine_file as downstream input with this name
 }
 
+/* Apply executor-level tuning. Unknown keys are forwarded to graph_tune. */
 int executor_tune(struct executor *e, const char *name, const char *value)
 {
 	if (!e || !name || !value) {
@@ -315,10 +334,6 @@ int executor_tune(struct executor *e, const char *name, const char *value)
 		double val = atof(value);
 		e->progress_bar_update_interval_sec = (val > 0.0) ? val : 0.1;
 
-	} else if (strcmp(name, "time-metrics-filename") == 0) {
-		/* Deprecated no-op: per-node timing fields are no longer collected. */
-		return 0;
-
 	} else if (strcmp(name, "enable-debug-log") == 0) {
 		if (e->enable_debug_log == 0) {
 			return -1;
@@ -329,21 +344,20 @@ int executor_tune(struct executor *e, const char *name, const char *value)
 			debug_close();
 		}
 
-	} else if (strcmp(name, "max-retry-attempts") == 0) {
-		e->max_retry_attempts = MAX(0, atoi(value));
-
 	} else {
-		return graph_tune(e->graph, name, value);
+		return graph_tune(e->graph, name, value); // graph owns structural tuning
 	}
 
 	return 0;
 }
 
+/* Set the interrupted flag when SIGINT is received. */
 static void handle_sigint(int signal)
 {
 	interrupted = 1;
 }
 
+/* Compute submission priority for a node using the configured scheduling policy. */
 static double calculate_task_priority(struct node *node, task_priority_mode_t priority_mode)
 {
 	if (!node) {
@@ -365,7 +379,7 @@ static double calculate_task_priority(struct node *node, task_priority_mode_t pr
 		priority = -(double)node->depth;
 		break;
 	case TASK_PRIORITY_MODE_FIFO:
-		priority = -(double)current_time;
+		priority = -(double)current_time; // earlier time yields higher priority
 		break;
 	case TASK_PRIORITY_MODE_LIFO:
 		priority = (double)current_time;
@@ -386,6 +400,7 @@ static double calculate_task_priority(struct node *node, task_priority_mode_t pr
 				continue;
 			}
 			timestamp_t parent_task_completion_time = parent_node->task->time_workers_execute_last;
+			// weight by parent input size and last observed worker runtime
 			priority += (double)vine_file_size(parent_node->outfile) * (double)parent_task_completion_time;
 		}
 		break;
@@ -394,6 +409,7 @@ static double calculate_task_priority(struct node *node, task_priority_mode_t pr
 	return priority;
 }
 
+/* Submit the node task if it is still initial, and record the manager task id for later lookup. */
 static void submit_node_task(struct executor *e, struct node *node)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -408,7 +424,7 @@ static void submit_node_task(struct executor *e, struct node *node)
 
 	if (node->task->state != VINE_TASK_INITIAL) {
 		debug(D_VINE, "submit_node_task: skipping node %" PRIu64 " (task already submitted, state=%d, task_id=%d)", node->node_id, node->task->state, node->task->task_id);
-		return;
+		return; // not INITIAL, manager already owns this submission
 	}
 
 	double priority = calculate_task_priority(node, e->task_priority_mode);
@@ -421,10 +437,11 @@ static void submit_node_task(struct executor *e, struct node *node)
 		return;
 	}
 
-	itable_insert(e->task_id_to_node, (uint64_t)task_id, node);
+	itable_insert(e->task_id_to_node, (uint64_t)task_id, node); // reverse lookup from vine_wait
 	debug(D_VINE, "submitted node %" PRIu64 " with task id %d", node->node_id, task_id);
 }
 
+/* Submit ready source nodes and enable delivery of recovery tasks to the application. */
 static void submit_initial_ready_nodes(struct executor *e)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -441,9 +458,10 @@ static void submit_initial_ready_nodes(struct executor *e)
 		}
 	}
 
-	vine_enable_return_recovery_tasks(e->manager);
+	vine_enable_return_recovery_tasks(e->manager); // driver must observe recovery completions for cut and prune
 }
 
+/* After a parent completes, decrement remaining parents and submit children that become ready. */
 static void submit_unblocked_children(struct executor *e, struct node *node)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -462,7 +480,7 @@ static void submit_unblocked_children(struct executor *e, struct node *node)
 			child_node->fired_parents = set_create(0);
 		}
 		if (set_lookup(child_node->fired_parents, node)) {
-			continue;
+			continue; // each parent completes at most once for this child
 		}
 		set_insert(child_node->fired_parents, node);
 
@@ -477,6 +495,7 @@ static void submit_unblocked_children(struct executor *e, struct node *node)
 	}
 }
 
+/* Map a completed vine_task to the corresponding graph node, including recovery tasks. */
 static struct node *get_node_by_task(struct executor *e, struct vine_task *task)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -487,6 +506,10 @@ static struct node *get_node_by_task(struct executor *e, struct vine_task *task)
 	if (task->type == VINE_TASK_TYPE_STANDARD) {
 		return itable_lookup(e->task_id_to_node, (uint64_t)task->task_id);
 	} else if (task->type == VINE_TASK_TYPE_RECOVERY) {
+		/*
+		 * Recovery tasks are not stored in task_id_to_node.
+		 * Resolve the logical node via the original producer id on output mounts.
+		 */
 		struct vine_mount *mount;
 		LIST_ITERATE(task->output_mounts, mount)
 		{
@@ -501,6 +524,7 @@ static struct node *get_node_by_task(struct executor *e, struct vine_task *task)
 	return NULL;
 }
 
+/* Update shared-filesystem byte counters when a node's credited output size changes. */
 static void pfs_account_write(struct executor *e, struct node *n, size_t new_size)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -516,7 +540,7 @@ static void pfs_account_write(struct executor *e, struct node *n, size_t new_siz
 	if (new_size > prev) {
 		e->pfs_usage_bytes += (new_size - prev);
 	} else {
-		e->pfs_usage_bytes -= (prev - new_size);
+		e->pfs_usage_bytes -= (prev - new_size); // retry may produce a smaller file
 	}
 	n->pfs_credited_bytes = new_size;
 
@@ -528,6 +552,7 @@ static void pfs_account_write(struct executor *e, struct node *n, size_t new_siz
 			e->pfs_usage_bytes);
 }
 
+/* Remove a node's credited bytes from the shared-filesystem usage total. */
 static void pfs_account_delete(struct executor *e, struct node *n)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -550,6 +575,7 @@ static void pfs_account_delete(struct executor *e, struct node *n)
 			e->pfs_usage_bytes);
 }
 
+/* Return non-zero if the completed node retains output on local disk or a shared filesystem path. */
 static int node_is_anchored(const struct node *n)
 {
 	if (!n || !n->completed) {
@@ -558,6 +584,7 @@ static int node_is_anchored(const struct node *n)
 	return n->outfile_type == NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM || n->outfile_type == NODE_OUTFILE_TYPE_LOCAL;
 }
 
+/* Return non-zero when a temporary output file has a recovery task that is neither initial nor finished. */
 static int node_is_mid_recovery(const struct node *n)
 {
 	if (!n || !n->outfile || n->outfile->type != VINE_TEMP) {
@@ -567,9 +594,10 @@ static int node_is_mid_recovery(const struct node *n)
 	if (!rt) {
 		return 0;
 	}
-	return rt->state != VINE_TASK_INITIAL && rt->state != VINE_TASK_DONE;
+	return rt->state != VINE_TASK_INITIAL && rt->state != VINE_TASK_DONE; // recovery in flight
 }
 
+/* Remove or prune the node's result file according to its output storage mode. */
 static void delete_node_return_file(struct executor *e, struct node *n)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -597,6 +625,7 @@ static void delete_node_return_file(struct executor *e, struct node *n)
 	}
 }
 
+/* Attempt to mark a completed node as cut and delete its return file when all children permit release. */
 static int try_cut_node(struct executor *e, struct node *n)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -608,7 +637,7 @@ static int try_cut_node(struct executor *e, struct node *n)
 	LIST_ITERATE(n->children, c)
 	{
 		if ((!node_is_anchored(c) && !c->cut) || node_is_mid_recovery(c)) {
-			return 0;
+			return 0; // wait for anchored, cut, or non-recovery children
 		}
 	}
 
@@ -616,12 +645,13 @@ static int try_cut_node(struct executor *e, struct node *n)
 	debug(D_VINE, "cut: node %" PRIu64 " outfile_type=%d is_target=%d", n->node_id, n->outfile_type, n->is_target);
 
 	if (!n->is_target) {
-		delete_node_return_file(e, n);
+		delete_node_return_file(e, n); // targets keep data for retrieval
 	}
 
 	return 1;
 }
 
+/* Walk upstream from a completed node and apply cut propagation along the worklist. */
 static void propagate_cut_from(struct executor *e, struct node *start)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -632,6 +662,7 @@ static void propagate_cut_from(struct executor *e, struct node *start)
 	timestamp_t t0 = timestamp_get();
 	try_cut_node(e, start);
 
+	/* Upstream BFS: when a node is cut, enqueue its parents for the same check. */
 	struct list *worklist = list_create();
 	struct node *p;
 	LIST_ITERATE(start->parents, p)
@@ -653,6 +684,7 @@ static void propagate_cut_from(struct executor *e, struct node *start)
 	e->time_spent_on_cut_propagation += timestamp_get() - t0;
 }
 
+/* Return non-zero if every descendant within the given depth bound is complete and not mid-recovery. */
 static int all_descendants_within_depth_completed(struct node *a, int depth)
 {
 	if (!a || depth <= 0) {
@@ -665,6 +697,7 @@ static int all_descendants_within_depth_completed(struct node *a, int depth)
 	set_insert(visited, a);
 
 	int ok = 1;
+	/* Expand one child frontier per iteration up to depth hops from a. */
 	for (int d = 0; d < depth && ok; d++) {
 		struct list *next = list_create();
 		struct node *n;
@@ -696,6 +729,7 @@ static int all_descendants_within_depth_completed(struct node *a, int depth)
 	return ok;
 }
 
+/* Release a temporary output when prune-depth constraints and descendant completion are satisfied. */
 static void try_prune_depth_release(struct executor *e, struct node *a)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -715,7 +749,7 @@ static void try_prune_depth_release(struct executor *e, struct node *a)
 		return;
 	}
 	if (!all_descendants_within_depth_completed(a, g->prune_depth)) {
-		return;
+		return; // wait until descendants within prune_depth layers are settled
 	}
 
 	delete_node_return_file(e, a);
@@ -724,6 +758,7 @@ static void try_prune_depth_release(struct executor *e, struct node *a)
 	debug(D_VINE, "prune-depth release: node %" PRIu64 " depth=%d", a->node_id, g->prune_depth);
 }
 
+/* Apply prune-depth release starting at a node and extending up to k ancestor levels. */
 static void apply_prune_depth_from(struct executor *e, struct node *node)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -742,6 +777,7 @@ static void apply_prune_depth_from(struct executor *e, struct node *node)
 	list_push_tail(current, node);
 	set_insert(visited, node);
 
+	/* Visit new parents up to k levels, trying prune release on each. */
 	for (int d = 1; d <= k; d++) {
 		struct list *next = list_create();
 		struct node *n;
@@ -769,6 +805,7 @@ static void apply_prune_depth_from(struct executor *e, struct node *node)
 #define RESUBMIT_SCAN_LIMIT 100
 #define RESUBMIT_COOLDOWN_USECS ((timestamp_t)1000000)
 
+/* Append a failed node to the resubmit queue after recording the failure time. */
 static void queue_node_for_retry(struct executor *e, struct node *node)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -785,6 +822,7 @@ static void queue_node_for_retry(struct executor *e, struct node *node)
 	node->in_resubmit_queue = 1;
 }
 
+/* Dequeue nodes whose cooldown has expired, reset tasks, and resubmit them within a bounded scan budget. */
 static void drain_resubmit_queue(struct executor *e)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -796,6 +834,7 @@ static void drain_resubmit_queue(struct executor *e)
 	int queued = list_size(e->resubmit_queue);
 	int budget = queued < RESUBMIT_SCAN_LIMIT ? queued : RESUBMIT_SCAN_LIMIT;
 
+	// drain at most budget entries, stop early if head remains in cooldown
 	for (int i = 0; i < budget; i++) {
 		struct node *node = list_peek_head(e->resubmit_queue);
 		if (!node) {
@@ -808,18 +847,16 @@ static void drain_resubmit_queue(struct executor *e)
 		list_pop_head(e->resubmit_queue);
 		node->in_resubmit_queue = 0;
 
-		if (--node->retry_attempts_left < 0) {
-			debug(D_ERROR, "node %" PRIu64 " has no retries left. Aborting.", node->node_id);
-			graph_delete(g);
-			exit(1);
-		}
-
-		debug(D_VINE, "Resubmitting node %" PRIu64 " (remaining=%d)", node->node_id, node->retry_attempts_left);
+		debug(D_VINE, "Resubmitting node %" PRIu64, node->node_id);
 		vine_task_reset(node->task);
 		submit_node_task(e, node);
 	}
 }
 
+/*
+ * Verify status and on-disk outputs.
+ * On failure enqueue a retry for the node.
+ */
 static int validate_task_or_enqueue(struct executor *e, struct node *node, struct vine_task *task)
 {
 	if (task->result != VINE_RESULT_SUCCESS || task->exit_code != 0) {
@@ -831,6 +868,7 @@ static int validate_task_or_enqueue(struct executor *e, struct node *node, struc
 	switch (node->outfile_type) {
 	case NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM: {
 		struct stat info;
+		// shared path may lag behind a successful task result code
 		if (stat(node->outfile_remote_name, &info) < 0) {
 			debug(D_VINE, "Task %d succeeded but missing sharedfs output %s", task->task_id, node->outfile_remote_name);
 			queue_node_for_retry(e, node);
@@ -849,6 +887,7 @@ static int validate_task_or_enqueue(struct executor *e, struct node *node, struc
 	return 1;
 }
 
+/* Return the recorded user-task makespan in microseconds. */
 uint64_t executor_get_makespan_us(const struct executor *e)
 {
 	if (!e) {
@@ -858,6 +897,7 @@ uint64_t executor_get_makespan_us(const struct executor *e)
 	return (uint64_t)e->makespan_us;
 }
 
+/* Return the manager's cumulative count of recovery tasks submitted. */
 uint64_t executor_get_total_recovery_tasks(const struct executor *e)
 {
 	if (!e || !e->manager || !e->manager->stats) {
@@ -867,6 +907,7 @@ uint64_t executor_get_total_recovery_tasks(const struct executor *e)
 	return (uint64_t)e->manager->stats->tasks_recovery;
 }
 
+/* Return how many recovery tasks have completed in the current executor run. */
 uint64_t executor_get_completed_recovery_tasks(const struct executor *e)
 {
 	if (!e) {
@@ -876,6 +917,7 @@ uint64_t executor_get_completed_recovery_tasks(const struct executor *e)
 	return e->completed_recovery_tasks;
 }
 
+/* Main loop: submit work, wait, handle recovery, update graph state. */
 void executor_execute(struct executor *e)
 {
 	struct graph *g = e ? e->graph : NULL;
@@ -903,7 +945,12 @@ void executor_execute(struct executor *e)
 		next_failure_threshold = e->failure_injection_step_percent / 100.0;
 	}
 
-	int wait_timeout = 1;
+	int wait_timeout = 1; // short timeout after a result, longer when idle
+
+	/*
+	 * Finish when every user node has succeeded at least once.
+	 * Recovery tasks do not advance user_tasks_part.
+	 */
 	while (user_tasks_part->current < user_tasks_part->total) {
 		if (interrupted) {
 			break;
@@ -923,7 +970,7 @@ void executor_execute(struct executor *e)
 			}
 
 			if (task->time_when_commit_end > 0) {
-				e->time_first_task_dispatched = MIN(e->time_first_task_dispatched, task->time_when_commit_end);
+				e->time_first_task_dispatched = MIN(e->time_first_task_dispatched, task->time_when_commit_end); // makespan start
 			}
 
 			if (task->type == VINE_TASK_TYPE_RECOVERY) {
@@ -939,6 +986,7 @@ void executor_execute(struct executor *e)
 
 				node->cut = 0;
 				node->prune_depth_pruned = 0;
+				// recovery restored output, re-run release logic for this subgraph
 				propagate_cut_from(e, node);
 				apply_prune_depth_from(e, node);
 				continue;
@@ -950,14 +998,18 @@ void executor_execute(struct executor *e)
 
 			e->time_last_task_retrieved = MAX(e->time_last_task_retrieved, task->time_when_retrieval);
 			if (e->time_last_task_retrieved < e->time_first_task_dispatched) {
-				debug(D_ERROR, "task %d time_last_task_retrieved < time_first_task_dispatched: %" PRIu64 " < %" PRIu64, task->task_id, e->time_last_task_retrieved, e->time_first_task_dispatched);
-				e->time_last_task_retrieved = e->time_first_task_dispatched;
+				debug(D_ERROR,
+						"task %d time_last_task_retrieved < time_first_task_dispatched: %" PRIu64 " < %" PRIu64,
+						task->task_id,
+						e->time_last_task_retrieved,
+						e->time_first_task_dispatched);
+				e->time_last_task_retrieved = e->time_first_task_dispatched; // clamp non-monotonic timestamps
 			}
 			e->makespan_us = e->time_last_task_retrieved - e->time_first_task_dispatched;
 
 			debug(D_VINE, "Node %" PRIu64 " completed with outfile %s size: %zu bytes", node->node_id, node->outfile_remote_name, node->outfile_size_bytes);
 
-			int first_completion = !node->completed;
+			int first_completion = !node->completed; // count user progress once per graph node
 			node->completed = 1;
 
 			propagate_cut_from(e, node);
@@ -973,6 +1025,7 @@ void executor_execute(struct executor *e)
 			}
 
 			if (e->failure_injection_step_percent > 0) {
+				// test hook, drop workers at stepped progress thresholds
 				double progress = (double)user_tasks_part->current / (double)user_tasks_part->total;
 				if (progress >= next_failure_threshold && release_random_worker(e->manager)) {
 					debug(D_VINE, "released a random worker at %.2f%% (threshold %.2f%%)", progress * 100, next_failure_threshold * 100);
@@ -982,7 +1035,7 @@ void executor_execute(struct executor *e)
 
 			switch (node->outfile_type) {
 			case NODE_OUTFILE_TYPE_TEMP:
-				vine_temp_queue_for_replication(e->manager, node->outfile);
+				vine_temp_queue_for_replication(e->manager, node->outfile); // optional replication policy
 				break;
 			case NODE_OUTFILE_TYPE_LOCAL:
 			case NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
@@ -991,7 +1044,7 @@ void executor_execute(struct executor *e)
 
 			submit_unblocked_children(e, node);
 		} else {
-			wait_timeout = 1;
+			wait_timeout = 1; // no task ready, wait with default blocking timeout
 		}
 	}
 
@@ -1002,6 +1055,6 @@ void executor_execute(struct executor *e)
 
 	signal(SIGINT, previous_sigint_handler);
 	if (interrupted) {
-		raise(SIGINT);
+		raise(SIGINT); // restore handler first, then honor prior interrupt
 	}
 }

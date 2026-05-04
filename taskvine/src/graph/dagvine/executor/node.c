@@ -56,7 +56,6 @@ struct node *node_create(uint64_t node_id)
 	node->prune_depth_pruned = 0;
 	node->outfile_size_bytes = 0;
 	node->pfs_credited_bytes = 0;
-	node->retry_attempts_left = 0;
 	node->in_resubmit_queue = 0;
 	node->last_failure_time = 0;
 
@@ -136,8 +135,7 @@ void node_debug_print(struct node *node)
 		debug(D_VINE, "outfile_type: SHARED_FILE_SYSTEM or none");
 	}
 
-	/* print parent and child node ids */
-	char *parent_ids = NULL;
+	char *parent_ids = NULL; // comma separated parent ids for logging
 	struct node *p;
 	LIST_ITERATE(node->parents, p)
 	{
@@ -150,7 +148,7 @@ void node_debug_print(struct node *node)
 		}
 	}
 
-	char *child_ids = NULL;
+	char *child_ids = NULL; // comma separated child ids for logging
 	struct node *c;
 	LIST_ITERATE(node->children, c)
 	{

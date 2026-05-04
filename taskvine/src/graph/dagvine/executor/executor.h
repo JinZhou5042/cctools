@@ -16,28 +16,23 @@ typedef enum {
 } task_priority_mode_t;
 
 struct executor {
-	/* Core ownership */
-	struct graph *graph;	      /* DAG model executed by this executor. */
-	struct vine_manager *manager; /* TaskVine manager used for runtime operations. */
+	struct graph *graph;	      // DAG executed by this executor
+	struct vine_manager *manager; // TaskVine runtime
 
-	/* Runtime indexes and queues */
-	struct itable *task_id_to_node; /* Submitted TaskVine task id -> graph node. */
-	struct list *resubmit_queue;	/* Nodes waiting for retry after a failed attempt. */
+	struct itable *task_id_to_node; // maps vine task id to graph node after submit
+	struct list *resubmit_queue;	// nodes waiting for retry
 
-	/* Execution timing and counters */
-	timestamp_t time_first_task_dispatched;	   /* Earliest task dispatch timestamp. */
-	timestamp_t time_last_task_retrieved;	   /* Latest user task retrieval timestamp. */
-	timestamp_t makespan_us;		   /* Current workflow makespan in microseconds. */
-	timestamp_t time_spent_on_cut_propagation; /* Time spent releasing upstream data. */
-	uint64_t completed_recovery_tasks;	   /* Number of completed recovery tasks observed. */
-	uint64_t pfs_usage_bytes;		   /* Bytes currently credited to shared FS outputs. */
+	timestamp_t time_first_task_dispatched;	   // earliest dispatch time among user tasks
+	timestamp_t time_last_task_retrieved;	   // latest user task retrieval time
+	timestamp_t makespan_us;		   // workflow span in microseconds
+	timestamp_t time_spent_on_cut_propagation; // time spent in cut propagation
+	uint64_t completed_recovery_tasks;	   // recovery completions seen this run
+	uint64_t pfs_usage_bytes;		   // bytes credited for shared filesystem outputs
 
-	/* Runtime tuning */
-	task_priority_mode_t task_priority_mode; /* Priority policy used before task submission. */
-	double failure_injection_step_percent;	 /* Worker-release interval for failure injection. */
-	double progress_bar_update_interval_sec; /* Progress bar refresh interval. */
-	int enable_debug_log;			 /* Whether executor debug logging remains enabled. */
-	int max_retry_attempts;			 /* Retry budget assigned to newly created nodes. */
+	task_priority_mode_t task_priority_mode; // schedule order before submit
+	double failure_injection_step_percent;	 // optional worker release steps for tests
+	double progress_bar_update_interval_sec;
+	int enable_debug_log;
 };
 
 struct executor *executor_create(struct vine_manager *manager, struct graph *graph);

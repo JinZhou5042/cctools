@@ -41,9 +41,7 @@ class DAGVineConfig:
             "checkpoint-dir": "./checkpoints",
             "checkpoint-fraction": 0,
             "progress-bar-update-interval-sec": 0.1,
-            "time-metrics-filename": 0,
             "enable-debug-log": 1,
-            "max-retry-attempts": 15,
             "print-graph-details": 0,
         }
         self.task_runner = {
