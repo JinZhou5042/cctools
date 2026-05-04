@@ -134,8 +134,11 @@ char *vine_runtime_directory_create()
 	return runtime_dir;
 }
 
-char *vine_get_runtime_directory(struct vine_manager *m)
+const char *vine_get_runtime_directory(struct vine_manager *m)
 {
+	if (!m || !m->runtime_directory) {
+		return NULL;
+	}
 	return m->runtime_directory;
 }
 

@@ -1545,11 +1545,11 @@ void vine_counters_print();
  */
 char *vine_version_string();
 
-/** Returns the runtime directory
-@param m Reference to the current manager object.
-@return A string.
-*/
-char *vine_get_runtime_directory(struct vine_manager *m);
+/** Absolute path of this run's workflow runtime directory.
+@param m The manager.
+@return Owned by the manager until @ref vine_delete.
+ */
+const char *vine_get_runtime_directory(struct vine_manager *m);
 
 /** Returns path relative to the logs runtime directory
 @param m Reference to the current manager object.

@@ -2,7 +2,6 @@
 # This software is distributed under the GNU General Public License.
 # See the file COPYING for details.
 
-from ndcctools.taskvine import cvine
 from ndcctools.taskvine.manager import Manager
 
 from ndcctools.taskvine.dagvine.dask_adaptor import DaskAdaptor
@@ -102,7 +101,6 @@ class DAGVine(Manager):
 
         # Manager lifetime is tied to this object.
         super().__init__(*args, **kwargs)
-        self.runtime_directory = cvine.vine_get_runtime_directory(self._taskvine)
 
         print(f"=== Manager name: {color_text(self.name, 92)}")
         print(f"=== Manager port: {color_text(self.port, 92)}")
