@@ -657,7 +657,6 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 		t->time_workers_execute_last = observed_execution_time > execution_time ? execution_time : observed_execution_time;
 		t->time_workers_execute_last_start = start_time;
 		t->time_workers_execute_last_end = end_time;
-		q->time_start_execution = MIN(q->time_start_execution, t->time_workers_execute_last_end); // TEMP HACK
 		t->time_workers_execute_all += t->time_workers_execute_last;
 		t->output_length = output_length;
 		t->result = task_status;
@@ -769,9 +768,7 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 			string_prefix_is(line, "wable_status") || string_prefix_is(line, "resources_status")) {
 		result = handle_manager_status(q, w, line, stoptime);
 	} else if (string_prefix_is(line, "available_results")) {
-		if (!hash_table_lookup(q->workers_with_watched_file_updates, w->hashkey)) {
-			hash_table_insert(q->workers_with_watched_file_updates, w->hashkey, w);
-		}
+		hash_table_insert(q->workers_with_watched_file_updates, w->hashkey, w);
 		result = VINE_MSG_PROCESSED;
 	} else if (string_prefix_is(line, "resources")) {
 		result = handle_resources(q, w, stoptime);
@@ -1411,11 +1408,6 @@ void exit_debug_message(struct vine_manager *q, struct vine_worker_info *w, stru
 	return;
 }
 
-uint64_t vine_manager_get_makespan_us(struct vine_manager *q)
-{
-	return (uint64_t)(q->time_end_execution - q->time_start_execution); // TEMP HACK
-}
-
 static int fetch_outputs_from_worker(struct vine_manager *q, struct vine_worker_info *w, int task_id)
 {
 	struct vine_task *t;
@@ -1428,8 +1420,6 @@ static int fetch_outputs_from_worker(struct vine_manager *q, struct vine_worker_
 		return 0;
 	}
 	t->time_when_retrieval = timestamp_get();
-
-	q->time_end_execution = MAX(q->time_end_execution, t->time_when_retrieval); // TEMP HACK
 
 	/* Determine what subset of outputs to retrieve based on status. */
 
@@ -4289,9 +4279,6 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	vine_perf_log_write_update(q, 1);
 
 	q->time_last_wait = timestamp_get();
-
-	q->time_start_execution = UINT64_MAX; // TMEP HACK
-	q->time_end_execution = 0;	      // TMEP HACK
 
 	debug(D_VINE, "Manager is listening on port %d.", q->port);
 
