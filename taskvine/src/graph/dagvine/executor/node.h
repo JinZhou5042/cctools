@@ -2,11 +2,11 @@
 #define NODE_H
 
 #include <stddef.h>
-#include <stdint.h>
 
-#include "list.h"
 #include "set.h"
 #include "timestamp.h"
+
+#include "vine_file.h"
 #include "vine_task.h"
 
 /** The storage type of the node's output file. */

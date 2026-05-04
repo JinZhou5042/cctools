@@ -1,24 +1,16 @@
+#include <errno.h>
+#include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <inttypes.h>
-#include <errno.h>
-#include <stdio.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
-#include "priority_queue.h"
-#include "list.h"
 #include "debug.h"
-#include "itable.h"
-#include "xxmalloc.h"
-#include "stringtools.h"
-#include "hash_table.h"
-#include "set.h"
-#include "uuid.h"
-
-#include "node.h"
 #include "graph.h"
+#include "priority_queue.h"
+#include "stringtools.h"
+#include "uuid.h"
+#include "xxmalloc.h"
 
 /*************************************************************/
 /* Private Functions */

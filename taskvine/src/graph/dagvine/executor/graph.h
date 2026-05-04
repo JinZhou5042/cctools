@@ -1,10 +1,9 @@
 #ifndef DAGVINE_GRAPH_H
 #define DAGVINE_GRAPH_H
 
-#include <stdint.h>
-
 #include "hash_table.h"
 #include "itable.h"
+
 #include "node.h"
 
 struct graph {

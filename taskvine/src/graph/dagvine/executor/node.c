@@ -1,15 +1,10 @@
 #include <inttypes.h>
 #include <stdlib.h>
 
-#include "xxmalloc.h"
-#include "stringtools.h"
-#include "timestamp.h"
-#include "list.h"
-#include "set.h"
 #include "debug.h"
+#include "stringtools.h"
+#include "xxmalloc.h"
 
-#include "vine_file.h"
-#include "vine_task.h"
 #include "node.h"
 
 /*************************************************************/

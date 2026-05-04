@@ -1,27 +1,22 @@
 #include <inttypes.h>
 #include <signal.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "debug.h"
 #include "executor.h"
-#include "itable.h"
-#include "list.h"
 #include "macros.h"
 #include "progress_bar.h"
 #include "random.h"
-#include "set.h"
 #include "stringtools.h"
-#include "timestamp.h"
+#include "xxmalloc.h"
+
 #include "vine_file.h"
-#include "vine_manager.h"
 #include "vine_mount.h"
 #include "vine_task.h"
 #include "vine_temp.h"
-#include "xxmalloc.h"
 
 static volatile sig_atomic_t interrupted = 0;
 
@@ -102,14 +97,11 @@ void executor_delete(struct executor *e)
 		ITABLE_ITERATE(g->nodes, nid, node)
 		{
 			if (node->task_runner_arg_file) {
-				vine_prune_file(e->manager, node->task_runner_arg_file);
-				hash_table_remove(e->manager->file_table, node->task_runner_arg_file->cached_name);
+				vine_undeclare_file(e->manager, node->task_runner_arg_file);
+				node->task_runner_arg_file = NULL;
 			}
 			switch (node->outfile_type) {
 			case NODE_OUTFILE_TYPE_TEMP:
-				if (node->outfile) {
-					vine_prune_file(e->manager, node->outfile);
-				}
 				break;
 			case NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
 				if (node->outfile_remote_name) {
@@ -124,7 +116,8 @@ void executor_delete(struct executor *e)
 			}
 			if (node->outfile) {
 				hash_table_remove(g->outfile_cachename_to_node, node->outfile->cached_name);
-				hash_table_remove(e->manager->file_table, node->outfile->cached_name);
+				vine_undeclare_file(e->manager, node->outfile);
+				node->outfile = NULL;
 			}
 		}
 	}

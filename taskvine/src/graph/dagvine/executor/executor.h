@@ -1,12 +1,8 @@
 #ifndef DAGVINE_EXECUTOR_H
 #define DAGVINE_EXECUTOR_H
 
-#include <stdint.h>
-
 #include "graph.h"
-#include "itable.h"
-#include "list.h"
-#include "timestamp.h"
+
 #include "vine_manager.h"
 
 typedef enum {
