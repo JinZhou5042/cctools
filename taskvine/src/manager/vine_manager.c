@@ -4696,7 +4696,7 @@ char *vine_monitor_wrap(struct vine_manager *q, struct vine_worker_info *w, stru
 	return wrap_cmd;
 }
 
-/* Put a given task on the ready queue, taking into account the task priority and the manager schedule. */
+/* Put a given task on the ready list, taking into account the task priority and the manager schedule. */
 static void push_task_to_ready_tasks(struct vine_manager *q, struct vine_task *t)
 {
 	vine_priority_t manager_priority = VINE_PRIORITY_NORMAL;
@@ -4954,11 +4954,6 @@ struct vine_task *send_library_to_worker(struct vine_manager *q, struct vine_wor
 		return 0;
 	}
 
-	/* HACK: if the worker already has a library instance, do not send another one */
-	if (itable_size(w->current_libraries) > 1) {
-		return 0;
-	}
-
 	/*
 	If this template had been failed for over a specific count,
 	then remove it and notify the user that this template might be broken
@@ -5162,7 +5157,7 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 	// promptly dispatch tasks, while avoiding wasting cpu cycles when the
 	// state of the system cannot be advanced.
 	int msec = q->nothing_happened_last_wait_cycle ? 1000 : 0;
-	msec = 0;
+
 	if (stoptime) {
 		msec = MIN(msec, (stoptime - time(0)) * 1000);
 	}
@@ -5430,18 +5425,6 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			if (!head) {
 				// there are no tasks to be received
 				break;
-			}
-
-			/* Should not happen: WAITING_RETRIEVAL implies the task was on a worker. */
-			if (!head->worker) {
-				debug(D_ERROR,
-						"task %d is WAITING_RETRIEVAL but has no worker; moving to retrieved (FORSAKEN)",
-						head->task_id);
-				list_remove(q->waiting_retrieval_list, head);
-				vine_task_set_result(head, VINE_RESULT_FORSAKEN);
-				change_task_state(q, head, VINE_TASK_RETRIEVED);
-				events++;
-				continue;
 			}
 
 			struct vine_worker_info *w = head->worker;
