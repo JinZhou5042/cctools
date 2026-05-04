@@ -42,35 +42,6 @@ def daskvine_merge(func):
         return result
     return flex_merge
 
-
-def _rep_key_dask(k, r):
-    """Match DAGVine._rep_key: first replica keeps original keys."""
-    return k if r == 0 else ("__rep", r, k)
-
-
-def _replicate_dts_dask_graph(dsk, keys_flatten, repeats):
-    """Replicate a dask._task_spec graph like DAGVine._replicate_graph (uses GraphNode.substitute)."""
-    if repeats <= 1:
-        return dsk, list(keys_flatten)
-    orig_keys = set(dsk.keys())
-    expanded = {}
-    for r in range(repeats):
-        subs = {k: dts.TaskRef(_rep_key_dask(k, r)) for k in orig_keys} if r > 0 else None
-        for k, v in dsk.items():
-            nk = _rep_key_dask(k, r)
-            if r == 0:
-                expanded[nk] = v
-            else:
-                if isinstance(v, dts.GraphNode):
-                    expanded[nk] = v.substitute(subs, key=nk)
-                else:
-                    expanded[nk] = v
-    vine_targets = list(keys_flatten)
-    for rr in range(1, repeats):
-        vine_targets.extend(_rep_key_dask(k, rr) for k in keys_flatten if k in dsk)
-    return expanded, vine_targets
-
-
 ##
 # @class ndcctools.taskvine.dask_executor.DaskVine
 #
@@ -151,8 +122,6 @@ class DaskVine(Manager):
     #                      Should return a tuple of (wrapper result, dask call result). Use for debugging.
     # @param wrapper_proc  Function to process results from wrapper on completion. (default is print)
     # @param prune_depth Control pruning behavior: 0 (default) - no pruning, 1 - only check direct consumers, 2+ - check consumers up to specified depth
-    # @param repeats     Replicate the entire graph this many times (like DAGVine.run(repeats=...)).
-    #                      Extra replicas use keys ("__rep", r, k). Only the first replica's results are returned for keys.
     def get(self, dsk, keys, *,
             environment=None,
             extra_files=None,
@@ -183,7 +152,6 @@ class DaskVine(Manager):
             hoisting_modules=None,  # Deprecated, use lib_modules
             import_modules=None,    # Deprecated, use lib_modules
             lazy_transfers=True,    # Deprecated, use worker_tranfers
-            repeats=1,
             ):
         try:
 
@@ -193,11 +161,6 @@ class DaskVine(Manager):
             self.set_property("framework", "dask")
             if retries and retries < 1:
                 raise ValueError("retries should be larger than 0")
-            if repeats is None:
-                repeats = 1
-            repeats = int(repeats)
-            if repeats < 1:
-                raise ValueError("repeats should be >= 1")
 
             if isinstance(environment, str):
                 self.environment = self.declare_poncho(environment, cache=True)
@@ -257,7 +220,7 @@ class DaskVine(Manager):
                 self.environment_name = os.path.basename(environment)
                 self.environment = None
 
-            return self._dask_execute(dsk, keys, repeats=repeats)
+            return self._dask_execute(dsk, keys)
         except Exception as e:
             # unhandled exceptions for now
             raise e
@@ -267,12 +230,9 @@ class DaskVine(Manager):
     def __call__(self, *args, **kwargs):
         return self.get(*args, **kwargs)
 
-    def _dask_execute(self, dsk, keys, repeats=1):
+    def _dask_execute(self, dsk, keys):
         indices = {k: inds for (k, inds) in find_dask_keys(keys)}
-        keys_flatten = list(indices.keys())
-
-        if repeats > 1:
-            dsk, keys_flatten = _replicate_dts_dask_graph(dsk, keys_flatten, repeats)
+        keys_flatten = indices.keys()
 
         dag = DaskVineDag(dsk, reconstruct=self.reconstruct, merge_size=self.merge_size, prune_depth=self.prune_depth)
 
@@ -325,9 +285,6 @@ class DaskVine(Manager):
 
         timeout = 5
         pending = 0
-        throughput_completed_tasks = 0
-        time_first_task_dispatched = None
-        last_throughput_print_time = 0.0
         (bar_progress, bar_update) = self._make_progress_bar(dag.left_to_compute())
         with bar_progress:
             while not self.empty() or enqueued_calls:
@@ -340,14 +297,11 @@ class DaskVine(Manager):
                 ):
                     t = enqueued_calls.pop()
                     self.submit(t)
-                    if time_first_task_dispatched is None:
-                        time_first_task_dispatched = time.time()
                     submitted += 1
                     pending += 1
 
                 t = self.wait_for_tag(tag, timeout)
                 if t:
-                    throughput_completed_tasks += 1
                     timeout = 0
                     pending -= 1
                     if self.verbose:
@@ -363,9 +317,8 @@ class DaskVine(Manager):
                         if self.wrapper:
                             self.wrapper_proc(t.load_wrapper_output(self))
 
-                        # Advance once per successfully completed DAG task (do not gate on `key in dsk`:
-                        # that can miss vertices for several graph shapes, e.g. low_memory_mode uuid keys).
-                        bar_update(advance=1)
+                        if t.key in dsk:
+                            bar_update(advance=1)
 
                         if self.prune_depth > 0:
                             for p in dag.pending_producers[t.key]:
@@ -384,14 +337,6 @@ class DaskVine(Manager):
                     t = None  # drop task reference
                 else:
                     timeout = 5
-
-                if throughput_completed_tasks > 0 and time_first_task_dispatched is not None:
-                    now = time.time()
-                    if last_throughput_print_time == 0.0 or (now - last_throughput_print_time) >= 1.0:
-                        elapsed_sec = now - time_first_task_dispatched
-                        throughput = (throughput_completed_tasks / elapsed_sec) if elapsed_sec > 0.0 else 0.0
-                        print(f"throughput: {throughput:.0f} tasks/s")
-                        last_throughput_print_time = now
             return self._load_results(dag, indices, keys)
 
     def _make_progress_bar(self, total):
