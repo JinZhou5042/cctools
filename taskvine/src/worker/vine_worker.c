@@ -21,6 +21,7 @@ See the file COPYING for details.
 #include "vine_worker_options.h"
 #include "vine_workspace.h"
 
+#include "address.h"
 #include "catalog_query.h"
 #include "cctools.h"
 #include "change_process_title.h"
@@ -552,6 +553,10 @@ Send an asynchronous message to the manager indicating where the worker is liste
 
 static void send_transfer_address(struct link *manager)
 {
+	if (!vine_transfer_server_running()) {
+		send_async_message(manager, "info transfer_port_bind_failed\n");
+		return;
+	}
 	char addr[LINK_ADDRESS_MAX];
 	int port;
 
@@ -675,7 +680,10 @@ static void reap_process(struct vine_process *p, struct link *manager)
 	gpus_allocated -= p->task->resources_requested->gpus;
 
 	vine_gpus_free(p->task->task_id);
-	vine_sandbox_stageout(p, cache_manager, manager);
+
+	if (manager) {
+		vine_sandbox_stageout(p, cache_manager, manager);
+	}
 
 	if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
 		p->library_process->functions_running--;
@@ -765,7 +773,7 @@ static void handle_failed_library_process(struct vine_process *p, struct link *m
 		if (p_running->library_process == p) {
 			debug(D_VINE, "killing function task %d running on library task %d", (int)task_id, p->task->task_id);
 			finish_running_task(p_running, VINE_RESULT_FORSAKEN);
-			reap_process(p_running, manager);
+			reap_process(p_running, /* do not stage out */ NULL);
 		}
 	}
 }
@@ -1086,12 +1094,7 @@ static int do_kill(int task_id)
 
 	if (itable_remove(procs_running, task_id)) {
 		vine_process_kill_and_wait(p);
-
-		cores_allocated -= p->task->resources_requested->cores;
-		memory_allocated -= p->task->resources_requested->memory;
-		disk_allocated -= p->task->resources_requested->disk;
-		gpus_allocated -= p->task->resources_requested->gpus;
-		vine_gpus_free(task_id);
+		reap_process(p, /* do not stage out */ NULL);
 	}
 
 	itable_remove(procs_complete, p->task->task_id);
@@ -1889,7 +1892,9 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	vine_cache_load(cache_manager);
 
 	/* Start the transfer server, which serves up the cache directory. */
-	vine_transfer_server_start(cache_manager, options->transfer_port_min, options->transfer_port_max);
+	if (!vine_transfer_server_start(cache_manager, options->transfer_port_min, options->transfer_port_max)) {
+		fprintf(stderr, "vine_worker: unable to bind transfer port (check --transfer-port or cluster permissions)\n");
+	}
 
 	measure_worker_resources();
 
@@ -2173,15 +2178,11 @@ struct list *parse_manager_addresses(const char *specs, int default_port)
 
 	char *next_manager = strtok(managers_args, ";");
 	while (next_manager) {
+		char host[DOMAIN_NAME_MAX];
 		int port = default_port;
 
-		char *port_str = strchr(next_manager, ':');
-		if (port_str) {
-			char *no_ipv4 = strchr(port_str + 1, ':'); /* if another ':', then this is not ipv4. */
-			if (!no_ipv4) {
-				*port_str = '\0';
-				port = atoi(port_str + 1);
-			}
+		if (!address_parse_hostport(next_manager, host, &port, default_port)) {
+			fatal("Invalid manager address '%s'", next_manager);
 		}
 
 		if (port < 1) {
@@ -2189,12 +2190,8 @@ struct list *parse_manager_addresses(const char *specs, int default_port)
 		}
 
 		struct manager_address *m = calloc(1, sizeof(*m));
-		strncpy(m->host, next_manager, DOMAIN_NAME_MAX - 1);
+		snprintf(m->host, sizeof(m->host), "%s", host);
 		m->port = port;
-
-		if (port_str) {
-			*port_str = ':';
-		}
 
 		list_push_tail(managers, m);
 		next_manager = strtok(NULL, ";");
