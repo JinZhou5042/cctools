@@ -1,8 +1,8 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `347f60531`
-Status: **FAIL — SHADOW PROOF PASSES, PHYSICAL DELETION IS UNSAFE**
+Reviewed through code commit: `3f993f15b`
+Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
 
@@ -43,6 +43,13 @@ replicas, and late completion fails closed. B1 is satisfied for currently
 reported Controller-memory, SharedFS, and worker-disk replicas. DRAM admission
 and large-data stable origins remain separately open under B2 and the cache
 acceptance rows.
+
+Correction checkpoint `3f993f15b` adds acknowledged physical worker-disk
+deletion. UUID operation IDs reject duplicate, stale, reordered, and
+wrong-worker acknowledgements; Scheduler confirmation is generation-specific
+and fails closed if Controller and TaskVine replica counts disagree. Five
+local multi-replica repetitions and one factory E2E pass. Worker-loss handling
+while an acknowledgement is pending remains a cross-component blocker.
 
 ### B2 — Stable-root reproducibility is assumed, not proved by Controller state
 
@@ -141,4 +148,7 @@ pin coverage and restart-persistent quarantine/audit recovery are absent.
 | Dynamic growth invalidates proofs? | PASS in runtime compare-and-apply |
 | Incremental equivalent to reference? | PASS for accepted deterministic suite |
 
-No local or SharedFS deletion may be enabled while B1–B7 remain unresolved.
+The reviewed local and SharedFS deletion paths may remain enabled only within
+their proven fail-closed preconditions. No broader eviction, transfer-coupled
+pruning, restart recovery, or automatic scale policy may be accepted until
+B2, B3, B5, B7, and the pending-worker-loss race are closed.

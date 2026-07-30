@@ -17,7 +17,7 @@ is never a pass.
 | LIGHTWEIGHT | Compact dispatch/queues scale with IDs and bindings | OPEN | Small records exist; 100k-binding bound unmeasured |
 | SERIAL | Exactly-once serialization and byte-preserving movement | OPEN | Small tests exist; full movement/fault proof absent |
 | AUTHORITY | Controller sole data/lineage/durability/pruning authority | FAIL | Runtime worker replicas integrate at `fbddcc70d`; lineage/pruning authority remains disconnected |
-| STATE | Validated logical/physical/durability/recovery/pruning transitions | OPEN | Runtime pruning revisions and SharedFS transitions pass; worker-local deletion and full races remain |
+| STATE | Validated logical/physical/durability/recovery/pruning transitions | OPEN | SharedFS transitions and acknowledged worker-local deletion pass at `3f993f15b`; full races remain |
 | CTRL-BOUND | Bounded memory, serving, metadata, queues, cleanup | FAIL | Replica metadata and persistence queues bounded; bulk bytes and HTTP serving remain unbounded |
 | CTRL-FAIL | Auth, idempotency, epochs, stale/partial/restart behavior | FAIL | Runtime worker epochs and stale completion pass at `fbddcc70d`; restart contract absent |
 | SCHED | Independent data progress, minimal rollback, fairness, termination | OPEN | Basic recovery/prefetch exists; combined cases absent |
@@ -29,7 +29,7 @@ is never a pass.
 | PERSIST | Bounded/cancellable/backpressured atomic durability | OPEN | Queue, cancel, overload, attempt-safe acknowledgement pass at `17577b058`; pruning integration and full failure matrix open |
 | RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | Single manual global-loss replay only |
 | PRUNE-SHADOW | Reference/incremental equivalence and proof records | PASS | `artifacts/phase9-shadow-20260729.json`, commit `2108b68a8` |
-| PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | FAIL | Logical invalidation exists; worker files are not deleted or acknowledged |
+| PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | OPEN | Multi-replica disk deletion, unique ACK, exact cache decline, and bounded tracker cleanup pass at `3f993f15b`; eviction/read races and recovery-after-prune remain |
 | PRUNE-SHAREDFS | Quarantine/grace/recovery/hard-delete audit | OPEN | Real revision-safe component path passes at `347f60531`; restart persistence, pins, and scale comparison open |
 | MIN-CUT | Observable minimum recoverable cut/frontier/depth | FAIL | Not implemented |
 | RACES | Mandatory cross-component race/corner-case matrix | OPEN | Unified deterministic harness absent |
@@ -82,6 +82,12 @@ proof rejection, dynamic-consumer invalidation, corrupt quarantine, validated
 restore, grace enforcement, and hard deletion. Cross-component rows remain
 OPEN until the real TaskVine transfer and worker-cache deletion paths
 participate and the Grand Challenge repeats the schedule at scale.
+
+Worker-local pruning evidence at commit `3f993f15b` covers real TaskVine cache
+deletion, multiple replicas of one IData, UUID-correlated duplicate/stale ACK
+rejection, exact Controller generation confirmation, cache decline, and
+bounded acknowledgement cleanup locally and through factory workers. Worker
+loss during a pending unlink and recovery after local pruning remain OPEN.
 
 ## Paper-thesis evidence map
 

@@ -125,6 +125,25 @@
   coupling, stable bulk origins, and persistent quarantine recovery.
 - Code commit: `347f60531`.
 
+## 2026-07-29 — Phase 9 acknowledged worker-local pruning
+
+- Added UUID-correlated TaskVine worker cache-unlink acknowledgements. The
+  Manager accepts each operation once and only from its intended worker.
+- Added bounded acknowledgement lifecycle: completed per-file tracker state is
+  explicitly forgotten and verified empty by the Scheduler.
+- Unified worker/DataID replica naming so one physical cache file cannot
+  appear as two Controller replicas merely because it is later consumed.
+- Added fail-closed Controller/TaskVine replica-count comparison and
+  generation-specific Controller confirmation after all physical ACKs.
+- Added a two-worker, multi-replica fan-out/fan-in E2E. Five local runs and one
+  prescribed-factory run passed exact output, request/ACK equality, Controller
+  state, and tracker cleanup; local cache decline equalled unlink count.
+- Rebuilt and verified `datavine.tar.gz`; SHA-256:
+  `af92ca3718fab236366b307d6ad98b4bd30df0b04c72b31ff8c2e41677cfd663`.
+- Self-review leaves worker loss during pending unlink, transfer-lease
+  coupling, bounded cache policy, and recovery-after-prune open.
+- Code commit: `3f993f15b`.
+
 ## 2026-07-29 — Phase 0 local baseline
 
 - Created branch `datavine` from freshly fetched `origin/task-graph` at PR

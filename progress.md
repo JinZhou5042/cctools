@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 physical replica authority and pruning integration**
-- Validated code commit: `fbddcc70d`
+- Active task: **Phase 9 direct transfer leases and pruning races**
+- Validated code commit: `3f993f15b`
 
 ## Ultimate acceptance reset
 
@@ -167,6 +167,45 @@ real transfers do not acquire source leases, quarantine/audit state is not
 restart-persistent, and stable bulk origins plus pin/final-output protocol
 coverage remain open. Evidence:
 `acceptance/artifacts/sharedfs-pruning-347f60531.json`.
+
+### Phase 9 acknowledged worker-local pruning checkpoint
+
+Commit `3f993f15b` connects proven Controller pruning decisions to physical
+TaskVine worker-cache deletion. The Manager assigns every unlink a UUID,
+accepts an acknowledgement only from the intended worker and pending
+operation, ignores duplicate/stale/reordered acknowledgements, and releases
+completed tracker state so workflow history does not grow per pruned file.
+Legacy unlink remains unacknowledged and unchanged.
+
+Worker output and later local-input observations now use one physical replica
+identity per WorkerID/DataID instead of inventing a second attempt-suffixed
+record for the same cache file. The Scheduler requires Controller and
+TaskVine physical replica counts to agree, waits for all worker
+acknowledgements, and only then advances the exact Controller generations from
+`invalid` to `pruned`.
+
+The accepted eight-task, two-worker fan-out/fan-in workflow has multiple
+physical replicas for shared IData. Across five local repetitions it issued
+10–11 physical unlinks per run, received exactly the same number of unique
+successful acknowledgements, decreased observable cache entries by exactly
+that count, marked the same number of Controller replicas pruned, released
+every acknowledgement tracker, and returned oracle value 62. Replica,
+SharedFS pruning, Phase 4–9, and worker-loss recovery regressions pass after
+the required clean build/install.
+
+The rebuilt `datavine.tar.gz`
+(`af92ca3718fab236366b307d6ad98b4bd30df0b04c72b31ff8c2e41677cfd663`)
+contains Python 3.10.20, cloudpickle 3.1.2, the prune-state cleanup symbol, and
+the UUID acknowledgement protocol. The prescribed factory supplied two
+workers; the same workflow completed with 11 requests, 11 acknowledgements,
+11 Controller-pruned replicas, no failures, and exact oracle output. Both
+factory workers were removed.
+
+Self-review keeps Ultimate Acceptance and Review B **OPEN/FAIL**. Worker loss
+while an unlink ACK is pending is not handled, real transfers still bypass
+Controller source leases, worker cache capacities/admission are not
+DataVine-owned, and recovery after local pruning has not yet passed. Evidence:
+`acceptance/artifacts/worker-local-pruning-3f993f15b.json`.
 
 ## Phase 8 acceptance
 
