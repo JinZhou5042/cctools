@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `3f993f15b`
+Reviewed through code commit: `d694bef4a`
 Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
@@ -59,6 +59,12 @@ that assumption for bulk data, Controller restart, or eviction.
 
 Required correction: explicit stable-origin records and large-data bypass with
 content validation and lifecycle protection.
+
+Correction checkpoint `d694bef4a` bounds Controller request threads, byte
+response concurrency, and in-flight served bytes, and exposes saturation
+metrics. The accepted test fails closed for a serialized object larger than
+the serving budget. B2 remains open because rejection is not a stable bulk
+origin or a usable large-data bypass.
 
 ### B3 — Active and recovery consumers are modeled but not runtime-connected
 

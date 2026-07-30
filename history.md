@@ -144,6 +144,26 @@
   coupling, bounded cache policy, and recovery-after-prune open.
 - Code commit: `3f993f15b`.
 
+## 2026-07-30 — Phase 9 bounded Controller admission
+
+- Replaced unbounded per-request HTTP threading with a hard request semaphore
+  and immediate overload response.
+- Added a second admission gate for Controller byte responses, bounded by both
+  response concurrency and total in-flight serialized bytes.
+- Added observable active/high-water/admitted/rejected/bytes-served metrics.
+- Added deterministic held-response tests for request saturation, byte
+  concurrency saturation, byte-budget rejection, metadata responsiveness,
+  and exact release accounting; 20 repetitions passed.
+- Required clean build/install and the complete current DataVine regression
+  passed. A rebuilt-package prescribed-factory Phase 4 run used two workers
+  and returned exact normal/shared-input results.
+- Rebuilt `datavine.tar.gz` SHA-256:
+  `9c31fdbe190e223a38708db17bb7064e687eb69b83a9b5056d4641eab9161391`.
+- Self-review leaves large-object bulk bypass, stable origins, direct transfer
+  lease coupling, cache ownership, restart behavior, and the Grand Challenge
+  open. This is not ultimate acceptance.
+- Code commit: `d694bef4a`.
+
 ## 2026-07-29 — Phase 0 local baseline
 
 - Created branch `datavine` from freshly fetched `origin/task-graph` at PR

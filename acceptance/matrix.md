@@ -18,7 +18,7 @@ is never a pass.
 | SERIAL | Exactly-once serialization and byte-preserving movement | OPEN | Small tests exist; full movement/fault proof absent |
 | AUTHORITY | Controller sole data/lineage/durability/pruning authority | FAIL | Runtime worker replicas integrate at `fbddcc70d`; lineage/pruning authority remains disconnected |
 | STATE | Validated logical/physical/durability/recovery/pruning transitions | OPEN | SharedFS transitions and acknowledged worker-local deletion pass at `3f993f15b`; full races remain |
-| CTRL-BOUND | Bounded memory, serving, metadata, queues, cleanup | FAIL | Replica metadata and persistence queues bounded; bulk bytes and HTTP serving remain unbounded |
+| CTRL-BOUND | Bounded memory, serving, metadata, queues, cleanup | FAIL | Request threads and byte serving are bounded at `d694bef4a`; stable bulk bypass and complete history cleanup remain absent |
 | CTRL-FAIL | Auth, idempotency, epochs, stale/partial/restart behavior | FAIL | Runtime worker epochs and stale completion pass at `fbddcc70d`; restart contract absent |
 | SCHED | Independent data progress, minimal rollback, fairness, termination | OPEN | Basic recovery/prefetch exists; combined cases absent |
 | WORKER-PREP | Batched validated resolution with direct source fallback | FAIL | Controller returns validated candidates; worker still resolves per object without direct candidate pulls |
@@ -88,6 +88,13 @@ deletion, multiple replicas of one IData, UUID-correlated duplicate/stale ACK
 rejection, exact Controller generation confirmation, cache decline, and
 bounded acknowledgement cleanup locally and through factory workers. Worker
 loss during a pending unlink and recovery after local pruning remain OPEN.
+
+Controller admission evidence at commit `d694bef4a` covers hard request-thread,
+byte-response concurrency, and in-flight-byte capacities; immediate overload;
+oversized response rejection; telemetry high-water marks; and cleanup after a
+held response. Twenty component repetitions and a rebuilt-package two-worker
+factory workflow pass. `CTRL-BOUND` remains FAIL because rejecting a large
+object is not the required stable bulk-data bypass.
 
 ## Paper-thesis evidence map
 

@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 direct transfer leases and pruning races**
-- Validated code commit: `3f993f15b`
+- Active task: **Phase 9 stable bulk origins and direct transfer leases**
+- Validated code commit: `d694bef4a`
 
 ## Ultimate acceptance reset
 
@@ -206,6 +206,40 @@ while an unlink ACK is pending is not handled, real transfers still bypass
 Controller source leases, worker cache capacities/admission are not
 DataVine-owned, and recovery after local pruning has not yet passed. Evidence:
 `acceptance/artifacts/worker-local-pruning-3f993f15b.json`.
+
+### Phase 9 bounded Controller request and byte-serving checkpoint
+
+Commit `d694bef4a` replaces the unbounded HTTP thread model with two explicit,
+fail-closed admission layers. The standalone Controller has a hard maximum
+number of live request threads. Byte responses additionally acquire both a
+concurrency slot and an in-flight byte budget before any payload is sent.
+Overload returns HTTP 503 without creating an unbounded queue. Active counts,
+high-water marks, rejections, admitted responses, and completed bytes are
+reported in the Controller snapshot.
+
+The deterministic test holds one 524,297-byte response in flight, proves a
+second response is rejected at concurrency one, proves metadata remains
+responsive on a separate admitted request, and rejects a 1.5 MiB serialized
+object against a 1 MiB byte budget. It then verifies both active counters
+return to zero. A separate request-capacity case holds the sole request slot
+and receives an immediate 503 for another request. Twenty repetitions pass.
+
+After the required clean build/install, all current DataVine component and
+Phase 4–9 tests pass. The environment archive was rebuilt from the DataVine
+environment and verified to contain Python 3.10.20, cloudpickle 3.1.2, and the
+new bounded server. Its SHA-256 is
+`9c31fdbe190e223a38708db17bb7064e687eb69b83a9b5056d4641eab9161391`.
+The prescribed factory supplied two workers to the Phase 4 workflow; normal
+and shared-input modes returned exact results, exercised both workers, and
+showed bounded request/byte-serving high-water telemetry. The factory was
+stopped and both workers removed.
+
+Self-review keeps `CTRL-BOUND`, Review B, and Ultimate Acceptance **FAIL**.
+The new limit deliberately rejects a payload larger than the byte budget; it
+does not yet provide the required stable bulk origin and large-object bypass.
+Actual TaskVine peer movement still does not acquire Controller leases, and
+Controller restart remains untested. Evidence:
+`acceptance/artifacts/controller-admission-d694bef4a.json`.
 
 ## Phase 8 acceptance
 
