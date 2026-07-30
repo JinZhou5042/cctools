@@ -131,6 +131,7 @@ def run_case(
     inject_idata_release_failures=0,
     peer_release_retry_seconds=0.1,
     peer_release_capacity=1024,
+    expected_additional_controller_tasks=0,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -477,7 +478,16 @@ def run_case(
                     task.output_count for task in workflow.tasks
                 ) - runtime_pruned
             )
-            assert snapshot["tasks"] == len(workflow.tasks)
+            assert snapshot["tasks"] == (
+                len(workflow.tasks)
+                + int(expected_additional_controller_tasks)
+            ), {
+                "controller_tasks": snapshot["tasks"],
+                "workflow_tasks": len(workflow.tasks),
+                "expected_additional_controller_tasks": (
+                    expected_additional_controller_tasks
+                ),
+            }
             return snapshot
         finally:
             for timer in replacement_timers:

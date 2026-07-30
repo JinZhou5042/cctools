@@ -2207,6 +2207,29 @@ class TaskSchedulerThread:
         if persist_outputs:
             for output_data_id in sorted(persistence_required):
                 self._wait_durable(output_data_id)
+        peer_release_drain_started = time.monotonic()
+        peer_release_drain_iterations = 0
+        peer_release_drain_deadline = (
+            peer_release_drain_started
+            + max(30.0, peer_release_retry_seconds + 30.0)
+        )
+        while True:
+            peer_faults = (
+                self._manager.datavine_peer_transfer_fault_stats()
+            )
+            if peer_faults["peer_release_pending"] == 0:
+                break
+            if time.monotonic() >= peer_release_drain_deadline:
+                raise TimeoutError(
+                    "DataVine peer lease release obligations did not "
+                    f"drain: {peer_faults}"
+                )
+            self._manager.wait(1)
+            self._sync_worker_epochs()
+            peer_release_drain_iterations += 1
+        peer_release_drain_seconds = (
+            time.monotonic() - peer_release_drain_started
+        )
         physical_cache_workers = self._manager.status("workers")
         self._manager._refresh_stats()
         self._last_run_report = {
@@ -2264,6 +2287,10 @@ class TaskSchedulerThread:
             ),
             "peer_release_retry_seconds": peer_release_retry_seconds,
             "peer_release_capacity": peer_release_capacity,
+            "peer_release_drain_iterations": (
+                peer_release_drain_iterations
+            ),
+            "peer_release_drain_seconds": peer_release_drain_seconds,
             "peer_transfer_faults": (
                 self._manager.datavine_peer_transfer_fault_stats()
             ),
