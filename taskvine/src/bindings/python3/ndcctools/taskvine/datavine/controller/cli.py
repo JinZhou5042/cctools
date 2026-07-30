@@ -22,6 +22,12 @@ def main(argv=None):
         "--max-edata-bytes", type=int, default=256 * 1024 * 1024
     )
     parser.add_argument(
+        "--max-idata-bytes", type=int, default=256 * 1024 * 1024
+    )
+    parser.add_argument(
+        "--max-inline-idata-bytes", type=int, default=8 * 1024 * 1024
+    )
+    parser.add_argument(
         "--max-request-concurrency", type=int, default=32
     )
     parser.add_argument(
@@ -42,7 +48,10 @@ def main(argv=None):
             token = stream.read().strip()
     token = token or secrets.token_urlsafe(32)
     state = ControllerState(
-        args.max_edata_bytes, bulk_origin_root=args.bulk_origin_dir
+        max_edata_bytes=args.max_edata_bytes,
+        bulk_origin_root=args.bulk_origin_dir,
+        max_idata_bytes=args.max_idata_bytes,
+        max_inline_idata_bytes=args.max_inline_idata_bytes,
     )
     if args.persistence_dir:
         state.configure_persistence(

@@ -777,6 +777,36 @@ class ControllerService:
                         },
                     )
                     return
+                if (
+                    self.path.startswith(f"{API_PREFIX}/idata/")
+                    and self.path.endswith("/publish-metadata")
+                ):
+                    token = self.path[
+                        len(f"{API_PREFIX}/idata/"):
+                        -len("/publish-metadata")
+                    ]
+                    try:
+                        request = self._read_json()
+                        record = owner.state.publish_idata_metadata(
+                            int(token),
+                            request["attempt"],
+                            request["content_hash"],
+                            request["size"],
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200,
+                        {
+                            "data_id": record.data_id,
+                            "content_hash": record.content_hash,
+                            "size": record.serialized_size,
+                            "attempt": record.attempt,
+                            "controller_inline": False,
+                        },
+                    )
+                    return
                 if self.path == f"{API_PREFIX}/edata/register-origin":
                     try:
                         request = self._read_json()

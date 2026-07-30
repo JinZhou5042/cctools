@@ -23,10 +23,24 @@ class ControllerState:
         replica_directory=None,
         pruning_audit_capacity=10000,
         bulk_origin_root=None,
+        max_idata_bytes=256 * 1024 * 1024,
+        max_inline_idata_bytes=8 * 1024 * 1024,
     ):
         if max_edata_bytes <= 0:
             raise ValueError("max_edata_bytes must be positive")
+        if max_idata_bytes < 0:
+            raise ValueError("max_idata_bytes cannot be negative")
+        if max_inline_idata_bytes < 0:
+            raise ValueError(
+                "max_inline_idata_bytes cannot be negative"
+            )
+        if max_inline_idata_bytes > max_idata_bytes:
+            raise ValueError(
+                "max_inline_idata_bytes cannot exceed max_idata_bytes"
+            )
         self.max_edata_bytes = int(max_edata_bytes)
+        self.max_idata_bytes = int(max_idata_bytes)
+        self.max_inline_idata_bytes = int(max_inline_idata_bytes)
         self.bulk_origin_root = (
             Path(bulk_origin_root).resolve()
             if bulk_origin_root is not None
@@ -44,6 +58,9 @@ class ControllerState:
         self._edata_fetches = {}
         self._next_idata_id = 1
         self._idata = {}
+        self._idata_bytes = 0
+        self._idata_bytes_high_water = 0
+        self._idata_metadata_publications = 0
         self._tasks = {}
         self._publications = 0
         self._persistence = None
@@ -370,6 +387,20 @@ class ControllerState:
                 ):
                     raise ValueError("conflicting IData publication")
                 return old
+            if len(serialized_bytes) > self.max_inline_idata_bytes:
+                raise MemoryError(
+                    "IData exceeds Controller inline object capacity"
+                )
+            old_bytes = (
+                len(old.serialized_bytes)
+                if old.serialized_bytes is not None
+                else 0
+            )
+            projected_bytes = (
+                self._idata_bytes - old_bytes + len(serialized_bytes)
+            )
+            if projected_bytes > self.max_idata_bytes:
+                raise MemoryError("Controller IData capacity exceeded")
             if attempt > old.attempt:
                 if old.durability == "durable":
                     raise ValueError("cannot supersede durable IData")
@@ -398,10 +429,77 @@ class ControllerState:
                 len(serialized_bytes),
             )
             self._idata[data_id] = record
+            self._idata_bytes = projected_bytes
+            self._idata_bytes_high_water = max(
+                self._idata_bytes_high_water, self._idata_bytes
+            )
             self._publications += 1
             self.pruning.set_data_state(
                 data_id,
                 available=True,
+                durable=False,
+                persistence="none",
+            )
+            return record
+
+    def publish_idata_metadata(
+        self, data_id, attempt, content_hash, serialized_size
+    ):
+        with self._lock:
+            old = self.get_idata(data_id)
+            attempt = int(attempt)
+            serialized_size = int(serialized_size)
+            content_hash = str(content_hash)
+            if attempt < 1 or serialized_size < 0:
+                raise ValueError("invalid IData metadata publication")
+            if (
+                len(content_hash) != 64
+                or any(
+                    value not in "0123456789abcdef"
+                    for value in content_hash
+                )
+            ):
+                raise ValueError("invalid IData content hash")
+            if attempt < old.attempt:
+                raise ValueError("stale IData publication")
+            if attempt == old.attempt and old.content_hash is not None:
+                if (
+                    old.content_hash != content_hash
+                    or old.serialized_size != serialized_size
+                ):
+                    raise ValueError("conflicting IData publication")
+                return old
+            if attempt > old.attempt:
+                if old.durability == "durable":
+                    raise ValueError("cannot supersede durable IData")
+                self._cancel_persistence_locked(
+                    old.data_id, "superseded-attempt"
+                )
+            old_bytes = (
+                len(old.serialized_bytes)
+                if old.serialized_bytes is not None
+                else 0
+            )
+            self.replicas.advance_attempt(
+                f"i:{old.data_id}", attempt
+            )
+            record = IDataRecord(
+                old.data_id,
+                old.producer_task_id,
+                content_hash,
+                None,
+                attempt,
+                "volatile",
+                None,
+                serialized_size,
+            )
+            self._idata[data_id] = record
+            self._idata_bytes -= old_bytes
+            self._publications += 1
+            self._idata_metadata_publications += 1
+            self.pruning.set_data_state(
+                data_id,
+                available=False,
                 durable=False,
                 persistence="none",
             )
@@ -588,7 +686,7 @@ class ControllerState:
             self._validate_replica_identity(
                 data_key, attempt, content_hash, size
             )
-            return self.replicas.commit_replica(
+            replica = self.replicas.commit_replica(
                 data_key,
                 replica_id,
                 generation,
@@ -596,6 +694,14 @@ class ControllerState:
                 content_hash,
                 size,
             )
+            if data_key.startswith("i:"):
+                value = self.get_idata(int(data_key.split(":", 1)[1]))
+                self.pruning.set_data_state(
+                    value.data_id,
+                    available=True,
+                    durable=value.durability == "durable",
+                )
+            return replica
 
     def report_worker_replica(
         self,
@@ -805,10 +911,22 @@ class ControllerState:
     def idata_status(self, data_id):
         with self._lock:
             value = self.get_idata(data_id)
+            sources = self.replicas.candidates(f"i:{value.data_id}")
+            available = bool(sources)
             return {
                 "data_id": value.data_id,
                 "producer_task_id": value.producer_task_id,
-                "available": value.serialized_bytes is not None,
+                "available": available,
+                "rematerializable": bool(
+                    value.serialized_bytes is not None
+                    or (
+                        value.durability == "durable"
+                        and value.durable_path
+                    )
+                ),
+                "controller_inline": (
+                    value.serialized_bytes is not None
+                ),
                 "attempt": value.attempt,
                 "content_hash": value.content_hash,
                 "size": value.serialized_size,
@@ -830,8 +948,28 @@ class ControllerState:
                     payload = stream.read()
                 if hashlib.sha256(payload).hexdigest() != old.content_hash:
                     raise IOError("durable recovery checksum mismatch")
+                if len(payload) > self.max_inline_idata_bytes:
+                    raise MemoryError(
+                        "durable IData exceeds Controller inline capacity"
+                    )
+                old_bytes = (
+                    len(old.serialized_bytes)
+                    if old.serialized_bytes is not None
+                    else 0
+                )
+                projected_bytes = (
+                    self._idata_bytes - old_bytes + len(payload)
+                )
+                if projected_bytes > self.max_idata_bytes:
+                    raise MemoryError(
+                        "Controller IData capacity exceeded during recovery"
+                    )
                 self._idata[data_id] = dataclasses.replace(
                     old, serialized_bytes=payload
+                )
+                self._idata_bytes = projected_bytes
+                self._idata_bytes_high_water = max(
+                    self._idata_bytes_high_water, self._idata_bytes
                 )
                 self._publish_replica(
                     f"i:{old.data_id}",
@@ -870,6 +1008,11 @@ class ControllerState:
                 serialized_bytes=None,
                 durability="volatile",
                 durable_path=None,
+            )
+            self._idata_bytes -= (
+                len(old.serialized_bytes)
+                if old.serialized_bytes is not None
+                else 0
             )
             self.pruning.set_data_state(
                 old.data_id,
@@ -1225,8 +1368,26 @@ class ControllerState:
                 },
                 "tasks": len(self._tasks),
                 "idata": len(self._idata),
-                "available_idata": sum(
+                "idata_bytes": self._idata_bytes,
+                "idata_bytes_high_water": self._idata_bytes_high_water,
+                "idata_capacity_bytes": self.max_idata_bytes,
+                "idata_inline_object_capacity_bytes": (
+                    self.max_inline_idata_bytes
+                ),
+                "idata_inline_records": sum(
                     value.serialized_bytes is not None
+                    for value in self._idata.values()
+                ),
+                "idata_metadata_records": sum(
+                    value.content_hash is not None
+                    and value.serialized_bytes is None
+                    for value in self._idata.values()
+                ),
+                "idata_metadata_publications": (
+                    self._idata_metadata_publications
+                ),
+                "available_idata": sum(
+                    bool(self.replicas.candidates(f"i:{value.data_id}"))
                     for value in self._idata.values()
                 ),
                 "publications": self._publications,

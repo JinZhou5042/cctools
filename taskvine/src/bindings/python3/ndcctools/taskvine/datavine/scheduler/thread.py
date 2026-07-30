@@ -413,6 +413,7 @@ class TaskSchedulerThread:
         worker_disk_cache_items=None,
         worker_disk_cache_admission_items=None,
         worker_disk_cache_admission_bytes=None,
+        result_task_ids=None,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -451,6 +452,21 @@ class TaskSchedulerThread:
                 "TaskVine Manager rejected cache byte admission capacity"
             )
         output_ids = self._op_register_workflow(workflow)
+        if result_task_ids is None:
+            result_task_ids = tuple(output_ids)
+        else:
+            result_task_ids = tuple(int(value) for value in result_task_ids)
+            unknown_results = set(result_task_ids) - set(output_ids)
+            if unknown_results:
+                raise KeyError(
+                    f"unknown result TaskIDs {sorted(unknown_results)}"
+                )
+        controller_snapshot = self.controller.snapshot()
+        idata_inline_threshold = int(
+            controller_snapshot[
+                "idata_inline_object_capacity_bytes"
+            ]
+        )
         task_by_id = {task.task_id: task for task in workflow.tasks}
         dependencies = {
             task.task_id: {
@@ -573,6 +589,7 @@ class TaskSchedulerThread:
         prefetch_failed = 0
         prefetch_overlapped = False
         done = set()
+        completed_once = set()
         recovery_reexecutions = 0
         loss_injected = False
         worker_loss_injected = False
@@ -604,7 +621,10 @@ class TaskSchedulerThread:
                 attempt = self._attempts.get(task_id, 0) + 1
                 self._attempts[task_id] = attempt
                 physical = self._make_physical_task(
-                    task_id, environment, attempt
+                    task_id,
+                    environment,
+                    attempt,
+                    idata_inline_threshold,
                 )
                 physical_id = self._manager.submit(physical)
                 self.controller.set_task_state(task_id, "running")
@@ -648,6 +668,26 @@ class TaskSchedulerThread:
                 "DATAVINE_LOCAL_IDATA"
             )
             if not completed.successful():
+                # A worker can disappear after its replica was selected but
+                # before a dependent task starts. Reconcile first, then turn
+                # a globally lost input into ordinary logical recomputation
+                # instead of making the failed consumer terminal.
+                self._sync_worker_epochs()
+                lost_inputs = []
+                for data_key in task_cache_inputs[logical_id]:
+                    if not data_key.startswith("i:"):
+                        continue
+                    input_data_id = int(data_key.split(":", 1)[1])
+                    if not self.controller.idata_status(input_data_id)[
+                        "available"
+                    ]:
+                        lost_inputs.append(input_data_id)
+                if lost_inputs:
+                    self.controller.set_task_state(
+                        logical_id, "pending"
+                    )
+                    pending.add(logical_id)
+                    continue
                 self.controller.set_task_state(logical_id, "pending")
                 raise RuntimeError(
                     f"TaskID {logical_id} failed: result={completed.result} "
@@ -689,13 +729,30 @@ class TaskSchedulerThread:
             )
             self._cache_admission.observe(preparation)
             # Publication is the completion contract, not process exit alone.
-            self.controller.fetch_idata(output_ids[logical_id])
+            output_status = self.controller.idata_status(
+                output_ids[logical_id]
+            )
+            if (
+                not output_status["available"]
+                or output_status["attempt"]
+                != self._attempts[logical_id]
+                or output_status["content_hash"]
+                != preparation["content_hash"]
+                or output_status["size"] != preparation["size"]
+            ):
+                raise RuntimeError(
+                    f"TaskID {logical_id} publication is not available"
+                )
+            if output_status["controller_inline"]:
+                self.controller.fetch_idata(output_ids[logical_id])
             if persist_outputs:
                 self.controller.persist_idata(output_ids[logical_id])
             self.controller.set_task_state(logical_id, "completed")
             done.add(logical_id)
-            for data_key in task_cache_inputs[logical_id]:
-                remaining_cache_uses[data_key] -= 1
+            if logical_id not in completed_once:
+                completed_once.add(logical_id)
+                for data_key in task_cache_inputs[logical_id]:
+                    remaining_cache_uses[data_key] -= 1
             if (
                 inject_global_loss_after == logical_id
                 and not loss_injected
@@ -719,6 +776,16 @@ class TaskSchedulerThread:
                     output_ids[logical_id]
                 )
                 worker_loss_injected = True
+                # Deterministic injection is a scheduler event: revoke the
+                # logical completion in the same turn so no downstream task
+                # can observe the intentionally lost replica generation.
+                self._manager.prune_file(
+                    self._idata_files[output_ids[logical_id]]
+                )
+                self.controller.set_task_state(logical_id, "pending")
+                done.remove(logical_id)
+                pending.add(logical_id)
+                recovery_reexecutions += 1
             self._cache_admission.enforce(
                 self._manager,
                 self._file_for_data_key,
@@ -837,6 +904,7 @@ class TaskSchedulerThread:
                 self.controller.fetch_idata(output_data_id)
             )
             for task_id, output_data_id in output_ids.items()
+            if task_id in result_task_ids
         }
 
     def _edata_file(self, data_id):
@@ -964,7 +1032,9 @@ class TaskSchedulerThread:
                 )
             time.sleep(0.05)
 
-    def _make_physical_task(self, task_id, environment, attempt):
+    def _make_physical_task(
+        self, task_id, environment, attempt, idata_inline_threshold
+    ):
         from ndcctools.taskvine import Task
 
         record = self.controller.get_task(task_id)
@@ -985,6 +1055,8 @@ class TaskSchedulerThread:
                 str(attempt),
                 "--output-file",
                 output_name,
+                "--idata-inline-threshold",
+                str(idata_inline_threshold),
             )
         )
         task = Task(command)

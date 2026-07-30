@@ -96,6 +96,8 @@ def run_case(
     bulk_threshold=None,
     bulk_origin_parent=None,
     max_edata_bytes=64 * 1024 * 1024,
+    max_idata_bytes=64 * 1024 * 1024,
+    max_inline_idata_bytes=8 * 1024 * 1024,
     max_serving_bytes=64 * 1024 * 1024,
     worker_cores=2,
     worker_disk_cache_bytes=None,
@@ -136,6 +138,10 @@ def run_case(
                 str(ready_path),
                 "--max-edata-bytes",
                 str(max_edata_bytes),
+                "--max-idata-bytes",
+                str(max_idata_bytes),
+                "--max-inline-idata-bytes",
+                str(max_inline_idata_bytes),
                 "--max-serving-bytes",
                 str(max_serving_bytes),
                 *(
@@ -225,6 +231,7 @@ def run_case(
                 worker_disk_cache_items,
                 worker_disk_cache_admission_items,
                 worker_disk_cache_admission_bytes,
+                [target_task_id],
             )
             if (
                 replacement_worker_delay is not None

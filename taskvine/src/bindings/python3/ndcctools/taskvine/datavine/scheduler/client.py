@@ -482,6 +482,20 @@ class ControllerClient:
                 f"Controller HTTP {exc.code}: {body}"
             ) from exc
 
+    def publish_idata_metadata(
+        self, data_id, attempt, content_hash, serialized_size
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/idata/{int(data_id)}/publish-metadata",
+            {
+                "attempt": int(attempt),
+                "content_hash": str(content_hash),
+                "size": int(serialized_size),
+            },
+        )
+        return json.loads(payload)
+
     def persist_idata(self, data_id):
         payload, _ = self._request(
             "POST", f"{API_PREFIX}/idata/{int(data_id)}/persist", {}

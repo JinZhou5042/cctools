@@ -139,8 +139,7 @@ class WorkerCacheAdmission:
                     int(data_key.split(":", 1)[1])
                 )
                 rematerializable[data_key] = bool(
-                    status["available"]
-                    or status["durability"] == "durable"
+                    status["rematerializable"]
                 )
             return rematerializable[data_key]
 

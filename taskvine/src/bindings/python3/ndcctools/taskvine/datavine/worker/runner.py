@@ -20,7 +20,14 @@ def main(argv=None):
     parser.add_argument("--task-id", required=True, type=int)
     parser.add_argument("--attempt", default=1, type=int)
     parser.add_argument("--output-file")
+    parser.add_argument(
+        "--idata-inline-threshold",
+        default=8 * 1024 * 1024,
+        type=int,
+    )
     args = parser.parse_args(argv)
+    if args.idata_inline_threshold < 0:
+        raise ValueError("IData inline threshold cannot be negative")
 
     client = ControllerClient(args.controller, args.token)
     worker_id = os.environ.get("VINE_WORKER_ID")
@@ -175,9 +182,17 @@ def main(argv=None):
             stream.flush()
             os.fsync(stream.fileno())
         staged_payload = stage.read_bytes()
-        publication = client.publish_idata(
-            task.output_data_id, args.attempt, staged_payload
-        )
+        if len(staged_payload) <= args.idata_inline_threshold:
+            publication = client.publish_idata(
+                task.output_data_id, args.attempt, staged_payload
+            )
+        else:
+            publication = client.publish_idata_metadata(
+                task.output_data_id,
+                args.attempt,
+                hashlib.sha256(staged_payload).hexdigest(),
+                len(staged_payload),
+            )
         prepared = client.prepare_replica(
             f"i:{task.output_data_id}",
             replica_id(f"i:{task.output_data_id}"),
