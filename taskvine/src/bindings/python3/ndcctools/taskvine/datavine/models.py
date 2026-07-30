@@ -14,6 +14,7 @@ class SerializationMetadata:
     python_version: tuple
     type_module: str
     type_qualname: str
+    domain: str = "value"
 
     def identity_bytes(self):
         values = dataclasses.asdict(self)
@@ -39,7 +40,25 @@ class EDataRecord:
     data_id: int
     content_hash: str
     metadata: SerializationMetadata
-    serialized_bytes: bytes
+    serialized_bytes: bytes | None
+    stable_path: str | None = None
+    serialized_size: int | None = None
+
+    def __post_init__(self):
+        inline = self.serialized_bytes is not None
+        stable = self.stable_path is not None
+        if inline == stable:
+            raise ValueError(
+                "EData must have exactly one inline or stable origin"
+            )
+        size = (
+            len(self.serialized_bytes)
+            if inline
+            else int(self.serialized_size)
+        )
+        if size < 0:
+            raise ValueError("EData serialized size cannot be negative")
+        object.__setattr__(self, "serialized_size", size)
 
     @staticmethod
     def digest(metadata, serialized_bytes):

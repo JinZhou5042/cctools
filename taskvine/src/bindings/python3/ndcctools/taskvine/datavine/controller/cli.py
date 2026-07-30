@@ -30,6 +30,7 @@ def main(argv=None):
     parser.add_argument(
         "--max-serving-bytes", type=int, default=64 * 1024 * 1024
     )
+    parser.add_argument("--bulk-origin-dir")
     parser.add_argument("--ready-file")
     parser.add_argument("--persistence-dir")
     parser.add_argument("--persistence-workers", type=int, default=1)
@@ -40,7 +41,9 @@ def main(argv=None):
         with open(args.token_file, encoding="utf-8") as stream:
             token = stream.read().strip()
     token = token or secrets.token_urlsafe(32)
-    state = ControllerState(args.max_edata_bytes)
+    state = ControllerState(
+        args.max_edata_bytes, bulk_origin_root=args.bulk_origin_dir
+    )
     if args.persistence_dir:
         state.configure_persistence(
             args.persistence_dir,

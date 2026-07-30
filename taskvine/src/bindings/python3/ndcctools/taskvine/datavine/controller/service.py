@@ -245,12 +245,25 @@ class ControllerService:
                             {
                                 "data_id": record.data_id,
                                 "content_hash": record.content_hash,
-                                "size": len(record.serialized_bytes),
+                                "size": record.serialized_size,
                                 "metadata": record.metadata.to_dict(),
+                                "storage": (
+                                    "controller-memory"
+                                    if record.serialized_bytes is not None
+                                    else "bulk-origin"
+                                ),
+                                "origin_path": record.stable_path,
                             },
                         )
                         return
                     payload = record.serialized_bytes
+                    if payload is None:
+                        self._error(
+                            409,
+                            "EData uses a stable bulk origin and is not "
+                            "served by the Controller",
+                        )
+                        return
                     if not owner.byte_serving.acquire(len(payload)):
                         self._error(503, "byte serving capacity exceeded")
                         return
@@ -696,6 +709,35 @@ class ControllerService:
                         },
                     )
                     return
+                if self.path == f"{API_PREFIX}/edata/register-origin":
+                    try:
+                        request = self._read_json()
+                        metadata = SerializationMetadata.from_dict(
+                            request["metadata"]
+                        )
+                        record = owner.state.register_edata_origin(
+                            metadata,
+                            request["origin_path"],
+                            request["content_hash"],
+                            request["size"],
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200,
+                        {
+                            "data_id": record.data_id,
+                            "content_hash": record.content_hash,
+                            "size": record.serialized_size,
+                            "storage": (
+                                "controller-memory"
+                                if record.serialized_bytes is not None
+                                else "bulk-origin"
+                            ),
+                        },
+                    )
+                    return
                 if self.path != f"{API_PREFIX}/edata/register":
                     self._error(404, "not found")
                     return
@@ -719,7 +761,12 @@ class ControllerService:
                     {
                         "data_id": record.data_id,
                         "content_hash": record.content_hash,
-                        "size": len(record.serialized_bytes),
+                        "size": record.serialized_size,
+                        "storage": (
+                            "controller-memory"
+                            if record.serialized_bytes is not None
+                            else "bulk-origin"
+                        ),
                     },
                 )
 

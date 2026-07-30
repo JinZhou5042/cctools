@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -92,9 +93,26 @@ def run_case(
     prefetch_item_budget=16,
     inject_prefetch_failure=False,
     apply_pruning=False,
+    bulk_threshold=None,
+    bulk_origin_parent=None,
+    max_edata_bytes=64 * 1024 * 1024,
+    max_serving_bytes=64 * 1024 * 1024,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
+        external_bulk_root = None
+        if bulk_threshold is None:
+            bulk_origin = None
+        elif bulk_origin_parent is None:
+            bulk_origin = root / "bulk-origin"
+        else:
+            external_bulk_root = Path(
+                tempfile.mkdtemp(
+                    prefix=f"datavine-{name}-bulk-",
+                    dir=bulk_origin_parent,
+                )
+            )
+            bulk_origin = external_bulk_root
         ready_path = root / "ready.json"
         token = f"token-{name}"
         controller_host = socket.getfqdn() if factory_manager else "127.0.0.1"
@@ -112,7 +130,14 @@ def run_case(
                 "--ready-file",
                 str(ready_path),
                 "--max-edata-bytes",
-                str(64 * 1024 * 1024),
+                str(max_edata_bytes),
+                "--max-serving-bytes",
+                str(max_serving_bytes),
+                *(
+                    ["--bulk-origin-dir", str(bulk_origin)]
+                    if bulk_origin is not None
+                    else []
+                ),
                 *(
                     [
                         "--persistence-dir",
@@ -141,7 +166,15 @@ def run_case(
             client = ControllerClient(
                 f"http://{controller_host}:{ready['port']}", token
             )
-            scheduler = TaskSchedulerThread(client).start()
+            scheduler = TaskSchedulerThread(
+                client,
+                bulk_origin,
+                (
+                    bulk_threshold
+                    if bulk_threshold is not None
+                    else 8 * 1024 * 1024
+                ),
+            ).start()
             port = scheduler.call(
                 "create_manager",
                 0,
@@ -250,6 +283,14 @@ def run_case(
             snapshot["pruning_result"] = pruning_result
             snapshot["worker_cache_before_pruning"] = cache_before
             snapshot["worker_cache_after_pruning"] = cache_after
+            snapshot["bulk_origin_files"] = (
+                sorted(
+                    path.name
+                    for path in bulk_origin.glob("edata-*.pkl")
+                )
+                if bulk_origin is not None
+                else []
+            )
             snapshot["durable_files"] = sorted(
                 path.name
                 for path in (root / "durable").glob("idata-*.pkl")
@@ -282,6 +323,8 @@ def run_case(
                     worker.wait(timeout=10)
             controller.terminate()
             _, stderr = controller.communicate(timeout=10)
+            if external_bulk_root is not None:
+                shutil.rmtree(external_bulk_root, ignore_errors=True)
             if controller.returncode != 0:
                 raise AssertionError(stderr)
 
@@ -311,7 +354,12 @@ def main():
         2 * len(SHARED) + 3,
         factory_manager=args.factory_manager,
     )
-    assert shared_snapshot["deduplicated_registrations"] >= 7
+    assert shared_snapshot["registrations"] == 7
+    assert shared_snapshot["deduplicated_registrations"] == 0
+    assert (
+        shared_snapshot["scheduler_report"]["edata_serializations"]
+        == 7
+    )
 
     recovery_snapshot = None
     if not args.factory_manager:

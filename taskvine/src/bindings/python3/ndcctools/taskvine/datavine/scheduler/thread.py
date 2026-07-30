@@ -2,22 +2,41 @@
 
 import concurrent.futures
 import cloudpickle
+import dataclasses
 import json
+import os
+from pathlib import Path
 import queue
 import shlex
 import threading
 import time
 import urllib.parse
+import uuid
 
-from ..models import TaskRecord
+from ..models import EDataRecord, TaskRecord
 from ..placement.policy import PrefetchCandidate, select_prefetch
 from ..serialization import serialize
 from ..workflow import OutputRef, iter_output_refs
 
 
 class TaskSchedulerThread:
-    def __init__(self, controller_client):
+    def __init__(
+        self,
+        controller_client,
+        bulk_origin_dir=None,
+        bulk_threshold=8 * 1024 * 1024,
+    ):
         self.controller = controller_client
+        self._bulk_origin_dir = (
+            Path(bulk_origin_dir).resolve()
+            if bulk_origin_dir is not None
+            else None
+        )
+        self._bulk_threshold = int(bulk_threshold)
+        if self._bulk_threshold < 1:
+            raise ValueError("bulk threshold must be positive")
+        if self._bulk_origin_dir is not None:
+            self._bulk_origin_dir.mkdir(parents=True, exist_ok=True)
         self._commands = queue.Queue()
         self._thread = threading.Thread(
             target=self._run,
@@ -34,6 +53,10 @@ class TaskSchedulerThread:
         self._attempts = {}
         self._last_run_report = {}
         self._nested_idata_by_task = {}
+        self._edata_by_object = {}
+        self._serialization_count = 0
+        self._bulk_serialization_count = 0
+        self._worker_reconciliation_deferrals = 0
 
     @property
     def thread_ident(self):
@@ -105,8 +128,7 @@ class TaskSchedulerThread:
         # Drive the manager event loop so newly connected workers become
         # visible even before the first logical task is submitted.
         self._manager.wait(1)
-        self._sync_worker_epochs()
-        return len(self._manager.status("workers"))
+        return len(self._sync_worker_epochs())
 
     def _sync_worker_epochs(self):
         workers = self._manager.status("workers")
@@ -116,8 +138,14 @@ class TaskSchedulerThread:
             if worker.get("workerid")
         }
         if len(worker_ids) != len(workers):
-            raise RuntimeError("TaskVine worker status lacks workerid")
-        return self.controller.reconcile_workers(worker_ids)
+            # TaskVine can expose a connecting/disconnecting status row
+            # before its WorkerID is available. Do not treat incomplete
+            # observation as global-loss truth. A later complete snapshot
+            # performs the authoritative reconciliation.
+            self._worker_reconciliation_deferrals += 1
+            return worker_ids
+        self.controller.reconcile_workers(worker_ids)
+        return worker_ids
 
     def _op_last_run_report(self):
         self._assert_owner()
@@ -246,15 +274,58 @@ class TaskSchedulerThread:
             self._manager.disable_peer_transfers()
         return self._manager.port
 
-    def _register_value(self, value):
+    def _register_value(self, value, domain="value"):
+        cache_key = (str(domain), id(value))
+        cached = self._edata_by_object.get(cache_key)
+        if cached is not None and cached[0] is value:
+            return cached[1]
         metadata, payload = serialize(value)
-        result = self.controller.register_edata(metadata, payload)
-        return int(result["data_id"])
+        metadata = dataclasses.replace(metadata, domain=str(domain))
+        self._serialization_count += 1
+        if (
+            self._bulk_origin_dir is not None
+            and len(payload) >= self._bulk_threshold
+        ):
+            self._bulk_serialization_count += 1
+            digest = EDataRecord.digest(metadata, payload)
+            path = self._bulk_origin_dir / f"edata-{digest}.pkl"
+            if not path.exists():
+                temporary = self._bulk_origin_dir / (
+                    f".edata-{digest}-{uuid.uuid4().hex}.tmp"
+                )
+                try:
+                    with temporary.open("xb") as stream:
+                        stream.write(payload)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, path)
+                    os.chmod(path, 0o444)
+                    directory = os.open(
+                        self._bulk_origin_dir, os.O_RDONLY
+                    )
+                    try:
+                        os.fsync(directory)
+                    finally:
+                        os.close(directory)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            os.chmod(path, 0o444)
+            result = self.controller.register_edata_origin(
+                metadata, path, digest, len(payload)
+            )
+        else:
+            result = self.controller.register_edata(metadata, payload)
+        data_id = int(result["data_id"])
+        self._edata_by_object[cache_key] = (value, data_id)
+        return data_id
 
     def _op_register_workflow(self, workflow):
         self._assert_owner()
         workflow.validate()
         self._logical_outputs = {}
+        self._edata_by_object = {}
+        self._serialization_count = 0
+        self._bulk_serialization_count = 0
         for task in workflow.tasks:
             self._logical_outputs[
                 task.task_id
@@ -273,7 +344,7 @@ class TaskSchedulerThread:
             )
             record = TaskRecord(
                 task.task_id,
-                self._register_value(task.function),
+                self._register_value(task.function, "function"),
                 positional,
                 keyword,
                 self._logical_outputs[task.task_id],
@@ -293,7 +364,9 @@ class TaskSchedulerThread:
                 ),
             )
             self.controller.register_task(record)
-        return dict(self._logical_outputs)
+        result = dict(self._logical_outputs)
+        self._edata_by_object.clear()
+        return result
 
     def _binding(self, task_id, value):
         if isinstance(value, OutputRef):
@@ -304,7 +377,7 @@ class TaskSchedulerThread:
                 self._logical_outputs[reference.producer_task_id]
                 for reference in references
             )
-            return ("c", self._register_value(value))
+            return ("c", self._register_value(value, "container"))
         return ("e", self._register_value(value))
 
     def _op_run_workflow(
@@ -323,6 +396,9 @@ class TaskSchedulerThread:
         self._assert_owner()
         if self._manager is None:
             raise RuntimeError("create_manager must be called first")
+        reconciliation_deferrals_before = (
+            self._worker_reconciliation_deferrals
+        )
         output_ids = self._op_register_workflow(workflow)
         task_by_id = {task.task_id: task for task in workflow.tasks}
         dependencies = {
@@ -484,6 +560,12 @@ class TaskSchedulerThread:
                 value["physical_task_id"]
                 for value in prefetch_selected
             ],
+            "edata_serializations": self._serialization_count,
+            "bulk_edata_serializations": self._bulk_serialization_count,
+            "worker_reconciliation_deferrals": (
+                self._worker_reconciliation_deferrals
+                - reconciliation_deferrals_before
+            ),
         }
         return {
             task_id: cloudpickle.loads(
@@ -495,14 +577,24 @@ class TaskSchedulerThread:
     def _edata_file(self, data_id):
         file_object = self._edata_files.get(data_id)
         if file_object is None:
-            url = (
-                self.controller.endpoint
-                + f"/v1/edata/{data_id}?"
-                + urllib.parse.urlencode({"token": self.controller.token})
-            )
-            file_object = self._manager.declare_url(
-                url, cache="worker", peer_transfer=True
-            )
+            info = self.controller.get_edata_metadata(data_id)
+            if info["storage"] == "bulk-origin":
+                file_object = self._manager.declare_file(
+                    info["origin_path"],
+                    cache="worker",
+                    peer_transfer=True,
+                )
+            else:
+                url = (
+                    self.controller.endpoint
+                    + f"/v1/edata/{data_id}?"
+                    + urllib.parse.urlencode(
+                        {"token": self.controller.token}
+                    )
+                )
+                file_object = self._manager.declare_url(
+                    url, cache="worker", peer_transfer=True
+                )
             self._edata_files[data_id] = file_object
         return file_object
 

@@ -4,6 +4,9 @@ import argparse
 import json
 
 from ndcctools.taskvine.datavine import Workflow
+from ndcctools.taskvine.datavine.scheduler.thread import (
+    TaskSchedulerThread,
+)
 from datavine_phase4_demand_pull import run_case
 
 
@@ -20,11 +23,52 @@ def build():
     return workflow, first, target, 35
 
 
+class TransientWorkerStatusManager:
+    def __init__(self):
+        self.workers = [
+            {"workerid": "worker-stable"},
+            {"address": "worker-connecting"},
+        ]
+
+    def status(self, category):
+        assert category == "workers"
+        return list(self.workers)
+
+
+class ReconciliationRecorder:
+    def __init__(self):
+        self.observations = []
+
+    def reconcile_workers(self, worker_ids):
+        self.observations.append(set(worker_ids))
+
+
+def worker_status_contract():
+    controller = ReconciliationRecorder()
+    manager = TransientWorkerStatusManager()
+    scheduler = TaskSchedulerThread(controller)
+    scheduler._manager = manager
+    observed = scheduler._sync_worker_epochs()
+    assert observed == {"worker-stable"}
+    assert controller.observations == []
+    assert scheduler._worker_reconciliation_deferrals == 1
+
+    manager.workers = [{"workerid": "worker-stable"}]
+    observed = scheduler._sync_worker_epochs()
+    assert observed == {"worker-stable"}
+    assert controller.observations == [{"worker-stable"}]
+    return {
+        "incomplete_snapshot_deferred": True,
+        "complete_snapshot_reconciled": True,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--factory-manager")
     args = parser.parse_args()
 
+    status_contract = worker_status_contract()
     workflow, first, target, expected = build()
     recovered = run_case(
         "phase7-global-loss",
@@ -57,8 +101,20 @@ def main():
         factory_manager=args.factory_manager,
     )
     assert rollback["scheduler_report"]["recovery_reexecutions"] == 0
-    print(json.dumps({"recovered": recovered, "rollback": rollback}, sort_keys=True))
-    print("DataVine Phase 7 volatile publication and unified recovery E2E PASS")
+    print(
+        json.dumps(
+            {
+                "recovered": recovered,
+                "rollback": rollback,
+                "worker_status_contract": status_contract,
+            },
+            sort_keys=True,
+        )
+    )
+    print(
+        "DataVine Phase 7 volatile publication and "
+        "unified recovery E2E PASS"
+    )
 
 
 if __name__ == "__main__":

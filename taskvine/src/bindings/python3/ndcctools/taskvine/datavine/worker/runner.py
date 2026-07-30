@@ -62,10 +62,27 @@ def main(argv=None):
                 return
 
     def fetch_edata(data_id):
+        info = client.get_edata_metadata(data_id)
+
+        def fallback():
+            if info["storage"] != "bulk-origin":
+                return client.fetch_edata_record(data_id)[1]
+            origin = Path(info["origin_path"])
+            payload = origin.read_bytes()
+            if (
+                len(payload) != info["size"]
+                or EDataRecord.digest(info["metadata"], payload)
+                != info["content_hash"]
+            ):
+                raise RuntimeError(
+                    f"EDataID {data_id} bulk origin checksum mismatch"
+                )
+            print(f"DATAVINE_BULK_ORIGIN e{data_id}")
+            return payload
+
         cache_path = Path(f"datavine-edata-{data_id}.pkl")
         if cache_path.is_file():
             payload = cache_path.read_bytes()
-            info = client.get_edata_metadata(data_id)
             if (
                 len(payload) != info["size"]
                 or EDataRecord.digest(info["metadata"], payload)
@@ -74,12 +91,12 @@ def main(argv=None):
                 # A worker cache or peer replica is soft state. Reject it and
                 # fall back to the Controller-owned stable source.
                 reject_reported_local(f"e:{data_id}")
-                return client.fetch_edata_record(data_id)[1]
+                return fallback()
             report_local(
                 f"e:{data_id}", 1, info["content_hash"], payload
             )
             return payload
-        return client.fetch_edata_record(data_id)[1]
+        return fallback()
 
     function = cloudpickle.loads(fetch_edata(task.function_data_id))
 

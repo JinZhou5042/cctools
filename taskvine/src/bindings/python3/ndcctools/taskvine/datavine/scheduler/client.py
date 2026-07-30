@@ -312,6 +312,21 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def register_edata_origin(
+        self, metadata, origin_path, content_hash, size
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/edata/register-origin",
+            {
+                "metadata": metadata.to_dict(),
+                "origin_path": str(origin_path),
+                "content_hash": str(content_hash),
+                "size": int(size),
+            },
+        )
+        return json.loads(payload)
+
     def fetch_edata(self, data_id, metadata):
         payload, headers = self._request(
             "GET", f"{API_PREFIX}/edata/{int(data_id)}"
