@@ -22,14 +22,14 @@ is never a pass.
 | CTRL-FAIL | Auth, idempotency, epochs, stale/partial/restart behavior | FAIL | Runtime epochs and stale completion pass at `fbddcc70d`; Controller-owned reconnect claims pass at `643cddd68`; restart/auth-isolation contract remains absent |
 | SCHED | Independent data progress, minimal rollback, fairness, termination | OPEN | Basic recovery/prefetch exists; combined cases absent |
 | WORKER-PREP | Batched validated resolution with direct source fallback | FAIL | Controller returns validated candidates; worker still resolves per object without direct candidate pulls |
-| CACHE | Strict DRAM/disk bounds, admission, eviction, zero mode | FAIL | TaskVine disk reuse only; DataVine DRAM/admission metrics absent |
+| CACHE | Strict DRAM/disk bounds, admission, eviction, zero mode | FAIL | Controller-authorized dead-data retention, per-worker acknowledged eviction, bounded final item count, and correct zero-retention final state pass at `c20db01a1`; instantaneous disk high-water exceeds the configured target and DRAM/admission remain absent |
 | PREFETCH | Bounded/cancellable/priority-safe independent progress | OPEN | Byte/item/priority gates pass; unverified prefetched replicas safely fall back at `ef605c343`; concurrency/cancel/final architecture open |
 | PUBLISH | Exactly-once staged idempotent publication and cleanup | OPEN | Two-phase worker prepare/Scheduler commit passes; full publication fault matrix open |
 | PLACE | Multi-source, load/epoch, bulk bypass, peer fallback | OPEN | Actual TaskVine peer movement acquires epoch-checked Controller leases and unverified sources fall back at `ef605c343`; transfer-loss/load adaptation remain open |
 | PERSIST | Bounded/cancellable/backpressured atomic durability | OPEN | Queue, cancel, overload, attempt-safe acknowledgement pass at `17577b058`; pruning integration and full failure matrix open |
 | RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | Single manual global-loss replay only |
 | PRUNE-SHADOW | Reference/incremental equivalence and proof records | PASS | `artifacts/phase9-shadow-20260729.json`, commit `2108b68a8` |
-| PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | OPEN | Multi-replica disk deletion, unique ACK, exact cache decline, and bounded tracker cleanup pass at `3f993f15b`; eviction/read races and recovery-after-prune remain |
+| PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | OPEN | Multi-replica deletion plus generation-exact targeted dead-data eviction and pending-ACK worker-loss cleanup pass through `c20db01a1`; active-read races, DRAM pruning, and recovery-after-prune remain |
 | PRUNE-SHAREDFS | Quarantine/grace/recovery/hard-delete audit | OPEN | Real revision-safe component path passes at `347f60531`; restart persistence, pins, and scale comparison open |
 | MIN-CUT | Observable minimum recoverable cut/frontier/depth | FAIL | Not implemented |
 | RACES | Mandatory cross-component race/corner-case matrix | OPEN | Unified deterministic harness absent |
@@ -89,7 +89,12 @@ Worker-local pruning evidence at commit `3f993f15b` covers real TaskVine cache
 deletion, multiple replicas of one IData, UUID-correlated duplicate/stale ACK
 rejection, exact Controller generation confirmation, cache decline, and
 bounded acknowledgement cleanup locally and through factory workers. Worker
-loss during a pending unlink and recovery after local pruning remain OPEN.
+cache checkpoint `c20db01a1` additionally covers two-worker dead-data
+retention, zero-retention correctness, and pending-unlink worker loss. The
+pending tracker is released as an explicit failure without falsely claiming
+physical deletion of a possibly retained workspace. Recovery after eviction,
+eviction during an active demand read, and strict instantaneous admission
+remain OPEN.
 
 Controller admission evidence at commit `d694bef4a` covers hard request-thread,
 byte-response concurrency, and in-flight-byte capacities; immediate overload;

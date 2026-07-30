@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `ef605c343`
+Reviewed through code commit: `c20db01a1`
 Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
@@ -48,8 +48,16 @@ Correction checkpoint `3f993f15b` adds acknowledged physical worker-disk
 deletion. UUID operation IDs reject duplicate, stale, reordered, and
 wrong-worker acknowledgements; Scheduler confirmation is generation-specific
 and fails closed if Controller and TaskVine replica counts disagree. Five
-local multi-replica repetitions and one factory E2E pass. Worker-loss handling
-while an acknowledgement is pending remains a cross-component blocker.
+local multi-replica repetitions and one factory E2E pass.
+
+Correction checkpoint `c20db01a1` resolves pending unlink state before a
+worker object is freed. Worker disappearance records an explicit failed
+deletion, releases the tracker, and does not claim that a keep-workspace cache
+was physically removed. Controller-authorized, generation-exact eviction now
+keeps only records whose direct-consumer count has reached zero and passes
+two-worker bounded-retention and zero-retention workflows. B1 remains open for
+strict instantaneous disk admission, worker DRAM, active-demand read
+protection, and recovery after eviction.
 
 ### B2 — Stable-root reproducibility is assumed, not proved by Controller state
 
@@ -173,4 +181,6 @@ pin coverage and restart-persistent quarantine/audit recovery are absent.
 The reviewed local and SharedFS deletion paths may remain enabled only within
 their proven fail-closed preconditions. No broader eviction, transfer-coupled
 pruning, restart recovery, or automatic scale policy may be accepted until
-B2, B3, B5, B7, and the pending-worker-loss race are closed.
+B2, B3, B5, and B7 are closed. Strict disk admission, DRAM ownership,
+recovery after eviction, and eviction concurrent with an active demand read
+remain additional blockers.

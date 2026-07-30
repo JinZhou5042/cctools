@@ -515,3 +515,35 @@
   slice-spacing violations. The cleanup was followed by the complete required
   rebuild and fresh local Phase 4–8 plus package/factory verification.
 - Code commit: `ab6b7666d`.
+
+## 2026-07-29 — Phase 9 acknowledged worker-cache retention
+
+- Added `datavine.cache.admission.WorkerCacheAdmission`, preserving Controller
+  authority while using TaskVine only for targeted physical unlink.
+- Added WorkerID-targeted `vine_prune_file_on_worker`, UUID acknowledgement
+  tracking, and safe tracker resolution before worker teardown.
+- Worker loss during a pending unlink records one explicit failure, zero
+  confirmations, and releases the tracker; it does not falsely claim that a
+  keep-workspace cache was removed.
+- Rejected an initial one-chain test because it exercised only one worker.
+  The accepted workload has two independent chains and a final fan-in and
+  requires both workers to execute tasks.
+- Rejected an initial eviction rule after it exposed a stale-generation race
+  for shared EData with future consumers. The accepted policy evicts only
+  Controller records with zero remaining direct consumers.
+- At exact code commit `c20db01a1`, the required clean build/install and 15
+  installed-path regressions pass. The bounded mode completes 13 logical tasks
+  on two workers with 32 acknowledged evictions and six final observed items
+  per worker; zero retention completes seven tasks with 22 evictions and an
+  empty final cache.
+- Rebuilt-package validation passes with Python 3.10.20 and cloudpickle 3.1.2.
+  `datavine.tar.gz` SHA-256:
+  `852eb4aeaa1d7041046ea1a514aef9d949e74dd48eee28c7cce25193a130091d`.
+- Factory `datavine-cache-c20db01a1` reproduced both modes with two workers and
+  was stopped with both workers removed.
+- Self-review status: **FAIL for strict cache capacity**. The bounded run
+  observed a nine-item instantaneous high-water against a six-item target;
+  zero retention observed seven items before cleanup. Dispatch admission,
+  worker-side hard enforcement, a DRAM tier, active-read eviction races, and
+  recovery after eviction remain unresolved.
+- Code commits: `2e0d8ebdd`, `c20db01a1`.

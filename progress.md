@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 bounded worker-cache admission and eviction safety**
-- Validated code commit: `ef605c343`
+- Active task: **Phase 9 strict physical cache admission/backpressure and DRAM tier**
+- Validated code commit: `c20db01a1`
 
 ## Ultimate acceptance reset
 
@@ -318,6 +318,43 @@ active peer transfer and Controller release-timeout retry are not yet
 deterministically injected, worker cache capacities/admission remain outside
 DataVine authority, and the Grand Challenge is absent. Evidence:
 `acceptance/artifacts/transfer-authority-ef605c343.json`.
+
+### Phase 9 acknowledged cache-retention checkpoint
+
+Commits `2e0d8ebdd` and `c20db01a1` add the separate
+`datavine.cache.admission` module and targeted TaskVine
+`prune_file_on_worker`. Worker observations carry exact generations. The
+policy evicts only replicas with zero remaining direct consumers, invalidates
+through the Controller, requests one WorkerID-targeted unlink, waits
+asynchronously for its UUID acknowledgement, and only then confirms pruning.
+
+The first two-branch stress run exposed a stale-generation race when an
+earlier prototype evicted shared EData with future consumers. The Controller
+correctly rejected the old acknowledgement after a new generation appeared.
+The accepted policy excludes all data with remaining direct consumers.
+Self-review also corrected worker-loss semantics: a missing worker resolves a
+pending tracker as failed/unavailable, not physically deleted, because a
+keep-workspace directory may survive.
+
+At exact commit `c20db01a1`, the prescribed clean build/install and all 15
+local regressions pass. The two-chain/fan-in case actually uses both workers,
+performs 32 acknowledged evictions, and finishes with six observed retained
+items per worker under a six-item target. Zero retention performs 22
+acknowledged evictions and finishes empty. Pending unlink plus immediate worker
+loss yields one request, zero confirmations, one explicit failure, and a
+released tracker.
+
+The rebuilt `datavine.tar.gz` SHA-256 is
+`852eb4aeaa1d7041046ea1a514aef9d949e74dd48eee28c7cce25193a130091d`.
+Factory `datavine-cache-c20db01a1` reproduced both modes with two workers, then
+stopped and removed both workers.
+
+This is deliberately **not** strict cache-capacity acceptance. Observed
+execution high-water was nine items for the six-item target and seven for zero
+retention because task working sets and asynchronous unlink remain outside
+admission control. No DRAM tier exists. `CACHE`, Review B, and Ultimate
+Acceptance remain **FAIL**. Evidence:
+`acceptance/artifacts/cache-retention-c20db01a1.json`.
 
 ## Phase 8 acceptance
 

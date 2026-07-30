@@ -16,6 +16,9 @@ task/file interfaces directly.
   controller thread.
 - `worker/`: per-worker inventory, bounded caches, demand/prefetch traffic,
   execution-time deserialization, output staging, and publication.
+- `cache/`: Scheduler-side retention and eviction policy. It may request
+  physical deletion, but it never defines logical availability or replica
+  truth; those remain Controller-owned.
 - `persistence/`: admitted and acknowledged durable writes.
 - `recovery/`: global-loss decisions and compute invalidation requests.
 - `placement/`: source selection, peer transfer, and deterministic bounded
@@ -78,3 +81,20 @@ does not claim topology-aware optimization.
 Composite argument bindings store one serialized template plus referenced
 IData IDs. A worker reconstructs the value with a memoized deep copy, preserving
 alias identity when the same `OutputRef` appears more than once.
+
+## Worker-cache retention boundary
+
+Workers report cache observations with qualified DataID, content metadata,
+attempt, WorkerID, and worker epoch. The Controller validates and generations
+those physical replicas. When a record has no remaining direct consumers, the
+cache policy may invalidate that exact generation and ask TaskVine to unlink
+the matching file on one specific worker. Physical pruning is confirmed only
+after a UUID-correlated acknowledgement from that worker.
+
+Worker disappearance while an unlink is pending resolves the operation as a
+failure and releases its tracker; it is not treated as proof that a retained
+workspace was deleted. The current policy bounds retained dead data after
+acknowledgements. It does not yet impose a strict instantaneous disk bound:
+task working sets can temporarily exceed the target, and no DataVine DRAM tier
+exists. Dispatch admission and worker-side fail-closed capacity enforcement
+are therefore required before cache-capacity acceptance.
