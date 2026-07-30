@@ -108,6 +108,7 @@ def run_case(
     validate_durable_recovery=False,
     persistence_parent=None,
     additional_result_task_ids=(),
+    inject_external_persistence_cancel=False,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -253,6 +254,7 @@ def run_case(
                         for value in additional_result_task_ids
                     ),
                 ],
+                inject_external_persistence_cancel,
             )
             if (
                 replacement_worker_delay is not None

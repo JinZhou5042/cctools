@@ -865,6 +865,7 @@ class ControllerState:
             return dict(job)
 
     def complete_external_persistence(self, data_id, request_id):
+        cancelled_target = None
         with self._lock:
             old = self.get_idata(data_id)
             job = self._persistence_jobs.get(old.data_id)
@@ -878,26 +879,57 @@ class ControllerState:
             ):
                 return old
             if (
-                job is None
-                or job.get("mode") != "worker"
-                or job["request_id"] != str(request_id)
-                or job["state"] != "writing"
-                or old.attempt != job["attempt"]
-                or old.content_hash != job["content_hash"]
-                or old.serialized_size != job["size"]
+                job is not None
+                and job.get("mode") == "worker"
+                and job["request_id"] == str(request_id)
+                and job["state"] in ("cancelled", "cancelling")
             ):
-                raise ValueError("stale external persistence completion")
-            target = Path(job["target_path"])
-            expected = {
-                key: job[key]
-                for key in (
-                    "request_id",
-                    "attempt",
-                    "content_hash",
-                    "size",
-                    "target_path",
+                cancelled_target = Path(job["target_path"])
+                job["state"] = "cancelled"
+                self._persistence_active_ids.discard(
+                    job["request_id"]
                 )
-            }
+                self._persistence_active = len(
+                    self._persistence_active_ids
+                )
+                record = dataclasses.replace(
+                    old,
+                    durability="cancelled",
+                    durable_path=None,
+                )
+                self._idata[old.data_id] = record
+                self.pruning.set_data_state(
+                    old.data_id, persistence="none"
+                )
+            else:
+                record = None
+            if record is None:
+                if (
+                    job is None
+                    or job.get("mode") != "worker"
+                    or job["request_id"] != str(request_id)
+                    or job["state"] != "writing"
+                    or old.attempt != job["attempt"]
+                    or old.content_hash != job["content_hash"]
+                    or old.serialized_size != job["size"]
+                ):
+                    raise ValueError(
+                        "stale external persistence completion"
+                    )
+                target = Path(job["target_path"])
+                expected = {
+                    key: job[key]
+                    for key in (
+                        "request_id",
+                        "attempt",
+                        "content_hash",
+                        "size",
+                        "target_path",
+                    )
+                }
+        if cancelled_target is not None:
+            cancelled_target.unlink(missing_ok=True)
+            return record
         digest = hashlib.sha256()
         size = 0
         with target.open("rb") as stream:
@@ -978,19 +1010,28 @@ class ControllerState:
                 return "stale"
             if job["state"] == "durable":
                 return "too-late"
-            job["state"] = "failed"
+            cancelled = job["state"] in (
+                "cancelled",
+                "cancelling",
+            )
+            job["state"] = "cancelled" if cancelled else "failed"
             self._persistence_active_ids.discard(job["request_id"])
             self._persistence_active = len(
                 self._persistence_active_ids
             )
             self._idata[old.data_id] = dataclasses.replace(
-                old, durability="failed", durable_path=None
+                old,
+                durability="cancelled" if cancelled else "failed",
+                durable_path=None,
             )
-            self._persistence_failures[old.data_id] = str(error)
+            if cancelled:
+                Path(job["target_path"]).unlink(missing_ok=True)
+            else:
+                self._persistence_failures[old.data_id] = str(error)
             self.pruning.set_data_state(
                 old.data_id, persistence="none"
             )
-            return "failed"
+            return "cancelled" if cancelled else "failed"
 
     def cancel_persistence(self, data_id, reason="obsolete"):
         with self._lock:

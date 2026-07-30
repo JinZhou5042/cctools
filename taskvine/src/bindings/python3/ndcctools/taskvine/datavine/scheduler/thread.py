@@ -415,6 +415,7 @@ class TaskSchedulerThread:
         worker_disk_cache_admission_items=None,
         worker_disk_cache_admission_bytes=None,
         result_task_ids=None,
+        inject_external_persistence_cancel=False,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -580,6 +581,7 @@ class TaskSchedulerThread:
         persistence_running = {}
         persistence_tasks_completed = 0
         persistence_worker_bytes = 0
+        persistence_cancellations = 0
         persistence_capacity = int(
             (
                 controller_snapshot.get("persistence_executor")
@@ -672,6 +674,26 @@ class TaskSchedulerThread:
             self._sync_worker_epochs()
             self._cache_admission.poll(self._manager)
             if completed is None:
+                if (
+                    inject_external_persistence_cancel
+                    and persistence_cancellations == 0
+                ):
+                    for data_id in persistence_running.values():
+                        status = self.controller.idata_status(data_id)
+                        if status["durability"] == "writing":
+                            response = (
+                                self.controller.cancel_persistence(
+                                    data_id,
+                                    "injected-active-cancellation",
+                                )
+                            )
+                            if response["action"] != "cancelling":
+                                raise RuntimeError(
+                                    "active persistence cancellation "
+                                    "did not enter cancelling"
+                                )
+                            persistence_cancellations += 1
+                            break
                 self._cache_admission.enforce(
                     self._manager,
                     self._file_for_data_key,
@@ -704,6 +726,17 @@ class TaskSchedulerThread:
                         f"stdout={completed.output}"
                     )
                 status = self.controller.idata_status(data_id)
+                if status["durability"] == "cancelled":
+                    retry_status = self.controller.persist_idata(
+                        data_id
+                    )
+                    persistence_pending.append(
+                        (
+                            data_id,
+                            retry_status["persistence_request"],
+                        )
+                    )
+                    continue
                 if status["durability"] != "durable":
                     raise RuntimeError(
                         f"IDataID {data_id} persistence did not publish"
@@ -804,6 +837,11 @@ class TaskSchedulerThread:
                     "persistence_request", {}
                 )
                 if request.get("mode") == "worker":
+                    if inject_external_persistence_cancel:
+                        request = {
+                            **request,
+                            "inject_cancel_delay": True,
+                        }
                     persistence_pending.append(
                         (output_ids[logical_id], request)
                     )
@@ -906,6 +944,7 @@ class TaskSchedulerThread:
                 persistence_tasks_completed
             ),
             "persistence_worker_bytes": persistence_worker_bytes,
+            "persistence_cancellations": persistence_cancellations,
             "prefetch_selected": len(prefetch_selected),
             "prefetch_completed": prefetch_completed,
             "prefetch_failed": prefetch_failed,
@@ -1213,6 +1252,11 @@ class TaskSchedulerThread:
                 request["request_id"],
                 "--input-file",
                 input_name,
+                *(
+                    ("--delay-before-complete", "3")
+                    if request.get("inject_cancel_delay")
+                    else ()
+                ),
             )
         )
         task = Task(command)

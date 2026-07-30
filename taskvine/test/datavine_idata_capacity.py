@@ -126,6 +126,107 @@ def external_persistence_idempotency_contract():
             state.stop()
 
 
+def external_persistence_cancel_retry_contract():
+    with tempfile.TemporaryDirectory(
+        prefix="datavine-external-persistence-cancel-"
+    ) as root:
+        state = ControllerState(
+            max_idata_bytes=8,
+            max_inline_idata_bytes=6,
+        )
+        state.configure_persistence(root)
+        try:
+            metadata, function_payload = serialize(bytes)
+            function = state.register_edata(
+                metadata, function_payload
+            )
+            record = state.allocate_idata(1)
+            state.register_task(
+                TaskRecord(
+                    1,
+                    function.data_id,
+                    (),
+                    (),
+                    record.data_id,
+                    (),
+                )
+            )
+            payload = b"1234567"
+            content_hash = hashlib.sha256(payload).hexdigest()
+            state.publish_idata_metadata(
+                record.data_id, 1, content_hash, len(payload)
+            )
+            state.join_worker("cancel-source", 1)
+            state.report_worker_replica(
+                f"i:{record.data_id}",
+                "cancel-source-replica",
+                1,
+                "worker-disk",
+                content_hash,
+                len(payload),
+                "cancel-source",
+                1,
+            )
+            state.request_persistence(record.data_id)
+            cancelled = state.idata_status(record.data_id)[
+                "persistence_request"
+            ]
+            state.begin_external_persistence(
+                record.data_id, cancelled["request_id"]
+            )
+            Path(cancelled["target_path"]).write_bytes(payload)
+            assert state.cancel_persistence(
+                record.data_id, "test-active-cancel"
+            ) == "cancelling"
+            completion = state.complete_external_persistence(
+                record.data_id, cancelled["request_id"]
+            )
+            assert completion.durability == "cancelled"
+            assert not Path(cancelled["target_path"]).exists()
+            assert state.snapshot()["persistence_active"] == 0
+
+            state.request_persistence(record.data_id)
+            retry = state.idata_status(record.data_id)[
+                "persistence_request"
+            ]
+            assert retry["request_id"] != cancelled["request_id"]
+            state.begin_external_persistence(
+                record.data_id, retry["request_id"]
+            )
+            Path(retry["target_path"]).write_bytes(b"corrupt")
+            try:
+                state.complete_external_persistence(
+                    record.data_id, retry["request_id"]
+                )
+            except IOError:
+                pass
+            else:
+                raise AssertionError(
+                    "corrupt external persistence was acknowledged"
+                )
+            assert state.fail_external_persistence(
+                record.data_id,
+                retry["request_id"],
+                "corrupt retry",
+            ) == "failed"
+
+            state.request_persistence(record.data_id)
+            final = state.idata_status(record.data_id)[
+                "persistence_request"
+            ]
+            state.begin_external_persistence(
+                record.data_id, final["request_id"]
+            )
+            Path(final["target_path"]).write_bytes(payload)
+            durable = state.complete_external_persistence(
+                record.data_id, final["request_id"]
+            )
+            assert durable.durability == "durable"
+            return state.snapshot()
+        finally:
+            state.stop()
+
+
 def make_large_payload(size):
     return bytes(index % 251 for index in range(size))
 
@@ -162,6 +263,7 @@ def run_bounded_case(factory_manager=None):
             else None
         ),
         additional_result_task_ids=(large.task_id,),
+        inject_external_persistence_cancel=True,
     )
     report = snapshot["scheduler_report"]
     assert snapshot["idata_capacity_bytes"] == CONTROLLER_IDATA_LIMIT
@@ -185,6 +287,7 @@ def run_bounded_case(factory_manager=None):
     )
     assert len(snapshot["durable_files"]) == 2
     assert report["persistence_tasks_completed"] == 1
+    assert report["persistence_cancellations"] == 1
     assert report["persistence_worker_bytes"] > LARGE_SIZE
     assert (
         snapshot["result_summaries"][str(large.task_id)][
@@ -207,6 +310,7 @@ def main():
     args = parser.parse_args()
     contract = state_capacity_contract()
     idempotency = external_persistence_idempotency_contract()
+    cancel_retry = external_persistence_cancel_retry_contract()
     snapshot = run_bounded_case(args.factory_manager)
     print(
         json.dumps(
@@ -239,6 +343,17 @@ def main():
                     ],
                     "stale_completions": idempotency[
                         "persistence_stale_completions"
+                    ],
+                },
+                "external_persistence_cancel_retry": {
+                    "durable": cancel_retry[
+                        "external_persistence_durable"
+                    ],
+                    "persistence_requests": cancel_retry[
+                        "persistence_requests"
+                    ],
+                    "active": cancel_retry[
+                        "persistence_active"
                     ],
                 },
                 "scheduler_report": snapshot["scheduler_report"],

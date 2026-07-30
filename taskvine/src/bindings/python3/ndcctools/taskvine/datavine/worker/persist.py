@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+import time
 
 from ..scheduler.client import ControllerClient
 
@@ -15,6 +16,7 @@ def main(argv=None):
     parser.add_argument("--data-id", required=True, type=int)
     parser.add_argument("--request-id", required=True)
     parser.add_argument("--input-file", required=True)
+    parser.add_argument("--delay-before-complete", type=float, default=0)
     args = parser.parse_args(argv)
     client = ControllerClient(args.controller, args.token)
     request = client.begin_external_persistence(
@@ -56,6 +58,8 @@ def main(argv=None):
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+        if args.delay_before_complete > 0:
+            time.sleep(args.delay_before_complete)
         client.complete_external_persistence(
             args.data_id, args.request_id
         )
