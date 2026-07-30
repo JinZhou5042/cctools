@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `fbddcc70d`
+Reviewed through code commit: `347f60531`
 Status: **FAIL — SHADOW PROOF PASSES, PHYSICAL DELETION IS UNSAFE**
 
 ## Accepted shadow evidence
@@ -66,17 +66,29 @@ Worker incarnation and publication transitions are now runtime-connected at
 `fbddcc70d`, but consumer lifecycle, cancellation, and atomic dynamic graph
 growth are not. This finding remains open.
 
+Correction checkpoint `347f60531` adds complete TaskRecord IData dependency
+edges, Scheduler task-state events, and Controller-serialized dynamic graph
+growth. The E2E rejects stale proofs after both required-output mutation and a
+new consumer. Cancellation semantics beyond the exercised completed/pending
+states remain part of the final cross-component matrix, so B3 is improved but
+not closed.
+
 ### B4 — Persistence cancellation is advisory only
 
 Correction checkpoint `17577b058` adds bounded request generations, queued and
 active cancellation, a defined atomic too-late boundary, and stale-completion
 rejection. The deterministic direct and HTTP tests pass.
 
-This finding remains open because the shadow pruning plan does not yet invoke
-the runtime cancellation API atomically with its proof revision.
+At checkpoint `17577b058` this finding remained open because the shadow plan
+did not invoke runtime cancellation atomically with its proof revision.
 
 Required correction: bounded request IDs/generations, queued cancellation,
 defined active cancellation, and stale-completion rejection.
+
+Correction checkpoint `347f60531` invokes cancellation inside the
+Controller's compare-and-apply critical section. One queued request is
+cancelled while another acknowledged writing request remains protected. B4 is
+closed for the current fault model.
 
 ### B5 — No in-flight transfer/read protection
 
@@ -100,12 +112,22 @@ Controller lineage mutation, and a pruning executor.
 Required correction: Controller revision compare-and-apply for every deletion
 or quarantine action.
 
+Correction checkpoint `347f60531` makes graph/state revisions part of the
+authenticated apply request and rechecks each decision before mutation. A
+dynamic consumer changes both the proof and hard-delete eligibility. B6 is
+closed for the in-process Controller fault model.
+
 ### B7 — SharedFS quarantine and hard-delete proof do not exist
 
 There is no grace period, recovery from quarantine, audit record, hard-delete
 revalidation, or pin/final-output enforcement at the filesystem boundary.
 
 Required correction: quarantine state machine and executor after B1–B6.
+
+Correction checkpoint `347f60531` performs real owned-file rename, fsync,
+source exclusion, checksum-validated restore, grace validation before unlink,
+fresh-proof hard deletion, and bounded audit. This finding remains open because
+pin coverage and restart-persistent quarantine/audit recovery are absent.
 
 ## Question outcomes
 
@@ -115,8 +137,8 @@ Required correction: quarantine state machine and executor after B1–B6.
 | Every shadow decision explained? | PASS |
 | Active and recovery consumers distinguished? | PASS in shadow, not runtime |
 | Durability coverage handles branches/joins? | PASS in shadow |
-| Persistence cancellation ordered safely? | FAIL |
-| Dynamic growth invalidates proofs? | PASS in shadow, not atomic at runtime |
+| Persistence cancellation ordered safely? | PASS in current fault model |
+| Dynamic growth invalidates proofs? | PASS in runtime compare-and-apply |
 | Incremental equivalent to reference? | PASS for accepted deterministic suite |
 
 No local or SharedFS deletion may be enabled while B1–B7 remain unresolved.

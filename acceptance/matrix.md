@@ -13,11 +13,11 @@ is never a pass.
 | CORRECT | Exact oracle, failures equal normal, safe explicit failure | OPEN | Small Phase 4–8 cases only |
 | MULTIOUT | Multiple outputs and partial downstream demand | FAIL | One IData output per TaskRecord |
 | EDATA-ID | Independent function/arg/kwarg/file identity and collision checks | OPEN | Values covered partially; dependency-file path absent |
-| IDATA-ID | Stable output-slot identity and complete explainable lineage | OPEN | Single output stable; complete lineage API absent |
+| IDATA-ID | Stable output-slot identity and complete explainable lineage | OPEN | Runtime lineage includes nested dependencies at `347f60531`; multi-output remains absent |
 | LIGHTWEIGHT | Compact dispatch/queues scale with IDs and bindings | OPEN | Small records exist; 100k-binding bound unmeasured |
 | SERIAL | Exactly-once serialization and byte-preserving movement | OPEN | Small tests exist; full movement/fault proof absent |
 | AUTHORITY | Controller sole data/lineage/durability/pruning authority | FAIL | Runtime worker replicas integrate at `fbddcc70d`; lineage/pruning authority remains disconnected |
-| STATE | Validated logical/physical/durability/recovery/pruning transitions | FAIL | Worker/persistence generations reject stale completion; pruning transitions remain disconnected |
+| STATE | Validated logical/physical/durability/recovery/pruning transitions | OPEN | Runtime pruning revisions and SharedFS transitions pass; worker-local deletion and full races remain |
 | CTRL-BOUND | Bounded memory, serving, metadata, queues, cleanup | FAIL | Replica metadata and persistence queues bounded; bulk bytes and HTTP serving remain unbounded |
 | CTRL-FAIL | Auth, idempotency, epochs, stale/partial/restart behavior | FAIL | Runtime worker epochs and stale completion pass at `fbddcc70d`; restart contract absent |
 | SCHED | Independent data progress, minimal rollback, fairness, termination | OPEN | Basic recovery/prefetch exists; combined cases absent |
@@ -29,8 +29,8 @@ is never a pass.
 | PERSIST | Bounded/cancellable/backpressured atomic durability | OPEN | Queue, cancel, overload, attempt-safe acknowledgement pass at `17577b058`; pruning integration and full failure matrix open |
 | RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | Single manual global-loss replay only |
 | PRUNE-SHADOW | Reference/incremental equivalence and proof records | PASS | `artifacts/phase9-shadow-20260729.json`, commit `2108b68a8` |
-| PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | FAIL | Not implemented |
-| PRUNE-SHAREDFS | Quarantine/grace/recovery/hard-delete audit | FAIL | Not implemented |
+| PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | FAIL | Logical invalidation exists; worker files are not deleted or acknowledged |
+| PRUNE-SHAREDFS | Quarantine/grace/recovery/hard-delete audit | OPEN | Real revision-safe component path passes at `347f60531`; restart persistence, pins, and scale comparison open |
 | MIN-CUT | Observable minimum recoverable cut/frontier/depth | FAIL | Not implemented |
 | RACES | Mandatory cross-component race/corner-case matrix | OPEN | Unified deterministic harness absent |
 | PERF-MGR | Manager/Controller/serialization/metadata metrics | FAIL | Required independent resource metrics absent |
@@ -75,6 +75,13 @@ replica publication, corrupt logical-identity rejection, stale/late reports,
 foreign invalidation, distinct equal-byte IData lineage, and zero-byte data.
 Transfer races remain OPEN because actual byte movement does not yet acquire
 the Controller source leases.
+
+Physical pruning evidence at commit `347f60531` covers persistence cancellation
+concurrent with an active write, pruning with an active source lease, stale
+proof rejection, dynamic-consumer invalidation, corrupt quarantine, validated
+restore, grace enforcement, and hard deletion. Cross-component rows remain
+OPEN until the real TaskVine transfer and worker-cache deletion paths
+participate and the Grand Challenge repeats the schedule at scale.
 
 ## Paper-thesis evidence map
 

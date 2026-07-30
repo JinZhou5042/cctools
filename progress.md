@@ -131,6 +131,43 @@ leases, worker cache capacities are not owned by DataVine, and worker
 reconciliation assumes one Scheduler/Controller workflow pair. Evidence:
 `acceptance/artifacts/worker-replica-protocol-fbddcc70d.json`.
 
+### Phase 9 revision-safe SharedFS pruning checkpoint
+
+Commit `347f60531` makes the Controller's full-reference-checked incremental
+lineage proof part of runtime state. Task records now carry the complete,
+sorted IData dependency set, including dependencies hidden inside nested
+containers. Scheduler pending/running/completed/recovery transitions update
+the same Controller-owned proof state.
+
+The compare-and-apply protocol rejects stale graph/state revisions. It cancels
+obsolete queued persistence, preserves active writes, invalidates
+Controller-memory replicas, retires replicas with active source leases, and
+renames owned durable files into a private SharedFS quarantine using file and
+directory durability barriers. Quarantined files are excluded from source
+selection. Restore validates size/hash before making the replica available.
+Hard deletion requires a fresh proof, an expired grace period, unchanged
+replica generation/revision, no lease, and a machine-readable audit record.
+
+The E2E deliberately mutates required-output state to reject an old proof,
+cancels queued persistence while another write is active, holds a source read
+through pruning, corrupts a quarantined file, adds a dynamic consumer, restores
+from quarantine, rejects early deletion, and finally deletes only after a new
+proof and grace expiry. The retained required output remains exact. The test
+passes 20 repetitions; installed topology and Phase 4–9 regressions pass, and
+the worker-loss recovery case passes five repetitions after removing a manual
+disconnect race.
+
+Self-review found and fixed four destructive-ordering defects before this
+checkpoint: absent quarantined data could never reach hard delete; unlink ran
+before grace validation; lineage rejection could leave a half-registered
+task; and corrupt quarantine bytes could be exposed before validation.
+
+Review B remains **FAIL**. Worker-local files are not yet physically deleted,
+real transfers do not acquire source leases, quarantine/audit state is not
+restart-persistent, and stable bulk origins plus pin/final-output protocol
+coverage remain open. Evidence:
+`acceptance/artifacts/sharedfs-pruning-347f60531.json`.
+
 ## Phase 8 acceptance
 
 The independent Scheduler now derives deterministic prefetch candidates from

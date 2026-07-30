@@ -98,6 +98,33 @@
   candidate/lease protocol and pruning still performs no physical deletion.
 - Code commit: `fbddcc70d`.
 
+## 2026-07-29 — Phase 9 revision-safe SharedFS pruning
+
+- Made Controller runtime lineage explicit for every TaskRecord, including
+  nested IData dependencies, and connected Scheduler task-state transitions
+  to the proven incremental/reference pruning model.
+- Added authenticated pruning plan, compare-and-apply, restore, and hard-delete
+  protocol operations with graph/state/replica revision checks.
+- Connected obsolete queued persistence cancellation and active-write
+  protection to pruning decisions.
+- Added real SharedFS quarantine rename, directory fsync, source exclusion,
+  checksum-validated restore, configurable grace, hard delete, and bounded
+  machine-readable audit records.
+- Added an E2E covering stale proof, persistence concurrency, active source
+  read, corrupt quarantine, dynamic consumer, restore, early-delete rejection,
+  final hard delete, and retained-output correctness.
+- Fixed destructive-order bugs uncovered by the test: unlink-before-grace,
+  restore-before-checksum, permanently undeletable quarantines, and
+  half-registered lineage.
+- Removed premature explicit worker disconnect after a Phase 7 retry exposed a
+  race with a still-live TaskVine worker; manager-status reconciliation remains
+  the worker-loss truth.
+- Required clean build/install, 20 repeated pruning E2Es, five repeated
+  worker-loss recoveries, and the installed Phase 4–9 regression passed.
+- Review B remains FAIL pending physical worker-cache deletion, transfer-lease
+  coupling, stable bulk origins, and persistent quarantine recovery.
+- Code commit: `347f60531`.
+
 ## 2026-07-29 — Phase 0 local baseline
 
 - Created branch `datavine` from freshly fetched `origin/task-graph` at PR
