@@ -50,6 +50,7 @@ class ControllerState:
         if self.bulk_origin_root is not None:
             self.bulk_origin_root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._persistence_capacity = threading.Condition(self._lock)
         self._next_edata_id = 1
         self._edata = {}
         self._buckets = {}
@@ -76,6 +77,11 @@ class ControllerState:
         self._persistence_cleanup_failures = 0
         self.replicas = replica_directory or ReplicaDirectory()
         self.pruning = PruningAuthority(pruning_audit_capacity)
+
+    def _release_persistence_slot(self, request_id):
+        self._persistence_active_ids.discard(str(request_id))
+        self._persistence_active = len(self._persistence_active_ids)
+        self._persistence_capacity.notify_all()
 
     def configure_persistence(
         self,
@@ -900,12 +906,7 @@ class ControllerState:
             ):
                 cancelled_target = Path(job["target_path"])
                 job["state"] = "cancelled"
-                self._persistence_active_ids.discard(
-                    job["request_id"]
-                )
-                self._persistence_active = len(
-                    self._persistence_active_ids
-                )
+                self._release_persistence_slot(job["request_id"])
                 record = dataclasses.replace(
                     old,
                     durability="cancelled",
@@ -974,12 +975,7 @@ class ControllerState:
                 and job["state"] in ("cancelled", "cancelling")
             ):
                 job["state"] = "cancelled"
-                self._persistence_active_ids.discard(
-                    job["request_id"]
-                )
-                self._persistence_active = len(
-                    self._persistence_active_ids
-                )
+                self._release_persistence_slot(job["request_id"])
                 record = dataclasses.replace(
                     old,
                     durability="cancelled",
@@ -1025,10 +1021,7 @@ class ControllerState:
                 old.serialized_size,
             )
             job["state"] = "durable"
-            self._persistence_active_ids.discard(job["request_id"])
-            self._persistence_active = len(
-                self._persistence_active_ids
-            )
+            self._release_persistence_slot(job["request_id"])
             record = dataclasses.replace(
                 old, durability="durable", durable_path=str(target)
             )
@@ -1060,10 +1053,7 @@ class ControllerState:
                 "cancelling",
             )
             job["state"] = "cancelled" if cancelled else "failed"
-            self._persistence_active_ids.discard(job["request_id"])
-            self._persistence_active = len(
-                self._persistence_active_ids
-            )
+            self._release_persistence_slot(job["request_id"])
             self._idata[old.data_id] = dataclasses.replace(
                 old,
                 durability="cancelled" if cancelled else "failed",
@@ -1098,6 +1088,7 @@ class ControllerState:
         if result in ("cancelled", "cancelling"):
             job["state"] = result
             job["cancel_reason"] = str(reason)
+            self._persistence_capacity.notify_all()
             old = self.get_idata(data_id)
             self._idata[data_id] = dataclasses.replace(
                 old, durability="cancelled"
@@ -1121,13 +1112,13 @@ class ControllerState:
                 or current_idata.content_hash != request.content_hash
             ):
                 return
-            if (
+            while (
                 len(self._persistence_active_ids)
                 >= self._persistence.worker_count
             ):
-                raise RuntimeError(
-                    "global persistence concurrency exceeded"
-                )
+                if job["state"] in ("cancelled", "cancelling"):
+                    raise InterruptedError("cancelled")
+                self._persistence_capacity.wait()
             job["state"] = "writing"
             self._persistence_active_ids.add(request.request_id)
             self._persistence_active = len(
@@ -1147,10 +1138,7 @@ class ControllerState:
 
     def _persistence_complete(self, request, path, error):
         with self._lock:
-            self._persistence_active_ids.discard(request.request_id)
-            self._persistence_active = len(
-                self._persistence_active_ids
-            )
+            self._release_persistence_slot(request.request_id)
             job = self._persistence_jobs.get(request.data_id)
             old = self._idata.get(request.data_id)
             current = (

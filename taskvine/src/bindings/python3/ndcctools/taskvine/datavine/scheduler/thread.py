@@ -723,12 +723,15 @@ class TaskSchedulerThread:
         running = {}
         persistence_pending = []
         persistence_running = {}
+        controller_persistence_pending = {}
         persistence_tasks_completed = 0
+        persistence_controller_tasks_completed = 0
         persistence_required = set()
         frontier_pruning = []
         frontier_pruning_applied = set()
         frontier_pruning_pending = {}
         persistence_worker_bytes = 0
+        persistence_controller_bytes = 0
         persistence_cancellations = 0
         persistence_failures = 0
         persistence_injected_failures_observed = 0
@@ -796,15 +799,94 @@ class TaskSchedulerThread:
         partial_publication_failures = []
         partial_publication_triggered = set()
         partial_publication_cancelled = {}
+
+        def queue_frontier_pruning_if_ready(frontier_task_id):
+            if (
+                frontier_task_id not in prune_after_persistence_by_task
+                or frontier_task_id in frontier_pruning_applied
+                or frontier_task_id in frontier_pruning_pending
+            ):
+                return
+            if any(
+                self.controller.idata_status(data_id)["durability"]
+                != "durable"
+                for data_id in self._logical_output_slots[
+                    frontier_task_id
+                ]
+            ):
+                return
+            frontier_pruning_pending[frontier_task_id] = [
+                output_ids[task_id]
+                for task_id in prune_after_persistence_by_task[
+                    frontier_task_id
+                ]
+            ]
+
         while (
             pending
             or running
             or prefetch_running
             or persistence_pending
             or persistence_running
+            or controller_persistence_pending
             or suspended_persistence_recovery
             or frontier_pruning_pending
         ):
+            for data_id, not_before in tuple(
+                controller_persistence_pending.items()
+            ):
+                if not_before > time.monotonic():
+                    continue
+                status = self.controller.idata_status(data_id)
+                if status["durability"] in ("queued", "writing"):
+                    continue
+                if status["durability"] == "failed":
+                    persistence_failures += 1
+                    retry_key = (data_id, int(status["attempt"]))
+                    retries = persistence_retry_counts[retry_key]
+                    if retries >= external_persistence_max_retries:
+                        raise RuntimeError(
+                            f"IDataID {data_id} Controller persistence "
+                            f"exhausted {retries} retries: status={status}"
+                        )
+                    delay = (
+                        external_persistence_retry_base_seconds
+                        * (2 ** min(retries, 30))
+                    )
+                    delay = min(
+                        delay,
+                        external_persistence_retry_max_seconds,
+                    )
+                    persistence_retry_counts[retry_key] += 1
+                    persistence_retries += 1
+                    persistence_retry_delay_seconds += delay
+                    retry_status = self.controller.persist_idata(data_id)
+                    retry_request = retry_status.get(
+                        "persistence_request", {}
+                    )
+                    if retry_request.get("mode") != "controller":
+                        raise RuntimeError(
+                            f"IDataID {data_id} Controller persistence "
+                            "retry changed execution mode"
+                        )
+                    controller_persistence_pending[data_id] = (
+                        time.monotonic() + delay
+                    )
+                    continue
+                if status["durability"] != "durable":
+                    raise RuntimeError(
+                        f"IDataID {data_id} Controller persistence "
+                        f"failed: status={status}"
+                    )
+                self._idata_files[data_id] = self._durable_idata_file(
+                    data_id, status
+                )
+                controller_persistence_pending.pop(data_id)
+                persistence_controller_tasks_completed += 1
+                persistence_controller_bytes += int(status["size"])
+                queue_frontier_pruning_if_ready(
+                    producer_by_data_id[data_id]
+                )
             for data_id, recovery in tuple(
                 suspended_persistence_recovery.items()
             ):
@@ -1005,7 +1087,81 @@ class TaskSchedulerThread:
                     self._manager.wait(wait_timeout)
                     self._sync_worker_epochs()
                     continue
-                raise RuntimeError("workflow cannot make progress")
+                if controller_persistence_pending:
+                    delay = max(
+                        0,
+                        min(controller_persistence_pending.values())
+                        - time.monotonic(),
+                    )
+                    time.sleep(
+                        min(float(wait_timeout), max(0.05, delay))
+                    )
+                    continue
+                if not (
+                    pending
+                    or running
+                    or prefetch_running
+                    or persistence_pending
+                    or persistence_running
+                    or suspended_persistence_recovery
+                    or frontier_pruning_pending
+                ):
+                    break
+                blocked = {}
+                for task_id in sorted(pending):
+                    unavailable_inputs = []
+                    persistence_frontiers = {}
+                    for input_data_id in self.controller.get_task(
+                        task_id
+                    ).input_data_ids:
+                        status = self.controller.idata_status(
+                            input_data_id
+                        )
+                        if not status["available"]:
+                            unavailable_inputs.append(input_data_id)
+                    for parent_task_id in sorted(
+                        dependencies[task_id]
+                        & persistence_frontier_tasks
+                    ):
+                        persistence_frontiers[parent_task_id] = {
+                            "attempt": self._attempts.get(
+                                parent_task_id, 0
+                            ),
+                            "threshold": (
+                                persistence_attempts_by_task.get(
+                                    parent_task_id
+                                )
+                            ),
+                            "pruning_applied": (
+                                parent_task_id
+                                in frontier_pruning_applied
+                            ),
+                            "durability": [
+                                self.controller.idata_status(data_id)[
+                                    "durability"
+                                ]
+                                for data_id in self._logical_output_slots[
+                                    parent_task_id
+                                ]
+                            ],
+                        }
+                    blocked[task_id] = {
+                        "unfinished_dependencies": sorted(
+                            dependencies[task_id] - done
+                        ),
+                        "unavailable_inputs": unavailable_inputs,
+                        "persistence_frontiers": persistence_frontiers,
+                        "pruning_inputs": sorted(
+                            task_cache_inputs[task_id]
+                            & self._cache_admission.prune_by_data
+                        ),
+                    }
+                raise RuntimeError(
+                    "workflow cannot make progress: "
+                    f"pending={blocked} done={sorted(done)} "
+                    f"frontier_pruning_pending="
+                    f"{sorted(frontier_pruning_pending)}"
+                )
             completed = self._manager.wait(wait_timeout)
             self._sync_worker_epochs()
             self._cache_admission.poll(self._manager)
@@ -1331,20 +1487,9 @@ class TaskSchedulerThread:
                 )
                 persistence_tasks_completed += 1
                 persistence_worker_bytes += int(status["size"])
-                frontier_task_id = producer_by_data_id[data_id]
-                if (
-                    frontier_task_id
-                    in prune_after_persistence_by_task
-                    and frontier_task_id
-                    not in frontier_pruning_applied
-                ):
-                    frontier_pruning_pending[frontier_task_id] = [
-                        output_ids[task_id]
-                        for task_id
-                        in prune_after_persistence_by_task[
-                            frontier_task_id
-                        ]
-                    ]
+                queue_frontier_pruning_if_ready(
+                    producer_by_data_id[data_id]
+                )
                 continue
             logical_id = running.pop(completed.id)
             if persistence_running or persistence_pending:
@@ -1542,6 +1687,10 @@ class TaskSchedulerThread:
                                 request,
                             )
                         )
+                    else:
+                        controller_persistence_pending[
+                            output_data_id
+                        ] = time.monotonic()
             self.controller.set_task_state(logical_id, "completed")
             done.add(logical_id)
             if logical_id not in completed_once:
@@ -1763,7 +1912,13 @@ class TaskSchedulerThread:
             "persistence_tasks_completed": (
                 persistence_tasks_completed
             ),
+            "persistence_controller_tasks_completed": (
+                persistence_controller_tasks_completed
+            ),
             "persistence_worker_bytes": persistence_worker_bytes,
+            "persistence_controller_bytes": (
+                persistence_controller_bytes
+            ),
             "persistence_cancellations": persistence_cancellations,
             "persistence_failures": persistence_failures,
             "persistence_injected_failures_observed": (
