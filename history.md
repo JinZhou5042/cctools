@@ -571,3 +571,38 @@
   hard enforcement, bytes, DRAM, prefetch/recovery/churn combinations, and
   hot-path scale proof remain open.
 - Code commits: `9d03dbf4d`, `88b7d1a44`.
+
+## 2026-07-30 — Phase 9 worker-enforced byte/item capacity and recovery
+
+- Made a worker cache insertion fail closed when its configured item or byte
+  capacity cannot admit the object; a task whose output cannot be published
+  now returns `output missing`.
+- Reserved every normal-task output slot before execution and released the
+  reservation on cancellation, protocol failure, or failed stageout.
+- Extended the Manager projection to account for input bytes, output bytes,
+  and unlink operations that have not yet been acknowledged.
+- Prevented Scheduler dispatch from using a cache input while its targeted
+  prune is pending, and waited for unlink acknowledgement before declaring
+  the workflow unable to progress.
+- Isolated factory recovery into one uniquely named Manager and raised the
+  combined local recovery worker to two cores so data preparation and ordinary
+  execution can make concurrent progress.
+- Rejected and fully reverted future-used volatile IData eviction after it
+  triggered TaskVine special recovery tasks and exposed a stale-generation
+  prune race. This is an architecture blocker requiring DataVine-owned
+  materialization, not a cache-policy exception.
+- Rejected one false clean-build result after its install submake reported
+  `Text file busy`; killed the two exact orphan test workers, repeated the
+  prescribed clean build/install, and verified source/installed worker hashes
+  match.
+- All 15 installed regressions and the full local cache workflow pass. A
+  unique two-worker package-only factory run passes the combined
+  prefetch/cache-pressure/worker-disconnect recovery case and removes both
+  workers.
+- Rebuilt archive SHA-256:
+  `667b2615e28566650e56afca48ab38fc3604ad36e8b1dbbf92b8ed00fde05671`.
+- Ultimate Acceptance remains FAIL: DRAM bounds, actual worker process loss,
+  active-transfer failure, repeated frontier-bounded recovery, scale, and
+  Legacy comparison are not proved.
+- Code commits: `3993bd475`, `5d2ef7d60`, `e48fffa4a`, `240e05ebd`,
+  `a66f7fae1`, `291a81a95`, `6d3b77042`.

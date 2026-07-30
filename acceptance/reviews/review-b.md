@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `88b7d1a44`
+Reviewed through code commit: `6d3b77042`
 Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
@@ -66,6 +66,22 @@ both workers at the six-item limit and reject an impossible five-item limit
 before execution. B1 remains open because enforcement is not worker-local,
 bytes and DRAM are unbounded, and prefetch/recovery/churn combinations have not
 passed.
+
+Correction checkpoint `6d3b77042` adds independent worker-side item/byte
+enforcement, reserves output slots before execution, and orders new dispatch
+after physical unlink acknowledgement. Combined prefetch, cache pressure, and
+one ordinary-task recovery replay pass locally and through two package-only
+factory workers without exceeding configured disk limits. B1 remains open
+because DRAM is absent, the fault is Manager-triggered worker release rather
+than a process kill, and active demand/peer transfers are not yet protected
+through eviction.
+
+Self-review also proved that future-used volatile IData cannot safely be
+evicted through the current TaskVine temporary-file interface: the experiment
+caused TaskVine to submit its special legacy recovery task and exposed a
+stale-generation prune acknowledgement. The policy was reverted. Closing B1
+therefore requires DataVine-owned IData materialization and normal logical
+producer invalidation, not a permissive cache rule.
 
 ### B2 — Stable-root reproducibility is assumed, not proved by Controller state
 
@@ -190,5 +206,5 @@ The reviewed local and SharedFS deletion paths may remain enabled only within
 their proven fail-closed preconditions. No broader eviction, transfer-coupled
 pruning, restart recovery, or automatic scale policy may be accepted until
 B2, B3, B5, and B7 are closed. Strict disk admission, DRAM ownership,
-recovery after eviction, and eviction concurrent with an active demand read
-remain additional blockers.
+recovery after eviction without legacy recovery tasks, true process loss, and
+eviction concurrent with an active demand read remain additional blockers.

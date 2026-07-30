@@ -10,8 +10,9 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 worker-side byte/DRAM admission and combined cache races**
-- Validated code commit: `88b7d1a44`
+- Active task: **Phase 9 DataVine-owned volatile IData materialization and
+  legacy-recovery removal**
+- Validated code commit: `6d3b77042`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +26,46 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 worker-enforced disk cache capacity and combined recovery checkpoint
+
+Commits `3993bd475` through `6d3b77042` add worker-side hard item/byte
+admission, reserve normal-task output slots before execution, reject
+unpublished or oversized outputs, and make Scheduler dispatch wait until an
+acknowledged targeted unlink has actually released physical capacity.
+
+After the required clean build/install, the source and installed workers had
+the identical SHA-256
+`8ccbc98c343542cf4f39771ca617247c4517a88045206c8253e3e3c146000a7a`.
+All 15 installed-path regressions passed. The local bounded workflow stayed at
+six items and 239,308 bytes on each worker; a five-item task working set failed
+before execution, and a 1 KiB worker byte limit rejected an oversized output
+without publishing it. A combined prefetch/cache-pressure test completed
+seven logical tasks through eight ordinary attempts and one recovery replay
+after two intentional worker disconnects, while both workers remained at or
+below six items and 238,743 bytes.
+
+The environment archive was rebuilt from the active DataVine environment.
+`poncho_package_run -e` verified cloudpickle 3.1.2 and the new worker symbol;
+archive SHA-256 is
+`667b2615e28566650e56afca48ab38fc3604ad36e8b1dbbf92b8ed00fde05671`.
+Two package-only factory workers reproduced the recovery workflow under the
+same limits and were removed cleanly.
+
+Self-review rejected three non-acceptance results: a build whose install step
+hit `Text file busy` because interrupted local workers still held the binary;
+a factory sequence contaminated by reusing one catalog project name; and an
+eviction policy that deleted future-used volatile IData when the Controller
+reported another source. The last policy caused TaskVine to submit special
+legacy recovery tasks and could race a newer replica generation, so it was
+fully removed.
+
+The complete `CACHE`, `RECOVERY`, Review B, and Ultimate Acceptance rows remain
+**FAIL**. DRAM remains unbounded, the injected loss is a Manager worker release
+rather than a proven process kill, active-transfer loss is absent, and
+future-used volatile IData cannot yet be evicted without falling into the
+obsolete TaskVine recovery path. Machine-readable evidence:
+`acceptance/artifacts/worker-cache-capacity-6d3b77042.json`.
 
 ### Phase 9 shadow pruning checkpoint
 
