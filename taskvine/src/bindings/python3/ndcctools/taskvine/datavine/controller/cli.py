@@ -28,6 +28,16 @@ def main(argv=None):
         "--max-inline-idata-bytes", type=int, default=8 * 1024 * 1024
     )
     parser.add_argument(
+        "--completed-pruning-operation-capacity",
+        type=int,
+        default=1024,
+    )
+    parser.add_argument(
+        "--completed-pruning-operation-bytes",
+        type=int,
+        default=64 * 1024 * 1024,
+    )
+    parser.add_argument(
         "--max-request-concurrency", type=int, default=32
     )
     parser.add_argument(
@@ -52,6 +62,12 @@ def main(argv=None):
         bulk_origin_root=args.bulk_origin_dir,
         max_idata_bytes=args.max_idata_bytes,
         max_inline_idata_bytes=args.max_inline_idata_bytes,
+        completed_pruning_operation_capacity=(
+            args.completed_pruning_operation_capacity
+        ),
+        completed_pruning_operation_bytes=(
+            args.completed_pruning_operation_bytes
+        ),
     )
     if args.persistence_dir:
         state.configure_persistence(

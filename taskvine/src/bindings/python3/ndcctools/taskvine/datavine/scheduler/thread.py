@@ -12,6 +12,7 @@ import queue
 import shlex
 import threading
 import time
+import urllib.error
 import urllib.parse
 import uuid
 
@@ -1025,43 +1026,74 @@ class TaskSchedulerThread:
                 >= frontier_pruning_active["poll_after"]
             ):
                 if frontier_pruning_active["deferred_data_ids"]:
-                    continuation = (
-                        self.controller.continue_deferred_pruning(
-                            sorted(
-                                frontier_pruning_active[
-                                    "deferred_data_ids"
-                                ]
+                    operation_id = frontier_pruning_active[
+                        "continuation_operation_id"
+                    ]
+                    if operation_id is None:
+                        operation_id = f"pruning:{uuid.uuid4().hex}"
+                        frontier_pruning_active[
+                            "continuation_operation_id"
+                        ] = operation_id
+                    try:
+                        continuation = (
+                            self.controller.continue_deferred_pruning(
+                                operation_id,
+                                sorted(
+                                    frontier_pruning_active[
+                                        "deferred_data_ids"
+                                    ]
+                                )
                             )
                         )
-                    )
-                    frontier_pruning_active[
-                        "controller_continuations"
-                    ].append(continuation)
-                    still_deferred = {
-                        item["data_id"]
-                        for item in continuation["deferred"]
-                    }
-                    resolved = (
+                    except (
+                        urllib.error.URLError,
+                        TimeoutError,
+                        OSError,
+                    ) as exc:
+                        frontier_pruning_active[
+                            "controller_continuation_retries"
+                        ].append(
+                            {
+                                "operation_id": operation_id,
+                                "error": type(exc).__name__,
+                            }
+                        )
+                        frontier_pruning_active["poll_after"] = (
+                            time.monotonic() + 0.1
+                        )
+                        continuation = None
+                    if continuation is not None:
+                        frontier_pruning_active[
+                            "continuation_operation_id"
+                        ] = None
+                        frontier_pruning_active[
+                            "controller_continuations"
+                        ].append(continuation)
+                        still_deferred = {
+                            item["data_id"]
+                            for item in continuation["deferred"]
+                        }
+                        resolved = (
+                            frontier_pruning_active[
+                                "deferred_data_ids"
+                            ]
+                            - still_deferred
+                        )
+                        cancelled = {
+                            item["data_id"]
+                            for item in continuation["cancelled"]
+                        }
+                        if cancelled:
+                            frontier_pruning_active[
+                                "cancelled_data_ids"
+                            ].update(cancelled)
+                        start_frontier_worker_prunes(
+                            frontier_pruning_active,
+                            continuation["applied"],
+                        )
                         frontier_pruning_active[
                             "deferred_data_ids"
-                        ]
-                        - still_deferred
-                    )
-                    cancelled = {
-                        item["data_id"]
-                        for item in continuation["cancelled"]
-                    }
-                    if cancelled:
-                        frontier_pruning_active[
-                            "cancelled_data_ids"
-                        ].update(cancelled)
-                    start_frontier_worker_prunes(
-                        frontier_pruning_active,
-                        continuation["applied"],
-                    )
-                    frontier_pruning_active[
-                        "deferred_data_ids"
-                    ] -= resolved
+                        ] -= resolved
                 all_complete = not frontier_pruning_active[
                     "deferred_data_ids"
                 ]
@@ -1151,6 +1183,11 @@ class TaskSchedulerThread:
                                         "controller_continuations"
                                     ]
                                 ),
+                                "controller_continuation_retries": (
+                                    frontier_pruning_active[
+                                        "controller_continuation_retries"
+                                    ]
+                                ),
                                 "worker_prunes": worker_prunes,
                             },
                             "cancelled_data_ids": sorted(
@@ -1209,6 +1246,8 @@ class TaskSchedulerThread:
                         "data_ids": prune_data_ids,
                         "controller_result": result,
                         "controller_continuations": [],
+                        "controller_continuation_retries": [],
+                        "continuation_operation_id": None,
                         "deferred_data_ids": {
                             item["data_id"]
                             for item in result["deferred"]

@@ -1,9 +1,13 @@
 """Thread-safe Controller-owned logical and serialized state."""
 
+import collections
+import copy
 import dataclasses
 import hashlib
+import json
 import os
 from pathlib import Path
+import re
 import threading
 
 from ..models import (
@@ -17,6 +21,11 @@ from .pruning import PruningAuthority
 from .replicas import ReplicaDirectory
 
 
+PRUNING_OPERATION_ID_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+)
+
+
 class ControllerState:
     def __init__(
         self,
@@ -26,6 +35,8 @@ class ControllerState:
         bulk_origin_root=None,
         max_idata_bytes=256 * 1024 * 1024,
         max_inline_idata_bytes=8 * 1024 * 1024,
+        completed_pruning_operation_capacity=1024,
+        completed_pruning_operation_bytes=64 * 1024 * 1024,
     ):
         if max_edata_bytes <= 0:
             raise ValueError("max_edata_bytes must be positive")
@@ -38,6 +49,14 @@ class ControllerState:
         if max_inline_idata_bytes > max_idata_bytes:
             raise ValueError(
                 "max_inline_idata_bytes cannot exceed max_idata_bytes"
+            )
+        if int(completed_pruning_operation_capacity) < 1:
+            raise ValueError(
+                "completed pruning operation capacity must be positive"
+            )
+        if int(completed_pruning_operation_bytes) < 1:
+            raise ValueError(
+                "completed pruning operation byte capacity must be positive"
             )
         self.max_edata_bytes = int(max_edata_bytes)
         self.max_idata_bytes = int(max_idata_bytes)
@@ -78,6 +97,17 @@ class ControllerState:
         self.replicas = replica_directory or ReplicaDirectory()
         self.pruning = PruningAuthority(pruning_audit_capacity)
         self._deferred_pruning = {}
+        self._completed_pruning_operation_capacity = int(
+            completed_pruning_operation_capacity
+        )
+        self._completed_pruning_operation_byte_capacity = int(
+            completed_pruning_operation_bytes
+        )
+        self._completed_pruning_operations = collections.OrderedDict()
+        self._completed_pruning_operation_bytes = 0
+        self._completed_pruning_operation_bytes_high_water = 0
+        self._pruning_continuation_idempotent = 0
+        self._pruning_continuation_evictions = 0
 
     def _release_persistence_slot(self, request_id):
         self._persistence_active_ids.discard(str(request_id))
@@ -1411,19 +1441,52 @@ class ControllerState:
                 "replica_revision": self.replicas.revision,
             }
 
-    def continue_deferred_pruning(self, data_ids=None):
+    def continue_deferred_pruning(self, operation_id, data_ids=None):
         """Resolve lease-deferred pruning against the newest proof."""
+        operation_id = str(operation_id)
+        if PRUNING_OPERATION_ID_PATTERN.fullmatch(operation_id) is None:
+            raise ValueError("invalid pruning continuation identity")
+        selection_key = (
+            None
+            if data_ids is None
+            else tuple(sorted({int(data_id) for data_id in data_ids}))
+        )
         with self._lock:
+            completed = self._completed_pruning_operations.get(
+                operation_id
+            )
+            if completed is not None:
+                if completed["selection"] != selection_key:
+                    raise ValueError(
+                        "conflicting pruning continuation identity"
+                    )
+                self._pruning_continuation_idempotent += 1
+                return copy.deepcopy(completed["result"])
             selected = (
                 set(self._deferred_pruning)
-                if data_ids is None
-                else {int(data_id) for data_id in data_ids}
+                if selection_key is None
+                else set(selection_key)
             )
             unknown = selected - set(self._deferred_pruning)
             if unknown:
                 raise ValueError(
                     "IDataIDs have no deferred pruning: "
                     f"{sorted(unknown)}"
+                )
+            estimated_records = sum(
+                len(self.replicas.records_for(f"i:{data_id}"))
+                for data_id in selected
+            )
+            estimated_result_bytes = 4096 + 16384 * (
+                len(selected) + estimated_records
+            )
+            if (
+                estimated_result_bytes
+                > self._completed_pruning_operation_byte_capacity
+            ):
+                raise RuntimeError(
+                    "pruning continuation response exceeds "
+                    "terminal byte capacity"
                 )
             applied = []
             deferred = []
@@ -1497,13 +1560,49 @@ class ControllerState:
                         "while Controller lock was held"
                     )
                 applied.extend(result["applied"])
-            return {
+            result = {
+                "operation_id": operation_id,
                 "applied": applied,
                 "deferred": deferred,
                 "cancelled": cancelled,
-                "plan": self.pruning.plan().to_dict(),
                 "replica_revision": self.replicas.revision,
             }
+            result_bytes = len(
+                json.dumps(
+                    result, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            )
+            if result_bytes > estimated_result_bytes:
+                raise RuntimeError(
+                    "pruning continuation response exceeded "
+                    "admitted bound"
+                )
+            self._completed_pruning_operations[operation_id] = {
+                "selection": selection_key,
+                "result": copy.deepcopy(result),
+                "bytes": result_bytes,
+            }
+            self._completed_pruning_operation_bytes += result_bytes
+            while (
+                len(self._completed_pruning_operations)
+                > self._completed_pruning_operation_capacity
+                or self._completed_pruning_operation_bytes
+                > self._completed_pruning_operation_byte_capacity
+            ):
+                _, evicted = (
+                    self._completed_pruning_operations.popitem(
+                        last=False
+                    )
+                )
+                self._completed_pruning_operation_bytes -= evicted[
+                    "bytes"
+                ]
+                self._pruning_continuation_evictions += 1
+            self._completed_pruning_operation_bytes_high_water = max(
+                self._completed_pruning_operation_bytes_high_water,
+                self._completed_pruning_operation_bytes,
+            )
+            return result
 
     def _prune_idata_locked(
         self, data_id, proof, grace_seconds, now
@@ -1852,4 +1951,25 @@ class ControllerState:
                         self._deferred_pruning.items()
                     )
                 },
+                "completed_pruning_operation_tombstones": len(
+                    self._completed_pruning_operations
+                ),
+                "completed_pruning_operation_capacity": (
+                    self._completed_pruning_operation_capacity
+                ),
+                "completed_pruning_operation_bytes": (
+                    self._completed_pruning_operation_bytes
+                ),
+                "completed_pruning_operation_byte_capacity": (
+                    self._completed_pruning_operation_byte_capacity
+                ),
+                "completed_pruning_operation_bytes_high_water": (
+                    self._completed_pruning_operation_bytes_high_water
+                ),
+                "pruning_continuation_idempotent": (
+                    self._pruning_continuation_idempotent
+                ),
+                "pruning_continuation_evictions": (
+                    self._pruning_continuation_evictions
+                ),
             }

@@ -339,8 +339,8 @@ class ControllerClient:
         )
         return json.loads(payload)
 
-    def continue_deferred_pruning(self, data_ids=None):
-        request = {}
+    def continue_deferred_pruning(self, operation_id, data_ids=None):
+        request = {"operation_id": str(operation_id)}
         if data_ids is not None:
             request["data_ids"] = [
                 int(data_id) for data_id in data_ids

@@ -124,6 +124,7 @@ def run_case(
     inject_partial_publication_after=None,
     frontier_pruning_ack_delay=0,
     runtime_controller_hook=None,
+    controller_client_wrapper=None,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -210,6 +211,8 @@ def run_case(
             client = ControllerClient(
                 f"http://{controller_host}:{ready['port']}", token
             )
+            if controller_client_wrapper is not None:
+                client = controller_client_wrapper(client)
             scheduler = TaskSchedulerThread(
                 client,
                 bulk_origin,

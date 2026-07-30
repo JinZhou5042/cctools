@@ -10,6 +10,31 @@ from ndcctools.taskvine.datavine import Workflow
 from datavine_phase4_demand_pull import run_case
 
 
+class LoseFirstContinuationResponse:
+    def __init__(self, client, observations):
+        self._client = client
+        self._observations = observations
+        self._lost = False
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def continue_deferred_pruning(self, operation_id, data_ids=None):
+        self._observations.setdefault(
+            "continuation_operation_ids", []
+        ).append(operation_id)
+        result = self._client.continue_deferred_pruning(
+            operation_id, data_ids
+        )
+        if not self._lost:
+            self._lost = True
+            self._observations["continuation_response_lost"] = True
+            raise TimeoutError(
+                "injected loss after continuation commit"
+            )
+        return result
+
+
 def seed(value):
     return value
 
@@ -59,13 +84,12 @@ def lease_hook(data_id, invalidate_proof, observations):
             time.sleep(0.02)
         if source is None:
             raise TimeoutError("worker source did not become available")
-        client.join_worker("lease-race-destination", 1)
         lease = client.acquire_replica(
             f"i:{data_id}",
             source["replica_id"],
             source["generation"],
-            "lease-race-destination",
-            1,
+            source["worker_id"],
+            source["worker_epoch"],
         )
         observations["lease_id"] = lease["lease_id"]
 
@@ -154,6 +178,15 @@ def run_mode(factory_manager, invalidate_proof):
         runtime_controller_hook=lease_hook(
             root.task_id, invalidate_proof, observations
         ),
+        controller_client_wrapper=(
+            (
+                lambda client: LoseFirstContinuationResponse(
+                    client, observations
+                )
+            )
+            if not invalidate_proof
+            else None
+        ),
     )
     assert "error" not in observations, observations
     assert observations["retiring_observed"]
@@ -169,6 +202,14 @@ def run_mode(factory_manager, invalidate_proof):
         assert event["cancelled_data_ids"] == [root.task_id]
         assert report["runtime_pruned_data_ids"] == [middle.task_id]
     else:
+        assert observations["continuation_response_lost"]
+        assert len(observations["continuation_operation_ids"]) >= 2
+        assert len(
+            set(observations["continuation_operation_ids"][:2])
+        ) == 1
+        assert len(
+            event["result"]["controller_continuation_retries"]
+        ) == 1
         assert observations["final_state"] == "pruned"
         assert event["cancelled_data_ids"] == []
         assert report["runtime_pruned_data_ids"] == [
@@ -179,6 +220,9 @@ def run_mode(factory_manager, invalidate_proof):
         "cancelled_data_ids": event["cancelled_data_ids"],
         "final_state": observations["final_state"],
         "runtime_pruned_data_ids": report["runtime_pruned_data_ids"],
+        "continuation_retries": len(
+            event["result"]["controller_continuation_retries"]
+        ),
     }
 
 

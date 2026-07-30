@@ -127,6 +127,7 @@ class ReplicaDirectory:
         self._observed_transfer_acquires = 0
         self._observed_transfer_idempotent = 0
         self._observed_transfer_releases = 0
+        self._worker_loss_lease_expirations = 0
 
     @property
     def revision(self):
@@ -153,6 +154,7 @@ class ReplicaDirectory:
                 if epoch <= old.epoch:
                     self._reject_stale("stale worker epoch")
                 self._invalidate_worker_replicas(old.worker_id, old.epoch)
+                self._expire_worker_leases(old.worker_id, old.epoch)
             elif len(self._workers) >= self._max_workers:
                 raise RuntimeError("worker directory capacity exceeded")
             record = WorkerEpoch(worker_id, epoch, True)
@@ -188,6 +190,7 @@ class ReplicaDirectory:
                 old, active=False
             )
             self._invalidate_worker_replicas(worker_id, epoch)
+            self._expire_worker_leases(worker_id, epoch)
             self._changed()
             return self._workers[worker_id]
 
@@ -204,6 +207,9 @@ class ReplicaDirectory:
                         worker, active=False
                     )
                     self._invalidate_worker_replicas(
+                        worker.worker_id, worker.epoch
+                    )
+                    self._expire_worker_leases(
                         worker.worker_id, worker.epoch
                     )
                     disconnected.append(self._workers[worker_id])
@@ -224,6 +230,29 @@ class ReplicaDirectory:
                 self._replicas[key] = dataclasses.replace(
                     record, state=state
                 )
+
+    def _expire_worker_leases(self, worker_id, epoch):
+        """Fail transfers owned by a dead source or destination epoch."""
+        worker_id = str(worker_id)
+        epoch = int(epoch)
+        expired = []
+        for lease_id, lease in tuple(self._active_leases.items()):
+            record = self._replicas[
+                (lease.data_id, lease.replica_id)
+            ]
+            source_matches = (
+                record.worker_id == worker_id
+                and record.worker_epoch == epoch
+            )
+            destination_matches = (
+                lease.destination_worker_id == worker_id
+                and lease.destination_worker_epoch == epoch
+            )
+            if source_matches or destination_matches:
+                self._complete_source_lease(lease_id, False)
+                expired.append(lease_id)
+        self._worker_loss_lease_expirations += len(expired)
+        return tuple(expired)
 
     def _validate_hash(self, content_hash):
         content_hash = str(content_hash)
@@ -631,31 +660,34 @@ class ReplicaDirectory:
                 if lease.success == bool(success):
                     return lease
                 raise ValueError("conflicting duplicate lease release")
-            key = (lease.data_id, lease.replica_id)
-            record = self._replicas[key]
-            if record.generation != lease.generation:
-                self._reject_stale("lease references stale generation")
-            leases = record.active_leases - 1
-            state = record.state
-            if state == "retiring" and leases == 0:
-                state = "invalid"
-            self._replicas[key] = dataclasses.replace(
-                record, active_leases=leases, state=state
-            )
-            lease = dataclasses.replace(
-                lease, active=False, success=bool(success)
-            )
-            del self._active_leases[lease_id]
-            self._completed_leases[lease_id] = lease
-            while (
-                len(self._completed_leases)
-                > self._max_completed_leases
-            ):
-                self._completed_leases.popitem(last=False)
-            if lease_id.startswith("taskvine:"):
-                self._observed_transfer_releases += 1
-            self._changed()
-            return lease
+            return self._complete_source_lease(lease_id, bool(success))
+
+    def _complete_source_lease(self, lease_id, success):
+        lease = self._active_leases[lease_id]
+        key = (lease.data_id, lease.replica_id)
+        record = self._replicas[key]
+        if record.generation != lease.generation:
+            self._reject_stale("lease references stale generation")
+        leases = record.active_leases - 1
+        if leases < 0:
+            raise RuntimeError("source lease count underflow")
+        state = record.state
+        if state == "retiring" and leases == 0:
+            state = "invalid"
+        self._replicas[key] = dataclasses.replace(
+            record, active_leases=leases, state=state
+        )
+        lease = dataclasses.replace(
+            lease, active=False, success=bool(success)
+        )
+        del self._active_leases[lease_id]
+        self._completed_leases[lease_id] = lease
+        while len(self._completed_leases) > self._max_completed_leases:
+            self._completed_leases.popitem(last=False)
+        if lease_id.startswith("taskvine:"):
+            self._observed_transfer_releases += 1
+        self._changed()
+        return lease
 
     def invalidate_replica(self, data_id, replica_id, generation):
         key = (self._normalize_data_id(data_id), str(replica_id))
@@ -997,5 +1029,8 @@ class ReplicaDirectory:
                 ),
                 "observed_transfer_releases": (
                     self._observed_transfer_releases
+                ),
+                "worker_loss_lease_expirations": (
+                    self._worker_loss_lease_expirations
                 ),
             }

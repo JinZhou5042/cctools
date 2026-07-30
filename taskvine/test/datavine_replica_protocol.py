@@ -336,12 +336,74 @@ def main():
                 f"i:{zero.data_id}"
             )["sources"]
         )
+
+        client.join_worker("w3", 1)
+        client.join_worker("w4", 1)
+        source = client.report_replica(
+            f"i:{same_bytes.data_id}",
+            "worker-loss-source",
+            1,
+            "worker-disk",
+            output_hash,
+            len(idata_payload),
+            "w2",
+            1,
+        )
+        destination_loss_lease = client.acquire_replica(
+            f"i:{same_bytes.data_id}",
+            source["replica_id"],
+            source["generation"],
+            "w3",
+            1,
+        )
+        source_loss_lease = client.acquire_replica(
+            f"i:{same_bytes.data_id}",
+            source["replica_id"],
+            source["generation"],
+            "w4",
+            1,
+        )
+        retiring_loss_source = client.invalidate_replica(
+            f"i:{same_bytes.data_id}",
+            source["replica_id"],
+            source["generation"],
+            "w2",
+            1,
+        )
+        assert retiring_loss_source["state"] == "retiring"
+        assert retiring_loss_source["load"] == 2
+        client.disconnect_worker("w3", 1)
+        after_destination_loss = state.replicas.get_replica(
+            f"i:{same_bytes.data_id}", source["replica_id"]
+        )
+        assert after_destination_loss.state == "retiring"
+        assert after_destination_loss.active_leases == 1
+        assert client.release_replica(
+            destination_loss_lease["lease_id"], False
+        )["success"] is False
+        client.disconnect_worker("w2", 1)
+        after_source_loss = state.replicas.get_replica(
+            f"i:{same_bytes.data_id}", source["replica_id"]
+        )
+        assert after_source_loss.state == "invalid"
+        assert after_source_loss.active_leases == 0
+        assert client.release_replica(
+            source_loss_lease["lease_id"], False
+        )["success"] is False
+        expect_remote_error(
+            "conflicting duplicate lease release",
+            client.release_replica,
+            source_loss_lease["lease_id"],
+            True,
+        )
         snapshot = client.snapshot()["replica_directory"]
         assert snapshot["stale_rejections"] >= 1
-        assert snapshot["lease_high_water"] == 1
+        assert snapshot["lease_high_water"] == 2
         assert snapshot["observed_transfer_acquires"] == 1
         assert snapshot["observed_transfer_idempotent"] == 1
         assert snapshot["observed_transfer_releases"] == 1
+        assert snapshot["active_leases"] == 0
+        assert snapshot["worker_loss_lease_expirations"] == 2
         print(json.dumps(snapshot, sort_keys=True))
         print("DataVine worker replica protocol component test PASS")
     finally:

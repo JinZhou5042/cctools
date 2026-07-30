@@ -50,7 +50,9 @@ def main():
         prefix="datavine-pruning-executor-"
     ) as temp_dir:
         durable_root = Path(temp_dir) / "durable"
-        state = ControllerState()
+        state = ControllerState(
+            completed_pruning_operation_capacity=2
+        )
         state.configure_persistence(
             durable_root,
             workers=1,
@@ -211,9 +213,70 @@ def main():
             assert duplicate["deferred"] == result["deferred"]
             assert not duplicate["applied"]
             client.release_replica(lease["lease_id"], True)
-            continued = client.continue_deferred_pruning(
+            continued = state.continue_deferred_pruning(
+                "pruning:test-release",
                 [outputs[0]]
             )
+            recovered_response = client.continue_deferred_pruning(
+                "pruning:test-release", [outputs[0]]
+            )
+            assert recovered_response == continued
+            assert (
+                client.continue_deferred_pruning(
+                    "pruning:test-release", [outputs[0]]
+                )
+                == continued
+            )
+            expect_remote_error(
+                "conflicting pruning continuation identity",
+                client.continue_deferred_pruning,
+                "pruning:test-release",
+                [outputs[1]],
+            )
+            client.continue_deferred_pruning(
+                "pruning:bounded-two", []
+            )
+            bounded_three = client.continue_deferred_pruning(
+                "pruning:bounded-three", []
+            )
+            assert (
+                client.continue_deferred_pruning(
+                    "pruning:bounded-three", []
+                )
+                == bounded_three
+            )
+            bounded_snapshot = client.snapshot()
+            assert (
+                bounded_snapshot[
+                    "completed_pruning_operation_tombstones"
+                ]
+                == 2
+            )
+            assert bounded_snapshot[
+                "completed_pruning_operation_capacity"
+            ] == 2
+            assert (
+                bounded_snapshot[
+                    "completed_pruning_operation_bytes"
+                ]
+                <= bounded_snapshot[
+                    "completed_pruning_operation_byte_capacity"
+                ]
+            )
+            assert (
+                bounded_snapshot[
+                    "completed_pruning_operation_bytes_high_water"
+                ]
+                <= bounded_snapshot[
+                    "completed_pruning_operation_byte_capacity"
+                ]
+            )
+            assert bounded_snapshot[
+                "pruning_continuation_idempotent"
+            ] == 3
+            assert bounded_snapshot[
+                "pruning_continuation_evictions"
+            ] == 1
             assert not continued["deferred"]
             assert any(
                 item["action"] == "quarantine-sharedfs"

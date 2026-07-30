@@ -656,6 +656,7 @@ class ControllerService:
                     try:
                         request = self._read_json()
                         result = owner.state.continue_deferred_pruning(
+                            request["operation_id"],
                             request.get("data_ids")
                         )
                     except Exception as exc:
