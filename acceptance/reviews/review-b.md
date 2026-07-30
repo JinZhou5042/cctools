@@ -344,3 +344,20 @@ test also uses one real active worker epoch as both selected source and lease
 destination rather than proving two distinct live peers. Transfer fallback,
 partial-byte cleanup, and pruning completion after that real process failure
 are the next critical correction.
+
+Correction checkpoint `9afe1a64b` kills the actual source worker process group
+only after the exact lease destination reports that its transfer child has
+forked. Local evidence includes source return code `-9`, no surviving transfer
+server/PGID, two concurrent failed/released leases, zero active leases, a
+stable-origin fallback read, and the exact oracle. The rebuilt-package
+two-worker factory reproduces the same semantic result and removes its
+remaining worker at shutdown. Evidence is
+`../artifacts/peer-source-loss-9afe1a64b.json`.
+
+Review B remains **FAIL**. Transfer-child start is not proof that a positive
+number of bytes crossed the peer connection, and the E2E does not retain and
+audit the destination transfer temporary path after interruption. Corrupt
+surviving peer fallback and real-transfer failure concurrent with pruning
+continuation are also absent. Those must pass, together with the existing
+restart/dynamic-consumer blockers, before transfer-coupled pruning can pass
+this review.

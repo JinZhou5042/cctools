@@ -25,14 +25,14 @@ is never a pass.
 | CACHE | Strict DRAM/disk bounds, admission, eviction, zero mode | FAIL | Worker/Manager bounds plus future-used IData eviction/rematerialization remain within six items and the byte limit at `f1237b8b8`; DRAM, active-transfer eviction, true process loss, soft-metadata cleanup, and scale cost remain open |
 | PREFETCH | Bounded/cancellable/priority-safe independent progress | OPEN | Byte/item/priority gates pass; unverified prefetched replicas safely fall back at `ef605c343`; concurrency/cancel/final architecture open |
 | PUBLISH | Exactly-once staged idempotent publication and cleanup | OPEN | Two-phase worker prepare/Scheduler commit passes; large output publishes attempt/hash/size without byte POST at `53db69f1e`; at `79bcbc832`, Scheduler cancels a task after slot zero prepares, kills that exact worker, invalidates the incomplete attempt, and accepts attempt two only after every slot validates; remaining publication stages and concurrent races remain |
-| PLACE | Multi-source, load/epoch, bulk bypass, peer fallback | OPEN | Actual TaskVine peer movement acquires epoch-checked Controller leases and unverified sources fall back at `ef605c343`; `artifacts/pruning-lease-race-a1d273444.json` protects active leased sources from pruning; `artifacts/lease-epoch-idempotency-f737147e7.json` expires source/destination leases on dead epochs without load leaks. Actual in-flight transfer source-process loss and load adaptation remain open |
+| PLACE | Multi-source, load/epoch, bulk bypass, peer fallback | OPEN | Actual TaskVine peer movement acquires epoch-checked Controller leases and unverified sources fall back at `ef605c343`; `artifacts/pruning-lease-race-a1d273444.json` protects active leased sources from pruning; `artifacts/lease-epoch-idempotency-f737147e7.json` expires source/destination leases on dead epochs without load leaks. `artifacts/peer-source-loss-9afe1a64b.json` proves a real destination transfer child starts, the source process group dies abruptly, concurrent leases close, and stable-origin fallback returns the oracle. Positive-byte interruption, corrupt/alternate peer fallback, and load adaptation remain open |
 | PERSIST | Bounded/cancellable/backpressured atomic durability | OPEN | Controller-inline queue/cancel/overload passes at `17577b058`; worker-driven 2 MiB atomic persistence and durable return pass at `4e8f19f1f`; active external cancellation before acknowledgement and during final compare-and-commit passes at `426ea2195`; two partial-write failures, bounded retry/exhaustion, unified global write admission, cleanup, and compute overlap pass at `c4d5258b6`; exact-request drain plus physical-prune barriers protect recomputation during persistence/global loss at `aac966a09a`; scale I/O limits and remaining races remain open |
 | RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | At `fafead8bde`, two actual unique-replica owner processes are shut down and frontier-bounded waves have depth four and three; `79bcbc832` cancels incomplete multi-output computation before exact WorkerID shutdown; `artifacts/branched-cut-6135c761a.json` proves branch-selective depth-two recovery after two inline durability frontiers and physical pruning. The full repeated-failure matrix remains absent |
 | PRUNE-SHADOW | Reference/incremental equivalence and proof records | PASS | `artifacts/phase9-shadow-20260729.json`, commit `2108b68a8` |
 | PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | OPEN | Generation-exact deletion and pending-ACK worker-loss cleanup pass through `c20db01a1`; at `fafead8bde`, IData 2–4 are physically deleted after task 5 becomes durable and a later unique-replica loss recovers only downstream tasks 6–8; `artifacts/async-pruning-a8bd9609c.json` proves compute/deletion overlap; `artifacts/pruning-lease-race-a1d273444.json` proves active-lease deferral, exact continuation, and restoration after proof invalidation. Actual transfer loss, DRAM pruning, and scale storage decline remain |
 | PRUNE-SHAREDFS | Quarantine/grace/recovery/hard-delete audit | OPEN | Real revision-safe component path passes at `347f60531`; restart persistence, pins, and scale comparison open |
 | MIN-CUT | Observable minimum recoverable cut/frontier/depth | OPEN | `artifacts/branched-cut-6135c761a.json` records two durability frontiers, covered IData pruning, a diamond/chain fan-in, and exact recovery wave `[8,7]` while the completed left branch stays at attempt one. `artifacts/async-pruning-a8bd9609c.json` removes the global compute-drain barrier. `artifacts/pruning-lease-race-a1d273444.json` revalidates or cancels a proof after an active source lease. Recovery-only versus direct-consumer retention, repeated branched churn, and Grand Challenge scale remain open |
-| RACES | Mandatory cross-component race/corner-case matrix | OPEN | Persistence-writing/global-loss/pruning proof interleaving passes locally and through package-only workers at `aac966a09a`; active source lease with release or concurrent proof invalidation passes at `a1d273444`; dead destination then source epoch and lost continuation response replay pass at `f737147e7`. Actual in-flight peer-transfer death, unified deterministic harness, and the remaining combinations are absent |
+| RACES | Mandatory cross-component race/corner-case matrix | OPEN | Persistence-writing/global-loss/pruning proof interleaving passes locally and through package-only workers at `aac966a09a`; active source lease with release or concurrent proof invalidation passes at `a1d273444`; dead destination then source epoch and lost continuation response replay pass at `f737147e7`; actual peer-source process-group loss after destination transfer-child start passes at `9afe1a64b`. Byte-counted partial cleanup, concurrent real-transfer pruning, the unified deterministic harness, and remaining combinations are absent |
 | PERF-MGR | Manager/Controller/serialization/metadata metrics | FAIL | Required independent resource metrics absent |
 | PERF-WORKER | Cache/staging/peer/overlap/idle metrics | FAIL | Partial transfer counts only |
 | PERF-FS | Bounded read/write/metadata/storage metrics | FAIL | Unified write high-water and worker bytes are recorded at `c4d5258b6`; separate read/write, metadata, peak-storage, and scale metrics remain absent |
@@ -50,7 +50,8 @@ is never a pass.
 All remain OPEN until a deterministic committed test and artifact exists:
 
 - cache eviction during resolution;
-- worker loss during peer transfer and after local publication;
+- worker loss after peer transfer-child start passes at `9afe1a64b`; positive
+  byte-count interruption and worker loss after local publication remain;
 - persistence completion concurrent with global-loss detection;
 - pruning concurrent with persistence and dynamic consumers;
 - duplicate publication and late old-attempt completion;
@@ -77,8 +78,13 @@ replica publication, corrupt logical-identity rejection, stale/late reports,
 foreign invalidation, distinct equal-byte IData lineage, and zero-byte data.
 Actual peer movement now acquires and releases Controller source leases at
 `ef605c343`; three local repetitions and factory peer-on/off runs have balanced
-lease counts and no active leaks. Transfer races remain OPEN because worker
-loss during an active transfer and release-timeout retry are not yet injected.
+lease counts and no active leaks. At `9afe1a64b`, three further repetitions
+and a package-only factory run kill the real source process group after the
+destination forks its transfer child, close two concurrent failed leases, and
+fall back to the stable origin without consuming invalid bytes. Transfer races
+remain OPEN because a positive byte count, partial-path audit, corrupt
+alternate peer, concurrent pruning continuation, and release-timeout retry are
+not yet combined.
 
 Physical pruning evidence at commit `347f60531` covers persistence cancellation
 concurrent with an active write, pruning with an active source lease, stale

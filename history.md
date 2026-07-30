@@ -1,5 +1,31 @@
 # DataVine History
 
+## 2026-07-30 — Actual peer-source process loss after transfer start
+
+- Added a destination-originated event after the real transfer child forks.
+  Manager accepts it only from the destination bound to the active DataVine
+  lease and records an exact start/fault count.
+- Added a default-off deterministic fault that abruptly loses the real source
+  worker process group. Normal cleanup fails all concurrent leases, releases
+  source load, and leaves zero active leases; the destination retries through
+  the stable origin and returns the exact oracle.
+- The accepted local run observes source return code `-9`, no surviving
+  process group, one worker disconnection, two failed/released leases, and zero
+  Legacy recovery tasks. Three repetitions have identical semantic evidence.
+- Rejected dispatch-only graceful shutdown, an orphaned transfer-server child,
+  a mixed old-manager/new-worker incremental install, and a build invoked from
+  the wrong directory.
+- The exact clean build/install, all 22 DataVine regressions, lint/diff checks,
+  packaged-environment verification, and a two-worker package-only factory
+  E2E pass. Factory shutdown removes its remaining worker.
+- Code commit: `9afe1a64b`; package SHA-256:
+  `ab39c707723854a269702b89ec85fdbf9b2f00e207ad151564fb88b0a42e77d5`.
+- Evidence: `acceptance/artifacts/peer-source-loss-9afe1a64b.json`.
+- Self-review: **PASS for the scoped process-loss checkpoint, FAIL for
+  Ultimate Acceptance**. Positive byte-count interruption, partial-file audit,
+  corrupt/alternate peer fallback, concurrent pruning continuation, scale,
+  and the Grand Challenge remain open.
+
 ## 2026-07-30 — Dead-epoch lease cleanup and bounded continuation replay
 
 - Worker reconciliation now fails leases owned by either a dead source or dead

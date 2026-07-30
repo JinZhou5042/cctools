@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 actual peer-transfer source process loss**
-- Validated code commit: `f737147e7`
+- Active task: **Phase 9 byte-counted partial peer transfer and corrupt-source fallback**
+- Validated code commit: `9afe1a64b`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +25,47 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 actual peer-source process-loss checkpoint
+
+Commit `9afe1a64b` adds a destination-originated
+`cache-transfer-start` event emitted only after the worker has forked the
+transfer child. The Manager accepts that event only from the exact destination
+bound to the active Data Controller lease. A bounded, default-off fault count
+then sends an abrupt-loss command to the source and removes it through normal
+Manager/Controller worker-loss cleanup.
+
+The source kills its complete process group, not only the worker main process.
+This matters because the first hardening attempt left an orphan transfer
+server and caused `make install` to fail with `Text file busy`; that result was
+rejected. The accepted local run records one transfer start, one injected
+source loss, source return code `-9`, no surviving source PGID, two concurrent
+leases failed and released, zero active leases, one worker disconnection, a
+second stable-origin fetch, and the exact oracle SHA-256. Three repetitions
+have identical semantic fields. The run performs ten logical/physical
+attempts and zero Legacy recovery tasks.
+
+The exact prescribed clean build/install and all 22 DataVine regressions pass.
+The rebuilt global `datavine.tar.gz` has SHA-256
+`ab39c707723854a269702b89ec85fdbf9b2f00e207ad151564fb88b0a42e77d5`;
+`poncho_package_run -e` reports cloudpickle 3.1.2 and imports the new Manager
+counter API, Workflow, and Controller client. Package-only factory
+`datavine-peer-9afe1a64b` reproduces the same transfer start, source loss,
+balanced failed leases, fallback fetch, and oracle with two workers. Factory
+shutdown reports `all workers removed`. Evidence:
+`acceptance/artifacts/peer-source-loss-9afe1a64b.json`.
+
+Self-review status is **PASS for actual source-process loss after transfer-child
+start and FAIL for Ultimate Acceptance**. A child start is not a measured
+positive byte count. The test proves invalid/partial bytes are never consumed,
+but does not yet audit the destination transfer temporary path after a
+byte-counted cut or inject corruption from a surviving peer. Pruning
+continuation is protected by the same lease lifecycle but is not concurrent
+in this E2E. Controller restart, remaining race combinations, scale, and the
+Grand Challenge remain open. The next smallest safe task is a throttled,
+byte-counted peer transfer cut with partial-file audit, corrupt-source
+rejection, validated alternate-source fallback, and concurrent pruning
+continuation.
 
 ### Phase 9 dead-epoch lease cleanup and terminal idempotency checkpoint
 
