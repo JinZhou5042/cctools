@@ -81,6 +81,57 @@ def pending_unlink_worker_loss():
             manager._free()
 
 
+def worker_byte_rejection():
+    with tempfile.TemporaryDirectory(
+        prefix="datavine-cache-byte-rejection-"
+    ) as root:
+        manager = Manager(
+            port=0, run_info_path=str(Path(root) / "run-info")
+        )
+        assert manager.tune("datavine-cache-capacity-items", -1) == 0
+        assert manager.tune("datavine-cache-capacity-bytes", 1024) == 0
+        worker = start_worker(manager.port, cores=1)
+        try:
+            output = manager.declare_temp()
+            task = Task(
+                "/bin/dd if=/dev/zero of=oversized bs=2048 count=1"
+            )
+            task.add_output(output, "oversized")
+            manager.submit(task)
+            completed = manager.wait(20)
+            assert completed is not None
+            assert not completed.successful(), completed
+            manager.wait(1)
+            workers = manager.status("workers")
+            assert len(workers) == 1, workers
+            status = workers[0]
+            assert status["cache_capacity_configured"], status
+            assert status["cache_capacity_bytes"] == 1024, status
+            assert status["worker_cache_bytes_high_water"] <= 1024, status
+            assert (
+                status["worker_cache_admission_rejections"] >= 1
+            ), status
+            assert status["worker_cache_bytes"] == 0, status
+            return {
+                "task_result": completed.result,
+                "cache_capacity_bytes": status[
+                    "cache_capacity_bytes"
+                ],
+                "cache_bytes_high_water": status[
+                    "worker_cache_bytes_high_water"
+                ],
+                "cache_admission_rejections": status[
+                    "worker_cache_admission_rejections"
+                ],
+                "worker_cache_bytes": status["worker_cache_bytes"],
+            }
+        finally:
+            if worker.poll() is None:
+                worker.terminate()
+                worker.wait(timeout=10)
+            manager._free()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--factory-manager")
@@ -96,16 +147,28 @@ def main():
         worker_count=2,
         worker_cores=1,
         prefetch=False,
+        worker_disk_cache_bytes=239308,
         worker_disk_cache_items=6,
         worker_disk_cache_admission_items=6,
+        worker_disk_cache_admission_bytes=239308,
     )
     bounded_report = bounded["scheduler_report"]
     assert bounded["taskvine_workers_used"] == 2, bounded
     assert bounded_report["worker_disk_cache_evictions"] > 0
     assert bounded_report["worker_disk_cache_admission_items"] == 6
+    assert bounded_report["worker_disk_cache_admission_bytes"] == 239308
     assert bounded_report["worker_physical_cache"]
     assert all(
         worker["cache_items_high_water"] <= 6
+        for worker in bounded_report["worker_physical_cache"]
+    ), bounded_report
+    assert all(
+        worker["cache_bytes_high_water"] <= 239308
+        and worker["worker_cache_bytes_high_water"] <= 239308
+        and worker["worker_cache_items_high_water"] <= 6
+        and worker["cache_capacity_configured"]
+        and worker["cache_capacity_bytes"] == 239308
+        and worker["worker_cache_bytes"] <= 239308
         for worker in bounded_report["worker_physical_cache"]
     ), bounded_report
     assert sum(
@@ -178,7 +241,39 @@ def main():
         for usage in zero_report["worker_disk_cache_usage"].values()
     ), zero_report
     assert zero["replica_directory"]["active_leases"] == 0
+
+    combined_workflow, combined_target, combined_oracle = build_workflow(6)
+    combined = run_case(
+        "cache-capacity-prefetch-recovery",
+        combined_workflow,
+        combined_target,
+        combined_oracle,
+        factory_manager=args.factory_manager,
+        worker_count=1,
+        worker_cores=1,
+        prefetch=True,
+        inject_worker_loss_after=1,
+        replacement_worker_delay=None if args.factory_manager else 1,
+        worker_disk_cache_bytes=238743,
+        worker_disk_cache_items=6,
+        worker_disk_cache_admission_items=6,
+        worker_disk_cache_admission_bytes=238743,
+    )
+    combined_report = combined["scheduler_report"]
+    assert combined_report["worker_loss_injected"], combined_report
+    assert combined_report["recovery_reexecutions"] >= 1, combined_report
+    assert combined_report["prefetch_selected"] > 0, combined_report
+    assert all(
+        worker["cache_items_high_water"] <= 6
+        and worker["cache_bytes_high_water"] <= 238743
+        and worker["worker_cache_items_high_water"] <= 6
+        and worker["worker_cache_bytes_high_water"] <= 238743
+        and worker["cache_capacity_configured"]
+        for worker in combined_report["worker_physical_cache"]
+    ), combined_report
+
     unlink_loss = pending_unlink_worker_loss()
+    byte_rejection = worker_byte_rejection()
 
     print(
         json.dumps(
@@ -186,7 +281,9 @@ def main():
                 "bounded": bounded_report,
                 "undersized": undersized,
                 "zero": zero_report,
+                "prefetch_recovery": combined_report,
                 "pending_unlink_worker_loss": unlink_loss,
+                "worker_byte_rejection": byte_rejection,
                 "status": "PASS",
             },
             indent=2,

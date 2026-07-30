@@ -101,6 +101,7 @@ def run_case(
     worker_disk_cache_bytes=None,
     worker_disk_cache_items=None,
     worker_disk_cache_admission_items=None,
+    worker_disk_cache_admission_bytes=None,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -223,6 +224,7 @@ def run_case(
                 worker_disk_cache_bytes,
                 worker_disk_cache_items,
                 worker_disk_cache_admission_items,
+                worker_disk_cache_admission_bytes,
             )
             if (
                 replacement_worker_delay is not None
