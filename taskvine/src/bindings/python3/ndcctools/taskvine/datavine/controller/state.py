@@ -440,6 +440,21 @@ class ControllerState:
                 destination_worker_epoch,
             )
 
+    def acquire_observed_transfer(
+        self,
+        data_id,
+        source_worker_id,
+        destination_worker_id,
+        transfer_id,
+    ):
+        with self._lock:
+            return self.replicas.acquire_observed_transfer(
+                data_id,
+                source_worker_id,
+                destination_worker_id,
+                transfer_id,
+            )
+
     def release_replica(self, lease_id, success):
         with self._lock:
             return self.replicas.release_source(lease_id, success)

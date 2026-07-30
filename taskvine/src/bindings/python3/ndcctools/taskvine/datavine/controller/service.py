@@ -524,6 +524,23 @@ class ControllerService:
                         return
                     self._json(200, dataclasses.asdict(lease))
                     return
+                if (
+                    self.path
+                    == f"{API_PREFIX}/replicas/acquire-observed"
+                ):
+                    try:
+                        request = self._read_json()
+                        lease = owner.state.acquire_observed_transfer(
+                            request["data_id"],
+                            request["source_worker_id"],
+                            request["destination_worker_id"],
+                            request["transfer_id"],
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, dataclasses.asdict(lease))
+                    return
                 if self.path == f"{API_PREFIX}/replicas/release":
                     try:
                         request = self._read_json()

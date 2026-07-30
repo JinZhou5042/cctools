@@ -217,6 +217,27 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def acquire_observed_transfer(
+        self,
+        data_id,
+        source_worker_id,
+        destination_worker_id,
+        transfer_id,
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/replicas/acquire-observed",
+            {
+                "data_id": str(data_id),
+                "source_worker_id": str(source_worker_id),
+                "destination_worker_id": str(
+                    destination_worker_id
+                ),
+                "transfer_id": str(transfer_id),
+            },
+        )
+        return json.loads(payload)
+
     def release_replica(self, lease_id, success):
         payload, _ = self._request(
             "POST",

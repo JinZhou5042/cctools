@@ -81,6 +81,47 @@ def main():
             "w1-edata",
         ]
 
+        transfer_id = "taskvine:transfer-contract-1"
+        observed = client.acquire_observed_transfer(
+            f"e:{edata.data_id}", "w2", "w1", transfer_id
+        )
+        duplicate_observed = client.acquire_observed_transfer(
+            f"e:{edata.data_id}", "w2", "w1", transfer_id
+        )
+        assert duplicate_observed == observed
+        expect_remote_error(
+            "conflicting observed transfer identity",
+            client.acquire_observed_transfer,
+            f"e:{edata.data_id}",
+            "w1",
+            "w1",
+            transfer_id,
+        )
+        retiring_observed = client.invalidate_replica(
+            f"e:{edata.data_id}",
+            "w2-edata",
+            1,
+            "w2",
+            1,
+        )
+        assert retiring_observed["state"] == "retiring"
+        released_observed = client.release_replica(
+            transfer_id, False
+        )
+        assert not released_observed["active"]
+        assert released_observed["success"] is False
+        assert client.release_replica(
+            transfer_id, False
+        ) == released_observed
+        expect_remote_error(
+            "observed transfer already completed",
+            client.acquire_observed_transfer,
+            f"e:{edata.data_id}",
+            "w2",
+            "w1",
+            transfer_id,
+        )
+
         lease = client.acquire_replica(
             f"e:{edata.data_id}",
             first["replica_id"],
@@ -210,6 +251,9 @@ def main():
         snapshot = client.snapshot()["replica_directory"]
         assert snapshot["stale_rejections"] >= 1
         assert snapshot["lease_high_water"] == 1
+        assert snapshot["observed_transfer_acquires"] == 1
+        assert snapshot["observed_transfer_idempotent"] == 1
+        assert snapshot["observed_transfer_releases"] == 1
         print(json.dumps(snapshot, sort_keys=True))
         print("DataVine worker replica protocol component test PASS")
     finally:
