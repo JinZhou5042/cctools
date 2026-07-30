@@ -53,6 +53,27 @@
   Controller/protocol/persistence/pruning integration passes.
 - Code commit: `e1843b9bd`.
 
+## 2026-07-29 — Phase 9 generation-safe persistence
+
+- Replaced IDataID-only persistence callbacks with bounded immutable requests
+  carrying request ID, attempt, content hash, payload, and target identity.
+- Added queued cancellation, active cancellation, a defined too-late atomic
+  commit boundary, bounded terminal tombstones, and protocol-v1 cancellation.
+- Registered Controller-memory and durable SharedFS realizations in the
+  physical replica directory; attempt-specific replica names permit an old
+  in-flight read to finish without being overwritten by a newer generation.
+- Fixed the pre-existing race where a late write for attempt 1 could mark
+  attempt 2 durable or overwrite its path. The accepted test commits the old
+  write, publishes attempt 2 concurrently, rejects the stale callback, removes
+  the old file, and then durably persists only attempt 2.
+- Required clean build/install, installed topology and Phase 4–9 regressions,
+  and 20 repeated persistence race runs passed.
+- Self-review also caught and fixed physical replica ID reuse while an old
+  source lease remained active.
+- Review B remains FAIL until pruning and real worker/local/SharedFS deletion
+  paths use the new states.
+- Code commit: `17577b058`.
+
 ## 2026-07-29 — Phase 0 local baseline
 
 - Created branch `datavine` from freshly fetched `origin/task-graph` at PR

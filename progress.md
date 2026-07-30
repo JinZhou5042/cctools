@@ -72,6 +72,34 @@ ControllerState, worker protocol, persistence generations, or the pruning
 executor, and no real bytes are deleted. Evidence:
 `acceptance/artifacts/replica-directory-e1843b9bd.json`.
 
+### Phase 9 persistence generation-safety checkpoint
+
+Commit `17577b058` wires Controller-owned EData, volatile IData, and durable
+IData records into the physical replica directory and replaces unqualified
+persistence callbacks with bounded requests carrying request ID, IDataID,
+attempt, and content hash. SharedFS targets are attempt- and
+content-addressed, so an old attempt cannot overwrite a new value.
+
+Queued cancellation, active cancellation before the atomic commit boundary,
+and explicit too-late cancellation after that boundary are distinct.
+Controller callbacks compare the full request generation and reject a
+completion after a newer attempt is published; a stale committed file is
+removed and cannot acknowledge durability. The cancellation path is available
+through protocol v1, and persistence queue/active/terminal collections expose
+hard capacities and high-water metrics.
+
+The deterministic race suite reproduces queued overload, active cancellation,
+and old completion concurrent with a new attempt. It passes through both
+direct state calls and the real HTTP service/client, repeats 20 times, and
+reports zero callback or cleanup failures. The complete installed local
+topology and Phase 4–9 regression passes after the required clean
+build/install.
+
+Review B remains **FAIL**: pruning does not yet issue these cancellations,
+worker DRAM/disk replicas are not protocol-connected, and SharedFS quarantine
+does not yet rename/delete real files. Evidence:
+`acceptance/artifacts/persistence-races-17577b058.json`.
+
 ## Phase 8 acceptance
 
 The independent Scheduler now derives deterministic prefetch candidates from

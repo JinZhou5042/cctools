@@ -17,16 +17,16 @@ is never a pass.
 | LIGHTWEIGHT | Compact dispatch/queues scale with IDs and bindings | OPEN | Small records exist; 100k-binding bound unmeasured |
 | SERIAL | Exactly-once serialization and byte-preserving movement | OPEN | Small tests exist; full movement/fault proof absent |
 | AUTHORITY | Controller sole data/lineage/durability/pruning authority | FAIL | Standalone replica authority exists at `e1843b9bd`; runtime integration and pruning authority absent |
-| STATE | Validated logical/physical/durability/recovery/pruning transitions | FAIL | Replica state machine passes standalone; combined runtime state is absent |
-| CTRL-BOUND | Bounded memory, serving, metadata, queues, cleanup | FAIL | Replica metadata bounded; bulk bytes and HTTP/persistence queues remain unbounded |
-| CTRL-FAIL | Auth, idempotency, epochs, stale/partial/restart behavior | FAIL | Replica epochs/idempotency pass standalone; protocol integration/restart contract absent |
+| STATE | Validated logical/physical/durability/recovery/pruning transitions | FAIL | Controller/persistence/replica generations integrate at `17577b058`; worker and pruning transitions absent |
+| CTRL-BOUND | Bounded memory, serving, metadata, queues, cleanup | FAIL | Replica metadata and persistence queues bounded; bulk bytes and HTTP serving remain unbounded |
+| CTRL-FAIL | Auth, idempotency, epochs, stale/partial/restart behavior | FAIL | Replica epochs and persistence stale completion pass; worker protocol and restart contract absent |
 | SCHED | Independent data progress, minimal rollback, fairness, termination | OPEN | Basic recovery/prefetch exists; combined cases absent |
 | WORKER-PREP | Batched validated resolution with direct source fallback | FAIL | Per-object resolution; no multi-source Controller response |
 | CACHE | Strict DRAM/disk bounds, admission, eviction, zero mode | FAIL | TaskVine disk reuse only; DataVine DRAM/admission metrics absent |
 | PREFETCH | Bounded/cancellable/priority-safe independent progress | OPEN | Byte/item/priority gates pass; concurrency/cancel/final architecture open |
 | PUBLISH | Exactly-once staged idempotent publication and cleanup | OPEN | Basic stage/fsync/publish passes; full fault matrix open |
 | PLACE | Multi-source, load/epoch, bulk bypass, peer fallback | FAIL | Standalone multi-source/load/epoch logic passes; runtime still uses Controller URL plus TaskVine peer |
-| PERSIST | Bounded/cancellable/backpressured atomic durability | FAIL | Atomic bounded workers exist; queue/cancel/overload missing |
+| PERSIST | Bounded/cancellable/backpressured atomic durability | OPEN | Queue, cancel, overload, attempt-safe acknowledgement pass at `17577b058`; pruning integration and full failure matrix open |
 | RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | Single manual global-loss replay only |
 | PRUNE-SHADOW | Reference/incremental equivalence and proof records | PASS | `artifacts/phase9-shadow-20260729.json`, commit `2108b68a8` |
 | PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | FAIL | Not implemented |

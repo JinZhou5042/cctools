@@ -56,9 +56,12 @@ tests for reordered/duplicate/stale transitions.
 
 ### B4 — Persistence cancellation is advisory only
 
-The shadow plan emits `cancel-persistence`, but the existing persistence queue
-cannot cancel queued work, and active completion could still acknowledge an
-obsolete write.
+Correction checkpoint `17577b058` adds bounded request generations, queued and
+active cancellation, a defined atomic too-late boundary, and stale-completion
+rejection. The deterministic direct and HTTP tests pass.
+
+This finding remains open because the shadow pruning plan does not yet invoke
+the runtime cancellation API atomically with its proof revision.
 
 Required correction: bounded request IDs/generations, queued cancellation,
 defined active cancellation, and stale-completion rejection.
