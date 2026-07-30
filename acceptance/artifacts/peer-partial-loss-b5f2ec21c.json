@@ -1,0 +1,91 @@
+{
+  "checkpoint": "byte-counted-peer-source-loss-and-partial-cleanup",
+  "code_commit": "b5f2ec21c77d3dbe05063ceab9df168f18083a03",
+  "status": {
+    "scoped_checkpoint": "PASS",
+    "architecture_review_b": "FAIL",
+    "ultimate_acceptance": "FAIL"
+  },
+  "acceptance": {
+    "edata_serialized_bytes": 48600009,
+    "fault_threshold_bytes": 4096,
+    "positive_partial_bytes_observed": true,
+    "partial_bytes_below_complete_size": true,
+    "peer_source_losses_injected": 1,
+    "source_process_returncode": -9,
+    "source_process_group_remaining": false,
+    "taskvine_worker_disconnections": 1,
+    "taskvine_workers_used": 2,
+    "logical_tasks": 10,
+    "physical_attempts": 10,
+    "legacy_recovery_tasks": 0,
+    "peer_transfer_progress_events": 1,
+    "peer_transfer_cleanup_reports": 1,
+    "peer_transfer_cleanup_absent": 1,
+    "peer_transfer_cleanup_pending": 0,
+    "observed_transfer_acquires": 2,
+    "observed_transfer_releases": 2,
+    "active_leases_after_run": 0,
+    "stable_origin_fetches": 2,
+    "result_serialized_sha256": "d1ae997de7b769de617355b983ec413d47803321409ae55f2fbe8c846c84154b"
+  },
+  "deterministic_repetitions": [
+    {
+      "partial_bytes": 131072,
+      "cleanup": "1 report, exact path absent, 0 pending",
+      "leases": "2 acquired, 2 failed, 2 released, 0 active",
+      "source_returncode": -9,
+      "result_serialized_sha256": "d1ae997de7b769de617355b983ec413d47803321409ae55f2fbe8c846c84154b"
+    },
+    {
+      "partial_bytes": 1077248,
+      "cleanup": "1 report, exact path absent, 0 pending",
+      "leases": "2 acquired, 1 failed, 2 released, 0 active",
+      "source_returncode": -9,
+      "result_serialized_sha256": "d1ae997de7b769de617355b983ec413d47803321409ae55f2fbe8c846c84154b"
+    },
+    {
+      "partial_bytes": 40960,
+      "cleanup": "1 report, exact path absent, 0 pending",
+      "leases": "2 acquired, 2 failed, 2 released, 0 active",
+      "source_returncode": -9,
+      "result_serialized_sha256": "d1ae997de7b769de617355b983ec413d47803321409ae55f2fbe8c846c84154b"
+    }
+  ],
+  "build": {
+    "command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+    "result": "PASS"
+  },
+  "regression_suite": {
+    "command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/test && for test_name in TR_datavine_*.sh; do bash ./$test_name run; done",
+    "passed": 23,
+    "failed": 0
+  },
+  "package": {
+    "path": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+    "sha256": "180dc4b948dd6c1a85d88c5f177a00b82e509e2e6b3f930d4dd989aa8376d649",
+    "cloudpickle": "3.1.2",
+    "poncho_package_run_imports_and_counter_api": "PASS"
+  },
+  "factory": {
+    "entrypoint": "/users/jzhou24/graph_optimization/factories/run_factory.sh",
+    "manager_name": "datavine-partial-b5f2ec21c",
+    "workers": 2,
+    "partial_bytes": 65536,
+    "cleanup": "1 report, exact path absent, 0 pending",
+    "result": "PASS",
+    "oracle_matches_local": true,
+    "shutdown": "all workers removed"
+  },
+  "rejected_results": [
+    "A 70 MiB first workload was rejected by the configured 64 MiB Controller EData capacity and was not counted.",
+    "The first in-capacity run observed 131072 partial bytes but lost the cleanup audit after active lease removal and was not counted.",
+    "Transfer-child start without a positive byte observation remains only evidence for the prior checkpoint."
+  ],
+  "remaining_critical_work": [
+    "Inject corrupt bytes from a surviving peer and prove hash rejection plus alternate-peer fallback.",
+    "Run pruning continuation concurrently with the byte-counted real transfer failure.",
+    "Exercise stale source metadata, destination loss, and repeated transfer failures through the real protocol.",
+    "Complete dynamic-consumer invalidation, Controller restart behavior, scale, and the Grand Challenge comparison."
+  ]
+}

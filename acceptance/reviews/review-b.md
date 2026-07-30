@@ -361,3 +361,17 @@ surviving peer fallback and real-transfer failure concurrent with pruning
 continuation are also absent. Those must pass, together with the existing
 restart/dynamic-consumer blockers, before transfer-coupled pruning can pass
 this review.
+
+Correction checkpoint `b5f2ec21c` proves a positive destination-side write
+strictly below the complete 48,600,009-byte object before source-process-group
+loss. The failed transfer removes its exact temporary path before invalidation;
+a TransferID/WorkerID-bound audit record crosses active-lease deletion and is
+consumed exactly once. Three local repetitions and a package-only factory run
+end with one absent-path cleanup report, zero pending audit records, zero
+active leases, stable-origin fallback, and the exact oracle. Evidence is
+`../artifacts/peer-partial-loss-b5f2ec21c.json`.
+
+Review B remains **FAIL**. The checkpoint does not corrupt a surviving peer or
+prove fallback to a second peer candidate, and it does not run physical
+pruning continuation concurrently with the byte-counted failure. Controller
+restart and dynamic-consumer invalidation also remain unresolved.

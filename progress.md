@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 byte-counted partial peer transfer and corrupt-source fallback**
-- Validated code commit: `9afe1a64b`
+- Active task: **Phase 9 corrupt surviving-peer fallback and transfer/pruning concurrency**
+- Validated code commit: `b5f2ec21c`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +25,43 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 byte-counted peer-source loss and cleanup checkpoint
+
+Commit `b5f2ec21c` replaces the transfer-child timing assumption with direct
+destination-side observation of the actual transfer temporary file. While a
+transfer is active, the worker remains responsive at a bounded 1 ms polling
+interval, reports the first positive byte count, and the Manager accepts it
+only for a live leased peer transfer from the exact destination. The fault is
+injected only when `0 < observed_bytes < expected_size` and the configured
+4 KiB threshold is met.
+
+The accepted 48,600,009-byte EData run cuts the transfer after a positive
+partial write, kills the complete source process group, removes the exact
+destination transfer path before `cache-invalid`, consumes a WorkerID-bound
+cleanup expectation, and ends with zero pending cleanup records and zero
+active leases. Three repetitions observe 40,960, 131,072, and 1,077,248
+partial bytes; every run has one cleanup report, an absent exact path, source
+return code `-9`, two stable-origin fetches, and result SHA-256
+`d1ae997de7b769de617355b983ec413d47803321409ae55f2fbe8c846c84154b`.
+
+The exact clean build/install and all 23 DataVine regressions pass. The rebuilt
+global package has SHA-256
+`180dc4b948dd6c1a85d88c5f177a00b82e509e2e6b3f930d4dd989aa8376d649`;
+`poncho_package_run -e` validates cloudpickle 3.1.2, imports, and the new
+counter API. The two-worker package-only factory observes 65,536 partial
+bytes, exact-path cleanup, no pending audit, stable-origin fallback, and the
+same oracle; shutdown removes its remaining worker. Evidence:
+`acceptance/artifacts/peer-partial-loss-b5f2ec21c.json`.
+
+Self-review is **PASS for the scoped byte-counted interruption and cleanup
+checkpoint, FAIL for Review B and Ultimate Acceptance**. The first 70 MiB
+workload was correctly rejected by the 64 MiB EData capacity and is not
+accepted evidence. The first in-capacity implementation also lost its cleanup
+audit after lease removal; it was rejected and corrected with an exact,
+one-shot TransferID/WorkerID audit record. Surviving corrupt-peer rejection,
+alternate-peer fallback, concurrent pruning continuation, scale, and the Grand
+Challenge remain open.
 
 ### Phase 9 actual peer-source process-loss checkpoint
 

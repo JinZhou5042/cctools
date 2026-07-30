@@ -1,5 +1,28 @@
 # DataVine History
 
+## 2026-07-30 — Byte-counted peer interruption and partial cleanup
+
+- Destination workers now observe a real positive transfer-file byte count;
+  the Manager validates exact destination, active lease, nonzero bytes, and
+  bytes below the expected complete size before injecting source loss.
+- Failed transfer paths are removed before invalidation and audited across
+  lease deletion with a one-shot TransferID/WorkerID expectation. Accepted
+  runs end with one absent-path report and zero pending audit records.
+- Three local repetitions cut a 48,600,009-byte EData item after 40,960 to
+  1,077,248 bytes, kill one complete source process group, release every lease,
+  fall back to the stable origin, and return the same oracle.
+- Rejected a 70 MiB workload stopped by the configured Controller capacity and
+  an implementation that lost cleanup evidence after active lease removal.
+- Exact clean build/install and all 23 regressions pass. A package-only
+  two-worker factory reproduces a 65,536-byte cut, cleanup, fallback, and
+  oracle; factory shutdown removes its remaining worker.
+- Code commit: `b5f2ec21c`; package SHA-256:
+  `180dc4b948dd6c1a85d88c5f177a00b82e509e2e6b3f930d4dd989aa8376d649`.
+- Evidence: `acceptance/artifacts/peer-partial-loss-b5f2ec21c.json`.
+- Self-review: **PASS for this scoped checkpoint, FAIL for Review B and
+  Ultimate Acceptance**. Corrupt alternate-peer fallback and concurrent
+  transfer/pruning continuation remain open.
+
 ## 2026-07-30 — Actual peer-source process loss after transfer start
 
 - Added a destination-originated event after the real transfer child forks.
