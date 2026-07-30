@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `643cddd68`
+Reviewed through code commit: `ef605c343`
 Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
@@ -121,9 +121,16 @@ state.
 Required correction: source leases or equivalent reference protection tied to
 replica epochs, with deterministic race tests.
 
-The authenticated protocol can acquire and release bounded epoch-checked
-source leases, but TaskVine's actual byte transfer path does not call it yet.
-The component race is necessary but insufficient; this finding remains open.
+Correction checkpoint `ef605c343` binds qualified DataIDs to TaskVine files
+and makes the actual peer-transfer path acquire and release bounded,
+epoch-checked Controller leases. Unverified prefetch-created TaskVine replicas
+are rejected by the Controller and fall back to the stable origin without
+compute rollback. Three local repetitions and factory peer-on/off runs balance
+every acquisition and release with no active lease leak.
+
+This finding remains open because worker loss during the active byte transfer,
+temporary Controller unavailability during release, and pruning concurrent
+with those real transfers have not yet passed one deterministic E2E schedule.
 
 ### B6 — Dynamic invalidation is correct only inside the shadow object
 
@@ -155,7 +162,7 @@ pin coverage and restart-persistent quarantine/audit recovery are absent.
 
 | Review B question | Result |
 |---|---|
-| Recoverability model complete? | FAIL — stable bulk origins exist; mutation/restart lifecycle and transfer coupling remain open |
+| Recoverability model complete? | FAIL — stable bulk origins and normal transfer coupling exist; mutation/restart and transfer-failure lifecycle remain open |
 | Every shadow decision explained? | PASS |
 | Active and recovery consumers distinguished? | PASS in shadow, not runtime |
 | Durability coverage handles branches/joins? | PASS in shadow |

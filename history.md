@@ -216,6 +216,39 @@
   `dagvine-env.tar.gz`, corrected in the Phase 2 factory validation below.
 - Code commit: `ab6b7666d`.
 
+## 2026-07-29 — Phase 9 direct TaskVine transfer authority
+
+- Commit `4367f95ca` added idempotent observed-transfer acquisition to the
+  authenticated Controller protocol, with current worker-epoch validation,
+  completed-ID tombstones, and bounded lease metrics.
+- Commit `11e555bef` attached qualified DataIDs to TaskVine files and wired
+  real peer pulls through Controller acquisition/release. Terminal transfer
+  state detaches worker pointers before lease-release retry, preventing stale
+  worker references after loss.
+- The old Phase 5 test was found insufficient: using two workers did not prove
+  both consumed the shared EData. It now uses two single-core workers, records
+  worker assignment per task, and requires nonzero balanced Controller lease
+  telemetry for peer-on and zero acquisitions for peer-off.
+- The first full regression after integration was rejected: Phase 8 prefetch
+  exposed a TaskVine cache source not yet published to the Controller. The
+  Controller correctly refused it, but TaskVine aborted instead of falling
+  back. Commit `ef605c343` deletes the unverified substitute and retries the
+  stable origin while preserving Controller authority.
+- The exact `ef605c343` clean build/install and all 14 local DataVine
+  regressions pass. Three repeated local Phase 5 runs each record 5
+  acquisitions, 5 releases, zero active leases, and zero peer-off
+  acquisitions.
+- Rebuilt `datavine.tar.gz` from the active DataVine environment and verified
+  it with `poncho_package_run`. SHA-256:
+  `fc44eadfc93a207f919279854036701248dafe4b98ba6bc45279a253ba89e110`.
+- Factory `datavine-transfer-ef605c343` supplied two workers. Phase 5
+  peer-on/off, Phase 8 prefetch/fallback, and Phase 7 worker-loss recovery
+  passed. The factory was stopped and both workers were removed.
+- This is not Ultimate Acceptance. Active-transfer worker loss,
+  release-timeout fault injection, bounded worker-cache admission, and the
+  Grand Challenge remain open.
+- Evidence: `acceptance/artifacts/transfer-authority-ef605c343.json`.
+
 ## 2026-07-29 — Phase 1 indexed serialized identity
 
 - Added feature-flagged TaskID, EDataID, IDataID, and task binding records while

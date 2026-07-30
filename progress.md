@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 direct transfer leases and bounded cache admission**
-- Validated code commit: `643cddd68`
+- Active task: **Phase 9 bounded worker-cache admission and eviction safety**
+- Validated code commit: `ef605c343`
 
 ## Ultimate acceptance reset
 
@@ -162,10 +162,10 @@ checkpoint: absent quarantined data could never reach hard delete; unlink ran
 before grace validation; lineage rejection could leave a half-registered
 task; and corrupt quarantine bytes could be exposed before validation.
 
-Review B remains **FAIL**. Worker-local files are not yet physically deleted,
-real transfers do not acquire source leases, quarantine/audit state is not
-restart-persistent, and stable bulk origins plus pin/final-output protocol
-coverage remain open. Evidence:
+At this checkpoint Review B remained **FAIL**. Worker-local files were not yet
+physically deleted, real transfers did not acquire source leases,
+quarantine/audit state was not restart-persistent, and stable bulk origins plus
+pin/final-output protocol coverage remained open. Evidence:
 `acceptance/artifacts/sharedfs-pruning-347f60531.json`.
 
 ### Phase 9 acknowledged worker-local pruning checkpoint
@@ -273,11 +273,51 @@ The rebuilt package SHA-256 is
 `857eb5a8d4f586c369ab0755b7f249557a8b1c08e1e3f367a5635dbfef3a5cd6`.
 The accepted factory `datavine-epoch-643cddd68` was stopped and both workers
 were removed. The earlier failing package/run is recorded as rejected evidence,
-not acceptance. `CTRL-BOUND`, Review B, and Ultimate Acceptance remain
-**FAIL**: actual transfers do not acquire Controller leases, cache admission
-is not DataVine-owned, bulk-origin mutation/restart recovery is open, and
-Controller history cleanup plus the Grand Challenge remain absent. Evidence:
+not acceptance. At this checkpoint `CTRL-BOUND`, Review B, and Ultimate
+Acceptance remained **FAIL**: actual transfers did not acquire Controller
+leases, cache admission was not DataVine-owned, bulk-origin mutation/restart
+recovery was open, and Controller history cleanup plus the Grand Challenge
+remained absent. Evidence:
 `acceptance/artifacts/bulk-origin-643cddd68.json`.
+
+### Phase 9 direct transfer authority checkpoint
+
+Commits `4367f95ca`, `11e555bef`, and `ef605c343` connect TaskVine's actual
+worker-to-worker byte-transfer path to Controller-owned source leases.
+TaskVine files carry their qualified EDataID or IDataID; substitute peer URLs
+preserve that identity. Before a peer pull is sent, the Manager acquires an
+idempotent lease tied to the Controller's current source and destination
+worker epochs. Success, failure, and worker removal terminate the physical
+transfer and release the lease. A failed release retains only a detached,
+bounded retry record, so it cannot reference a deleted worker.
+
+The accepted Phase 5 test was strengthened because its old two-worker metric
+did not prove shared-data consumers ran on both workers. Two single-core
+workers now execute the shared consumers concurrently. Across three local
+repetitions, peer-on performed exactly 5 authorized acquisitions and 5
+releases with zero active leases; peer-off performed zero acquisitions.
+Controller fetches for the 1,769,481-byte shared EData remained one with peer
+transfer and two without it.
+
+Self-review of the first full regression exposed an authority/fallback bug:
+prefetch can create a TaskVine cache replica before a DataVine runner reports
+it. The Controller correctly rejected this unverified source, but TaskVine's
+old error path aborted scheduling. Commit `ef605c343` preserves sole
+Controller authority, discards the substitute, and retries the stable origin
+without compute rollback. Phase 8 now asserts this rejection/fallback path,
+balanced authorized leases, zero leaked leases, and the exact oracle.
+
+The required clean build/install and all 14 local regressions pass at
+`ef605c343`. The rebuilt package SHA-256 is
+`fc44eadfc93a207f919279854036701248dafe4b98ba6bc45279a253ba89e110`.
+Factory `datavine-transfer-ef605c343` passed peer-on/off, prefetch fallback,
+and worker-loss recovery; it was stopped and both workers were removed.
+
+Review B and Ultimate Acceptance remain **FAIL/OPEN**. Worker loss during an
+active peer transfer and Controller release-timeout retry are not yet
+deterministically injected, worker cache capacities/admission remain outside
+DataVine authority, and the Grand Challenge is absent. Evidence:
+`acceptance/artifacts/transfer-authority-ef605c343.json`.
 
 ## Phase 8 acceptance
 

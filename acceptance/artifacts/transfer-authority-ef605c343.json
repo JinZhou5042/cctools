@@ -1,0 +1,100 @@
+{
+  "acceptance": "PASS",
+  "scope": "Phase 9 direct TaskVine transfer authority and safe origin fallback",
+  "code_commits": [
+    "4367f95ca",
+    "11e555bef",
+    "ef605c343"
+  ],
+  "build": {
+    "command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+    "result": "PASS"
+  },
+  "local": {
+    "complete_regression": {
+      "tests": 14,
+      "passed": 14,
+      "result": "PASS"
+    },
+    "peer_repetitions_before_final_checkpoint": [
+      {
+        "acquires": 5,
+        "releases": 5,
+        "active_leases": 0,
+        "peer_off_acquires": 0
+      },
+      {
+        "acquires": 5,
+        "releases": 5,
+        "active_leases": 0,
+        "peer_off_acquires": 0
+      },
+      {
+        "acquires": 5,
+        "releases": 5,
+        "active_leases": 0,
+        "peer_off_acquires": 0
+      }
+    ],
+    "prefetch_unverified_source": {
+      "controller_rejections": 3,
+      "authorized_acquires": 3,
+      "releases": 3,
+      "active_leases": 0,
+      "stable_origin_fallback": "PASS",
+      "oracle": "PASS"
+    },
+    "worker_loss_recovery": {
+      "result": "PASS",
+      "logical_tasks": 4,
+      "physical_attempts": 5,
+      "recovery_reexecutions": 1
+    }
+  },
+  "package": {
+    "path": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+    "sha256": "fc44eadfc93a207f919279854036701248dafe4b98ba6bc45279a253ba89e110",
+    "poncho_package_run": "PASS"
+  },
+  "factory": {
+    "entrypoint": "bash /users/jzhou24/graph_optimization/factories/run_factory.sh",
+    "manager_name": "datavine-transfer-ef605c343",
+    "workers": 2,
+    "peer_on": {
+      "result": "PASS",
+      "controller_fetches_for_shared_edata": 1,
+      "acquires": 5,
+      "releases": 5,
+      "active_leases": 0
+    },
+    "peer_off": {
+      "result": "PASS",
+      "controller_fetches_for_shared_edata": 2,
+      "acquires": 0
+    },
+    "prefetch": {
+      "result": "PASS",
+      "unverified_source_rejections": 3,
+      "stable_origin_fallback": "PASS"
+    },
+    "worker_loss_recovery": {
+      "result": "PASS",
+      "worker_disconnections": 1,
+      "logical_tasks": 4,
+      "physical_attempts": 5,
+      "recovery_reexecutions": 1
+    },
+    "shutdown": "PASS; 2 workers removed"
+  },
+  "rejected_experiment": {
+    "test": "first complete regression after direct transfer integration",
+    "failure": "prefetch-created TaskVine cache source was not yet published to Controller; Controller correctly rejected the lease, but the manager did not fall back and TaskVine aborted in list scheduling",
+    "accepted_correction": "retain Controller authority, delete the unverified substitute, and retry the stable origin without compute rollback"
+  },
+  "remaining": [
+    "worker loss during an active peer transfer is not yet deterministically injected",
+    "Controller release timeout retry is implemented but not fault-injected end to end",
+    "TaskVine worker cache capacity and admission are not yet DataVine-owned",
+    "Grand Challenge and Ultimate Acceptance remain open"
+  ]
+}
