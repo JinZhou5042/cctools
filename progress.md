@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 persistence/global-loss/pruning race integration**
-- Validated code commit: `c4d5258b6`
+- Active task: **Phase 9 minimum recoverable cut and repeated-frontier recovery**
+- Validated code commit: `aac966a09a`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +25,45 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 persistence/global-loss/pruning recovery-barrier checkpoint
+
+Commit `aac966a09a` closes one actual runtime race. While a worker persistence
+task is in `writing`, Scheduler records a pruning proof, invalidates the only
+volatile replica, records the post-loss proof, and cancels the exact
+persistence request. Recovery remains suspended until both the old request
+task has drained and TaskVine has acknowledged deletion of the old cached
+file. Only then is the original logical TaskID released as ordinary pending
+computation. Request-ID matching prevents an unrelated request for the same
+IDataID from opening the barrier.
+
+The first three implementations were rejected by their end-to-end tests:
+unavailable IData was retried for persistence; prune acknowledgement raced
+ahead of old-request completion; and DataID-only drain matching admitted a
+new attempt too early. Those failures also revealed that worker curl transfer
+accepted an HTTP 409 response body as a cache file. TaskVine now uses
+fail-on-HTTP-error semantics, so the error body cannot become a replica, and
+remote-URL failure is no longer misclassified as a malformed peer transfer.
+
+After the final prescribed clean build/install, all 16 installed-path
+regressions pass and three consecutive local race repetitions pass. The
+rebuilt package SHA-256 is
+`d9fff8aef1e52a2d8ab574de9903df06e463a3221da370d977c78e498b2a18ce`.
+Package-only factory `datavine-persist-loss-aac966a09` used two workers and
+completed the exact oracle through four physical attempts for two logical
+tasks, two ordinary recovery reexecutions, one active-persistence global
+loss, one 2,097,161-byte worker persistence, zero legacy recovery tasks, zero
+stale persistence completions, and 79 bytes of Controller IData high-water.
+The pre-loss pruning proof is `keep` with `persistence-writing`; the post-loss
+proof is `absent` with `no-accepted-replica`. Both factory workers were
+removed. Evidence:
+`acceptance/artifacts/persistence-loss-race-aac966a09.json`.
+
+Self-review leaves `RACES`, `RECOVERY`, `MIN-CUT`, Review B, and Ultimate
+Acceptance FAIL/OPEN. The next smallest safe task is a real minimum
+recoverable-cut runtime checkpoint with two durability frontiers and a second
+loss after the first recovery, proving bounded rollback and safe pruning of
+the covered upstream branch.
 
 ### Phase 9 bounded Controller IData and worker-local large-IData checkpoint
 

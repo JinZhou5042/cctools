@@ -1,5 +1,36 @@
 # DataVine History
 
+## 2026-07-30 — Persistence/global-loss/pruning recovery barrier
+
+- Added a deterministic runtime interleaving that loses the only volatile
+  replica while worker persistence is writing, evaluates pruning immediately
+  before and after the loss, drains the cancelled request, confirms physical
+  worker-cache deletion, and only then releases the stable logical task for
+  ordinary recomputation.
+- Rejected three intermediate designs. The first retried persistence while
+  IData was unavailable; the second let a prune acknowledgement release a new
+  attempt before the old persistence task drained; the third matched that
+  drain by DataID instead of exact request ID and allowed another request to
+  open the barrier.
+- The failed runs exposed that TaskVine curl transfers cached HTTP 409 error
+  bodies as successful files. URL transfer now fails on HTTP 4xx/5xx, and
+  URL-origin failures no longer falsely report a missing peer source worker
+  or penalize a destination worker.
+- Final clean build/install and all 16 installed regressions pass. Three
+  consecutive local race repetitions pass with identical semantic metrics.
+  Package-only factory `datavine-persist-loss-aac966a09` passed with two
+  workers, two ordinary recovery reexecutions, four physical attempts for two
+  logical tasks, one persistence/global-loss event, one 2,097,161-byte worker
+  persistence, zero legacy recovery tasks, no stale completion, and 79 bytes
+  of Controller IData high-water. Both workers were removed.
+- Code commit: `aac966a09a`; package SHA-256:
+  `d9fff8aef1e52a2d8ab574de9903df06e463a3221da370d977c78e498b2a18ce`.
+- Evidence:
+  `acceptance/artifacts/persistence-loss-race-aac966a09.json`.
+- Ultimate Acceptance remains FAIL. This checkpoint closes one required
+  persistence/global-loss/pruning ordering, not the full race matrix,
+  minimum recoverable cut, scale comparison, or Grand Challenge.
+
 ## 2026-07-30 — Bounded worker persistence failure recovery
 
 - Replaced TaskVine-level persistence-task retries with Scheduler-owned,

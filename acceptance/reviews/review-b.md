@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `c4d5258b6`
+Reviewed through code commit: `aac966a09a`
 Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
@@ -132,6 +132,18 @@ B1 remains open for worker DRAM, active peer-transfer loss, persistence
 completion concurrent with global loss/pruning, metadata cleanup, and
 scale-level I/O/fairness evidence.
 
+Correction checkpoint `aac966a09a` closes one persistence/global-loss/pruning
+interleaving in the real runtime. Scheduler protects a writing IData from
+pruning, cancels its exact persistence request on global loss, waits for both
+that physical task to drain and the old worker-cache prune acknowledgement,
+then reuses the original logical task for recomputation. Three local
+repetitions and a two-worker package-only factory run complete two recovery
+cycles with zero legacy recovery tasks. Failed intermediate designs exposed
+and corrected HTTP error-body cache admission and request-ID barrier races.
+
+B1 remains open for DRAM, active peer-transfer loss, metadata cleanup,
+minimum-cut/frontier recovery, and scale-level I/O/fairness evidence.
+
 ### B2 — Stable-root reproducibility is assumed, not proved by Controller state
 
 The independent safety oracle assumes task metadata and all root EData remain
@@ -203,6 +215,13 @@ cancelled request cannot acknowledge durability, removes its target, releases
 admission, and can be retried. B4 remains closed for the current fault model;
 SharedFS unavailability/overload and pruning/global-loss combinations remain
 separate open race requirements.
+
+Checkpoint `aac966a09a` additionally proves that global loss during worker
+persistence cannot let the cancelled request publish durability or let a
+different request for the same IDataID release recovery early. The pruning
+proof moves from protected `persistence-writing` to non-prunable
+`no-accepted-replica`, then ordinary recomputation reaches durable. B4 remains
+closed; other transfer/pruning and scale combinations remain open elsewhere.
 
 ### B5 — No in-flight transfer/read protection
 
