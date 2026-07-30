@@ -10,9 +10,9 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 DataVine-owned volatile IData materialization and
-  legacy-recovery removal**
-- Validated code commit: `6d3b77042`
+- Active task: **Phase 9 bounded ordinary-IData storage and large-IData
+  bypass**
+- Validated code commit: `f1237b8b8`
 
 ## Ultimate acceptance reset
 
@@ -66,6 +66,49 @@ rather than a proven process kill, active-transfer loss is absent, and
 future-used volatile IData cannot yet be evicted without falling into the
 obsolete TaskVine recovery path. Machine-readable evidence:
 `acceptance/artifacts/worker-cache-capacity-6d3b77042.json`.
+
+### Phase 9 DataVine-owned IData rematerialization checkpoint
+
+Commits `997d63acf` and `9512638c5` replace DataVine's `VINE_TEMP` output
+identity with an attempt-qualified, Controller-backed URL that is both a
+writable worker cache identity and a stable rematerialization source. Only a
+Controller-qualified URL may be used as a task output. Consumers still prefer
+worker/peer cache, but a missing physical replica can be fetched directly
+without asking TaskVine to create a special recovery task. The Controller
+returns HTTP 409 for an old attempt URL after a newer attempt is published.
+
+The first package-only factory run was rejected when worker release raced
+cache eviction and exposed a stale local replica generation. Commits
+`f6c1c712e` and `f1237b8b8` correct that race with a Controller-atomic observed
+invalidation: attempt, content hash, size, worker identity, and worker epoch
+must still match, then the Controller invalidates its current physical
+generation. A stale generation can no longer fail the workflow merely because
+the same physical cache identity was safely rematerialized; different content
+or a different incarnation still fails closed.
+
+After the repeated required clean build/install, all 15 installed regressions
+pass. Local bounded and zero-cache cases physically evict IData with one
+future consumer and reconstruct the exact oracle. The combined local run has
+seven logical tasks, eight ordinary attempts, one DataVine recovery replay,
+and zero TaskVine recovery tasks. The protocol test advances a physical
+replica from generation 1 to 2, invalidates generation 2 through the
+identity-checked operation, and rejects a wrong hash.
+
+The rebuilt archive SHA-256 is
+`2bbb11c55b86b08719b4173e32ad0a93b0cdb1961dc68c948ce83342a1cec9f6`.
+Factory `datavine-idata-f1237b8b8` reproduced future-used IData eviction,
+prefetch, one worker release, one ordinary recovery replay, exact output, and
+zero legacy recovery tasks. Physical cache high-water was six items and
+238,726 bytes against limits of six and 238,743; both workers were removed.
+
+Self-review keeps `CTRL-BOUND`, `CACHE`, `RECOVERY`, Review B, and Ultimate
+Acceptance **FAIL**. The Controller still retains ordinary IData bytes, so
+this checkpoint proves ownership and rematerialization but not the required
+volatile worker-local/bulk-data architecture. Worker loss was a Manager
+release, only one recovery cycle ran, DRAM remains absent, and the factory
+Scheduler's soft logical observation briefly counted seven records while the
+worker's authoritative physical high-water remained six. Evidence:
+`acceptance/artifacts/idata-rematerialization-f1237b8b8.json`.
 
 ### Phase 9 shadow pruning checkpoint
 

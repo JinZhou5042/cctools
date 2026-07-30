@@ -606,3 +606,35 @@
   Legacy comparison are not proved.
 - Code commits: `3993bd475`, `5d2ef7d60`, `e48fffa4a`, `240e05ebd`,
   `a66f7fae1`, `291a81a95`, `6d3b77042`.
+
+## 2026-07-30 — Phase 9 DataVine-owned IData rematerialization
+
+- Replaced DataVine `VINE_TEMP` outputs with attempt-qualified,
+  Controller-backed URL cache identities. Controller-qualified URLs may be
+  written as task outputs; ordinary URL outputs remain rejected.
+- Kept worker/peer cache reuse while adding an authenticated stable fallback
+  for a missing IData realization.
+- Added attempt validation to the Controller byte endpoint; an old attempt
+  URL receives HTTP 409 after a newer publication.
+- Allowed the cache policy to evict future-used IData only while the
+  Controller reports it rematerializable.
+- Added `legacy_recovery_tasks` telemetry and made zero legacy TaskVine
+  recovery tasks an acceptance criterion.
+- Rejected the first factory result after worker release raced eviction and
+  produced `stale invalidation generation`.
+- Added a Controller-atomic observed invalidation operation that verifies
+  attempt, hash, size, worker identity, and worker epoch before invalidating
+  the current generation. Wrong content and stale incarnations fail closed.
+- The required build, 15 regressions, future-IData bounded/zero-cache tests,
+  stale-attempt HTTP test, and rematerialized-generation protocol test pass.
+- Rebuilt package SHA-256:
+  `2bbb11c55b86b08719b4173e32ad0a93b0cdb1961dc68c948ce83342a1cec9f6`.
+- A fresh two-worker factory run completes seven logical tasks through eight
+  ordinary attempts, evicts future-used IData, performs one DataVine recovery,
+  stays within physical disk bounds, reports zero legacy recovery tasks, and
+  removes both workers.
+- Ultimate Acceptance remains FAIL because ordinary IData bytes are still
+  retained centrally, large-IData bypass and DRAM bounds are absent, and real
+  process loss/repeated frontier-aware recovery/Grand Challenge comparison
+  have not passed.
+- Code commits: `997d63acf`, `9512638c5`, `f6c1c712e`, `f1237b8b8`.

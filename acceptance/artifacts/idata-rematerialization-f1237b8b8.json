@@ -1,0 +1,92 @@
+{
+  "artifact": "DataVine-owned IData rematerialization checkpoint",
+  "commit": "f1237b8b8",
+  "date": "2026-07-30",
+  "status": "PASS_COMPONENT_NOT_ULTIMATE_ACCEPTANCE",
+  "build": {
+    "command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+    "status": "PASS",
+    "source_worker_sha256": "2b7e27d4a050623f2b97601fabf4e78a0ab2f7cbb57e7fbca66d58b7283e7109",
+    "installed_worker_sha256": "2b7e27d4a050623f2b97601fabf4e78a0ab2f7cbb57e7fbca66d58b7283e7109"
+  },
+  "regression": {
+    "tests": 15,
+    "passed": 15,
+    "status": "PASS"
+  },
+  "local": {
+    "future_used_idata_evicted": true,
+    "zero_cache_future_used_idata_evicted": true,
+    "stale_attempt_http_status": 409,
+    "legacy_recovery_tasks": 0,
+    "prefetch_recovery": {
+      "logical_tasks": 7,
+      "physical_attempts": 8,
+      "recovery_reexecutions": 1,
+      "item_capacity": 6,
+      "byte_capacity": 238743,
+      "physical_item_high_water": [6, 6],
+      "physical_byte_high_water": [238726, 238435],
+      "oracle": "PASS"
+    },
+    "observed_generation_race": {
+      "old_generation": 1,
+      "rematerialized_generation": 2,
+      "identity_checked_current_generation_invalidated": 2,
+      "wrong_content_identity_rejected": true,
+      "status": "PASS"
+    }
+  },
+  "factory": {
+    "entrypoint": "/users/jzhou24/graph_optimization/factories/run_factory.sh",
+    "manager": "datavine-idata-f1237b8b8",
+    "package_only_workers": 2,
+    "logical_tasks": 7,
+    "physical_attempts": 8,
+    "recovery_reexecutions": 1,
+    "legacy_recovery_tasks": 0,
+    "future_used_idata_evicted": ["i:1", "i:2", "i:3", "i:4", "i:5", "i:6"],
+    "physical_item_capacity": 6,
+    "physical_byte_capacity": 238743,
+    "physical_item_high_water": [6, 0],
+    "physical_byte_high_water": [238726, 0],
+    "scheduler_observed_item_high_water": 7,
+    "oracle": "PASS",
+    "workers_removed_after_test": 2
+  },
+  "package": {
+    "path": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+    "sha256": "2bbb11c55b86b08719b4173e32ad0a93b0cdb1961dc68c948ce83342a1cec9f6",
+    "cloudpickle": "3.1.2",
+    "observed_invalidation_api_present": true,
+    "poncho_package_run": "PASS"
+  },
+  "self_review": {
+    "rejected_results": [
+      "The first factory run failed closed with stale invalidation generation when worker release raced cache eviction; it was not accepted.",
+      "The initial test required at least one admission rejection, but correct proactive eviction can produce zero rejections; the nondeterministic assertion was replaced by strict high-water and rematerialization criteria."
+    ],
+    "correction": [
+      "DataVine IData uses one attempt-qualified Controller URL as its writable output cache identity and stable rematerialization source.",
+      "Only Controller-qualified URLs may be task outputs; ordinary URL output remains rejected.",
+      "The Controller returns HTTP 409 when an old attempt URL is used after a newer publication.",
+      "Cache eviction now atomically validates observed attempt, hash, size, worker identity, and worker epoch before invalidating the current replica generation."
+    ],
+    "proved": [
+      "Future-used IData can be physically evicted and rematerialized without a TaskVine special recovery task.",
+      "TaskID and IDataID remain stable while physical attempts and replica generations change.",
+      "One worker release, prefetch, cache pressure, rematerialization, and ordinary-task recovery coexist under the configured physical disk bounds.",
+      "A stale generation cannot authorize deletion of different logical content or a different worker incarnation."
+    ],
+    "not_proved": [
+      "bounded Controller memory for ordinary IData",
+      "large IData bypass that preserves worker-local volatility",
+      "real worker process loss",
+      "active-transfer loss and concurrent eviction",
+      "more than one recovery cycle",
+      "durability-frontier-bounded rollback",
+      "DRAM cache capacity",
+      "Grand Challenge scale or Legacy comparison"
+    ]
+  }
+}

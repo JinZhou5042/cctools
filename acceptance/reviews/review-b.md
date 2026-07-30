@@ -83,6 +83,20 @@ stale-generation prune acknowledgement. The policy was reverted. Closing B1
 therefore requires DataVine-owned IData materialization and normal logical
 producer invalidation, not a permissive cache rule.
 
+Correction checkpoint `f1237b8b8` supplies that materialization path. IData
+uses an attempt-qualified Controller URL as one writable TaskVine cache
+identity and stable fallback; missing physical replicas no longer invoke
+TaskVine TEMP recovery. Local and factory cases evict future-used IData and
+report zero special recovery tasks. The first factory attempt exposed and
+rejected a stale-generation eviction race. The accepted operation validates
+the complete observed identity under the Controller lock before invalidating
+the current generation.
+
+B1 remains open because the Controller still stores ordinary IData bytes,
+DRAM is absent, true worker process loss is untested, and active peer-transfer
+eviction has not passed. The current solution establishes authority but does
+not yet establish the required volatile worker-local/bulk-data behavior.
+
 ### B2 — Stable-root reproducibility is assumed, not proved by Controller state
 
 The independent safety oracle assumes task metadata and all root EData remain
@@ -206,5 +220,5 @@ The reviewed local and SharedFS deletion paths may remain enabled only within
 their proven fail-closed preconditions. No broader eviction, transfer-coupled
 pruning, restart recovery, or automatic scale policy may be accepted until
 B2, B3, B5, and B7 are closed. Strict disk admission, DRAM ownership,
-recovery after eviction without legacy recovery tasks, true process loss, and
+repeated frontier-bounded recovery after eviction, true process loss, and
 eviction concurrent with an active demand read remain additional blockers.

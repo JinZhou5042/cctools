@@ -20,14 +20,14 @@ is never a pass.
 | STATE | Validated logical/physical/durability/recovery/pruning transitions | OPEN | SharedFS transitions and acknowledged worker-local deletion pass at `3f993f15b`; full races remain |
 | CTRL-BOUND | Bounded memory, serving, metadata, queues, cleanup | FAIL | Request/byte admission passes at `d694bef4a`; stable bulk bypass passes at `13193c99a`; complete metadata/history cleanup remains absent |
 | CTRL-FAIL | Auth, idempotency, epochs, stale/partial/restart behavior | FAIL | Runtime epochs and stale completion pass at `fbddcc70d`; Controller-owned reconnect claims pass at `643cddd68`; restart/auth-isolation contract remains absent |
-| SCHED | Independent data progress, minimal rollback, fairness, termination | OPEN | Basic recovery/prefetch exists; combined cases absent |
+| SCHED | Independent data progress, minimal rollback, fairness, termination | OPEN | Future-used IData rematerializes with ordinary logical attempts and zero TaskVine recovery tasks at `f1237b8b8`; repeated/minimal rollback, fairness, and termination combinations remain open |
 | WORKER-PREP | Batched validated resolution with direct source fallback | FAIL | Controller returns validated candidates; worker still resolves per object without direct candidate pulls |
-| CACHE | Strict DRAM/disk bounds, admission, eviction, zero mode | FAIL | Worker and Manager item/byte admission, output reservation, and prefetch/recovery pressure remain within six items and the configured byte bound at `6d3b77042`; DRAM, active-transfer eviction, true process loss, and scale cost remain open |
+| CACHE | Strict DRAM/disk bounds, admission, eviction, zero mode | FAIL | Worker/Manager bounds plus future-used IData eviction/rematerialization remain within six items and the byte limit at `f1237b8b8`; DRAM, active-transfer eviction, true process loss, soft-metadata cleanup, and scale cost remain open |
 | PREFETCH | Bounded/cancellable/priority-safe independent progress | OPEN | Byte/item/priority gates pass; unverified prefetched replicas safely fall back at `ef605c343`; concurrency/cancel/final architecture open |
 | PUBLISH | Exactly-once staged idempotent publication and cleanup | OPEN | Two-phase worker prepare/Scheduler commit passes; full publication fault matrix open |
 | PLACE | Multi-source, load/epoch, bulk bypass, peer fallback | OPEN | Actual TaskVine peer movement acquires epoch-checked Controller leases and unverified sources fall back at `ef605c343`; transfer-loss/load adaptation remain open |
 | PERSIST | Bounded/cancellable/backpressured atomic durability | OPEN | Queue, cancel, overload, attempt-safe acknowledgement pass at `17577b058`; pruning integration and full failure matrix open |
-| RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | Single manual global-loss replay only |
+| RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | One ordinary-task replay plus future-IData rematerialization complete with zero special TaskVine recovery tasks at `f1237b8b8`; repeated loss, minimum rollback, and durability-frontier bounds remain absent |
 | PRUNE-SHADOW | Reference/incremental equivalence and proof records | PASS | `artifacts/phase9-shadow-20260729.json`, commit `2108b68a8` |
 | PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | OPEN | Multi-replica deletion plus generation-exact targeted dead-data eviction and pending-ACK worker-loss cleanup pass through `c20db01a1`; active-read races, DRAM pruning, and recovery-after-prune remain |
 | PRUNE-SHAREDFS | Quarantine/grace/recovery/hard-delete audit | OPEN | Real revision-safe component path passes at `347f60531`; restart persistence, pins, and scale comparison open |
@@ -115,6 +115,20 @@ process-kill fault, and active-transfer eviction plus Grand Challenge scale
 remain untested. It also does not close `RECOVERY`: an attempted policy for
 evicting future-used volatile IData fell into TaskVine's prohibited special
 recovery-task path and was reverted.
+
+IData rematerialization evidence at `f1237b8b8` removes that rejected
+dependency. An attempt-qualified Controller URL is now the writable physical
+cache identity and stable fallback for each IData attempt. Local and
+package-only factory runs delete future-used IData, reconstruct exact results,
+perform one ordinary logical-task replay, and report zero TaskVine recovery
+tasks. The first factory attempt exposed a worker-release/eviction generation
+race and was rejected; the accepted Controller-atomic operation validates the
+observed attempt, hash, size, WorkerID, and epoch before invalidating the
+current generation. `CACHE` remains FAIL because DRAM, active-transfer loss,
+true process death, soft-record cleanup, and scale remain open. `RECOVERY`
+remains FAIL because only one replay occurs and no durability-frontier bound is
+proved. `CTRL-BOUND` remains FAIL because ordinary IData bytes are still held
+by the Controller.
 
 Controller admission evidence at commit `d694bef4a` covers hard request-thread,
 byte-response concurrency, and in-flight-byte capacities; immediate overload;

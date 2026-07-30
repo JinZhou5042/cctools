@@ -35,7 +35,11 @@ bindings without merging byte-identical logical outputs.
 ### A3 — No legacy recovery-task correctness dependency
 
 The new runtime uses ordinary logical tasks for replay and contains no
-`vine_graph` import. This question passes for the independent runtime.
+`vine_graph` import. Checkpoint `f1237b8b8` additionally removes the hidden
+TaskVine TEMP fallback: future-used IData is physically evicted and
+rematerialized locally and through factory workers with
+`tasks_recovery == 0`. This question passes for the current independent
+runtime path.
 
 The older package remains frozen reference code and must not regain authority.
 
