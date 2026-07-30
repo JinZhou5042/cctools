@@ -100,6 +100,7 @@ def run_case(
     worker_cores=2,
     worker_disk_cache_bytes=None,
     worker_disk_cache_items=None,
+    worker_disk_cache_admission_items=None,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -221,6 +222,7 @@ def run_case(
                 inject_prefetch_failure,
                 worker_disk_cache_bytes,
                 worker_disk_cache_items,
+                worker_disk_cache_admission_items,
             )
             if (
                 replacement_worker_delay is not None

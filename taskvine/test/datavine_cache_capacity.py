@@ -97,20 +97,61 @@ def main():
         worker_cores=1,
         prefetch=False,
         worker_disk_cache_items=6,
+        worker_disk_cache_admission_items=6,
     )
     bounded_report = bounded["scheduler_report"]
     assert bounded["taskvine_workers_used"] == 2, bounded
     assert bounded_report["worker_disk_cache_evictions"] > 0
+    assert bounded_report["worker_disk_cache_admission_items"] == 6
+    assert bounded_report["worker_physical_cache"]
+    assert all(
+        worker["cache_items_high_water"] <= 6
+        for worker in bounded_report["worker_physical_cache"]
+    ), bounded_report
+    assert sum(
+        worker["cache_admission_rejections"]
+        for worker in bounded_report["worker_physical_cache"]
+    ) > 0, bounded_report
+    assert all(
+        worker["cache_prune_pending_items"] == 0
+        for worker in bounded_report["worker_physical_cache"]
+    ), bounded_report
     assert all(
         usage["items"] <= 6
         for usage in bounded_report["worker_disk_cache_usage"].values()
     ), bounded_report
     assert all(
         record["remaining_uses"] == 0
+        or record["data_id"].startswith("e:")
         for record in bounded_report[
             "worker_disk_cache_eviction_records"
         ]
     )
+    assert bounded_report[
+        "worker_disk_cache_effective_retention_items"
+    ] == 0
+    assert bounded_report["worker_disk_cache_max_task_items"] == 6
+
+    undersized_workflow, undersized_target, undersized_oracle = (
+        build_workflow(2)
+    )
+    try:
+        run_case(
+            "cache-capacity-undersized",
+            undersized_workflow,
+            undersized_target,
+            undersized_oracle,
+            worker_count=1,
+            worker_cores=1,
+            prefetch=False,
+            worker_disk_cache_items=4,
+            worker_disk_cache_admission_items=5,
+        )
+    except ValueError as error:
+        assert "largest task working set of 6 items" in str(error)
+        undersized = {"status": "REJECTED", "error": str(error)}
+    else:
+        raise AssertionError("undersized cache admission did not fail closed")
 
     zero_workflow, zero_target, zero_oracle = build_workflow(6)
     zero = run_case(
@@ -143,6 +184,7 @@ def main():
         json.dumps(
             {
                 "bounded": bounded_report,
+                "undersized": undersized,
                 "zero": zero_report,
                 "pending_unlink_worker_loss": unlink_loss,
                 "status": "PASS",
