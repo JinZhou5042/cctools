@@ -60,13 +60,16 @@ def main(argv=None):
             os.close(directory_fd)
         if args.delay_before_complete > 0:
             time.sleep(args.delay_before_complete)
-        client.complete_external_persistence(
+        completion = client.complete_external_persistence(
             args.data_id, args.request_id
         )
-        print(
-            f"DATAVINE_PERSISTED i:{args.data_id} "
-            f"{args.request_id}"
+        durability = completion["durability"]
+        event = (
+            "DATAVINE_PERSISTED"
+            if durability == "durable"
+            else "DATAVINE_PERSISTENCE_CANCELLED"
         )
+        print(f"{event} i:{args.data_id} {args.request_id}")
     except Exception as exc:
         temporary.unlink(missing_ok=True)
         client.fail_external_persistence(

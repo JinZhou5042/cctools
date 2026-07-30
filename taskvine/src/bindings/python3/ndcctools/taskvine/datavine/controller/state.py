@@ -954,20 +954,51 @@ class ControllerState:
             old = self.get_idata(data_id)
             job = self._persistence_jobs.get(old.data_id)
             if (
-                job is None
-                or job.get("mode") != "worker"
-                or job["state"] != "writing"
-                or any(
-                    job[key] != value
-                    for key, value in expected.items()
+                job is not None
+                and job.get("mode") == "worker"
+                and job["request_id"] == expected["request_id"]
+                and job["state"] in ("cancelled", "cancelling")
+            ):
+                job["state"] = "cancelled"
+                self._persistence_active_ids.discard(
+                    job["request_id"]
                 )
-                or old.attempt != expected["attempt"]
-                or old.content_hash != expected["content_hash"]
-                or old.serialized_size != expected["size"]
+                self._persistence_active = len(
+                    self._persistence_active_ids
+                )
+                record = dataclasses.replace(
+                    old,
+                    durability="cancelled",
+                    durable_path=None,
+                )
+                self._idata[old.data_id] = record
+                self.pruning.set_data_state(
+                    old.data_id, persistence="none"
+                )
+                cancelled_after_validation = True
+            else:
+                cancelled_after_validation = False
+            if (
+                not cancelled_after_validation
+                and (
+                    job is None
+                    or job.get("mode") != "worker"
+                    or job["state"] != "writing"
+                    or any(
+                        job[key] != value
+                        for key, value in expected.items()
+                    )
+                    or old.attempt != expected["attempt"]
+                    or old.content_hash != expected["content_hash"]
+                    or old.serialized_size != expected["size"]
+                )
             ):
                 target.unlink(missing_ok=True)
                 self._persistence_stale_completions += 1
                 raise ValueError("stale external persistence completion")
+            if cancelled_after_validation:
+                target.unlink(missing_ok=True)
+                return record
             self._publish_replica(
                 f"i:{old.data_id}",
                 (

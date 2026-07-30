@@ -3,8 +3,11 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
+import threading
+from unittest import mock
 
 from datavine_phase4_demand_pull import run_case
 from ndcctools.taskvine.datavine import TaskRecord, Workflow
@@ -175,12 +178,48 @@ def external_persistence_cancel_retry_contract():
                 record.data_id, cancelled["request_id"]
             )
             Path(cancelled["target_path"]).write_bytes(payload)
-            assert state.cancel_persistence(
-                record.data_id, "test-active-cancel"
-            ) == "cancelling"
-            completion = state.complete_external_persistence(
-                record.data_id, cancelled["request_id"]
-            )
+            validation_finished = threading.Event()
+            allow_commit = threading.Event()
+            original_open = os.open
+            result = {}
+            failure = {}
+
+            def block_directory_fsync(*args, **kwargs):
+                validation_finished.set()
+                if not allow_commit.wait(5):
+                    raise TimeoutError(
+                        "test did not release persistence completion"
+                    )
+                return original_open(*args, **kwargs)
+
+            def complete_persistence():
+                try:
+                    result["record"] = (
+                        state.complete_external_persistence(
+                            record.data_id,
+                            cancelled["request_id"],
+                        )
+                    )
+                except Exception as exc:
+                    failure["error"] = exc
+
+            with mock.patch(
+                "ndcctools.taskvine.datavine.controller.state.os.open",
+                side_effect=block_directory_fsync,
+            ):
+                completion_thread = threading.Thread(
+                    target=complete_persistence
+                )
+                completion_thread.start()
+                assert validation_finished.wait(5)
+                assert state.cancel_persistence(
+                    record.data_id, "test-active-cancel"
+                ) == "cancelling"
+                allow_commit.set()
+                completion_thread.join(5)
+            assert not completion_thread.is_alive()
+            assert "error" not in failure, failure
+            completion = result["record"]
             assert completion.durability == "cancelled"
             assert not Path(cancelled["target_path"]).exists()
             assert state.snapshot()["persistence_active"] == 0
