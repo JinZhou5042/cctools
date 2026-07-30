@@ -727,6 +727,62 @@ class ControllerService:
                     return
                 if (
                     self.path.startswith(f"{API_PREFIX}/idata/")
+                    and self.path.endswith("/persist/begin")
+                ):
+                    token = self.path[
+                        len(f"{API_PREFIX}/idata/"):-len("/persist/begin")
+                    ]
+                    try:
+                        request = self._read_json()
+                        job = owner.state.begin_external_persistence(
+                            int(token), request["request_id"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, job)
+                    return
+                if (
+                    self.path.startswith(f"{API_PREFIX}/idata/")
+                    and self.path.endswith("/persist/complete")
+                ):
+                    token = self.path[
+                        len(f"{API_PREFIX}/idata/"):
+                        -len("/persist/complete")
+                    ]
+                    try:
+                        request = self._read_json()
+                        owner.state.complete_external_persistence(
+                            int(token), request["request_id"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200, owner.state.idata_status(int(token))
+                    )
+                    return
+                if (
+                    self.path.startswith(f"{API_PREFIX}/idata/")
+                    and self.path.endswith("/persist/fail")
+                ):
+                    token = self.path[
+                        len(f"{API_PREFIX}/idata/"):-len("/persist/fail")
+                    ]
+                    try:
+                        request = self._read_json()
+                        action = owner.state.fail_external_persistence(
+                            int(token),
+                            request["request_id"],
+                            request["error"],
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, {"action": action})
+                    return
+                if (
+                    self.path.startswith(f"{API_PREFIX}/idata/")
                     and self.path.endswith("/invalidate")
                 ):
                     token = self.path[

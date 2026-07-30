@@ -45,6 +45,7 @@ class PersistenceManager:
         self._on_complete = on_complete
         self._queue = queue.Queue(maxsize=queue_capacity)
         self._queue_capacity = queue_capacity
+        self._worker_count = workers
         self._terminal_capacity = terminal_capacity
         self._transition_hook = transition_hook
         self._failures_remaining = 1 if fail_first else 0
@@ -65,6 +66,20 @@ class PersistenceManager:
         ]
         for thread in self._threads:
             thread.start()
+
+    @property
+    def worker_count(self):
+        return self._worker_count
+
+    @property
+    def queue_capacity(self):
+        return self._queue_capacity
+
+    def target_path(self, data_id, attempt, content_hash):
+        return self.root / (
+            f"idata-{int(data_id)}-attempt-{int(attempt)}-"
+            f"{str(content_hash)}.pkl"
+        )
 
     def _notify(self, request, state):
         if self._transition_hook is not None:
@@ -172,9 +187,10 @@ class PersistenceManager:
             if request is None:
                 self._queue.task_done()
                 return
-            target = self.root / (
-                f"idata-{request.data_id}-attempt-{request.attempt}-"
-                f"{request.content_hash}.pkl"
+            target = self.target_path(
+                request.data_id,
+                request.attempt,
+                request.content_hash,
             )
             temporary = self.root / (
                 f".{request.request_id}.{threading.get_ident()}.tmp"
@@ -236,6 +252,7 @@ class PersistenceManager:
         with self._lock:
             states = collections.Counter(self._states.values())
             return {
+                "workers": self._worker_count,
                 "queue_capacity": self._queue_capacity,
                 "queued": states["queued"],
                 "active": self._active,

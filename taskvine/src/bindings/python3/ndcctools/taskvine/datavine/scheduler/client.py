@@ -502,6 +502,35 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def begin_external_persistence(self, data_id, request_id):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/idata/{int(data_id)}/persist/begin",
+            {"request_id": str(request_id)},
+        )
+        return json.loads(payload)
+
+    def complete_external_persistence(self, data_id, request_id):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/idata/{int(data_id)}/persist/complete",
+            {"request_id": str(request_id)},
+        )
+        return json.loads(payload)
+
+    def fail_external_persistence(
+        self, data_id, request_id, error
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/idata/{int(data_id)}/persist/fail",
+            {
+                "request_id": str(request_id),
+                "error": str(error),
+            },
+        )
+        return json.loads(payload)
+
     def cancel_persistence(self, data_id, reason="obsolete"):
         payload, _ = self._request(
             "POST",

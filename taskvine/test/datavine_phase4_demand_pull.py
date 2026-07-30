@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import cloudpickle
 import hashlib
 import json
 import os
@@ -104,6 +105,9 @@ def run_case(
     worker_disk_cache_items=None,
     worker_disk_cache_admission_items=None,
     worker_disk_cache_admission_bytes=None,
+    validate_durable_recovery=False,
+    persistence_parent=None,
+    additional_result_task_ids=(),
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -121,6 +125,17 @@ def run_case(
             )
             bulk_origin = external_bulk_root
         ready_path = root / "ready.json"
+        external_persistence_root = None
+        if persistence and persistence_parent is not None:
+            external_persistence_root = Path(
+                tempfile.mkdtemp(
+                    prefix=f"datavine-{name}-persistence-",
+                    dir=persistence_parent,
+                )
+            )
+            persistence_dir = external_persistence_root / "durable"
+        else:
+            persistence_dir = root / "durable"
         token = f"token-{name}"
         controller_host = socket.getfqdn() if factory_manager else "127.0.0.1"
         controller = subprocess.Popen(
@@ -152,7 +167,7 @@ def run_case(
                 *(
                     [
                         "--persistence-dir",
-                        str(root / "durable"),
+                        str(persistence_dir),
                         "--persistence-workers",
                         "1",
                         *(
@@ -231,7 +246,13 @@ def run_case(
                 worker_disk_cache_items,
                 worker_disk_cache_admission_items,
                 worker_disk_cache_admission_bytes,
-                [target_task_id],
+                [
+                    target_task_id,
+                    *(
+                        int(value)
+                        for value in additional_result_task_ids
+                    ),
+                ],
             )
             if (
                 replacement_worker_delay is not None
@@ -253,6 +274,15 @@ def run_case(
                 timeout=600 if factory_manager else 90
             )
             assert results[target_task_id] == oracle
+            result_summaries = {}
+            for task_id, value in results.items():
+                payload = cloudpickle.dumps(value)
+                result_summaries[str(task_id)] = {
+                    "serialized_size": len(payload),
+                    "serialized_sha256": hashlib.sha256(
+                        payload
+                    ).hexdigest(),
+                }
             if apply_pruning:
                 cache_before = sorted(
                     str(path.relative_to(root))
@@ -275,6 +305,7 @@ def run_case(
             snapshot["scheduler_report"] = scheduler.call(
                 "last_run_report"
             )
+            snapshot["result_summaries"] = result_summaries
             worker_ids = set()
             worker_by_task = {}
             worker_disconnections = 0
@@ -316,9 +347,10 @@ def run_case(
             )
             snapshot["durable_files"] = sorted(
                 path.name
-                for path in (root / "durable").glob("idata-*.pkl")
+                for path in persistence_dir.glob("idata-*.pkl")
             ) if persistence else []
             if persistence:
+                durable_recovery_actions = {}
                 for data_id in range(1, len(workflow.tasks) + 1):
                     status = client.idata_status(data_id)
                     durable_bytes = Path(
@@ -328,7 +360,17 @@ def run_case(
                         hashlib.sha256(durable_bytes).hexdigest()
                         == status["content_hash"]
                     )
+                    if validate_durable_recovery:
+                        durable_recovery_actions[str(data_id)] = (
+                            client.invalidate_idata(data_id)["action"]
+                        )
                 snapshot["durable_hashes_valid"] = True
+                snapshot["durable_recovery_actions"] = (
+                    durable_recovery_actions
+                )
+                snapshot["idata_bytes_after_durable_recovery"] = (
+                    client.snapshot()["idata_bytes"]
+                )
             assert snapshot["available_idata"] == (
                 0 if apply_pruning else len(workflow.tasks)
             )
@@ -348,6 +390,10 @@ def run_case(
             _, stderr = controller.communicate(timeout=10)
             if external_bulk_root is not None:
                 shutil.rmtree(external_bulk_root, ignore_errors=True)
+            if external_persistence_root is not None:
+                shutil.rmtree(
+                    external_persistence_root, ignore_errors=True
+                )
             if controller.returncode != 0:
                 raise AssertionError(stderr)
 

@@ -2,6 +2,7 @@
 
 import dataclasses
 import hashlib
+import os
 from pathlib import Path
 import threading
 
@@ -738,15 +739,58 @@ class ControllerState:
             if self._persistence is None:
                 raise RuntimeError("persistence is disabled")
             old = self.get_idata(data_id)
-            if old.serialized_bytes is None:
-                raise ValueError("cannot persist unavailable IData")
             if old.durability in ("queued", "writing", "durable"):
                 return old
             self._persistence_sequence += 1
+            request_id = (
+                f"i{old.data_id}-a{old.attempt}-"
+                f"p{self._persistence_sequence}"
+            )
+            if old.serialized_bytes is None:
+                if not self.replicas.candidates(f"i:{old.data_id}"):
+                    raise ValueError(
+                        "cannot persist unavailable IData"
+                    )
+                active_external = sum(
+                    job.get("mode") == "worker"
+                    and job["state"] in (
+                        "queued",
+                        "writing",
+                        "cancelling",
+                    )
+                    for job in self._persistence_jobs.values()
+                )
+                capacity = (
+                    self._persistence.queue_capacity
+                    + self._persistence.worker_count
+                )
+                if active_external >= capacity:
+                    raise RuntimeError(
+                        "external persistence admission capacity exceeded"
+                    )
+                target = self._persistence.target_path(
+                    old.data_id, old.attempt, old.content_hash
+                )
+                record = dataclasses.replace(old, durability="queued")
+                self._idata[old.data_id] = record
+                self._persistence_jobs[old.data_id] = {
+                    "request_id": request_id,
+                    "attempt": old.attempt,
+                    "content_hash": old.content_hash,
+                    "size": old.serialized_size,
+                    "state": "queued",
+                    "cancel_reason": None,
+                    "mode": "worker",
+                    "target_path": str(target),
+                }
+                self._persistence_requests += 1
+                self.pruning.set_data_state(
+                    old.data_id, persistence="queued"
+                )
+                return record
             request = PersistenceRequest(
                 request_id=(
-                    f"i{old.data_id}-a{old.attempt}-"
-                    f"p{self._persistence_sequence}"
+                    request_id
                 ),
                 data_id=old.data_id,
                 attempt=old.attempt,
@@ -761,6 +805,7 @@ class ControllerState:
                 "content_hash": request.content_hash,
                 "state": "queued",
                 "cancel_reason": None,
+                "mode": "controller",
             }
             self._persistence_requests += 1
             try:
@@ -775,6 +820,178 @@ class ControllerState:
             )
             return record
 
+    def begin_external_persistence(self, data_id, request_id):
+        with self._lock:
+            old = self.get_idata(data_id)
+            job = self._persistence_jobs.get(old.data_id)
+            if (
+                job is None
+                or job.get("mode") != "worker"
+                or job["request_id"] != str(request_id)
+            ):
+                raise ValueError("unknown external persistence request")
+            if job["state"] == "durable":
+                return dict(job)
+            if job["state"] == "writing":
+                return dict(job)
+            if job["state"] != "queued":
+                raise ValueError(
+                    f"cannot begin persistence in state {job['state']}"
+                )
+            active = sum(
+                value.get("mode") == "worker"
+                and value["state"] == "writing"
+                for value in self._persistence_jobs.values()
+            )
+            if active >= self._persistence.worker_count:
+                raise RuntimeError(
+                    "external persistence concurrency exceeded"
+                )
+            job["state"] = "writing"
+            self._idata[old.data_id] = dataclasses.replace(
+                old, durability="writing"
+            )
+            self._persistence_active_ids.add(job["request_id"])
+            self._persistence_active = len(
+                self._persistence_active_ids
+            )
+            self._persistence_max_active = max(
+                self._persistence_max_active,
+                self._persistence_active,
+            )
+            self.pruning.set_data_state(
+                old.data_id, persistence="writing"
+            )
+            return dict(job)
+
+    def complete_external_persistence(self, data_id, request_id):
+        with self._lock:
+            old = self.get_idata(data_id)
+            job = self._persistence_jobs.get(old.data_id)
+            if (
+                job is not None
+                and job.get("mode") == "worker"
+                and job["request_id"] == str(request_id)
+                and job["state"] == "durable"
+                and old.durability == "durable"
+                and old.durable_path == job["target_path"]
+            ):
+                return old
+            if (
+                job is None
+                or job.get("mode") != "worker"
+                or job["request_id"] != str(request_id)
+                or job["state"] != "writing"
+                or old.attempt != job["attempt"]
+                or old.content_hash != job["content_hash"]
+                or old.serialized_size != job["size"]
+            ):
+                raise ValueError("stale external persistence completion")
+            target = Path(job["target_path"])
+            expected = {
+                key: job[key]
+                for key in (
+                    "request_id",
+                    "attempt",
+                    "content_hash",
+                    "size",
+                    "target_path",
+                )
+            }
+        digest = hashlib.sha256()
+        size = 0
+        with target.open("rb") as stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                digest.update(chunk)
+        if (
+            size != expected["size"]
+            or digest.hexdigest() != expected["content_hash"]
+        ):
+            target.unlink(missing_ok=True)
+            raise IOError("external persistence validation failed")
+        directory_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        with self._lock:
+            old = self.get_idata(data_id)
+            job = self._persistence_jobs.get(old.data_id)
+            if (
+                job is None
+                or job.get("mode") != "worker"
+                or job["state"] != "writing"
+                or any(
+                    job[key] != value
+                    for key, value in expected.items()
+                )
+                or old.attempt != expected["attempt"]
+                or old.content_hash != expected["content_hash"]
+                or old.serialized_size != expected["size"]
+            ):
+                target.unlink(missing_ok=True)
+                self._persistence_stale_completions += 1
+                raise ValueError("stale external persistence completion")
+            self._publish_replica(
+                f"i:{old.data_id}",
+                (
+                    f"sharedfs-idata-{old.data_id}-"
+                    f"attempt-{old.attempt}"
+                ),
+                old.attempt,
+                "sharedfs",
+                old.content_hash,
+                old.serialized_size,
+            )
+            job["state"] = "durable"
+            self._persistence_active_ids.discard(job["request_id"])
+            self._persistence_active = len(
+                self._persistence_active_ids
+            )
+            record = dataclasses.replace(
+                old, durability="durable", durable_path=str(target)
+            )
+            self._idata[old.data_id] = record
+            self.pruning.set_data_state(
+                old.data_id,
+                available=True,
+                durable=True,
+                persistence="none",
+            )
+            return record
+
+    def fail_external_persistence(
+        self, data_id, request_id, error
+    ):
+        with self._lock:
+            old = self.get_idata(data_id)
+            job = self._persistence_jobs.get(old.data_id)
+            if (
+                job is None
+                or job.get("mode") != "worker"
+                or job["request_id"] != str(request_id)
+            ):
+                return "stale"
+            if job["state"] == "durable":
+                return "too-late"
+            job["state"] = "failed"
+            self._persistence_active_ids.discard(job["request_id"])
+            self._persistence_active = len(
+                self._persistence_active_ids
+            )
+            self._idata[old.data_id] = dataclasses.replace(
+                old, durability="failed", durable_path=None
+            )
+            self._persistence_failures[old.data_id] = str(error)
+            self.pruning.set_data_state(
+                old.data_id, persistence="none"
+            )
+            return "failed"
+
     def cancel_persistence(self, data_id, reason="obsolete"):
         with self._lock:
             return self._cancel_persistence_locked(data_id, reason)
@@ -784,7 +1001,14 @@ class ControllerState:
         job = self._persistence_jobs.get(data_id)
         if job is None or job["state"] not in ("queued", "writing"):
             return "not-active"
-        result = self._persistence.cancel(job["request_id"])
+        if job.get("mode") == "worker":
+            if job["state"] == "queued":
+                result = "cancelled"
+            else:
+                result = "cancelling"
+            job["state"] = result
+        else:
+            result = self._persistence.cancel(job["request_id"])
         if result in ("cancelled", "cancelling"):
             job["state"] = result
             job["cancel_reason"] = str(reason)
@@ -944,48 +1168,35 @@ class ControllerState:
         with self._lock:
             old = self.get_idata(data_id)
             if old.durability == "durable" and old.durable_path:
+                digest = hashlib.sha256()
+                size = 0
                 with open(old.durable_path, "rb") as stream:
-                    payload = stream.read()
-                if hashlib.sha256(payload).hexdigest() != old.content_hash:
+                    while True:
+                        chunk = stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        digest.update(chunk)
+                if (
+                    digest.hexdigest() != old.content_hash
+                    or size != old.serialized_size
+                ):
                     raise IOError("durable recovery checksum mismatch")
-                if len(payload) > self.max_inline_idata_bytes:
-                    raise MemoryError(
-                        "durable IData exceeds Controller inline capacity"
-                    )
-                old_bytes = (
-                    len(old.serialized_bytes)
-                    if old.serialized_bytes is not None
-                    else 0
-                )
-                projected_bytes = (
-                    self._idata_bytes - old_bytes + len(payload)
-                )
-                if projected_bytes > self.max_idata_bytes:
-                    raise MemoryError(
-                        "Controller IData capacity exceeded during recovery"
-                    )
-                self._idata[data_id] = dataclasses.replace(
-                    old, serialized_bytes=payload
-                )
-                self._idata_bytes = projected_bytes
-                self._idata_bytes_high_water = max(
-                    self._idata_bytes_high_water, self._idata_bytes
-                )
                 self._publish_replica(
                     f"i:{old.data_id}",
                     (
-                        f"controller-idata-{old.data_id}-"
+                        f"sharedfs-idata-{old.data_id}-"
                         f"attempt-{old.attempt}"
                     ),
                     old.attempt,
-                    "controller-memory",
+                    "sharedfs",
                     old.content_hash,
-                    len(payload),
+                    size,
                 )
                 self.pruning.set_data_state(
                     old.data_id, available=True, durable=True
                 )
-                return "restored-durable"
+                return "validated-durable"
             self._cancel_persistence_locked(old.data_id, "global-loss")
             try:
                 replica = self.replicas.get_replica(
@@ -1408,6 +1619,15 @@ class ControllerState:
                 "persistence_active": self._persistence_active,
                 "persistence_max_active": self._persistence_max_active,
                 "persistence_requests": self._persistence_requests,
+                "external_persistence_requests": sum(
+                    job.get("mode") == "worker"
+                    for job in self._persistence_jobs.values()
+                ),
+                "external_persistence_durable": sum(
+                    job.get("mode") == "worker"
+                    and job["state"] == "durable"
+                    for job in self._persistence_jobs.values()
+                ),
                 "persistence_stale_completions": (
                     self._persistence_stale_completions
                 ),

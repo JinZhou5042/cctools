@@ -3,6 +3,7 @@
 import concurrent.futures
 import cloudpickle
 import dataclasses
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -575,6 +576,16 @@ class TaskSchedulerThread:
                 effective_retention_bytes = admission_byte_headroom
         pending = set(task_by_id)
         running = {}
+        persistence_pending = []
+        persistence_running = {}
+        persistence_tasks_completed = 0
+        persistence_worker_bytes = 0
+        persistence_capacity = int(
+            (
+                controller_snapshot.get("persistence_executor")
+                or {}
+            ).get("workers", 1)
+        )
         prefetch_running = set()
         prefetch_selected = self._submit_prefetches(
             prefetch,
@@ -594,7 +605,13 @@ class TaskSchedulerThread:
         loss_injected = False
         worker_loss_injected = False
         local_idata_hits = 0
-        while pending or running or prefetch_running:
+        while (
+            pending
+            or running
+            or prefetch_running
+            or persistence_pending
+            or persistence_running
+        ):
             for completed_task_id in tuple(done):
                 output_data_id = output_ids[completed_task_id]
                 output_status = self.controller.idata_status(output_data_id)
@@ -630,7 +647,21 @@ class TaskSchedulerThread:
                 self.controller.set_task_state(task_id, "running")
                 running[physical_id] = task_id
                 pending.remove(task_id)
-            if not running and not prefetch_running:
+            while (
+                persistence_pending
+                and len(persistence_running) < persistence_capacity
+            ):
+                data_id, request = persistence_pending.pop(0)
+                physical = self._make_persistence_task(
+                    data_id, request, environment
+                )
+                physical_id = self._manager.submit(physical)
+                persistence_running[physical_id] = data_id
+            if (
+                not running
+                and not prefetch_running
+                and not persistence_running
+            ):
                 if self._cache_admission.evictions:
                     self._manager.wait(wait_timeout)
                     self._sync_worker_epochs()
@@ -662,6 +693,26 @@ class TaskSchedulerThread:
                     prefetch_failed += 1
                 if not done:
                     prefetch_overlapped = True
+                continue
+            if completed.id in persistence_running:
+                data_id = persistence_running.pop(completed.id)
+                if not completed.successful():
+                    raise RuntimeError(
+                        f"IDataID {data_id} persistence task failed: "
+                        f"result={completed.result} "
+                        f"exit={completed.exit_code} "
+                        f"stdout={completed.output}"
+                    )
+                status = self.controller.idata_status(data_id)
+                if status["durability"] != "durable":
+                    raise RuntimeError(
+                        f"IDataID {data_id} persistence did not publish"
+                    )
+                self._idata_files[data_id] = self._durable_idata_file(
+                    data_id, status
+                )
+                persistence_tasks_completed += 1
+                persistence_worker_bytes += int(status["size"])
                 continue
             logical_id = running.pop(completed.id)
             local_idata_hits += completed.output.count(
@@ -746,7 +797,16 @@ class TaskSchedulerThread:
             if output_status["controller_inline"]:
                 self.controller.fetch_idata(output_ids[logical_id])
             if persist_outputs:
-                self.controller.persist_idata(output_ids[logical_id])
+                persistence_status = self.controller.persist_idata(
+                    output_ids[logical_id]
+                )
+                request = persistence_status.get(
+                    "persistence_request", {}
+                )
+                if request.get("mode") == "worker":
+                    persistence_pending.append(
+                        (output_ids[logical_id], request)
+                    )
             self.controller.set_task_state(logical_id, "completed")
             done.add(logical_id)
             if logical_id not in completed_once:
@@ -775,6 +835,11 @@ class TaskSchedulerThread:
                 self.controller.invalidate_idata(
                     output_ids[logical_id]
                 )
+                persistence_pending = [
+                    entry
+                    for entry in persistence_pending
+                    if entry[0] != output_ids[logical_id]
+                ]
                 worker_loss_injected = True
                 # Deterministic injection is a scheduler event: revoke the
                 # logical completion in the same turn so no downstream task
@@ -837,6 +902,10 @@ class TaskSchedulerThread:
             "loss_injected": loss_injected,
             "local_idata_hits": local_idata_hits,
             "worker_loss_injected": worker_loss_injected,
+            "persistence_tasks_completed": (
+                persistence_tasks_completed
+            ),
+            "persistence_worker_bytes": persistence_worker_bytes,
             "prefetch_selected": len(prefetch_selected),
             "prefetch_completed": prefetch_completed,
             "prefetch_failed": prefetch_failed,
@@ -900,12 +969,31 @@ class TaskSchedulerThread:
             ),
         }
         return {
-            task_id: cloudpickle.loads(
-                self.controller.fetch_idata(output_data_id)
-            )
+            task_id: self._load_result(output_data_id)
             for task_id, output_data_id in output_ids.items()
             if task_id in result_task_ids
         }
+
+    def _load_result(self, data_id):
+        status = self.controller.idata_status(data_id)
+        if status["controller_inline"]:
+            payload = self.controller.fetch_idata(data_id)
+        elif status["durability"] == "durable":
+            path = Path(status["durable_path"])
+            payload = path.read_bytes()
+            if (
+                len(payload) != status["size"]
+                or hashlib.sha256(payload).hexdigest()
+                != status["content_hash"]
+            ):
+                raise IOError(
+                    f"durable result IDataID {data_id} is corrupt"
+                )
+        else:
+            raise RuntimeError(
+                f"large result IDataID {data_id} requires durability"
+            )
+        return cloudpickle.loads(payload)
 
     def _edata_file(self, data_id):
         file_object = self._edata_files.get(data_id)
@@ -1104,3 +1192,49 @@ class TaskSchedulerThread:
         if environment is not None:
             task.add_environment(environment)
         return task
+
+    def _make_persistence_task(self, data_id, request, environment):
+        from ndcctools.taskvine import Task
+
+        input_name = f"datavine-persist-i{int(data_id)}.pkl"
+        command = " ".join(
+            shlex.quote(value)
+            for value in (
+                "python",
+                "-m",
+                "ndcctools.taskvine.datavine.worker.persist",
+                "--controller",
+                self.controller.endpoint,
+                "--token",
+                self.controller.token,
+                "--data-id",
+                str(int(data_id)),
+                "--request-id",
+                request["request_id"],
+                "--input-file",
+                input_name,
+            )
+        )
+        task = Task(command)
+        task.set_tag(f"persist-i{int(data_id)}")
+        task.set_cores(0)
+        task.set_priority(-500)
+        task.set_retries(5)
+        task.add_input(self._idata_files[int(data_id)], input_name)
+        if environment is not None:
+            task.add_environment(environment)
+        return task
+
+    def _durable_idata_file(self, data_id, status):
+        file_object = self._manager.declare_file(
+            status["durable_path"],
+            cache="worker",
+            peer_transfer=True,
+        )
+        if not file_object.set_datavine_data_id(
+            f"i:{int(data_id)}"
+        ):
+            raise RuntimeError(
+                f"could not bind durable IDataID i:{data_id}"
+            )
+        return file_object
