@@ -1,5 +1,29 @@
 # DataVine History
 
+## 2026-07-30 — Surviving corrupt peer and alternate-peer fallback
+
+- Added a raw serialized-byte SHA-256 beside, not instead of, the
+  metadata-domain-qualified EData identity. Destination workers validate it
+  before cache publication, so corrupt bytes cannot become an available
+  replica.
+- Added a deterministic default-off corruption injection on a real peer
+  transfer. The source stays alive; after rejection, the Manager excludes its
+  WorkerID and waits for a different READY peer rather than silently using the
+  Controller or SharedFS origin.
+- Three local and three package-only factory repetitions each record one
+  injection, one rejection, one alternate-peer success, four balanced leases,
+  zero disconnections, and the exact oracle.
+- Rejected a missing Python binding, short peer-retention window, mixed
+  incremental binary, generic peer reselection, and an accidental EData-only
+  field access in the IData endpoint. The accepted result follows an exact
+  clean rebuild and all 24 regressions.
+- Code commit: `0a5eefbd0`; package SHA-256:
+  `ba5d58999ee8a5a636d189ebcf03849af3958dd83b36ee2bff958d9410f939cb`.
+- Evidence: `acceptance/artifacts/peer-corruption-0a5eefbd0.json`.
+- Self-review: **PASS for the scoped integrity/fallback checkpoint, FAIL for
+  Review B and Ultimate Acceptance**. Real-transfer/pruning continuation,
+  restart/dynamic-consumer races, scale, and the Grand Challenge remain open.
+
 ## 2026-07-30 — Byte-counted peer interruption and partial cleanup
 
 - Destination workers now observe a real positive transfer-file byte count;

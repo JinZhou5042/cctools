@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 corrupt surviving-peer fallback and transfer/pruning concurrency**
-- Validated code commit: `b5f2ec21c`
+- Active task: **Phase 9 real-transfer/pruning concurrency**
+- Validated code commit: `0a5eefbd0`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +25,46 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 surviving-corrupt-peer alternate-source checkpoint
+
+Commit `0a5eefbd0` separates Controller-owned semantic EData identity from a
+raw SHA-256 of the serialized transport bytes. The semantic digest remains
+metadata-domain-qualified and determines EDataID deduplication; the raw digest
+is integrity metadata only. It is computed during the existing registration
+stream, copied through TaskVine file substitution, and validated by the
+destination worker after transfer completion but before cache publication.
+Invalid bytes produce a transfer failure and never a valid `cache-update`.
+
+The deterministic three-worker E2E creates two READY peer replicas of one
+8,000,009-byte EData item, corrupts the received bytes from one surviving
+source, keeps that source worker alive, rejects the replica by hash, excludes
+that exact WorkerID, and requires the destination to fetch from a different
+READY peer. Each of three local repetitions records one injection, one
+rejection, one alternate-peer success, four acquisitions/releases, one failed
+lease, zero active leases, zero worker disconnections, and result SHA-256
+`69dbbf0e6516330e5c25bed6491b0bd63b6a120d35393861cf8b719fdeb3b61c`.
+
+The exact clean build/install and all 24 DataVine regressions pass. The global
+package was rebuilt from the active DataVine environment with
+`poncho_package_create`; its SHA-256 is
+`ba5d58999ee8a5a636d189ebcf03849af3958dd83b36ee2bff958d9410f939cb`.
+`poncho_package_run -e` validates cloudpickle 3.1.2, Workflow import, and the
+new fault counters. Three package-only factory repetitions with three workers
+produce the same fault counts, balanced leases, no disconnections, and exact
+oracle. Factory shutdown reports `all workers removed`. Evidence:
+`acceptance/artifacts/peer-corruption-0a5eefbd0.json`.
+
+Self-review is **PASS for corrupt-byte rejection and different-peer fallback,
+FAIL for Review B and Ultimate Acceptance**. Rejected iterations exposed a
+missing Python setter, stable-origin fallback caused by an insufficient peer
+window, mixed incremental linkage, nondeterministic peer exclusion, and an
+EData-only field accidentally referenced by an IData response. None were
+accepted; the final clean build and full suite include their corrections.
+The next smallest safe task is one deterministic E2E in which an active real
+peer transfer holds a pruning lease, pruning is deferred, transfer failure
+releases that lease, and continuation either revalidates and deletes or
+restores the replica after concurrent proof invalidation.
 
 ### Phase 9 byte-counted peer-source loss and cleanup checkpoint
 

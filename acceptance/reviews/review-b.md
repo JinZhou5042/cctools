@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `fafead8bde`
+Reviewed through code commit: `0a5eefbd0`
 Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
@@ -375,3 +375,17 @@ Review B remains **FAIL**. The checkpoint does not corrupt a surviving peer or
 prove fallback to a second peer candidate, and it does not run physical
 pruning continuation concurrently with the byte-counted failure. Controller
 restart and dynamic-consumer invalidation also remain unresolved.
+
+Correction checkpoint `0a5eefbd0` keeps the corrupt peer alive, validates a
+raw serialized-byte SHA-256 at the destination before cache publication,
+rejects the bad replica, excludes the failed source WorkerID, and completes
+from a different READY peer. Three local and three rebuilt-package factory
+repetitions have one injected corruption, one rejection, one alternate-source
+success, balanced leases, zero worker disconnections, and the exact oracle.
+Evidence is `../artifacts/peer-corruption-0a5eefbd0.json`.
+
+Review B remains **FAIL**. Integrity and alternate-source behavior are now
+proved independently, but no E2E overlaps a real active transfer lease with a
+deferred physical pruning decision and then revalidates the proof after
+transfer success or failure. Controller restart, dynamic-consumer invalidation
+during that exact window, release timeout, and scale remain unresolved.
