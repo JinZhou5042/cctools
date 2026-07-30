@@ -698,7 +698,9 @@ static void reap_process(struct vine_process *p, struct link *manager)
 	xpu_tracker_free(core_tracker, p->task->task_id);
 
 	if (manager) {
-		vine_sandbox_stageout(p, cache_manager, manager);
+		if (!vine_sandbox_stageout(p, cache_manager, manager)) {
+			p->result |= VINE_RESULT_OUTPUT_MISSING;
+		}
 	}
 
 	if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
