@@ -422,6 +422,7 @@ class TaskSchedulerThread:
         external_persistence_retry_base_seconds=0.25,
         external_persistence_retry_max_seconds=5,
         external_persistence_failure_delay=2,
+        inject_global_loss_during_persistence=False,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -593,6 +594,9 @@ class TaskSchedulerThread:
         persistence_retries = 0
         persistence_retry_delay_seconds = 0.0
         compute_completions_while_persistence_active = 0
+        persistence_global_losses = 0
+        persistence_loss_pruning_plans = []
+        suspended_persistence_recovery = {}
         injected_external_persistence_failures = 0
         inject_external_persistence_failures = int(
             inject_external_persistence_failures
@@ -652,7 +656,41 @@ class TaskSchedulerThread:
             or prefetch_running
             or persistence_pending
             or persistence_running
+            or suspended_persistence_recovery
         ):
+            for data_id, recovery in tuple(
+                suspended_persistence_recovery.items()
+            ):
+                if not recovery["persistence_drained"]:
+                    continue
+                status = self._manager.prune_file_status(
+                    recovery["file"]
+                )
+                confirmed = (
+                    status["confirmed"]
+                    - recovery["before"]["confirmed"]
+                )
+                failed = (
+                    status["failed"] - recovery["before"]["failed"]
+                )
+                if failed:
+                    raise RuntimeError(
+                        f"physical prune failed before recovery "
+                        f"of i:{data_id}"
+                    )
+                if confirmed < recovery["requested"]:
+                    continue
+                if (
+                    recovery["requested"]
+                    and not self._manager.forget_prune_file_status(
+                        recovery["file"]
+                    )
+                ):
+                    raise RuntimeError(
+                        f"could not release prune barrier for i:{data_id}"
+                    )
+                pending.add(recovery["logical_id"])
+                suspended_persistence_recovery.pop(data_id)
             for completed_task_id in tuple(done):
                 output_data_id = output_ids[completed_task_id]
                 output_status = self.controller.idata_status(output_data_id)
@@ -719,11 +757,96 @@ class TaskSchedulerThread:
                     self._sync_worker_epochs()
                     self._cache_admission.poll(self._manager)
                     continue
+                if suspended_persistence_recovery:
+                    self._manager.wait(wait_timeout)
+                    self._sync_worker_epochs()
+                    continue
                 raise RuntimeError("workflow cannot make progress")
             completed = self._manager.wait(wait_timeout)
             self._sync_worker_epochs()
             self._cache_admission.poll(self._manager)
             if completed is None:
+                if (
+                    inject_global_loss_during_persistence
+                    and persistence_global_losses == 0
+                ):
+                    for data_id, active_request in (
+                        persistence_running.values()
+                    ):
+                        status = self.controller.idata_status(data_id)
+                        if status["durability"] != "writing":
+                            continue
+                        before = self.controller.pruning_plan()
+                        record_before = next(
+                            record
+                            for record in before["records"]
+                            if record["data_id"] == data_id
+                        )
+                        if (
+                            record_before["decision"] != "keep"
+                            or "persistence-writing"
+                            not in record_before["reasons"]
+                        ):
+                            raise RuntimeError(
+                                "active persistence was not protected "
+                                "from pruning"
+                            )
+                        self.controller.invalidate_idata(data_id)
+                        after = self.controller.pruning_plan()
+                        record_after = next(
+                            record
+                            for record in after["records"]
+                            if record["data_id"] == data_id
+                        )
+                        if (
+                            record_after["decision"] != "absent"
+                            or "no-accepted-replica"
+                            not in record_after["reasons"]
+                        ):
+                            raise RuntimeError(
+                                "globally lost IData was not protected "
+                                "from pruning"
+                            )
+                        logical_id = next(
+                            task_id
+                            for task_id, output_data_id
+                            in output_ids.items()
+                            if output_data_id == data_id
+                        )
+                        if logical_id not in done:
+                            raise RuntimeError(
+                                "persistence loss target was not "
+                                "logically completed"
+                            )
+                        file_object = self._idata_files[data_id]
+                        prune_before = (
+                            self._manager.prune_file_status(file_object)
+                        )
+                        prune_requested = self._manager.prune_file(
+                            file_object
+                        )
+                        self.controller.set_task_state(
+                            logical_id, "pending"
+                        )
+                        done.remove(logical_id)
+                        suspended_persistence_recovery[data_id] = {
+                            "logical_id": logical_id,
+                            "file": file_object,
+                            "before": prune_before,
+                            "requested": prune_requested,
+                            "request_id": active_request["request_id"],
+                            "persistence_drained": False,
+                        }
+                        recovery_reexecutions += 1
+                        persistence_global_losses += 1
+                        persistence_loss_pruning_plans.append(
+                            {
+                                "data_id": data_id,
+                                "before": record_before,
+                                "after": record_after,
+                            }
+                        )
+                        break
                 if (
                     inject_external_persistence_cancel
                     and persistence_cancellations == 0
@@ -768,6 +891,13 @@ class TaskSchedulerThread:
                 continue
             if completed.id in persistence_running:
                 data_id, request = persistence_running.pop(completed.id)
+                suspended = suspended_persistence_recovery.get(data_id)
+                if (
+                    suspended is not None
+                    and suspended["request_id"]
+                    == request["request_id"]
+                ):
+                    suspended["persistence_drained"] = True
                 if not completed.successful():
                     if (
                         "DATAVINE_PERSISTENCE_INJECTED_FAILURE"
@@ -793,6 +923,8 @@ class TaskSchedulerThread:
                     if status["durability"] == "durable":
                         pass
                     elif status["durability"] == "cancelled":
+                        if not status["available"]:
+                            continue
                         retry_status = self.controller.persist_idata(
                             data_id
                         )
@@ -855,12 +987,32 @@ class TaskSchedulerThread:
                         )
                         continue
                     else:
+                        current_request_id = (
+                            status.get("persistence_request") or {}
+                        ).get("request_id")
+                        if (
+                            int(status["attempt"])
+                            > int(request["attempt"])
+                            or (
+                                current_request_id is not None
+                                and current_request_id
+                                != request["request_id"]
+                            )
+                        ):
+                            continue
                         raise RuntimeError(
                             f"IDataID {data_id} persistence task failed "
-                            f"without a terminal Controller state"
+                            f"without a terminal Controller state: "
+                            f"request={request['request_id']} "
+                            f"status={status} "
+                            f"result={completed.result} "
+                            f"exit={completed.exit_code} "
+                            f"stdout={completed.output}"
                         )
                 status = self.controller.idata_status(data_id)
                 if status["durability"] == "cancelled":
+                    if not status["available"]:
+                        continue
                     retry_status = self.controller.persist_idata(
                         data_id
                     )
@@ -974,7 +1126,10 @@ class TaskSchedulerThread:
                     "persistence_request", {}
                 )
                 if request.get("mode") == "worker":
-                    if inject_external_persistence_cancel:
+                    if (
+                        inject_external_persistence_cancel
+                        or inject_global_loss_during_persistence
+                    ):
                         request = {
                             **request,
                             "inject_cancel_delay": True,
@@ -1121,6 +1276,10 @@ class TaskSchedulerThread:
             ),
             "compute_completions_while_persistence_active": (
                 compute_completions_while_persistence_active
+            ),
+            "persistence_global_losses": persistence_global_losses,
+            "persistence_loss_pruning_plans": (
+                persistence_loss_pruning_plans
             ),
             "prefetch_selected": len(prefetch_selected),
             "prefetch_completed": prefetch_completed,

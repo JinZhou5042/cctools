@@ -309,7 +309,7 @@ def payload_digest(payload):
 
 
 def run_bounded_case(factory_manager=None, persistence_mode="cancel"):
-    if persistence_mode not in ("cancel", "failure"):
+    if persistence_mode not in ("cancel", "failure", "loss-race"):
         raise ValueError("unknown persistence test mode")
     workflow = Workflow()
     large = workflow.add_task(make_large_payload, LARGE_SIZE)
@@ -344,6 +344,9 @@ def run_bounded_case(factory_manager=None, persistence_mode="cancel"):
         inject_external_persistence_failures=(
             2 if persistence_mode == "failure" else 0
         ),
+        inject_global_loss_during_persistence=(
+            persistence_mode == "loss-race"
+        ),
         external_persistence_max_retries=2,
         external_persistence_retry_base_seconds=0.25,
         external_persistence_retry_max_seconds=0.5,
@@ -371,12 +374,15 @@ def run_bounded_case(factory_manager=None, persistence_mode="cancel"):
         == "validated-durable"
     )
     assert len(snapshot["durable_files"]) == 2
-    assert report["persistence_tasks_completed"] == 1
+    if persistence_mode == "loss-race":
+        assert report["persistence_tasks_completed"] >= 1
+    else:
+        assert report["persistence_tasks_completed"] == 1
     if persistence_mode == "cancel":
         assert report["persistence_cancellations"] == 1
         assert report["persistence_failures"] == 0
         assert report["persistence_retries"] == 0
-    else:
+    elif persistence_mode == "failure":
         assert report["persistence_cancellations"] == 0
         assert report["persistence_failures"] == 2
         assert report["persistence_injected_failures_observed"] == 2
@@ -387,6 +393,16 @@ def run_bounded_case(factory_manager=None, persistence_mode="cancel"):
             >= 1
         ), report
         assert snapshot["persistence_max_active"] == 1
+    else:
+        assert report["persistence_global_losses"] == 1
+        assert report["recovery_reexecutions"] >= 2, report
+        assert len(report["persistence_loss_pruning_plans"]) == 1
+        pruning = report["persistence_loss_pruning_plans"][0]
+        assert pruning["before"]["decision"] == "keep"
+        assert "persistence-writing" in pruning["before"]["reasons"]
+        assert pruning["after"]["decision"] == "absent"
+        assert "no-accepted-replica" in pruning["after"]["reasons"]
+        assert snapshot["persistence_stale_completions"] == 0
     assert report["persistence_worker_bytes"] > LARGE_SIZE
     assert (
         snapshot["result_summaries"][str(large.task_id)][
@@ -438,7 +454,7 @@ def main():
     parser.add_argument("--factory-manager")
     parser.add_argument(
         "--persistence-mode",
-        choices=("cancel", "failure", "both"),
+        choices=("cancel", "failure", "loss-race", "both"),
         default="both",
     )
     args = parser.parse_args()
@@ -451,7 +467,7 @@ def main():
         else "covered by local installed-path contract"
     )
     modes = (
-        ("cancel", "failure")
+        ("cancel", "failure", "loss-race")
         if args.persistence_mode == "both"
         else (args.persistence_mode,)
     )

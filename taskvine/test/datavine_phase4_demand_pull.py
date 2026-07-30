@@ -114,6 +114,7 @@ def run_case(
     external_persistence_retry_base_seconds=0.25,
     external_persistence_retry_max_seconds=5,
     external_persistence_failure_delay=2,
+    inject_global_loss_during_persistence=False,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -265,6 +266,7 @@ def run_case(
                 external_persistence_retry_base_seconds,
                 external_persistence_retry_max_seconds,
                 external_persistence_failure_delay,
+                inject_global_loss_during_persistence,
             )
             if (
                 replacement_worker_delay is not None

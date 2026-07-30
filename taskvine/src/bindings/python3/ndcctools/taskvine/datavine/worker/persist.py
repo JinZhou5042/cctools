@@ -67,7 +67,13 @@ def main(argv=None):
             size != int(request["size"])
             or digest.hexdigest() != request["content_hash"]
         ):
-            raise IOError("worker persistence source validation failed")
+            raise IOError(
+                "worker persistence source validation failed: "
+                f"request={args.request_id} "
+                f"expected_size={request['size']} actual_size={size} "
+                f"expected_hash={request['content_hash']} "
+                f"actual_hash={digest.hexdigest()}"
+            )
         temporary.replace(target)
         directory_fd = os.open(target.parent, os.O_RDONLY)
         try:

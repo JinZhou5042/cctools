@@ -173,11 +173,17 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 	struct vine_worker_info *dest_worker = p->dest_worker;
 	p->success = 0;
 
-	/* If p is valid, the elements of p should always be valid, because a failed worker causes the transfer record to be removed,
-	 * not nulled out. This shouldn't happen, but we check and emit an error just in case. */
+	/* Stable URL transfers intentionally have no source worker.  A URL
+	 * failure is not evidence that the destination worker is unhealthy. */
+	if (!source_worker && p->source_url && dest_worker) {
+		vine_transfer_pair_complete(p);
+		return 0;
+	}
+
+	/* Peer transfers require both worker endpoints. */
 	if (!source_worker || !dest_worker) {
 		if (!source_worker) {
-			debug(D_ERROR, "%s: transfer record for file %s with id %s is found, but source worker is null", __func__, cachename, id);
+			debug(D_ERROR, "%s: peer transfer record for file %s with id %s is found, but source worker is null", __func__, cachename, id);
 		}
 		if (!dest_worker) {
 			debug(D_ERROR, "%s: transfer record for file %s with id %s is found, but destination worker is null", __func__, cachename, id);

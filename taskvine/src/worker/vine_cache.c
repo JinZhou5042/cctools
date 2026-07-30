@@ -645,13 +645,14 @@ static int do_internal_command(struct vine_cache *c, const char *command, char *
 Transfer a single input file from a url to the local transfer path via curl.
 -s Do not show progress bar.  (Also disables errors.)
 -S Show errors.
+-f Reject HTTP response codes 400 and above instead of caching their bodies.
 -L Follow redirects as needed.
 --stderr Send errors to /dev/stdout so that they are observed by popen.
 */
 
 static int do_curl_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *transfer_path, const char *cache_path, char **error_message)
 {
-	char *command = string_format("curl -sSL --stderr /dev/stdout -o \"%s\" \"%s\"", transfer_path, f->source);
+	char *command = string_format("curl -fsSL --stderr /dev/stdout -o \"%s\" \"%s\"", transfer_path, f->source);
 	int result = do_internal_command(c, command, error_message);
 	free(command);
 
