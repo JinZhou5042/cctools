@@ -3,11 +3,15 @@
 import json
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 from ndcctools.taskvine.datavine.controller.service import (
     ControllerService,
 )
 from ndcctools.taskvine.datavine.controller.state import ControllerState
+from ndcctools.taskvine.datavine.models import TaskRecord
 from ndcctools.taskvine.datavine.protocol import DataVineRemoteError
 from ndcctools.taskvine.datavine.scheduler.client import ControllerClient
 from ndcctools.taskvine.datavine.serialization import serialize
@@ -136,11 +140,60 @@ def request_admission_case():
     return admission
 
 
+def idata_attempt_source_case():
+    state = ControllerState(max_edata_bytes=1024 * 1024)
+    metadata, function_payload = serialize(bytes)
+    function = state.register_edata(metadata, function_payload)
+    record = state.allocate_idata(41)
+    state.register_task(
+        TaskRecord(41, function.data_id, (), (), record.data_id, ())
+    )
+    state.publish_idata(record.data_id, 1, b"attempt-one")
+    service = ControllerService(
+        "127.0.0.1",
+        0,
+        "attempt-token",
+        state,
+        max_serving_bytes=1024 * 1024,
+    )
+    _, port = service.start()
+
+    def source(attempt):
+        query = urllib.parse.urlencode(
+            {"token": "attempt-token", "attempt": attempt}
+        )
+        return (
+            f"http://127.0.0.1:{port}/v1/idata/{record.data_id}?"
+            f"{query}"
+        )
+
+    try:
+        with urllib.request.urlopen(source(1), timeout=5) as response:
+            assert response.read() == b"attempt-one"
+        state.publish_idata(record.data_id, 2, b"attempt-two")
+        try:
+            urllib.request.urlopen(source(1), timeout=5)
+        except urllib.error.HTTPError as error:
+            assert error.code == 409, error
+        else:
+            raise AssertionError("stale IData attempt source was accepted")
+        with urllib.request.urlopen(source(2), timeout=5) as response:
+            assert response.read() == b"attempt-two"
+    finally:
+        service.stop()
+    return {
+        "old_attempt_status": 409,
+        "current_attempt": 2,
+        "status": "PASS",
+    }
+
+
 def main():
     started = time.monotonic()
     result = {
         "byte_serving": byte_serving_case(),
         "request_admission": request_admission_case(),
+        "idata_attempt_source": idata_attempt_source_case(),
         "elapsed_seconds": time.monotonic() - started,
         "status": "PASS",
     }

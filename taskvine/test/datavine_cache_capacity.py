@@ -153,6 +153,7 @@ def prefetch_recovery_case(factory_manager=None):
     report = combined["scheduler_report"]
     assert report["worker_loss_injected"], report
     assert report["recovery_reexecutions"] >= 1, report
+    assert report["legacy_recovery_tasks"] == 0, report
     assert report["prefetch_selected"] > 0, report
     assert all(
         worker["cache_items_high_water"] <= 6
@@ -225,10 +226,6 @@ def main():
         and worker["worker_cache_bytes"] <= 239308
         for worker in bounded_report["worker_physical_cache"]
     ), bounded_report
-    assert sum(
-        worker["cache_admission_rejections"]
-        for worker in bounded_report["worker_physical_cache"]
-    ) > 0, bounded_report
     assert all(
         worker["cache_prune_pending_items"] == 0
         for worker in bounded_report["worker_physical_cache"]
@@ -237,13 +234,16 @@ def main():
         usage["items"] <= 6
         for usage in bounded_report["worker_disk_cache_usage"].values()
     ), bounded_report
-    assert all(
-        record["remaining_uses"] == 0
-        or record["data_id"].startswith("e:")
+    future_idata_evictions = [
+        record
         for record in bounded_report[
             "worker_disk_cache_eviction_records"
         ]
-    )
+        if record["data_id"].startswith("i:")
+        and record["remaining_uses"] > 0
+    ]
+    assert future_idata_evictions, bounded_report
+    assert bounded_report["legacy_recovery_tasks"] == 0, bounded_report
     assert bounded_report[
         "worker_disk_cache_effective_retention_items"
     ] == 0
@@ -284,12 +284,14 @@ def main():
     )
     zero_report = zero["scheduler_report"]
     assert zero_report["worker_disk_cache_evictions"] > 0
-    assert all(
-        record["remaining_uses"] == 0
+    assert any(
+        record["data_id"].startswith("i:")
+        and record["remaining_uses"] > 0
         for record in zero_report[
             "worker_disk_cache_eviction_records"
         ]
     )
+    assert zero_report["legacy_recovery_tasks"] == 0, zero_report
     assert all(
         usage["items"] == 0
         for usage in zero_report["worker_disk_cache_usage"].values()
