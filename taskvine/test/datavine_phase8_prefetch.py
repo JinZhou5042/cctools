@@ -89,6 +89,13 @@ def main():
         enabled["taskvine_running_order"][0]
         not in report["prefetch_task_ids"]
     ), "prefetch traffic ran ahead of ready demand work"
+    transfer_metrics = enabled["replica_directory"]
+    assert transfer_metrics["stale_rejections"] >= 1
+    assert (
+        transfer_metrics["observed_transfer_acquires"]
+        == transfer_metrics["observed_transfer_releases"]
+    )
+    assert transfer_metrics["active_leases"] == 0
 
     workflow, target, expected = build_prefetch()
     failed = run_case(

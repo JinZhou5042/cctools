@@ -446,6 +446,17 @@ static vine_result_code_t vine_manager_put_input_file_if_needed(struct vine_mana
 
 	/* Now send the actual file. */
 	vine_result_code_t result = vine_manager_put_input_file(q, w, t, m, file_to_send);
+	if (result == VINE_MGR_FAILURE && m->substitute) {
+		/*
+		A DataVine-bound peer is only a usable source after the Controller
+		authorizes its transfer lease.  A cache observation made by TaskVine
+		alone is soft state, so discard the substitute and retry the stable
+		origin without rolling back computation.
+		*/
+		vine_file_delete(m->substitute);
+		m->substitute = 0;
+		result = vine_manager_put_input_file(q, w, t, m, m->file);
+	}
 
 	/* If the send succeeded, then note that we have a PENDING replica */
 	/* If will be marked as READY when a cache-update message comes back. */

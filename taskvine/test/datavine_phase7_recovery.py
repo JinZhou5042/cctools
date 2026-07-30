@@ -38,6 +38,11 @@ class TransientWorkerStatusManager:
 class ReconciliationRecorder:
     def __init__(self):
         self.observations = []
+        self.claims = []
+
+    def claim_worker(self, worker_id):
+        self.claims.append(worker_id)
+        return {"worker_id": worker_id, "epoch": 1, "active": True}
 
     def reconcile_workers(self, worker_ids):
         self.observations.append(set(worker_ids))
@@ -51,12 +56,14 @@ def worker_status_contract():
     observed = scheduler._sync_worker_epochs()
     assert observed == {"worker-stable"}
     assert controller.observations == []
+    assert controller.claims == []
     assert scheduler._worker_reconciliation_deferrals == 1
 
     manager.workers = [{"workerid": "worker-stable"}]
     observed = scheduler._sync_worker_epochs()
     assert observed == {"worker-stable"}
     assert controller.observations == [{"worker-stable"}]
+    assert controller.claims == ["worker-stable"]
     return {
         "incomplete_snapshot_deferred": True,
         "complete_snapshot_reconciled": True,

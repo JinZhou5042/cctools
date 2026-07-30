@@ -86,7 +86,7 @@ char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info
 	if (f && f->datavine_data_id && source_worker) {
 		if (!source_worker->workerid || !dest_worker || !dest_worker->workerid ||
 				!vine_datavine_acquire_transfer(q, f->datavine_data_id, source_worker->workerid, dest_worker->workerid, transfer_id)) {
-			debug(D_ERROR, "DataVine rejected peer transfer lease for %s", f->datavine_data_id);
+			debug(D_VINE, "DataVine rejected peer transfer lease for %s; using stable origin", f->datavine_data_id);
 			vine_transfer_pair_delete(t);
 			free(transfer_id);
 			return 0;
