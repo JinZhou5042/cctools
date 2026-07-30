@@ -164,6 +164,37 @@
   open. This is not ultimate acceptance.
 - Code commit: `d694bef4a`.
 
+## 2026-07-30 — Phase 9 stable bulk origins and worker epoch claims
+
+- Added metadata-aware serialization domains and Scheduler object-identity
+  memoization so repeated function/value/container references serialize once
+  without cross-domain aliasing.
+- Added atomic content-addressed bulk EData origins beneath a configured
+  Controller root. Registration rejects symlinks, root escape, wrong names,
+  size mismatch, hash mismatch, and byte collisions while keeping bulk bytes
+  outside Controller memory and byte serving.
+- Added worker fallback validation for stable-origin bytes and a two-worker
+  4 MiB repeated-reference E2E whose Controller memory and serving capacities
+  are each 1 MiB.
+- Required clean build/install, all 14 current DataVine tests, 10 repeated bulk
+  workflows, and five repeated worker-loss recoveries passed locally.
+- The first rebuilt-package factory bulk workflow passed, but the immediately
+  following recovery workflow failed with `stale worker epoch`. This run was
+  rejected as acceptance evidence.
+- Fixed the root cause by replacing worker hard-coded epoch 1 with an
+  idempotent Controller claim. An inactive WorkerID advances to the next
+  incarnation; an active duplicate claim returns the same epoch; explicit old
+  reports still fail closed.
+- Rebuilt and verified `datavine.tar.gz`; SHA-256:
+  `857eb5a8d4f586c369ab0755b7f249557a8b1c08e1e3f367a5635dbfef3a5cd6`.
+  Factory `datavine-epoch-643cddd68` then passed both the bulk workflow and the
+  same deterministic worker-loss recovery and was stopped with two workers
+  removed.
+- Self-review leaves transfer-lease coupling, bounded cache admission,
+  stable-origin mutation/restart recovery, dependency-file identity,
+  Controller history cleanup, and the Grand Challenge open.
+- Code commits: `13193c99a`, `643cddd68`.
+
 ## 2026-07-29 — Phase 0 local baseline
 
 - Created branch `datavine` from freshly fetched `origin/task-graph` at PR

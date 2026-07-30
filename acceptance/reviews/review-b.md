@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `d694bef4a`
+Reviewed through code commit: `643cddd68`
 Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
@@ -65,6 +65,15 @@ response concurrency, and in-flight served bytes, and exposes saturation
 metrics. The accepted test fails closed for a serialized object larger than
 the serving budget. B2 remains open because rejection is not a stable bulk
 origin or a usable large-data bypass.
+
+Correction checkpoint `13193c99a` adds an explicit content-addressed stable
+origin beneath a configured Controller root. The Controller validates
+metadata-aware hash, size, regular-file type, path containment, and canonical
+name without retaining the bulk payload. A 4,194,313-byte repeated object
+completes through two factory workers while Controller memory and byte serving
+are each limited to 1 MiB. B2 is improved but remains open because origin
+mutation/replacement, Controller restart reconstruction, and lifecycle
+cleanup are not yet proved.
 
 ### B3 — Active and recovery consumers are modeled but not runtime-connected
 
@@ -146,7 +155,7 @@ pin coverage and restart-persistent quarantine/audit recovery are absent.
 
 | Review B question | Result |
 |---|---|
-| Recoverability model complete? | FAIL — runtime epochs exist; stable bulk origins and transfer coupling remain open |
+| Recoverability model complete? | FAIL — stable bulk origins exist; mutation/restart lifecycle and transfer coupling remain open |
 | Every shadow decision explained? | PASS |
 | Active and recovery consumers distinguished? | PASS in shadow, not runtime |
 | Durability coverage handles branches/joins? | PASS in shadow |

@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 stable bulk origins and direct transfer leases**
-- Validated code commit: `d694bef4a`
+- Active task: **Phase 9 direct transfer leases and bounded cache admission**
+- Validated code commit: `643cddd68`
 
 ## Ultimate acceptance reset
 
@@ -240,6 +240,44 @@ does not yet provide the required stable bulk origin and large-object bypass.
 Actual TaskVine peer movement still does not acquire Controller leases, and
 Controller restart remains untested. Evidence:
 `acceptance/artifacts/controller-admission-d694bef4a.json`.
+
+### Phase 9 stable bulk EData origin checkpoint
+
+Commits `13193c99a` and `643cddd68` add a content-addressed stable-origin path
+for serialized EData that is too large for Controller memory or byte-serving
+budgets. The Scheduler cloudpickles each repeated object reference once,
+assigns serialization domains so function/value/container bytes cannot alias,
+writes one atomic read-only origin, and registers its path, size, metadata, and
+metadata-aware hash. The Controller accepts only regular content-addressed
+files beneath its configured root, streams the hash check, records a SharedFS
+replica, and never admits or serves the bulk bytes.
+
+The deterministic two-worker workflow reuses one 4,194,313-byte serialized
+object through eight bindings while both Controller capacities are 1 MiB. It
+returns the exact oracle with alias identity intact, one EDataID, one bulk
+serialization, 1,170 Controller inline bytes, and 3,146 Controller-served
+bytes in the accepted factory run. Hash mismatch, root escape, symlink,
+cross-domain aliasing, and a distinct oversized inline registration all fail
+closed. All 14 current DataVine regressions pass after the required clean
+build/install.
+
+Self-review of the first factory recovery run exposed a real epoch bug:
+reconnected workers hard-coded epoch 1 and were rejected as stale. Commit
+`643cddd68` moves incarnation allocation to the Controller, makes active claims
+idempotent, advances an inactive identity, and preserves explicit stale-epoch
+rejection. Five local recovery repetitions and the same factory worker-loss
+workflow now pass through five ordinary attempts for four logical tasks with
+one disconnection and one replay.
+
+The rebuilt package SHA-256 is
+`857eb5a8d4f586c369ab0755b7f249557a8b1c08e1e3f367a5635dbfef3a5cd6`.
+The accepted factory `datavine-epoch-643cddd68` was stopped and both workers
+were removed. The earlier failing package/run is recorded as rejected evidence,
+not acceptance. `CTRL-BOUND`, Review B, and Ultimate Acceptance remain
+**FAIL**: actual transfers do not acquire Controller leases, cache admission
+is not DataVine-owned, bulk-origin mutation/restart recovery is open, and
+Controller history cleanup plus the Grand Challenge remain absent. Evidence:
+`acceptance/artifacts/bulk-origin-643cddd68.json`.
 
 ## Phase 8 acceptance
 

@@ -12,20 +12,20 @@ is never a pass.
 | GC-LEGACY | Architectural Legacy limit demonstrated | OPEN | Comparable Legacy driver absent |
 | CORRECT | Exact oracle, failures equal normal, safe explicit failure | OPEN | Small Phase 4–8 cases only |
 | MULTIOUT | Multiple outputs and partial downstream demand | FAIL | One IData output per TaskRecord |
-| EDATA-ID | Independent function/arg/kwarg/file identity and collision checks | OPEN | Values covered partially; dependency-file path absent |
+| EDATA-ID | Independent function/arg/kwarg/file identity and collision checks | OPEN | Function/value/container domains, repeated-reference one-time serialization, bulk hash/path validation pass at `13193c99a`; dependency-file path and explicit collision injection remain |
 | IDATA-ID | Stable output-slot identity and complete explainable lineage | OPEN | Runtime lineage includes nested dependencies at `347f60531`; multi-output remains absent |
 | LIGHTWEIGHT | Compact dispatch/queues scale with IDs and bindings | OPEN | Small records exist; 100k-binding bound unmeasured |
-| SERIAL | Exactly-once serialization and byte-preserving movement | OPEN | Small tests exist; full movement/fault proof absent |
+| SERIAL | Exactly-once serialization and byte-preserving movement | OPEN | A repeated 4 MiB EData object serializes once and preserves validated bytes at `13193c99a`; IData/full movement fault proof remains |
 | AUTHORITY | Controller sole data/lineage/durability/pruning authority | FAIL | Runtime worker replicas integrate at `fbddcc70d`; lineage/pruning authority remains disconnected |
 | STATE | Validated logical/physical/durability/recovery/pruning transitions | OPEN | SharedFS transitions and acknowledged worker-local deletion pass at `3f993f15b`; full races remain |
-| CTRL-BOUND | Bounded memory, serving, metadata, queues, cleanup | FAIL | Request threads and byte serving are bounded at `d694bef4a`; stable bulk bypass and complete history cleanup remain absent |
-| CTRL-FAIL | Auth, idempotency, epochs, stale/partial/restart behavior | FAIL | Runtime worker epochs and stale completion pass at `fbddcc70d`; restart contract absent |
+| CTRL-BOUND | Bounded memory, serving, metadata, queues, cleanup | FAIL | Request/byte admission passes at `d694bef4a`; stable bulk bypass passes at `13193c99a`; complete metadata/history cleanup remains absent |
+| CTRL-FAIL | Auth, idempotency, epochs, stale/partial/restart behavior | FAIL | Runtime epochs and stale completion pass at `fbddcc70d`; Controller-owned reconnect claims pass at `643cddd68`; restart/auth-isolation contract remains absent |
 | SCHED | Independent data progress, minimal rollback, fairness, termination | OPEN | Basic recovery/prefetch exists; combined cases absent |
 | WORKER-PREP | Batched validated resolution with direct source fallback | FAIL | Controller returns validated candidates; worker still resolves per object without direct candidate pulls |
 | CACHE | Strict DRAM/disk bounds, admission, eviction, zero mode | FAIL | TaskVine disk reuse only; DataVine DRAM/admission metrics absent |
 | PREFETCH | Bounded/cancellable/priority-safe independent progress | OPEN | Byte/item/priority gates pass; concurrency/cancel/final architecture open |
 | PUBLISH | Exactly-once staged idempotent publication and cleanup | OPEN | Two-phase worker prepare/Scheduler commit passes; full publication fault matrix open |
-| PLACE | Multi-source, load/epoch, bulk bypass, peer fallback | FAIL | Runtime candidate/lease protocol exists; byte movement still bypasses it via TaskVine mounts |
+| PLACE | Multi-source, load/epoch, bulk bypass, peer fallback | FAIL | Stable bulk bypass passes at `13193c99a` and candidate/lease protocol exists; actual TaskVine byte movement still bypasses Controller leases |
 | PERSIST | Bounded/cancellable/backpressured atomic durability | OPEN | Queue, cancel, overload, attempt-safe acknowledgement pass at `17577b058`; pruning integration and full failure matrix open |
 | RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | Single manual global-loss replay only |
 | PRUNE-SHADOW | Reference/incremental equivalence and proof records | PASS | `artifacts/phase9-shadow-20260729.json`, commit `2108b68a8` |
@@ -96,6 +96,16 @@ held response. Twenty component repetitions and a rebuilt-package two-worker
 factory workflow pass. `CTRL-BOUND` remains FAIL because rejecting a large
 object is not the required stable bulk-data bypass.
 
+Stable-origin evidence at commits `13193c99a` and `643cddd68` covers a
+4,194,313-byte repeated EData object with 1 MiB Controller memory and serving
+limits, one serialization, one EDataID, exact alias reconstruction, hash/path
+validation, serialization-domain separation, and a rebuilt-package two-worker
+factory run. The first factory recovery exposed and rejected a hard-coded
+worker-epoch bug; Controller-owned idempotent incarnation claims then passed
+the same recovery schedule. `CTRL-BOUND` remains FAIL because completed
+metadata/history cleanup is incomplete, and `PLACE` remains FAIL because
+actual movement does not acquire Controller leases.
+
 ## Paper-thesis evidence map
 
 | Clause | Status | Required final evidence |
@@ -103,7 +113,7 @@ object is not the required stable bulk-data bypass.
 | Workflow-owned semantics | OPEN | stable identity/lineage/authority under churn |
 | Serialized identity | OPEN | dedup, indexing, preserved bytes, boundary deserialize |
 | Distributed movement | OPEN | demand/peer/multi-source/bounded central bytes |
-| Distributed caching | FAIL | bounded DRAM/disk, admission, eviction, bulk bypass |
+| Distributed caching | FAIL | bulk bypass passes; bounded DRAM/disk admission and eviction remain |
 | Controlled persistence | FAIL | admission, retry, backpressure, cancellation |
 | Re-realization | OPEN | repeated ordinary-task recovery from frontier |
 | Disposable workers | OPEN | churn across execution/transfer/persist/recovery/prune |

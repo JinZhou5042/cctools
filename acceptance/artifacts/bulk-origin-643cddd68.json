@@ -1,0 +1,90 @@
+{
+	"artifact_type": "datavine-stable-bulk-origin-checkpoint",
+	"branch": "datavine",
+	"commits": {
+		"bulk_origin": "13193c99a75b3eb686ce5dc45261a1dba95e5e57",
+		"worker_epoch_fix": "643cddd68ff009ee16c3aca91b2ea4c15a28b9fc"
+	},
+	"status": "PASS_COMPONENT_ONLY",
+	"ultimate_acceptance": false,
+	"commands": {
+		"build": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+		"bulk_component": "cd /users/jzhou24/cctools_repo/datavine/taskvine/test && ./TR_datavine_bulk_origin.sh run",
+		"epoch_protocol": "cd /users/jzhou24/cctools_repo/datavine/taskvine/test && ./TR_datavine_replica_protocol.sh run",
+		"recovery": "cd /users/jzhou24/cctools_repo/datavine/taskvine/test && ./TR_datavine_phase7_recovery.sh run",
+		"package": "poncho_package_create /groups/dthain/users/jzhou24/miniconda/envs/datavine /users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+		"package_verify": "poncho_package_run -e /users/jzhou24/graph_optimization/factories/datavine.tar.gz python -c 'from ndcctools.taskvine.datavine.scheduler.client import ControllerClient; print(hasattr(ControllerClient, \"claim_worker\"))'",
+		"factory": "cd /users/jzhou24/graph_optimization/factories && bash ./run_factory.sh --manager-name datavine-epoch-643cddd68 --workers 2 --cores 2 --memory 4 --disk 10",
+		"factory_bulk": "python taskvine/test/datavine_bulk_origin.py --factory-manager datavine-epoch-643cddd68",
+		"factory_recovery": "python taskvine/test/datavine_phase7_recovery.py --factory-manager datavine-epoch-643cddd68"
+	},
+	"bulk_origin_evidence": {
+		"logical_bulk_bytes": 4194313,
+		"controller_inline_capacity_bytes": 1048576,
+		"controller_byte_serving_capacity_bytes": 1048576,
+		"controller_inline_bytes_factory": 1170,
+		"controller_bytes_served_factory": 3146,
+		"bulk_records": 1,
+		"bulk_serializations": 1,
+		"total_edata_serializations": 7,
+		"workers_used": 2,
+		"alias_identity_preserved": true,
+		"canonical_content_addressed_file": true,
+		"inline_capacity_rejected_distinct_bulk": true,
+		"incorrect_hash_rejected": true,
+		"out_of_root_path_rejected": true,
+		"symbolic_link_rejected": true,
+		"function_and_value_domains_isolated": true,
+		"exact_oracle": true
+	},
+	"worker_epoch_evidence": {
+		"controller_allocates_incarnation_epoch": true,
+		"inactive_worker_claim_advanced_to_epoch": 2,
+		"duplicate_active_claim_idempotent": true,
+		"explicit_stale_epoch_rejected": true,
+		"incomplete_taskvine_worker_snapshot_deferred": true,
+		"complete_snapshot_reconciled": true,
+		"factory_worker_disconnections": 1,
+		"factory_recovery_reexecutions": 1,
+		"factory_physical_attempts": 5,
+		"factory_logical_tasks": 4,
+		"factory_final_available_idata": 4,
+		"factory_stale_rejections_after_fix": 0,
+		"factory_exact_oracle": true
+	},
+	"regression_evidence": {
+		"all_fourteen_current_datavine_tests_passed_after_epoch_fix": true,
+		"recovery_repetitions_after_epoch_fix": 5,
+		"bulk_repetitions_before_factory_validation": 10,
+		"required_clean_build_install_passed": true,
+		"flake8_changed_files_passed": true,
+		"python_compile_passed": true,
+		"git_diff_check_passed": true
+	},
+	"rejected_experiment": {
+		"package_sha256": "eaff08e9286f8117aeadc6ea50c8d32406ddab85454ac2c4ff1d16161d965301",
+		"factory_manager": "datavine-bulk-13193c99a",
+		"bulk_workflow_passed": true,
+		"recovery_workflow_passed": false,
+		"failure": "worker rejoin used hard-coded epoch 1 and Controller rejected it as stale",
+		"accepted_as_evidence": false,
+		"correction_commit": "643cddd68ff009ee16c3aca91b2ea4c15a28b9fc"
+	},
+	"environment": {
+		"archive": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+		"archive_sha256": "857eb5a8d4f586c369ab0755b7f249557a8b1c08e1e3f367a5635dbfef3a5cd6",
+		"python": "3.10.20",
+		"cloudpickle": "3.1.2",
+		"claim_worker_import_verified": true,
+		"factory_stopped": true,
+		"workers_removed": 2
+	},
+	"remaining_blockers": [
+		"actual TaskVine byte movement still bypasses Controller source leases",
+		"bulk-origin mutation and Controller restart lifecycle are not recovered",
+		"worker cache capacity and large-object admission are not DataVine-owned",
+		"dependency-file EData identity is not implemented in the independent runtime",
+		"completed and pruned Controller metadata cleanup is incomplete",
+		"Grand Challenge and mandatory comparison modes are not implemented"
+	]
+}
