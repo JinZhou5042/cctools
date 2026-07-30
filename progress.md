@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 asynchronous pruning coordination**
-- Validated code commit: `6135c761a`
+- Active task: **Phase 9 deferred-lease pruning completion**
+- Validated code commit: `a8bd9609c`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +25,41 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 asynchronous frontier-pruning checkpoint
+
+Commit `a8bd9609c` removes the Scheduler's global frontier-pruning drain
+barrier. A proven frontier may now enter an explicit active-pruning state while
+unrelated compute and persistence continue. The Scheduler prevents pruning
+data used by a running task or active persistence request, applies the current
+Controller proof, issues generation-exact TaskVine deletions, polls deletion
+acknowledgements in its normal event loop, confirms replica removal, and
+releases every physical prune tracker before advancing the frontier.
+
+The deterministic workflow runs a four-task durable chain beside an independent
+slow task. A four-second controlled acknowledgement window proves overlap:
+all five logical tasks complete in exactly five physical attempts, IData
+`[1,2]` is physically pruned after task 3 becomes durable, and one independent
+compute completion is observed while frontier pruning is active. Three local
+repetitions have semantic SHA-256
+`feda8901dc3927b1a9c668116b09ec3c3e2d7dcec1bbde8939797987c85f6d11`.
+
+The required clean build/install, `flake8`, and all 20 installed-path
+regressions pass. The rebuilt package SHA-256 is
+`3b74914b788ed67e665f651ba873eda005765ff0857e85582519acea59a9b51f`.
+`poncho_package_run -e` validates `cloudpickle 3.1.2` and the packaged
+DataVine import. Factory `datavine-async-a8bd9609c` passes with two
+package-only workers and reports `all workers removed` on stop. Evidence:
+`acceptance/artifacts/async-pruning-a8bd9609c.json`.
+
+Self-review status is **PASS for this scoped overlap checkpoint and FAIL for
+Ultimate Acceptance**. It proves independent compute progress during worker
+deletion acknowledgement, but not an active source-read race. If the
+Controller returns a retiring replica with an active lease, the current
+Scheduler fails closed. The next smallest safe task is to make deferred
+lease retirement an explicit bounded state: wait for lease release, revalidate
+the pruning proof and generation, complete physical deletion exactly once,
+and test concurrent proof invalidation without deleting newly required data.
 
 ### Phase 9 branched minimum recoverable-cut checkpoint
 

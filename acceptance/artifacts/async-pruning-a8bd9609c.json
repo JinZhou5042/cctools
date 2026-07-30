@@ -1,0 +1,64 @@
+{
+	"acceptance_scope": [
+		"event-driven frontier pruning without a global compute drain",
+		"Controller proof application before physical worker deletion",
+		"asynchronous worker deletion acknowledgement",
+		"prune-tracker release after generation-exact confirmation",
+		"independent compute completion while pruning is active"
+	],
+	"branch": "datavine",
+	"build": {
+		"command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+		"status": "PASS"
+	},
+	"code_commit": "a8bd9609c2954ef1873a782779ecac49d5f523d0",
+	"factory": {
+		"command": "bash ./run_factory.sh --manager-name datavine-async-a8bd9609c --workers 2 --cores 1 --memory 4 --disk 10",
+		"manager_name": "datavine-async-a8bd9609c",
+		"package_only_e2e": "PASS",
+		"shutdown": "all workers removed",
+		"workers": 2
+	},
+	"factory_package": {
+		"path": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+		"poncho_package_run": "cloudpickle=3.1.2; DataVine imported from packaged site-packages",
+		"sha256": "3b74914b788ed67e665f651ba873eda005765ff0857e85582519acea59a9b51f",
+		"size_bytes": 790757463
+	},
+	"local_e2e": {
+		"command": "python3 taskvine/test/datavine_async_pruning.py",
+		"semantic_output_sha256_repetitions": [
+			"feda8901dc3927b1a9c668116b09ec3c3e2d7dcec1bbde8939797987c85f6d11",
+			"feda8901dc3927b1a9c668116b09ec3c3e2d7dcec1bbde8939797987c85f6d11",
+			"feda8901dc3927b1a9c668116b09ec3c3e2d7dcec1bbde8939797987c85f6d11"
+		],
+		"status": "PASS"
+	},
+	"pruning": {
+		"compute_completions_while_frontier_pruning": 1,
+		"frontier_task_id": 3,
+		"logical_tasks": 5,
+		"physical_attempts": 5,
+		"runtime_pruned_data_ids": [
+			1,
+			2
+		],
+		"worker_prune_confirmations_equal_requests": true,
+		"worker_prune_trackers_released": true
+	},
+	"regression": {
+		"installed_path": "20/20 PASS",
+		"diff_check": "PASS",
+		"flake8": "PASS"
+	},
+	"self_review": {
+		"checkpoint_status": "PASS",
+		"ultimate_acceptance": "FAIL",
+		"unresolved": [
+			"active Controller source leases currently fail closed instead of waiting for lease release and revalidating the proof",
+			"dynamic consumer insertion and proof invalidation are not exercised concurrently with runtime pruning",
+			"pruning fairness and storage decline are not measured at scale",
+			"Grand Challenge and eight-mode Legacy comparison remain absent"
+		]
+	}
+}

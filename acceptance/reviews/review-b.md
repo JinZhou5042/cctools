@@ -302,3 +302,12 @@ pruning, restart recovery, or automatic scale policy may be accepted until
 B2, B3, B5, and B7 are closed. Strict disk admission, DRAM ownership,
 repeated frontier-bounded recovery after eviction, true process loss, and
 eviction concurrent with an active demand read remain additional blockers.
+
+Correction checkpoint `a8bd9609c` removes the Scheduler's global
+frontier-pruning drain barrier and proves that unrelated compute completes
+while generation-exact worker deletions await acknowledgement. It does not
+close Review B. A Controller replica with an active source lease transitions
+to retiring, but the Scheduler currently fails closed instead of waiting for
+lease release, revalidating the proof/generation, and completing deletion.
+Dynamic consumer insertion during that wait is also untested. Those are
+critical blockers to accepting concurrent active-read pruning.

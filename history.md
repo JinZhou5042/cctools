@@ -1,5 +1,29 @@
 # DataVine History
 
+## 2026-07-30 — Asynchronous frontier pruning and compute overlap
+
+- Replaced the frontier-pruning global drain barrier with an explicit active
+  state polled from the Scheduler event loop. Unrelated compute and
+  persistence remain dispatchable while worker deletion acknowledgements are
+  outstanding.
+- Prevented prune start when targeted IData is used by a running task or an
+  active persistence request. Controller proof application precedes physical
+  deletion; generation-exact confirmations and tracker cleanup precede
+  frontier advancement.
+- Added a deterministic five-task chain/independent-branch E2E. All five tasks
+  run once, IData `[1,2]` is deleted, and one compute completion occurs during
+  the controlled pruning-acknowledgement window.
+- The required build, all 20 installed regressions, `flake8`, three identical
+  local repetitions, packaged-environment verification, and two-worker
+  factory run pass. Factory shutdown removes all workers.
+- Code commit: `a8bd9609c`; package SHA-256:
+  `3b74914b788ed67e665f651ba873eda005765ff0857e85582519acea59a9b51f`.
+- Evidence: `acceptance/artifacts/async-pruning-a8bd9609c.json`.
+- Self-review status: **PASS for the scoped checkpoint, FAIL for Ultimate
+  Acceptance**. Active Controller leases still fail closed instead of
+  entering a bounded wait/revalidation state. Dynamic proof invalidation,
+  scale storage decline, and the Grand Challenge remain unresolved.
+
 ## 2026-07-30 — Branched durability-frontier recovery
 
 - Added a diamond branch and unequal chain joined by fan-in, with durable
