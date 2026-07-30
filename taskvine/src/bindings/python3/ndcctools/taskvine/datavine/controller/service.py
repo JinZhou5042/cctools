@@ -408,6 +408,17 @@ class ControllerService:
                         return
                     self._json(200, dataclasses.asdict(worker))
                     return
+                if self.path == f"{API_PREFIX}/workers/claim":
+                    try:
+                        request = self._read_json()
+                        worker = owner.state.claim_worker(
+                            request["worker_id"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, dataclasses.asdict(worker))
+                    return
                 if self.path == f"{API_PREFIX}/workers/disconnect":
                     try:
                         request = self._read_json()

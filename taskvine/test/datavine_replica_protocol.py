@@ -150,7 +150,9 @@ def main():
             output_hash,
             len(idata_payload),
         )
-        client.join_worker("w1", 2)
+        claimed = client.claim_worker("w1")
+        assert claimed["epoch"] == 2
+        assert client.claim_worker("w1") == claimed
         expect_remote_error(
             "stale worker epoch",
             client.report_replica,

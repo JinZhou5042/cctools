@@ -411,6 +411,10 @@ class ControllerState:
         with self._lock:
             return self.replicas.join_worker(worker_id, epoch)
 
+    def claim_worker(self, worker_id):
+        with self._lock:
+            return self.replicas.claim_worker(worker_id)
+
     def disconnect_worker(self, worker_id, epoch):
         with self._lock:
             return self.replicas.disconnect_worker(worker_id, epoch)

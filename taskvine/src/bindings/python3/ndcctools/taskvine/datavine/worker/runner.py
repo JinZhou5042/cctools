@@ -26,8 +26,7 @@ def main(argv=None):
     worker_id = os.environ.get("VINE_WORKER_ID")
     if not worker_id:
         raise RuntimeError("TaskVine worker incarnation is unavailable")
-    worker_epoch = 1
-    client.join_worker(worker_id, worker_epoch)
+    worker_epoch = int(client.claim_worker(worker_id)["epoch"])
     task = client.get_task(args.task_id)
     objects = {}
 

@@ -60,6 +60,14 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def claim_worker(self, worker_id):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/workers/claim",
+            {"worker_id": str(worker_id)},
+        )
+        return json.loads(payload)
+
     def disconnect_worker(self, worker_id, epoch=1):
         payload, _ = self._request(
             "POST",

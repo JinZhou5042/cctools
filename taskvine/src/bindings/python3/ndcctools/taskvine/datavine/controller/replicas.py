@@ -156,6 +156,21 @@ class ReplicaDirectory:
             self._changed()
             return record
 
+    def claim_worker(self, worker_id):
+        """Return or allocate the Controller-owned worker incarnation."""
+        worker_id = str(worker_id)
+        if not worker_id:
+            raise ValueError("invalid worker identity")
+        with self._lock:
+            old = self._workers.get(worker_id)
+            if old is None:
+                epoch = 1
+            elif old.active:
+                return old
+            else:
+                epoch = old.epoch + 1
+            return self.join_worker(worker_id, epoch)
+
     def disconnect_worker(self, worker_id, epoch):
         worker_id = str(worker_id)
         epoch = int(epoch)
