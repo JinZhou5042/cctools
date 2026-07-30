@@ -1,5 +1,26 @@
 # DataVine History
 
+## 2026-07-30 — Real IData transfer release/pruning coordination
+
+- Retained failed Controller lease releases for delayed retry and bounded them
+  with an explicit capacity plus an exact O(1) pending counter.
+- Backpressured missing volatile IData at capacity while preserving safe
+  stable-origin fallback for EData.
+- Forced an 8,000,132-byte serialized IData across two distinct workers,
+  deferred pruning with one active lease, retried release, revalidated the
+  proof, and acknowledged deletion of both worker replicas.
+- Three local and three package-only factory repetitions returned the exact
+  oracle. The exact clean build and all 25 DataVine regressions pass.
+- Rejected a timing-dependent no-backpressure run, an O(active-transfers)
+  hot-path scan, and an unsafe volatile-IData origin fallback.
+- Code commit: `8772071b8`; package SHA-256:
+  `a63b506e31417bd1dda2596911a7229f80cdd65edff4cde0313cb26a3f063161`.
+- Evidence: `acceptance/artifacts/transfer-pruning-8772071b8.json`.
+- Self-review: **PASS for the scoped release/pruning checkpoint, FAIL for
+  Review B and Ultimate Acceptance**. Positive-byte failure during the same
+  pruning window, dynamic invalidation, restart, scale, and the Grand
+  Challenge remain open.
+
 ## 2026-07-30 — Surviving corrupt peer and alternate-peer fallback
 
 - Added a raw serialized-byte SHA-256 beside, not instead of, the

@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 real-transfer/pruning concurrency**
-- Validated code commit: `0a5eefbd0`
+- Active task: **Phase 9 byte-counted transfer failure during pruning**
+- Validated code commit: `8772071b8`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +25,46 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 real-IData transfer release/pruning checkpoint
+
+Commit `8772071b8` retains a completed peer-transfer record when the Data
+Controller lease release fails, retries it after a bounded delay, and accounts
+for pending releases with an exact O(1) counter. The queue has an explicit
+capacity. At capacity, missing volatile IData preparation backpressures rather
+than falling through to an origin that cannot reproduce the bytes; stable
+EData may still use its validated stable origin.
+
+The deterministic two-worker E2E produces an 8,000,132-byte serialized IData
+on one worker and forces its consumer onto the other. After the real peer byte
+transfer completes, the first IData lease release is retained. A durable
+downstream frontier makes the source prunable while that lease remains active:
+the Controller reports one deferred replica with `active_leases=1`, the retry
+releases the lease, continuation revalidates the proof, and both physical
+worker replicas acknowledge deletion. The capacity mode sets the pending
+limit to one and proves dispatch backpressure without exceeding that limit.
+The exact logical result is `16000246`, serialized SHA-256
+`bcfeda77d9ec62ee5366601505e8ef74a8898d5bbab68fa654a6904f995883de`.
+
+Three local repetitions each observe 22 capacity-backpressure decisions,
+one release retry, one pending high-water item, and two acknowledged prunes.
+The exact clean build/install and all 25 DataVine regressions pass. The rebuilt
+global package SHA-256 is
+`a63b506e31417bd1dda2596911a7229f80cdd65edff4cde0313cb26a3f063161`;
+`poncho_package_run -e` verifies cloudpickle 3.1.2, Workflow import, and the
+new counter API. Three package-only factory repetitions each observe 32
+backpressure decisions and the same correctness/pruning fields. Shutdown
+reports `all workers removed`. Evidence:
+`acceptance/artifacts/transfer-pruning-8772071b8.json`.
+
+Self-review is **PASS for this bounded release/pruning checkpoint and FAIL for
+Review B and Ultimate Acceptance**. The bytes finish before the deliberately
+failed release, so this does not prove pruning while bytes remain in flight.
+The fault is deterministic pre-request injection, not a real HTTP timeout.
+Dynamic consumer registration, Controller restart, scale, comparisons, and
+the Grand Challenge remain open. The next smallest safe task combines the
+existing positive-byte source-loss hook with this pruning continuation and
+dynamically invalidates the proof in a second deterministic mode.
 
 ### Phase 9 surviving-corrupt-peer alternate-source checkpoint
 

@@ -389,3 +389,22 @@ proved independently, but no E2E overlaps a real active transfer lease with a
 deferred physical pruning decision and then revalidates the proof after
 transfer success or failure. Controller restart, dynamic-consumer invalidation
 during that exact window, release timeout, and scale remain unresolved.
+
+Correction checkpoint `8772071b8` forces an 8,000,132-byte serialized IData
+between distinct live workers, retains its real Controller source lease after
+a deterministic release failure, and applies a pruning proof while that lease
+is active. The Controller defers the exact replica, bounded retry releases the
+lease, continuation revalidates the proof, and two physical worker replicas
+acknowledge deletion. A second mode fills the one-item pending-release queue
+and proves missing-IData dispatch backpressure without exceeding the bound.
+Three local and three rebuilt-package factory repetitions return the exact
+oracle. Evidence is
+`../artifacts/transfer-pruning-8772071b8.json`.
+
+Review B remains **FAIL**. This closes the successful-transfer/delayed-release
+half of the transfer-coupled pruning gap, but the byte transfer is complete
+before release failure retains the lease. It does not yet combine a positive
+partial write and source loss with the same pruning continuation, nor dynamic
+consumer registration in that window. The injected release failure occurs
+before the HTTP request and is not evidence of a real Controller timeout.
+Controller restart and scale also remain unresolved.
