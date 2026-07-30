@@ -53,6 +53,18 @@ class VineGraphConfig:
             "local-execute": 0,
             # 1 = merge maximal linear chains into supernodes before finalize (vine_graph_group_chain_like_tasks).
             "task-group": 0,
+            # Phase 1 shadow identity/bindings. Legacy execution and movement
+            # remain authoritative whether this is enabled or disabled.
+            "indexed-data-identity": 0,
+            # Phase 2 read-only Data Graph. It requires Phase 1 identity and
+            # makes no scheduling or data-management decisions.
+            "shadow-data-graph": 0,
+            # Phase 3 authoritative logical registry and materialization
+            # binding audit. Physical lifecycle remains on the legacy path.
+            "data-controller": 0,
+            # Phase 4 worker inventory and stable-source preparation audit.
+            # Legacy mounts still transport bytes.
+            "worker-data-agent": 0,
         }
 
     def _sections(self):
@@ -197,7 +209,12 @@ class VineGraph(Manager):
                 assert callable(func), f"Task {k} does not have a callable"
                 workflow._add_task_with_key(k, func, *args, **kwargs)
 
-        workflow.finalize()
+        workflow.finalize(
+            indexed_data_identity=bool(self.get_param("indexed-data-identity")),
+            shadow_data_graph=bool(self.get_param("shadow-data-graph")),
+            data_controller=bool(self.get_param("data-controller")),
+            worker_data_agent=bool(self.get_param("worker-data-agent")),
+        )
 
         return workflow
 
@@ -251,6 +268,29 @@ class VineGraph(Manager):
             for workflow_key in consumers:
                 bridge.add_task_input_file(workflow_key, file_id, task_path)
 
+        if py_graph.data_controller is not None:
+            if int(self.get_param("task-group")):
+                raise ValueError(
+                    "data-controller does not yet support task-group"
+                )
+            for workflow_key in py_graph.get_topological_order():
+                expectation = (
+                    py_graph.data_controller.legacy_mount_expectation(
+                        py_graph, workflow_key
+                    )
+                )
+                bridge.set_data_binding_expectations(
+                    workflow_key, expectation
+                )
+                if py_graph.worker_data_agent_enabled:
+                    task_id = py_graph.data_controller.task_id_for(
+                        workflow_key
+                    )
+                    bridge.set_worker_data_assignment(
+                        workflow_key,
+                        py_graph.data_controller.worker_assignment(task_id),
+                    )
+
         # Matches --task-group on the Python side so the C layer knows whether merging is allowed.
         bridge.tune(
             "chain-grouping-enabled",
@@ -302,6 +342,11 @@ class VineGraph(Manager):
             if not os.path.isabs(remote_name):
                 py_graph.outfile_remote_name[k] = os.path.join(out_dir, remote_name)
         t0 = time.time()
+        local_worker_data_agent = None
+        if py_graph.worker_data_agent_enabled:
+            from .worker_data_agent import WorkerDataAgent
+
+            local_worker_data_agent = WorkerDataAgent()
         try:
             order = py_graph.get_topological_order()
             interval = float(self.get_param("progress-bar-update-interval-sec"))
@@ -334,6 +379,21 @@ class VineGraph(Manager):
                         )
                     py_graph._local_file_paths[file_id] = local_path
                 py_graph.save_task_output(k, out)
+                if py_graph.data_controller is not None:
+                    task_id = py_graph.data_controller.task_id_for(k)
+                    py_graph.data_controller.record_materialization_audit(
+                        task_id, 1
+                    )
+                    if py_graph.worker_data_agent_enabled:
+                        assignment = (
+                            py_graph.data_controller.worker_assignment(task_id)
+                        )
+                        local_worker_data_agent.prepare(
+                            py_graph.data_controller, py_graph, assignment
+                        )
+                        py_graph.data_controller.record_worker_preparation_audit(
+                            task_id, 1
+                        )
                 now = time.time()
                 if now - last_update >= interval or i == n:
                     self._print_local_progress(i, n, t0)
@@ -409,6 +469,50 @@ class VineGraph(Manager):
                 bridge.execute()
                 makespan_s = round(bridge.get_makespan_us() / 1e6, 6)
                 completed_recovery_tasks = bridge.get_completed_recovery_tasks()
+                if py_graph.data_controller is not None:
+                    if bridge.get_total_materialization_audit_failures() != 0:
+                        raise RuntimeError(
+                            "Data Controller materialization audit failed"
+                        )
+                    for workflow_key in py_graph.task_dict:
+                        task_id = py_graph.data_controller.task_id_for(
+                            workflow_key
+                        )
+                        py_graph.data_controller.record_materialization_audit(
+                            task_id,
+                            bridge.get_materialization_audit_count(
+                                workflow_key
+                            ),
+                        )
+                    if (
+                        bridge.get_total_materialization_audits()
+                        != len(py_graph.task_dict)
+                    ):
+                        raise RuntimeError(
+                            "Data Controller materialization audit count "
+                            "differs from workflow task count"
+                        )
+                    if py_graph.worker_data_agent_enabled:
+                        if bridge.get_total_worker_data_audit_failures() != 0:
+                            raise RuntimeError(
+                                "Worker Data Agent preparation audit failed"
+                            )
+                        for workflow_key in py_graph.task_dict:
+                            task_id = py_graph.data_controller.task_id_for(
+                                workflow_key
+                            )
+                            py_graph.data_controller.record_worker_preparation_audit(
+                                task_id,
+                                bridge.get_worker_data_audit_count(workflow_key),
+                            )
+                        if (
+                            bridge.get_total_worker_data_audits()
+                            != len(py_graph.task_dict)
+                        ):
+                            raise RuntimeError(
+                                "Worker Data Agent audit count differs from "
+                                "workflow task count"
+                            )
 
             total_tasks_completed = len(py_graph.task_dict) + completed_recovery_tasks
             throughput_tps = round(total_tasks_completed / makespan_s, 6) if makespan_s > 0 else 0.0

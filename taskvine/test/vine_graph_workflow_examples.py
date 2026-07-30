@@ -456,7 +456,8 @@ def _sink_tasks(workflow):
 
 def _run_vine_graph(
     graph, n, task_group, port, port_file, logs, tag, out_dir, ckpt_dir,
-    priority, manager_name, libcores,
+    priority, manager_name, libcores, indexed_data_identity, shadow_data_graph,
+    data_controller, worker_data_agent,
 ):
     run_info = logs / tag
     if run_info.exists():
@@ -492,6 +493,10 @@ def _run_vine_graph(
                 "task-group": task_group,
                 "task-priority-mode": priority,
                 "wait-for-workers": 1,
+                "indexed-data-identity": indexed_data_identity,
+                "shadow-data-graph": shadow_data_graph,
+                "data-controller": data_controller,
+                "worker-data-agent": worker_data_agent,
             }
         )
         results = m.run(
@@ -500,10 +505,39 @@ def _run_vine_graph(
             hoisting_modules=[sys.modules[__name__]],
             env_files={"./vine_graph_workflow_examples.py": "vine_graph_workflow_examples.py"},
         ) or {}
+        if data_controller:
+            assert wf.data_controller is not None, "Controller was not built"
+            assert wf.indexed_data_identity is None, "duplicate identity authority"
+            assert wf.shadow_data_graph is None, "duplicate shadow authority"
+            assert wf.data_controller.validate(), "Controller validation failed"
+            comparison = wf.data_controller.comparison_report()
+            assert comparison["mismatches"] == [], comparison
+            audit = wf.data_controller.audit_report()
+            assert audit["mismatches"] == [], audit
+            if worker_data_agent:
+                worker_audit = (
+                    wf.data_controller.worker_preparation_audit_report()
+                )
+                assert worker_audit["mismatches"] == [], worker_audit
+        elif indexed_data_identity:
+            assert wf.indexed_data_identity is not None
+            assert wf.indexed_data_identity.validate()
+        else:
+            assert wf.indexed_data_identity is None
+        if data_controller:
+            pass
+        elif shadow_data_graph:
+            assert wf.shadow_data_graph is not None
+            assert wf.shadow_data_graph.comparison_report()["mismatches"] == []
+        else:
+            assert wf.shadow_data_graph is None
         if graph == "corner-cases":
-            assert results[corner_target] == "corner-cases-ok"
+            assert results[corner_target] == "corner-cases-ok", results[
+                corner_target
+            ]
             target_path = results[wf._corner_file_target]
-            assert Path(target_path).read_text() == "left"
+            target_contents = Path(target_path).read_text()
+            assert target_contents == "left", target_contents
         return {str(i): value for i, value in enumerate(results.values())}
 
 
@@ -519,6 +553,10 @@ def run_graph(
     priority="random",
     manager_name=None,
     libcores=4,
+    indexed_data_identity=0,
+    shadow_data_graph=0,
+    data_controller=0,
+    worker_data_agent=0,
 ):
     root = work_root or Path(tempfile.mkdtemp(prefix="vine_graph-run-"))
     delete_root = work_root is None
@@ -549,6 +587,10 @@ def run_graph(
                 priority,
                 manager_name,
                 libcores,
+                indexed_data_identity,
+                shadow_data_graph,
+                data_controller,
+                worker_data_agent,
             )
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
@@ -572,6 +614,18 @@ def main():
     p.add_argument("--result-file")
     p.add_argument("--timeout", type=float, default=120.0)
     p.add_argument("--no-print-results", action="store_true")
+    p.add_argument(
+        "--indexed-data-identity", type=int, choices=(0, 1), default=0
+    )
+    p.add_argument(
+        "--shadow-data-graph", type=int, choices=(0, 1), default=0
+    )
+    p.add_argument(
+        "--data-controller", type=int, choices=(0, 1), default=0
+    )
+    p.add_argument(
+        "--worker-data-agent", type=int, choices=(0, 1), default=0
+    )
     args = p.parse_args()
 
     if args.cases:
@@ -602,6 +656,10 @@ def main():
                     priority=args.task_priority_mode,
                     manager_name=args.manager_name,
                     libcores=args.libcores,
+                    indexed_data_identity=args.indexed_data_identity,
+                    shadow_data_graph=args.shadow_data_graph,
+                    data_controller=args.data_controller,
+                    worker_data_agent=args.worker_data_agent,
                 )
             except Exception as e:
                 rc = 1

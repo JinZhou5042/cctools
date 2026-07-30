@@ -11,6 +11,7 @@ CCTOOLS_FLAKE8_IGNORE_FILES = "cvine.py,vine_graph_capi.py"
 
 DSPYTHONSO = ndcctools/taskvine/_cvine.$(CCTOOLS_DYNAMIC_SUFFIX)
 VINE_GRAPH_MODULE_DIR = $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/vine_graph
+DATAVINE_MODULE_DIR = $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/datavine
 LIBRARIES = $(DSPYTHONSO)
 OBJECTS = vine_wrap.o
 TARGETS = $(LIBRARIES)
@@ -42,4 +43,7 @@ install: all
 	rm -f $(VINE_GRAPH_MODULE_DIR)/*.py
 	cd ndcctools/taskvine/vine_graph && find . -path ./test -prune -o -type d -print | while read dir; do mkdir -p "$(VINE_GRAPH_MODULE_DIR)/$$dir"; done
 	cd ndcctools/taskvine/vine_graph && find . -path ./test -prune -o -name '*.py' -print | while read file; do cp "$$file" "$(VINE_GRAPH_MODULE_DIR)/$$file"; done
+	rm -rf $(DATAVINE_MODULE_DIR)
+	cd ndcctools/taskvine/datavine && find . -type d -print | while read dir; do mkdir -p "$(DATAVINE_MODULE_DIR)/$$dir"; done
+	cd ndcctools/taskvine/datavine && find . -type f \( -name '*.py' -o -name '*.md' \) -print | while read file; do cp "$$file" "$(DATAVINE_MODULE_DIR)/$$file"; done
 	cp taskvine.py $(CCTOOLS_PYTHON3_PATH)/

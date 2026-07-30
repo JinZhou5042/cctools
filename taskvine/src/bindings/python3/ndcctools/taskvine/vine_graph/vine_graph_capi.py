@@ -149,6 +149,10 @@ class vine_graph_executor(object):
     pfs_usage_bytes = property(_vine_graph_capi.vine_graph_executor_pfs_usage_bytes_get, _vine_graph_capi.vine_graph_executor_pfs_usage_bytes_set)
     total_preprocessing_time_us = property(_vine_graph_capi.vine_graph_executor_total_preprocessing_time_us_get, _vine_graph_capi.vine_graph_executor_total_preprocessing_time_us_set)
     total_postprocessing_time_us = property(_vine_graph_capi.vine_graph_executor_total_postprocessing_time_us_get, _vine_graph_capi.vine_graph_executor_total_postprocessing_time_us_set)
+    total_materialization_audits = property(_vine_graph_capi.vine_graph_executor_total_materialization_audits_get, _vine_graph_capi.vine_graph_executor_total_materialization_audits_set)
+    total_materialization_audit_failures = property(_vine_graph_capi.vine_graph_executor_total_materialization_audit_failures_get, _vine_graph_capi.vine_graph_executor_total_materialization_audit_failures_set)
+    total_worker_data_audits = property(_vine_graph_capi.vine_graph_executor_total_worker_data_audits_get, _vine_graph_capi.vine_graph_executor_total_worker_data_audits_set)
+    total_worker_data_audit_failures = property(_vine_graph_capi.vine_graph_executor_total_worker_data_audit_failures_get, _vine_graph_capi.vine_graph_executor_total_worker_data_audit_failures_set)
     task_priority_mode = property(_vine_graph_capi.vine_graph_executor_task_priority_mode_get, _vine_graph_capi.vine_graph_executor_task_priority_mode_set)
     failure_injection_step_percent = property(_vine_graph_capi.vine_graph_executor_failure_injection_step_percent_get, _vine_graph_capi.vine_graph_executor_failure_injection_step_percent_set)
     progress_bar_update_interval_sec = property(_vine_graph_capi.vine_graph_executor_progress_bar_update_interval_sec_get, _vine_graph_capi.vine_graph_executor_progress_bar_update_interval_sec_set)
@@ -183,6 +187,30 @@ def vine_graph_executor_add_task_output_file(e, task_id, file_id, task_path, is_
 
 def vine_graph_executor_add_task_input_file(e, task_id, file_id, task_path):
     return _vine_graph_capi.vine_graph_executor_add_task_input_file(e, task_id, file_id, task_path)
+
+def vine_graph_executor_set_node_data_binding_expectations(e, task_id, parent_inputs, extra_inputs, extra_outputs):
+    return _vine_graph_capi.vine_graph_executor_set_node_data_binding_expectations(e, task_id, parent_inputs, extra_inputs, extra_outputs)
+
+def vine_graph_executor_get_node_materialization_audit_count(e, task_id):
+    return _vine_graph_capi.vine_graph_executor_get_node_materialization_audit_count(e, task_id)
+
+def vine_graph_executor_get_total_materialization_audits(e):
+    return _vine_graph_capi.vine_graph_executor_get_total_materialization_audits(e)
+
+def vine_graph_executor_get_total_materialization_audit_failures(e):
+    return _vine_graph_capi.vine_graph_executor_get_total_materialization_audit_failures(e)
+
+def vine_graph_executor_set_node_worker_data_assignment(e, task_id, assignment):
+    return _vine_graph_capi.vine_graph_executor_set_node_worker_data_assignment(e, task_id, assignment)
+
+def vine_graph_executor_get_node_worker_data_audit_count(e, task_id):
+    return _vine_graph_capi.vine_graph_executor_get_node_worker_data_audit_count(e, task_id)
+
+def vine_graph_executor_get_total_worker_data_audits(e):
+    return _vine_graph_capi.vine_graph_executor_get_total_worker_data_audits(e)
+
+def vine_graph_executor_get_total_worker_data_audit_failures(e):
+    return _vine_graph_capi.vine_graph_executor_get_total_worker_data_audit_failures(e)
 
 def vine_graph_executor_get_file_target_path(e, file_id):
     return _vine_graph_capi.vine_graph_executor_get_file_target_path(e, file_id)

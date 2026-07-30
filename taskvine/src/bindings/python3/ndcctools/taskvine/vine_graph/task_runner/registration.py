@@ -5,6 +5,8 @@
 import os
 import uuid
 import cloudpickle
+import copy
+import dataclasses
 import types
 import time
 import random
@@ -13,6 +15,12 @@ import collections
 
 from ..workflow import FileHandle, TaskHandle, TaskOutputHandle, TaskOutputWrapper, Workflow, _TaskOutputAttribute
 from .execution import run_scheduler_keys
+from ..worker_data_agent import (
+    StableDataSource,
+    WorkerDataAgent,
+    WorkerPreparationReport,
+    worker_data_agent_for,
+)
 from ndcctools.taskvine.utils import load_variable_from_library
 
 
@@ -27,9 +35,12 @@ class TaskRunnerRegistration:
 
         # These modules are included in the generated function context so task calls can execute directly.
         self.hoisting_modules = [
-            os, cloudpickle, Workflow, FileHandle, TaskHandle, TaskOutputHandle, TaskOutputWrapper, _TaskOutputAttribute,
+            os, cloudpickle, copy, dataclasses,
+            Workflow, FileHandle, TaskHandle, TaskOutputHandle, TaskOutputWrapper, _TaskOutputAttribute,
             uuid, hashlib, random, types, collections, time,
-            load_variable_from_library, run_scheduler_keys
+            StableDataSource, WorkerDataAgent, WorkerPreparationReport,
+            worker_data_agent_for, load_variable_from_library,
+            run_scheduler_keys
         ]
 
         # Environment files are sent with the task runner context and exposed under their remote paths.

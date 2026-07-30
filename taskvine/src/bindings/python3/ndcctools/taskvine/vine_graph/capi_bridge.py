@@ -115,6 +115,71 @@ class VineGraphCapiBridge:
         ) != 0:
             raise RuntimeError(f"failed to declare output file {file_id} on task {workflow_key}")
 
+    def set_data_binding_expectations(self, workflow_key, expectation):
+        """Install Controller counts that C checks at actual materialization."""
+        task_id = self._workflow_key_to_scheduler_key.get(workflow_key)
+        if task_id is None:
+            raise KeyError(f"Workflow key not found: {workflow_key}")
+        result = vine_graph_capi.vine_graph_executor_set_node_data_binding_expectations(
+            self._c_executor,
+            task_id,
+            expectation.parent_inputs,
+            expectation.extra_inputs,
+            expectation.extra_outputs,
+        )
+        if result != 0:
+            raise RuntimeError(
+                f"Data Controller binding expectation mismatch for "
+                f"TaskID {expectation.task_id}"
+            )
+
+    def get_materialization_audit_count(self, workflow_key):
+        task_id = self._workflow_key_to_scheduler_key.get(workflow_key)
+        if task_id is None:
+            raise KeyError(f"Workflow key not found: {workflow_key}")
+        return vine_graph_capi.vine_graph_executor_get_node_materialization_audit_count(
+            self._c_executor, task_id
+        )
+
+    def get_total_materialization_audits(self):
+        return vine_graph_capi.vine_graph_executor_get_total_materialization_audits(
+            self._c_executor
+        )
+
+    def get_total_materialization_audit_failures(self):
+        return vine_graph_capi.vine_graph_executor_get_total_materialization_audit_failures(
+            self._c_executor
+        )
+
+    def set_worker_data_assignment(self, workflow_key, assignment):
+        task_id = self._workflow_key_to_scheduler_key.get(workflow_key)
+        if task_id is None:
+            raise KeyError(f"Workflow key not found: {workflow_key}")
+        if vine_graph_capi.vine_graph_executor_set_node_worker_data_assignment(
+            self._c_executor, task_id, assignment
+        ) != 0:
+            raise RuntimeError(
+                f"failed to set worker data assignment for {workflow_key}"
+            )
+
+    def get_worker_data_audit_count(self, workflow_key):
+        task_id = self._workflow_key_to_scheduler_key.get(workflow_key)
+        if task_id is None:
+            raise KeyError(f"Workflow key not found: {workflow_key}")
+        return vine_graph_capi.vine_graph_executor_get_node_worker_data_audit_count(
+            self._c_executor, task_id
+        )
+
+    def get_total_worker_data_audits(self):
+        return vine_graph_capi.vine_graph_executor_get_total_worker_data_audits(
+            self._c_executor
+        )
+
+    def get_total_worker_data_audit_failures(self):
+        return vine_graph_capi.vine_graph_executor_get_total_worker_data_audit_failures(
+            self._c_executor
+        )
+
     def get_file_target_path(self, file_id):
         """Return the manager-side path of a retrieved output file."""
         path = vine_graph_capi.vine_graph_executor_get_file_target_path(self._c_executor, file_id)

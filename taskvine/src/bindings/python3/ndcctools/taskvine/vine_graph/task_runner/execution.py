@@ -7,10 +7,11 @@ import sys
 import time
 import copy
 import dataclasses
-from collections import defaultdict, deque
+import collections
 
 from ndcctools.taskvine.utils import load_variable_from_library
 from ..workflow import _TaskOutputAttribute
+from ..worker_data_agent import worker_data_agent_for
 
 
 def _resolve_nested_legacy_tasks(obj, memo=None):
@@ -38,8 +39,8 @@ def _resolve_nested_legacy_tasks(obj, memo=None):
         out.extend(_resolve_nested_legacy_tasks(v, memo) for v in obj)
         return out
 
-    if isinstance(obj, deque):
-        out = deque(maxlen=obj.maxlen)
+    if isinstance(obj, collections.deque):
+        out = collections.deque(maxlen=obj.maxlen)
         memo[oid] = out
         out.extend(_resolve_nested_legacy_tasks(v, memo) for v in obj)
         return out
@@ -145,7 +146,7 @@ def topo_sort_group_scheduler_keys(workflow, member_scheduler_keys):
 
     nodes = set(ordered)
     order_index = {k: i for i, k in enumerate(ordered)}
-    adj = defaultdict(set)
+    adj = collections.defaultdict(set)
     indeg = {k: 0 for k in nodes}
 
     # Restrict Workflow to this batch: edge parent_sk -> child_sk only when both endpoints are members.
@@ -159,7 +160,7 @@ def topo_sort_group_scheduler_keys(workflow, member_scheduler_keys):
                 indeg[child_sk] += 1
 
     # Kahn: serial execution order within this task-runner call.
-    q = deque(k for k in ordered if indeg[k] == 0)
+    q = collections.deque(k for k in ordered if indeg[k] == 0)
     out = []
     while q:
         u = q.popleft()
@@ -181,7 +182,6 @@ def run_single_workflow_node(workflow, scheduler_key):
     """Run one node: scheduler_key -> workflow_key, execute, write outfile for downstream refs."""
     workflow_key = workflow.scheduler_key_to_task_id[scheduler_key]
     task_expr = workflow.task_dict[workflow_key]
-
     output = compute_task(workflow, task_expr)
 
     time.sleep(workflow.extra_task_sleep_time[workflow_key])
@@ -226,11 +226,37 @@ def _workflow_from_task_runner_context():
     return load_variable_from_library("graph")
 
 
-def run_scheduler_keys(scheduler_keys_spec):
+def run_scheduler_keys(scheduler_keys_spec, data_assignment_spec=None):
     """Task runner entry that parses keys, orders them, runs each node, and writes outfiles."""
     workflow = _workflow_from_task_runner_context()
     keys = _scheduler_keys_spec_to_list(scheduler_keys_spec)
     ordered = topo_sort_group_scheduler_keys(workflow, keys)
+    preparation_report = None
+    if workflow.worker_data_agent_enabled:
+        if len(keys) != 1:
+            raise ValueError(
+                "worker-data-agent requires one logical task per assignment"
+            )
+        if data_assignment_spec is None:
+            raise ValueError("worker-data-agent assignment is missing")
+        workflow_key = workflow.scheduler_key_to_task_id[keys[0]]
+        task_id = workflow.data_controller.task_id_for(workflow_key)
+        expected_assignment = workflow.data_controller.worker_assignment(
+            task_id
+        )
+        if data_assignment_spec != expected_assignment:
+            raise ValueError(
+                f"TaskID {task_id} assignment differs from Controller"
+            )
+        preparation_report = worker_data_agent_for(workflow).prepare(
+            workflow.data_controller,
+            workflow,
+            data_assignment_spec,
+        )
+        # Put the audit marker before user stdout so bounded stdout capture
+        # cannot discard it after a very chatty task. C accepts it only after
+        # the task and all declared outputs have succeeded.
+        print(preparation_report.audit_line(), flush=True)
     leader_sk = keys[0]
     # The infile from C lists the leader first. Kahn might pick another indeg-zero key first which
     # would reorder writes and confuse executor validation, so move the leader to the front

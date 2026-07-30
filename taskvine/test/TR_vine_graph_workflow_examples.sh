@@ -12,6 +12,10 @@ export PATH=$(dirname "${CCTOOLS_PYTHON_TEST_EXEC}"):$PATH
 STATUS_FILE=vine_graph_workflow_examples.status
 PORT_FILE=vine_graph_workflow_examples.port
 RESULT_FILE=vine_graph_workflow_examples.result
+INDEXED_DATA_IDENTITY=${DATAVINE_INDEXED_DATA_IDENTITY:-0}
+SHADOW_DATA_GRAPH=${DATAVINE_SHADOW_DATA_GRAPH:-0}
+DATA_CONTROLLER=${DATAVINE_DATA_CONTROLLER:-0}
+WORKER_DATA_AGENT=${DATAVINE_WORKER_DATA_AGENT:-0}
 
 check_needed()
 {
@@ -28,7 +32,7 @@ prepare()
 
 run()
 {
-	( ${CCTOOLS_PYTHON_TEST_EXEC} vine_graph_workflow_examples.py $PORT_FILE --case corner-cases --result-file $RESULT_FILE --no-print-results --timeout 90; echo $? > $STATUS_FILE ) &
+	( ${CCTOOLS_PYTHON_TEST_EXEC} vine_graph_workflow_examples.py $PORT_FILE --case corner-cases --result-file $RESULT_FILE --no-print-results --timeout 90 --indexed-data-identity "$INDEXED_DATA_IDENTITY" --shadow-data-graph "$SHADOW_DATA_GRAPH" --data-controller "$DATA_CONTROLLER" --worker-data-agent "$WORKER_DATA_AGENT"; echo $? > $STATUS_FILE ) &
 
 	wait_for_file_creation $PORT_FILE 15
 

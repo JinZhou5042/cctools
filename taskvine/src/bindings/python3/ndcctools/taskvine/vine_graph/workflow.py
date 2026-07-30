@@ -2,13 +2,23 @@
 # This software is distributed under the GNU General Public License.
 # See the file COPYING for details.
 
-from collections import defaultdict, deque
-from collections.abc import Mapping
+import collections
 import copy
 import dataclasses
 import cloudpickle
 import os
 import uuid
+
+from .data_identity import (
+    DataReference,
+    IDataRecord,
+    IndexedDataIdentity,
+    TaskDataBindings,
+    TaskInputBinding,
+    TaskOutputBinding,
+)
+from .shadow_data_graph import ShadowDataGraph
+from .data_controller import DataController
 
 
 # Lightweight wrapper around task results that optionally pads the payload. The
@@ -135,23 +145,27 @@ class Workflow:
 
         self.task_dict = {}
 
-        self.parents_of = defaultdict(set)     # workflow_key -> set of workflow_keys
-        self.children_of = defaultdict(set)    # workflow_key -> set of workflow_keys
+        self.parents_of = collections.defaultdict(set)     # workflow_key -> set of workflow_keys
+        self.children_of = collections.defaultdict(set)    # workflow_key -> set of workflow_keys
 
         self.input_files = {}                  # file_id -> absolute frontend path
         self.output_files = {}                 # file_id -> (producer task id, task-relative path)
-        self.output_files_by_task = defaultdict(dict)  # task id -> relative path -> file_id
-        self.file_consumers = defaultdict(set) # file_id -> consumer task ids
+        self.output_files_by_task = collections.defaultdict(dict)  # task id -> relative path -> file_id
+        self.file_consumers = collections.defaultdict(set) # file_id -> consumer task ids
         self._local_execute = False
         self._local_file_paths = {}
 
-        self.outfile_remote_name = defaultdict(lambda: None)   # workflow_key -> remote outfile name, will be set by the executor graph
+        self.outfile_remote_name = collections.defaultdict(lambda: None)   # workflow_key -> remote outfile name, will be set by the executor graph
 
         self.task_id_to_scheduler_key = {}                  # workflow_key -> scheduler key (C node id)
         self.scheduler_key_to_task_id = {}                  # scheduler key -> workflow_key
 
         self.extra_task_output_size_mb = {}  # workflow_key -> extra size in MB
         self.extra_task_sleep_time = {}      # workflow_key -> extra sleep time in seconds
+        self.indexed_data_identity = None
+        self.shadow_data_graph = None
+        self.data_controller = None
+        self.worker_data_agent_enabled = False
 
     def _intern_callable(self, func):
         idx = self._callable_index.get(func)
@@ -176,12 +190,12 @@ class Workflow:
             seen.add(oid)
             if dataclasses.is_dataclass(key) and not isinstance(key, type):
                 return any(dict_key_contains_ref(getattr(key, f.name), seen) for f in dataclasses.fields(key))
-            if isinstance(key, Mapping):
+            if isinstance(key, collections.abc.Mapping):
                 return any(
                     dict_key_contains_ref(k, seen) or dict_key_contains_ref(v, seen)
                     for k, v in key.items()
                 )
-            if isinstance(key, (list, tuple, set, frozenset, deque)):
+            if isinstance(key, (list, tuple, set, frozenset, collections.deque)):
                 return any(dict_key_contains_ref(v, seen) for v in key)
             try:
                 state = vars(key)
@@ -217,7 +231,7 @@ class Workflow:
             if not rewrite:
                 memo[oid] = None
 
-            if isinstance(x, Mapping):
+            if isinstance(x, collections.abc.Mapping):
                 for k in x.keys():
                     if dict_key_contains_ref(k, set()):
                         raise ValueError("dependency handles cannot be used as dict keys")
@@ -248,12 +262,12 @@ class Workflow:
                 out.extend(rec(v) for v in x)
                 return out
 
-            if isinstance(x, deque):
+            if isinstance(x, collections.deque):
                 if not rewrite:
                     for v in x:
                         rec(v)
                     return None
-                out = deque(maxlen=x.maxlen)
+                out = collections.deque(maxlen=x.maxlen)
                 memo[oid] = out
                 out.extend(rec(v) for v in x)
                 return out
@@ -453,7 +467,7 @@ class Workflow:
         for workflow_key in self.task_dict:
             indegree[workflow_key] = len(self.parents_of.get(workflow_key, ()))
 
-        q = deque(t for t, d in indegree.items() if d == 0)
+        q = collections.deque(t for t, d in indegree.items() if d == 0)
         order = []
 
         while q:
@@ -474,5 +488,200 @@ class Workflow:
         """Return handles for tasks with no downstream children."""
         return [self._task_handle(key) for key in self.task_dict if not self.children_of.get(key)]
 
-    def finalize(self):
-        """Finalize the workflow. Dependencies are recorded when tasks are added."""
+    def _build_indexed_data_identity(self):
+        identity = IndexedDataIdentity()
+
+        # Task IDs and output IDs are allocated first so every dependency can
+        # be represented by a compact, already-known IDataID.
+        for task_id, workflow_key in enumerate(self.task_dict, 1):
+            identity.task_ids[workflow_key] = task_id
+
+        next_idata_id = 1
+        return_idata = {}
+        file_idata = {}
+        for workflow_key in self.task_dict:
+            task_id = identity.task_ids[workflow_key]
+            return_idata[workflow_key] = next_idata_id
+            identity.idata[next_idata_id] = IDataRecord(
+                data_id=next_idata_id,
+                producer_task_id=task_id,
+                slot_kind="return",
+                slot=None,
+            )
+            next_idata_id += 1
+            for path, file_id in self.output_files_by_task.get(workflow_key, {}).items():
+                file_idata[file_id] = next_idata_id
+                identity.idata[next_idata_id] = IDataRecord(
+                    data_id=next_idata_id,
+                    producer_task_id=task_id,
+                    slot_kind="file",
+                    slot=path,
+                )
+                next_idata_id += 1
+
+        identity.output_file_data_ids.update(file_idata)
+        input_file_edata = {
+            file_id: identity.edata.register_file(path)
+            for file_id, path in self.input_files.items()
+        }
+        identity.input_file_data_ids.update(input_file_edata)
+
+        def argument_binding(slot_kind, slot, value):
+            if isinstance(value, TaskOutputHandle):
+                return TaskInputBinding(
+                    slot_kind=slot_kind,
+                    slot=slot,
+                    source_kind="idata",
+                    data_id=return_idata[value.task_id],
+                    references=(
+                        DataReference(
+                            data_kind="idata",
+                            data_id=return_idata[value.task_id],
+                            projection=value.path,
+                        ),
+                    ),
+                )
+            if isinstance(value, FileHandle):
+                if value.file_id in input_file_edata:
+                    data_kind = "edata"
+                    data_id = input_file_edata[value.file_id]
+                else:
+                    data_kind = "idata"
+                    data_id = file_idata[value.file_id]
+                return TaskInputBinding(
+                    slot_kind=slot_kind,
+                    slot=slot,
+                    source_kind=data_kind,
+                    data_id=data_id,
+                    references=(DataReference(data_kind=data_kind, data_id=data_id),),
+                )
+
+            has_references = []
+
+            def detect_reference(ref):
+                has_references.append(True)
+
+            self._visit_task_output_refs(
+                value,
+                detect_reference,
+                rewrite=False,
+                on_file=detect_reference,
+            )
+            if not has_references:
+                return TaskInputBinding(
+                    slot_kind=slot_kind,
+                    slot=slot,
+                    source_kind="edata",
+                    data_id=identity.edata.register(value),
+                )
+
+            references = []
+
+            def on_ref(ref):
+                data_id = return_idata[ref.task_id]
+                reference = DataReference(
+                    data_kind="idata", data_id=data_id, projection=ref.path
+                )
+                references.append(reference)
+                return reference
+
+            def on_file(file_handle):
+                if file_handle.file_id in input_file_edata:
+                    data_kind = "edata"
+                    data_id = input_file_edata[file_handle.file_id]
+                else:
+                    data_kind = "idata"
+                    data_id = file_idata[file_handle.file_id]
+                reference = DataReference(data_kind=data_kind, data_id=data_id)
+                references.append(reference)
+                return reference
+
+            template = self._visit_task_output_refs(
+                value, on_ref, rewrite=True, on_file=on_file
+            )
+            data_id = identity.edata.register(template)
+            return TaskInputBinding(
+                slot_kind=slot_kind,
+                slot=slot,
+                source_kind="structured",
+                data_id=data_id,
+                references=tuple(references),
+            )
+
+        for workflow_key, (func_id, args, kwargs) in self.task_dict.items():
+            task_id = identity.task_ids[workflow_key]
+            callable_edata_id = identity.edata.register(self.callables[func_id])
+            inputs = [
+                argument_binding("positional", index, value)
+                for index, value in enumerate(args)
+            ]
+            inputs.extend(
+                argument_binding("keyword", name, value)
+                for name, value in kwargs.items()
+            )
+            outputs = [
+                TaskOutputBinding(
+                    slot_kind="return",
+                    slot=None,
+                    data_id=return_idata[workflow_key],
+                )
+            ]
+            outputs.extend(
+                TaskOutputBinding(
+                    slot_kind="file", slot=path, data_id=file_idata[file_id]
+                )
+                for path, file_id in self.output_files_by_task.get(workflow_key, {}).items()
+            )
+            identity.task_bindings[task_id] = TaskDataBindings(
+                task_id=task_id,
+                workflow_key=workflow_key,
+                callable_edata_id=callable_edata_id,
+                inputs=tuple(inputs),
+                outputs=tuple(outputs),
+            )
+
+        identity.validate()
+        return identity
+
+    def finalize(
+        self,
+        indexed_data_identity=False,
+        shadow_data_graph=False,
+        data_controller=False,
+        worker_data_agent=False,
+    ):
+        """Finalize topology and optionally build Phase 1/2/3/4 data state."""
+        self.get_topological_order()
+        if data_controller and not (
+            indexed_data_identity and shadow_data_graph
+        ):
+            raise ValueError(
+                "data-controller requires indexed-data-identity "
+                "and shadow-data-graph"
+            )
+        if worker_data_agent and not data_controller:
+            raise ValueError(
+                "worker-data-agent requires data-controller"
+            )
+        if shadow_data_graph and not indexed_data_identity:
+            raise ValueError(
+                "shadow-data-graph requires indexed-data-identity"
+            )
+        if indexed_data_identity:
+            self.indexed_data_identity = self._build_indexed_data_identity()
+        else:
+            self.indexed_data_identity = None
+        if shadow_data_graph:
+            self.shadow_data_graph = ShadowDataGraph.from_workflow(self)
+        else:
+            self.shadow_data_graph = None
+        if data_controller:
+            self.data_controller = DataController.from_workflow(self)
+            # Phase 3 has one logical authority. The Phase 1/2 builders are
+            # construction inputs, not retained parallel registries.
+            self.indexed_data_identity = None
+            self.shadow_data_graph = None
+        else:
+            self.data_controller = None
+        self.worker_data_agent_enabled = bool(worker_data_agent)
+        return self

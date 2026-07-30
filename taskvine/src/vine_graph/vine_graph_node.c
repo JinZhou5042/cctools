@@ -53,6 +53,13 @@ struct vine_graph_node *vine_graph_node_create(uint64_t node_id)
 	node->children = list_create();
 	node->extra_outputs = list_create();
 	node->extra_inputs = list_create();
+	node->data_binding_audit_enabled = 0;
+	node->expected_parent_inputs = 0;
+	node->expected_extra_inputs = 0;
+	node->expected_extra_outputs = 0;
+	node->materialization_audit_count = 0;
+	node->worker_data_assignment = NULL;
+	node->worker_data_audit_count = 0;
 	node->remaining_parents_count = 0;
 	node->fired_parents = NULL;
 	node->completed = 0;
@@ -240,6 +247,7 @@ void vine_graph_node_delete(struct vine_graph_node *node)
 	if (node->outfile_remote_name) {
 		free(node->outfile_remote_name);
 	}
+	free(node->worker_data_assignment);
 
 	vine_task_delete(node->task);
 	node->task = NULL;

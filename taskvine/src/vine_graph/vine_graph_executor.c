@@ -87,6 +87,12 @@ static char *vine_graph_executor_format_runner_infile_json(struct vine_graph *g,
 	}
 
 	if (!g->chain_grouping_enabled) {
+		if (node->worker_data_assignment) {
+			return string_format(
+					"{\"fn_args\":[\"%" PRIu64 "\",\"%s\"],\"fn_kwargs\":{}}",
+					node->node_id,
+					node->worker_data_assignment);
+		}
 		return string_format("{\"fn_args\":[\"%" PRIu64 "\"],\"fn_kwargs\":{}}", node->node_id);
 	}
 
@@ -145,6 +151,10 @@ static void vine_graph_executor_init_runtime(struct vine_graph_executor *e)
 	e->pfs_usage_bytes = 0;
 	e->total_preprocessing_time_us = 0;
 	e->total_postprocessing_time_us = 0;
+	e->total_materialization_audits = 0;
+	e->total_materialization_audit_failures = 0;
+	e->total_worker_data_audits = 0;
+	e->total_worker_data_audit_failures = 0;
 	e->task_priority_mode = TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST;
 	e->failure_injection_step_percent = -1.0;
 	e->progress_bar_update_interval_sec = 0.1;
@@ -292,6 +302,33 @@ static void vine_graph_executor_materialize_node(struct vine_graph_executor *e, 
 	/* INITIAL task implies mounts + runner infile are already complete. */
 	if (node->task) {
 		return;
+	}
+
+	if (node->data_binding_audit_enabled) {
+		uint64_t actual_parent_inputs = (uint64_t)list_size(node->parents);
+		uint64_t actual_extra_inputs = (uint64_t)list_size(node->extra_inputs);
+		uint64_t actual_extra_outputs = (uint64_t)list_size(node->extra_outputs);
+		if (node->materialization_audit_count != 0
+				|| actual_parent_inputs != node->expected_parent_inputs
+				|| actual_extra_inputs != node->expected_extra_inputs
+				|| actual_extra_outputs != node->expected_extra_outputs) {
+			e->total_materialization_audit_failures++;
+			fatal("Data Controller binding audit failed for node %" PRIu64
+					": parents=%" PRIu64 "/%" PRIu64
+					" inputs=%" PRIu64 "/%" PRIu64
+					" outputs=%" PRIu64 "/%" PRIu64
+					" prior-audits=%" PRIu64,
+					node->node_id,
+					actual_parent_inputs,
+					node->expected_parent_inputs,
+					actual_extra_inputs,
+					node->expected_extra_inputs,
+					actual_extra_outputs,
+					node->expected_extra_outputs,
+					node->materialization_audit_count);
+		}
+		node->materialization_audit_count++;
+		e->total_materialization_audits++;
 	}
 
 	vine_graph_executor_clear_node_runner_arg(e, node);
@@ -505,6 +542,86 @@ int vine_graph_executor_add_task_input_file(struct vine_graph_executor *e, uint6
 
 	vine_graph_io_mount_add(node->extra_inputs, file, task_path);
 	return 0;
+}
+
+int vine_graph_executor_set_node_data_binding_expectations(
+		struct vine_graph_executor *e,
+		uint64_t task_id,
+		uint64_t parent_inputs,
+		uint64_t extra_inputs,
+		uint64_t extra_outputs)
+{
+	struct vine_graph *g = e ? e->graph : NULL;
+	struct vine_graph_node *node = g ? itable_lookup(g->nodes, task_id) : NULL;
+	if (!node || node->task || node->data_binding_audit_enabled) {
+		return -1;
+	}
+	if ((uint64_t)list_size(node->parents) != parent_inputs
+			|| (uint64_t)list_size(node->extra_inputs) != extra_inputs
+			|| (uint64_t)list_size(node->extra_outputs) != extra_outputs) {
+		e->total_materialization_audit_failures++;
+		return -1;
+	}
+	node->expected_parent_inputs = parent_inputs;
+	node->expected_extra_inputs = extra_inputs;
+	node->expected_extra_outputs = extra_outputs;
+	node->data_binding_audit_enabled = 1;
+	return 0;
+}
+
+uint64_t vine_graph_executor_get_node_materialization_audit_count(
+		const struct vine_graph_executor *e, uint64_t task_id)
+{
+	struct vine_graph *g = e ? e->graph : NULL;
+	struct vine_graph_node *node = g ? itable_lookup(g->nodes, task_id) : NULL;
+	return node ? node->materialization_audit_count : 0;
+}
+
+uint64_t vine_graph_executor_get_total_materialization_audits(
+		const struct vine_graph_executor *e)
+{
+	return e ? e->total_materialization_audits : 0;
+}
+
+uint64_t vine_graph_executor_get_total_materialization_audit_failures(
+		const struct vine_graph_executor *e)
+{
+	return e ? e->total_materialization_audit_failures : 0;
+}
+
+int vine_graph_executor_set_node_worker_data_assignment(
+		struct vine_graph_executor *e,
+		uint64_t task_id,
+		const char *assignment)
+{
+	struct vine_graph *g = e ? e->graph : NULL;
+	struct vine_graph_node *node = g ? itable_lookup(g->nodes, task_id) : NULL;
+	if (!node || !assignment || !assignment[0] || node->task
+			|| node->worker_data_assignment) {
+		return -1;
+	}
+	node->worker_data_assignment = xxstrdup(assignment);
+	return 0;
+}
+
+uint64_t vine_graph_executor_get_node_worker_data_audit_count(
+		const struct vine_graph_executor *e, uint64_t task_id)
+{
+	struct vine_graph *g = e ? e->graph : NULL;
+	struct vine_graph_node *node = g ? itable_lookup(g->nodes, task_id) : NULL;
+	return node ? node->worker_data_audit_count : 0;
+}
+
+uint64_t vine_graph_executor_get_total_worker_data_audits(
+		const struct vine_graph_executor *e)
+{
+	return e ? e->total_worker_data_audits : 0;
+}
+
+uint64_t vine_graph_executor_get_total_worker_data_audit_failures(
+		const struct vine_graph_executor *e)
+{
+	return e ? e->total_worker_data_audit_failures : 0;
 }
 
 const char *vine_graph_executor_get_file_target_path(struct vine_graph_executor *e, uint64_t file_id)
@@ -1232,6 +1349,36 @@ static int vine_graph_executor_validate_all_declared_outputs_or_retry(
 	return 1;
 }
 
+static void vine_graph_executor_audit_worker_data_preparation(
+		struct vine_graph_executor *e,
+		struct vine_graph_node *node,
+		struct vine_task *task)
+{
+	if (!e || !node || !task || !node->worker_data_assignment) {
+		return;
+	}
+	if (vine_task_get_recovery_source_task_id(task) > 0) {
+		return;
+	}
+	const char *stdout_text = vine_task_get_stdout(task);
+	char *expected = string_format(
+			"DATAVINE_WORKER_DATA_AGENT PASS %s",
+			node->worker_data_assignment);
+	if (node->worker_data_audit_count != 0
+			|| !stdout_text
+			|| !strstr(stdout_text, expected)) {
+		e->total_worker_data_audit_failures++;
+		fatal("Worker Data Agent audit failed for node %" PRIu64
+				": assignment=%s prior-audits=%" PRIu64,
+				node->node_id,
+				node->worker_data_assignment,
+				node->worker_data_audit_count);
+	}
+	free(expected);
+	node->worker_data_audit_count++;
+	e->total_worker_data_audits++;
+}
+
 static int vine_graph_executor_validate_task_or_retry(struct vine_graph_executor *e, struct vine_graph_node *node, struct vine_task *task)
 {
 	struct vine_graph *g = e ? e->graph : NULL;
@@ -1270,6 +1417,7 @@ static int vine_graph_executor_validate_task_or_retry(struct vine_graph_executor
 		}
 	}
 
+	vine_graph_executor_audit_worker_data_preparation(e, node, task);
 	return 1;
 }
 

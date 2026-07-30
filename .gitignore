@@ -8,6 +8,8 @@ cctools.test.log
 cctools.test.tmp
 cctools.test.fail
 cctools.lint.out
+/phase0-artifacts/
+/vine-run-info/
 configure.rerun
 config.mk
 *.pyc

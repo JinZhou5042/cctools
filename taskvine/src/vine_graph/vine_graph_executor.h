@@ -32,6 +32,10 @@ struct vine_graph_executor {
 	uint64_t total_preprocessing_time_us;
 	/** Sum of @c vine_graph_executor_run_completion_postprocess intervals across all completions (microseconds). */
 	uint64_t total_postprocessing_time_us;
+	uint64_t total_materialization_audits;
+	uint64_t total_materialization_audit_failures;
+	uint64_t total_worker_data_audits;
+	uint64_t total_worker_data_audit_failures;
 
 	task_priority_mode_t task_priority_mode; // schedule order before submit
 	double failure_injection_step_percent;	 // optional worker release steps for tests
@@ -46,6 +50,28 @@ void vine_graph_executor_finalize(struct vine_graph_executor *e);
 int vine_graph_executor_declare_input_file(struct vine_graph_executor *e, uint64_t file_id, const char *source_path);
 int vine_graph_executor_add_task_output_file(struct vine_graph_executor *e, uint64_t task_id, uint64_t file_id, const char *task_path, int is_target);
 int vine_graph_executor_add_task_input_file(struct vine_graph_executor *e, uint64_t task_id, uint64_t file_id, const char *task_path);
+int vine_graph_executor_set_node_data_binding_expectations(
+		struct vine_graph_executor *e,
+		uint64_t task_id,
+		uint64_t parent_inputs,
+		uint64_t extra_inputs,
+		uint64_t extra_outputs);
+uint64_t vine_graph_executor_get_node_materialization_audit_count(
+		const struct vine_graph_executor *e, uint64_t task_id);
+uint64_t vine_graph_executor_get_total_materialization_audits(
+		const struct vine_graph_executor *e);
+uint64_t vine_graph_executor_get_total_materialization_audit_failures(
+		const struct vine_graph_executor *e);
+int vine_graph_executor_set_node_worker_data_assignment(
+		struct vine_graph_executor *e,
+		uint64_t task_id,
+		const char *assignment);
+uint64_t vine_graph_executor_get_node_worker_data_audit_count(
+		const struct vine_graph_executor *e, uint64_t task_id);
+uint64_t vine_graph_executor_get_total_worker_data_audits(
+		const struct vine_graph_executor *e);
+uint64_t vine_graph_executor_get_total_worker_data_audit_failures(
+		const struct vine_graph_executor *e);
 const char *vine_graph_executor_get_file_target_path(struct vine_graph_executor *e, uint64_t file_id);
 
 int vine_graph_executor_tune(struct vine_graph_executor *e, const char *name, const char *value);

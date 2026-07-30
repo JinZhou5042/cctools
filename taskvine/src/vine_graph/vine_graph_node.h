@@ -56,6 +56,15 @@ struct vine_graph_node {
 	 * as @c extra_outputs: queued at graph build, wired on @c vine_task at materialize.
 	 */
 	struct list *extra_inputs;
+	/** Phase 3 Controller expectations checked at actual task materialization. */
+	int data_binding_audit_enabled;
+	uint64_t expected_parent_inputs;
+	uint64_t expected_extra_inputs;
+	uint64_t expected_extra_outputs;
+	uint64_t materialization_audit_count;
+	/** Phase 4 compact assignment and worker completion audit. */
+	char *worker_data_assignment;
+	uint64_t worker_data_audit_count;
 
 	int remaining_parents_count; // parents not yet satisfied for scheduling
 	struct set *fired_parents;   // parents already counted toward that count
