@@ -1,0 +1,75 @@
+{
+	"artifact_version": 1,
+	"status": "PASS_COMPONENT_CHECKPOINT",
+	"accepted_at": "2026-07-30T07:40:00-04:00",
+	"branch": "datavine",
+	"commit": "426ea2195b45e651e56a28899ec7d7c19f02ed49",
+	"package": {
+		"path": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+		"sha256": "57b98edc2b5583d9dcfe49fb1698cc3c0f23940ff13fd53f9e5ef625967d54d6",
+		"poncho_package_run": "PASS TaskVine, Workflow, and worker.persist imports"
+	},
+	"build": {
+		"command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+		"status": "PASS",
+		"source_controller_state_sha256": "75aa988f10242741ae3534b4440065767f1d410f1aa988832a9bc67aeb3b6786",
+		"installed_controller_state_sha256": "75aa988f10242741ae3534b4440065767f1d410f1aa988832a9bc67aeb3b6786",
+		"source_worker_persist_sha256": "3b41f7899fd58555cffcdf3ebaa6c15da7028a3684b5769ee81bda017b35a2fc",
+		"installed_worker_persist_sha256": "3b41f7899fd58555cffcdf3ebaa6c15da7028a3684b5769ee81bda017b35a2fc"
+	},
+	"regression": {
+		"command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/test && for test_path in ./TR_datavine_*.sh; do \"$test_path\" run; done",
+		"passed": 16,
+		"total": 16,
+		"commit_time_cancellation_race": "PASS"
+	},
+	"factory": {
+		"entrypoint": "bash /users/jzhou24/graph_optimization/factories/run_factory.sh --manager-name datavine-cancel-race-426ea2195 --workers 2 --cores 1 --memory 2 --disk 4 --poncho-env /users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+		"test_command": "python3 datavine_idata_capacity.py --factory-manager datavine-cancel-race-426ea2195",
+		"workers_requested": 2,
+		"workers_removed": 2,
+		"status": "PASS"
+	},
+	"workflow": {
+		"large_logical_bytes": 2097152,
+		"large_serialized_bytes": 2097161,
+		"controller_idata_capacity_bytes": 131072,
+		"controller_inline_object_capacity_bytes": 65536,
+		"controller_idata_bytes_high_water": 79,
+		"metadata_publications": 2,
+		"logical_tasks": 2,
+		"physical_attempts": 3,
+		"recovery_reexecutions": 1,
+		"legacy_recovery_tasks": 0,
+		"worker_loss_injected": true,
+		"persistence_cancellations": 1,
+		"persistence_tasks_completed": 1,
+		"persistence_worker_bytes": 2097161,
+		"exact_oracle_match": true
+	},
+	"persistence_protocol": {
+		"external_requests_cancel_retry_contract": 3,
+		"external_active_after_contract": 0,
+		"external_durable_after_contract": 1,
+		"duplicate_begin_complete": "PASS",
+		"cancel_after_write_before_ack": "PASS factory",
+		"cancel_after_validation_before_commit": "PASS deterministic threaded component race",
+		"cancelled_target_removed": true,
+		"cancelled_request_cannot_mark_durable": true,
+		"cancelled_request_retry_reaches_durable": true,
+		"corrupt_retry_rejected": true,
+		"stale_completions_in_idempotency_contract": 0
+	},
+	"rejected_evidence": {
+		"commit": "52f7b8139545b6ae64c8e8ee9d7558043d87fdfa",
+		"reason": "The first factory PASS did not cover cancellation after Controller validation but before durability compare-and-commit. Self-review found that race would be misclassified as a stale completion and make the worker persistence task fail instead of retrying."
+	},
+	"remaining_blockers": [
+		"Failed and temporarily unavailable SharedFS retry/backpressure need runtime E2E coverage.",
+		"SharedFS overload admission and persistence fairness need scale evidence.",
+		"Controller validation responsiveness needs latency evidence.",
+		"Persistence cancellation concurrent with pruning and global-loss detection needs the unified failure harness.",
+		"Grand Challenge remains absent."
+	],
+	"ultimate_acceptance": "FAIL"
+}

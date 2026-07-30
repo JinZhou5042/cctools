@@ -10,9 +10,9 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 bounded ordinary-IData storage and large-IData
-  bypass**
-- Validated code commit: `4e8f19f1f`
+- Active task: **Phase 9 SharedFS failure, overload, and persistence
+  responsiveness**
+- Validated code commit: `426ea2195`
 
 ## Ultimate acceptance reset
 
@@ -108,6 +108,42 @@ Self-review keeps `PERSIST`, `CTRL-BOUND`, `RECOVERY`, Review B, and Ultimate
 Acceptance **FAIL**. Active-write cancellation, SharedFS overload/failure
 retry, validation latency, data-operation fairness, repeated recovery, and
 Grand Challenge scale remain unproved.
+
+### Phase 9 active worker-persistence cancellation checkpoint
+
+Commits `52f7b8139` and `426ea2195` make worker-driven persistence
+cancellable after it has entered `writing`. Controller owns the transition
+from `writing` to `cancelling`; a late acknowledgement removes the target,
+releases the bounded active slot, remains non-durable, and causes Scheduler
+to issue a new request for the same stable IDataID. Duplicate completion
+remains idempotent only for the exact durable request.
+
+The first package-only factory PASS at `52f7b8139` was rejected during
+self-review. Its delay injected cancellation before Controller validation,
+but cancellation arriving after stream validation and before the final
+compare-and-commit was incorrectly classified as stale. Commit `426ea2195`
+closes that race. A deterministic threaded test blocks at the directory-fsync
+boundary, cancels the active request, then proves that completion returns
+`cancelled`, deletes the target, releases admission, and permits a new request
+to reach durable. Worker logs also distinguish a cancelled acknowledgement
+from `DATAVINE_PERSISTED`.
+
+The prescribed clean build/install and all 16 installed-path regressions pass.
+The rebuilt archive SHA-256 is
+`57b98edc2b5583d9dcfe49fb1698cc3c0f23940ff13fd53f9e5ef625967d54d6`,
+and `poncho_package_run -e` verified TaskVine, Workflow, and worker persistence
+imports. Factory `datavine-cancel-race-426ea2195` used two package workers,
+performed one active cancellation and successful retry, persisted 2,097,161
+bytes on a worker, evicted one worker, recovered through one ordinary task
+replay, produced the exact oracle result, used zero legacy recovery tasks,
+kept Controller IData high-water at 79 bytes, and removed both workers.
+
+Self-review leaves `PERSIST`, `RACES`, Review B, and Ultimate Acceptance
+**OPEN/FAIL**. The next smallest safe task is deterministic runtime injection
+of failed and temporarily unavailable SharedFS writes, with bounded retry,
+admission/backpressure, independent Controller responsiveness measurement,
+and no Scheduler starvation. Evidence:
+`acceptance/artifacts/worker-persistence-cancel-426ea2195.json`.
 
 ### Phase 9 worker-enforced disk cache capacity and combined recovery checkpoint
 

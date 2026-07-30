@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `4e8f19f1f`
+Reviewed through code commit: `426ea2195`
 Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
@@ -180,6 +180,17 @@ Correction checkpoint `347f60531` invokes cancellation inside the
 Controller's compare-and-apply critical section. One queued request is
 cancelled while another acknowledged writing request remains protected. B4 is
 closed for the current fault model.
+
+Correction checkpoint `426ea2195` extends cancellation to the worker-driven
+large-IData path. A real package-only factory workflow cancels after the
+worker's atomic SharedFS publication and retries to durable. Self-review
+rejected the first passing version because it did not cover cancellation
+between Controller stream validation and final compare-and-commit. The
+accepted deterministic threaded race blocks at that boundary and proves the
+cancelled request cannot acknowledge durability, removes its target, releases
+admission, and can be retried. B4 remains closed for the current fault model;
+SharedFS unavailability/overload and pruning/global-loss combinations remain
+separate open race requirements.
 
 ### B5 — No in-flight transfer/read protection
 

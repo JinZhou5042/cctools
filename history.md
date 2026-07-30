@@ -1,5 +1,34 @@
 # DataVine History
 
+## 2026-07-30 — Active worker-persistence cancellation and commit race
+
+- Added active external-persistence cancellation with explicit `cancelling`
+  and terminal `cancelled` behavior. A cancelled target cannot publish a
+  durable replica, its admission slot is released, and Scheduler retries with
+  a new request for the same IDataID.
+- Added a real two-worker workflow injection after local SharedFS publication
+  but before acknowledgement. It requires one cancellation, one successful
+  worker persistence, one worker-loss recovery, exact output, and zero legacy
+  recovery tasks.
+- Rejected the first factory PASS at `52f7b8139`: self-review showed it did
+  not cover cancellation between Controller stream validation and the final
+  durability commit, where cancellation was incorrectly treated as stale.
+- Closed that compare-and-commit race and added a deterministic threaded
+  regression that cancels at the directory-fsync boundary. Worker output now
+  reports cancellation rather than falsely printing `DATAVINE_PERSISTED`.
+- The required clean build/install and all 16 installed regressions pass.
+  Package-only factory `datavine-cancel-race-426ea2195` passed with two
+  workers and removed both. It records one active cancellation, one retry to
+  durable, 2,097,161 worker-persisted bytes, one ordinary recovery replay,
+  zero legacy recovery tasks, and 79 bytes of Controller IData high-water.
+- Code commits: `52f7b8139`, `426ea2195`; archive SHA-256:
+  `57b98edc2b5583d9dcfe49fb1698cc3c0f23940ff13fd53f9e5ef625967d54d6`.
+- Evidence:
+  `acceptance/artifacts/worker-persistence-cancel-426ea2195.json`.
+- PERSIST and Ultimate Acceptance remain unaccepted pending SharedFS
+  failure/overload retry, fairness/responsiveness bounds, unified races, and
+  the Grand Challenge.
+
 ## 2026-07-30 — Worker-driven large-IData persistence
 
 - Added Controller-authorized external persistence requests for metadata-only
