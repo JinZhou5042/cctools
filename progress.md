@@ -11,7 +11,7 @@
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
 - Active task: **Phase 9 byte-counted transfer failure during pruning**
-- Validated code commit: `8772071b8`
+- Validated code commit: `f60fe7582`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +25,41 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 dynamic-consumer invalidation and terminal drain checkpoint
+
+Commit `f60fe7582` fixes a terminal-state hole found by composing dynamic
+lineage mutation with the real-IData release/pruning test. Previously, a new
+consumer could invalidate the pruning proof and resolve the pruning
+continuation before the deliberately retained peer lease release retried; the
+Scheduler then returned with one pending data obligation. It now drains
+pending peer releases with bounded Manager waits and worker-epoch
+synchronization before reporting completion. Permanent failure raises an
+explicit timeout with the current fault counters.
+
+The deterministic dynamic mode waits for the 8,000,132-byte IData replica to
+enter `retiring`, registers TaskID `1000001` as a real Controller lineage
+consumer, and advances the graph revision to five. Continuation cancels the
+old proof for IData 1, performs no worker deletion, restores every replica to
+`available`, retries the retained release exactly once, drains to zero, and
+returns the exact oracle. The no-pending path uses zero drain iterations.
+
+Three local repetitions each require eight drain iterations; the exact clean
+build/install and all 25 regressions pass. The rebuilt global package SHA-256
+is `a3b72d6f08de9abb241163d03b067b412c8721c6cfbd67150818ad3891a1b856`.
+Three package-only factory repetitions each require twelve drain iterations,
+cancel the same proof, restore replicas, and return the oracle; companion
+capacity and physical-pruning modes also pass. Factory shutdown reports
+`all workers removed`. Evidence:
+`acceptance/artifacts/dynamic-pruning-f60fe7582.json`.
+
+Self-review is **PASS for dynamic invalidation in the retained real-transfer
+lease window and Scheduler terminal obligation handling; FAIL for Review B
+and Ultimate Acceptance**. A four-second release window proved flaky and was
+rejected; the accepted deterministic window is ten seconds locally and
+fifteen seconds in the factory. This still does not interrupt positive-byte
+movement during the same pruning schedule, simulate a real HTTP timeout, or
+restart the Controller. Those remain the next critical work.
 
 ### Phase 9 real-IData transfer release/pruning checkpoint
 

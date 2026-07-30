@@ -1,5 +1,25 @@
 # DataVine History
 
+## 2026-07-30 — Dynamic pruning invalidation and terminal release drain
+
+- Registered a new Controller lineage consumer while a real IData source
+  replica was retiring under a retained peer lease.
+- Cancelled the stale pruning proof, restored all replicas, and performed no
+  physical deletion of newly required data.
+- Fixed Scheduler termination so pending peer releases are bounded terminal
+  obligations; permanent failure now raises an explicit timeout.
+- Three local and three package-only factory repetitions returned the exact
+  oracle. The exact clean build and all 25 regressions pass.
+- Rejected premature Scheduler completion, access to a non-public replica
+  field, a timing-dependent four-second lease window, and a DataID/TaskID
+  identity assumption.
+- Code commit: `f60fe7582`; package SHA-256:
+  `a3b72d6f08de9abb241163d03b067b412c8721c6cfbd67150818ad3891a1b856`.
+- Evidence: `acceptance/artifacts/dynamic-pruning-f60fe7582.json`.
+- Self-review: **PASS for the scoped dynamic/termination checkpoint, FAIL for
+  Review B and Ultimate Acceptance**. Positive-byte failure in the same
+  pruning window, timeout/restart, scale, and Grand Challenge work remain.
+
 ## 2026-07-30 — Real IData transfer release/pruning coordination
 
 - Retained failed Controller lease releases for delayed retry and bounded them

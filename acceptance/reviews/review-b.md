@@ -408,3 +408,20 @@ partial write and source loss with the same pruning continuation, nor dynamic
 consumer registration in that window. The injected release failure occurs
 before the HTTP request and is not evidence of a real Controller timeout.
 Controller restart and scale also remain unresolved.
+
+Correction checkpoint `f60fe7582` registers a new real Controller lineage
+consumer while the transferred IData replica is retiring and its release is
+pending. The graph revision advances, continuation cancels the stale proof,
+every replica returns to available, and no worker deletion is issued. This
+composition exposed a Scheduler terminal hole: pruning cancellation could
+resolve before lease release, allowing workflow return with a pending data
+obligation. The Scheduler now performs a bounded terminal drain and fails
+explicitly if releases cannot complete. Three local and three rebuilt-package
+factory repetitions pass. Evidence is
+`../artifacts/dynamic-pruning-f60fe7582.json`.
+
+Review B remains **FAIL**. Dynamic registration is now exercised in the exact
+retained-lease pruning window, but the peer byte transfer has already
+completed. A positive partial write followed by source loss must still be
+combined with pruning evaluation and recovery. Real Controller timeout,
+restart, and scale remain unresolved.

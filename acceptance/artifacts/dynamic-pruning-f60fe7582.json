@@ -1,0 +1,105 @@
+{
+	"checkpoint": "dynamic-consumer-invalidation-and-peer-obligation-drain",
+	"code_commit": "f60fe7582222da33ce9ee74e3d66b173a43ea41a",
+	"status": {
+		"scoped_checkpoint": "PASS",
+		"architecture_review_b": "FAIL",
+		"ultimate_acceptance": "FAIL"
+	},
+	"acceptance": {
+		"logical_result": 16000246,
+		"result_serialized_sha256": "bcfeda77d9ec62ee5366601505e8ef74a8898d5bbab68fa654a6904f995883de",
+		"idata_serialized_bytes": 8000132,
+		"dynamic_task_id": 1000001,
+		"graph_revision_after_registration": 5,
+		"retiring_replica_observed": true,
+		"old_proof_cancelled_data_ids": [
+			1
+		],
+		"runtime_pruned_data_ids": [],
+		"final_replica_states": "all available",
+		"release_failures_injected": 1,
+		"release_retries_succeeded": 1,
+		"release_pending_after_run": 0,
+		"worker_disconnections": 0,
+		"durable_hashes_valid": true
+	},
+	"scheduler_termination": {
+		"peer_release_is_required_terminal_obligation": true,
+		"normal_no-pending_path": "zero drain iterations",
+		"pending_path": "bounded Manager wait and worker-epoch synchronization",
+		"permanent_failure": "explicit TimeoutError with fault counters",
+		"deadline_seconds": "max(30, configured release retry seconds + 30)",
+		"local_dynamic_mode_drain_iterations_each": 8,
+		"factory_dynamic_mode_drain_iterations_each": 12
+	},
+	"local_repetitions": [
+		{
+			"dynamic_registration": 1,
+			"cancelled_data_ids": [
+				1
+			],
+			"release_drain_iterations": 8,
+			"release_retries": 1,
+			"result": "PASS"
+		},
+		{
+			"dynamic_registration": 1,
+			"cancelled_data_ids": [
+				1
+			],
+			"release_drain_iterations": 8,
+			"release_retries": 1,
+			"result": "PASS"
+		},
+		{
+			"dynamic_registration": 1,
+			"cancelled_data_ids": [
+				1
+			],
+			"release_drain_iterations": 8,
+			"release_retries": 1,
+			"result": "PASS"
+		}
+	],
+	"build": {
+		"command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+		"result": "PASS"
+	},
+	"regression_suite": {
+		"command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/test && for test_name in TR_datavine_*.sh; do bash ./$test_name run; done",
+		"passed": 25,
+		"failed": 0
+	},
+	"package": {
+		"path": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+		"sha256": "a3b72d6f08de9abb241163d03b067b412c8721c6cfbd67150818ad3891a1b856",
+		"created_from": "/groups/dthain/users/jzhou24/miniconda/envs/datavine",
+		"cloudpickle": "3.1.2",
+		"poncho_package_run_workflow_import_and_scheduler_drain_source": "PASS"
+	},
+	"factory": {
+		"entrypoint": "/users/jzhou24/graph_optimization/factories/run_factory.sh",
+		"manager_name": "datavine-dynamic-prune-f60fe7582",
+		"workers": 2,
+		"cores_per_worker": 1,
+		"repetitions": 3,
+		"dynamic_release_drain_iterations_each": 12,
+		"capacity_backpressure_observations_each": 32,
+		"each_repetition": "dynamic graph revision five cancels IData one pruning, restores all replicas, drains one retained release, and returns the exact oracle; companion modes retain bounded capacity and successful physical pruning",
+		"result": "PASS",
+		"shutdown": "all workers removed"
+	},
+	"rejected_results": [
+		"The first dynamic run exposed that Scheduler returned with one pending release and zero successful retries; the test was rejected and the terminal-obligation drain was implemented.",
+		"The first hook inspected a non-public active_leases replica field; it was rejected in favor of public retiring state plus independent pruning-response and Manager-counter evidence.",
+		"A four-second release window occasionally expired before persistence and pruning completed; those runs were rejected and the deterministic window was increased to ten seconds locally and fifteen seconds in the factory.",
+		"The dynamic hook no longer assumes IDataID equals producer TaskID; it resolves the producer through Controller lineage."
+	],
+	"remaining_critical_work": [
+		"Combine positive partial-byte peer transfer failure and source loss with pruning evaluation and continuation.",
+		"Exercise a real Controller timeout and restart with outstanding terminal obligations.",
+		"Run the unified deterministic failure schedule at Grand Challenge scale.",
+		"Complete all comparison modes and architectural scaling evidence."
+	]
+}
