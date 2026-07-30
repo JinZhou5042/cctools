@@ -441,6 +441,7 @@ class TaskSchedulerThread:
         prune_after_persistence_by_task=None,
         worker_loss_process_shutdown=False,
         inject_partial_publication_after=None,
+        frontier_pruning_ack_delay=0,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -730,6 +731,15 @@ class TaskSchedulerThread:
         frontier_pruning = []
         frontier_pruning_applied = set()
         frontier_pruning_pending = {}
+        frontier_pruning_active = None
+        frontier_pruning_ack_delay = float(
+            frontier_pruning_ack_delay
+        )
+        if frontier_pruning_ack_delay < 0:
+            raise ValueError(
+                "frontier pruning acknowledgement delay cannot be negative"
+            )
+        compute_completions_while_frontier_pruning = 0
         persistence_worker_bytes = 0
         persistence_controller_bytes = 0
         persistence_cancellations = 0
@@ -831,6 +841,7 @@ class TaskSchedulerThread:
             or controller_persistence_pending
             or suspended_persistence_recovery
             or frontier_pruning_pending
+            or frontier_pruning_active
         ):
             for data_id, not_before in tuple(
                 controller_persistence_pending.items()
@@ -966,27 +977,188 @@ class TaskSchedulerThread:
                 )
 
             if (
-                frontier_pruning_pending
-                and not running
-                and not prefetch_running
-                and not persistence_running
+                frontier_pruning_active is not None
+                and time.monotonic()
+                >= frontier_pruning_active["poll_after"]
             ):
-                frontier_task_id = min(frontier_pruning_pending)
-                prune_data_ids = frontier_pruning_pending.pop(
+                all_complete = True
+                worker_prunes = []
+                for entry in frontier_pruning_active["worker_entries"]:
+                    status = self._manager.prune_file_status(
+                        entry["file"]
+                    )
+                    confirmed = (
+                        status["confirmed"]
+                        - entry["before"]["confirmed"]
+                    )
+                    failed = (
+                        status["failed"] - entry["before"]["failed"]
+                    )
+                    if failed:
+                        raise RuntimeError(
+                            f"{failed} asynchronous worker prune "
+                            f"operations failed for i:{entry['data_id']}"
+                        )
+                    if confirmed < entry["requested"]:
+                        all_complete = False
+                        continue
+                    worker_prunes.append(
+                        {
+                            "data_id": entry["data_id"],
+                            "requested": entry["requested"],
+                            "confirmed": confirmed,
+                            "failed": failed,
+                        }
+                    )
+                if (
+                    not all_complete
+                    and time.monotonic()
+                    >= frontier_pruning_active["deadline"]
+                ):
+                    raise TimeoutError(
+                        "asynchronous frontier pruning acknowledgement "
+                        "timed out"
+                    )
+                if all_complete:
+                    for entry in frontier_pruning_active[
+                        "worker_entries"
+                    ]:
+                        for record in entry["records"]:
+                            self.controller.confirm_replica_pruned(
+                                f"i:{entry['data_id']}",
+                                record["replica_id"],
+                                record["generation"],
+                            )
+                        if not self._manager.forget_prune_file_status(
+                            entry["file"]
+                        ):
+                            raise RuntimeError(
+                                "could not release asynchronous prune "
+                                f"tracker for i:{entry['data_id']}"
+                            )
+                        if any(
+                            self._manager.prune_file_status(
+                                entry["file"]
+                            ).values()
+                        ):
+                            raise RuntimeError(
+                                "asynchronous prune tracker leaked for "
+                                f"i:{entry['data_id']}"
+                            )
+                        next(
+                            item
+                            for item in worker_prunes
+                            if item["data_id"] == entry["data_id"]
+                        )["tracker_released"] = True
+                    frontier_task_id = frontier_pruning_active[
+                        "frontier_task_id"
+                    ]
+                    frontier_pruning.append(
+                        {
+                            "frontier_task_id": frontier_task_id,
+                            "data_ids": frontier_pruning_active[
+                                "data_ids"
+                            ],
+                            "result": {
+                                "controller": frontier_pruning_active[
+                                    "controller_result"
+                                ],
+                                "worker_prunes": worker_prunes,
+                            },
+                        }
+                    )
+                    frontier_pruning_applied.add(frontier_task_id)
+                    frontier_pruning_active = None
+
+            if (
+                frontier_pruning_active is None
+                and frontier_pruning_pending
+            ):
+                active_inputs = {
+                    data_key
+                    for running_logical_id in running.values()
+                    for data_key in task_cache_inputs[
+                        running_logical_id
+                    ]
+                }
+                safe_frontiers = [
                     frontier_task_id
-                )
-                prune_result = self._op_apply_pruning(
-                    0, prune_data_ids, None, 30
-                )
-                frontier_pruning.append(
-                    {
+                    for frontier_task_id, data_ids
+                    in frontier_pruning_pending.items()
+                    if not (
+                        {f"i:{data_id}" for data_id in data_ids}
+                        & active_inputs
+                    )
+                    and not (
+                        set(data_ids)
+                        & {
+                            data_id
+                            for data_id, _ in persistence_running.values()
+                        }
+                    )
+                ]
+                if safe_frontiers:
+                    frontier_task_id = min(safe_frontiers)
+                    prune_data_ids = frontier_pruning_pending.pop(
+                        frontier_task_id
+                    )
+                    plan = self.controller.pruning_plan()
+                    result = self.controller.apply_pruning(
+                        plan["records"][0]["graph_revision"],
+                        plan["records"][0]["state_revision"],
+                        0,
+                        prune_data_ids,
+                        None,
+                    )
+                    if result["deferred"]:
+                        raise RuntimeError(
+                            "frontier pruning encountered an active "
+                            f"Controller lease: {result['deferred']}"
+                        )
+                    pending_by_data = {}
+                    for record in result["applied"]:
+                        if (
+                            record["action"]
+                            == "invalidate-worker-pending-delete"
+                        ):
+                            pending_by_data.setdefault(
+                                record["data_id"], []
+                            ).append(record)
+                    worker_entries = []
+                    for data_id, records in sorted(
+                        pending_by_data.items()
+                    ):
+                        file_object = self._idata_files[data_id]
+                        before = self._manager.prune_file_status(
+                            file_object
+                        )
+                        requested = self._manager.prune_file(file_object)
+                        if requested != len(records):
+                            raise RuntimeError(
+                                "replica authority mismatch for "
+                                f"i:{data_id}: Controller={len(records)} "
+                                f"TaskVine={requested}"
+                            )
+                        worker_entries.append(
+                            {
+                                "data_id": data_id,
+                                "records": records,
+                                "file": file_object,
+                                "before": before,
+                                "requested": requested,
+                            }
+                        )
+                    now_value = time.monotonic()
+                    frontier_pruning_active = {
                         "frontier_task_id": frontier_task_id,
                         "data_ids": prune_data_ids,
-                        "result": prune_result,
+                        "controller_result": result,
+                        "worker_entries": worker_entries,
+                        "poll_after": (
+                            now_value + frontier_pruning_ack_delay
+                        ),
+                        "deadline": now_value + 30,
                     }
-                )
-                frontier_pruning_applied.add(frontier_task_id)
-                continue
 
             def persistence_frontier_ready(task_id):
                 if not persist_outputs:
@@ -1027,8 +1199,7 @@ class TaskSchedulerThread:
             ready = sorted(
                 task_id
                 for task_id in pending
-                if not frontier_pruning_pending
-                and dependencies[task_id] <= done
+                if dependencies[task_id] <= done
                 and persistence_frontier_ready(task_id)
                 and not (
                     task_cache_inputs[task_id]
@@ -1053,7 +1224,6 @@ class TaskSchedulerThread:
                 pending.remove(task_id)
             while (
                 persistence_pending
-                and not frontier_pruning_pending
                 and len(persistence_running) < persistence_capacity
             ):
                 persistence_pending.sort(key=lambda entry: entry[0])
@@ -1105,8 +1275,13 @@ class TaskSchedulerThread:
                     or persistence_running
                     or suspended_persistence_recovery
                     or frontier_pruning_pending
+                    or frontier_pruning_active
                 ):
                     break
+                if frontier_pruning_active is not None:
+                    self._manager.wait(wait_timeout)
+                    self._sync_worker_epochs()
+                    continue
                 blocked = {}
                 for task_id in sorted(pending):
                     unavailable_inputs = []
@@ -1492,6 +1667,8 @@ class TaskSchedulerThread:
                 )
                 continue
             logical_id = running.pop(completed.id)
+            if frontier_pruning_active is not None:
+                compute_completions_while_frontier_pruning += 1
             if persistence_running or persistence_pending:
                 compute_completions_while_persistence_active += 1
             local_idata_hits += (completed.output or "").count(
@@ -1902,6 +2079,9 @@ class TaskSchedulerThread:
                 persistence_required
             ),
             "frontier_pruning": frontier_pruning,
+            "compute_completions_while_frontier_pruning": (
+                compute_completions_while_frontier_pruning
+            ),
             "runtime_pruned_data_ids": sorted(
                 {
                     data_id
