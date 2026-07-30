@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 multi-output partial-publication failure**
-- Validated code commit: `605426341`
+- Active task: **Phase 9 branched minimum recoverable cut**
+- Validated code commit: `79bcbc832`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +25,44 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 multi-output partial-publication process-loss checkpoint
+
+Commit `79bcbc832` adds a coordinated publication fault barrier. A worker
+publishes and prepares output slot zero, then pauses before slot one. Scheduler
+queries Controller-owned replica records, identifies the exact preparing
+WorkerID, cancels the physical task first, shuts down that worker second, and
+invalidates every output in the incomplete attempt. Only the cancellation
+completion releases the original logical task as attempt two.
+
+The accepted design performs three physical attempts for two logical tasks.
+Producer attempt one publishes only IData 1 and never becomes logically
+complete; producer attempt two republishes stable IDataIDs `[1, 2]`; the
+consumer runs once and returns the oracle. No DataVine recovery reexecution is
+counted because the producer never completed, and TaskVine reports zero Legacy
+recovery tasks.
+
+Self-review rejected two designs. Killing only the main worker left its
+transfer-server child holding the manager connection and timed out. Killing
+the worker process group from inside the task allowed TaskVine to reassign the
+same faulting physical command, which repeatedly killed replacements. The
+accepted ordering keeps retry ownership in the DataVine Scheduler by cancelling
+the old physical task before process shutdown.
+
+The required clean build/install and all 18 installed regressions pass. Three
+local repetitions have identical semantic hashes. Package SHA-256 is
+`73205f65cd5e5cf8aac2070ee3c1e27e055652047e990d6d30ee81476e04e615`.
+Package-only factory `datavine-partial-79bcbc832` observes exact remote
+WorkerID shutdown, completes with a replacement, and removes all remaining
+workers on stop. Evidence:
+`acceptance/artifacts/partial-publication-79bcbc832.json`.
+
+Self-review status is **PASS for MULTIOUT and this scoped publication fault,
+FAIL for Ultimate Acceptance**. Concurrent multi-output persistence/pruning,
+other publication failure stages, scale, and the Grand Challenge remain. The
+next smallest safe task is a branched fan-out/fan-in minimum recoverable-cut
+case with unequal durability frontiers and branch-selective loss, proving that
+an unaffected completed branch is neither invalidated nor replayed.
 
 ### Phase 9 stable multi-output identity checkpoint
 

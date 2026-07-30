@@ -1,0 +1,81 @@
+{
+  "acceptance_scope": [
+    "worker loss after output slot zero publication",
+    "no partial logical task completion",
+    "Scheduler-owned physical cancellation",
+    "exact WorkerID process shutdown",
+    "stable TaskID and per-slot IDataID retry",
+    "package-only factory recovery"
+  ],
+  "branch": "datavine",
+  "build": {
+    "command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+    "status": "PASS"
+  },
+  "code_commit": "79bcbc832",
+  "factory": {
+    "command": "bash ./run_factory.sh --manager-name datavine-partial-79bcbc832 --workers 2 --cores 1 --memory 4 --disk 10",
+    "manager_name": "datavine-partial-79bcbc832",
+    "package_only_e2e": "PASS",
+    "shutdown": "all workers removed",
+    "target_worker_shutdown": true
+  },
+  "factory_package": {
+    "path": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+    "poncho_package_run": "cloudpickle 3.1.2 partial-publication-package PASS",
+    "sha256": "73205f65cd5e5cf8aac2070ee3c1e27e055652047e990d6d30ee81476e04e615",
+    "size_bytes": 790766096
+  },
+  "failure_semantics": {
+    "consumer_attempt": 1,
+    "expected_output_data_ids": [
+      1,
+      2
+    ],
+    "legacy_recovery_tasks": 0,
+    "logical_recovery_reexecutions": 0,
+    "partial_attempt": 1,
+    "physical_attempts": 3,
+    "producer_final_attempt": 2,
+    "published_before_loss": [
+      1
+    ],
+    "scheduler_cancel_before_shutdown": true
+  },
+  "local_e2e": {
+    "command": "python3 taskvine/test/datavine_multi_output.py",
+    "semantic_output_sha256_repetitions": [
+      "43a0d422ce1b575b48182944cf88c8b2092fdd91ac76668bbc9fe32f2824b0ae",
+      "43a0d422ce1b575b48182944cf88c8b2092fdd91ac76668bbc9fe32f2824b0ae",
+      "43a0d422ce1b575b48182944cf88c8b2092fdd91ac76668bbc9fe32f2824b0ae"
+    ],
+    "status": "PASS"
+  },
+  "regression": {
+    "data_vine_installed_path": "18/18 PASS",
+    "diff_check": "PASS",
+    "flake8": "PASS"
+  },
+  "rejected_designs": [
+    {
+      "reason": "transfer-server child retained the manager socket and prevented worker-loss detection",
+      "result": "timeout",
+      "strategy": "kill only the vine_worker parent process"
+    },
+    {
+      "reason": "TaskVine automatically reassigned the same physical command, so every replacement worker repeated the fault",
+      "result": "repeated worker deaths",
+      "strategy": "let worker self-kill its process group"
+    }
+  ],
+  "self_review": {
+    "checkpoint_status": "PASS",
+    "ultimate_acceptance": "FAIL",
+    "unresolved": [
+      "multi-output persistence completion concurrent with loss",
+      "multi-output pruning concurrent with dynamic consumers",
+      "branched minimum recoverable cut",
+      "Grand Challenge scale and comparison"
+    ]
+  }
+}

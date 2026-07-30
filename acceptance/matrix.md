@@ -11,7 +11,7 @@ is never a pass.
 | GC-MODES | Eight mandatory comparison modes | OPEN | Unified mode runner absent |
 | GC-LEGACY | Architectural Legacy limit demonstrated | OPEN | Comparable Legacy driver absent |
 | CORRECT | Exact oracle, failures equal normal, safe explicit failure | OPEN | Small Phase 4–8 cases only |
-| MULTIOUT | Multiple outputs and partial downstream demand | OPEN | Commit `605426341` assigns one stable IDataID per output slot, preserves nested/cyclic alias identity, keeps equal-byte outputs logically distinct, and recovers one demanded slot with ordinary computation; process loss between slot publications and multi-output persistence/pruning races remain |
+| MULTIOUT | Multiple outputs and partial downstream demand | PASS | `artifacts/partial-publication-79bcbc832.json`, commit `79bcbc832` |
 | EDATA-ID | Independent function/arg/kwarg/file identity and collision checks | OPEN | Function/value/container domains, repeated-reference one-time serialization, bulk hash/path validation pass at `13193c99a`; dependency-file path and explicit collision injection remain |
 | IDATA-ID | Stable output-slot identity and complete explainable lineage | OPEN | Runtime lineage includes nested dependencies at `347f60531`; per-slot producer identity and retry-stable multi-output IDs pass at `605426341`; full explainability and scale remain |
 | LIGHTWEIGHT | Compact dispatch/queues scale with IDs and bindings | OPEN | Small records exist; 100k-binding bound unmeasured |
@@ -24,10 +24,10 @@ is never a pass.
 | WORKER-PREP | Batched validated resolution with direct source fallback | FAIL | Controller returns validated candidates; worker still resolves per object without direct candidate pulls |
 | CACHE | Strict DRAM/disk bounds, admission, eviction, zero mode | FAIL | Worker/Manager bounds plus future-used IData eviction/rematerialization remain within six items and the byte limit at `f1237b8b8`; DRAM, active-transfer eviction, true process loss, soft-metadata cleanup, and scale cost remain open |
 | PREFETCH | Bounded/cancellable/priority-safe independent progress | OPEN | Byte/item/priority gates pass; unverified prefetched replicas safely fall back at `ef605c343`; concurrency/cancel/final architecture open |
-| PUBLISH | Exactly-once staged idempotent publication and cleanup | OPEN | Two-phase worker prepare/Scheduler commit passes; large output publishes attempt/hash/size without byte POST at `53db69f1e`; multi-output tasks require every slot publication before logical completion at `605426341`; partial multi-slot publication failure and cleanup remain open |
+| PUBLISH | Exactly-once staged idempotent publication and cleanup | OPEN | Two-phase worker prepare/Scheduler commit passes; large output publishes attempt/hash/size without byte POST at `53db69f1e`; at `79bcbc832`, Scheduler cancels a task after slot zero prepares, kills that exact worker, invalidates the incomplete attempt, and accepts attempt two only after every slot validates; remaining publication stages and concurrent races remain |
 | PLACE | Multi-source, load/epoch, bulk bypass, peer fallback | OPEN | Actual TaskVine peer movement acquires epoch-checked Controller leases and unverified sources fall back at `ef605c343`; transfer-loss/load adaptation remain open |
 | PERSIST | Bounded/cancellable/backpressured atomic durability | OPEN | Controller-inline queue/cancel/overload passes at `17577b058`; worker-driven 2 MiB atomic persistence and durable return pass at `4e8f19f1f`; active external cancellation before acknowledgement and during final compare-and-commit passes at `426ea2195`; two partial-write failures, bounded retry/exhaustion, unified global write admission, cleanup, and compute overlap pass at `c4d5258b6`; exact-request drain plus physical-prune barriers protect recomputation during persistence/global loss at `aac966a09a`; scale I/O limits and remaining races remain open |
-| RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | At `fafead8bde`, two actual unique-replica owner processes are shut down and frontier-bounded waves have depth four and three; `605426341` recovers one demanded slot of a multi-output producer with stable IDs and zero special recovery tasks; branched minimality, mid-publication process loss, and the full repeated-failure matrix remain absent |
+| RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | At `fafead8bde`, two actual unique-replica owner processes are shut down and frontier-bounded waves have depth four and three; `79bcbc832` cancels incomplete multi-output computation before exact WorkerID shutdown and retries under stable IDs without a Legacy recovery task; branched minimality and the full repeated-failure matrix remain absent |
 | PRUNE-SHADOW | Reference/incremental equivalence and proof records | PASS | `artifacts/phase9-shadow-20260729.json`, commit `2108b68a8` |
 | PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | OPEN | Generation-exact deletion and pending-ACK worker-loss cleanup pass through `c20db01a1`; at `fafead8bde`, IData 2–4 are physically deleted after task 5 becomes durable and a later unique-replica loss recovers only downstream tasks 6–8; active-read races, DRAM pruning, and scale storage decline remain |
 | PRUNE-SHAREDFS | Quarantine/grace/recovery/hard-delete audit | OPEN | Real revision-safe component path passes at `347f60531`; restart persistence, pins, and scale comparison open |
@@ -59,9 +59,9 @@ All remain OPEN until a deterministic committed test and artifact exists:
 - late source-load updates and Controller eviction during read;
 - zero-byte, very large, and over-capacity objects;
 - equal IData bytes with different lineage and serialization-domain separation;
-- cyclic/aliased graphs, nested OutputRefs, and multi-output partial demand
-  pass as a scoped normal/global-loss E2E at `605426341`; mid-publication
-  process loss and concurrent persistence/pruning remain open;
+- cyclic/aliased graphs, nested OutputRefs, multi-output partial demand, and
+  exact worker loss between slot publications pass at `79bcbc832`; concurrent
+  multi-output persistence/pruning remain open;
 - task cancellation, workflow interruption, delayed workers, repeated churn;
 - temporary SharedFS/Controller overload and all-optimizations-disabled mode.
 

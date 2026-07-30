@@ -1,5 +1,29 @@
 # DataVine History
 
+## 2026-07-30 — Multi-output partial-publication process loss
+
+- Added a coordinated fault after output slot zero publication but before slot
+  one. Scheduler reads the Controller-owned preparing replica, cancels the
+  physical task, shuts down that exact WorkerID, invalidates the partial
+  attempt, and releases the original logical task as attempt two only after
+  cancellation completion.
+- The accepted run uses three physical attempts for two logical tasks. Stable
+  IDataIDs `[1, 2]` advance to attempt two, the consumer runs once, the oracle
+  matches, and zero Legacy recovery tasks execute.
+- Rejected two designs: killing only the worker parent left the transfer server
+  holding the manager socket and timed out; self-killing the process group let
+  TaskVine repeatedly reassign the same faulting physical command.
+- The final required clean build/install, all 18 installed regressions, and
+  three local repetitions pass. Package-only factory
+  `datavine-partial-79bcbc832` passes with exact remote WorkerID shutdown and
+  removes all remaining workers.
+- Code commit: `79bcbc832`; package SHA-256:
+  `73205f65cd5e5cf8aac2070ee3c1e27e055652047e990d6d30ee81476e04e615`.
+- Evidence: `acceptance/artifacts/partial-publication-79bcbc832.json`.
+- Self-review status: **PASS for MULTIOUT and this scoped fault, FAIL for
+  Ultimate Acceptance**. Other publication stages, concurrent persistence and
+  pruning, branched minimum-cut behavior, scale, and the Grand Challenge remain.
+
 ## 2026-07-30 — Stable multi-output identity and partial demand
 
 - Replaced the one-output TaskRecord assumption with ordered output slots.
