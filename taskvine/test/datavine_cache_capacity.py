@@ -141,7 +141,7 @@ def prefetch_recovery_case(factory_manager=None):
         oracle,
         factory_manager=factory_manager,
         worker_count=1,
-        worker_cores=1,
+        worker_cores=2,
         prefetch=True,
         inject_worker_loss_after=1,
         replacement_worker_delay=None if factory_manager else 1,
