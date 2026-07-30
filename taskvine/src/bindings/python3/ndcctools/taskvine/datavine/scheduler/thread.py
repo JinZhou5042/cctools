@@ -446,6 +446,9 @@ class TaskSchedulerThread:
         inject_peer_source_losses=0,
         inject_peer_source_loss_after_bytes=0,
         inject_peer_corruptions=0,
+        inject_idata_release_failures=0,
+        peer_release_retry_seconds=0.1,
+        peer_release_capacity=1024,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -517,6 +520,38 @@ class TaskSchedulerThread:
         ) != 0:
             raise RuntimeError(
                 "TaskVine Manager rejected peer corruption injection"
+            )
+        idata_release_failures = int(inject_idata_release_failures)
+        if idata_release_failures < 0:
+            raise ValueError("IData release failure count is negative")
+        if self._manager.tune(
+            "datavine-fault-idata-release-failure",
+            idata_release_failures,
+        ) != 0:
+            raise RuntimeError(
+                "TaskVine Manager rejected IData release failure injection"
+            )
+        peer_release_retry_seconds = float(
+            peer_release_retry_seconds
+        )
+        if peer_release_retry_seconds < 0:
+            raise ValueError("peer release retry delay is negative")
+        if self._manager.tune(
+            "datavine-transfer-release-retry-seconds",
+            peer_release_retry_seconds,
+        ) != 0:
+            raise RuntimeError(
+                "TaskVine Manager rejected peer release retry delay"
+            )
+        peer_release_capacity = int(peer_release_capacity)
+        if peer_release_capacity < 1:
+            raise ValueError("peer release capacity is below one")
+        if self._manager.tune(
+            "datavine-transfer-release-capacity",
+            peer_release_capacity,
+        ) != 0:
+            raise RuntimeError(
+                "TaskVine Manager rejected peer release capacity"
             )
         output_ids = self._op_register_workflow(workflow)
         producer_by_data_id = {
@@ -2224,6 +2259,11 @@ class TaskSchedulerThread:
                 peer_source_loss_after_bytes
             ),
             "peer_corruptions_requested": peer_corruptions,
+            "idata_release_failures_requested": (
+                idata_release_failures
+            ),
+            "peer_release_retry_seconds": peer_release_retry_seconds,
+            "peer_release_capacity": peer_release_capacity,
             "peer_transfer_faults": (
                 self._manager.datavine_peer_transfer_fault_stats()
             ),

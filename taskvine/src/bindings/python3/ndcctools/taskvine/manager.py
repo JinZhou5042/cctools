@@ -1059,6 +1059,36 @@ class Manager(object):
                     self._taskvine
                 )
             ),
+            "peer_release_failures_injected": int(
+                cvine.vine_manager_datavine_peer_release_failures_injected(
+                    self._taskvine
+                )
+            ),
+            "peer_release_retries_succeeded": int(
+                cvine.vine_manager_datavine_peer_release_retries_succeeded(
+                    self._taskvine
+                )
+            ),
+            "peer_release_pending": int(
+                cvine.vine_manager_datavine_peer_release_pending(
+                    self._taskvine
+                )
+            ),
+            "peer_release_pending_capacity": int(
+                cvine.vine_manager_datavine_peer_release_pending_capacity(
+                    self._taskvine
+                )
+            ),
+            "peer_release_pending_high_water": int(
+                cvine.vine_manager_datavine_peer_release_pending_high_water(
+                    self._taskvine
+                )
+            ),
+            "peer_release_capacity_backpressure": int(
+                cvine.vine_manager_datavine_peer_release_capacity_backpressure(
+                    self._taskvine
+                )
+            ),
         }
 
     ##

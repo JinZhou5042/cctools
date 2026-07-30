@@ -3799,6 +3799,15 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 			m->substitute = NULL;
 		}
 
+		if (m->file->datavine_data_id
+				&& !strncmp(
+						m->file->datavine_data_id, "i:", 2)
+				&& vine_current_transfers_pending_releases(q)
+						>= q->datavine_transfer_release_capacity) {
+			q->datavine_peer_release_capacity_backpressure++;
+			return 0;
+		}
+
 		/* Provide a substitute file object to describe the peer. */
 		if (!(m->file->flags & VINE_PEER_NOSHARE) && (m->file->cache_level > VINE_CACHE_LEVEL_TASK)) {
 			const char *excluded_source = hash_table_lookup(
@@ -4693,6 +4702,14 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->datavine_peer_corruptions_injected = 0;
 	q->datavine_peer_corruptions_rejected = 0;
 	q->datavine_peer_alternate_source_fallbacks = 0;
+	q->datavine_fault_idata_release_failures_remaining = 0;
+	q->datavine_transfer_release_retry_delay = 100000;
+	q->datavine_transfer_release_capacity = 1024;
+	q->datavine_peer_release_failures_injected = 0;
+	q->datavine_peer_release_retries_succeeded = 0;
+	q->datavine_peer_release_pending = 0;
+	q->datavine_peer_release_pending_high_water = 0;
+	q->datavine_peer_release_capacity_backpressure = 0;
 	q->time_start_worker_eviction = 0;
 
 	if ((envstring = getenv("VINE_BANDWIDTH"))) {
@@ -6551,6 +6568,23 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 		q->datavine_fault_peer_corruption_remaining =
 				MAX(0, (int)value);
 
+	} else if (!strcmp(name, "datavine-fault-idata-release-failure")) {
+		q->datavine_fault_idata_release_failures_remaining =
+				MAX(0, (int)value);
+
+	} else if (!strcmp(name, "datavine-transfer-release-retry-seconds")) {
+		if (value < 0) {
+			return -1;
+		}
+		q->datavine_transfer_release_retry_delay =
+				(timestamp_t)(value * 1000000);
+
+	} else if (!strcmp(name, "datavine-transfer-release-capacity")) {
+		if (value < 1) {
+			return -1;
+		}
+		q->datavine_transfer_release_capacity = (uint64_t)value;
+
 	} else if (!strcmp(name, "load-from-shared-filesystem")) {
 		q->load_from_shared_fs_enabled = !!((int)value);
 
@@ -6679,6 +6713,42 @@ uint64_t vine_manager_datavine_peer_corrupt_fallback_pending(
 			? hash_table_size(
 					q->datavine_corrupt_source_expectations)
 			: 0;
+}
+
+uint64_t vine_manager_datavine_peer_release_failures_injected(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_release_failures_injected : 0;
+}
+
+uint64_t vine_manager_datavine_peer_release_retries_succeeded(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_release_retries_succeeded : 0;
+}
+
+uint64_t vine_manager_datavine_peer_release_pending(
+		struct vine_manager *q)
+{
+	return vine_current_transfers_pending_releases(q);
+}
+
+uint64_t vine_manager_datavine_peer_release_pending_capacity(
+		struct vine_manager *q)
+{
+	return vine_current_transfers_pending_release_capacity(q);
+}
+
+uint64_t vine_manager_datavine_peer_release_pending_high_water(
+		struct vine_manager *q)
+{
+	return vine_current_transfers_pending_release_high_water(q);
+}
+
+uint64_t vine_manager_datavine_peer_release_capacity_backpressure(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_release_capacity_backpressure : 0;
 }
 
 void vine_manager_enable_process_shortcut(struct vine_manager *q)

@@ -128,6 +128,9 @@ def run_case(
     inject_peer_source_losses=0,
     inject_peer_source_loss_after_bytes=0,
     inject_peer_corruptions=0,
+    inject_idata_release_failures=0,
+    peer_release_retry_seconds=0.1,
+    peer_release_capacity=1024,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -294,6 +297,9 @@ def run_case(
                 inject_peer_source_losses,
                 inject_peer_source_loss_after_bytes,
                 inject_peer_corruptions,
+                inject_idata_release_failures,
+                peer_release_retry_seconds,
+                peer_release_capacity,
             )
             if runtime_controller_hook is not None:
                 runtime_hook_handle = runtime_controller_hook(client)

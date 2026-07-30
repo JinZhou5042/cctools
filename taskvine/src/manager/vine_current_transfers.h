@@ -58,3 +58,10 @@ int vine_current_transfers_uses_alternate_peer(
 
 /* Abruptly lose the source endpoint of an active DataVine peer lease. */
 int vine_current_transfers_abort_source(struct vine_manager *q, const char *id);
+
+uint64_t vine_current_transfers_pending_releases(
+		struct vine_manager *q);
+uint64_t vine_current_transfers_pending_release_capacity(
+		struct vine_manager *q);
+uint64_t vine_current_transfers_pending_release_high_water(
+		struct vine_manager *q);

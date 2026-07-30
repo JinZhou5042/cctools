@@ -270,6 +270,14 @@ struct vine_manager {
 	uint64_t datavine_peer_corruptions_rejected;
 	uint64_t datavine_peer_alternate_source_fallbacks;
 	struct hash_table *datavine_corrupt_source_expectations;
+	int datavine_fault_idata_release_failures_remaining;
+	timestamp_t datavine_transfer_release_retry_delay;
+	uint64_t datavine_transfer_release_capacity;
+	uint64_t datavine_peer_release_failures_injected;
+	uint64_t datavine_peer_release_retries_succeeded;
+	uint64_t datavine_peer_release_pending;
+	uint64_t datavine_peer_release_pending_high_water;
+	uint64_t datavine_peer_release_capacity_backpressure;
 };
 
 /*

@@ -1559,6 +1559,14 @@ Disabled by default. (default=0)
  - "datavine-fault-peer-corruption" Test-only count of leased peer transfers
 whose received bytes are corrupted before worker-side SHA-256 validation.
 Disabled by default. (default=0)
+ - "datavine-fault-idata-release-failure" Test-only count of successful
+IData peer transfers whose first Controller lease release is retained for
+bounded retry. Disabled by default. (default=0)
+ - "datavine-transfer-release-retry-seconds" Delay before retrying a failed
+Controller transfer-lease release. (default=0.1)
+ - "datavine-transfer-release-capacity" Maximum completed transfer leases
+retained for retry. Missing IData preparation backpressures at the limit;
+stable EData may use its stable origin. (default=1024)
  - "transient-error-interval" Time to wait in seconds after a resource failure before attempting to use it again
 (default=15)
  - "resource_management_interval" Seconds between measurement of manager local resources. (default=30)
@@ -1610,6 +1618,18 @@ uint64_t vine_manager_datavine_peer_corruptions_rejected(
 uint64_t vine_manager_datavine_peer_alternate_source_fallbacks(
 		struct vine_manager *m);
 uint64_t vine_manager_datavine_peer_corrupt_fallback_pending(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_release_failures_injected(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_release_retries_succeeded(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_release_pending(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_release_pending_capacity(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_release_pending_high_water(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_release_capacity_backpressure(
 		struct vine_manager *m);
 
 /** Sets the maximum resources a task without an explicit category ("default" category).
