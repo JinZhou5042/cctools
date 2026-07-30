@@ -21,6 +21,15 @@ def main(argv=None):
     parser.add_argument(
         "--max-edata-bytes", type=int, default=256 * 1024 * 1024
     )
+    parser.add_argument(
+        "--max-request-concurrency", type=int, default=32
+    )
+    parser.add_argument(
+        "--max-serving-concurrency", type=int, default=8
+    )
+    parser.add_argument(
+        "--max-serving-bytes", type=int, default=64 * 1024 * 1024
+    )
     parser.add_argument("--ready-file")
     parser.add_argument("--persistence-dir")
     parser.add_argument("--persistence-workers", type=int, default=1)
@@ -38,7 +47,15 @@ def main(argv=None):
             args.persistence_workers,
             args.persistence_fail_first,
         )
-    service = ControllerService(args.host, args.port, token, state)
+    service = ControllerService(
+        args.host,
+        args.port,
+        token,
+        state,
+        args.max_request_concurrency,
+        args.max_serving_concurrency,
+        args.max_serving_bytes,
+    )
     _, port = service.start()
     ready = {
         "pid": os.getpid(),

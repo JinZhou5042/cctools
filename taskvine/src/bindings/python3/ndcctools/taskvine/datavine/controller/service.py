@@ -12,16 +12,166 @@ from ..protocol import API_PREFIX, PROTOCOL_VERSION, TOKEN_HEADER
 from .state import ControllerState
 
 
+class ByteServingAdmission:
+    """Bound concurrent Controller byte responses without owning payloads."""
+
+    def __init__(self, max_concurrency, max_inflight_bytes):
+        self.max_concurrency = int(max_concurrency)
+        self.max_inflight_bytes = int(max_inflight_bytes)
+        if self.max_concurrency < 1 or self.max_inflight_bytes < 1:
+            raise ValueError("byte-serving capacities must be positive")
+        self._lock = threading.Lock()
+        self._active = 0
+        self._inflight_bytes = 0
+        self._active_high_water = 0
+        self._bytes_high_water = 0
+        self._admitted = 0
+        self._rejected = 0
+        self._bytes_served = 0
+
+    def acquire(self, size):
+        size = int(size)
+        if size < 0:
+            raise ValueError("serving size cannot be negative")
+        with self._lock:
+            if (
+                self._active >= self.max_concurrency
+                or self._inflight_bytes + size > self.max_inflight_bytes
+            ):
+                self._rejected += 1
+                return False
+            self._active += 1
+            self._inflight_bytes += size
+            self._admitted += 1
+            self._active_high_water = max(
+                self._active_high_water, self._active
+            )
+            self._bytes_high_water = max(
+                self._bytes_high_water, self._inflight_bytes
+            )
+            return True
+
+    def release(self, size, completed):
+        size = int(size)
+        with self._lock:
+            if self._active < 1 or self._inflight_bytes < size:
+                raise RuntimeError("invalid byte-serving release")
+            self._active -= 1
+            self._inflight_bytes -= size
+            if completed:
+                self._bytes_served += size
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "active": self._active,
+                "active_capacity": self.max_concurrency,
+                "active_high_water": self._active_high_water,
+                "inflight_bytes": self._inflight_bytes,
+                "inflight_byte_capacity": self.max_inflight_bytes,
+                "inflight_byte_high_water": self._bytes_high_water,
+                "admitted": self._admitted,
+                "rejected": self._rejected,
+                "bytes_served": self._bytes_served,
+            }
+
+
+class BoundedThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, address, handler, max_requests):
+        self.max_requests = int(max_requests)
+        if self.max_requests < 1:
+            raise ValueError("request concurrency must be positive")
+        self._request_slots = threading.BoundedSemaphore(
+            self.max_requests
+        )
+        self._request_lock = threading.Lock()
+        self._request_active = 0
+        self._request_high_water = 0
+        self._request_rejected = 0
+        super().__init__(address, handler)
+
+    def process_request(self, request, client_address):
+        if not self._request_slots.acquire(blocking=False):
+            with self._request_lock:
+                self._request_rejected += 1
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Length: 0\r\n"
+                    b"Connection: close\r\n\r\n"
+                )
+            finally:
+                self.shutdown_request(request)
+            return
+        with self._request_lock:
+            self._request_active += 1
+            self._request_high_water = max(
+                self._request_high_water, self._request_active
+            )
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._release_request_slot()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._release_request_slot()
+
+    def _release_request_slot(self):
+        with self._request_lock:
+            self._request_active -= 1
+        self._request_slots.release()
+
+    def admission_snapshot(self):
+        with self._request_lock:
+            return {
+                "active": self._request_active,
+                "active_capacity": self.max_requests,
+                "active_high_water": self._request_high_water,
+                "rejected": self._request_rejected,
+            }
+
+
 class ControllerService:
-    def __init__(self, host, port, token, state=None):
+    def __init__(
+        self,
+        host,
+        port,
+        token,
+        state=None,
+        max_request_concurrency=32,
+        max_serving_concurrency=8,
+        max_serving_bytes=64 * 1024 * 1024,
+        serving_hook=None,
+    ):
         if not token:
             raise ValueError("Controller token is required")
         self.host = host
         self.port = int(port)
         self.token = token
         self.state = state or ControllerState()
+        self.max_request_concurrency = int(max_request_concurrency)
+        self.byte_serving = ByteServingAdmission(
+            max_serving_concurrency, max_serving_bytes
+        )
+        self.serving_hook = serving_hook
         self._server = None
         self._thread = None
+
+    def snapshot(self):
+        value = self.state.snapshot()
+        value["byte_serving"] = self.byte_serving.snapshot()
+        value["request_admission"] = (
+            self._server.admission_snapshot()
+            if self._server is not None
+            else None
+        )
+        return value
 
     def start(self):
         owner = self
@@ -65,7 +215,7 @@ class ControllerService:
                     )
                     return
                 if parsed.path == f"{API_PREFIX}/snapshot":
-                    self._json(200, owner.state.snapshot())
+                    self._json(200, owner.snapshot())
                     return
                 if parsed.path == f"{API_PREFIX}/pruning/plan":
                     try:
@@ -100,28 +250,42 @@ class ControllerService:
                             },
                         )
                         return
-                    owner.state.record_edata_fetch(record.data_id)
                     payload = record.serialized_bytes
-                    self.send_response(200)
-                    self.send_header(
-                        "Content-Type", "application/octet-stream"
-                    )
-                    self.send_header("Content-Length", str(len(payload)))
-                    self.send_header(
-                        "X-DataVine-SHA256", record.content_hash
-                    )
-                    self.send_header(
-                        "X-DataVine-Metadata",
-                        base64.urlsafe_b64encode(
-                            json.dumps(
-                                record.metadata.to_dict(),
-                                sort_keys=True,
-                                separators=(",", ":"),
-                            ).encode("utf-8")
-                        ).decode("ascii"),
-                    )
-                    self.end_headers()
-                    self.wfile.write(payload)
+                    if not owner.byte_serving.acquire(len(payload)):
+                        self._error(503, "byte serving capacity exceeded")
+                        return
+                    owner.state.record_edata_fetch(record.data_id)
+                    completed = False
+                    try:
+                        if owner.serving_hook is not None:
+                            owner.serving_hook(f"e:{record.data_id}")
+                        self.send_response(200)
+                        self.send_header(
+                            "Content-Type", "application/octet-stream"
+                        )
+                        self.send_header(
+                            "Content-Length", str(len(payload))
+                        )
+                        self.send_header(
+                            "X-DataVine-SHA256", record.content_hash
+                        )
+                        self.send_header(
+                            "X-DataVine-Metadata",
+                            base64.urlsafe_b64encode(
+                                json.dumps(
+                                    record.metadata.to_dict(),
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                ).encode("utf-8")
+                            ).decode("ascii"),
+                        )
+                        self.end_headers()
+                        self.wfile.write(payload)
+                        completed = True
+                    finally:
+                        owner.byte_serving.release(
+                            len(payload), completed
+                        )
                     return
                 task_prefix = f"{API_PREFIX}/tasks/"
                 if parsed.path.startswith(task_prefix):
@@ -153,15 +317,33 @@ class ControllerService:
                         self._error(409, "IData is not available")
                         return
                     payload = record.serialized_bytes
-                    self.send_response(200)
-                    self.send_header(
-                        "Content-Type", "application/octet-stream"
-                    )
-                    self.send_header("Content-Length", str(len(payload)))
-                    self.send_header("X-DataVine-SHA256", record.content_hash)
-                    self.send_header("X-DataVine-Attempt", str(record.attempt))
-                    self.end_headers()
-                    self.wfile.write(payload)
+                    if not owner.byte_serving.acquire(len(payload)):
+                        self._error(503, "byte serving capacity exceeded")
+                        return
+                    completed = False
+                    try:
+                        if owner.serving_hook is not None:
+                            owner.serving_hook(f"i:{record.data_id}")
+                        self.send_response(200)
+                        self.send_header(
+                            "Content-Type", "application/octet-stream"
+                        )
+                        self.send_header(
+                            "Content-Length", str(len(payload))
+                        )
+                        self.send_header(
+                            "X-DataVine-SHA256", record.content_hash
+                        )
+                        self.send_header(
+                            "X-DataVine-Attempt", str(record.attempt)
+                        )
+                        self.end_headers()
+                        self.wfile.write(payload)
+                        completed = True
+                    finally:
+                        owner.byte_serving.release(
+                            len(payload), completed
+                        )
                     return
                 replica_prefix = f"{API_PREFIX}/replicas/"
                 if (
@@ -550,11 +732,10 @@ class ControllerService:
             def log_message(self, format_string, *args):
                 return
 
-        # One dedicated Controller thread owns request ordering and state
-        # transitions. Bounded concurrency is introduced later at explicit
-        # data-transfer/persistence admission points, not implicitly here.
-        self._server = http.server.HTTPServer(
-            (self.host, self.port), Handler
+        self._server = BoundedThreadingHTTPServer(
+            (self.host, self.port),
+            Handler,
+            self.max_request_concurrency,
         )
         self._thread = threading.Thread(
             target=self._server.serve_forever,
