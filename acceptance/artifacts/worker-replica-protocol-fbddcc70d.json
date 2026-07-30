@@ -1,0 +1,61 @@
+{
+	"artifact_schema": 1,
+	"commit": "fbddcc70d",
+	"date": "2026-07-29",
+	"status": "PASS_COMPONENT_ONLY",
+	"acceptance_scope": [
+		"authenticated worker join and incarnation reconciliation",
+		"validated worker-disk EData and IData replica reports",
+		"two-phase output replica prepare and scheduler commit",
+		"worker-loss invalidation with no preparing replica leak",
+		"late commit rejection after worker loss",
+		"stale epoch and foreign invalidation rejection",
+		"qualified EData and IData identity",
+		"zero-byte replica acceptance after hash validation"
+	],
+	"commands": [
+		"cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+		"cd /users/jzhou24/cctools_repo/datavine/taskvine/test && bash TR_datavine_replica_protocol.sh run",
+		"cd /users/jzhou24/cctools_repo/datavine/taskvine/test && for run in $(seq 1 20); do bash TR_datavine_replica_protocol.sh run >/dev/null || exit; done",
+		"cd /users/jzhou24/cctools_repo/datavine/taskvine/test && bash TR_datavine_phase4_demand_pull.sh run",
+		"cd /users/jzhou24/cctools_repo/datavine/taskvine/test && bash TR_datavine_phase7_recovery.sh run"
+	],
+	"component_result": {
+		"active_workers": 2,
+		"replicas": 10,
+		"replica_states": {
+			"available": 8,
+			"invalid": 2,
+			"preparing": 0,
+			"retiring": 0,
+			"quarantined": 0,
+			"pruned": 0
+		},
+		"active_leases": 0,
+		"lease_high_water": 1,
+		"stale_rejections": 1,
+		"repetitions": 20
+	},
+	"worker_loss_result": {
+		"active_workers": 1,
+		"available_replicas": 13,
+		"invalid_replicas": 4,
+		"preparing_replicas": 0,
+		"taskvine_worker_disconnections": 1
+	},
+	"recovery_result": {
+		"logical_tasks": 4,
+		"physical_attempts": 5,
+		"recovery_reexecutions": 1,
+		"active_workers": 1,
+		"available_replicas": 21,
+		"invalid_replicas": 5,
+		"preparing_replicas": 0
+	},
+	"explicit_nonclaims": [
+		"workers do not yet pull bytes from Controller-selected peer sources",
+		"transfer leases are not yet attached to TaskVine byte movement",
+		"worker DRAM and disk capacity policy is not yet DataVine-owned",
+		"this is not Grand Challenge or final acceptance evidence"
+	]
+}

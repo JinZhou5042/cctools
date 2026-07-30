@@ -11,7 +11,7 @@
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
 - Active task: **Phase 9 physical replica authority and pruning integration**
-- Validated code commit: `e1843b9bd`
+- Validated code commit: `fbddcc70d`
 
 ## Ultimate acceptance reset
 
@@ -99,6 +99,37 @@ Review B remains **FAIL**: pruning does not yet issue these cancellations,
 worker DRAM/disk replicas are not protocol-connected, and SharedFS quarantine
 does not yet rename/delete real files. Evidence:
 `acceptance/artifacts/persistence-races-17577b058.json`.
+
+### Phase 9 worker replica protocol checkpoint
+
+Commit `fbddcc70d` connects the physical replica directory to the real
+Controller HTTP protocol, Task Scheduler, and TaskVine worker processes.
+Every worker process exports its unique TaskVine WorkerID as an incarnation
+identity, joins the Controller, and reports only replicas whose qualified
+DataID, attempt, content hash, and serialized size match Controller truth.
+Worker output publication is two phase: the task prepares its local output
+replica, and the Scheduler commits that exact generation only after TaskVine
+reports successful task completion.
+
+The Scheduler reconciles Controller worker incarnations against TaskVine
+manager status after every wait. A disappeared worker invalidates all of its
+available and preparing replicas; a late commit cannot resurrect them.
+TaskVine worker status now exposes WorkerID for local as well as factory
+workers. Corrupt local cache reports are invalidated before fallback, and
+zero-byte IData is accepted when its hash is correct.
+
+The required clean build/install passes. The protocol component test passes 20
+repetitions, and installed topology, Phase 4 worker-loss, and Phase 7 recovery
+tests pass with zero leaked preparing replicas. The recovery run executes four
+logical tasks through five ordinary attempts, records one worker
+disconnection, leaves five old replicas invalid, and completes with the exact
+result.
+
+Self-review keeps Review B **FAIL**. The source records do not yet expose
+fetchable peer endpoints, runtime byte transfers do not yet acquire Controller
+leases, worker cache capacities are not owned by DataVine, and worker
+reconciliation assumes one Scheduler/Controller workflow pair. Evidence:
+`acceptance/artifacts/worker-replica-protocol-fbddcc70d.json`.
 
 ## Phase 8 acceptance
 

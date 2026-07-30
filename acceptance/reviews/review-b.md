@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed code commit: `2108b68a8`
+Reviewed through code commit: `fbddcc70d`
 Status: **FAIL — SHADOW PROOF PASSES, PHYSICAL DELETION IS UNSAFE**
 
 ## Accepted shadow evidence
@@ -36,6 +36,14 @@ quarantine, active reads, or replicas from stale worker epochs.
 Required correction: Controller-owned physical replica records, epochs,
 locations, tiers, leases/readers, and validated loss transitions.
 
+Correction checkpoint `fbddcc70d` connects qualified, tiered, generation- and
+epoch-checked physical records to real Controller, Scheduler, and worker
+protocol events. TaskVine worker loss invalidates available and preparing
+replicas, and late completion fails closed. B1 is satisfied for currently
+reported Controller-memory, SharedFS, and worker-disk replicas. DRAM admission
+and large-data stable origins remain separately open under B2 and the cache
+acceptance rows.
+
 ### B2 — Stable-root reproducibility is assumed, not proved by Controller state
 
 The independent safety oracle assumes task metadata and all root EData remain
@@ -53,6 +61,10 @@ and retry epochs do not yet drive this model through the Controller protocol.
 
 Required correction: versioned Controller events and fail-closed integration
 tests for reordered/duplicate/stale transitions.
+
+Worker incarnation and publication transitions are now runtime-connected at
+`fbddcc70d`, but consumer lifecycle, cancellation, and atomic dynamic graph
+growth are not. This finding remains open.
 
 ### B4 — Persistence cancellation is advisory only
 
@@ -75,6 +87,10 @@ state.
 Required correction: source leases or equivalent reference protection tied to
 replica epochs, with deterministic race tests.
 
+The authenticated protocol can acquire and release bounded epoch-checked
+source leases, but TaskVine's actual byte transfer path does not call it yet.
+The component race is necessary but insufficient; this finding remains open.
+
 ### B6 — Dynamic invalidation is correct only inside the shadow object
 
 Adding a task updates incremental direct-consumer indexes and invalidates the
@@ -95,7 +111,7 @@ Required correction: quarantine state machine and executor after B1–B6.
 
 | Review B question | Result |
 |---|---|
-| Recoverability model complete? | FAIL — physical origins/epochs absent |
+| Recoverability model complete? | FAIL — runtime epochs exist; stable bulk origins and transfer coupling remain open |
 | Every shadow decision explained? | PASS |
 | Active and recovery consumers distinguished? | PASS in shadow, not runtime |
 | Durability coverage handles branches/joins? | PASS in shadow |

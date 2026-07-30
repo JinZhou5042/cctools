@@ -74,6 +74,30 @@
   paths use the new states.
 - Code commit: `17577b058`.
 
+## 2026-07-29 — Phase 9 worker replica incarnations
+
+- Exposed TaskVine's unique WorkerID to task processes and to manager status
+  for both local and factory workers.
+- Added authenticated Controller protocol operations for worker join,
+  disconnect/reconciliation, replica prepare/commit/report/invalidate,
+  candidate lookup, and source-lease acquire/release.
+- Connected worker cache observations to qualified Controller replica records.
+  Reports must match the Controller's attempt, content hash, and serialized
+  size; stale epochs, corrupt metadata, and foreign invalidation fail closed.
+- Made output realization two phase. A worker prepares the replica after
+  fsync/publication, while the Scheduler commits the exact generation only
+  after successful TaskVine completion.
+- Fixed two defects found during integration: zero-byte IData was incorrectly
+  rejected, and worker loss left an unbounded ghost `preparing` replica.
+  Scheduler-to-Controller incarnation reconciliation now invalidates both
+  available and preparing state.
+- Required clean build/install, installed topology, Phase 4 worker-loss, Phase
+  7 recovery, the complete Phase 4-9 local regression, and 20 repeated
+  protocol races passed.
+- Review B remains FAIL because real peer byte movement does not yet use the
+  candidate/lease protocol and pruning still performs no physical deletion.
+- Code commit: `fbddcc70d`.
+
 ## 2026-07-29 — Phase 0 local baseline
 
 - Created branch `datavine` from freshly fetched `origin/task-graph` at PR
