@@ -339,6 +339,17 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def continue_deferred_pruning(self, data_ids=None):
+        request = {}
+        if data_ids is not None:
+            request["data_ids"] = [
+                int(data_id) for data_id in data_ids
+            ]
+        payload, _ = self._request(
+            "POST", f"{API_PREFIX}/pruning/continue", request
+        )
+        return json.loads(payload)
+
     def restore_quarantined(self, data_id):
         payload, _ = self._request(
             "POST",

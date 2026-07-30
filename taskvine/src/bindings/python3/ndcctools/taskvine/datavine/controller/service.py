@@ -652,6 +652,17 @@ class ControllerService:
                         return
                     self._json(200, result)
                     return
+                if self.path == f"{API_PREFIX}/pruning/continue":
+                    try:
+                        request = self._read_json()
+                        result = owner.state.continue_deferred_pruning(
+                            request.get("data_ids")
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, result)
+                    return
                 if self.path == f"{API_PREFIX}/pruning/restore":
                     try:
                         request = self._read_json()

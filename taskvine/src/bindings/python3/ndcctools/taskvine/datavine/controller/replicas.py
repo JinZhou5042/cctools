@@ -675,6 +675,26 @@ class ReplicaDirectory:
             self._changed()
             return record
 
+    def cancel_invalidation(self, data_id, replica_id, generation):
+        """Restore a not-yet-deleted replica after prune proof invalidation."""
+        key = (self._normalize_data_id(data_id), str(replica_id))
+        with self._lock:
+            record = self._replicas.get(key)
+            if record is None:
+                raise KeyError("unknown replica")
+            if record.generation != int(generation):
+                self._reject_stale("stale invalidation cancellation")
+            if record.state == "available":
+                return record
+            if record.state not in ("retiring", "invalid"):
+                raise ValueError(
+                    f"cannot cancel invalidation in state {record.state}"
+                )
+            record = dataclasses.replace(record, state="available")
+            self._replicas[key] = record
+            self._changed()
+            return record
+
     def invalidate_worker_replica(
         self,
         data_id,

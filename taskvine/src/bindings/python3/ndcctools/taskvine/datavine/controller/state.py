@@ -77,6 +77,7 @@ class ControllerState:
         self._persistence_cleanup_failures = 0
         self.replicas = replica_directory or ReplicaDirectory()
         self.pruning = PruningAuthority(pruning_audit_capacity)
+        self._deferred_pruning = {}
 
     def _release_persistence_slot(self, request_id):
         self._persistence_active_ids.discard(str(request_id))
@@ -1376,6 +1377,20 @@ class ControllerState:
             applied = []
             deferred = []
             for data_id in sorted(selected):
+                if data_id in self._deferred_pruning:
+                    for item in self._deferred_pruning[data_id]:
+                        replica = self.replicas.get_replica(
+                            f"i:{data_id}", item["replica_id"]
+                        )
+                        deferred.append(
+                            {
+                                **item,
+                                "active_leases": (
+                                    replica.active_leases
+                                ),
+                            }
+                        )
+                    continue
                 record = self._pruning_record(
                     self.pruning.plan(), data_id
                 )
@@ -1396,31 +1411,141 @@ class ControllerState:
                 "replica_revision": self.replicas.revision,
             }
 
+    def continue_deferred_pruning(self, data_ids=None):
+        """Resolve lease-deferred pruning against the newest proof."""
+        with self._lock:
+            selected = (
+                set(self._deferred_pruning)
+                if data_ids is None
+                else {int(data_id) for data_id in data_ids}
+            )
+            unknown = selected - set(self._deferred_pruning)
+            if unknown:
+                raise ValueError(
+                    "IDataIDs have no deferred pruning: "
+                    f"{sorted(unknown)}"
+                )
+            applied = []
+            deferred = []
+            cancelled = []
+            for data_id in sorted(selected):
+                pending = self._deferred_pruning[data_id]
+                current_plan = self.pruning.plan()
+                if data_id not in set(current_plan.prunable):
+                    for item in pending:
+                        restored = self.replicas.cancel_invalidation(
+                            f"i:{data_id}",
+                            item["replica_id"],
+                            item["generation"],
+                        )
+                        audit = self.pruning.audit(
+                            "cancel-retiring-prune",
+                            data_id,
+                            "pruning-proof-invalidated",
+                            self.replicas.revision,
+                            restored.replica_id,
+                            restored.generation,
+                        )
+                        cancelled.append(audit.to_dict())
+                    del self._deferred_pruning[data_id]
+                    self.pruning.set_data_state(
+                        data_id,
+                        available=self.replicas.globally_available(
+                            f"i:{data_id}"
+                        ),
+                    )
+                    continue
+                proof = self._pruning_record(current_plan, data_id)
+                waiting = False
+                for item in pending:
+                    replica = self.replicas.get_replica(
+                        f"i:{data_id}", item["replica_id"]
+                    )
+                    if replica.generation != item["generation"]:
+                        raise ValueError(
+                            "deferred pruning generation changed"
+                        )
+                    if replica.active_leases:
+                        waiting = True
+                        deferred.append(
+                            {
+                                **item,
+                                "active_leases": (
+                                    replica.active_leases
+                                ),
+                            }
+                        )
+                    elif replica.state != "invalid":
+                        raise ValueError(
+                            "lease-deferred replica did not become invalid"
+                        )
+                if waiting:
+                    continue
+                for item in pending:
+                    self.replicas.cancel_invalidation(
+                        f"i:{data_id}",
+                        item["replica_id"],
+                        item["generation"],
+                    )
+                del self._deferred_pruning[data_id]
+                result = self._prune_idata_locked(
+                    data_id, proof, 0, None
+                )
+                if result["deferred"]:
+                    raise RuntimeError(
+                        "deferred pruning reacquired a source lease "
+                        "while Controller lock was held"
+                    )
+                applied.extend(result["applied"])
+            return {
+                "applied": applied,
+                "deferred": deferred,
+                "cancelled": cancelled,
+                "plan": self.pruning.plan().to_dict(),
+                "replica_revision": self.replicas.revision,
+            }
+
     def _prune_idata_locked(
         self, data_id, proof, grace_seconds, now
     ):
         old = self.get_idata(data_id)
         applied = []
         deferred = []
-        sharedfs_id = (
-            f"sharedfs-idata-{old.data_id}-attempt-{old.attempt}"
+        available = tuple(
+            replica
+            for replica in self.replicas.records_for(f"i:{data_id}")
+            if replica.state == "available"
         )
-        for replica in self.replicas.records_for(f"i:{data_id}"):
-            if replica.state != "available":
-                continue
-            if replica.active_leases:
+        if any(replica.active_leases for replica in available):
+            pending = []
+            for replica in available:
+                if not replica.active_leases:
+                    continue
                 retiring = self.replicas.invalidate_replica(
                     replica.data_id,
                     replica.replica_id,
                     replica.generation,
                 )
+                item = {
+                    "data_id": data_id,
+                    "replica_id": retiring.replica_id,
+                    "generation": retiring.generation,
+                    "action": "retiring-active-read",
+                }
+                pending.append(item)
                 deferred.append(
                     {
-                        "data_id": data_id,
-                        "replica_id": retiring.replica_id,
-                        "action": "retiring-active-read",
+                        **item,
+                        "active_leases": retiring.active_leases,
                     }
                 )
+            self._deferred_pruning[data_id] = pending
+            return {"applied": applied, "deferred": deferred}
+        sharedfs_id = (
+            f"sharedfs-idata-{old.data_id}-attempt-{old.attempt}"
+        )
+        for replica in self.replicas.records_for(f"i:{data_id}"):
+            if replica.state != "available":
                 continue
             if replica.tier == "sharedfs":
                 if (
@@ -1721,4 +1846,10 @@ class ControllerState:
                 ),
                 "replica_directory": self.replicas.snapshot(),
                 "pruning": self.pruning.snapshot(),
+                "deferred_pruning": {
+                    str(data_id): list(records)
+                    for data_id, records in sorted(
+                        self._deferred_pruning.items()
+                    )
+                },
             }

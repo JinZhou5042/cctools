@@ -123,6 +123,7 @@ def run_case(
     worker_loss_process_shutdown=False,
     inject_partial_publication_after=None,
     frontier_pruning_ack_delay=0,
+    runtime_controller_hook=None,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -203,6 +204,7 @@ def run_case(
         workers = []
         replacement_timer = None
         replacement_timers = []
+        runtime_hook_handle = None
         try:
             ready = wait_json(ready_path)
             client = ControllerClient(
@@ -284,6 +286,8 @@ def run_case(
                 inject_partial_publication_after,
                 frontier_pruning_ack_delay,
             )
+            if runtime_controller_hook is not None:
+                runtime_hook_handle = runtime_controller_hook(client)
             if (
                 replacement_worker_delay is not None
                 and not factory_manager
@@ -313,6 +317,15 @@ def run_case(
             results = future.result(
                 timeout=600 if factory_manager else 90
             )
+            if (
+                runtime_hook_handle is not None
+                and hasattr(runtime_hook_handle, "join")
+            ):
+                runtime_hook_handle.join(timeout=30)
+                if runtime_hook_handle.is_alive():
+                    raise TimeoutError(
+                        "runtime Controller hook did not finish"
+                    )
             assert results[target_task_id] == oracle
             result_summaries = {}
             for task_id, value in results.items():

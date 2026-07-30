@@ -191,20 +191,42 @@ def main():
             )
             assert outputs[2] in result["cancelled_persistence"]
             assert any(
-                item["action"] == "quarantine-sharedfs"
-                and item["data_id"] == outputs[0]
-                for item in result["applied"]
-            )
-            assert any(
                 item["action"] == "retiring-active-read"
                 and item["data_id"] == outputs[0]
                 for item in result["deferred"]
             )
-            assert not first_path.exists()
-            expect_remote_error(
-                "not available", client.fetch_idata, outputs[0]
+            assert not any(
+                item["data_id"] == outputs[0]
+                for item in result["applied"]
             )
+            assert first_path.exists()
+            assert client.fetch_idata(outputs[0]) == payloads[outputs[0]]
+            duplicate = client.apply_pruning(
+                result["plan"]["records"][0]["graph_revision"],
+                result["plan"]["records"][0]["state_revision"],
+                grace_seconds=10,
+                data_ids=[outputs[0]],
+                now=100,
+            )
+            assert duplicate["deferred"] == result["deferred"]
+            assert not duplicate["applied"]
             client.release_replica(lease["lease_id"], True)
+            continued = client.continue_deferred_pruning(
+                [outputs[0]]
+            )
+            assert not continued["deferred"]
+            assert any(
+                item["action"] == "quarantine-sharedfs"
+                and item["data_id"] == outputs[0]
+                for item in continued["applied"]
+            )
+            assert any(
+                item["action"]
+                == "invalidate-worker-pending-delete"
+                and item["data_id"] == outputs[0]
+                for item in continued["applied"]
+            )
+            assert not first_path.exists()
 
             restored = client.restore_quarantined(outputs[0])
             assert restored["restored"][0]["action"] == (

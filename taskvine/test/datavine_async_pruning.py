@@ -28,7 +28,7 @@ def build():
     middle = workflow.add_task(advance, root.output(), 1)
     frontier = workflow.add_task(advance, middle.output(), 2)
     target = workflow.add_task(advance, frontier.output(), 3)
-    independent = workflow.add_task(slow_independent, 99, 3)
+    independent = workflow.add_task(slow_independent, 99, 8)
     return workflow, root, middle, frontier, target, independent
 
 
@@ -64,7 +64,7 @@ def main():
             frontier.task_id: (root.task_id, middle.task_id)
         },
         additional_result_task_ids=(independent.task_id,),
-        frontier_pruning_ack_delay=4,
+        frontier_pruning_ack_delay=12,
     )
     report = snapshot["scheduler_report"]
     assert report["logical_tasks"] == 5

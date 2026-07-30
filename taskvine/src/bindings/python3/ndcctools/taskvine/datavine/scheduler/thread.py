@@ -743,6 +743,49 @@ class TaskSchedulerThread:
         persistence_worker_bytes = 0
         persistence_controller_bytes = 0
         persistence_cancellations = 0
+
+        def start_frontier_worker_prunes(active, records):
+            pending_by_data = {}
+            for record in records:
+                if (
+                    record["action"]
+                    == "invalidate-worker-pending-delete"
+                ):
+                    pending_by_data.setdefault(
+                        record["data_id"], []
+                    ).append(record)
+            existing = {
+                entry["data_id"]
+                for entry in active["worker_entries"]
+            }
+            for data_id, data_records in sorted(
+                pending_by_data.items()
+            ):
+                if data_id in existing:
+                    raise RuntimeError(
+                        "duplicate physical frontier-prune request "
+                        f"for i:{data_id}"
+                    )
+                file_object = self._idata_files[data_id]
+                before = self._manager.prune_file_status(
+                    file_object
+                )
+                requested = self._manager.prune_file(file_object)
+                if requested != len(data_records):
+                    raise RuntimeError(
+                        "replica authority mismatch for "
+                        f"i:{data_id}: Controller={len(data_records)} "
+                        f"TaskVine={requested}"
+                    )
+                active["worker_entries"].append(
+                    {
+                        "data_id": data_id,
+                        "records": data_records,
+                        "file": file_object,
+                        "before": before,
+                        "requested": requested,
+                    }
+                )
         persistence_failures = 0
         persistence_injected_failures_observed = 0
         persistence_retries = 0
@@ -981,7 +1024,47 @@ class TaskSchedulerThread:
                 and time.monotonic()
                 >= frontier_pruning_active["poll_after"]
             ):
-                all_complete = True
+                if frontier_pruning_active["deferred_data_ids"]:
+                    continuation = (
+                        self.controller.continue_deferred_pruning(
+                            sorted(
+                                frontier_pruning_active[
+                                    "deferred_data_ids"
+                                ]
+                            )
+                        )
+                    )
+                    frontier_pruning_active[
+                        "controller_continuations"
+                    ].append(continuation)
+                    still_deferred = {
+                        item["data_id"]
+                        for item in continuation["deferred"]
+                    }
+                    resolved = (
+                        frontier_pruning_active[
+                            "deferred_data_ids"
+                        ]
+                        - still_deferred
+                    )
+                    cancelled = {
+                        item["data_id"]
+                        for item in continuation["cancelled"]
+                    }
+                    if cancelled:
+                        frontier_pruning_active[
+                            "cancelled_data_ids"
+                        ].update(cancelled)
+                    start_frontier_worker_prunes(
+                        frontier_pruning_active,
+                        continuation["applied"],
+                    )
+                    frontier_pruning_active[
+                        "deferred_data_ids"
+                    ] -= resolved
+                all_complete = not frontier_pruning_active[
+                    "deferred_data_ids"
+                ]
                 worker_prunes = []
                 for entry in frontier_pruning_active["worker_entries"]:
                     status = self._manager.prune_file_status(
@@ -1063,8 +1146,18 @@ class TaskSchedulerThread:
                                 "controller": frontier_pruning_active[
                                     "controller_result"
                                 ],
+                                "controller_continuations": (
+                                    frontier_pruning_active[
+                                        "controller_continuations"
+                                    ]
+                                ),
                                 "worker_prunes": worker_prunes,
                             },
+                            "cancelled_data_ids": sorted(
+                                frontier_pruning_active[
+                                    "cancelled_data_ids"
+                                ]
+                            ),
                         }
                     )
                     frontier_pruning_applied.add(frontier_task_id)
@@ -1110,55 +1203,34 @@ class TaskSchedulerThread:
                         prune_data_ids,
                         None,
                     )
-                    if result["deferred"]:
-                        raise RuntimeError(
-                            "frontier pruning encountered an active "
-                            f"Controller lease: {result['deferred']}"
-                        )
-                    pending_by_data = {}
-                    for record in result["applied"]:
-                        if (
-                            record["action"]
-                            == "invalidate-worker-pending-delete"
-                        ):
-                            pending_by_data.setdefault(
-                                record["data_id"], []
-                            ).append(record)
-                    worker_entries = []
-                    for data_id, records in sorted(
-                        pending_by_data.items()
-                    ):
-                        file_object = self._idata_files[data_id]
-                        before = self._manager.prune_file_status(
-                            file_object
-                        )
-                        requested = self._manager.prune_file(file_object)
-                        if requested != len(records):
-                            raise RuntimeError(
-                                "replica authority mismatch for "
-                                f"i:{data_id}: Controller={len(records)} "
-                                f"TaskVine={requested}"
-                            )
-                        worker_entries.append(
-                            {
-                                "data_id": data_id,
-                                "records": records,
-                                "file": file_object,
-                                "before": before,
-                                "requested": requested,
-                            }
-                        )
                     now_value = time.monotonic()
                     frontier_pruning_active = {
                         "frontier_task_id": frontier_task_id,
                         "data_ids": prune_data_ids,
                         "controller_result": result,
-                        "worker_entries": worker_entries,
+                        "controller_continuations": [],
+                        "deferred_data_ids": {
+                            item["data_id"]
+                            for item in result["deferred"]
+                        },
+                        "cancelled_data_ids": set(),
+                        "worker_entries": [],
                         "poll_after": (
                             now_value + frontier_pruning_ack_delay
                         ),
                         "deadline": now_value + 30,
                     }
+                    start_frontier_worker_prunes(
+                        frontier_pruning_active,
+                        [
+                            record
+                            for record in result["applied"]
+                            if record["data_id"]
+                            not in frontier_pruning_active[
+                                "deferred_data_ids"
+                            ]
+                        ],
+                    )
 
             def persistence_frontier_ready(task_id):
                 if not persist_outputs:
@@ -2087,6 +2159,8 @@ class TaskSchedulerThread:
                     data_id
                     for event in frontier_pruning
                     for data_id in event["data_ids"]
+                    if data_id
+                    not in event["cancelled_data_ids"]
                 }
             ),
             "persistence_tasks_completed": (
