@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+from pathlib import Path
+import tempfile
+
+from datavine_phase4_demand_pull import run_case, start_worker
+from ndcctools.taskvine import Manager, Task, cvine
+from ndcctools.taskvine.datavine import Workflow
+
+
+HOT = b"datavine-hot-cache-value\n" * 4096
+
+
+def consume(hot, unique, previous, ordinal):
+    assert hot is HOT or hot == HOT
+    return previous + len(hot) + len(unique) + ordinal
+
+
+def build_workflow(count=12):
+    workflow = Workflow()
+    previous = None
+    expected = 0
+    for ordinal in range(count):
+        unique = bytes([ordinal + 1]) * (32768 + ordinal * 97)
+        if previous is None:
+            previous_value = 0
+        else:
+            previous_value = previous.output()
+        previous = workflow.add_task(
+            consume, HOT, unique, previous_value, ordinal
+        )
+        expected += len(HOT) + len(unique) + ordinal
+    return workflow, previous.task_id, expected
+
+
+def pending_unlink_worker_loss():
+    with tempfile.TemporaryDirectory(
+        prefix="datavine-cache-unlink-loss-"
+    ) as root:
+        manager = Manager(
+            port=0, run_info_path=str(Path(root) / "run-info")
+        )
+        worker = start_worker(manager.port, cores=1)
+        try:
+            while not manager.status("workers"):
+                manager.wait(1)
+            cached = manager.declare_buffer(
+                b"pending-unlink-worker-loss", cache="worker"
+            )
+            task = Task("/bin/true")
+            task.add_input(cached, "input")
+            manager.submit(task)
+            completed = manager.wait(10)
+            assert completed is not None and completed.successful()
+            worker_id = manager.status("workers")[0]["workerid"]
+            before = manager.prune_file_status(cached)
+            assert manager.prune_file_on_worker(cached, worker_id) == 1
+            assert cvine.vine_manager_release_random_worker(
+                manager._taskvine
+            )
+            status = manager.prune_file_status(cached)
+            assert status["requested"] - before["requested"] == 1
+            assert status["confirmed"] - before["confirmed"] == 0
+            assert status["failed"] - before["failed"] == 1
+            assert manager.forget_prune_file_status(cached)
+            return status
+        finally:
+            if worker.poll() is None:
+                worker.terminate()
+                worker.wait(timeout=10)
+            manager._free()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--factory-manager")
+    args = parser.parse_args()
+
+    bounded_workflow, bounded_target, bounded_oracle = build_workflow()
+    bounded = run_case(
+        "cache-capacity-bounded",
+        bounded_workflow,
+        bounded_target,
+        bounded_oracle,
+        factory_manager=args.factory_manager,
+        worker_count=2,
+        worker_cores=1,
+        prefetch=False,
+        worker_disk_cache_items=6,
+    )
+    bounded_report = bounded["scheduler_report"]
+    assert bounded_report["worker_disk_cache_evictions"] > 0
+    assert all(
+        usage["items"] <= 6
+        for usage in bounded_report["worker_disk_cache_usage"].values()
+    ), bounded_report
+    assert any(
+        record["remaining_uses"] == 0
+        for record in bounded_report[
+            "worker_disk_cache_eviction_records"
+        ]
+    )
+
+    zero_workflow, zero_target, zero_oracle = build_workflow(6)
+    zero = run_case(
+        "cache-capacity-zero",
+        zero_workflow,
+        zero_target,
+        zero_oracle,
+        factory_manager=args.factory_manager,
+        worker_count=1,
+        worker_cores=1,
+        prefetch=False,
+        worker_disk_cache_items=0,
+    )
+    zero_report = zero["scheduler_report"]
+    assert zero_report["worker_disk_cache_evictions"] > 0
+    assert all(
+        usage["items"] == 0
+        for usage in zero_report["worker_disk_cache_usage"].values()
+    ), zero_report
+    assert zero["replica_directory"]["active_leases"] == 0
+    unlink_loss = pending_unlink_worker_loss()
+
+    print(
+        json.dumps(
+            {
+                "bounded": bounded_report,
+                "zero": zero_report,
+                "pending_unlink_worker_loss": unlink_loss,
+                "status": "PASS",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -98,6 +98,8 @@ def run_case(
     max_edata_bytes=64 * 1024 * 1024,
     max_serving_bytes=64 * 1024 * 1024,
     worker_cores=2,
+    worker_disk_cache_bytes=None,
+    worker_disk_cache_items=None,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -217,6 +219,8 @@ def run_case(
                 prefetch_byte_budget,
                 prefetch_item_budget,
                 inject_prefetch_failure,
+                worker_disk_cache_bytes,
+                worker_disk_cache_items,
             )
             if (
                 replacement_worker_delay is not None

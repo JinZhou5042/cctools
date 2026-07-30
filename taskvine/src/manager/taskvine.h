@@ -973,6 +973,9 @@ but is still available on the manager's site, and can be recovered by submitting
 */
 int vine_prune_file(struct vine_manager *m, struct vine_file *f);
 
+/** Prune one replica from the worker with the given stable WorkerID. */
+int vine_prune_file_on_worker(struct vine_manager *m, struct vine_file *f, const char *worker_id);
+
 /** Return cumulative remote prune requests for a declared file. */
 int64_t vine_prune_file_requested(struct vine_manager *m, struct vine_file *f);
 

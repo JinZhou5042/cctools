@@ -127,6 +127,8 @@ static void vine_prune_tracker_delete(void *value)
 	free(tracker);
 }
 
+static void vine_prune_track_worker_loss(struct vine_manager *m, struct vine_worker_info *w);
+
 /* Default value for maximum size of standard output from task.  (If larger, send to a separate file.) */
 #define MAX_TASK_STDOUT_STORAGE (1 * GIGABYTE)
 
@@ -1148,6 +1150,7 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w)
 	if (!q || !w)
 		return;
 
+	vine_prune_track_worker_loss(q, w);
 	vine_current_transfers_wipe_worker(q, w);
 
 	ITABLE_ITERATE(w->current_tasks, iteration, task_id, t)
@@ -6653,6 +6656,67 @@ Should be invoked by the application when a file will never
 be needed again, to free up available space.
 */
 
+static struct vine_prune_tracker *vine_prune_tracker_get_or_create(struct vine_manager *m, const char *cachename)
+{
+	struct vine_prune_tracker *tracker = hash_table_lookup(m->file_prune_table, cachename);
+	if (!tracker) {
+		tracker = calloc(1, sizeof(*tracker));
+		if (!tracker) {
+			fatal("out of memory creating prune tracker");
+		}
+		tracker->pending = hash_table_create(0, 0);
+		hash_table_insert(m->file_prune_table, cachename, tracker);
+	}
+	return tracker;
+}
+
+static int vine_prune_file_from_worker(struct vine_manager *m, struct vine_file *f, struct vine_worker_info *w)
+{
+	if (!m || !f || !w || !vine_file_replica_table_lookup(w, f->cached_name)) {
+		return 0;
+	}
+	struct vine_prune_tracker *tracker = vine_prune_tracker_get_or_create(m, f->cached_name);
+	cctools_uuid_t operation_id;
+	cctools_uuid_create(&operation_id);
+	if (vine_manager_send(m, w, "unlink %s %s\n", f->cached_name, operation_id.str) <= 0) {
+		return 0;
+	}
+	process_replica_on_event(m, w, f->cached_name, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_UNLINK);
+	struct vine_file_replica *removed_replica = vine_file_replica_table_remove(m, w, f->cached_name);
+	if (removed_replica) {
+		vine_file_replica_delete(removed_replica);
+	}
+	hash_table_insert(tracker->pending, operation_id.str, w);
+	tracker->requested++;
+	return 1;
+}
+
+static void vine_prune_track_worker_loss(struct vine_manager *m, struct vine_worker_info *w)
+{
+	char *cachename;
+	struct vine_prune_tracker *tracker;
+	int iteration;
+	HASH_TABLE_ITERATE(m->file_prune_table, iteration, cachename, tracker)
+	{
+		char **operation_ids = hash_table_keys_array(tracker->pending);
+		if (!operation_ids) {
+			continue;
+		}
+		for (int i = 0; operation_ids[i]; i++) {
+			if (hash_table_lookup(tracker->pending, operation_ids[i]) == w) {
+				hash_table_remove(tracker->pending, operation_ids[i]);
+				/*
+				 * The incarnation is unavailable, but a persistent
+				 * workspace may remain. Resolve the tracker without
+				 * claiming physical deletion.
+				 */
+				tracker->failed++;
+			}
+		}
+		hash_table_free_keys_array(operation_ids);
+	}
+}
+
 int vine_prune_file(struct vine_manager *m, struct vine_file *f)
 {
 	if (!f) {
@@ -6664,16 +6728,6 @@ int vine_prune_file(struct vine_manager *m, struct vine_file *f)
 	}
 
 	int pruned_replica_count = 0;
-	struct vine_prune_tracker *tracker = hash_table_lookup(m->file_prune_table, f->cached_name);
-	if (!tracker) {
-		tracker = calloc(1, sizeof(*tracker));
-		if (!tracker) {
-			fatal("out of memory creating prune tracker");
-		}
-		tracker->pending = hash_table_create(0, 0);
-		hash_table_insert(m->file_prune_table, f->cached_name, tracker);
-	}
-
 	/* delete all of the replicas present at remote workers. */
 	struct set *source_workers = hash_table_lookup(m->file_worker_table, f->cached_name);
 	if (source_workers && set_size(source_workers) > 0) {
@@ -6681,20 +6735,7 @@ int vine_prune_file(struct vine_manager *m, struct vine_file *f)
 		if (workers_array) {
 			for (int i = 0; workers_array[i] != NULL; i++) {
 				struct vine_worker_info *w = (struct vine_worker_info *)workers_array[i];
-				cctools_uuid_t operation_id;
-				cctools_uuid_create(&operation_id);
-				int requested = vine_manager_send(m, w, "unlink %s %s\n", f->cached_name, operation_id.str) > 0;
-
-				/* update replica table for the worker */
-				if (requested) {
-					process_replica_on_event(m, w, f->cached_name, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_UNLINK);
-					struct vine_file_replica *removed_replica = vine_file_replica_table_remove(m, w, f->cached_name);
-					if (removed_replica) {
-						vine_file_replica_delete(removed_replica);
-					}
-
-					hash_table_insert(tracker->pending, operation_id.str, w);
-					tracker->requested++;
+				if (vine_prune_file_from_worker(m, f, w)) {
 					pruned_replica_count++;
 				}
 			}
@@ -6703,6 +6744,23 @@ int vine_prune_file(struct vine_manager *m, struct vine_file *f)
 	}
 
 	return pruned_replica_count;
+}
+
+int vine_prune_file_on_worker(struct vine_manager *m, struct vine_file *f, const char *worker_id)
+{
+	if (!m || !f || !worker_id || !worker_id[0]) {
+		return 0;
+	}
+	char *key;
+	struct vine_worker_info *w;
+	int iteration;
+	HASH_TABLE_ITERATE(m->worker_table, iteration, key, w)
+	{
+		if (w->workerid && !strcmp(w->workerid, worker_id)) {
+			return vine_prune_file_from_worker(m, f, w);
+		}
+	}
+	return 0;
 }
 
 static struct vine_prune_tracker *vine_prune_file_tracker(struct vine_manager *m, struct vine_file *f)

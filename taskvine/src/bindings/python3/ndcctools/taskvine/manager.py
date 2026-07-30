@@ -1746,6 +1746,12 @@ class Manager(object):
     def prune_file(self, file):
         return cvine.vine_prune_file(self._taskvine, file._file)
 
+    def prune_file_on_worker(self, file, worker_id):
+        """Request acknowledged deletion of one replica by WorkerID."""
+        return cvine.vine_prune_file_on_worker(
+            self._taskvine, file._file, str(worker_id)
+        )
+
     def prune_file_status(self, file):
         return {
             "requested": cvine.vine_prune_file_requested(

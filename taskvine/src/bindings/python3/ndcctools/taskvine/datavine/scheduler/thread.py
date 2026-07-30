@@ -14,6 +14,7 @@ import urllib.parse
 import uuid
 
 from ..models import EDataRecord, TaskRecord
+from ..cache import WorkerCacheAdmission
 from ..placement.policy import PrefetchCandidate, select_prefetch
 from ..serialization import serialize
 from ..workflow import OutputRef, iter_output_refs
@@ -57,6 +58,7 @@ class TaskSchedulerThread:
         self._serialization_count = 0
         self._bulk_serialization_count = 0
         self._worker_reconciliation_deferrals = 0
+        self._cache_admission = WorkerCacheAdmission(controller_client)
 
     @property
     def thread_ident(self):
@@ -147,7 +149,17 @@ class TaskSchedulerThread:
         for worker_id in sorted(worker_ids):
             self.controller.claim_worker(worker_id)
         self.controller.reconcile_workers(worker_ids)
+        self._cache_admission.sync_workers(worker_ids)
         return worker_ids
+
+    def _file_for_data_key(self, data_key):
+        kind, token = str(data_key).split(":", 1)
+        data_id = int(token)
+        if kind == "e":
+            return self._edata_files.get(data_id)
+        if kind == "i":
+            return self._idata_files.get(data_id)
+        raise ValueError(f"unknown qualified DataID {data_key!r}")
 
     def _op_last_run_report(self):
         self._assert_owner()
@@ -405,6 +417,8 @@ class TaskSchedulerThread:
         prefetch_byte_budget=64 * 1024 * 1024,
         prefetch_item_budget=16,
         inject_prefetch_failure=False,
+        worker_disk_cache_bytes=None,
+        worker_disk_cache_items=None,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -422,6 +436,30 @@ class TaskSchedulerThread:
             }
             for task in workflow.tasks
         }
+        task_cache_inputs = {}
+        remaining_cache_uses = {}
+        for task_id in sorted(task_by_id):
+            record = self.controller.get_task(task_id)
+            keys = {f"e:{record.function_data_id}"}
+            keys.update(
+                f"{'e' if kind == 'c' else kind}:{data_id}"
+                for kind, data_id in record.positional
+                if kind in ("e", "c", "i")
+            )
+            keys.update(
+                f"{'e' if kind == 'c' else kind}:{data_id}"
+                for _, (kind, data_id) in record.keyword
+                if kind in ("e", "c", "i")
+            )
+            keys.update(
+                f"i:{data_id}"
+                for data_id in self._nested_idata_by_task.get(task_id, ())
+            )
+            task_cache_inputs[task_id] = keys
+            for data_key in keys:
+                remaining_cache_uses[data_key] = (
+                    remaining_cache_uses.get(data_key, 0) + 1
+                )
         pending = set(task_by_id)
         running = {}
         prefetch_running = set()
@@ -475,7 +513,15 @@ class TaskSchedulerThread:
                 raise RuntimeError("workflow cannot make progress")
             completed = self._manager.wait(wait_timeout)
             self._sync_worker_epochs()
+            self._cache_admission.poll(self._manager)
             if completed is None:
+                self._cache_admission.enforce(
+                    self._manager,
+                    self._file_for_data_key,
+                    worker_disk_cache_bytes,
+                    worker_disk_cache_items,
+                    remaining_cache_uses,
+                )
                 continue
             if completed.id in prefetch_running:
                 prefetch_running.remove(completed.id)
@@ -496,6 +542,13 @@ class TaskSchedulerThread:
                     f"TaskID {logical_id} failed: result={completed.result} "
                     f"exit={completed.exit_code} stdout={completed.output}"
                 )
+            observation_lines = [
+                line[len("DATAVINE_REPLICA_OBSERVED "):]
+                for line in completed.output.splitlines()
+                if line.startswith("DATAVINE_REPLICA_OBSERVED ")
+            ]
+            for line in observation_lines:
+                self._cache_admission.observe(json.loads(line))
             preparation_lines = [
                 line[len("DATAVINE_REPLICA_PREPARED "):]
                 for line in completed.output.splitlines()
@@ -523,12 +576,15 @@ class TaskSchedulerThread:
                 preparation["content_hash"],
                 preparation["size"],
             )
+            self._cache_admission.observe(preparation)
             # Publication is the completion contract, not process exit alone.
             self.controller.fetch_idata(output_ids[logical_id])
             if persist_outputs:
                 self.controller.persist_idata(output_ids[logical_id])
             self.controller.set_task_state(logical_id, "completed")
             done.add(logical_id)
+            for data_key in task_cache_inputs[logical_id]:
+                remaining_cache_uses[data_key] -= 1
             if (
                 inject_global_loss_after == logical_id
                 and not loss_injected
@@ -552,6 +608,34 @@ class TaskSchedulerThread:
                     output_ids[logical_id]
                 )
                 worker_loss_injected = True
+            self._cache_admission.enforce(
+                self._manager,
+                self._file_for_data_key,
+                worker_disk_cache_bytes,
+                worker_disk_cache_items,
+                remaining_cache_uses,
+            )
+        cache_deadline = time.monotonic() + 30
+        while (
+            self._cache_admission.evictions
+            or not self._cache_admission.within_capacity(
+                worker_disk_cache_bytes, worker_disk_cache_items
+            )
+        ):
+            self._manager.wait(1)
+            self._sync_worker_epochs()
+            self._cache_admission.poll(self._manager)
+            self._cache_admission.enforce(
+                self._manager,
+                self._file_for_data_key,
+                worker_disk_cache_bytes,
+                worker_disk_cache_items,
+                remaining_cache_uses,
+            )
+            if time.monotonic() >= cache_deadline:
+                raise TimeoutError(
+                    "worker cache eviction acknowledgements timed out"
+                )
         if persist_outputs:
             for output_data_id in output_ids.values():
                 self._wait_durable(output_data_id)
@@ -578,6 +662,10 @@ class TaskSchedulerThread:
             "worker_reconciliation_deferrals": (
                 self._worker_reconciliation_deferrals
                 - reconciliation_deferrals_before
+            ),
+            **self._cache_admission.report(
+                worker_disk_cache_bytes,
+                worker_disk_cache_items,
             ),
         }
         return {

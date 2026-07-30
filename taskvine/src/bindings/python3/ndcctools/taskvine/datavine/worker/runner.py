@@ -36,7 +36,7 @@ def main(argv=None):
         )
 
     def report_local(data_key, attempt, content_hash, payload):
-        client.report_replica(
+        replica = client.report_replica(
             data_key,
             replica_id(data_key),
             attempt,
@@ -45,6 +45,23 @@ def main(argv=None):
             len(payload),
             worker_id,
             worker_epoch,
+        )
+        print(
+            "DATAVINE_REPLICA_OBSERVED "
+            + json.dumps(
+                {
+                    "data_id": replica["data_id"],
+                    "replica_id": replica["replica_id"],
+                    "generation": replica["generation"],
+                    "attempt": replica["attempt"],
+                    "content_hash": replica["content_hash"],
+                    "size": replica["size"],
+                    "worker_id": worker_id,
+                    "worker_epoch": worker_epoch,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         )
 
     def reject_reported_local(data_key):
