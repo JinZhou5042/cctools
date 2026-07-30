@@ -47,5 +47,14 @@ int vine_current_transfers_is_partial_datavine_peer_progress(
 		struct vine_worker_info *destination,
 		uint64_t bytes);
 
+const char *vine_current_transfers_peer_source_workerid(
+		struct vine_manager *q, const char *id);
+const char *vine_current_transfers_cachename(
+		struct vine_manager *q, const char *id);
+int vine_current_transfers_uses_alternate_peer(
+		struct vine_manager *q,
+		const char *id,
+		const char *excluded_source_workerid);
+
 /* Abruptly lose the source endpoint of an active DataVine peer lease. */
 int vine_current_transfers_abort_source(struct vine_manager *q, const char *id);

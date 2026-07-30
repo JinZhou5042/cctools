@@ -740,6 +740,10 @@ int vine_file_delete(struct vine_file *f);
 /** Attach a Controller-qualified DataVine identity to a declared file. */
 int vine_file_set_datavine_data_id(struct vine_file *f, const char *data_id);
 
+/** Attach the expected SHA-256 of DataVine serialized bytes. */
+int vine_file_set_datavine_content_hash(
+		struct vine_file *f, const char *content_hash);
+
 /** Get the length of a vine file.
 @param f A file object.
 @return The length of the file, or zero if unknown.
@@ -1552,6 +1556,9 @@ transfer child. Disabled by default. (default=0)
 threshold. When nonzero, one leased peer source is abruptly lost only after
 the destination reports a partial transfer at or above the threshold.
 Disabled by default. (default=0)
+ - "datavine-fault-peer-corruption" Test-only count of leased peer transfers
+whose received bytes are corrupted before worker-side SHA-256 validation.
+Disabled by default. (default=0)
  - "transient-error-interval" Time to wait in seconds after a resource failure before attempting to use it again
 (default=15)
  - "resource_management_interval" Seconds between measurement of manager local resources. (default=30)
@@ -1594,6 +1601,15 @@ uint64_t vine_manager_datavine_peer_transfer_cleanup_pending(
 
 /** Return the number of deterministic abrupt peer-source losses injected. */
 uint64_t vine_manager_datavine_peer_source_losses_injected(
+		struct vine_manager *m);
+
+uint64_t vine_manager_datavine_peer_corruptions_injected(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_corruptions_rejected(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_alternate_source_fallbacks(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_corrupt_fallback_pending(
 		struct vine_manager *m);
 
 /** Sets the maximum resources a task without an explicit category ("default" category).

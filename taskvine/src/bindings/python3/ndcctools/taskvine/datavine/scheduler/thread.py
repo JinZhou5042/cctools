@@ -445,6 +445,7 @@ class TaskSchedulerThread:
         frontier_pruning_ack_delay=0,
         inject_peer_source_losses=0,
         inject_peer_source_loss_after_bytes=0,
+        inject_peer_corruptions=0,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -507,6 +508,15 @@ class TaskSchedulerThread:
             raise RuntimeError(
                 "TaskVine Manager rejected byte-counted "
                 "peer source-loss injection"
+            )
+        peer_corruptions = int(inject_peer_corruptions)
+        if peer_corruptions < 0:
+            raise ValueError("peer corruption count is negative")
+        if self._manager.tune(
+            "datavine-fault-peer-corruption", peer_corruptions
+        ) != 0:
+            raise RuntimeError(
+                "TaskVine Manager rejected peer corruption injection"
             )
         output_ids = self._op_register_workflow(workflow)
         producer_by_data_id = {
@@ -2213,6 +2223,7 @@ class TaskSchedulerThread:
             "peer_source_loss_after_bytes_requested": (
                 peer_source_loss_after_bytes
             ),
+            "peer_corruptions_requested": peer_corruptions,
             "peer_transfer_faults": (
                 self._manager.datavine_peer_transfer_fault_stats()
             ),
@@ -2385,6 +2396,12 @@ class TaskSchedulerThread:
             if not file_object.set_datavine_data_id(f"e:{data_id}"):
                 raise RuntimeError(
                     f"could not bind TaskVine file to EDataID e:{data_id}"
+                )
+            if not file_object.set_datavine_content_hash(
+                info["serialized_sha256"]
+            ):
+                raise RuntimeError(
+                    f"could not bind EDataID e:{data_id} content hash"
                 )
         return file_object
 
@@ -2637,5 +2654,12 @@ class TaskSchedulerThread:
         ):
             raise RuntimeError(
                 f"could not bind durable IDataID i:{data_id}"
+            )
+        if not file_object.set_datavine_content_hash(
+            status["content_hash"]
+        ):
+            raise RuntimeError(
+                f"could not bind durable IDataID i:{data_id} "
+                "content hash"
             )
         return file_object

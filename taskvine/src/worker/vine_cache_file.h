@@ -19,6 +19,8 @@ struct vine_cache_file {
 	/* Static properties of cache file object. */
 	vine_cache_type_t cache_type;
 	char *source;
+	char *expected_sha256;
+	int inject_corruption;
 	struct vine_task *mini_task;
 
 	/* Dynamic state tracking process to materialize the file. */

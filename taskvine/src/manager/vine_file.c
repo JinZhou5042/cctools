@@ -37,6 +37,23 @@ int vine_file_set_datavine_data_id(struct vine_file *f, const char *data_id)
 	return 1;
 }
 
+int vine_file_set_datavine_content_hash(
+		struct vine_file *f, const char *content_hash)
+{
+	if (!f || !content_hash || strlen(content_hash) != 64) {
+		return 0;
+	}
+	for (const char *cursor = content_hash; *cursor; cursor++) {
+		if (!((*cursor >= '0' && *cursor <= '9')
+					|| (*cursor >= 'a' && *cursor <= 'f'))) {
+			return 0;
+		}
+	}
+	free(f->datavine_content_hash);
+	f->datavine_content_hash = xxstrdup(content_hash);
+	return 1;
+}
+
 /* Returns file refcount. If refcount is 0, the file has been deleted. */
 int vine_file_delete(struct vine_file *f)
 {
@@ -78,6 +95,7 @@ int vine_file_delete(struct vine_file *f)
 		free(f->source);
 		free(f->cached_name);
 		free(f->datavine_data_id);
+		free(f->datavine_content_hash);
 		free(f->data);
 		free(f);
 	}
@@ -250,6 +268,10 @@ struct vine_file *vine_file_substitute_url(struct vine_file *f, const char *sour
 	sub->source_worker = w;
 	if (f->datavine_data_id) {
 		vine_file_set_datavine_data_id(sub, f->datavine_data_id);
+	}
+	if (f->datavine_content_hash) {
+		vine_file_set_datavine_content_hash(
+				sub, f->datavine_content_hash);
 	}
 	return sub;
 }

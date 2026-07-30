@@ -1039,6 +1039,26 @@ class Manager(object):
                     self._taskvine
                 )
             ),
+            "peer_corruptions_injected": int(
+                cvine.vine_manager_datavine_peer_corruptions_injected(
+                    self._taskvine
+                )
+            ),
+            "peer_corruptions_rejected": int(
+                cvine.vine_manager_datavine_peer_corruptions_rejected(
+                    self._taskvine
+                )
+            ),
+            "peer_alternate_source_fallbacks": int(
+                cvine.vine_manager_datavine_peer_alternate_source_fallbacks(
+                    self._taskvine
+                )
+            ),
+            "peer_corrupt_fallback_pending": int(
+                cvine.vine_manager_datavine_peer_corrupt_fallback_pending(
+                    self._taskvine
+                )
+            ),
         }
 
     ##

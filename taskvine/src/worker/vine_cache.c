@@ -38,6 +38,8 @@ See the file COPYING for details.
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <openssl/evp.h>
+
 struct vine_cache {
 	struct hash_table *table;
 	struct hash_table *pending_transfers;
@@ -52,6 +54,75 @@ struct vine_cache {
 };
 
 static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager);
+
+static int vine_cache_file_sha256(
+		const char *path, char output[65])
+{
+	int fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		return 0;
+	}
+	EVP_MD_CTX *context = EVP_MD_CTX_new();
+	unsigned char digest[EVP_MAX_MD_SIZE];
+	unsigned int digest_length = 0;
+	int ok = context
+			&& EVP_DigestInit_ex(context, EVP_sha256(), NULL) == 1;
+	char buffer[64 * 1024];
+	while (ok) {
+		ssize_t count = read(fd, buffer, sizeof(buffer));
+		if (count == 0) {
+			break;
+		}
+		if (count < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			ok = 0;
+			break;
+		}
+		ok = EVP_DigestUpdate(context, buffer, count) == 1;
+	}
+	if (ok) {
+		ok = EVP_DigestFinal_ex(
+				context, digest, &digest_length) == 1
+				&& digest_length == 32;
+	}
+	if (context) {
+		EVP_MD_CTX_free(context);
+	}
+	close(fd);
+	if (!ok) {
+		return 0;
+	}
+	for (unsigned int index = 0; index < digest_length; index++) {
+		snprintf(
+				output + index * 2,
+				3,
+				"%02x",
+				digest[index]);
+	}
+	output[64] = 0;
+	return 1;
+}
+
+static int vine_cache_inject_corruption(
+		struct vine_cache *c, const char *cachename)
+{
+	char *path = vine_cache_transfer_path(c, cachename);
+	int fd = open(path, O_RDWR);
+	unsigned char byte;
+	int ok = fd >= 0 && read(fd, &byte, 1) == 1
+			&& lseek(fd, 0, SEEK_SET) == 0;
+	if (ok) {
+		byte ^= 0x01;
+		ok = write(fd, &byte, 1) == 1 && fsync(fd) == 0;
+	}
+	if (fd >= 0) {
+		close(fd);
+	}
+	free(path);
+	return ok;
+}
 
 int vine_cache_transfer_count(struct vine_cache *c)
 {
@@ -476,7 +547,7 @@ Queue a remote file transfer to produce a file.
 This entry will be materialized later in vine_cache_ensure.
 */
 
-int vine_cache_add_transfer(struct vine_cache *c, const char *cachename, const char *source, vine_cache_level_t level, int mode, uint64_t size, vine_cache_flags_t flags, struct link *manager)
+int vine_cache_add_transfer(struct vine_cache *c, const char *cachename, const char *source, vine_cache_level_t level, int mode, uint64_t size, const char *expected_sha256, int inject_corruption, vine_cache_flags_t flags, struct link *manager)
 {
 	/* Has this transfer already been queued? */
 	struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
@@ -504,6 +575,10 @@ int vine_cache_add_transfer(struct vine_cache *c, const char *cachename, const c
 	/* Create the object and fill in the metadata. */
 
 	f = vine_cache_file_create(VINE_CACHE_TRANSFER, source, 0);
+	if (expected_sha256 && strcmp(expected_sha256, "-")) {
+		f->expected_sha256 = xxstrdup(expected_sha256);
+	}
+	f->inject_corruption = !!inject_corruption;
 
 	/*
 	XXX Note that VINE_URL may not be right b/c puturl may be used to
@@ -814,6 +889,14 @@ static void vine_cache_worker_process(struct vine_cache_file *f, struct vine_cac
 		break;
 	case VINE_CACHE_TRANSFER:
 		result = do_transfer(c, f, cachename, &error_message);
+		if (result && f->inject_corruption
+				&& !vine_cache_inject_corruption(c, cachename)) {
+			result = 0;
+			if (!error_message) {
+				error_message = string_format(
+						"Could not inject deterministic transfer corruption");
+			}
+		}
 		break;
 	case VINE_CACHE_MINI_TASK:
 		result = do_mini_task(c, f, &error_message);
@@ -1017,7 +1100,21 @@ static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_fil
 		debug(D_VINE, "cache: measuring %s", transfer_path);
 		if (vine_cache_file_measure_metadata(transfer_path, &mode, &size, &mtime)) {
 			debug(D_VINE, "cache: created %s with size %lld in %lld usec", cachename, (long long)size, (long long)transfer_time);
-			if (vine_cache_add_file(c, cachename, transfer_path, f->cache_level, mode, size, mtime, f->start_time, transfer_time, manager)) {
+			char actual_sha256[65];
+			int valid_hash = !f->expected_sha256
+					|| (vine_cache_file_sha256(
+								transfer_path,
+								actual_sha256)
+							&& !strcmp(
+									actual_sha256,
+									f->expected_sha256));
+			if (!valid_hash) {
+				debug(D_VINE,
+						"cache: rejecting corrupt DataVine transfer %s",
+						cachename);
+				vine_worker_send_cache_transfer_corrupt(cachename);
+				f->status = VINE_CACHE_STATUS_FAILED;
+			} else if (vine_cache_add_file(c, cachename, transfer_path, f->cache_level, mode, size, mtime, f->start_time, transfer_time, manager)) {
 				f->status = VINE_CACHE_STATUS_READY;
 			} else {
 				debug(D_VINE, "cache: unable to move %s to %s: %s\n", transfer_path, cache_path, strerror(errno));

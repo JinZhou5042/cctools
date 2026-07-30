@@ -156,6 +156,39 @@ struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager
 	return peer_selected;
 }
 
+struct vine_worker_info *vine_file_replica_table_find_worker_except(
+		struct vine_manager *q,
+		const char *cachename,
+		const char *excluded_workerid)
+{
+	struct set *workers = hash_table_lookup(
+			q->file_worker_table, cachename);
+	if (!workers || !excluded_workerid) {
+		return 0;
+	}
+	struct vine_worker_info *peer;
+	int iteration;
+	SET_ITERATE(workers, iteration, peer)
+	{
+		if (!peer->workerid
+				|| !strcmp(peer->workerid, excluded_workerid)
+				|| !peer->transfer_port_active
+				|| peer->outgoing_xfer_counter
+						>= q->worker_source_max_transfers) {
+			continue;
+		}
+		struct vine_file_replica *replica =
+				hash_table_lookup(
+						peer->current_files, cachename);
+		if (replica
+				&& replica->state
+						== VINE_FILE_REPLICA_STATE_READY) {
+			return peer;
+		}
+	}
+	return 0;
+}
+
 /*
 Count number of replicas of a file in the system.
 */

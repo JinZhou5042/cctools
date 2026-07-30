@@ -61,6 +61,13 @@ class File(object):
                 self._file, str(data_id)
             )
 
+    def set_datavine_content_hash(self, content_hash):
+        """Bind the expected SHA-256 of DataVine serialized bytes."""
+        if self._file:
+            return cvine.vine_file_set_datavine_content_hash(
+                self._file, str(content_hash)
+            )
+
     ##
     # Return the contents of a file object as a string.
     # Typically used to return the contents of an output buffer.

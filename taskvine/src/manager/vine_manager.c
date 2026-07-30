@@ -582,6 +582,17 @@ static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_w
 
 		process_replica_on_event(q, w, cachename, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_CACHE_UPDATE);
 
+		const char *excluded_source = hash_table_lookup(
+				q->datavine_corrupt_source_expectations,
+				cachename);
+		if (excluded_source
+				&& vine_current_transfers_uses_alternate_peer(
+						q, id, excluded_source)) {
+			q->datavine_peer_alternate_source_fallbacks++;
+			free(hash_table_remove(
+					q->datavine_corrupt_source_expectations,
+					cachename));
+		}
 		vine_current_transfers_set_success(q, id);
 		vine_current_transfers_remove(q, id);
 
@@ -723,6 +734,37 @@ static vine_msg_code_t handle_cache_transfer_cleanup(
 		free(hash_table_remove(
 				q->datavine_partial_cleanup_expectations,
 				transfer_id));
+	}
+	return VINE_MSG_PROCESSED;
+}
+
+static vine_msg_code_t handle_cache_transfer_corrupt(
+		struct vine_manager *q,
+		struct vine_worker_info *w,
+		const char *line)
+{
+	char transfer_id[VINE_LINE_MAX];
+	if (sscanf(line, "cache-transfer-corrupt %s", transfer_id) != 1) {
+		return VINE_MSG_FAILURE;
+	}
+	if (!vine_current_transfers_is_datavine_peer_destination(
+				q, transfer_id, w)) {
+		return VINE_MSG_PROCESSED;
+	}
+	const char *source_workerid =
+			vine_current_transfers_peer_source_workerid(
+					q, transfer_id);
+	const char *cachename =
+			vine_current_transfers_cachename(q, transfer_id);
+	if (source_workerid && cachename) {
+		free(hash_table_remove(
+				q->datavine_corrupt_source_expectations,
+				cachename));
+		hash_table_insert(
+				q->datavine_corrupt_source_expectations,
+				cachename,
+				xxstrdup(source_workerid));
+		q->datavine_peer_corruptions_rejected++;
 	}
 	return VINE_MSG_PROCESSED;
 }
@@ -1109,6 +1151,8 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		result = handle_cache_transfer_progress(q, w, line);
 	} else if (string_prefix_is(line, "cache-transfer-cleanup")) {
 		result = handle_cache_transfer_cleanup(q, w, line);
+	} else if (string_prefix_is(line, "cache-transfer-corrupt")) {
+		result = handle_cache_transfer_corrupt(q, w, line);
 	} else if (string_prefix_is(line, "cache-invalid")) {
 		result = handle_cache_invalid(q, w, line);
 	} else if (string_prefix_is(line, "cache-unlinked")) {
@@ -3757,7 +3801,17 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 
 		/* Provide a substitute file object to describe the peer. */
 		if (!(m->file->flags & VINE_PEER_NOSHARE) && (m->file->cache_level > VINE_CACHE_LEVEL_TASK)) {
-			if ((peer = vine_file_replica_table_find_worker(q, m->file->cached_name))) {
+			const char *excluded_source = hash_table_lookup(
+					q->datavine_corrupt_source_expectations,
+					m->file->cached_name);
+			peer = excluded_source
+					? vine_file_replica_table_find_worker_except(
+							q,
+							m->file->cached_name,
+							excluded_source)
+					: vine_file_replica_table_find_worker(
+							q, m->file->cached_name);
+			if (peer) {
 				char *peer_source = string_format("%s/%s", peer->transfer_url, m->file->cached_name);
 				m->substitute = vine_file_substitute_url(m->file, peer_source, peer);
 				free(peer_source);
@@ -3768,6 +3822,11 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 		/* If that resulted in a match, move on to the next file. */
 		if (found_match) {
 			continue;
+		}
+		if (hash_table_lookup(
+					q->datavine_corrupt_source_expectations,
+					m->file->cached_name)) {
+			return 0;
 		}
 
 		/*
@@ -4515,6 +4574,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->current_transfer_table = hash_table_create(0, 0);
 	q->datavine_partial_cleanup_expectations =
 			hash_table_create(0, 0);
+	q->datavine_corrupt_source_expectations =
+			hash_table_create(0, 0);
 	q->task_group_table = itable_create(0);
 	q->group_id_counter = 1;
 	q->fetch_factory = 0;
@@ -4628,6 +4689,10 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->datavine_peer_transfer_cleanup_reports = 0;
 	q->datavine_peer_transfer_cleanup_absent = 0;
 	q->datavine_peer_source_losses_injected = 0;
+	q->datavine_fault_peer_corruption_remaining = 0;
+	q->datavine_peer_corruptions_injected = 0;
+	q->datavine_peer_corruptions_rejected = 0;
+	q->datavine_peer_alternate_source_fallbacks = 0;
 	q->time_start_worker_eviction = 0;
 
 	if ((envstring = getenv("VINE_BANDWIDTH"))) {
@@ -4921,6 +4986,10 @@ void vine_delete(struct vine_manager *q)
 			q->datavine_partial_cleanup_expectations,
 			(void *)free);
 	hash_table_delete(q->datavine_partial_cleanup_expectations);
+	hash_table_clear(
+			q->datavine_corrupt_source_expectations,
+			(void *)free);
+	hash_table_delete(q->datavine_corrupt_source_expectations);
 
 	vine_task_groups_clear(q);
 	itable_delete(q->task_group_table);
@@ -6478,6 +6547,10 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 		q->datavine_fault_peer_source_loss_after_bytes_threshold =
 				value > 0 ? (uint64_t)value : 1;
 
+	} else if (!strcmp(name, "datavine-fault-peer-corruption")) {
+		q->datavine_fault_peer_corruption_remaining =
+				MAX(0, (int)value);
+
 	} else if (!strcmp(name, "load-from-shared-filesystem")) {
 		q->load_from_shared_fs_enabled = !!((int)value);
 
@@ -6579,6 +6652,33 @@ uint64_t vine_manager_datavine_peer_source_losses_injected(
 		struct vine_manager *q)
 {
 	return q ? q->datavine_peer_source_losses_injected : 0;
+}
+
+uint64_t vine_manager_datavine_peer_corruptions_injected(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_corruptions_injected : 0;
+}
+
+uint64_t vine_manager_datavine_peer_corruptions_rejected(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_corruptions_rejected : 0;
+}
+
+uint64_t vine_manager_datavine_peer_alternate_source_fallbacks(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_alternate_source_fallbacks : 0;
+}
+
+uint64_t vine_manager_datavine_peer_corrupt_fallback_pending(
+		struct vine_manager *q)
+{
+	return q && q->datavine_corrupt_source_expectations
+			? hash_table_size(
+					q->datavine_corrupt_source_expectations)
+			: 0;
 }
 
 void vine_manager_enable_process_shortcut(struct vine_manager *q)

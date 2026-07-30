@@ -246,7 +246,22 @@ vine_result_code_t vine_manager_put_url_now(struct vine_manager *q, struct vine_
 		return VINE_MGR_FAILURE;
 	}
 
-	vine_manager_send(q, dest_worker, "puturl_now %s %s %d %lld 0%o %s\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id);
+	const char *expected_hash = f->datavine_content_hash
+			? f->datavine_content_hash
+			: "-";
+	int inject_corruption = 0;
+	if (source_worker && f->datavine_content_hash
+			&& vine_file_replica_table_count_replicas(
+					   q,
+					   f->cached_name,
+					   VINE_FILE_REPLICA_STATE_READY)
+					>= 2
+			&& q->datavine_fault_peer_corruption_remaining > 0) {
+		q->datavine_fault_peer_corruption_remaining--;
+		q->datavine_peer_corruptions_injected++;
+		inject_corruption = 1;
+	}
+	vine_manager_send(q, dest_worker, "puturl_now %s %s %d %lld 0%o %s %s %d\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id, expected_hash, inject_corruption);
 
 	vine_file_replica_table_get_or_create(q, dest_worker, f->cached_name, f->type, f->cache_level, f->size, f->mtime);
 
@@ -287,7 +302,22 @@ vine_result_code_t vine_manager_put_url(struct vine_manager *q, struct vine_work
 		return VINE_MGR_FAILURE;
 	}
 
-	vine_manager_send(q, dest_worker, "puturl %s %s %d %lld 0%o %s\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id);
+	const char *expected_hash = f->datavine_content_hash
+			? f->datavine_content_hash
+			: "-";
+	int inject_corruption = 0;
+	if (source_worker && f->datavine_content_hash
+			&& vine_file_replica_table_count_replicas(
+					   q,
+					   f->cached_name,
+					   VINE_FILE_REPLICA_STATE_READY)
+					>= 2
+			&& q->datavine_fault_peer_corruption_remaining > 0) {
+		q->datavine_fault_peer_corruption_remaining--;
+		q->datavine_peer_corruptions_injected++;
+		inject_corruption = 1;
+	}
+	vine_manager_send(q, dest_worker, "puturl %s %s %d %lld 0%o %s %s %d\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id, expected_hash, inject_corruption);
 
 	vine_file_replica_table_get_or_create(q, dest_worker, f->cached_name, f->type, f->cache_level, f->size, f->mtime);
 

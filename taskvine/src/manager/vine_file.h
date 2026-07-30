@@ -37,6 +37,7 @@ struct vine_file {
 	char *source;       // Name of source file, url, buffer.
 	char *cached_name;  // Name of file in the worker's cache directory.
 	char *datavine_data_id; // Controller-qualified logical identity, or null for legacy files.
+	char *datavine_content_hash; // Expected SHA-256 of serialized bytes.
 	size_t size;        // Length of source data, if known.
 	time_t mtime;       // Modification time of source data, if known.
 	mode_t mode;        // Manual override for Unix mode bits sent to worker.  Zero if unset.

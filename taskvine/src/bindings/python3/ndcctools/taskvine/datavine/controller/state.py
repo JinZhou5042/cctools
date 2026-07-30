@@ -184,7 +184,11 @@ class ControllerState:
                 raise MemoryError("Controller EData capacity exceeded")
             data_id = self._next_edata_id
             record = EDataRecord(
-                data_id, digest, metadata, serialized_bytes
+                data_id,
+                digest,
+                hashlib.sha256(serialized_bytes).hexdigest(),
+                metadata,
+                serialized_bytes,
             )
             self._publish_replica(
                 f"e:{data_id}",
@@ -269,12 +273,14 @@ class ControllerState:
         digest = hashlib.sha256()
         digest.update(metadata.identity_bytes())
         digest.update(b"\0")
+        serialized_digest = hashlib.sha256()
         with resolved.open("rb") as stream:
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
                     break
                 digest.update(chunk)
+                serialized_digest.update(chunk)
         if digest.hexdigest() != str(content_hash):
             raise ValueError("bulk origin content hash mismatch")
         bucket_key = (metadata, str(content_hash))
@@ -297,6 +303,7 @@ class ControllerState:
             record = EDataRecord(
                 data_id,
                 str(content_hash),
+                serialized_digest.hexdigest(),
                 metadata,
                 None,
                 str(resolved),

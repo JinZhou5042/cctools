@@ -245,6 +245,9 @@ class ControllerService:
                             {
                                 "data_id": record.data_id,
                                 "content_hash": record.content_hash,
+                                "serialized_sha256": (
+                                    record.serialized_sha256
+                                ),
                                 "size": record.serialized_size,
                                 "metadata": record.metadata.to_dict(),
                                 "storage": (
@@ -905,6 +908,9 @@ class ControllerService:
                         {
                             "data_id": record.data_id,
                             "content_hash": record.content_hash,
+                            "serialized_sha256": (
+                                record.serialized_sha256
+                            ),
                             "size": record.serialized_size,
                             "storage": (
                                 "controller-memory"
@@ -937,6 +943,7 @@ class ControllerService:
                     {
                         "data_id": record.data_id,
                         "content_hash": record.content_hash,
+                        "serialized_sha256": record.serialized_sha256,
                         "size": record.serialized_size,
                         "storage": (
                             "controller-memory"

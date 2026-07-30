@@ -265,6 +265,11 @@ struct vine_manager {
 	uint64_t datavine_peer_transfer_cleanup_absent;
 	uint64_t datavine_peer_source_losses_injected;
 	struct hash_table *datavine_partial_cleanup_expectations;
+	int datavine_fault_peer_corruption_remaining;
+	uint64_t datavine_peer_corruptions_injected;
+	uint64_t datavine_peer_corruptions_rejected;
+	uint64_t datavine_peer_alternate_source_fallbacks;
+	struct hash_table *datavine_corrupt_source_expectations;
 };
 
 /*

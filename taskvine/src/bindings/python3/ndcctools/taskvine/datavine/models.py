@@ -39,6 +39,7 @@ class SerializationMetadata:
 class EDataRecord:
     data_id: int
     content_hash: str
+    serialized_sha256: str
     metadata: SerializationMetadata
     serialized_bytes: bytes | None
     stable_path: str | None = None

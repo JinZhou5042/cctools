@@ -20,18 +20,20 @@ struct vine_transfer_pair {
 	struct vine_worker_info *dest_worker;
 	struct vine_worker_info *source_worker;
 	char *source_url;
+	char *cachename;
 	int datavine_lease;
 	int success;
 	int completed;
 	uint64_t expected_size;
 };
 
-static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, uint64_t expected_size)
+static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename, uint64_t expected_size)
 {
 	struct vine_transfer_pair *t = malloc(sizeof(struct vine_transfer_pair));
 	t->dest_worker = dest_worker;
 	t->source_worker = source_worker;
 	t->source_url = source_url ? xxstrdup(source_url) : 0;
+	t->cachename = cachename ? xxstrdup(cachename) : 0;
 	t->datavine_lease = 0;
 	t->success = 0;
 	t->completed = 0;
@@ -57,6 +59,7 @@ static void vine_transfer_pair_delete(struct vine_transfer_pair *p)
 			p->source_worker->outgoing_xfer_counter--;
 		}
 		free(p->source_url);
+		free(p->cachename);
 		free(p);
 	}
 }
@@ -88,6 +91,7 @@ char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info
 			dest_worker,
 			source_worker,
 			source_url,
+			f ? f->cached_name : 0,
 			f ? f->size : 0);
 	if (f && f->datavine_data_id && source_worker) {
 		if (!source_worker->workerid || !dest_worker || !dest_worker->workerid ||
@@ -393,6 +397,42 @@ int vine_current_transfers_is_partial_datavine_peer_progress(
 	return p && p->datavine_lease && p->source_worker &&
 			p->dest_worker == destination && !p->completed &&
 			p->expected_size > 0 && bytes < p->expected_size;
+}
+
+const char *vine_current_transfers_peer_source_workerid(
+		struct vine_manager *q, const char *id)
+{
+	struct vine_transfer_pair *p =
+			q && id
+			? hash_table_lookup(q->current_transfer_table, id)
+			: 0;
+	return p && p->datavine_lease && !p->completed
+					&& p->source_worker
+			? p->source_worker->workerid
+			: 0;
+}
+
+const char *vine_current_transfers_cachename(
+		struct vine_manager *q, const char *id)
+{
+	struct vine_transfer_pair *p =
+			q && id
+			? hash_table_lookup(q->current_transfer_table, id)
+			: 0;
+	return p && p->datavine_lease && !p->completed
+			? p->cachename
+			: 0;
+}
+
+int vine_current_transfers_uses_alternate_peer(
+		struct vine_manager *q,
+		const char *id,
+		const char *excluded_source_workerid)
+{
+	const char *source_workerid =
+			vine_current_transfers_peer_source_workerid(q, id);
+	return source_workerid && excluded_source_workerid
+			&& strcmp(source_workerid, excluded_source_workerid);
 }
 
 int vine_current_transfers_abort_source(struct vine_manager *q, const char *id)
