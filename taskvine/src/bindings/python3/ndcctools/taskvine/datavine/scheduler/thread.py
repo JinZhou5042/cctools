@@ -603,6 +603,10 @@ class TaskSchedulerThread:
                 task_id
                 for task_id in pending
                 if dependencies[task_id] <= done
+                and not (
+                    task_cache_inputs[task_id]
+                    & self._cache_admission.prune_by_data
+                )
             )
             for task_id in ready:
                 attempt = self._attempts.get(task_id, 0) + 1
@@ -615,6 +619,11 @@ class TaskSchedulerThread:
                 running[physical_id] = task_id
                 pending.remove(task_id)
             if not running and not prefetch_running:
+                if self._cache_admission.evictions:
+                    self._manager.wait(wait_timeout)
+                    self._sync_worker_epochs()
+                    self._cache_admission.poll(self._manager)
+                    continue
                 raise RuntimeError("workflow cannot make progress")
             completed = self._manager.wait(wait_timeout)
             self._sync_worker_epochs()
