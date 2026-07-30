@@ -1,0 +1,65 @@
+{
+	"artifact_version": 1,
+	"status": "PASS_COMPONENT_CHECKPOINT",
+	"accepted_at": "2026-07-30T07:13:00-04:00",
+	"branch": "datavine",
+	"commit": "4e8f19f1f",
+	"package": {
+		"path": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+		"sha256": "9eb6c9e6ba2f31b5989cd0e0c35408a6f17423aee6dca8c2d90121558fdb4db2",
+		"poncho_package_run": "PASS worker.persist import and capacity probe"
+	},
+	"build": {
+		"command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+		"status": "PASS",
+		"source_worker_sha256": "2b7e27d4a050623f2b97601fabf4e78a0ab2f7cbb57e7fbca66d58b7283e7109",
+		"installed_worker_sha256": "2b7e27d4a050623f2b97601fabf4e78a0ab2f7cbb57e7fbca66d58b7283e7109"
+	},
+	"regression": {
+		"passed": 16,
+		"total": 16
+	},
+	"factory": {
+		"entrypoint": "bash /users/jzhou24/graph_optimization/factories/run_factory.sh --manager-name datavine-persist-4e8f19f1f --workers 2 --cores 1 --memory 2 --disk 4 --poncho-env /users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+		"test_command": "python3 datavine_idata_capacity.py --factory-manager datavine-persist-4e8f19f1f",
+		"workers_requested": 2,
+		"workers_removed": 2,
+		"status": "PASS"
+	},
+	"workflow": {
+		"large_logical_bytes": 2097152,
+		"large_serialized_bytes": 2097161,
+		"large_value_used_as_intermediate": true,
+		"large_value_returned_as_final": true,
+		"large_value_persisted_by_worker": true,
+		"durable_hashes_valid": true,
+		"durable_recovery_without_controller_bytes": true,
+		"controller_idata_capacity_bytes": 131072,
+		"controller_inline_object_capacity_bytes": 65536,
+		"controller_idata_bytes_high_water": 79,
+		"metadata_publications": 2,
+		"logical_tasks": 2,
+		"physical_attempts": 3,
+		"recovery_reexecutions": 1,
+		"legacy_recovery_tasks": 0,
+		"worker_loss_injected": true,
+		"persistence_tasks_completed": 1,
+		"persistence_worker_bytes": 2097161,
+		"exact_oracle_match": true
+	},
+	"protocol": {
+		"controller_role": "authorizes request, owns state, validates outside lock, compare-and-commits durability",
+		"worker_role": "validates local bytes, atomically writes and fsyncs SharedFS target",
+		"scheduler_role": "submits bounded data-operation task without reading payload",
+		"duplicate_begin_complete": "PASS idempotent component contract",
+		"stale_attempt": "fail closed"
+	},
+	"remaining_blockers": [
+		"Active worker persistence cancellation lacks E2E coverage.",
+		"Failed and overloaded SharedFS retry/backpressure need E2E coverage.",
+		"Controller validation responsiveness needs latency evidence.",
+		"Persistence data tasks still require fairness and scale measurements.",
+		"Grand Challenge remains absent."
+	],
+	"ultimate_acceptance": "FAIL"
+}

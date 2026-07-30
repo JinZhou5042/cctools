@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `53db69f1e`
+Reviewed through code commit: `4e8f19f1f`
 Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
@@ -109,6 +109,16 @@ B1 still remains open. Worker DRAM is absent, active-transfer loss is not
 covered, and large worker-only IData cannot yet enter durable storage or
 return as a large final result without a new worker-driven path. Controller
 metadata/history cleanup also remains unresolved under `CTRL-BOUND`.
+
+Correction checkpoint `4e8f19f1f` supplies that worker-driven path. Controller
+owns a bounded persistence request and target, worker validates and atomically
+writes SharedFS, and Controller validates outside its global lock before an
+identity-checked durability commit. The resulting source supports downstream
+tasks, durability validation after volatile loss, and return of a 2 MiB final
+without Controller byte retention.
+
+B1 remains open for worker DRAM, active transfer/cancellation, SharedFS
+overload retry, Controller metadata cleanup, and scale/fairness evidence.
 
 ### B2 — Stable-root reproducibility is assumed, not proved by Controller state
 

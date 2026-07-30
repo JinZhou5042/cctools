@@ -26,7 +26,7 @@ is never a pass.
 | PREFETCH | Bounded/cancellable/priority-safe independent progress | OPEN | Byte/item/priority gates pass; unverified prefetched replicas safely fall back at `ef605c343`; concurrency/cancel/final architecture open |
 | PUBLISH | Exactly-once staged idempotent publication and cleanup | OPEN | Two-phase worker prepare/Scheduler commit passes; large output publishes attempt/hash/size without byte POST at `53db69f1e`; full publication fault matrix open |
 | PLACE | Multi-source, load/epoch, bulk bypass, peer fallback | OPEN | Actual TaskVine peer movement acquires epoch-checked Controller leases and unverified sources fall back at `ef605c343`; transfer-loss/load adaptation remain open |
-| PERSIST | Bounded/cancellable/backpressured atomic durability | OPEN | Queue, cancel, overload, attempt-safe acknowledgement pass at `17577b058`; pruning integration and full failure matrix open |
+| PERSIST | Bounded/cancellable/backpressured atomic durability | OPEN | Controller-inline queue/cancel/overload passes at `17577b058`; worker-driven 2 MiB atomic persistence and durable return pass at `4e8f19f1f`; active external cancellation, overload retry, fairness, and full failure matrix remain open |
 | RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | One ordinary replay of a lost worker-only 2 MiB IData completes with stable IDs and zero special TaskVine recovery tasks at `53db69f1e`; repeated loss, minimum rollback, and durability-frontier bounds remain absent |
 | PRUNE-SHADOW | Reference/incremental equivalence and proof records | PASS | `artifacts/phase9-shadow-20260729.json`, commit `2108b68a8` |
 | PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | OPEN | Multi-replica deletion plus generation-exact targeted dead-data eviction and pending-ACK worker-loss cleanup pass through `c20db01a1`; active-read races, DRAM pruning, and recovery-after-prune remain |
@@ -142,6 +142,17 @@ because metadata-only IData has no worker-driven durable write path.
 `RECOVERY` remains FAIL because only one loss cycle is covered and no
 durability-frontier bound is proved. Evidence:
 `artifacts/idata-capacity-e6ef08b16.json`.
+
+Worker-persistence evidence at `4e8f19f1f` adds a bounded data-operation path
+for metadata-only IData. The Controller owns request identity and durability,
+the worker validates and atomically publishes directly to SharedFS, and the
+Controller stream-validates outside its state lock before compare-and-commit.
+The same 2 MiB value is consumed downstream and returned as a durable final
+after worker churn, with Controller IData high-water still 79 bytes.
+Duplicate identical begin/complete is idempotent. `PERSIST` remains OPEN
+because active external cancellation, SharedFS overload/failure retry,
+fairness, and the full failure schedule are not proved. Evidence:
+`artifacts/worker-persistence-4e8f19f1f.json`.
 
 Controller admission evidence at commit `d694bef4a` covers hard request-thread,
 byte-response concurrency, and in-flight-byte capacities; immediate overload;

@@ -1,5 +1,32 @@
 # DataVine History
 
+## 2026-07-30 — Worker-driven large-IData persistence
+
+- Added Controller-authorized external persistence requests for metadata-only
+  IData with bounded admission/concurrency and explicit queued, writing,
+  failed/cancelled, and durable state.
+- Added a worker persistence entry point that validates the existing local or
+  peer-provided bytes, writes a same-directory temporary, fsyncs, atomically
+  renames, and acknowledges the exact request.
+- Moved Controller durable validation outside the global state lock and added
+  a compare-and-commit check after streaming hash/size validation.
+- Made duplicate begin/complete of the same durable request idempotent while
+  retaining fail-closed attempt/request mismatch behavior.
+- Made durable large IData a TaskVine SharedFS source and supported explicit
+  large final-result return without Controller byte retention.
+- Fixed durable recovery so it validates/re-registers SharedFS rather than
+  loading a large durable object into Controller memory.
+- Required clean build/install and all 16 regressions pass. Rebuilt-package
+  factory test persists and returns a 2 MiB IData after worker churn with one
+  ordinary recovery and zero legacy recovery tasks; Controller IData
+  high-water is 79 bytes.
+- Commit: `4e8f19f1f`; package SHA-256:
+  `9eb6c9e6ba2f31b5989cd0e0c35408a6f17423aee6dca8c2d90121558fdb4db2`.
+- Evidence: `acceptance/artifacts/worker-persistence-4e8f19f1f.json`.
+- PERSIST and Ultimate Acceptance remain FAIL pending active cancellation,
+  SharedFS overload/failure retry, fairness/latency bounds, and Grand
+  Challenge evidence.
+
 ## 2026-07-30 — Bounded Controller IData and large-output bypass
 
 - Added hard total and per-object Controller IData byte capacities with

@@ -12,7 +12,7 @@
   Phase 4A and is no longer the DataVine implementation.
 - Active task: **Phase 9 bounded ordinary-IData storage and large-IData
   bypass**
-- Validated code commit: `e6ef08b16`
+- Validated code commit: `4e8f19f1f`
 
 ## Ultimate acceptance reset
 
@@ -70,6 +70,44 @@ completed workflow history are not cleaned; large IData lacks worker-driven
 persistence and large final-result return; repeated churn, DRAM, and the Grand
 Challenge remain open. Evidence:
 `acceptance/artifacts/idata-capacity-e6ef08b16.json`.
+
+### Phase 9 worker-driven large-IData durability checkpoint
+
+Commit `4e8f19f1f` extends the bounded-IData path without returning payloads to
+the Controller. For metadata-only IData, the Controller creates a bounded,
+attempt/hash/size-qualified persistence request and target. A bounded
+Scheduler data-operation task consumes the existing TaskVine file identity;
+the worker validates the source, writes a same-directory temporary file,
+fsyncs, renames, and acknowledges. The Controller stream-validates outside
+its state lock, then compare-and-commits the unchanged request as a SharedFS
+replica and durability frontier. Scheduler never reads persistence payload
+bytes.
+
+The same durable path supports a large final result. A requested final that is
+not Controller-inline is accepted only when durable; Scheduler validates the
+SharedFS bytes and deserializes the result. Explicit durable recovery validates
+and re-registers the SharedFS source without loading it into Controller
+memory. Duplicate begin/complete for the same durable request is idempotent;
+different attempts remain stale.
+
+After the final clean build/install, all 16 regressions pass. Local and
+package-only factory runs combine a 2 MiB worker-only IData, deterministic
+worker release, ordinary recomputation, worker-driven persistence, downstream
+consumption, and return of that same large object as a final. The accepted
+factory run completes two logical tasks through three ordinary attempts, one
+recovery replay, one 2,097,161-byte worker persistence operation, and zero
+legacy recovery tasks. Controller IData high-water remains 79 bytes under a
+128 KiB limit.
+
+Package SHA-256 is
+`9eb6c9e6ba2f31b5989cd0e0c35408a6f17423aee6dca8c2d90121558fdb4db2`;
+factory `datavine-persist-4e8f19f1f` passed and removed both workers. Evidence:
+`acceptance/artifacts/worker-persistence-4e8f19f1f.json`.
+
+Self-review keeps `PERSIST`, `CTRL-BOUND`, `RECOVERY`, Review B, and Ultimate
+Acceptance **FAIL**. Active-write cancellation, SharedFS overload/failure
+retry, validation latency, data-operation fairness, repeated recovery, and
+Grand Challenge scale remain unproved.
 
 ### Phase 9 worker-enforced disk cache capacity and combined recovery checkpoint
 
