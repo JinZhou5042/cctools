@@ -1,0 +1,89 @@
+{
+  "artifact": "DataVine strict worker-cache item admission checkpoint",
+  "commit": "88b7d1a44",
+  "date": "2026-07-30",
+  "status": "PASS_COMPONENT_NOT_ULTIMATE_ACCEPTANCE",
+  "build": {
+    "command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+    "status": "PASS",
+    "log": "/tmp/datavine-cache-admission-88b7d1a44-build.log"
+  },
+  "regression": {
+    "tests": 15,
+    "passed": 15,
+    "status": "PASS",
+    "summary": "/tmp/datavine-cache-admission-88b7d1a44-regressions.txt"
+  },
+  "local": {
+    "bounded": {
+      "logical_tasks": 13,
+      "workers_used": 2,
+      "admission_items_per_worker": 6,
+      "largest_task_working_set_items": 6,
+      "effective_dead_data_retention_items": 0,
+      "physical_item_high_water": [6, 6],
+      "admission_rejections": [6, 0],
+      "acknowledged_evictions": 44,
+      "final_cache_items": [0, 0],
+      "pending_unlinks": [0, 0],
+      "oracle": "PASS"
+    },
+    "undersized": {
+      "admission_items_per_worker": 5,
+      "largest_task_working_set_items": 6,
+      "status": "REJECTED_BEFORE_EXECUTION",
+      "error": "worker disk cache admission capacity 5 cannot fit the largest task working set of 6 items"
+    },
+    "pending_unlink_worker_loss": {
+      "requested": 1,
+      "confirmed": 0,
+      "failed": 1,
+      "tracker_released": true
+    }
+  },
+  "factory": {
+    "entrypoint": "/users/jzhou24/graph_optimization/factories/run_factory.sh",
+    "manager": "datavine-cache-88b7d1a44",
+    "workers": 2,
+    "logical_tasks": 13,
+    "admission_items_per_worker": 6,
+    "physical_item_high_water": [6, 6],
+    "admission_rejections": [1, 6],
+    "acknowledged_evictions": 44,
+    "final_cache_items": [0, 0],
+    "pending_unlinks": [0, 0],
+    "oracle": "PASS",
+    "workers_removed_after_test": 2
+  },
+  "package": {
+    "path": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+    "sha256": "fc8003bb0a5422909214cb62311f1678ea5de37c37a192e0abe0fdcfe75e6e71",
+    "python": "3.10",
+    "cloudpickle": "3.1.2",
+    "poncho_package_run": "PASS"
+  },
+  "self_review": {
+    "rejected_prototypes": [
+      "retention equal to admission capacity deadlocked because it left no task-working-set headroom",
+      "evicting stable EData without protecting running-task inputs caused a stale prune confirmation race"
+    ],
+    "proved": [
+      "Manager-coordinated dispatch never projects a worker above the configured item capacity",
+      "assigned outputs and pending acknowledged unlinks count against admission",
+      "an impossible per-task capacity fails closed before execution",
+      "dead-data retention is reduced to reserve worst-case task-working-set headroom",
+      "active logical task inputs are excluded from eviction",
+      "physical high-water and admission rejection telemetry are observable",
+      "the accepted local and factory workflows make progress and return exact results"
+    ],
+    "not_proved": [
+      "worker-side hard enforcement independent of a cooperating Manager",
+      "strict disk byte capacity",
+      "strict DRAM capacity and eviction",
+      "prefetch input protection under concurrent admission pressure",
+      "recovery and repeated worker churn under admission pressure",
+      "bounded scheduling cost at Grand Challenge scale",
+      "Grand Challenge scale or Legacy comparison"
+    ]
+  }
+}

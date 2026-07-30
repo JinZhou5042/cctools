@@ -22,7 +22,7 @@ is never a pass.
 | CTRL-FAIL | Auth, idempotency, epochs, stale/partial/restart behavior | FAIL | Runtime epochs and stale completion pass at `fbddcc70d`; Controller-owned reconnect claims pass at `643cddd68`; restart/auth-isolation contract remains absent |
 | SCHED | Independent data progress, minimal rollback, fairness, termination | OPEN | Basic recovery/prefetch exists; combined cases absent |
 | WORKER-PREP | Batched validated resolution with direct source fallback | FAIL | Controller returns validated candidates; worker still resolves per object without direct candidate pulls |
-| CACHE | Strict DRAM/disk bounds, admission, eviction, zero mode | FAIL | Controller-authorized dead-data retention, per-worker acknowledged eviction, bounded final item count, and correct zero-retention final state pass at `c20db01a1`; instantaneous disk high-water exceeds the configured target and DRAM/admission remain absent |
+| CACHE | Strict DRAM/disk bounds, admission, eviction, zero mode | FAIL | Manager-coordinated item admission holds physical high-water at six and fails closed below a task working set at `88b7d1a44`; worker-side enforcement, bytes, DRAM, prefetch/recovery races, and scale cost remain open |
 | PREFETCH | Bounded/cancellable/priority-safe independent progress | OPEN | Byte/item/priority gates pass; unverified prefetched replicas safely fall back at `ef605c343`; concurrency/cancel/final architecture open |
 | PUBLISH | Exactly-once staged idempotent publication and cleanup | OPEN | Two-phase worker prepare/Scheduler commit passes; full publication fault matrix open |
 | PLACE | Multi-source, load/epoch, bulk bypass, peer fallback | OPEN | Actual TaskVine peer movement acquires epoch-checked Controller leases and unverified sources fall back at `ef605c343`; transfer-loss/load adaptation remain open |
@@ -95,6 +95,14 @@ pending tracker is released as an explicit failure without falsely claiming
 physical deletion of a possibly retained workspace. Recovery after eviction,
 eviction during an active demand read, and strict instantaneous admission
 remain OPEN.
+
+Dispatch-admission evidence at `88b7d1a44` closes the scoped instantaneous
+item-bound gap for a cooperating DataVine Manager: both local and factory
+workers remain at or below six physical items while admission backpressure is
+observed, and capacity five is rejected for a six-item task. The overall row
+remains FAIL because the worker has no independent hard limit, byte and DRAM
+capacities are absent, prefetch and recovery combinations are untested, and
+the hot-path projection has not been bounded at Grand Challenge scale.
 
 Controller admission evidence at commit `d694bef4a` covers hard request-thread,
 byte-response concurrency, and in-flight-byte capacities; immediate overload;

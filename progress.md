@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 strict physical cache admission/backpressure and DRAM tier**
-- Validated code commit: `c20db01a1`
+- Active task: **Phase 9 worker-side byte/DRAM admission and combined cache races**
+- Validated code commit: `88b7d1a44`
 
 ## Ultimate acceptance reset
 
@@ -355,6 +355,41 @@ retention because task working sets and asynchronous unlink remain outside
 admission control. No DRAM tier exists. `CACHE`, Review B, and Ultimate
 Acceptance remain **FAIL**. Evidence:
 `acceptance/artifacts/cache-retention-c20db01a1.json`.
+
+### Phase 9 strict cache-item dispatch admission checkpoint
+
+Commits `9d03dbf4d` and `88b7d1a44` add a Manager-side item admission gate
+before worker selection. Its projection includes the worker's reported cache,
+outputs reserved by already assigned tasks, the candidate's distinct inputs
+and outputs, and physical files whose acknowledged unlink is still pending.
+The Scheduler rejects a capacity smaller than the largest task working set and
+reduces dead-data retention to reserve that working-set headroom.
+
+Two prototypes were rejected during self-review. Retaining six dead items
+under a six-item admission limit deadlocked the next root task. After adding
+headroom, evicting reproducible EData exposed a stale confirmation race against
+another running root; running-task inputs are now explicitly protected.
+
+At exact commit `88b7d1a44`, the required clean build/install and all 15
+installed regressions pass. The accepted 13-task, two-worker run uses a
+six-item capacity: both physical worker high-water marks are exactly six,
+admission rejects six placements while other placements continue, 44
+acknowledged evictions complete, both final caches are empty, and no unlink is
+pending. A five-item limit for a six-item task fails closed before execution.
+
+The rebuilt package contains cloudpickle 3.1.2 and has SHA-256
+`fc8003bb0a5422909214cb62311f1678ea5de37c37a192e0abe0fdcfe75e6e71`.
+Factory `datavine-cache-88b7d1a44` reproduces the six-item physical bound on
+both workers, records seven admission rejections, returns the exact oracle,
+and removes both workers on shutdown.
+
+This is a strict **Manager-coordinated item** bound, not full cache acceptance.
+The worker itself does not enforce the contract, byte and DRAM bounds are
+absent, prefetch inputs are not yet protected by this accounting, admission
+under recovery/churn is untested, and the projection currently allocates a
+temporary set in the scheduling hot path. `CACHE`, Review B, and Ultimate
+Acceptance remain **FAIL**. Evidence:
+`acceptance/artifacts/cache-item-admission-88b7d1a44.json`.
 
 ## Phase 8 acceptance
 

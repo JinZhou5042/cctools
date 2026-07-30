@@ -547,3 +547,27 @@
   worker-side hard enforcement, a DRAM tier, active-read eviction races, and
   recovery after eviction remain unresolved.
 - Code commits: `2e0d8ebdd`, `c20db01a1`.
+
+## 2026-07-30 — Phase 9 strict cache-item dispatch admission
+
+- Added a Manager worker-selection gate that projects cached files, outputs of
+  assigned tasks, candidate inputs/outputs, and acknowledged unlinks still
+  occupying physical slots.
+- Added per-worker physical item high-water, pending-unlink, and admission
+  rejection telemetry.
+- Added Scheduler fail-closed validation for a capacity below the largest task
+  working set and retained-dead-data headroom.
+- Rejected a prototype that deadlocked when retention consumed all admission
+  capacity, then rejected a second prototype after eviction raced an active
+  root input. The accepted policy protects running-task inputs.
+- At exact test commit `88b7d1a44`, the required clean build/install and all
+  15 installed regressions pass. Local and factory runs keep two workers at a
+  six-item physical high-water, complete 44 acknowledged evictions, and return
+  exact results; a five-item capacity rejects a six-item task before execution.
+- Rebuilt `datavine.tar.gz` SHA-256:
+  `fc8003bb0a5422909214cb62311f1678ea5de37c37a192e0abe0fdcfe75e6e71`.
+  Factory `datavine-cache-88b7d1a44` passed and removed both workers.
+- Self-review status remains **FAIL for the complete CACHE row**. Worker-side
+  hard enforcement, bytes, DRAM, prefetch/recovery/churn combinations, and
+  hot-path scale proof remain open.
+- Code commits: `9d03dbf4d`, `88b7d1a44`.

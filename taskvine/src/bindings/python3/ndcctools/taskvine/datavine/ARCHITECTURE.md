@@ -93,8 +93,14 @@ after a UUID-correlated acknowledgement from that worker.
 
 Worker disappearance while an unlink is pending resolves the operation as a
 failure and releases its tracker; it is not treated as proof that a retained
-workspace was deleted. The current policy bounds retained dead data after
-acknowledgements. It does not yet impose a strict instantaneous disk bound:
-task working sets can temporarily exceed the target, and no DataVine DRAM tier
-exists. Dispatch admission and worker-side fail-closed capacity enforcement
-are therefore required before cache-capacity acceptance.
+workspace was deleted. The retention policy reserves capacity for the largest
+task working set. Before assigning a task, the Manager projects distinct
+cached inputs, all assigned outputs, the candidate working set, and physical
+slots awaiting unlink acknowledgement. A projection above the configured item
+limit is backpressured, and an individual task larger than the limit fails
+before execution.
+
+This is a cooperating Manager protocol bound, not yet a complete worker cache
+contract. The worker does not independently reject excess files, bytes and
+DRAM are not bounded, and prefetch/recovery combinations remain unproved.
+Those corrections are required before cache-capacity acceptance.

@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `c20db01a1`
+Reviewed through code commit: `88b7d1a44`
 Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
@@ -58,6 +58,14 @@ keeps only records whose direct-consumer count has reached zero and passes
 two-worker bounded-retention and zero-retention workflows. B1 remains open for
 strict instantaneous disk admission, worker DRAM, active-demand read
 protection, and recovery after eviction.
+
+Correction checkpoint `88b7d1a44` adds Manager-coordinated dispatch admission.
+The projection accounts for cached files, assigned outputs, the candidate
+working set, and unacknowledged physical deletion. Local and factory runs keep
+both workers at the six-item limit and reject an impossible five-item limit
+before execution. B1 remains open because enforcement is not worker-local,
+bytes and DRAM are unbounded, and prefetch/recovery/churn combinations have not
+passed.
 
 ### B2 — Stable-root reproducibility is assumed, not proved by Controller state
 
