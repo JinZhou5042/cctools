@@ -184,13 +184,20 @@ class WorkerCacheAdmission:
                 if not candidates:
                     break
                 key, record = candidates.pop(0)
-                invalidated = self.controller.invalidate_replica(
+                invalidated = self.controller.invalidate_observed_replica(
                     record["data_id"],
                     record["replica_id"],
-                    record["generation"],
+                    record["attempt"],
+                    record["content_hash"],
+                    record["size"],
                     record["worker_id"],
                     record["worker_epoch"],
                 )
+                record = {
+                    **record,
+                    "generation": invalidated["generation"],
+                }
+                self.records[key] = record
                 if invalidated["state"] == "retiring":
                     continue
                 if invalidated["state"] not in ("invalid", "pruned"):

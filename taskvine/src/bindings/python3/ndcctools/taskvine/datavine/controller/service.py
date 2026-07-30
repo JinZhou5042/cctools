@@ -526,6 +526,29 @@ class ControllerService:
                         return
                     self._json(200, replica.source_dict())
                     return
+                if (
+                    self.path
+                    == f"{API_PREFIX}/replicas/invalidate-observed"
+                ):
+                    try:
+                        request = self._read_json()
+                        replica = (
+                            owner.state
+                            .invalidate_observed_worker_replica(
+                                request["data_id"],
+                                request["replica_id"],
+                                request["attempt"],
+                                request["content_hash"],
+                                request["size"],
+                                request["worker_id"],
+                                request["worker_epoch"],
+                            )
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, replica.source_dict())
+                    return
                 if self.path == f"{API_PREFIX}/replicas/acquire":
                     try:
                         request = self._read_json()

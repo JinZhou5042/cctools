@@ -186,6 +186,31 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def invalidate_observed_replica(
+        self,
+        data_id,
+        replica_id,
+        attempt,
+        content_hash,
+        size,
+        worker_id,
+        worker_epoch=1,
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/replicas/invalidate-observed",
+            {
+                "data_id": str(data_id),
+                "replica_id": str(replica_id),
+                "attempt": int(attempt),
+                "content_hash": str(content_hash),
+                "size": int(size),
+                "worker_id": str(worker_id),
+                "worker_epoch": int(worker_epoch),
+            },
+        )
+        return json.loads(payload)
+
     def replica_sources(self, data_id):
         kind, token = str(data_id).split(":", 1)
         payload, _ = self._request(

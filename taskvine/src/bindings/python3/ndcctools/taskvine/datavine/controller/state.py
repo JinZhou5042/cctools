@@ -476,6 +476,27 @@ class ControllerState:
                 worker_epoch,
             )
 
+    def invalidate_observed_worker_replica(
+        self,
+        data_id,
+        replica_id,
+        attempt,
+        content_hash,
+        size,
+        worker_id,
+        worker_epoch,
+    ):
+        with self._lock:
+            return self.replicas.invalidate_observed_worker_replica(
+                data_id,
+                replica_id,
+                attempt,
+                content_hash,
+                size,
+                worker_id,
+                worker_epoch,
+            )
+
     def confirm_worker_pruned(
         self, data_id, replica_id, generation
     ):

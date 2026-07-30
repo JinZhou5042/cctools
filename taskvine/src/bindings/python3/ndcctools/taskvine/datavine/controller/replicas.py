@@ -698,6 +698,48 @@ class ReplicaDirectory:
                 data_id, replica_id, generation
             )
 
+    def invalidate_observed_worker_replica(
+        self,
+        data_id,
+        replica_id,
+        attempt,
+        content_hash,
+        size,
+        worker_id,
+        worker_epoch,
+    ):
+        data_id = self._normalize_data_id(data_id)
+        key = (data_id, str(replica_id))
+        attempt = int(attempt)
+        content_hash = self._validate_hash(content_hash)
+        size = int(size)
+        with self._lock:
+            self._validate_worker(worker_id, worker_epoch)
+            record = self._replicas.get(key)
+            if record is None:
+                raise KeyError("unknown observed replica")
+            identity = (
+                record.attempt,
+                record.content_hash,
+                record.size,
+                record.worker_id,
+                record.worker_epoch,
+            )
+            observed = (
+                attempt,
+                content_hash,
+                size,
+                str(worker_id),
+                int(worker_epoch),
+            )
+            if identity != observed:
+                self._reject_stale(
+                    "observed replica identity is no longer current"
+                )
+            return self.invalidate_replica(
+                data_id, replica_id, record.generation
+            )
+
     def confirm_worker_pruned(
         self, data_id, replica_id, generation
     ):
