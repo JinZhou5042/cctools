@@ -585,6 +585,31 @@ class ReplicaDirectory:
                 data_id, replica_id, generation
             )
 
+    def confirm_worker_pruned(
+        self, data_id, replica_id, generation
+    ):
+        key = (self._normalize_data_id(data_id), str(replica_id))
+        with self._lock:
+            record = self._replicas.get(key)
+            if record is None:
+                raise KeyError("unknown replica")
+            if record.generation != int(generation):
+                self._reject_stale("stale prune confirmation")
+            if record.tier not in WORKER_TIERS:
+                raise ValueError("prune confirmation requires worker replica")
+            if record.active_leases:
+                raise ValueError("active read prevents prune confirmation")
+            if record.state == "pruned":
+                return record
+            if record.state != "invalid":
+                raise ValueError(
+                    f"cannot confirm prune in state {record.state}"
+                )
+            record = dataclasses.replace(record, state="pruned")
+            self._replicas[key] = record
+            self._changed()
+            return record
+
     def quarantine(
         self,
         data_id,

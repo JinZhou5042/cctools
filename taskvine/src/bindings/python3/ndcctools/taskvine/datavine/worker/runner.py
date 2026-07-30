@@ -147,10 +147,7 @@ def main(argv=None):
         )
         prepared = client.prepare_replica(
             f"i:{task.output_data_id}",
-            (
-                f"taskvine-{worker_id}-i-{task.output_data_id}-"
-                f"attempt-{args.attempt}"
-            ),
+            replica_id(f"i:{task.output_data_id}"),
             args.attempt,
             "worker-disk",
             publication["content_hash"],

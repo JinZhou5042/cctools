@@ -50,7 +50,14 @@ def wait_json(path, timeout=15):
     raise TimeoutError(path)
 
 
-def start_worker(port):
+def start_worker(port, workspace=None):
+    workspace_args = []
+    if workspace is not None:
+        workspace_args = [
+            "--workspace",
+            str(workspace),
+            "--keep-workspace",
+        ]
     return subprocess.Popen(
         [
             os.environ.get("VINE_WORKER", "vine_worker"),
@@ -58,6 +65,7 @@ def start_worker(port):
             str(port),
             "--cores",
             "2",
+            *workspace_args,
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -83,6 +91,7 @@ def run_case(
     prefetch_byte_budget=64 * 1024 * 1024,
     prefetch_item_budget=16,
     inject_prefetch_failure=False,
+    apply_pruning=False,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -142,7 +151,15 @@ def run_case(
             )
             if not factory_manager:
                 workers.extend(
-                    start_worker(port) for _ in range(worker_count)
+                    start_worker(
+                        port,
+                        (
+                            root / f"worker-{index}"
+                            if apply_pruning
+                            else None
+                        ),
+                    )
+                    for index in range(worker_count)
                 )
             deadline = time.monotonic() + (
                 600 if factory_manager else 30
@@ -184,6 +201,24 @@ def run_case(
                 timeout=600 if factory_manager else 90
             )
             assert results[target_task_id] == oracle
+            if apply_pruning:
+                cache_before = sorted(
+                    str(path.relative_to(root))
+                    for path in root.glob("worker-*/cache/*")
+                    if not path.name.endswith(".meta")
+                )
+                pruning_result = scheduler.call(
+                    "apply_pruning", 0, None, None, 30
+                )
+                cache_after = sorted(
+                    str(path.relative_to(root))
+                    for path in root.glob("worker-*/cache/*")
+                    if not path.name.endswith(".meta")
+                )
+            else:
+                cache_before = []
+                cache_after = []
+                pruning_result = None
             snapshot = client.snapshot()
             snapshot["scheduler_report"] = scheduler.call(
                 "last_run_report"
@@ -212,6 +247,9 @@ def run_case(
                 worker_disconnections
             )
             snapshot["taskvine_running_order"] = running_task_ids
+            snapshot["pruning_result"] = pruning_result
+            snapshot["worker_cache_before_pruning"] = cache_before
+            snapshot["worker_cache_after_pruning"] = cache_after
             snapshot["durable_files"] = sorted(
                 path.name
                 for path in (root / "durable").glob("idata-*.pkl")
@@ -227,7 +265,9 @@ def run_case(
                         == status["content_hash"]
                     )
                 snapshot["durable_hashes_valid"] = True
-            assert snapshot["available_idata"] == len(workflow.tasks)
+            assert snapshot["available_idata"] == (
+                0 if apply_pruning else len(workflow.tasks)
+            )
             assert snapshot["tasks"] == len(workflow.tasks)
             return snapshot
         finally:

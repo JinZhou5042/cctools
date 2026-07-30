@@ -126,6 +126,7 @@ struct vine_manager {
 
 	struct hash_table *file_table;      /* Maps fileid -> struct vine_file.* */
 	struct hash_table *file_worker_table; /* Maps cachename -> struct set of workers with a replica of the file.* */
+	struct hash_table *file_prune_table; /* Maps cachename -> acknowledged prune counters. */
 	struct priority_queue *temp_files_to_replicate; /* Priority queue of temp files to be replicated, those with less replicas are at the top. */
 
 

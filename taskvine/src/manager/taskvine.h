@@ -970,6 +970,21 @@ but is still available on the manager's site, and can be recovered by submitting
 */
 int vine_prune_file(struct vine_manager *m, struct vine_file *f);
 
+/** Return cumulative remote prune requests for a declared file. */
+int64_t vine_prune_file_requested(struct vine_manager *m, struct vine_file *f);
+
+/** Return cumulative worker-confirmed remote prune operations. */
+int64_t vine_prune_file_confirmed(struct vine_manager *m, struct vine_file *f);
+
+/** Return cumulative worker-reported remote prune failures. */
+int64_t vine_prune_file_failed(struct vine_manager *m, struct vine_file *f);
+
+/** Forget completed remote prune acknowledgement state.
+This succeeds only after every requested operation has been acknowledged.
+@return 1 if completed state was removed, otherwise 0.
+*/
+int vine_prune_file_forget(struct vine_manager *m, struct vine_file *f);
+
 /** Return a declared file by its cached name, or NULL if it is unknown to the manager.
 @param m A manager object.
 @param cached_name The file cache name.

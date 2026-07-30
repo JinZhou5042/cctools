@@ -329,6 +329,19 @@ class ControllerService:
                         return
                     self._json(200, dataclasses.asdict(lease))
                     return
+                if self.path == f"{API_PREFIX}/replicas/pruned":
+                    try:
+                        request = self._read_json()
+                        result = owner.state.confirm_worker_pruned(
+                            request["data_id"],
+                            request["replica_id"],
+                            request["generation"],
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, result)
+                    return
                 if self.path == f"{API_PREFIX}/pruning/task-state":
                     try:
                         request = self._read_json()

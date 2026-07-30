@@ -217,6 +217,20 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def confirm_replica_pruned(
+        self, data_id, replica_id, generation
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/replicas/pruned",
+            {
+                "data_id": str(data_id),
+                "replica_id": str(replica_id),
+                "generation": int(generation),
+            },
+        )
+        return json.loads(payload)
+
     def set_task_state(self, task_id, state):
         payload, _ = self._request(
             "POST",

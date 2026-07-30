@@ -55,6 +55,7 @@ See the file COPYING for details.
 #include "trash.h"
 #include "unlink_recursive.h"
 #include "url_encode.h"
+#include "uuid.h"
 #include "xpu_tracker.h"
 #include "xxmalloc.h"
 
@@ -1075,7 +1076,7 @@ directory.  If the request is valid, then move the file to the
 trash and deal with it there.
 */
 
-static int do_unlink(struct link *manager, const char *path)
+static int do_unlink(struct link *manager, const char *path, const char *operation_id)
 {
 	char *cached_path = vine_cache_data_path(cache_manager, path);
 
@@ -1090,6 +1091,12 @@ static int do_unlink(struct link *manager, const char *path)
 	}
 
 	free(cached_path);
+	if (operation_id) {
+		char path_encoded[VINE_LINE_MAX];
+		url_encode(path, path_encoded, sizeof(path_encoded));
+		send_async_message(
+				manager, "cache-unlinked %s %s %d\n", path_encoded, operation_id, result);
+	}
 	return result;
 }
 
@@ -1308,6 +1315,7 @@ static int handle_manager(struct link *manager)
 	char source_encoded[VINE_LINE_MAX];
 	char source[VINE_LINE_MAX];
 	char transfer_id[VINE_LINE_MAX];
+	char operation_id[UUID_LEN + 1];
 	int64_t length;
 	int64_t task_id = 0;
 	int mode, n;
@@ -1338,9 +1346,12 @@ static int handle_manager(struct link *manager)
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = do_put_mini_task(manager, time(0) + options->active_timeout, filename, cache_level, length, mode, source);
 			reset_idle_timer();
+		} else if (sscanf(line, "unlink %s %36s", filename_encoded, operation_id) == 2) {
+			url_decode(filename_encoded, filename, sizeof(filename));
+			r = do_unlink(manager, filename, operation_id);
 		} else if (sscanf(line, "unlink %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = do_unlink(manager, filename);
+			r = do_unlink(manager, filename, NULL);
 		} else if (sscanf(line, "getfile %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = vine_transfer_put_any(manager, cache_manager, filename, VINE_TRANSFER_MODE_FILE_ONLY, time(0) + options->active_timeout);

@@ -332,6 +332,26 @@ class ControllerState:
                 worker_epoch,
             )
 
+    def confirm_worker_pruned(
+        self, data_id, replica_id, generation
+    ):
+        with self._lock:
+            replica = self.replicas.confirm_worker_pruned(
+                data_id, replica_id, generation
+            )
+            audit = self.pruning.audit(
+                "confirm-worker-pruned",
+                int(str(data_id).split(":", 1)[1]),
+                "worker-cache-unlink-acknowledged",
+                self.replicas.revision,
+                replica.replica_id,
+                replica.generation,
+            )
+            return {
+                "replica": replica.source_dict(),
+                "audit": audit.to_dict(),
+            }
+
     def _validate_replica_identity(
         self, data_key, attempt, content_hash, size
     ):

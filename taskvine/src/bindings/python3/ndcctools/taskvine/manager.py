@@ -1738,7 +1738,27 @@ class Manager(object):
         cvine.vine_undeclare_file(self._taskvine, file._file)
 
     def prune_file(self, file):
-        cvine.vine_prune_file(self._taskvine, file._file)
+        return cvine.vine_prune_file(self._taskvine, file._file)
+
+    def prune_file_status(self, file):
+        return {
+            "requested": cvine.vine_prune_file_requested(
+                self._taskvine, file._file
+            ),
+            "confirmed": cvine.vine_prune_file_confirmed(
+                self._taskvine, file._file
+            ),
+            "failed": cvine.vine_prune_file_failed(
+                self._taskvine, file._file
+            ),
+        }
+
+    def forget_prune_file_status(self, file):
+        return bool(
+            cvine.vine_prune_file_forget(
+                self._taskvine, file._file
+            )
+        )
 
     # Deprecated, for backwards compatibility.
     def remove_file(self, file):

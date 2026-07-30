@@ -67,6 +67,7 @@ See the file COPYING for details.
 #include "unlink_recursive.h"
 #include "url_encode.h"
 #include "username.h"
+#include "uuid.h"
 #include "xxmalloc.h"
 
 #include <assert.h>
@@ -107,6 +108,23 @@ See the file COPYING for details.
 
 /* Default value before disconnecting a worker that keeps forsaking tasks without any completions */
 #define VINE_DEFAULT_MAX_FORSAKEN_PER_WORKER 10
+
+struct vine_prune_tracker {
+	int64_t requested;
+	int64_t confirmed;
+	int64_t failed;
+	struct hash_table *pending;
+};
+
+static void vine_prune_tracker_delete(void *value)
+{
+	struct vine_prune_tracker *tracker = value;
+	if (!tracker) {
+		return;
+	}
+	hash_table_delete(tracker->pending);
+	free(tracker);
+}
 
 /* Default value for maximum size of standard output from task.  (If larger, send to a separate file.) */
 #define MAX_TASK_STDOUT_STORAGE (1 * GIGABYTE)
@@ -551,6 +569,39 @@ static vine_msg_code_t handle_cache_invalid(struct vine_manager *q, struct vine_
 	}
 }
 
+static vine_msg_code_t handle_cache_unlinked(struct vine_manager *q, struct vine_worker_info *w, const char *line)
+{
+	char cachename_encoded[VINE_LINE_MAX];
+	char cachename[VINE_LINE_MAX];
+	char operation_id[UUID_LEN + 1];
+	int success = 0;
+
+	if (sscanf(line, "cache-unlinked %s %36s %d", cachename_encoded, operation_id, &success) != 3) {
+		return VINE_MSG_FAILURE;
+	}
+
+	url_decode(cachename_encoded, cachename, sizeof(cachename));
+	struct vine_prune_tracker *tracker = hash_table_lookup(q->file_prune_table, cachename);
+	if (!tracker) {
+		debug(D_VINE, "ignoring unsolicited cache-unlinked for %s", cachename);
+		return VINE_MSG_PROCESSED;
+	}
+
+	struct vine_worker_info *expected_worker = hash_table_lookup(tracker->pending, operation_id);
+	if (!expected_worker || expected_worker != w) {
+		debug(D_VINE, "ignoring duplicate, stale, or mismatched cache-unlinked operation %s", operation_id);
+		return VINE_MSG_PROCESSED;
+	}
+	hash_table_remove(tracker->pending, operation_id);
+
+	if (success) {
+		tracker->confirmed++;
+	} else {
+		tracker->failed++;
+	}
+	return VINE_MSG_PROCESSED;
+}
+
 /*
 A transfer-port message indicates that the worker is listening
 on its own port to receive get requests from other workers.
@@ -798,6 +849,8 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		result = handle_cache_update(q, w, line);
 	} else if (string_prefix_is(line, "cache-invalid")) {
 		result = handle_cache_invalid(q, w, line);
+	} else if (string_prefix_is(line, "cache-unlinked")) {
+		result = handle_cache_unlinked(q, w, line);
 	} else if (string_prefix_is(line, "transfer-hostport")) {
 		result = handle_transfer_hostport(q, w, line);
 	} else if (string_prefix_is(line, "transfer-port")) {
@@ -1252,9 +1305,10 @@ static void add_worker(struct vine_manager *q)
 int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const char *filename, vine_cache_level_t cache_level, vine_cache_level_t delete_upto_level)
 {
 	if (cache_level <= delete_upto_level) {
-		process_replica_on_event(q, w, filename, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_UNLINK);
-		vine_manager_send(q, w, "unlink %s\n", filename);
-		return 1;
+		if (vine_manager_send(q, w, "unlink %s\n", filename) > 0) {
+			process_replica_on_event(q, w, filename, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_UNLINK);
+			return 1;
+		}
 	}
 
 	return 0;
@@ -4158,6 +4212,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->worker_table = hash_table_create(0, 0);
 	q->file_worker_table = hash_table_create(0, 0);
+	q->file_prune_table = hash_table_create(0, 0);
 	q->temp_files_to_replicate = priority_queue_create(0);
 	q->worker_blocklist = hash_table_create(0, 0);
 	q->workers_idle_disconnecting = hash_table_create(0, 0);
@@ -4536,6 +4591,9 @@ void vine_delete(struct vine_manager *q)
 
 	hash_table_clear(q->file_worker_table, (void *)set_delete);
 	hash_table_delete(q->file_worker_table);
+
+	hash_table_clear(q->file_prune_table, vine_prune_tracker_delete);
+	hash_table_delete(q->file_prune_table);
 
 	priority_queue_delete(q->temp_files_to_replicate);
 
@@ -6593,6 +6651,15 @@ int vine_prune_file(struct vine_manager *m, struct vine_file *f)
 	}
 
 	int pruned_replica_count = 0;
+	struct vine_prune_tracker *tracker = hash_table_lookup(m->file_prune_table, f->cached_name);
+	if (!tracker) {
+		tracker = calloc(1, sizeof(*tracker));
+		if (!tracker) {
+			fatal("out of memory creating prune tracker");
+		}
+		tracker->pending = hash_table_create(0, 0);
+		hash_table_insert(m->file_prune_table, f->cached_name, tracker);
+	}
 
 	/* delete all of the replicas present at remote workers. */
 	struct set *source_workers = hash_table_lookup(m->file_worker_table, f->cached_name);
@@ -6601,21 +6668,66 @@ int vine_prune_file(struct vine_manager *m, struct vine_file *f)
 		if (workers_array) {
 			for (int i = 0; workers_array[i] != NULL; i++) {
 				struct vine_worker_info *w = (struct vine_worker_info *)workers_array[i];
-				delete_worker_file(m, w, f->cached_name, 0, 0);
+				cctools_uuid_t operation_id;
+				cctools_uuid_create(&operation_id);
+				int requested = vine_manager_send(m, w, "unlink %s %s\n", f->cached_name, operation_id.str) > 0;
 
 				/* update replica table for the worker */
-				struct vine_file_replica *removed_replica = vine_file_replica_table_remove(m, w, f->cached_name);
-				if (removed_replica) {
-					vine_file_replica_delete(removed_replica);
-				}
+				if (requested) {
+					process_replica_on_event(m, w, f->cached_name, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_UNLINK);
+					struct vine_file_replica *removed_replica = vine_file_replica_table_remove(m, w, f->cached_name);
+					if (removed_replica) {
+						vine_file_replica_delete(removed_replica);
+					}
 
-				pruned_replica_count++;
+					hash_table_insert(tracker->pending, operation_id.str, w);
+					tracker->requested++;
+					pruned_replica_count++;
+				}
 			}
 			set_free_values_array(workers_array);
 		}
 	}
 
 	return pruned_replica_count;
+}
+
+static struct vine_prune_tracker *vine_prune_file_tracker(struct vine_manager *m, struct vine_file *f)
+{
+	if (!m || !f) {
+		return NULL;
+	}
+	return hash_table_lookup(m->file_prune_table, f->cached_name);
+}
+
+int64_t vine_prune_file_requested(struct vine_manager *m, struct vine_file *f)
+{
+	struct vine_prune_tracker *tracker = vine_prune_file_tracker(m, f);
+	return tracker ? tracker->requested : 0;
+}
+
+int64_t vine_prune_file_confirmed(struct vine_manager *m, struct vine_file *f)
+{
+	struct vine_prune_tracker *tracker = vine_prune_file_tracker(m, f);
+	return tracker ? tracker->confirmed : 0;
+}
+
+int64_t vine_prune_file_failed(struct vine_manager *m, struct vine_file *f)
+{
+	struct vine_prune_tracker *tracker = vine_prune_file_tracker(m, f);
+	return tracker ? tracker->failed : 0;
+}
+
+int vine_prune_file_forget(struct vine_manager *m, struct vine_file *f)
+{
+	struct vine_prune_tracker *tracker = vine_prune_file_tracker(m, f);
+	if (!tracker || tracker->requested != tracker->confirmed + tracker->failed) {
+		return 0;
+	}
+
+	tracker = hash_table_remove(m->file_prune_table, f->cached_name);
+	vine_prune_tracker_delete(tracker);
+	return 1;
 }
 
 /*

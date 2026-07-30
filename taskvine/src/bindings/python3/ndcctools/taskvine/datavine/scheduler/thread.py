@@ -123,6 +123,111 @@ class TaskSchedulerThread:
         self._assert_owner()
         return dict(self._last_run_report)
 
+    def _op_apply_pruning(
+        self,
+        grace_seconds=60,
+        data_ids=None,
+        now=None,
+        acknowledgement_timeout=30,
+    ):
+        self._assert_owner()
+        if self._manager is None:
+            raise RuntimeError("TaskVine Manager is not configured")
+        plan = self.controller.pruning_plan()
+        if not plan["records"]:
+            return {
+                "controller": {
+                    "cancelled_persistence": [],
+                    "applied": [],
+                    "deferred": [],
+                    "plan": plan,
+                },
+                "worker_prunes": [],
+            }
+        graph_revision = plan["records"][0]["graph_revision"]
+        state_revision = plan["records"][0]["state_revision"]
+        result = self.controller.apply_pruning(
+            graph_revision,
+            state_revision,
+            grace_seconds,
+            data_ids,
+            now,
+        )
+        pending_by_data = {}
+        for record in result["applied"]:
+            if record["action"] != "invalidate-worker-pending-delete":
+                continue
+            pending_by_data.setdefault(record["data_id"], []).append(
+                record
+            )
+        worker_prunes = []
+        for data_id, records in sorted(pending_by_data.items()):
+            file_object = self._idata_files.get(data_id)
+            if file_object is None:
+                raise RuntimeError(
+                    f"no TaskVine file for local prune i:{data_id}"
+                )
+            before = self._manager.prune_file_status(file_object)
+            requested = self._manager.prune_file(file_object)
+            if requested != len(records):
+                raise RuntimeError(
+                    f"replica authority mismatch for i:{data_id}: "
+                    f"Controller={len(records)} TaskVine={requested}"
+                )
+            deadline = time.monotonic() + float(
+                acknowledgement_timeout
+            )
+            while True:
+                self._manager.wait(1)
+                self._sync_worker_epochs()
+                status = self._manager.prune_file_status(file_object)
+                confirmed = (
+                    status["confirmed"] - before["confirmed"]
+                )
+                failed = status["failed"] - before["failed"]
+                if confirmed + failed >= requested:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"worker prune acknowledgement timed out "
+                        f"for i:{data_id}"
+                    )
+            if failed:
+                raise RuntimeError(
+                    f"{failed} worker prune operations failed "
+                    f"for i:{data_id}"
+                )
+            for record in records:
+                self.controller.confirm_replica_pruned(
+                    f"i:{data_id}",
+                    record["replica_id"],
+                    record["generation"],
+                )
+            worker_prunes.append(
+                {
+                    "data_id": data_id,
+                    "requested": requested,
+                    "confirmed": confirmed,
+                    "failed": failed,
+                }
+            )
+            if not self._manager.forget_prune_file_status(file_object):
+                raise RuntimeError(
+                    f"could not release completed prune state "
+                    f"for i:{data_id}"
+                )
+            if any(
+                self._manager.prune_file_status(file_object).values()
+            ):
+                raise RuntimeError(
+                    f"completed prune state leaked for i:{data_id}"
+                )
+            worker_prunes[-1]["tracker_released"] = True
+        return {
+            "controller": result,
+            "worker_prunes": worker_prunes,
+        }
+
     def _op_create_manager(
         self, port=0, name=None, run_info_path=None, peer_transfers=True
     ):
