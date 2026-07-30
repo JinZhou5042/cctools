@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 source-loss lease cleanup and terminal protocol idempotency**
-- Validated code commit: `a1d273444`
+- Active task: **Phase 9 actual peer-transfer source process loss**
+- Validated code commit: `f737147e7`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +25,49 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 dead-epoch lease cleanup and terminal idempotency checkpoint
+
+Commit `f737147e7` closes two protocol holes left by the lease-aware pruning
+checkpoint. When either a transfer source epoch or destination epoch
+disappears, the Controller now fails every lease owned by that incarnation,
+decrements the exact source load, advances a retiring source to invalid when
+its last lease expires, and retains the failed release in the existing bounded
+tombstone set. A late duplicate failure is idempotent; a contradictory late
+success is rejected and cannot resurrect the replica.
+
+Pruning continuation now requires a stable operation ID. The Scheduler stores
+that ID before sending, retries transport/timeout failures with the same ID,
+and allocates a new ID only after receiving a response. The Controller returns
+the original completed result for a matching replay and rejects conflicting
+reuse. Terminal results are bounded by both configurable item count and total
+serialized bytes. Admission uses the selected replica count before mutation,
+and continuation responses no longer duplicate the full pruning plan.
+
+The component E2E creates two leases on one retiring source. Destination loss
+reduces load from two to one; source loss reduces it to zero and makes the
+replica invalid. The Scheduler E2E makes the Controller commit a continuation
+and then injects a lost response. One same-ID retry recovers the committed
+result and completes physical pruning. Proof invalidation remains safe in the
+second mode. Three local repetitions have identical semantic SHA-256
+`d68d149cf5df30f4cac57ec9709f43f281f8b8c91946a432f02f91c427a57e58`.
+
+The final prescribed clean build/install, `flake8`, and all 21 installed-path
+regressions pass. The rebuilt package SHA-256 is
+`51f52957912d9e62fa336e76edd0a45b5cbbb899bd8f93ba7c70945d056ed588`.
+Package-only factory `datavine-epoch-f737147e7` completes five tasks in each
+mode and removes both workers at shutdown. Evidence:
+`acceptance/artifacts/lease-epoch-idempotency-f737147e7.json`.
+
+Self-review status is **PASS for this bounded protocol checkpoint and FAIL for
+Ultimate Acceptance**. The old E2E's fake destination was rejected because
+Scheduler reconciliation correctly declared it dead; the corrected scoped
+test uses a real active worker epoch. It still does not kill a distinct peer
+source process during byte movement. Controller restart, timeouts on other
+request types, and terminal replay after bounded eviction remain unproven. The
+next smallest safe task is an actual peer transfer of a throttled large item,
+source-process loss after lease acquisition, fallback to another validated
+source, and concurrent pruning continuation without a leaked lease.
 
 ### Phase 9 lease-aware pruning race checkpoint
 

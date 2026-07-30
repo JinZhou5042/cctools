@@ -327,3 +327,20 @@ processing cannot yet be replayed from a bounded terminal record. Dynamic
 registration of a new consumer is also not exercised; the accepted test
 invalidates the proof through an existing output becoming required. These
 remain critical before transfer-coupled pruning can pass this review.
+
+Correction checkpoint `f737147e7` adds bounded dead-epoch cleanup and terminal
+protocol replay. Loss of either the source or destination worker incarnation
+fails its leases and releases exact source load; a retiring replica becomes
+invalid when the final lease is gone. Pruning continuation uses a stable
+operation ID, and an injected response loss after Controller commit is
+recovered with one same-ID Scheduler retry. Tombstones have independent item
+and byte bounds and do not retain repeated full-graph plans. Evidence is
+`../artifacts/lease-epoch-idempotency-f737147e7.json`.
+
+Review B remains **FAIL**. Epoch loss is proven at the Controller protocol
+boundary, but no package-only run kills the actual source process while a
+throttled peer byte transfer is in flight. The current scoped pruning lease
+test also uses one real active worker epoch as both selected source and lease
+destination rather than proving two distinct live peers. Transfer fallback,
+partial-byte cleanup, and pruning completion after that real process failure
+are the next critical correction.

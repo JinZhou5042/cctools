@@ -1,0 +1,95 @@
+{
+	"acceptance_scope": [
+		"fail active source leases when their source worker epoch disappears",
+		"fail active source leases when their destination worker epoch disappears",
+		"idempotent late failed release and rejection of a conflicting late success",
+		"stable pruning continuation operation identity across a lost response",
+		"item-bounded and byte-bounded terminal continuation tombstones"
+	],
+	"branch": "datavine",
+	"build": {
+		"command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+		"status": "PASS"
+	},
+	"code_commit": "f737147e71f2b1e0357b7d3661fea662542264d3",
+	"controller_protocol": {
+		"active_leases_after_worker_losses": 0,
+		"destination_loss_then_source_loss": "PASS",
+		"late_conflicting_success": "REJECTED",
+		"late_failed_release": "IDEMPOTENT",
+		"worker_loss_lease_expirations": 2
+	},
+	"factory": {
+		"command": "bash ./run_factory.sh --manager-name datavine-epoch-f737147e7 --workers 2 --cores 1 --memory 4 --disk 10",
+		"lease_release": {
+			"completed_tasks": 5,
+			"continuation_retries": 1,
+			"final_state": "pruned",
+			"runtime_pruned_data_ids": [
+				1,
+				2
+			]
+		},
+		"manager_name": "datavine-epoch-f737147e7",
+		"package_only_e2e": "PASS",
+		"proof_invalidation": {
+			"cancelled_data_ids": [
+				1
+			],
+			"completed_tasks": 5,
+			"final_state": "available",
+			"runtime_pruned_data_ids": [
+				2
+			]
+		},
+		"shutdown": "all workers removed",
+		"workers": 2
+	},
+	"factory_package": {
+		"path": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+		"poncho_package_run": "cloudpickle=3.1.2; DataVine and Controller state imported from packaged site-packages",
+		"sha256": "51f52957912d9e62fa336e76edd0a45b5cbbb899bd8f93ba7c70945d056ed588",
+		"size_bytes": 790728003
+	},
+	"local_e2e": {
+		"command": "python3 taskvine/test/datavine_pruning_lease_race.py",
+		"semantic_output_sha256_repetitions": [
+			"d68d149cf5df30f4cac57ec9709f43f281f8b8c91946a432f02f91c427a57e58",
+			"d68d149cf5df30f4cac57ec9709f43f281f8b8c91946a432f02f91c427a57e58",
+			"d68d149cf5df30f4cac57ec9709f43f281f8b8c91946a432f02f91c427a57e58"
+		],
+		"status": "PASS"
+	},
+	"pruning_continuation": {
+		"conflicting_operation_reuse": "REJECTED",
+		"controller_committed_response_loss": "INJECTED",
+		"same_operation_id_replayed": true,
+		"scheduler_retries": 1,
+		"terminal_byte_bound_checked": true,
+		"terminal_item_capacity": 2,
+		"terminal_item_evictions": 1,
+		"terminal_tombstones_after_eviction": 2
+	},
+	"regression": {
+		"diff_check": "PASS",
+		"flake8": "PASS",
+		"installed_path": "21/21 PASS"
+	},
+	"rejected_designs": [
+		"a fake destination worker was correctly reconciled as dead, exposing that the old lease test bypassed Scheduler worker truth",
+		"generating a fresh continuation operation identity on every retry could repeat a committed mutation after a lost response",
+		"an item-only terminal cache containing a full pruning plan could grow with item count times graph size"
+	],
+	"self_review": {
+		"checkpoint_status": "PASS",
+		"ultimate_acceptance": "FAIL",
+		"unresolved": [
+			"no actual peer source process is killed while bytes are in flight",
+			"the pruning lease race uses an active worker epoch at the Controller boundary rather than a distinct live destination process",
+			"only pruning continuation timeout replay is injected; other Controller requests remain untested",
+			"terminal replay is guaranteed only within the explicitly bounded retention window",
+			"Controller restart and persistence of terminal protocol state remain outside the tested fault model",
+			"Grand Challenge scale, resource limits, and eight-mode Legacy comparison remain absent"
+		]
+	}
+}

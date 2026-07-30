@@ -1,5 +1,31 @@
 # DataVine History
 
+## 2026-07-30 — Dead-epoch lease cleanup and bounded continuation replay
+
+- Worker reconciliation now fails leases owned by either a dead source or dead
+  destination epoch. Exact replica load reaches zero, retiring sources become
+  invalid, late duplicate failure is idempotent, and contradictory success is
+  rejected.
+- Added stable pruning continuation operation IDs. Scheduler transport retries
+  reuse the in-flight ID; Controller terminal tombstones replay matching
+  results and reject conflicting reuse.
+- Bounded terminal history by both configurable item count and serialized
+  bytes, with pre-mutation response admission. Removed the full pruning plan
+  from each cached continuation response.
+- The Scheduler E2E injects response loss after Controller commit and completes
+  with exactly one same-ID retry. The component E2E covers destination loss
+  followed by source loss with two active leases.
+- Rejected a fake destination-worker test, fresh IDs on retry, and item-only
+  tombstones containing repeated full-graph plans.
+- Final clean build, all 21 regressions, lint, three identical repetitions,
+  package verification, and two-mode package-only factory E2E pass.
+- Code commit: `f737147e7`; package SHA-256:
+  `51f52957912d9e62fa336e76edd0a45b5cbbb899bd8f93ba7c70945d056ed588`.
+- Evidence: `acceptance/artifacts/lease-epoch-idempotency-f737147e7.json`.
+- Self-review: **PASS for the scoped checkpoint, FAIL for Ultimate
+  Acceptance**. Actual in-flight peer source process loss, broader Controller
+  timeout coverage, restart semantics, scale, and the Grand Challenge remain.
+
 ## 2026-07-30 — Lease-aware pruning proof revalidation
 
 - Added explicit deferred pruning for actively leased Controller sources.
