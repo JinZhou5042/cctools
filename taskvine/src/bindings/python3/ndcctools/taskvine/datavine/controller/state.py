@@ -293,11 +293,15 @@ class ControllerState:
                 self._edata_fetches.get(int(data_id), 0) + 1
             )
 
-    def allocate_idata(self, producer_task_id):
+    def allocate_idata(self, producer_task_id, producer_output_index=0):
         with self._lock:
             data_id = self._next_idata_id
             self._next_idata_id += 1
-            record = IDataRecord(data_id, int(producer_task_id))
+            record = IDataRecord(
+                data_id,
+                int(producer_task_id),
+                int(producer_output_index),
+            )
             self._idata[data_id] = record
             return record
 
@@ -317,11 +321,21 @@ class ControllerState:
                 self._validate_binding(kind, data_id)
             for _, binding in task.keyword:
                 self._validate_binding(*binding)
-            output = self._idata.get(task.output_data_id)
-            if output is None:
-                raise KeyError(f"unknown output IDataID {task.output_data_id}")
-            if output.producer_task_id != task.task_id:
-                raise ValueError("IData producer does not match TaskID")
+            for output_index, output_data_id in enumerate(
+                task.output_data_ids
+            ):
+                output = self._idata.get(output_data_id)
+                if output is None:
+                    raise KeyError(
+                        f"unknown output IDataID {output_data_id}"
+                    )
+                if (
+                    output.producer_task_id != task.task_id
+                    or output.producer_output_index != output_index
+                ):
+                    raise ValueError(
+                        "IData producer slot does not match TaskID"
+                    )
             direct_inputs = {
                 data_id
                 for kind, data_id in task.positional
@@ -344,7 +358,7 @@ class ControllerState:
             self.pruning.register_task(
                 task.task_id,
                 task.input_data_ids,
-                (task.output_data_id,),
+                task.output_data_ids,
             )
             self._tasks[task.task_id] = task
             return task
@@ -422,6 +436,7 @@ class ControllerState:
             record = IDataRecord(
                 old.data_id,
                 old.producer_task_id,
+                old.producer_output_index,
                 digest,
                 serialized_bytes,
                 attempt,
@@ -487,6 +502,7 @@ class ControllerState:
             record = IDataRecord(
                 old.data_id,
                 old.producer_task_id,
+                old.producer_output_index,
                 content_hash,
                 None,
                 attempt,
@@ -1217,6 +1233,7 @@ class ControllerState:
             return {
                 "data_id": value.data_id,
                 "producer_task_id": value.producer_task_id,
+                "producer_output_index": value.producer_output_index,
                 "available": available,
                 "rematerializable": bool(
                     value.serialized_bytes is not None

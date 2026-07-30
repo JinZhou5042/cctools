@@ -425,11 +425,14 @@ class ControllerClient:
         )
         return value
 
-    def allocate_idata(self, producer_task_id):
+    def allocate_idata(self, producer_task_id, producer_output_index=0):
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/idata/allocate",
-            {"producer_task_id": int(producer_task_id)},
+            {
+                "producer_task_id": int(producer_task_id),
+                "producer_output_index": int(producer_output_index),
+            },
         )
         return json.loads(payload)["data_id"]
 

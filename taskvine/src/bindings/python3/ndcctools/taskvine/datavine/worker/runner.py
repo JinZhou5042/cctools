@@ -19,7 +19,7 @@ def main(argv=None):
     parser.add_argument("--token", required=True)
     parser.add_argument("--task-id", required=True, type=int)
     parser.add_argument("--attempt", default=1, type=int)
-    parser.add_argument("--output-file")
+    parser.add_argument("--output-file", action="append", default=[])
     parser.add_argument(
         "--idata-inline-threshold",
         default=8 * 1024 * 1024,
@@ -136,7 +136,12 @@ def main(argv=None):
             for reference in iter_output_refs(template):
                 producer = client.get_task(reference.producer_task_id)
                 memo[id(reference)] = resolve(
-                    ("i", producer.output_data_id)
+                    (
+                        "i",
+                        producer.output_data_ids[
+                            reference.output_index
+                        ],
+                    )
                 )
             objects[key] = copy.deepcopy(template, memo)
             return objects[key]
@@ -171,12 +176,39 @@ def main(argv=None):
         name: resolve(binding) for name, binding in task.keyword
     }
     result = function(*positional, **keyword)
-    payload = cloudpickle.dumps(result)
-    stage = Path(
-        args.output_file
-        or f".datavine-idata-{task.output_data_id}.stage"
-    )
-    try:
+    if len(task.output_data_ids) == 1:
+        output_values = (result,)
+    else:
+        if not isinstance(result, (tuple, list)):
+            raise TypeError(
+                f"TaskID {task.task_id} declared "
+                f"{len(task.output_data_ids)} outputs but returned "
+                f"{type(result).__name__}"
+            )
+        if len(result) != len(task.output_data_ids):
+            raise ValueError(
+                f"TaskID {task.task_id} declared "
+                f"{len(task.output_data_ids)} outputs but returned "
+                f"{len(result)} values"
+            )
+        output_values = tuple(result)
+    if args.output_file and len(args.output_file) != len(
+        task.output_data_ids
+    ):
+        raise ValueError(
+            "output file count does not match logical output count"
+        )
+    total_bytes = 0
+    for output_index, (output_data_id, output_value) in enumerate(
+        zip(task.output_data_ids, output_values)
+    ):
+        payload = cloudpickle.dumps(output_value)
+        total_bytes += len(payload)
+        stage = Path(
+            args.output_file[output_index]
+            if args.output_file
+            else f".datavine-idata-{output_data_id}.stage"
+        )
         with stage.open("wb") as stream:
             stream.write(payload)
             stream.flush()
@@ -184,18 +216,18 @@ def main(argv=None):
         staged_payload = stage.read_bytes()
         if len(staged_payload) <= args.idata_inline_threshold:
             publication = client.publish_idata(
-                task.output_data_id, args.attempt, staged_payload
+                output_data_id, args.attempt, staged_payload
             )
         else:
             publication = client.publish_idata_metadata(
-                task.output_data_id,
+                output_data_id,
                 args.attempt,
                 hashlib.sha256(staged_payload).hexdigest(),
                 len(staged_payload),
             )
         prepared = client.prepare_replica(
-            f"i:{task.output_data_id}",
-            replica_id(f"i:{task.output_data_id}"),
+            f"i:{output_data_id}",
+            replica_id(f"i:{output_data_id}"),
             args.attempt,
             "worker-disk",
             publication["content_hash"],
@@ -208,6 +240,7 @@ def main(argv=None):
             + json.dumps(
                 {
                     "data_id": prepared["data_id"],
+                    "output_index": output_index,
                     "replica_id": prepared["replica_id"],
                     "generation": prepared["generation"],
                     "attempt": prepared["attempt"],
@@ -220,13 +253,16 @@ def main(argv=None):
                 separators=(",", ":"),
             )
         )
-    finally:
-        if args.output_file is None:
+        if not args.output_file:
             stage.unlink(missing_ok=True)
+        print(
+            "DATAVINE "
+            f"task={task.task_id} slot={output_index} "
+            f"output=i{output_data_id} bytes={len(payload)}"
+        )
     print(
-        "DATAVINE "
-        f"task={task.task_id} output=i{task.output_data_id} "
-        f"bytes={len(payload)}"
+        f"DATAVINE_OUTPUTS task={task.task_id} "
+        f"count={len(task.output_data_ids)} bytes={total_bytes}"
     )
     return 0
 

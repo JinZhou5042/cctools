@@ -71,6 +71,7 @@ class EDataRecord:
 class IDataRecord:
     data_id: int
     producer_task_id: int
+    producer_output_index: int = 0
     content_hash: str | None = None
     serialized_bytes: bytes | None = None
     attempt: int = 0
@@ -85,8 +86,27 @@ class TaskRecord:
     function_data_id: int
     positional: tuple
     keyword: tuple
-    output_data_id: int
+    output_data_ids: tuple
     input_data_ids: tuple
+
+    def __post_init__(self):
+        output_data_ids = self.output_data_ids
+        if isinstance(output_data_ids, int):
+            output_data_ids = (output_data_ids,)
+        else:
+            output_data_ids = tuple(int(value) for value in output_data_ids)
+        if not output_data_ids:
+            raise ValueError("TaskRecord requires at least one output")
+        if len(set(output_data_ids)) != len(output_data_ids):
+            raise ValueError("TaskRecord output IDataIDs must be unique")
+        object.__setattr__(self, "output_data_ids", output_data_ids)
+
+    @property
+    def output_data_id(self):
+        """Return the sole output of a single-output task."""
+        if len(self.output_data_ids) != 1:
+            raise ValueError("multi-output TaskRecord has no sole output")
+        return self.output_data_ids[0]
 
     def to_dict(self):
         return {
@@ -94,12 +114,15 @@ class TaskRecord:
             "function_data_id": self.function_data_id,
             "positional": [list(value) for value in self.positional],
             "keyword": [[name, list(value)] for name, value in self.keyword],
-            "output_data_id": self.output_data_id,
+            "output_data_ids": list(self.output_data_ids),
             "input_data_ids": list(self.input_data_ids),
         }
 
     @classmethod
     def from_dict(cls, value):
+        output_data_ids = value.get("output_data_ids")
+        if output_data_ids is None:
+            output_data_ids = (value["output_data_id"],)
         return cls(
             task_id=int(value["task_id"]),
             function_data_id=int(value["function_data_id"]),
@@ -111,7 +134,9 @@ class TaskRecord:
                 (str(name), (str(binding[0]), int(binding[1])))
                 for name, binding in value["keyword"]
             ),
-            output_data_id=int(value["output_data_id"]),
+            output_data_ids=tuple(
+                int(data_id) for data_id in output_data_ids
+            ),
             input_data_ids=tuple(
                 int(data_id) for data_id in value["input_data_ids"]
             ),

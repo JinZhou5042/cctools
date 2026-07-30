@@ -51,6 +51,7 @@ class TaskSchedulerThread:
         self._ready = threading.Event()
         self._manager = None
         self._logical_outputs = {}
+        self._logical_output_slots = {}
         self._edata_files = {}
         self._idata_files = {}
         self._attempts = {}
@@ -345,13 +346,17 @@ class TaskSchedulerThread:
         self._assert_owner()
         workflow.validate()
         self._logical_outputs = {}
+        self._logical_output_slots = {}
         self._edata_by_object = {}
         self._serialization_count = 0
         self._bulk_serialization_count = 0
         for task in workflow.tasks:
-            self._logical_outputs[
-                task.task_id
-            ] = self.controller.allocate_idata(task.task_id)
+            output_data_ids = tuple(
+                self.controller.allocate_idata(task.task_id, output_index)
+                for output_index in range(task.output_count)
+            )
+            self._logical_output_slots[task.task_id] = output_data_ids
+            self._logical_outputs[task.task_id] = output_data_ids[0]
         for task in workflow.tasks:
             self._nested_idata_by_task[task.task_id] = set()
             positional = tuple(
@@ -366,13 +371,13 @@ class TaskSchedulerThread:
                 self._register_value(task.function, "function"),
                 positional,
                 keyword,
-                self._logical_outputs[task.task_id],
+                self._logical_output_slots[task.task_id],
                 tuple(
                     sorted(
                         {
-                            self._logical_outputs[
+                            self._logical_output_slots[
                                 reference.producer_task_id
-                            ]
+                            ][reference.output_index]
                             for value in (
                                 *task.args,
                                 *task.kwargs.values(),
@@ -389,11 +394,18 @@ class TaskSchedulerThread:
 
     def _binding(self, task_id, value):
         if isinstance(value, OutputRef):
-            return ("i", self._logical_outputs[value.producer_task_id])
+            return (
+                "i",
+                self._logical_output_slots[value.producer_task_id][
+                    value.output_index
+                ],
+            )
         references = tuple(iter_output_refs(value))
         if references:
             self._nested_idata_by_task[task_id].update(
-                self._logical_outputs[reference.producer_task_id]
+                self._logical_output_slots[
+                    reference.producer_task_id
+                ][reference.output_index]
                 for reference in references
             )
             return ("c", self._register_value(value, "container"))
@@ -466,6 +478,11 @@ class TaskSchedulerThread:
                 "TaskVine Manager rejected cache byte admission capacity"
             )
         output_ids = self._op_register_workflow(workflow)
+        producer_by_data_id = {
+            data_id: task_id
+            for task_id, data_ids in self._logical_output_slots.items()
+            for data_id in data_ids
+        }
         if result_task_ids is None:
             result_task_ids = tuple(output_ids)
         else:
@@ -607,7 +624,10 @@ class TaskSchedulerThread:
                     remaining_cache_uses.get(data_key, 0) + 1
                 )
         max_task_cache_items = max(
-            (len(keys) + 1 for keys in task_cache_inputs.values()),
+            (
+                len(keys) + len(self._logical_output_slots[task_id])
+                for task_id, keys in task_cache_inputs.items()
+            ),
             default=0,
         )
         if (
@@ -797,34 +817,39 @@ class TaskSchedulerThread:
                 suspended_persistence_recovery.pop(data_id)
             recovery_wave = []
 
-            def require_available(task_id):
+            def require_available(data_id):
                 nonlocal recovery_reexecutions
+                task_id = producer_by_data_id[data_id]
                 if task_id not in done:
                     return
-                output_data_id = output_ids[task_id]
                 output_status = self.controller.idata_status(
-                    output_data_id
+                    data_id
                 )
                 if output_status["available"]:
                     return
                 self._manager.prune_file(
-                    self._idata_files[output_data_id]
+                    self._idata_files[data_id]
                 )
                 self.controller.set_task_state(task_id, "pending")
                 done.remove(task_id)
                 pending.add(task_id)
                 recovery_reexecutions += 1
                 recovery_wave.append(task_id)
-                for parent_task_id in sorted(dependencies[task_id]):
-                    require_available(parent_task_id)
+                producer_record = self.controller.get_task(task_id)
+                for input_data_id in producer_record.input_data_ids:
+                    require_available(input_data_id)
 
             for pending_task_id in sorted(pending):
-                for parent_task_id in sorted(
-                    dependencies[pending_task_id]
-                ):
-                    require_available(parent_task_id)
+                pending_record = self.controller.get_task(
+                    pending_task_id
+                )
+                for input_data_id in pending_record.input_data_ids:
+                    require_available(input_data_id)
             for result_task_id in sorted(result_task_ids):
-                require_available(result_task_id)
+                for result_data_id in self._logical_output_slots[
+                    result_task_id
+                ]:
+                    require_available(result_data_id)
             if recovery_wave:
                 plan = self.controller.pruning_plan()
                 recovery_waves.append(
@@ -883,10 +908,14 @@ class TaskSchedulerThread:
                         not in frontier_pruning_applied
                     ):
                         return False
-                    parent_data_id = output_ids[parent_task_id]
-                    if self.controller.idata_status(parent_data_id)[
-                        "durability"
-                    ] != "durable":
+                    if any(
+                        self.controller.idata_status(data_id)[
+                            "durability"
+                        ] != "durable"
+                        for data_id in self._logical_output_slots[
+                            parent_task_id
+                        ]
+                    ):
                         return False
                 return True
 
@@ -996,12 +1025,7 @@ class TaskSchedulerThread:
                                 "globally lost IData was not protected "
                                 "from pruning"
                             )
-                        logical_id = next(
-                            task_id
-                            for task_id, output_data_id
-                            in output_ids.items()
-                            if output_data_id == data_id
-                        )
+                        logical_id = producer_by_data_id[data_id]
                         if logical_id not in done:
                             raise RuntimeError(
                                 "persistence loss target was not "
@@ -1222,12 +1246,7 @@ class TaskSchedulerThread:
                 )
                 persistence_tasks_completed += 1
                 persistence_worker_bytes += int(status["size"])
-                frontier_task_id = next(
-                    task_id
-                    for task_id, output_data_id
-                    in output_ids.items()
-                    if output_data_id == data_id
-                )
+                frontier_task_id = producer_by_data_id[data_id]
                 if (
                     frontier_task_id
                     in prune_after_persistence_by_task
@@ -1286,87 +1305,103 @@ class TaskSchedulerThread:
                 for line in completed.output.splitlines()
                 if line.startswith("DATAVINE_REPLICA_PREPARED ")
             ]
-            if len(preparation_lines) != 1:
+            expected_output_ids = self._logical_output_slots[logical_id]
+            if len(preparation_lines) != len(expected_output_ids):
                 raise RuntimeError(
                     f"TaskID {logical_id} returned "
-                    f"{len(preparation_lines)} replica preparations"
+                    f"{len(preparation_lines)} replica preparations; "
+                    f"expected {len(expected_output_ids)}"
                 )
-            preparation = json.loads(preparation_lines[0])
-            if (
-                preparation["data_id"]
-                != f"i:{output_ids[logical_id]}"
-                or preparation["attempt"] != self._attempts[logical_id]
-            ):
+            preparations = {
+                int(preparation["output_index"]): preparation
+                for preparation in map(json.loads, preparation_lines)
+            }
+            if set(preparations) != set(range(len(expected_output_ids))):
                 raise RuntimeError(
-                    f"TaskID {logical_id} returned mismatched replica"
+                    f"TaskID {logical_id} returned invalid output slots"
                 )
-            self.controller.commit_replica(
-                preparation["data_id"],
-                preparation["replica_id"],
-                preparation["generation"],
-                preparation["attempt"],
-                preparation["content_hash"],
-                preparation["size"],
-            )
-            self._cache_admission.observe(preparation)
-            # Publication is the completion contract, not process exit alone.
-            output_status = self.controller.idata_status(
-                output_ids[logical_id]
-            )
-            if (
-                not output_status["available"]
-                or output_status["attempt"]
-                != self._attempts[logical_id]
-                or output_status["content_hash"]
-                != preparation["content_hash"]
-                or output_status["size"] != preparation["size"]
+            for output_index, output_data_id in enumerate(
+                expected_output_ids
             ):
-                raise RuntimeError(
-                    f"TaskID {logical_id} publication is not available"
+                preparation = preparations[output_index]
+                if (
+                    preparation["data_id"] != f"i:{output_data_id}"
+                    or preparation["attempt"]
+                    != self._attempts[logical_id]
+                ):
+                    raise RuntimeError(
+                        f"TaskID {logical_id} returned mismatched replica"
+                    )
+                self.controller.commit_replica(
+                    preparation["data_id"],
+                    preparation["replica_id"],
+                    preparation["generation"],
+                    preparation["attempt"],
+                    preparation["content_hash"],
+                    preparation["size"],
                 )
-            if output_status["controller_inline"]:
-                self.controller.fetch_idata(output_ids[logical_id])
+                self._cache_admission.observe(preparation)
+                # Every output slot must be published before the logical task
+                # can complete.
+                output_status = self.controller.idata_status(
+                    output_data_id
+                )
+                if (
+                    not output_status["available"]
+                    or output_status["attempt"]
+                    != self._attempts[logical_id]
+                    or output_status["content_hash"]
+                    != preparation["content_hash"]
+                    or output_status["size"] != preparation["size"]
+                ):
+                    raise RuntimeError(
+                        f"TaskID {logical_id} output {output_index} "
+                        "publication is not available"
+                    )
+                if output_status["controller_inline"]:
+                    self.controller.fetch_idata(output_data_id)
             if (
                 persist_outputs
                 and logical_id in persistence_attempts_by_task
                 and self._attempts[logical_id]
                 >= persistence_attempts_by_task[logical_id]
             ):
-                persistence_status = self.controller.persist_idata(
-                    output_ids[logical_id]
-                )
-                persistence_required.add(output_ids[logical_id])
-                request = persistence_status.get(
-                    "persistence_request", {}
-                )
-                if request.get("mode") == "worker":
-                    if (
-                        inject_external_persistence_cancel
-                        or inject_global_loss_during_persistence
-                    ):
-                        request = {
-                            **request,
-                            "inject_cancel_delay": True,
-                        }
-                    if (
-                        injected_external_persistence_failures
-                        < inject_external_persistence_failures
-                    ):
-                        request = {
-                            **request,
-                            "inject_failure_during_write": True,
-                            "inject_failure_delay": (
-                                external_persistence_failure_delay
-                            ),
-                        }
-                        injected_external_persistence_failures += 1
-                    persistence_pending.append(
-                        (
-                            time.monotonic(),
-                            output_ids[logical_id],
-                            request,
-                        )
+                for output_data_id in expected_output_ids:
+                    persistence_status = self.controller.persist_idata(
+                        output_data_id
                     )
+                    persistence_required.add(output_data_id)
+                    request = persistence_status.get(
+                        "persistence_request", {}
+                    )
+                    if request.get("mode") == "worker":
+                        if (
+                            inject_external_persistence_cancel
+                            or inject_global_loss_during_persistence
+                        ):
+                            request = {
+                                **request,
+                                "inject_cancel_delay": True,
+                            }
+                        if (
+                            injected_external_persistence_failures
+                            < inject_external_persistence_failures
+                        ):
+                            request = {
+                                **request,
+                                "inject_failure_during_write": True,
+                                "inject_failure_delay": (
+                                    external_persistence_failure_delay
+                                ),
+                            }
+                            injected_external_persistence_failures += 1
+                        persistence_pending.append(
+                            (
+                                time.monotonic(),
+                                output_data_id,
+                                request,
+                            )
+                        )
             self.controller.set_task_state(logical_id, "completed")
             done.add(logical_id)
             if logical_id not in completed_once:
@@ -1526,6 +1561,31 @@ class TaskSchedulerThread:
         self._manager._refresh_stats()
         self._last_run_report = {
             "logical_tasks": len(output_ids),
+            "logical_output_slots": {
+                str(task_id): list(data_ids)
+                for task_id, data_ids
+                in sorted(self._logical_output_slots.items())
+            },
+            "logical_output_status": {
+                str(data_id): {
+                    key: status[key]
+                    for key in (
+                        "producer_task_id",
+                        "producer_output_index",
+                        "attempt",
+                        "content_hash",
+                        "size",
+                        "available",
+                        "durability",
+                    )
+                }
+                for data_id in sorted(producer_by_data_id)
+                for status in (self.controller.idata_status(data_id),)
+            },
+            "attempts_by_task": {
+                str(task_id): attempt
+                for task_id, attempt in sorted(self._attempts.items())
+            },
             "physical_attempts": sum(self._attempts.values()),
             "recovery_reexecutions": recovery_reexecutions,
             "recovery_waves": recovery_waves,
@@ -1640,8 +1700,16 @@ class TaskSchedulerThread:
             ),
         }
         return {
-            task_id: self._load_result(output_data_id)
-            for task_id, output_data_id in output_ids.items()
+            task_id: (
+                self._load_result(output_ids_for_task[0])
+                if len(output_ids_for_task) == 1
+                else tuple(
+                    self._load_result(output_data_id)
+                    for output_data_id in output_ids_for_task
+                )
+            )
+            for task_id, output_ids_for_task
+            in self._logical_output_slots.items()
             if task_id in result_task_ids
         }
 
@@ -1797,7 +1865,10 @@ class TaskSchedulerThread:
         from ndcctools.taskvine import Task
 
         record = self.controller.get_task(task_id)
-        output_name = f"datavine-idata-{record.output_data_id}.pkl"
+        output_names = tuple(
+            f"datavine-idata-{data_id}.pkl"
+            for data_id in record.output_data_ids
+        )
         command = " ".join(
             shlex.quote(value)
             for value in (
@@ -1812,8 +1883,11 @@ class TaskSchedulerThread:
                 str(task_id),
                 "--attempt",
                 str(attempt),
-                "--output-file",
-                output_name,
+                *(
+                    value
+                    for output_name in output_names
+                    for value in ("--output-file", output_name)
+                ),
                 "--idata-inline-threshold",
                 str(idata_inline_threshold),
             )
@@ -1854,12 +1928,13 @@ class TaskSchedulerThread:
                 self._idata_files[data_id],
                 f"datavine-idata-{data_id}.pkl",
             )
-        output_file = self._idata_output_file(
-            record.output_data_id, attempt
-        )
-        task.add_output(
-            output_file, output_name
-        )
+        for output_data_id, output_name in zip(
+            record.output_data_ids, output_names
+        ):
+            output_file = self._idata_output_file(
+                output_data_id, attempt
+            )
+            task.add_output(output_file, output_name)
         if environment is not None:
             task.add_environment(environment)
         return task

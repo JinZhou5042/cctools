@@ -422,7 +422,9 @@ def run_case(
             assert snapshot["available_idata"] == (
                 0
                 if apply_pruning
-                else len(workflow.tasks) - runtime_pruned
+                else sum(
+                    task.output_count for task in workflow.tasks
+                ) - runtime_pruned
             )
             assert snapshot["tasks"] == len(workflow.tasks)
             return snapshot

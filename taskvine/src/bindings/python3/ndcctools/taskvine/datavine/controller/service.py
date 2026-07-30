@@ -671,7 +671,8 @@ class ControllerService:
                     try:
                         request = self._read_json()
                         record = owner.state.allocate_idata(
-                            request["producer_task_id"]
+                            request["producer_task_id"],
+                            request.get("producer_output_index", 0),
                         )
                     except Exception as exc:
                         self._error(400, exc)
