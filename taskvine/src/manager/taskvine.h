@@ -1085,6 +1085,14 @@ This is a testing support hook, not a normal manager control operation.
 */
 int vine_manager_release_random_worker(struct vine_manager *m);
 
+/** Shut down one named worker for deterministic failure-injection tests.
+This is a testing support hook, not a normal manager control operation.
+@param m A manager object.
+@param worker_id The exact TaskVine WorkerID to terminate.
+@return Non-zero if the named worker was found and shut down.
+*/
+int vine_manager_shut_down_worker_by_id(struct vine_manager *m, const char *worker_id);
+
 /** Wait for a task to complete.
 This call will block until either a task has completed, the timeout has expired, or the manager is empty.
 If a task has completed, the corresponding task object will be returned by this function.

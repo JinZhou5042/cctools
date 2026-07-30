@@ -270,6 +270,42 @@ def main():
             1,
         )
         client.report_replica(
+            f"i:{idata.data_id}",
+            "global-loss-w1",
+            1,
+            "worker-disk",
+            output_hash,
+            len(idata_payload),
+            "w1",
+            2,
+        )
+        client.report_replica(
+            f"i:{idata.data_id}",
+            "global-loss-w2",
+            1,
+            "worker-dram",
+            output_hash,
+            len(idata_payload),
+            "w2",
+            1,
+        )
+        assert len(
+            client.replica_sources(f"i:{idata.data_id}")["sources"]
+        ) == 3
+        invalid_before = client.snapshot()["replica_directory"][
+            "replica_states"
+        ]["invalid"]
+        assert (
+            client.invalidate_idata(idata.data_id)["action"]
+            == "globally-lost"
+        )
+        assert client.replica_sources(
+            f"i:{idata.data_id}"
+        )["sources"] == []
+        assert client.snapshot()["replica_directory"][
+            "replica_states"
+        ]["invalid"] >= invalid_before + 3
+        client.report_replica(
             f"i:{same_bytes.data_id}",
             "w2-idata-two",
             1,

@@ -423,6 +423,11 @@ class TaskSchedulerThread:
         external_persistence_retry_max_seconds=5,
         external_persistence_failure_delay=2,
         inject_global_loss_during_persistence=False,
+        persistence_attempts_by_task=None,
+        inject_worker_loss_schedule=None,
+        inject_worker_loss_data_by_task=None,
+        prune_after_persistence_by_task=None,
+        worker_loss_process_shutdown=False,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -477,6 +482,98 @@ class TaskSchedulerThread:
             ]
         )
         task_by_id = {task.task_id: task for task in workflow.tasks}
+        explicit_persistence_frontiers = (
+            persistence_attempts_by_task is not None
+        )
+        if persistence_attempts_by_task is None:
+            persistence_attempts_by_task = {
+                task_id: 1 for task_id in task_by_id
+            }
+        else:
+            persistence_attempts_by_task = {
+                int(task_id): int(attempt)
+                for task_id, attempt
+                in persistence_attempts_by_task.items()
+            }
+            unknown_persistence = (
+                set(persistence_attempts_by_task) - set(task_by_id)
+            )
+            if unknown_persistence:
+                raise KeyError(
+                    "unknown persistence TaskIDs "
+                    f"{sorted(unknown_persistence)}"
+                )
+            if any(
+                attempt < 1
+                for attempt in persistence_attempts_by_task.values()
+            ):
+                raise ValueError(
+                    "persistence attempt thresholds must be positive"
+                )
+        persistence_frontier_tasks = (
+            set(persistence_attempts_by_task)
+            if explicit_persistence_frontiers
+            else set()
+        )
+        if inject_worker_loss_schedule is None:
+            worker_loss_schedule = (
+                ()
+                if inject_worker_loss_after is None
+                else (int(inject_worker_loss_after),)
+            )
+        else:
+            worker_loss_schedule = tuple(
+                int(task_id)
+                for task_id in inject_worker_loss_schedule
+            )
+            unknown_losses = set(worker_loss_schedule) - set(task_by_id)
+            if unknown_losses:
+                raise KeyError(
+                    f"unknown worker-loss TaskIDs "
+                    f"{sorted(unknown_losses)}"
+                )
+        inject_worker_loss_data_by_task = {
+            int(trigger_task_id): tuple(
+                int(producer_task_id)
+                for producer_task_id in producer_task_ids
+            )
+            for trigger_task_id, producer_task_ids in (
+                inject_worker_loss_data_by_task or {}
+            ).items()
+        }
+        unknown_loss_data = {
+            task_id
+            for trigger_task_id, producer_task_ids
+            in inject_worker_loss_data_by_task.items()
+            for task_id in (trigger_task_id, *producer_task_ids)
+            if task_id not in task_by_id
+        }
+        if unknown_loss_data:
+            raise KeyError(
+                "unknown worker-loss data TaskIDs "
+                f"{sorted(unknown_loss_data)}"
+            )
+        prune_after_persistence_by_task = {
+            int(frontier_task_id): tuple(
+                int(producer_task_id)
+                for producer_task_id in producer_task_ids
+            )
+            for frontier_task_id, producer_task_ids in (
+                prune_after_persistence_by_task or {}
+            ).items()
+        }
+        unknown_prune_tasks = {
+            task_id
+            for frontier_task_id, producer_task_ids
+            in prune_after_persistence_by_task.items()
+            for task_id in (frontier_task_id, *producer_task_ids)
+            if task_id not in task_by_id
+        }
+        if unknown_prune_tasks:
+            raise KeyError(
+                "unknown frontier-prune TaskIDs "
+                f"{sorted(unknown_prune_tasks)}"
+            )
         dependencies = {
             task.task_id: {
                 reference.producer_task_id
@@ -587,6 +684,10 @@ class TaskSchedulerThread:
         persistence_pending = []
         persistence_running = {}
         persistence_tasks_completed = 0
+        persistence_required = set()
+        frontier_pruning = []
+        frontier_pruning_applied = set()
+        frontier_pruning_pending = {}
         persistence_worker_bytes = 0
         persistence_cancellations = 0
         persistence_failures = 0
@@ -647,8 +748,10 @@ class TaskSchedulerThread:
         done = set()
         completed_once = set()
         recovery_reexecutions = 0
+        recovery_waves = []
         loss_injected = False
-        worker_loss_injected = False
+        worker_loss_injections = 0
+        worker_loss_events = []
         local_idata_hits = 0
         while (
             pending
@@ -657,6 +760,7 @@ class TaskSchedulerThread:
             or persistence_pending
             or persistence_running
             or suspended_persistence_recovery
+            or frontier_pruning_pending
         ):
             for data_id, recovery in tuple(
                 suspended_persistence_recovery.items()
@@ -691,23 +795,107 @@ class TaskSchedulerThread:
                     )
                 pending.add(recovery["logical_id"])
                 suspended_persistence_recovery.pop(data_id)
-            for completed_task_id in tuple(done):
-                output_data_id = output_ids[completed_task_id]
-                output_status = self.controller.idata_status(output_data_id)
-                if not output_status["available"]:
-                    self._manager.prune_file(
-                        self._idata_files[output_data_id]
+            recovery_wave = []
+
+            def require_available(task_id):
+                nonlocal recovery_reexecutions
+                if task_id not in done:
+                    return
+                output_data_id = output_ids[task_id]
+                output_status = self.controller.idata_status(
+                    output_data_id
+                )
+                if output_status["available"]:
+                    return
+                self._manager.prune_file(
+                    self._idata_files[output_data_id]
+                )
+                self.controller.set_task_state(task_id, "pending")
+                done.remove(task_id)
+                pending.add(task_id)
+                recovery_reexecutions += 1
+                recovery_wave.append(task_id)
+                for parent_task_id in sorted(dependencies[task_id]):
+                    require_available(parent_task_id)
+
+            for pending_task_id in sorted(pending):
+                for parent_task_id in sorted(
+                    dependencies[pending_task_id]
+                ):
+                    require_available(parent_task_id)
+            for result_task_id in sorted(result_task_ids):
+                require_available(result_task_id)
+            if recovery_wave:
+                plan = self.controller.pruning_plan()
+                recovery_waves.append(
+                    {
+                        "tasks": recovery_wave,
+                        "rollback_depth": len(recovery_wave),
+                        "recovery_depths": plan["recovery_depths"],
+                    }
+                )
+
+            if (
+                frontier_pruning_pending
+                and not running
+                and not prefetch_running
+                and not persistence_running
+            ):
+                frontier_task_id = min(frontier_pruning_pending)
+                prune_data_ids = frontier_pruning_pending.pop(
+                    frontier_task_id
+                )
+                prune_result = self._op_apply_pruning(
+                    0, prune_data_ids, None, 30
+                )
+                frontier_pruning.append(
+                    {
+                        "frontier_task_id": frontier_task_id,
+                        "data_ids": prune_data_ids,
+                        "result": prune_result,
+                    }
+                )
+                frontier_pruning_applied.add(frontier_task_id)
+                continue
+
+            def persistence_frontier_ready(task_id):
+                if not persist_outputs:
+                    return True
+                for parent_task_id in dependencies[task_id]:
+                    if (
+                        parent_task_id
+                        not in persistence_frontier_tasks
+                    ):
+                        continue
+                    threshold = persistence_attempts_by_task.get(
+                        parent_task_id
                     )
-                    self.controller.set_task_state(
-                        completed_task_id, "pending"
-                    )
-                    done.remove(completed_task_id)
-                    pending.add(completed_task_id)
-                    recovery_reexecutions += 1
+                    if (
+                        threshold is None
+                        or self._attempts.get(parent_task_id, 0)
+                        < threshold
+                    ):
+                        continue
+                    if (
+                        parent_task_id
+                        in prune_after_persistence_by_task
+                        and parent_task_id
+                        not in frontier_pruning_applied
+                    ):
+                        return False
+                    parent_data_id = output_ids[parent_task_id]
+                    if self.controller.idata_status(parent_data_id)[
+                        "durability"
+                    ] != "durable":
+                        return False
+                return True
+
             ready = sorted(
                 task_id
                 for task_id in pending
-                if dependencies[task_id] <= done
+                if not frontier_pruning_pending
+                and dependencies[task_id] <= done
+                and persistence_frontier_ready(task_id)
                 and not (
                     task_cache_inputs[task_id]
                     & self._cache_admission.prune_by_data
@@ -728,6 +916,7 @@ class TaskSchedulerThread:
                 pending.remove(task_id)
             while (
                 persistence_pending
+                and not frontier_pruning_pending
                 and len(persistence_running) < persistence_capacity
             ):
                 persistence_pending.sort(key=lambda entry: entry[0])
@@ -1033,6 +1222,25 @@ class TaskSchedulerThread:
                 )
                 persistence_tasks_completed += 1
                 persistence_worker_bytes += int(status["size"])
+                frontier_task_id = next(
+                    task_id
+                    for task_id, output_data_id
+                    in output_ids.items()
+                    if output_data_id == data_id
+                )
+                if (
+                    frontier_task_id
+                    in prune_after_persistence_by_task
+                    and frontier_task_id
+                    not in frontier_pruning_applied
+                ):
+                    frontier_pruning_pending[frontier_task_id] = [
+                        output_ids[task_id]
+                        for task_id
+                        in prune_after_persistence_by_task[
+                            frontier_task_id
+                        ]
+                    ]
                 continue
             logical_id = running.pop(completed.id)
             if persistence_running or persistence_pending:
@@ -1118,10 +1326,16 @@ class TaskSchedulerThread:
                 )
             if output_status["controller_inline"]:
                 self.controller.fetch_idata(output_ids[logical_id])
-            if persist_outputs:
+            if (
+                persist_outputs
+                and logical_id in persistence_attempts_by_task
+                and self._attempts[logical_id]
+                >= persistence_attempts_by_task[logical_id]
+            ):
                 persistence_status = self.controller.persist_idata(
                     output_ids[logical_id]
                 )
+                persistence_required.add(output_ids[logical_id])
                 request = persistence_status.get(
                     "persistence_request", {}
                 )
@@ -1168,19 +1382,71 @@ class TaskSchedulerThread:
                 )
                 loss_injected = True
             if (
-                inject_worker_loss_after == logical_id
-                and not worker_loss_injected
+                worker_loss_injections < len(worker_loss_schedule)
+                and worker_loss_schedule[worker_loss_injections]
+                == logical_id
             ):
                 from ndcctools.taskvine import cvine
-                if not cvine.vine_manager_release_random_worker(
-                    self._manager._taskvine
-                ):
+                workers_before = sorted(self._sync_worker_epochs())
+                if not workers_before:
                     raise RuntimeError(
                         "no worker available for loss injection"
                     )
-                self.controller.invalidate_idata(
-                    output_ids[logical_id]
+                target_replica_worker_ids = []
+                if worker_loss_process_shutdown:
+                    target_data_id = output_ids[logical_id]
+                    target_sources = self.controller.replica_sources(
+                        f"i:{target_data_id}"
+                    )["sources"]
+                    target_replica_worker_ids = sorted(
+                        {
+                            source["worker_id"]
+                            for source in target_sources
+                            if source.get("worker_id")
+                            in workers_before
+                            and str(source.get("tier", "")).startswith(
+                                "worker-"
+                            )
+                        }
+                    )
+                    if not target_replica_worker_ids:
+                        raise RuntimeError(
+                            "no connected volatile replica worker for "
+                            f"loss target i:{target_data_id}"
+                        )
+                    released_worker_id = target_replica_worker_ids[0]
+                    if not cvine.vine_manager_shut_down_worker_by_id(
+                        self._manager._taskvine, released_worker_id
+                    ):
+                        raise RuntimeError(
+                            "could not shut down deterministic worker "
+                            f"{released_worker_id}"
+                        )
+                else:
+                    if not cvine.vine_manager_release_random_worker(
+                        self._manager._taskvine
+                    ):
+                        raise RuntimeError(
+                            "could not release worker"
+                        )
+                workers_after = sorted(self._sync_worker_epochs())
+                if not worker_loss_process_shutdown:
+                    released = sorted(
+                        set(workers_before) - set(workers_after)
+                    )
+                    released_worker_id = (
+                        released[0] if len(released) == 1 else None
+                    )
+                lost_task_ids = inject_worker_loss_data_by_task.get(
+                    logical_id, (logical_id,)
                 )
+                for lost_task_id in lost_task_ids:
+                    self.controller.invalidate_idata(
+                        output_ids[lost_task_id]
+                    )
+                    self._manager.prune_file(
+                        self._idata_files[output_ids[lost_task_id]]
+                    )
                 removed_persistence = [
                     entry
                     for entry in persistence_pending
@@ -1199,17 +1465,24 @@ class TaskSchedulerThread:
                     for entry in persistence_pending
                     if entry[1] != output_ids[logical_id]
                 ]
-                worker_loss_injected = True
-                # Deterministic injection is a scheduler event: revoke the
-                # logical completion in the same turn so no downstream task
-                # can observe the intentionally lost replica generation.
-                self._manager.prune_file(
-                    self._idata_files[output_ids[logical_id]]
+                worker_loss_events.append(
+                    {
+                        "trigger_task_id": logical_id,
+                        "released_worker_id": released_worker_id,
+                        "workers_before": workers_before,
+                        "workers_after": workers_after,
+                        "lost_task_ids": list(lost_task_ids),
+                        "target_replica_worker_ids": (
+                            target_replica_worker_ids
+                        ),
+                        "process_shutdown": bool(
+                            worker_loss_process_shutdown
+                        ),
+                    }
                 )
-                self.controller.set_task_state(logical_id, "pending")
-                done.remove(logical_id)
-                pending.add(logical_id)
-                recovery_reexecutions += 1
+                worker_loss_injections += 1
+                # Prevent a downstream dispatch until the next scheduler
+                # turn computes the target-driven recovery closure.
             self._cache_admission.enforce(
                 self._manager,
                 self._file_for_data_key,
@@ -1247,7 +1520,7 @@ class TaskSchedulerThread:
                     "worker cache eviction acknowledgements timed out"
                 )
         if persist_outputs:
-            for output_data_id in output_ids.values():
+            for output_data_id in sorted(persistence_required):
                 self._wait_durable(output_data_id)
         physical_cache_workers = self._manager.status("workers")
         self._manager._refresh_stats()
@@ -1255,12 +1528,35 @@ class TaskSchedulerThread:
             "logical_tasks": len(output_ids),
             "physical_attempts": sum(self._attempts.values()),
             "recovery_reexecutions": recovery_reexecutions,
+            "recovery_waves": recovery_waves,
             "legacy_recovery_tasks": int(
                 self._manager.stats.tasks_recovery
             ),
             "loss_injected": loss_injected,
             "local_idata_hits": local_idata_hits,
-            "worker_loss_injected": worker_loss_injected,
+            "worker_loss_injected": bool(worker_loss_injections),
+            "worker_loss_injections": worker_loss_injections,
+            "worker_loss_schedule": list(worker_loss_schedule),
+            "worker_loss_events": worker_loss_events,
+            "worker_loss_process_shutdown": bool(
+                worker_loss_process_shutdown
+            ),
+            "worker_loss_data_by_task": {
+                str(task_id): list(data_task_ids)
+                for task_id, data_task_ids
+                in inject_worker_loss_data_by_task.items()
+            },
+            "persistence_required_data_ids": sorted(
+                persistence_required
+            ),
+            "frontier_pruning": frontier_pruning,
+            "runtime_pruned_data_ids": sorted(
+                {
+                    data_id
+                    for event in frontier_pruning
+                    for data_id in event["data_ids"]
+                }
+            ),
             "persistence_tasks_completed": (
                 persistence_tasks_completed
             ),

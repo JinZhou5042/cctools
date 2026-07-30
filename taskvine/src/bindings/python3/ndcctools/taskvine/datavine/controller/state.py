@@ -1275,17 +1275,15 @@ class ControllerState:
                 )
                 return "validated-durable"
             self._cancel_persistence_locked(old.data_id, "global-loss")
-            try:
-                replica = self.replicas.get_replica(
-                    f"i:{old.data_id}",
-                    (
-                        f"controller-idata-{old.data_id}-"
-                        f"attempt-{old.attempt}"
-                    ),
-                )
-            except KeyError:
-                replica = None
-            if replica is not None:
+            for replica in self.replicas.records_for(
+                f"i:{old.data_id}"
+            ):
+                if (
+                    replica.attempt != old.attempt
+                    or replica.state
+                    in ("invalid", "pruned", "quarantined")
+                ):
+                    continue
                 self.replicas.invalidate_replica(
                     replica.data_id,
                     replica.replica_id,

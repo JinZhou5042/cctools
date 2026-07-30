@@ -115,6 +115,12 @@ def run_case(
     external_persistence_retry_max_seconds=5,
     external_persistence_failure_delay=2,
     inject_global_loss_during_persistence=False,
+    persistence_attempts_by_task=None,
+    inject_worker_loss_schedule=None,
+    inject_worker_loss_data_by_task=None,
+    replacement_worker_delays=(),
+    prune_after_persistence_by_task=None,
+    worker_loss_process_shutdown=False,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -194,6 +200,7 @@ def run_case(
         scheduler = None
         workers = []
         replacement_timer = None
+        replacement_timers = []
         try:
             ready = wait_json(ready_path)
             client = ControllerClient(
@@ -267,6 +274,11 @@ def run_case(
                 external_persistence_retry_max_seconds,
                 external_persistence_failure_delay,
                 inject_global_loss_during_persistence,
+                persistence_attempts_by_task,
+                inject_worker_loss_schedule,
+                inject_worker_loss_data_by_task,
+                prune_after_persistence_by_task,
+                worker_loss_process_shutdown,
             )
             if (
                 replacement_worker_delay is not None
@@ -279,6 +291,16 @@ def run_case(
                     ),
                 )
                 replacement_timer.start()
+            if not factory_manager:
+                for replacement_delay in replacement_worker_delays:
+                    timer = threading.Timer(
+                        replacement_delay,
+                        lambda: workers.append(
+                            start_worker(port, cores=worker_cores)
+                        ),
+                    )
+                    timer.start()
+                    replacement_timers.append(timer)
             if inject_loss:
                 time.sleep(1.5)
                 os.killpg(workers[-1].pid, signal.SIGKILL)
@@ -369,7 +391,10 @@ def run_case(
             ) if persistence else []
             if persistence:
                 durable_recovery_actions = {}
-                for data_id in range(1, len(workflow.tasks) + 1):
+                persisted_data_ids = snapshot["scheduler_report"][
+                    "persistence_required_data_ids"
+                ]
+                for data_id in persisted_data_ids:
                     status = client.idata_status(data_id)
                     durable_bytes = Path(
                         status["durable_path"]
@@ -389,12 +414,22 @@ def run_case(
                 snapshot["idata_bytes_after_durable_recovery"] = (
                     client.snapshot()["idata_bytes"]
                 )
+            runtime_pruned = len(
+                snapshot["scheduler_report"].get(
+                    "runtime_pruned_data_ids", ()
+                )
+            )
             assert snapshot["available_idata"] == (
-                0 if apply_pruning else len(workflow.tasks)
+                0
+                if apply_pruning
+                else len(workflow.tasks) - runtime_pruned
             )
             assert snapshot["tasks"] == len(workflow.tasks)
             return snapshot
         finally:
+            for timer in replacement_timers:
+                timer.cancel()
+                timer.join(timeout=5)
             if replacement_timer is not None:
                 replacement_timer.cancel()
                 replacement_timer.join(timeout=5)

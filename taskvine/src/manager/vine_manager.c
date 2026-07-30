@@ -1245,6 +1245,34 @@ int vine_manager_release_random_worker(struct vine_manager *q)
 	return removed;
 }
 
+int vine_manager_shut_down_worker_by_id(struct vine_manager *q, const char *worker_id)
+{
+	if (!q || !worker_id || !worker_id[0]) {
+		return 0;
+	}
+
+	char *key;
+	struct vine_worker_info *w;
+	int iteration;
+
+	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+	{
+		if (!w || !w->workerid || strcmp(w->workerid, worker_id)) {
+			continue;
+		}
+
+		debug(
+				D_VINE | D_NOTICE,
+				"Intentionally shutting down worker %s with WorkerID %s",
+				w->hostname,
+				w->workerid);
+		vine_manager_shut_down_worker(q, w);
+		return 1;
+	}
+
+	return 0;
+}
+
 /*
 This function enforces a target worker eviction rate (1 every X seconds).
 If the observed eviction interval is shorter than the desired one, we randomly evict one worker
