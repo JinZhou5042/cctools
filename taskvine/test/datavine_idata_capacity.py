@@ -83,9 +83,7 @@ def run_bounded_case(factory_manager=None):
         prefetch=False,
         max_idata_bytes=CONTROLLER_IDATA_LIMIT,
         max_inline_idata_bytes=INLINE_LIMIT,
-        inject_worker_loss_after=(
-            None if factory_manager else large.task_id
-        ),
+        inject_worker_loss_after=large.task_id,
         replacement_worker_delay=None if factory_manager else 1,
     )
     report = snapshot["scheduler_report"]
