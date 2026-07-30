@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `aac966a09a`
+Reviewed through code commit: `fafead8bde`
 Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
@@ -143,6 +143,21 @@ and corrected HTTP error-body cache admission and request-ID barrier races.
 
 B1 remains open for DRAM, active peer-transfer loss, metadata cleanup,
 minimum-cut/frontier recovery, and scale-level I/O/fairness evidence.
+
+Correction checkpoint `fafead8bde` adds a scoped real minimum-recoverable-cut
+path. Controller-selected unique volatile replica owners are shut down as
+processes twice. Recovery reuses original tasks in rollback waves of depth four
+and three. Once task 5 is durable, IData 2–4 are physically deleted with exact
+worker acknowledgements, and the second loss recovers only tasks 6–8. Failed
+prototypes exposed and corrected a nested `manager.wait` completion-loss race,
+non-persistence frontier gating, lost compute/persistence overlap, reconnecting
+release semantics, and failure injection that did not target the replica owner.
+
+B1 remains open. The safe runtime pruning path currently drains all submitted
+compute, prefetch, and persistence work before its bounded acknowledgement
+loop; this is a correctness barrier, not independent asynchronous pruning.
+Worker DRAM, active-transfer loss, multi-branch minimum-cut optimality,
+metadata cleanup, and scale-level I/O/fairness evidence remain absent.
 
 ### B2 — Stable-root reproducibility is assumed, not proved by Controller state
 

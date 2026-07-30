@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 minimum recoverable cut and repeated-frontier recovery**
-- Validated code commit: `aac966a09a`
+- Active task: **Phase 9 multi-output identity and partial downstream demand**
+- Validated code commit: `fafead8bde`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +25,52 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 two-frontier minimum recoverable cut checkpoint
+
+Commit `fafead8bde` adds selective durability frontiers and target-driven
+recovery closure. A nine-task, 512 KiB lineage persists task 1 on its first
+attempt and task 5 only after its recovery attempt. Loss detection starts from
+unfinished consumers and required results instead of invalidating every
+completed output. The two measured rollback waves are tasks 5–2 at depth four
+and tasks 8–6 at depth three; TaskID and IDataID remain stable across 16
+physical attempts, seven ordinary reexecutions, and zero legacy TaskVine
+recovery tasks.
+
+After task 5 becomes durable, Controller proof authorizes physical deletion of
+IData 2–4. TaskVine workers acknowledge all three deletions, the acknowledgement
+trackers are released, and a second loss still recovers only tasks 6–8 from the
+task-5 durability frontier. Controller global-loss handling now invalidates
+every current non-durable replica rather than only its own inline replica.
+
+Self-review rejected six materially flawed implementations: a timer-driven
+replacement schedule with a 90-second timeout; a nested pruning wait that
+consumed an ordinary completion; durability gating in persistence-disabled
+mode; treating default persistence as an explicit scheduling frontier;
+graceful worker release that reconnected the same WorkerID; and shutdown of a
+worker not proven to own the target replica. The accepted process-loss hook
+selects the actual unique volatile source from Controller replica truth and
+shuts down that exact WorkerID. Three clean local repetitions each observe
+unique-source losses with worker counts 3→2→1 and complete in 17, 16, and 17
+seconds.
+
+The prescribed clean build/install passes. The installed suite passes 17/17;
+post-clean minimum-cut, Phase 7 graceful-release recovery, replica protocol,
+DataVine flake8, and diff checks pass. The rebuilt package SHA-256 is
+`1f1da5b661f61eaa4c532b1df65d09f84a061f96278a729df21c861f2c87761d`;
+`poncho_package_run` verifies cloudpickle 3.1.2, Workflow, and the deterministic
+shutdown API. Factory `datavine-mincut-fafead8bd` uses three package-only
+workers, shuts down the two actual unique-replica owners, returns the exact
+oracle, and removes all workers.
+
+This is a scoped linear minimum-cut checkpoint, not Ultimate Acceptance.
+Multi-branch retained-cut optimality, asynchronous non-blocking pruning, DRAM,
+active-transfer loss, scale, and the Grand Challenge remain unresolved.
+Evidence: `acceptance/artifacts/minimum-cut-fafead8bd.json`.
+
+The next smallest safe task is multi-output task identity with stable
+per-output-slot IDataIDs, nested partial demand, retry stability, and
+loss/recovery of only one demanded output.
 
 ### Phase 9 persistence/global-loss/pruning recovery-barrier checkpoint
 

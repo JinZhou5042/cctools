@@ -783,3 +783,39 @@
   process loss/repeated frontier-aware recovery/Grand Challenge comparison
   have not passed.
 - Code commits: `997d63acf`, `9512638c5`, `f6c1c712e`, `f1237b8b8`.
+# 2026-07-30 — Phase 9 two-frontier minimum recoverable cut
+
+- Added selective durability-frontier scheduling and target-driven recovery
+  closure from unfinished consumer and required-result obligations.
+- Added deterministic TaskVine process shutdown by exact WorkerID. The accepted
+  loss target is selected from the Controller replica directory, not from
+  worker ordering; both accepted losses remove the unique volatile source.
+- Persisted task 1 on attempt one and task 5 on attempt two. Recovery executes
+  tasks 5–2 at depth four, then tasks 8–6 at depth three after the newer
+  frontier; 16 physical attempts represent nine logical tasks and seven
+  ordinary reexecutions with zero legacy recovery tasks.
+- Physically deleted IData 2–4 after task 5 durability. All worker prune
+  operations report requested=confirmed=1, failed=0, and release their trackers.
+  The later loss still completes from the retained task-5 frontier.
+- Rejected timer-dependent worker replacement, a nested pruning wait that
+  swallowed compute completion, frontier gating outside persistence mode,
+  lost compute/persistence overlap, reconnecting graceful release as process
+  loss, and shutdown not tied to the target replica owner.
+- The required clean build/install passes. The installed regression suite
+  passes 17/17; three final local repetitions complete in 17, 16, and 17
+  seconds. Post-clean Phase 7 recovery, replica protocol, DataVine flake8, and
+  diff checks pass.
+- Rebuilt `/users/jzhou24/graph_optimization/factories/datavine.tar.gz` from the
+  active environment. SHA-256:
+  `1f1da5b661f61eaa4c532b1df65d09f84a061f96278a729df21c861f2c87761d`.
+  `poncho_package_run` verifies cloudpickle 3.1.2, Workflow, and the shutdown
+  API.
+- Factory `datavine-mincut-fafead8bd` passes with three package-only workers,
+  two unique-source process shutdowns, exact oracle output, and zero remaining
+  workers after factory stop.
+- Code commit: `fafead8bde`.
+- Evidence: `acceptance/artifacts/minimum-cut-fafead8bd.json`.
+- Self-review status: **FAIL for full MIN-CUT/RECOVERY acceptance**. The
+  checkpoint is linear and pruning uses a global drain barrier; branch/join
+  optimality, asynchronous pruning, DRAM, active-transfer loss, scale, and the
+  Grand Challenge remain open.
