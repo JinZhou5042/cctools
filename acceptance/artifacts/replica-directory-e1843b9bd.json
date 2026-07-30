@@ -1,0 +1,31 @@
+{
+  "acceptance_scope": "standalone Controller physical replica directory component",
+  "build_command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+  "build_result": "PASS",
+  "commit": "e1843b9bd49bbc882605af13c990ac90db101f17",
+  "installed_test_command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/test && ./TR_datavine_replica_directory.sh run",
+  "installed_test_result": "PASS",
+  "race_repeat_command": "for n in $(seq 1 20); do ./TR_datavine_replica_directory.sh run >/dev/null; done",
+  "race_repeat_result": "PASS",
+  "checks": {
+    "active_lease_capacity": 1024,
+    "active_lease_high_water": 2,
+    "completed_lease_tombstones_bounded": true,
+    "edata_idata_domains_distinct": true,
+    "partial_replica_excluded": true,
+    "quarantine_grace_and_revision_checked": true,
+    "replica_capacity_enforced": true,
+    "source_invalidation_during_two_reads": true,
+    "stale_attempt_completion_rejected": true,
+    "stale_worker_epoch_rejected": true,
+    "terminal_cleanup_revision_checked": true,
+    "worker_capacity_enforced": true
+  },
+  "not_accepted_yet": [
+    "ControllerState and HTTP protocol integration",
+    "runtime worker publication and source resolution",
+    "persistence generation and cancellation",
+    "pruning proof atomicity across logical and physical revisions",
+    "actual local or SharedFS deletion"
+  ]
+}

@@ -33,6 +33,26 @@
   cancellation, and SharedFS quarantine exist.
 - Code commit: `2108b68a8`.
 
+## 2026-07-29 — Phase 9 bounded physical replica directory
+
+- Added qualified `e:<id>` / `i:<id>` physical identities, explicit replica
+  tiers and states, worker epochs, logical attempts, source generations, and
+  Controller-owned multi-source selection.
+- Added transfer leases that protect concurrent readers and make source
+  invalidation retire before final invalidation.
+- Added explicit capacities for workers, replicas, active leases, and bounded
+  completed-lease tombstones, plus revision-checked terminal cleanup.
+- Added SharedFS quarantine, restore, grace-period, and revision-checked
+  hard-delete transitions. This is state-machine coverage only; filesystem
+  deletion remains disabled.
+- Required clean build/install passed. The installed component test and 20
+  repeated race runs passed at code commit `e1843b9bd`.
+- Self-review found and fixed two pre-acceptance defects: numeric EData/IData
+  ID collision and unbounded completed lease history.
+- The checkpoint remains runtime-disconnected. Review B stays FAIL until
+  Controller/protocol/persistence/pruning integration passes.
+- Code commit: `e1843b9bd`.
+
 ## 2026-07-29 — Phase 0 local baseline
 
 - Created branch `datavine` from freshly fetched `origin/task-graph` at PR

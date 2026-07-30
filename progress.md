@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Architecture Review A corrections and Phase 9 shadow pruning**
-- Validated code commit: `ab6b7666d`
+- Active task: **Phase 9 physical replica authority and pruning integration**
+- Validated code commit: `e1843b9bd`
 
 ## Ultimate acceptance reset
 
@@ -42,6 +42,35 @@ FAIL because replica epochs/tiers, in-flight reads, atomic runtime revisions,
 real persistence cancellation, and SharedFS quarantine are not implemented.
 Machine-readable evidence:
 `acceptance/artifacts/phase9-shadow-20260729.json`.
+
+### Phase 9 physical replica directory checkpoint
+
+Commit `e1843b9bd` adds a Controller-owned, fail-closed physical replica
+directory. Physical keys are qualified (`e:<id>` or `i:<id>`) so equal numeric
+EData and IData IDs cannot collide. Records distinguish preparation,
+availability, retirement, invalidity, SharedFS quarantine, and final pruning;
+worker replicas carry monotonically checked worker epochs and logical attempt
+numbers.
+
+Source selection returns multiple deterministic candidates and acquisition
+revalidates the selected generation and both worker epochs. Active source
+leases protect concurrent readers: invalidation moves an in-use source to
+`retiring`, and the final release makes it invalid. Replica, worker, active
+lease, and completed idempotency-tombstone collections all have explicit
+capacities; terminal records have revision-checked cleanup.
+
+The installed-path component test and 20 repeated race runs pass after the
+required clean build/install. They include two concurrent destinations, source
+invalidation during both reads, stale source selection, partial publication,
+duplicate commit/release, old attempt completion, worker reincarnation,
+corrupt metadata, one-of-many versus all-replica loss, zero-byte objects,
+SharedFS quarantine/restore/grace/hard-delete, overload rejection, and terminal
+cleanup.
+
+This checkpoint does **not** close Review B. The directory is not yet wired to
+ControllerState, worker protocol, persistence generations, or the pruning
+executor, and no real bytes are deleted. Evidence:
+`acceptance/artifacts/replica-directory-e1843b9bd.json`.
 
 ## Phase 8 acceptance
 
