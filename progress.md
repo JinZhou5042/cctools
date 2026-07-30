@@ -523,7 +523,7 @@ All locally applicable gates pass:
 9. The 13-task nested/container/file corner-case workflow passes with the
    feature enabled and disabled.
 10. Clean build/install, compile checks, shell checks, invariant component
-    tests, exact workflow oracles, recovery, and process cleanup pass.
+	tests, exact workflow oracles, recovery, and process cleanup pass.
 
 Machine-readable results:
 
