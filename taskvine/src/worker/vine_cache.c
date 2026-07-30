@@ -53,6 +53,11 @@ struct vine_cache {
 
 static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager);
 
+int vine_cache_transfer_count(struct vine_cache *c)
+{
+	return c ? hash_table_size(c->processing_transfers) : 0;
+}
+
 /*
 Create the cache manager structure for a given cache directory.
 */
@@ -1027,6 +1032,21 @@ static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_fil
 		f->status = VINE_CACHE_STATUS_FAILED;
 	}
 
+	/*
+	A failed transfer may have written a partial object. Remove it before
+	telling the manager that the transfer failed, then report whether the
+	temporary namespace is clean while the transfer ID is still active.
+	*/
+	if (f->status != VINE_CACHE_STATUS_READY) {
+		trash_file(transfer_path);
+		struct stat transfer_info;
+		vine_worker_send_cache_transfer_cleanup(
+				cachename,
+				f->transfer_bytes_observed,
+				lstat(transfer_path, &transfer_info) < 0
+						&& errno == ENOENT);
+	}
+
 	/* Finally send a cache update message one way or the other. */
 	/* Note that manager could be null if we are in a shutdown situation. */
 
@@ -1052,7 +1072,7 @@ static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_fil
 		}
 	}
 
-	/* The transfer path is either moved to the cache or failed, so we can delete it safely. */
+	/* A successful transfer was renamed; failed transfers were removed above. */
 	trash_file(transfer_path);
 
 	free(cache_path);
@@ -1097,6 +1117,21 @@ static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *
 {
 	int status;
 	if (f->status == VINE_CACHE_STATUS_PROCESSING) {
+		if (f->cache_type == VINE_CACHE_TRANSFER
+				&& !f->transfer_progress_reported) {
+			char *transfer_path = vine_cache_transfer_path(c, cachename);
+			struct stat info;
+			if (stat(transfer_path, &info) == 0
+					&& S_ISREG(info.st_mode)
+					&& info.st_size > 0) {
+				f->transfer_bytes_observed = info.st_size;
+				f->transfer_progress_reported = 1;
+				vine_worker_send_cache_transfer_progress(
+						cachename,
+						f->transfer_bytes_observed);
+			}
+			free(transfer_path);
+		}
 		int result = waitpid(f->pid, &status, WNOHANG);
 		if (result == 0) {
 			// process still executing

@@ -1009,6 +1009,31 @@ class Manager(object):
                     self._taskvine
                 )
             ),
+            "peer_transfer_progress_events": int(
+                cvine.vine_manager_datavine_peer_transfer_progress_events(
+                    self._taskvine
+                )
+            ),
+            "peer_transfer_progress_max_bytes": int(
+                cvine.vine_manager_datavine_peer_transfer_progress_max_bytes(
+                    self._taskvine
+                )
+            ),
+            "peer_transfer_cleanup_reports": int(
+                cvine.vine_manager_datavine_peer_transfer_cleanup_reports(
+                    self._taskvine
+                )
+            ),
+            "peer_transfer_cleanup_absent": int(
+                cvine.vine_manager_datavine_peer_transfer_cleanup_absent(
+                    self._taskvine
+                )
+            ),
+            "peer_transfer_cleanup_pending": int(
+                cvine.vine_manager_datavine_peer_transfer_cleanup_pending(
+                    self._taskvine
+                )
+            ),
             "peer_source_losses_injected": int(
                 cvine.vine_manager_datavine_peer_source_losses_injected(
                     self._taskvine

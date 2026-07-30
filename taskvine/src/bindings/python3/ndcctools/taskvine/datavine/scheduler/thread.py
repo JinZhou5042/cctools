@@ -444,6 +444,7 @@ class TaskSchedulerThread:
         inject_partial_publication_after=None,
         frontier_pruning_ack_delay=0,
         inject_peer_source_losses=0,
+        inject_peer_source_loss_after_bytes=0,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -491,6 +492,21 @@ class TaskSchedulerThread:
         ) != 0:
             raise RuntimeError(
                 "TaskVine Manager rejected peer source-loss injection"
+            )
+        peer_source_loss_after_bytes = int(
+            inject_peer_source_loss_after_bytes
+        )
+        if peer_source_loss_after_bytes < 0:
+            raise ValueError(
+                "peer source-loss byte threshold is negative"
+            )
+        if self._manager.tune(
+            "datavine-fault-peer-source-loss-after-bytes",
+            peer_source_loss_after_bytes,
+        ) != 0:
+            raise RuntimeError(
+                "TaskVine Manager rejected byte-counted "
+                "peer source-loss injection"
             )
         output_ids = self._op_register_workflow(workflow)
         producer_by_data_id = {
@@ -2194,6 +2210,9 @@ class TaskSchedulerThread:
                 worker_loss_process_shutdown
             ),
             "peer_source_losses_requested": peer_source_losses,
+            "peer_source_loss_after_bytes_requested": (
+                peer_source_loss_after_bytes
+            ),
             "peer_transfer_faults": (
                 self._manager.datavine_peer_transfer_fault_stats()
             ),

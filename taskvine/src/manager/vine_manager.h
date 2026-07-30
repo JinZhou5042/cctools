@@ -256,8 +256,15 @@ struct vine_manager {
 	timestamp_t enforce_worker_eviction_interval;   /* Enforce worker eviction interval in seconds */
 	timestamp_t time_start_worker_eviction;         /* Track the time when we start evicting workers */
 	int datavine_fault_peer_source_loss_remaining; /* One-shot failures after a leased peer request is dispatched. */
+	int datavine_fault_peer_source_loss_after_bytes_remaining;
+	uint64_t datavine_fault_peer_source_loss_after_bytes_threshold;
 	uint64_t datavine_peer_transfer_starts;
+	uint64_t datavine_peer_transfer_progress_events;
+	uint64_t datavine_peer_transfer_progress_max_bytes;
+	uint64_t datavine_peer_transfer_cleanup_reports;
+	uint64_t datavine_peer_transfer_cleanup_absent;
 	uint64_t datavine_peer_source_losses_injected;
+	struct hash_table *datavine_partial_cleanup_expectations;
 };
 
 /*

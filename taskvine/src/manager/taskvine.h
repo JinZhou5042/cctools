@@ -1548,6 +1548,10 @@ would exceed the limit. A negative value disables the gate. (default=-1)
  - "datavine-fault-peer-source-loss" Test-only count of leased peer transfers
 whose real source worker is abruptly lost after the destination starts its
 transfer child. Disabled by default. (default=0)
+ - "datavine-fault-peer-source-loss-after-bytes" Test-only positive-byte
+threshold. When nonzero, one leased peer source is abruptly lost only after
+the destination reports a partial transfer at or above the threshold.
+Disabled by default. (default=0)
  - "transient-error-interval" Time to wait in seconds after a resource failure before attempting to use it again
 (default=15)
  - "resource_management_interval" Seconds between measurement of manager local resources. (default=30)
@@ -1566,6 +1570,26 @@ int vine_tune(struct vine_manager *m, const char *name, double value);
 /** Return the number of leased DataVine peer transfers whose destination
 transfer process was observed starting. */
 uint64_t vine_manager_datavine_peer_transfer_starts(
+		struct vine_manager *m);
+
+/** Return validated partial peer-transfer progress event count. */
+uint64_t vine_manager_datavine_peer_transfer_progress_events(
+		struct vine_manager *m);
+
+/** Return the largest validated partial peer-transfer byte observation. */
+uint64_t vine_manager_datavine_peer_transfer_progress_max_bytes(
+		struct vine_manager *m);
+
+/** Return reports issued after failed partial-transfer cleanup. */
+uint64_t vine_manager_datavine_peer_transfer_cleanup_reports(
+		struct vine_manager *m);
+
+/** Return cleanup reports whose exact transfer path was absent. */
+uint64_t vine_manager_datavine_peer_transfer_cleanup_absent(
+		struct vine_manager *m);
+
+/** Return byte-fault cleanup observations that have not yet arrived. */
+uint64_t vine_manager_datavine_peer_transfer_cleanup_pending(
 		struct vine_manager *m);
 
 /** Return the number of deterministic abrupt peer-source losses injected. */

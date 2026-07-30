@@ -23,9 +23,10 @@ struct vine_transfer_pair {
 	int datavine_lease;
 	int success;
 	int completed;
+	uint64_t expected_size;
 };
 
-static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url)
+static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, uint64_t expected_size)
 {
 	struct vine_transfer_pair *t = malloc(sizeof(struct vine_transfer_pair));
 	t->dest_worker = dest_worker;
@@ -34,6 +35,7 @@ static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_i
 	t->datavine_lease = 0;
 	t->success = 0;
 	t->completed = 0;
+	t->expected_size = expected_size;
 
 	if (t->dest_worker) {
 		t->dest_worker->incoming_xfer_counter++;
@@ -82,7 +84,11 @@ char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info
 	cctools_uuid_create(&uuid);
 
 	char *transfer_id = strdup(uuid.str);
-	struct vine_transfer_pair *t = vine_transfer_pair_create(dest_worker, source_worker, source_url);
+	struct vine_transfer_pair *t = vine_transfer_pair_create(
+			dest_worker,
+			source_worker,
+			source_url,
+			f ? f->size : 0);
 	if (f && f->datavine_data_id && source_worker) {
 		if (!source_worker->workerid || !dest_worker || !dest_worker->workerid ||
 				!vine_datavine_acquire_transfer(q, f->datavine_data_id, source_worker->workerid, dest_worker->workerid, transfer_id)) {
@@ -371,6 +377,22 @@ int vine_current_transfers_is_datavine_peer_destination(
 	p = hash_table_lookup(q->current_transfer_table, id);
 	return p && p->datavine_lease && p->source_worker &&
 			p->dest_worker == destination && !p->completed;
+}
+
+int vine_current_transfers_is_partial_datavine_peer_progress(
+		struct vine_manager *q,
+		const char *id,
+		struct vine_worker_info *destination,
+		uint64_t bytes)
+{
+	struct vine_transfer_pair *p;
+	if (!q || !id || !destination || bytes == 0) {
+		return 0;
+	}
+	p = hash_table_lookup(q->current_transfer_table, id);
+	return p && p->datavine_lease && p->source_worker &&
+			p->dest_worker == destination && !p->completed &&
+			p->expected_size > 0 && bytes < p->expected_size;
 }
 
 int vine_current_transfers_abort_source(struct vine_manager *q, const char *id)

@@ -649,6 +649,84 @@ static vine_msg_code_t handle_cache_transfer_start(
 	return VINE_MSG_PROCESSED;
 }
 
+static vine_msg_code_t handle_cache_transfer_progress(
+		struct vine_manager *q,
+		struct vine_worker_info *w,
+		const char *line)
+{
+	char transfer_id[VINE_LINE_MAX];
+	uint64_t bytes;
+	if (sscanf(
+				line,
+				"cache-transfer-progress %s %" SCNu64,
+				transfer_id,
+				&bytes)
+			!= 2) {
+		return VINE_MSG_FAILURE;
+	}
+	int valid_partial =
+			vine_current_transfers_is_partial_datavine_peer_progress(
+					q, transfer_id, w, bytes);
+	if (!valid_partial) {
+		return VINE_MSG_PROCESSED;
+	}
+	q->datavine_peer_transfer_progress_events++;
+	q->datavine_peer_transfer_progress_max_bytes =
+			MAX(q->datavine_peer_transfer_progress_max_bytes, bytes);
+	if (q->datavine_fault_peer_source_loss_after_bytes_remaining > 0
+			&& bytes >=
+					q->datavine_fault_peer_source_loss_after_bytes_threshold) {
+		if (w->workerid) {
+			hash_table_insert(
+					q->datavine_partial_cleanup_expectations,
+					transfer_id,
+					xxstrdup(w->workerid));
+		}
+		q->datavine_fault_peer_source_loss_after_bytes_remaining--;
+		q->datavine_peer_source_losses_injected++;
+		debug(D_VINE,
+				"DataVine fault injection: abruptly losing source after destination %s wrote %" PRIu64 " partial bytes for leased peer transfer %s",
+				w->workerid ? w->workerid : "(unknown)",
+				bytes,
+				transfer_id);
+		vine_current_transfers_abort_source(q, transfer_id);
+	}
+	return VINE_MSG_PROCESSED;
+}
+
+static vine_msg_code_t handle_cache_transfer_cleanup(
+		struct vine_manager *q,
+		struct vine_worker_info *w,
+		const char *line)
+{
+	char transfer_id[VINE_LINE_MAX];
+	uint64_t bytes;
+	int path_absent;
+	if (sscanf(
+				line,
+				"cache-transfer-cleanup %s %" SCNu64 " %d",
+				transfer_id,
+				&bytes,
+				&path_absent)
+			!= 3) {
+		return VINE_MSG_FAILURE;
+	}
+	char *expected_worker = hash_table_lookup(
+			q->datavine_partial_cleanup_expectations,
+			transfer_id);
+	if (expected_worker && w->workerid && bytes > 0
+			&& !strcmp(expected_worker, w->workerid)) {
+		q->datavine_peer_transfer_cleanup_reports++;
+		if (path_absent) {
+			q->datavine_peer_transfer_cleanup_absent++;
+		}
+		free(hash_table_remove(
+				q->datavine_partial_cleanup_expectations,
+				transfer_id));
+	}
+	return VINE_MSG_PROCESSED;
+}
+
 /*
 A cache-invalid message coming from the worker means that a requested
 remote transfer or command did not succeed, and the intended file is
@@ -1027,6 +1105,10 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		result = handle_cache_update(q, w, line);
 	} else if (string_prefix_is(line, "cache-transfer-start")) {
 		result = handle_cache_transfer_start(q, w, line);
+	} else if (string_prefix_is(line, "cache-transfer-progress")) {
+		result = handle_cache_transfer_progress(q, w, line);
+	} else if (string_prefix_is(line, "cache-transfer-cleanup")) {
+		result = handle_cache_transfer_cleanup(q, w, line);
 	} else if (string_prefix_is(line, "cache-invalid")) {
 		result = handle_cache_invalid(q, w, line);
 	} else if (string_prefix_is(line, "cache-unlinked")) {
@@ -4431,6 +4513,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->factory_table = hash_table_create(0, 0);
 	q->current_transfer_table = hash_table_create(0, 0);
+	q->datavine_partial_cleanup_expectations =
+			hash_table_create(0, 0);
 	q->task_group_table = itable_create(0);
 	q->group_id_counter = 1;
 	q->fetch_factory = 0;
@@ -4536,7 +4620,13 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->enforce_worker_eviction_interval = 0;
 	q->datavine_fault_peer_source_loss_remaining = 0;
+	q->datavine_fault_peer_source_loss_after_bytes_remaining = 0;
+	q->datavine_fault_peer_source_loss_after_bytes_threshold = 1;
 	q->datavine_peer_transfer_starts = 0;
+	q->datavine_peer_transfer_progress_events = 0;
+	q->datavine_peer_transfer_progress_max_bytes = 0;
+	q->datavine_peer_transfer_cleanup_reports = 0;
+	q->datavine_peer_transfer_cleanup_absent = 0;
 	q->datavine_peer_source_losses_injected = 0;
 	q->time_start_worker_eviction = 0;
 
@@ -4827,6 +4917,10 @@ void vine_delete(struct vine_manager *q)
 
 	vine_current_transfers_clear(q);
 	hash_table_delete(q->current_transfer_table);
+	hash_table_clear(
+			q->datavine_partial_cleanup_expectations,
+			(void *)free);
+	hash_table_delete(q->datavine_partial_cleanup_expectations);
 
 	vine_task_groups_clear(q);
 	itable_delete(q->task_group_table);
@@ -6378,6 +6472,12 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 	} else if (!strcmp(name, "datavine-fault-peer-source-loss")) {
 		q->datavine_fault_peer_source_loss_remaining = MAX(0, (int)value);
 
+	} else if (!strcmp(name, "datavine-fault-peer-source-loss-after-bytes")) {
+		q->datavine_fault_peer_source_loss_after_bytes_remaining =
+				value > 0 ? 1 : 0;
+		q->datavine_fault_peer_source_loss_after_bytes_threshold =
+				value > 0 ? (uint64_t)value : 1;
+
 	} else if (!strcmp(name, "load-from-shared-filesystem")) {
 		q->load_from_shared_fs_enabled = !!((int)value);
 
@@ -6440,6 +6540,39 @@ uint64_t vine_manager_datavine_peer_transfer_starts(
 		struct vine_manager *q)
 {
 	return q ? q->datavine_peer_transfer_starts : 0;
+}
+
+uint64_t vine_manager_datavine_peer_transfer_progress_events(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_transfer_progress_events : 0;
+}
+
+uint64_t vine_manager_datavine_peer_transfer_progress_max_bytes(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_transfer_progress_max_bytes : 0;
+}
+
+uint64_t vine_manager_datavine_peer_transfer_cleanup_reports(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_transfer_cleanup_reports : 0;
+}
+
+uint64_t vine_manager_datavine_peer_transfer_cleanup_absent(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_transfer_cleanup_absent : 0;
+}
+
+uint64_t vine_manager_datavine_peer_transfer_cleanup_pending(
+		struct vine_manager *q)
+{
+	return q && q->datavine_partial_cleanup_expectations
+			? hash_table_size(
+					q->datavine_partial_cleanup_expectations)
+			: 0;
 }
 
 uint64_t vine_manager_datavine_peer_source_losses_injected(

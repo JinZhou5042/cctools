@@ -627,6 +627,41 @@ void vine_worker_send_cache_transfer_start(const char *cachename)
 	}
 }
 
+void vine_worker_send_cache_transfer_progress(
+		const char *cachename, uint64_t bytes)
+{
+	if (!active_manager_link || !cachename || bytes == 0) {
+		return;
+	}
+	const char *transfer_id = hash_table_lookup(
+			current_transfers, cachename);
+	if (transfer_id) {
+		send_async_message(
+				active_manager_link,
+				"cache-transfer-progress %s %" PRIu64 "\n",
+				transfer_id,
+				bytes);
+	}
+}
+
+void vine_worker_send_cache_transfer_cleanup(
+		const char *cachename, uint64_t bytes, int path_absent)
+{
+	if (!active_manager_link || !cachename || bytes == 0) {
+		return;
+	}
+	const char *transfer_id = hash_table_lookup(
+			current_transfers, cachename);
+	if (transfer_id) {
+		send_async_message(
+				active_manager_link,
+				"cache-transfer-cleanup %s %" PRIu64 " %d\n",
+				transfer_id,
+				bytes,
+				!!path_absent);
+	}
+}
+
 void vine_worker_send_cache_capacity_update(struct link *manager)
 {
 	vine_worker_send_cache_capacity_status(
@@ -1904,7 +1939,9 @@ static void vine_worker_serve_manager(struct link *manager)
 		hence a maximum wait time of five seconds is enforced.
 		*/
 
-		int wait_msec = 5000;
+		int wait_msec = vine_cache_transfer_count(cache_manager) > 0
+				? 1
+				: 5000;
 
 		if (sigchld_received_flag) {
 			wait_msec = 0;

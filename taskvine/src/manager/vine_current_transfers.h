@@ -40,5 +40,12 @@ int vine_current_transfers_is_datavine_peer_destination(
 		const char *id,
 		struct vine_worker_info *destination);
 
+/* Validate destination progress that is nonzero and below the expected size. */
+int vine_current_transfers_is_partial_datavine_peer_progress(
+		struct vine_manager *q,
+		const char *id,
+		struct vine_worker_info *destination,
+		uint64_t bytes);
+
 /* Abruptly lose the source endpoint of an active DataVine peer lease. */
 int vine_current_transfers_abort_source(struct vine_manager *q, const char *id);
