@@ -207,13 +207,65 @@ def main():
             1,
         )
 
-        client.report_replica(
+        first_idata = client.report_replica(
             f"i:{idata.data_id}",
             "w2-idata-one",
             1,
             "worker-disk",
             output_hash,
             len(idata_payload),
+            "w2",
+            1,
+        )
+        invalid_idata = client.invalidate_replica(
+            f"i:{idata.data_id}",
+            first_idata["replica_id"],
+            first_idata["generation"],
+            "w2",
+            1,
+        )
+        assert invalid_idata["state"] == "invalid"
+        client.confirm_replica_pruned(
+            f"i:{idata.data_id}",
+            first_idata["replica_id"],
+            first_idata["generation"],
+        )
+        rematerialized_idata = client.report_replica(
+            f"i:{idata.data_id}",
+            "w2-idata-one",
+            1,
+            "worker-disk",
+            output_hash,
+            len(idata_payload),
+            "w2",
+            1,
+        )
+        assert (
+            rematerialized_idata["generation"]
+            == first_idata["generation"] + 1
+        )
+        refreshed_invalidation = client.invalidate_observed_replica(
+            f"i:{idata.data_id}",
+            first_idata["replica_id"],
+            first_idata["attempt"],
+            first_idata["content_hash"],
+            first_idata["size"],
+            "w2",
+            1,
+        )
+        assert refreshed_invalidation["state"] == "invalid"
+        assert (
+            refreshed_invalidation["generation"]
+            == rematerialized_idata["generation"]
+        )
+        expect_remote_error(
+            "no longer current",
+            client.invalidate_observed_replica,
+            f"i:{idata.data_id}",
+            first_idata["replica_id"],
+            1,
+            hashlib.sha256(b"wrong").hexdigest(),
+            first_idata["size"],
             "w2",
             1,
         )
