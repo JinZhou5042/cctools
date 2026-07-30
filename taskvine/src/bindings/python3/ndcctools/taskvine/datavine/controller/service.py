@@ -378,10 +378,15 @@ class ControllerService:
                 replica_prefix = f"{API_PREFIX}/replicas/"
                 if (
                     parsed.path.startswith(replica_prefix)
-                    and parsed.path.endswith("/sources")
+                    and (
+                        parsed.path.endswith("/sources")
+                        or parsed.path.endswith("/records")
+                    )
                 ):
+                    records_only = parsed.path.endswith("/records")
+                    suffix = "/records" if records_only else "/sources"
                     token = parsed.path[
-                        len(replica_prefix):-len("/sources")
+                        len(replica_prefix):-len(suffix)
                     ]
                     pieces = token.strip("/").split("/")
                     if (
@@ -393,7 +398,11 @@ class ControllerService:
                         return
                     data_key = f"{pieces[0]}:{int(pieces[1])}"
                     try:
-                        sources = owner.state.replicas.candidates(data_key)
+                        sources = (
+                            owner.state.replicas.records_for(data_key)
+                            if records_only
+                            else owner.state.replicas.candidates(data_key)
+                        )
                     except Exception as exc:
                         self._error(400, exc)
                         return
@@ -401,7 +410,7 @@ class ControllerService:
                         200,
                         {
                             "data_id": data_key,
-                            "sources": [
+                            "records" if records_only else "sources": [
                                 source.source_dict()
                                 for source in sources
                             ],

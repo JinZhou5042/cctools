@@ -219,6 +219,14 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def replica_records(self, data_id):
+        kind, token = str(data_id).split(":", 1)
+        payload, _ = self._request(
+            "GET",
+            f"{API_PREFIX}/replicas/{kind}/{int(token)}/records",
+        )
+        return json.loads(payload)
+
     def acquire_replica(
         self,
         data_id,

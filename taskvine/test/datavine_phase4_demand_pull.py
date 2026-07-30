@@ -121,6 +121,7 @@ def run_case(
     replacement_worker_delays=(),
     prune_after_persistence_by_task=None,
     worker_loss_process_shutdown=False,
+    inject_partial_publication_after=None,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -279,6 +280,7 @@ def run_case(
                 inject_worker_loss_data_by_task,
                 prune_after_persistence_by_task,
                 worker_loss_process_shutdown,
+                inject_partial_publication_after,
             )
             if (
                 replacement_worker_delay is not None

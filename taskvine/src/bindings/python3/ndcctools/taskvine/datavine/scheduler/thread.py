@@ -440,6 +440,7 @@ class TaskSchedulerThread:
         inject_worker_loss_data_by_task=None,
         prune_after_persistence_by_task=None,
         worker_loss_process_shutdown=False,
+        inject_partial_publication_after=None,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -483,6 +484,25 @@ class TaskSchedulerThread:
             for task_id, data_ids in self._logical_output_slots.items()
             for data_id in data_ids
         }
+        inject_partial_publication_after = {
+            int(task_id): int(output_index)
+            for task_id, output_index in (
+                inject_partial_publication_after or {}
+            ).items()
+        }
+        for task_id, output_index in (
+            inject_partial_publication_after.items()
+        ):
+            if task_id not in self._logical_output_slots:
+                raise KeyError(
+                    f"unknown partial-publication TaskID {task_id}"
+                )
+            output_count = len(self._logical_output_slots[task_id])
+            if output_index < 0 or output_index >= output_count - 1:
+                raise ValueError(
+                    "partial-publication fault must follow a "
+                    "non-final output slot"
+                )
         if result_task_ids is None:
             result_task_ids = tuple(output_ids)
         else:
@@ -773,6 +793,9 @@ class TaskSchedulerThread:
         worker_loss_injections = 0
         worker_loss_events = []
         local_idata_hits = 0
+        partial_publication_failures = []
+        partial_publication_triggered = set()
+        partial_publication_cancelled = {}
         while (
             pending
             or running
@@ -938,6 +961,9 @@ class TaskSchedulerThread:
                     environment,
                     attempt,
                     idata_inline_threshold,
+                    inject_partial_publication_after.get(task_id)
+                    if attempt == 1
+                    else None,
                 )
                 physical_id = self._manager.submit(physical)
                 self.controller.set_task_state(task_id, "running")
@@ -984,6 +1010,65 @@ class TaskSchedulerThread:
             self._sync_worker_epochs()
             self._cache_admission.poll(self._manager)
             if completed is None:
+                for physical_id, logical_id in tuple(running.items()):
+                    output_index = (
+                        inject_partial_publication_after.get(logical_id)
+                    )
+                    if (
+                        output_index is None
+                        or logical_id in partial_publication_triggered
+                        or self._attempts[logical_id] != 1
+                    ):
+                        continue
+                    expected_data_ids = self._logical_output_slots[
+                        logical_id
+                    ]
+                    published_data_id = expected_data_ids[output_index]
+                    prepared = [
+                        record
+                        for record in self.controller.replica_records(
+                            f"i:{published_data_id}"
+                        )["records"]
+                        if (
+                            record["state"] == "preparing"
+                            and record["attempt"] == 1
+                            and record.get("worker_id")
+                        )
+                    ]
+                    if not prepared:
+                        continue
+                    if len(prepared) != 1:
+                        raise RuntimeError(
+                            "partial publication has ambiguous worker "
+                            "ownership"
+                        )
+                    worker_id = prepared[0]["worker_id"]
+                    if not self._manager.cancel_by_task_id(physical_id):
+                        raise RuntimeError(
+                            "could not cancel partial publication task"
+                        )
+                    from ndcctools.taskvine import cvine
+                    if not cvine.vine_manager_shut_down_worker_by_id(
+                        self._manager._taskvine, worker_id
+                    ):
+                        raise RuntimeError(
+                            "could not shut down partial publication "
+                            f"worker {worker_id}"
+                        )
+                    for output_data_id in expected_data_ids:
+                        self.controller.invalidate_idata(output_data_id)
+                    partial_publication_triggered.add(logical_id)
+                    partial_publication_cancelled[physical_id] = {
+                        "task_id": logical_id,
+                        "attempt": 1,
+                        "published_data_ids": [published_data_id],
+                        "expected_data_ids": list(expected_data_ids),
+                        "worker_id": worker_id,
+                        "physical_task_id": physical_id,
+                    }
+                    break
+                if partial_publication_cancelled:
+                    continue
                 if (
                     inject_global_loss_during_persistence
                     and persistence_global_losses == 0
@@ -1264,7 +1349,7 @@ class TaskSchedulerThread:
             logical_id = running.pop(completed.id)
             if persistence_running or persistence_pending:
                 compute_completions_while_persistence_active += 1
-            local_idata_hits += completed.output.count(
+            local_idata_hits += (completed.output or "").count(
                 "DATAVINE_LOCAL_IDATA"
             )
             if not completed.successful():
@@ -1273,6 +1358,61 @@ class TaskSchedulerThread:
                 # a globally lost input into ordinary logical recomputation
                 # instead of making the failed consumer terminal.
                 self._sync_worker_epochs()
+                partial_failure = partial_publication_cancelled.pop(
+                    completed.id, None
+                )
+                if partial_failure is not None:
+                    partial_publication_failures.append(
+                        partial_failure
+                    )
+                    self.controller.set_task_state(
+                        logical_id, "pending"
+                    )
+                    pending.add(logical_id)
+                    continue
+                expected_output_ids = self._logical_output_slots[
+                    logical_id
+                ]
+                published_output_ids = [
+                    data_id
+                    for data_id in expected_output_ids
+                    if (
+                        self.controller.idata_status(data_id)[
+                            "attempt"
+                        ] == self._attempts[logical_id]
+                        and self.controller.idata_status(data_id)[
+                            "content_hash"
+                        ]
+                        is not None
+                    )
+                ]
+                if (
+                    published_output_ids
+                    and len(published_output_ids)
+                    < len(expected_output_ids)
+                ):
+                    for output_data_id in expected_output_ids:
+                        self.controller.invalidate_idata(
+                            output_data_id
+                        )
+                        self._manager.prune_file(
+                            self._idata_files[output_data_id]
+                        )
+                    partial_publication_failures.append(
+                        {
+                            "task_id": logical_id,
+                            "attempt": self._attempts[logical_id],
+                            "published_data_ids": published_output_ids,
+                            "expected_data_ids": list(
+                                expected_output_ids
+                            ),
+                        }
+                    )
+                    self.controller.set_task_state(
+                        logical_id, "pending"
+                    )
+                    pending.add(logical_id)
+                    continue
                 lost_inputs = []
                 for data_key in task_cache_inputs[logical_id]:
                     if not data_key.startswith("i:"):
@@ -1586,6 +1726,9 @@ class TaskSchedulerThread:
                 str(task_id): attempt
                 for task_id, attempt in sorted(self._attempts.items())
             },
+            "partial_publication_failures": (
+                partial_publication_failures
+            ),
             "physical_attempts": sum(self._attempts.values()),
             "recovery_reexecutions": recovery_reexecutions,
             "recovery_waves": recovery_waves,
@@ -1860,7 +2003,12 @@ class TaskSchedulerThread:
             time.sleep(0.05)
 
     def _make_physical_task(
-        self, task_id, environment, attempt, idata_inline_threshold
+        self,
+        task_id,
+        environment,
+        attempt,
+        idata_inline_threshold,
+        kill_worker_after_output_index=None,
     ):
         from ndcctools.taskvine import Task
 
@@ -1890,12 +2038,22 @@ class TaskSchedulerThread:
                 ),
                 "--idata-inline-threshold",
                 str(idata_inline_threshold),
+                *(
+                    (
+                        "--pause-after-output-index",
+                        str(kill_worker_after_output_index),
+                    )
+                    if kill_worker_after_output_index is not None
+                    else ()
+                ),
             )
         )
         task = Task(command)
         task.set_tag(str(task_id))
         task.set_cores(1)
-        task.set_retries(5)
+        task.set_retries(
+            0 if kill_worker_after_output_index is not None else 5
+        )
         edata_ids = {record.function_data_id}
         edata_ids.update(
             data_id

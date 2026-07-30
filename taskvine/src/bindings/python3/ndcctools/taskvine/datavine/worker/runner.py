@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import time
 
 from ..models import EDataRecord
 from ..scheduler.client import ControllerClient
@@ -20,6 +21,11 @@ def main(argv=None):
     parser.add_argument("--task-id", required=True, type=int)
     parser.add_argument("--attempt", default=1, type=int)
     parser.add_argument("--output-file", action="append", default=[])
+    parser.add_argument(
+        "--pause-after-output-index",
+        default=-1,
+        type=int,
+    )
     parser.add_argument(
         "--idata-inline-threshold",
         default=8 * 1024 * 1024,
@@ -199,6 +205,7 @@ def main(argv=None):
             "output file count does not match logical output count"
         )
     total_bytes = 0
+
     for output_index, (output_data_id, output_value) in enumerate(
         zip(task.output_data_ids, output_values)
     ):
@@ -260,6 +267,8 @@ def main(argv=None):
             f"task={task.task_id} slot={output_index} "
             f"output=i{output_data_id} bytes={len(payload)}"
         )
+        if output_index == args.pause_after_output_index:
+            time.sleep(30)
     print(
         f"DATAVINE_OUTPUTS task={task.task_id} "
         f"count={len(task.output_data_ids)} bytes={total_bytes}"
