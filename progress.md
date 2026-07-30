@@ -2,7 +2,7 @@
 
 ## Current status
 
-- Phase: **Phase 8 — prefetch and adaptive placement complete**
+- Phase: **Ultimate Acceptance — OPEN, not accepted**
 - Branch: `datavine`
 - Starting point: `origin/task-graph` / PR #4253 head `345dc7fcde3851400bebb81ccfd877c93a93cdca`
 - New runtime root: `ndcctools.taskvine.datavine`
@@ -10,8 +10,21 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 4B–8 acceptance complete; no later phase started**
+- Active task: **Architecture Review A corrections and Phase 9 shadow pruning**
 - Validated code commit: `ab6b7666d`
+
+## Ultimate acceptance reset
+
+The Phase 8 result remains a valid component checkpoint, but it is not final
+DataVine acceptance. The binding contract is now `acceptance/README.md`, and
+the live status is `acceptance/matrix.md`.
+
+Architecture Review A at pushed commit `1045fa2dd0` is **FAIL** with critical
+findings. In particular, the independent runtime lacks physical replica epochs,
+multi-output identity, large-data bypass, bounded byte serving and queues,
+persistence cancellation, repeated frontier-aware recovery, all pruning
+algorithms, and the Grand Challenge comparison. No final completion claim is
+permitted while those rows remain open or failed.
 
 ## Phase 8 acceptance
 

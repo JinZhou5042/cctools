@@ -1,5 +1,18 @@
 # DataVine History
 
+## 2026-07-29 — Ultimate Acceptance reopened
+
+- Adopted `acceptance/README.md` as the binding final contract and created the
+  requirement/evidence index in `acceptance/matrix.md`.
+- Reclassified Phase 8 as a component checkpoint, not final acceptance.
+- Completed Architecture Review A against pushed commit `1045fa2dd0`.
+- Review A status is FAIL. Critical gaps include physical replica epochs,
+  multi-output identity, large-data bypass, bounded serving/queues,
+  persistence cancellation, repeated frontier-aware recovery, pruning, and
+  Grand Challenge evidence.
+- No runtime source changed in this checkpoint; build/package evidence remains
+  the Phase 8 component baseline only.
+
 ## 2026-07-29 — Phase 0 local baseline
 
 - Created branch `datavine` from freshly fetched `origin/task-graph` at PR
