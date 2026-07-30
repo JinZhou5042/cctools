@@ -217,6 +217,74 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def set_task_state(self, task_id, state):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/pruning/task-state",
+            {"task_id": int(task_id), "state": str(state)},
+        )
+        return json.loads(payload)
+
+    def set_required_output(self, data_id, required=True):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/pruning/required-output",
+            {"data_id": int(data_id), "required": bool(required)},
+        )
+        return json.loads(payload)
+
+    def pruning_plan(self):
+        payload, _ = self._request(
+            "GET", f"{API_PREFIX}/pruning/plan"
+        )
+        return json.loads(payload)
+
+    def apply_pruning(
+        self,
+        graph_revision,
+        state_revision,
+        grace_seconds=60,
+        data_ids=None,
+        now=None,
+    ):
+        request = {
+            "graph_revision": int(graph_revision),
+            "state_revision": int(state_revision),
+            "grace_seconds": float(grace_seconds),
+        }
+        if data_ids is not None:
+            request["data_ids"] = [
+                int(data_id) for data_id in data_ids
+            ]
+        if now is not None:
+            request["now"] = float(now)
+        payload, _ = self._request(
+            "POST", f"{API_PREFIX}/pruning/apply", request
+        )
+        return json.loads(payload)
+
+    def restore_quarantined(self, data_id):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/pruning/restore",
+            {"data_id": int(data_id)},
+        )
+        return json.loads(payload)
+
+    def hard_delete_quarantined(
+        self, graph_revision, state_revision, now=None
+    ):
+        request = {
+            "graph_revision": int(graph_revision),
+            "state_revision": int(state_revision),
+        }
+        if now is not None:
+            request["now"] = float(now)
+        payload, _ = self._request(
+            "POST", f"{API_PREFIX}/pruning/hard-delete", request
+        )
+        return json.loads(payload)
+
     def register_edata(self, metadata, serialized_bytes):
         payload, _ = self._request(
             "POST",

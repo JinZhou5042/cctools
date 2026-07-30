@@ -34,7 +34,6 @@ class TaskSchedulerThread:
         self._attempts = {}
         self._last_run_report = {}
         self._nested_idata_by_task = {}
-        self._worker_by_task = {}
 
     @property
     def thread_ident(self):
@@ -173,6 +172,20 @@ class TaskSchedulerThread:
                 positional,
                 keyword,
                 self._logical_outputs[task.task_id],
+                tuple(
+                    sorted(
+                        {
+                            self._logical_outputs[
+                                reference.producer_task_id
+                            ]
+                            for value in (
+                                *task.args,
+                                *task.kwargs.values(),
+                            )
+                            for reference in iter_output_refs(value)
+                        }
+                    )
+                ),
             )
             self.controller.register_task(record)
         return dict(self._logical_outputs)
@@ -243,6 +256,9 @@ class TaskSchedulerThread:
                     self._manager.prune_file(
                         self._idata_files[output_data_id]
                     )
+                    self.controller.set_task_state(
+                        completed_task_id, "pending"
+                    )
                     done.remove(completed_task_id)
                     pending.add(completed_task_id)
                     recovery_reexecutions += 1
@@ -258,6 +274,7 @@ class TaskSchedulerThread:
                     task_id, environment, attempt
                 )
                 physical_id = self._manager.submit(physical)
+                self.controller.set_task_state(task_id, "running")
                 running[physical_id] = task_id
                 pending.remove(task_id)
             if not running and not prefetch_running:
@@ -280,6 +297,7 @@ class TaskSchedulerThread:
                 "DATAVINE_LOCAL_IDATA"
             )
             if not completed.successful():
+                self.controller.set_task_state(logical_id, "pending")
                 raise RuntimeError(
                     f"TaskID {logical_id} failed: result={completed.result} "
                     f"exit={completed.exit_code} stdout={completed.output}"
@@ -311,14 +329,11 @@ class TaskSchedulerThread:
                 preparation["content_hash"],
                 preparation["size"],
             )
-            self._worker_by_task[logical_id] = (
-                preparation["worker_id"],
-                preparation["worker_epoch"],
-            )
             # Publication is the completion contract, not process exit alone.
             self.controller.fetch_idata(output_ids[logical_id])
             if persist_outputs:
                 self.controller.persist_idata(output_ids[logical_id])
+            self.controller.set_task_state(logical_id, "completed")
             done.add(logical_id)
             if (
                 inject_global_loss_after == logical_id
@@ -339,10 +354,6 @@ class TaskSchedulerThread:
                     raise RuntimeError(
                         "no worker available for loss injection"
                     )
-                worker_id, worker_epoch = self._worker_by_task[logical_id]
-                self.controller.disconnect_worker(
-                    worker_id, worker_epoch
-                )
                 self.controller.invalidate_idata(
                     output_ids[logical_id]
                 )

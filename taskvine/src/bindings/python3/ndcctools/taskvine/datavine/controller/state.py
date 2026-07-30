@@ -12,6 +12,7 @@ from ..models import (
     TaskRecord,
 )
 from ..persistence.manager import PersistenceRequest
+from .pruning import PruningAuthority
 from .replicas import ReplicaDirectory
 
 
@@ -20,6 +21,7 @@ class ControllerState:
         self,
         max_edata_bytes=256 * 1024 * 1024,
         replica_directory=None,
+        pruning_audit_capacity=10000,
     ):
         if max_edata_bytes <= 0:
             raise ValueError("max_edata_bytes must be positive")
@@ -46,6 +48,7 @@ class ControllerState:
         self._persistence_stale_completions = 0
         self._persistence_cleanup_failures = 0
         self.replicas = replica_directory or ReplicaDirectory()
+        self.pruning = PruningAuthority(pruning_audit_capacity)
 
     def configure_persistence(
         self,
@@ -71,6 +74,7 @@ class ControllerState:
                 terminal_capacity,
                 transition_hook,
             )
+            self.pruning.configure_filesystem(root)
 
     def _publish_replica(
         self,
@@ -175,6 +179,30 @@ class ControllerState:
                 raise KeyError(f"unknown output IDataID {task.output_data_id}")
             if output.producer_task_id != task.task_id:
                 raise ValueError("IData producer does not match TaskID")
+            direct_inputs = {
+                data_id
+                for kind, data_id in task.positional
+                if kind == "i"
+            }
+            direct_inputs.update(
+                data_id
+                for _, (kind, data_id) in task.keyword
+                if kind == "i"
+            )
+            normalized_inputs = tuple(
+                sorted(set(task.input_data_ids))
+            )
+            if task.input_data_ids != normalized_inputs:
+                raise ValueError(
+                    "TaskRecord IData dependencies must be unique and sorted"
+                )
+            if not direct_inputs <= set(task.input_data_ids):
+                raise ValueError("TaskRecord omits direct IData dependency")
+            self.pruning.register_task(
+                task.task_id,
+                task.input_data_ids,
+                (task.output_data_id,),
+            )
             self._tasks[task.task_id] = task
             return task
 
@@ -246,16 +274,63 @@ class ControllerState:
             )
             self._idata[data_id] = record
             self._publications += 1
+            self.pruning.set_data_state(
+                data_id,
+                available=True,
+                durable=False,
+                persistence="none",
+            )
             return record
 
     def join_worker(self, worker_id, epoch):
-        return self.replicas.join_worker(worker_id, epoch)
+        with self._lock:
+            return self.replicas.join_worker(worker_id, epoch)
 
     def disconnect_worker(self, worker_id, epoch):
-        return self.replicas.disconnect_worker(worker_id, epoch)
+        with self._lock:
+            return self.replicas.disconnect_worker(worker_id, epoch)
 
     def reconcile_workers(self, active_worker_ids):
-        return self.replicas.reconcile_workers(active_worker_ids)
+        with self._lock:
+            return self.replicas.reconcile_workers(active_worker_ids)
+
+    def acquire_replica(
+        self,
+        data_id,
+        replica_id,
+        generation,
+        destination_worker_id,
+        destination_worker_epoch,
+    ):
+        with self._lock:
+            return self.replicas.acquire_source(
+                data_id,
+                replica_id,
+                generation,
+                destination_worker_id,
+                destination_worker_epoch,
+            )
+
+    def release_replica(self, lease_id, success):
+        with self._lock:
+            return self.replicas.release_source(lease_id, success)
+
+    def invalidate_worker_replica(
+        self,
+        data_id,
+        replica_id,
+        generation,
+        worker_id,
+        worker_epoch,
+    ):
+        with self._lock:
+            return self.replicas.invalidate_worker_replica(
+                data_id,
+                replica_id,
+                generation,
+                worker_id,
+                worker_epoch,
+            )
 
     def _validate_replica_identity(
         self, data_key, attempt, content_hash, size
@@ -404,6 +479,9 @@ class ControllerState:
                 self._persistence_jobs.pop(old.data_id, None)
                 self._persistence_requests -= 1
                 raise
+            self.pruning.set_data_state(
+                old.data_id, persistence="queued"
+            )
             return record
 
     def cancel_persistence(self, data_id, reason="obsolete"):
@@ -422,6 +500,9 @@ class ControllerState:
             old = self.get_idata(data_id)
             self._idata[data_id] = dataclasses.replace(
                 old, durability="cancelled"
+            )
+            self.pruning.set_data_state(
+                data_id, persistence="none"
             )
         return result
 
@@ -452,6 +533,9 @@ class ControllerState:
             self._idata[request.data_id] = dataclasses.replace(
                 old, durability="writing"
             )
+            self.pruning.set_data_state(
+                request.data_id, persistence="writing"
+            )
 
     def _persistence_complete(self, request, path, error):
         with self._lock:
@@ -478,11 +562,17 @@ class ControllerState:
                 self._idata[request.data_id] = dataclasses.replace(
                     old, durability="cancelled", durable_path=None
                 )
+                self.pruning.set_data_state(
+                    request.data_id, persistence="none"
+                )
                 return
             if error is not None:
                 job["state"] = "failed"
                 self._idata[request.data_id] = dataclasses.replace(
                     old, durability="failed", durable_path=None
+                )
+                self.pruning.set_data_state(
+                    request.data_id, persistence="none"
                 )
                 self._persistence_failures[request.data_id] = error
                 return
@@ -504,11 +594,20 @@ class ControllerState:
                 self._idata[request.data_id] = dataclasses.replace(
                     old, durability="failed", durable_path=None
                 )
+                self.pruning.set_data_state(
+                    request.data_id, persistence="none"
+                )
                 self._persistence_failures[request.data_id] = str(exc)
                 return
             job["state"] = "durable"
             self._idata[request.data_id] = dataclasses.replace(
                 old, durability="durable", durable_path=path
+            )
+            self.pruning.set_data_state(
+                request.data_id,
+                available=True,
+                durable=True,
+                persistence="none",
             )
             self._persistence_failures.pop(request.data_id, None)
 
@@ -560,6 +659,9 @@ class ControllerState:
                     old.content_hash,
                     len(payload),
                 )
+                self.pruning.set_data_state(
+                    old.data_id, available=True, durable=True
+                )
                 return "restored-durable"
             self._cancel_persistence_locked(old.data_id, "global-loss")
             try:
@@ -584,7 +686,323 @@ class ControllerState:
                 durability="volatile",
                 durable_path=None,
             )
+            self.pruning.set_data_state(
+                old.data_id,
+                available=False,
+                durable=False,
+                persistence="none",
+            )
             return "globally-lost"
+
+    def set_task_state(self, task_id, state):
+        with self._lock:
+            self.get_task(task_id)
+            return self.pruning.set_task_state(task_id, state).to_dict()
+
+    def set_required_output(self, data_id, required=True):
+        with self._lock:
+            self.get_idata(data_id)
+            return self.pruning.set_data_state(
+                data_id, required_output=bool(required)
+            ).to_dict()
+
+    def pruning_plan(self):
+        with self._lock:
+            return self.pruning.plan().to_dict()
+
+    def _pruning_record(self, plan, data_id):
+        for record in plan.records:
+            if record.data_id == int(data_id):
+                return record
+        raise KeyError(f"unknown pruning IDataID {data_id}")
+
+    def apply_pruning(
+        self,
+        graph_revision,
+        state_revision,
+        grace_seconds=60,
+        data_ids=None,
+        now=None,
+    ):
+        """Compare a proof revision and quarantine/invalidate proven data."""
+        with self._lock:
+            plan = self.pruning.validate_revision(
+                graph_revision, state_revision
+            )
+            cancelled = []
+            for data_id in plan.cancel_persistence:
+                action = self._cancel_persistence_locked(
+                    data_id, "pruning-obsolete"
+                )
+                if action in ("cancelled", "cancelling"):
+                    cancelled.append(data_id)
+                    self.pruning.audit(
+                        "cancel-persistence",
+                        data_id,
+                        "obsolete-persistence",
+                        self.replicas.revision,
+                    )
+            if cancelled:
+                plan = self.pruning.plan()
+            selected = (
+                set(plan.prunable)
+                if data_ids is None
+                else {int(data_id) for data_id in data_ids}
+            )
+            unknown = selected - set(plan.prunable)
+            if unknown:
+                raise ValueError(
+                    f"IDataIDs are not prunable: {sorted(unknown)}"
+                )
+            applied = []
+            deferred = []
+            for data_id in sorted(selected):
+                record = self._pruning_record(
+                    self.pruning.plan(), data_id
+                )
+                if record.decision != "prune":
+                    raise ValueError(
+                        f"IDataID {data_id} proof changed before pruning"
+                    )
+                result = self._prune_idata_locked(
+                    data_id, record, grace_seconds, now
+                )
+                applied.extend(result["applied"])
+                deferred.extend(result["deferred"])
+            return {
+                "cancelled_persistence": cancelled,
+                "applied": applied,
+                "deferred": deferred,
+                "plan": self.pruning.plan().to_dict(),
+                "replica_revision": self.replicas.revision,
+            }
+
+    def _prune_idata_locked(
+        self, data_id, proof, grace_seconds, now
+    ):
+        old = self.get_idata(data_id)
+        applied = []
+        deferred = []
+        sharedfs_id = (
+            f"sharedfs-idata-{old.data_id}-attempt-{old.attempt}"
+        )
+        for replica in self.replicas.records_for(f"i:{data_id}"):
+            if replica.state != "available":
+                continue
+            if replica.active_leases:
+                retiring = self.replicas.invalidate_replica(
+                    replica.data_id,
+                    replica.replica_id,
+                    replica.generation,
+                )
+                deferred.append(
+                    {
+                        "data_id": data_id,
+                        "replica_id": retiring.replica_id,
+                        "action": "retiring-active-read",
+                    }
+                )
+                continue
+            if replica.tier == "sharedfs":
+                if (
+                    old.durable_path is None
+                    or replica.replica_id != sharedfs_id
+                ):
+                    raise ValueError(
+                        "SharedFS replica lacks owned durable path"
+                    )
+                quarantine_path = self.pruning.quarantine_file(
+                    data_id,
+                    replica.replica_id,
+                    replica.generation,
+                    old.durable_path,
+                )
+                revision = self.replicas.revision
+                try:
+                    quarantined = self.replicas.quarantine(
+                        replica.data_id,
+                        replica.replica_id,
+                        replica.generation,
+                        grace_seconds,
+                        revision,
+                        now,
+                    )
+                except Exception:
+                    self.pruning.restore_file(
+                        data_id,
+                        replica.replica_id,
+                        replica.generation,
+                    )
+                    raise
+                action = "quarantine-sharedfs"
+                path = str(quarantine_path)
+                generation = quarantined.generation
+            else:
+                invalid = self.replicas.invalidate_replica(
+                    replica.data_id,
+                    replica.replica_id,
+                    replica.generation,
+                )
+                action = (
+                    "invalidate-worker-pending-delete"
+                    if replica.tier in ("worker-dram", "worker-disk")
+                    else "drop-controller-replica"
+                )
+                path = None
+                generation = invalid.generation
+            audit = self.pruning.audit(
+                action,
+                data_id,
+                ",".join(proof.reasons),
+                self.replicas.revision,
+                replica.replica_id,
+                generation,
+                path,
+            )
+            applied.append(audit.to_dict())
+        self._idata[data_id] = dataclasses.replace(
+            old,
+            serialized_bytes=None,
+            durability="volatile",
+            durable_path=None,
+        )
+        self.pruning.set_data_state(
+            data_id,
+            available=self.replicas.globally_available(f"i:{data_id}"),
+            durable=False,
+            persistence="none",
+        )
+        return {"applied": applied, "deferred": deferred}
+
+    def restore_quarantined(self, data_id):
+        with self._lock:
+            old = self.get_idata(data_id)
+            restored = []
+            for replica in self.replicas.records_for(f"i:{data_id}"):
+                if replica.state != "quarantined":
+                    continue
+                self.pruning.validate_quarantined_file(
+                    data_id,
+                    replica.replica_id,
+                    replica.generation,
+                    replica.content_hash,
+                    replica.size,
+                )
+                path = self.pruning.restore_file(
+                    data_id, replica.replica_id, replica.generation
+                )
+                try:
+                    restored_replica = (
+                        self.replicas.restore_quarantine(
+                            replica.data_id,
+                            replica.replica_id,
+                            replica.generation,
+                        )
+                    )
+                except Exception:
+                    self.pruning.quarantine_file(
+                        data_id,
+                        replica.replica_id,
+                        replica.generation,
+                        path,
+                    )
+                    raise
+                payload = Path(path).read_bytes()
+                self._idata[data_id] = dataclasses.replace(
+                    old,
+                    serialized_bytes=payload,
+                    durability="durable",
+                    durable_path=str(path),
+                )
+                self._publish_replica(
+                    f"i:{data_id}",
+                    (
+                        f"controller-idata-{data_id}-"
+                        f"attempt-{old.attempt}"
+                    ),
+                    old.attempt,
+                    "controller-memory",
+                    old.content_hash,
+                    len(payload),
+                )
+                self.pruning.set_data_state(
+                    data_id, available=True, durable=True
+                )
+                audit = self.pruning.audit(
+                    "restore-quarantine",
+                    data_id,
+                    "new-or-recovery-consumer",
+                    self.replicas.revision,
+                    restored_replica.replica_id,
+                    restored_replica.generation,
+                    path,
+                )
+                restored.append(audit.to_dict())
+            if not restored:
+                raise ValueError("IDataID has no quarantined replica")
+            return restored
+
+    def hard_delete_quarantined(
+        self, graph_revision, state_revision, now=None
+    ):
+        with self._lock:
+            plan = self.pruning.validate_revision(
+                graph_revision, state_revision
+            )
+            records = {
+                record.data_id: record for record in plan.records
+            }
+            deleted = []
+            for data_id in self.pruning.pruner.graph.data_ids:
+                for replica in self.replicas.records_for(
+                    f"i:{data_id}"
+                ):
+                    if replica.state != "quarantined":
+                        continue
+                    proof = records[data_id]
+                    if (
+                        proof.decision not in ("prune", "absent")
+                        or set(proof.reasons)
+                        - {"no-accepted-replica"}
+                    ):
+                        raise ValueError(
+                            "quarantine is no longer proven prunable"
+                        )
+                    revision = self.replicas.revision
+                    self.replicas.validate_hard_delete(
+                        replica.data_id,
+                        replica.replica_id,
+                        replica.generation,
+                        revision,
+                        now,
+                    )
+                    path = self.pruning.delete_file(
+                        data_id,
+                        replica.replica_id,
+                        replica.generation,
+                    )
+                    pruned = self.replicas.hard_delete_quarantine(
+                        replica.data_id,
+                        replica.replica_id,
+                        replica.generation,
+                        revision,
+                        now,
+                    )
+                    audit = self.pruning.audit(
+                        "hard-delete-sharedfs",
+                        data_id,
+                        "proof-remains-valid-after-grace",
+                        self.replicas.revision,
+                        pruned.replica_id,
+                        pruned.generation,
+                        path,
+                    )
+                    deleted.append(audit.to_dict())
+            return {
+                "deleted": deleted,
+                "plan": self.pruning.plan().to_dict(),
+                "replica_revision": self.replicas.revision,
+            }
 
     def stop(self):
         persistence = self._persistence
@@ -647,4 +1065,5 @@ class ControllerState:
                     else None
                 ),
                 "replica_directory": self.replicas.snapshot(),
+                "pruning": self.pruning.snapshot(),
             }

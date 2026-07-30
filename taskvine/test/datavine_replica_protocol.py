@@ -5,6 +5,7 @@ import json
 
 from ndcctools.taskvine.datavine.controller.service import ControllerService
 from ndcctools.taskvine.datavine.controller.state import ControllerState
+from ndcctools.taskvine.datavine.models import TaskRecord
 from ndcctools.taskvine.datavine.protocol import DataVineRemoteError
 from ndcctools.taskvine.datavine.scheduler.client import ControllerClient
 from ndcctools.taskvine.datavine.serialization import serialize
@@ -30,10 +31,21 @@ def main():
     edata = state.register_edata(metadata, edata_payload)
     idata = state.allocate_idata(1)
     idata_payload = b"same-logical-bytes"
+    state.register_task(
+        TaskRecord(1, edata.data_id, (), (), idata.data_id, ())
+    )
     state.publish_idata(idata.data_id, 1, idata_payload)
     same_bytes = state.allocate_idata(2)
+    state.register_task(
+        TaskRecord(
+            2, edata.data_id, (), (), same_bytes.data_id, ()
+        )
+    )
     state.publish_idata(same_bytes.data_id, 1, idata_payload)
     zero = state.allocate_idata(3)
+    state.register_task(
+        TaskRecord(3, edata.data_id, (), (), zero.data_id, ())
+    )
     state.publish_idata(zero.data_id, 1, b"")
 
     service = ControllerService("127.0.0.1", 0, "replica-token", state)

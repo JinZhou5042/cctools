@@ -67,6 +67,7 @@ class TaskRecord:
     positional: tuple
     keyword: tuple
     output_data_id: int
+    input_data_ids: tuple
 
     def to_dict(self):
         return {
@@ -75,6 +76,7 @@ class TaskRecord:
             "positional": [list(value) for value in self.positional],
             "keyword": [[name, list(value)] for name, value in self.keyword],
             "output_data_id": self.output_data_id,
+            "input_data_ids": list(self.input_data_ids),
         }
 
     @classmethod
@@ -91,4 +93,7 @@ class TaskRecord:
                 for name, binding in value["keyword"]
             ),
             output_data_id=int(value["output_data_id"]),
+            input_data_ids=tuple(
+                int(data_id) for data_id in value["input_data_ids"]
+            ),
         )

@@ -646,6 +646,30 @@ class ReplicaDirectory:
         expected_revision,
         now=None,
     ):
+        with self._lock:
+            record = self.validate_hard_delete(
+                data_id,
+                replica_id,
+                generation,
+                expected_revision,
+                now,
+            )
+            record = dataclasses.replace(
+                record, state="pruned", quarantine_until=None
+            )
+            key = (record.data_id, record.replica_id)
+            self._replicas[key] = record
+            self._changed()
+            return record
+
+    def validate_hard_delete(
+        self,
+        data_id,
+        replica_id,
+        generation,
+        expected_revision,
+        now=None,
+    ):
         key = (self._normalize_data_id(data_id), str(replica_id))
         now = time.time() if now is None else float(now)
         with self._lock:
@@ -661,15 +685,27 @@ class ReplicaDirectory:
                 or now < record.quarantine_until
             ):
                 raise ValueError("quarantine cannot be hard deleted")
-            record = dataclasses.replace(
-                record, state="pruned", quarantine_until=None
-            )
-            self._replicas[key] = record
-            self._changed()
             return record
 
     def globally_available(self, data_id):
         return bool(self.candidates(data_id))
+
+    def records_for(self, data_id):
+        data_id = self._normalize_data_id(data_id)
+        with self._lock:
+            return tuple(
+                sorted(
+                    (
+                        record
+                        for record in self._replicas.values()
+                        if record.data_id == data_id
+                    ),
+                    key=lambda record: (
+                        record.replica_id,
+                        record.generation,
+                    ),
+                )
+            )
 
     def forget_data(self, data_id, expected_revision):
         """Forget terminal physical history after logical pruning."""

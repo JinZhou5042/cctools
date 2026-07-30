@@ -130,6 +130,7 @@ def main():
                     (("e", argument_id),),
                     (),
                     output_id,
+                    (),
                 )
             )
             (Path(temp_dir) / f"datavine-edata-{function_id}.pkl").write_bytes(

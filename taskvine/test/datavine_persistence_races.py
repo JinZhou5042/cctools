@@ -9,7 +9,9 @@ import time
 
 from ndcctools.taskvine.datavine.controller.service import ControllerService
 from ndcctools.taskvine.datavine.controller.state import ControllerState
+from ndcctools.taskvine.datavine.models import TaskRecord
 from ndcctools.taskvine.datavine.scheduler.client import ControllerClient
+from ndcctools.taskvine.datavine.serialization import serialize
 
 
 def expect_error(fragment, function, *args, **kwargs):
@@ -36,6 +38,18 @@ def wait_for(state, data_id, durability, timeout=5):
 
 def allocate_value(state, producer, attempt, payload):
     record = state.allocate_idata(producer)
+    metadata, function_payload = serialize(bytes)
+    function = state.register_edata(metadata, function_payload)
+    state.register_task(
+        TaskRecord(
+            producer,
+            function.data_id,
+            (),
+            (),
+            record.data_id,
+            (),
+        )
+    )
     state.publish_idata(record.data_id, attempt, payload)
     return record.data_id
 
@@ -75,7 +89,10 @@ def queued_cancellation_and_capacity(root):
         release.set()
         wait_for(state, first, "durable")
         cancelled = wait_for(state, second, "cancelled")
-        assert cancelled["persistence_request"]["cancel_reason"] == "shadow-prune"
+        assert (
+            cancelled["persistence_request"]["cancel_reason"]
+            == "shadow-prune"
+        )
         assert state.idata_status(third)["durability"] == "volatile"
         files = sorted(Path(root).glob("idata-*.pkl"))
         assert len(files) == 1
@@ -150,7 +167,9 @@ def stale_completion_after_new_attempt(root):
             time.sleep(0.01)
         status = state.idata_status(data_id)
         assert status["attempt"] == 2
-        assert status["content_hash"] == hashlib.sha256(new_payload).hexdigest()
+        assert status["content_hash"] == hashlib.sha256(
+            new_payload
+        ).hexdigest()
         assert status["durability"] == "volatile"
         assert not list(Path(root).glob("*attempt-1-*.pkl"))
 
@@ -168,10 +187,9 @@ def stale_completion_after_new_attempt(root):
         snapshot = state.snapshot()
         assert snapshot["persistence_stale_completions"] == 1
         assert snapshot["persistence_cleanup_failures"] == 0
-        assert (
-            snapshot["replica_directory"]["replica_states"]["available"]
-            == 2
-        )
+        assert len(
+            state.replicas.candidates(f"i:{data_id}")
+        ) == 2
         return snapshot
     finally:
         release.set()

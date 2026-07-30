@@ -67,6 +67,14 @@ class ControllerService:
                 if parsed.path == f"{API_PREFIX}/snapshot":
                     self._json(200, owner.state.snapshot())
                     return
+                if parsed.path == f"{API_PREFIX}/pruning/plan":
+                    try:
+                        plan = owner.state.pruning_plan()
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, plan)
+                    return
                 prefix = f"{API_PREFIX}/edata/"
                 if parsed.path.startswith(prefix):
                     token = parsed.path[len(prefix):]
@@ -283,14 +291,12 @@ class ControllerService:
                 if self.path == f"{API_PREFIX}/replicas/invalidate":
                     try:
                         request = self._read_json()
-                        replica = (
-                            owner.state.replicas.invalidate_worker_replica(
-                                request["data_id"],
-                                request["replica_id"],
-                                request["generation"],
-                                request["worker_id"],
-                                request["worker_epoch"],
-                            )
+                        replica = owner.state.invalidate_worker_replica(
+                            request["data_id"],
+                            request["replica_id"],
+                            request["generation"],
+                            request["worker_id"],
+                            request["worker_epoch"],
                         )
                     except Exception as exc:
                         self._error(400, exc)
@@ -300,7 +306,7 @@ class ControllerService:
                 if self.path == f"{API_PREFIX}/replicas/acquire":
                     try:
                         request = self._read_json()
-                        lease = owner.state.replicas.acquire_source(
+                        lease = owner.state.acquire_replica(
                             request["data_id"],
                             request["replica_id"],
                             request["generation"],
@@ -315,13 +321,75 @@ class ControllerService:
                 if self.path == f"{API_PREFIX}/replicas/release":
                     try:
                         request = self._read_json()
-                        lease = owner.state.replicas.release_source(
+                        lease = owner.state.release_replica(
                             request["lease_id"], request["success"]
                         )
                     except Exception as exc:
                         self._error(400, exc)
                         return
                     self._json(200, dataclasses.asdict(lease))
+                    return
+                if self.path == f"{API_PREFIX}/pruning/task-state":
+                    try:
+                        request = self._read_json()
+                        plan = owner.state.set_task_state(
+                            request["task_id"], request["state"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, plan)
+                    return
+                if self.path == f"{API_PREFIX}/pruning/required-output":
+                    try:
+                        request = self._read_json()
+                        plan = owner.state.set_required_output(
+                            request["data_id"],
+                            request.get("required", True),
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, plan)
+                    return
+                if self.path == f"{API_PREFIX}/pruning/apply":
+                    try:
+                        request = self._read_json()
+                        result = owner.state.apply_pruning(
+                            request["graph_revision"],
+                            request["state_revision"],
+                            request.get("grace_seconds", 60),
+                            request.get("data_ids"),
+                            request.get("now"),
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, result)
+                    return
+                if self.path == f"{API_PREFIX}/pruning/restore":
+                    try:
+                        request = self._read_json()
+                        result = owner.state.restore_quarantined(
+                            request["data_id"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, {"restored": result})
+                    return
+                if self.path == f"{API_PREFIX}/pruning/hard-delete":
+                    try:
+                        request = self._read_json()
+                        result = owner.state.hard_delete_quarantined(
+                            request["graph_revision"],
+                            request["state_revision"],
+                            request.get("now"),
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, result)
                     return
                 if self.path == f"{API_PREFIX}/idata/allocate":
                     try:
