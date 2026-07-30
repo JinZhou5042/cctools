@@ -350,14 +350,6 @@ class TaskSchedulerThread:
             self._logical_outputs[
                 task.task_id
             ] = self.controller.allocate_idata(task.task_id)
-            self._idata_files[
-                self._logical_outputs[task.task_id]
-            ] = self._manager.declare_temp()
-            self._idata_files[
-                self._logical_outputs[task.task_id]
-            ].set_datavine_data_id(
-                f"i:{self._logical_outputs[task.task_id]}"
-            )
         for task in workflow.tasks:
             self._nested_idata_by_task[task.task_id] = set()
             positional = tuple(
@@ -767,10 +759,14 @@ class TaskSchedulerThread:
             for output_data_id in output_ids.values():
                 self._wait_durable(output_data_id)
         physical_cache_workers = self._manager.status("workers")
+        self._manager._refresh_stats()
         self._last_run_report = {
             "logical_tasks": len(output_ids),
             "physical_attempts": sum(self._attempts.values()),
             "recovery_reexecutions": recovery_reexecutions,
+            "legacy_recovery_tasks": int(
+                self._manager.stats.tasks_recovery
+            ),
             "loss_injected": loss_injected,
             "local_idata_hits": local_idata_hits,
             "worker_loss_injected": worker_loss_injected,
@@ -869,6 +865,27 @@ class TaskSchedulerThread:
                 raise RuntimeError(
                     f"could not bind TaskVine file to EDataID e:{data_id}"
                 )
+        return file_object
+
+    def _idata_output_file(self, data_id, attempt):
+        url = (
+            self.controller.endpoint
+            + f"/v1/idata/{int(data_id)}?"
+            + urllib.parse.urlencode(
+                {
+                    "token": self.controller.token,
+                    "attempt": int(attempt),
+                }
+            )
+        )
+        file_object = self._manager.declare_url(
+            url, cache="worker", peer_transfer=True
+        )
+        if not file_object.set_datavine_data_id(f"i:{int(data_id)}"):
+            raise RuntimeError(
+                f"could not bind TaskVine file to IDataID i:{data_id}"
+            )
+        self._idata_files[int(data_id)] = file_object
         return file_object
 
     def _submit_prefetches(
@@ -1006,8 +1023,11 @@ class TaskSchedulerThread:
                 self._idata_files[data_id],
                 f"datavine-idata-{data_id}.pkl",
             )
+        output_file = self._idata_output_file(
+            record.output_data_id, attempt
+        )
         task.add_output(
-            self._idata_files[record.output_data_id], output_name
+            output_file, output_name
         )
         if environment is not None:
             task.add_environment(environment)

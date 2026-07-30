@@ -129,6 +129,21 @@ class WorkerCacheAdmission:
             raise ValueError("worker disk cache item capacity is negative")
         self.poll(manager)
         usage = self.usage()
+        rematerializable = {}
+
+        def can_rematerialize(data_key):
+            if data_key.startswith("e:"):
+                return True
+            if data_key not in rematerializable:
+                status = self.controller.idata_status(
+                    int(data_key.split(":", 1)[1])
+                )
+                rematerializable[data_key] = bool(
+                    status["available"]
+                    or status["durability"] == "durable"
+                )
+            return rematerializable[data_key]
+
         for worker_id in sorted(usage):
             projected_bytes = usage[worker_id]["bytes"]
             projected_items = usage[worker_id]["items"]
@@ -140,10 +155,10 @@ class WorkerCacheAdmission:
                 and record["data_id"] not in self.prune_by_data
                 and record["data_id"] not in protected_data
                 and (
-                    record["data_id"].startswith("e:")
-                    or int(
+                    int(
                         remaining_uses.get(record["data_id"], 0)
                     ) == 0
+                    or can_rematerialize(record["data_id"])
                 )
                 and file_resolver(record["data_id"]) is not None
             ]

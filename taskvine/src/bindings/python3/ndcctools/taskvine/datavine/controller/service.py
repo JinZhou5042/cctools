@@ -326,6 +326,23 @@ class ControllerService:
                     except (KeyError, ValueError) as exc:
                         self._error(404, exc)
                         return
+                    requested_attempt = urllib.parse.parse_qs(
+                        parsed.query
+                    ).get("attempt")
+                    if requested_attempt is not None:
+                        try:
+                            requested_attempt = int(
+                                requested_attempt[0]
+                            )
+                        except (TypeError, ValueError, IndexError):
+                            self._error(400, "invalid IData attempt")
+                            return
+                        if requested_attempt != record.attempt:
+                            self._error(
+                                409,
+                                "IData attempt no longer current",
+                            )
+                            return
                     if record.serialized_bytes is None:
                         self._error(409, "IData is not available")
                         return
