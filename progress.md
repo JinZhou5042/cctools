@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 branched minimum recoverable cut**
-- Validated code commit: `79bcbc832`
+- Active task: **Phase 9 asynchronous pruning coordination**
+- Validated code commit: `6135c761a`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +25,46 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 branched minimum recoverable-cut checkpoint
+
+Commit `6135c761a` adds a nine-task diamond/chain/fan-in workflow with
+durability frontiers at tasks 4 and 6. Both small frontier outputs use
+Controller-inline persistence. Scheduler now tracks those asynchronous writes
+as first-class termination obligations, triggers pruning only after every
+frontier output is durable, and reports Controller and worker persistence
+counts/bytes separately.
+
+Controller-inline and worker persistence now share one strict concurrency
+condition. Inline writes wait for capacity instead of converting temporary
+contention into a permanent failure. Scheduler applies bounded retry with
+exponential backoff and a maximum delay to failed inline writes, preserves the
+old worker-persistence metric meaning, and exits only after the last data
+obligation is actually satisfied.
+
+The accepted run physically prunes IData `[1,2,3,5]`, then shuts down the exact
+remote worker holding the only volatile replica of join IData 8 and explicitly
+loses IData 7. Recovery reuses ordinary tasks 8 and 7 at rollback depth two.
+Tasks 1–6 and target task 9 remain at one attempt, so the completed left
+diamond and both durability frontiers are not replayed. The oracle matches and
+Legacy recovery task count is zero.
+
+The prescribed clean build/install and all 19 installed-path regressions pass.
+Three local repetitions have semantic SHA-256
+`de1bef4d8e7ab5d6ee64044ef672d2e1d65e0cf2c6b8c95153ea935f44aaa547`.
+Package SHA-256 is
+`d0b5afd42be4b2b6f256873c077cdf0c0e3a1c048fee777959f12c2f2c5d423f`.
+Factory `datavine-branch-6135c761a` passes with three package-only workers,
+exact WorkerID shutdown on `qa-h100-006.crc.nd.edu`, and removes all workers
+on stop. Evidence: `acceptance/artifacts/branched-cut-6135c761a.json`.
+
+Self-review status is **PASS for the scoped branched recovery checkpoint and
+FAIL for Ultimate Acceptance**. The test remains nine tasks with one recovery
+cycle. The current frontier-pruning path globally drains running compute,
+prefetch, and persistence before physical deletion; dynamic graph growth and
+concurrent proof invalidation remain unresolved. The next smallest safe task
+is event-driven asynchronous pruning coordination that removes this global
+drain barrier while protecting active reads and invalidating stale proofs.
 
 ### Phase 9 multi-output partial-publication process-loss checkpoint
 

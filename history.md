@@ -1,5 +1,31 @@
 # DataVine History
 
+## 2026-07-30 — Branched durability-frontier recovery
+
+- Added a diamond branch and unequal chain joined by fan-in, with durable
+  frontiers at tasks 4 and 6 and physical pruning of covered IData
+  `[1,2,3,5]`.
+- Made Controller-inline persistence a Scheduler-owned obligation, separated
+  Controller/worker persistence telemetry, added bounded inline retry, and
+  preserved strict shared global write admission through condition
+  backpressure.
+- Actual shutdown of the unique join-replica WorkerID causes only tasks 8 and
+  7 to replay at rollback depth two. The left diamond, both durable frontiers,
+  and final target do not replay; 11 physical attempts execute for 9 logical
+  tasks with zero Legacy recovery tasks.
+- Rejected three intermediate results: an untracked inline write deadlocked
+  the frontier gate; temporary shared-capacity contention became terminal;
+  and clearing the last obligation in-loop caused a false no-progress error.
+- The final prescribed build, all 19 installed regressions, three deterministic
+  local repetitions, package verification, and three-worker factory run pass.
+  Factory shutdown removes all workers.
+- Code commit: `6135c761a`; package SHA-256:
+  `d0b5afd42be4b2b6f256873c077cdf0c0e3a1c048fee777959f12c2f2c5d423f`.
+- Evidence: `acceptance/artifacts/branched-cut-6135c761a.json`.
+- Self-review status: **PASS for the scoped checkpoint, FAIL for Ultimate
+  Acceptance**. Asynchronous pruning, dynamic proof invalidation, repeated
+  branched churn, scale, and the Grand Challenge remain unresolved.
+
 ## 2026-07-30 — Multi-output partial-publication process loss
 
 - Added a coordinated fault after output slot zero publication but before slot
