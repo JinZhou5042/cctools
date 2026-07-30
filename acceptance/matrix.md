@@ -28,7 +28,7 @@ is never a pass.
 | PLACE | Multi-source, load/epoch, bulk bypass, peer fallback | FAIL | Controller URL plus TaskVine peer only |
 | PERSIST | Bounded/cancellable/backpressured atomic durability | FAIL | Atomic bounded workers exist; queue/cancel/overload missing |
 | RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | Single manual global-loss replay only |
-| PRUNE-SHADOW | Reference/incremental equivalence and proof records | FAIL | Not implemented in independent runtime |
+| PRUNE-SHADOW | Reference/incremental equivalence and proof records | PASS | `artifacts/phase9-shadow-20260729.json`, commit `2108b68a8` |
 | PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | FAIL | Not implemented |
 | PRUNE-SHAREDFS | Quarantine/grace/recovery/hard-delete audit | FAIL | Not implemented |
 | MIN-CUT | Observable minimum recoverable cut/frontier/depth | FAIL | Not implemented |
@@ -38,7 +38,7 @@ is never a pass.
 | PERF-FS | Bounded read/write/metadata/storage metrics | FAIL | Persistence active count only |
 | PERF-COMP | Three repetitions, median/variation, scaling cause | FAIL | Not run |
 | REVIEW-A | Before-pruning architecture review | FAIL | `reviews/review-a.md` |
-| REVIEW-B | After shadow-pruning review | OPEN | Blocked on shadow pruning |
+| REVIEW-B | After shadow-pruning review | FAIL | `reviews/review-b.md`; physical deletion blocked |
 | REVIEW-C | Final architecture review | OPEN | Blocked on all acceptance work |
 | QUALITY | Modular ownership, invariants, cleanup, lint/sanitizers | OPEN | Phase 8 lint passes; ultimate implementation not reviewed |
 | GIT | Reviewable commits/checkpoints/builds/artifacts/bisection | FAIL | Earlier phases consolidated into one code commit |

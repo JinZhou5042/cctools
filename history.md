@@ -13,6 +13,26 @@
 - No runtime source changed in this checkpoint; build/package evidence remains
   the Phase 8 component baseline only.
 
+## 2026-07-29 — Phase 9 recovery-aware shadow pruning
+
+- Added independent reference and incremental pruning proof algorithms in
+  `datavine/recovery/pruning.py`; no deletion path was enabled.
+- Fixed a self-review failure where set-based recovery sources dropped a
+  shared anchor when one of several obligations ended. The accepted algorithm
+  uses target reference counts and event-local memoization.
+- Added current-revision proof records and observable recovery depth.
+- Accepted 40 seeded random DAGs, 80 tasks per graph, 6,400 state events, zero
+  reference/incremental mismatches, and zero observed false-positive pruning
+  decisions. Maximum per-event incremental scan was 64 of 84 IData nodes.
+- Dynamic growth, multiple durability frontiers, mixed volatile/durable
+  branches, repeated recovery, and obsolete queued-persistence decisions pass.
+- Required clean build/install and local topology plus Phase 4–9 regressions
+  pass.
+- Architecture Review B remains FAIL and blocks deletion until physical
+  replicas/epochs, transfer readers, atomic revisions, persistence
+  cancellation, and SharedFS quarantine exist.
+- Code commit: `2108b68a8`.
+
 ## 2026-07-29 — Phase 0 local baseline
 
 - Created branch `datavine` from freshly fetched `origin/task-graph` at PR

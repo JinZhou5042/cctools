@@ -26,6 +26,23 @@ persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
 
+### Phase 9 shadow pruning checkpoint
+
+Commit `2108b68a8` adds a full-scan pruning oracle and an event-indexed
+incremental evaluator in the independent runtime. The installed-path test
+passes 40 deterministic random DAGs and 6,400 state events with zero semantic
+mismatches and zero observed false-positive prune decisions. It also covers
+dynamic growth, multiple frontiers, mixed durability, repeated recovery,
+queued-persistence cancellation decisions, proof revisions, and recovery-depth
+progression. The full local topology and Phase 4–8 regressions pass after the
+required clean build/install.
+
+This is **shadow-only**. No physical data is deleted. Architecture Review B is
+FAIL because replica epochs/tiers, in-flight reads, atomic runtime revisions,
+real persistence cancellation, and SharedFS quarantine are not implemented.
+Machine-readable evidence:
+`acceptance/artifacts/phase9-shadow-20260729.json`.
+
 ## Phase 8 acceptance
 
 The independent Scheduler now derives deterministic prefetch candidates from
