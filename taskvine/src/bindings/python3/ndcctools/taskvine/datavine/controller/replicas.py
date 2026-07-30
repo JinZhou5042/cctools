@@ -407,8 +407,13 @@ class ReplicaDirectory:
         data_id = self._normalize_data_id(data_id)
         with self._lock:
             records = []
+            latest_attempt = self._latest_attempt.get(data_id, 0)
             for record in self._replicas.values():
-                if record.data_id != data_id or record.state != "available":
+                if (
+                    record.data_id != data_id
+                    or record.state != "available"
+                    or record.attempt != latest_attempt
+                ):
                     continue
                 if record.tier in WORKER_TIERS:
                     worker = self._workers.get(record.worker_id)

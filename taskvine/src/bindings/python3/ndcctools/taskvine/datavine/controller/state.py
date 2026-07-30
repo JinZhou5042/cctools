@@ -2,13 +2,20 @@
 
 import dataclasses
 import hashlib
+from pathlib import Path
 import threading
 
 from ..models import EDataRecord, IDataRecord, SerializationMetadata, TaskRecord
+from ..persistence.manager import PersistenceRequest
+from .replicas import ReplicaDirectory
 
 
 class ControllerState:
-    def __init__(self, max_edata_bytes=256 * 1024 * 1024):
+    def __init__(
+        self,
+        max_edata_bytes=256 * 1024 * 1024,
+        replica_directory=None,
+    ):
         if max_edata_bytes <= 0:
             raise ValueError("max_edata_bytes must be positive")
         self.max_edata_bytes = int(max_edata_bytes)
@@ -28,9 +35,21 @@ class ControllerState:
         self._persistence_active = 0
         self._persistence_max_active = 0
         self._persistence_requests = 0
+        self._persistence_sequence = 0
+        self._persistence_jobs = {}
+        self._persistence_active_ids = set()
+        self._persistence_stale_completions = 0
+        self._persistence_cleanup_failures = 0
+        self.replicas = replica_directory or ReplicaDirectory()
 
     def configure_persistence(
-        self, root, workers=1, fail_first=False
+        self,
+        root,
+        workers=1,
+        fail_first=False,
+        queue_capacity=64,
+        terminal_capacity=1024,
+        transition_hook=None,
     ):
         from ..persistence.manager import PersistenceManager
 
@@ -43,7 +62,36 @@ class ControllerState:
                 self._persistence_complete,
                 workers,
                 fail_first,
+                queue_capacity,
+                terminal_capacity,
+                transition_hook,
             )
+
+    def _publish_replica(
+        self,
+        data_key,
+        replica_id,
+        attempt,
+        tier,
+        content_hash,
+        size,
+    ):
+        replica = self.replicas.prepare_replica(
+            data_key,
+            replica_id,
+            attempt,
+            tier,
+            content_hash,
+            size,
+        )
+        return self.replicas.commit_replica(
+            data_key,
+            replica_id,
+            replica.generation,
+            attempt,
+            content_hash,
+            size,
+        )
 
     def register_edata(self, metadata, serialized_bytes):
         if not isinstance(metadata, SerializationMetadata):
@@ -61,10 +109,18 @@ class ControllerState:
             if self._edata_bytes + len(serialized_bytes) > self.max_edata_bytes:
                 raise MemoryError("Controller EData capacity exceeded")
             data_id = self._next_edata_id
-            self._next_edata_id += 1
             record = EDataRecord(
                 data_id, digest, metadata, serialized_bytes
             )
+            self._publish_replica(
+                f"e:{data_id}",
+                f"controller-edata-{data_id}",
+                1,
+                "controller-memory",
+                digest,
+                len(serialized_bytes),
+            )
+            self._next_edata_id += 1
             self._edata[data_id] = record
             self._buckets.setdefault(bucket_key, []).append(data_id)
             self._edata_bytes += len(serialized_bytes)
@@ -141,6 +197,8 @@ class ControllerState:
         with self._lock:
             old = self.get_idata(data_id)
             attempt = int(attempt)
+            if attempt < 1:
+                raise ValueError("IData publication attempt must be positive")
             if attempt < old.attempt:
                 raise ValueError("stale IData publication")
             digest = hashlib.sha256(serialized_bytes).hexdigest()
@@ -148,6 +206,23 @@ class ControllerState:
                 if old.content_hash != digest or old.serialized_bytes != serialized_bytes:
                     raise ValueError("conflicting IData publication")
                 return old
+            if attempt > old.attempt:
+                if old.durability == "durable":
+                    raise ValueError("cannot supersede durable IData")
+                self._cancel_persistence_locked(
+                    old.data_id, "superseded-attempt"
+                )
+            self._publish_replica(
+                f"i:{old.data_id}",
+                (
+                    f"controller-idata-{old.data_id}-"
+                    f"attempt-{attempt}"
+                ),
+                attempt,
+                "controller-memory",
+                digest,
+                len(serialized_bytes),
+            )
             record = IDataRecord(
                 old.data_id,
                 old.producer_task_id,
@@ -170,40 +245,147 @@ class ControllerState:
                 raise ValueError("cannot persist unavailable IData")
             if old.durability in ("queued", "writing", "durable"):
                 return old
+            self._persistence_sequence += 1
+            request = PersistenceRequest(
+                request_id=(
+                    f"i{old.data_id}-a{old.attempt}-"
+                    f"p{self._persistence_sequence}"
+                ),
+                data_id=old.data_id,
+                attempt=old.attempt,
+                payload=old.serialized_bytes,
+                content_hash=old.content_hash,
+            )
             record = dataclasses.replace(old, durability="queued")
             self._idata[old.data_id] = record
+            self._persistence_jobs[old.data_id] = {
+                "request_id": request.request_id,
+                "attempt": request.attempt,
+                "content_hash": request.content_hash,
+                "state": "queued",
+                "cancel_reason": None,
+            }
             self._persistence_requests += 1
-            self._persistence.submit(
-                old.data_id, old.serialized_bytes, old.content_hash
-            )
+            try:
+                self._persistence.submit(request)
+            except Exception:
+                self._idata[old.data_id] = old
+                self._persistence_jobs.pop(old.data_id, None)
+                self._persistence_requests -= 1
+                raise
             return record
 
-    def _persistence_writing(self, data_id):
+    def cancel_persistence(self, data_id, reason="obsolete"):
         with self._lock:
-            self._persistence_active += 1
+            return self._cancel_persistence_locked(data_id, reason)
+
+    def _cancel_persistence_locked(self, data_id, reason):
+        data_id = int(data_id)
+        job = self._persistence_jobs.get(data_id)
+        if job is None or job["state"] not in ("queued", "writing"):
+            return "not-active"
+        result = self._persistence.cancel(job["request_id"])
+        if result in ("cancelled", "cancelling"):
+            job["state"] = result
+            job["cancel_reason"] = str(reason)
+            old = self.get_idata(data_id)
+            self._idata[data_id] = dataclasses.replace(
+                old, durability="cancelled"
+            )
+        return result
+
+    def _persistence_writing(self, request):
+        with self._lock:
+            job = self._persistence_jobs.get(request.data_id)
+            current_idata = self._idata.get(request.data_id)
+            if (
+                job is None
+                or current_idata is None
+                or job["request_id"] != request.request_id
+                or job["attempt"] != request.attempt
+                or job["content_hash"] != request.content_hash
+                or current_idata.attempt != request.attempt
+                or current_idata.content_hash != request.content_hash
+            ):
+                return
+            job["state"] = "writing"
+            self._persistence_active_ids.add(request.request_id)
+            self._persistence_active = len(
+                self._persistence_active_ids
+            )
             self._persistence_max_active = max(
                 self._persistence_max_active,
                 self._persistence_active,
             )
-            old = self.get_idata(data_id)
-            self._idata[data_id] = dataclasses.replace(
+            old = current_idata
+            self._idata[request.data_id] = dataclasses.replace(
                 old, durability="writing"
             )
 
-    def _persistence_complete(self, data_id, path, error):
+    def _persistence_complete(self, request, path, error):
         with self._lock:
-            self._persistence_active -= 1
-            old = self.get_idata(data_id)
-            if error is None:
-                self._idata[data_id] = dataclasses.replace(
-                    old, durability="durable", durable_path=path
+            self._persistence_active_ids.discard(request.request_id)
+            self._persistence_active = len(
+                self._persistence_active_ids
+            )
+            job = self._persistence_jobs.get(request.data_id)
+            old = self._idata.get(request.data_id)
+            current = (
+                job is not None
+                and old is not None
+                and job["request_id"] == request.request_id
+                and old.attempt == request.attempt
+                and old.content_hash == request.content_hash
+            )
+            if not current:
+                self._persistence_stale_completions += 1
+                if path is not None:
+                    self._discard_persistence_path(path)
+                return
+            if error == "cancelled":
+                job["state"] = "cancelled"
+                self._idata[request.data_id] = dataclasses.replace(
+                    old, durability="cancelled", durable_path=None
                 )
-                self._persistence_failures.pop(data_id, None)
-            else:
-                self._idata[data_id] = dataclasses.replace(
+                return
+            if error is not None:
+                job["state"] = "failed"
+                self._idata[request.data_id] = dataclasses.replace(
                     old, durability="failed", durable_path=None
                 )
-                self._persistence_failures[data_id] = error
+                self._persistence_failures[request.data_id] = error
+                return
+            try:
+                self._publish_replica(
+                    f"i:{request.data_id}",
+                    (
+                        f"sharedfs-idata-{request.data_id}-"
+                        f"attempt-{request.attempt}"
+                    ),
+                    request.attempt,
+                    "sharedfs",
+                    request.content_hash,
+                    len(request.payload),
+                )
+            except Exception as exc:
+                self._discard_persistence_path(path)
+                job["state"] = "failed"
+                self._idata[request.data_id] = dataclasses.replace(
+                    old, durability="failed", durable_path=None
+                )
+                self._persistence_failures[request.data_id] = str(exc)
+                return
+            job["state"] = "durable"
+            self._idata[request.data_id] = dataclasses.replace(
+                old, durability="durable", durable_path=path
+            )
+            self._persistence_failures.pop(request.data_id, None)
+
+    def _discard_persistence_path(self, path):
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            self._persistence_cleanup_failures += 1
 
     def idata_status(self, data_id):
         with self._lock:
@@ -219,6 +401,9 @@ class ControllerState:
                 "persistence_error": self._persistence_failures.get(
                     value.data_id
                 ),
+                "persistence_request": dict(
+                    self._persistence_jobs.get(value.data_id, {})
+                ),
             }
 
     def invalidate_volatile_idata(self, data_id):
@@ -232,7 +417,35 @@ class ControllerState:
                 self._idata[data_id] = dataclasses.replace(
                     old, serialized_bytes=payload
                 )
+                self._publish_replica(
+                    f"i:{old.data_id}",
+                    (
+                        f"controller-idata-{old.data_id}-"
+                        f"attempt-{old.attempt}"
+                    ),
+                    old.attempt,
+                    "controller-memory",
+                    old.content_hash,
+                    len(payload),
+                )
                 return "restored-durable"
+            self._cancel_persistence_locked(old.data_id, "global-loss")
+            try:
+                replica = self.replicas.get_replica(
+                    f"i:{old.data_id}",
+                    (
+                        f"controller-idata-{old.data_id}-"
+                        f"attempt-{old.attempt}"
+                    ),
+                )
+            except KeyError:
+                replica = None
+            if replica is not None:
+                self.replicas.invalidate_replica(
+                    replica.data_id,
+                    replica.replica_id,
+                    replica.generation,
+                )
             self._idata[data_id] = dataclasses.replace(
                 old,
                 serialized_bytes=None,
@@ -279,10 +492,27 @@ class ControllerState:
                         for record in self._idata.values()
                     )
                     for state in (
-                        "volatile", "queued", "writing", "durable", "failed"
+                        "volatile",
+                        "queued",
+                        "writing",
+                        "durable",
+                        "failed",
+                        "cancelled",
                     )
                 },
                 "persistence_active": self._persistence_active,
                 "persistence_max_active": self._persistence_max_active,
                 "persistence_requests": self._persistence_requests,
+                "persistence_stale_completions": (
+                    self._persistence_stale_completions
+                ),
+                "persistence_cleanup_failures": (
+                    self._persistence_cleanup_failures
+                ),
+                "persistence_executor": (
+                    self._persistence.snapshot()
+                    if self._persistence is not None
+                    else None
+                ),
+                "replica_directory": self.replicas.snapshot(),
             }

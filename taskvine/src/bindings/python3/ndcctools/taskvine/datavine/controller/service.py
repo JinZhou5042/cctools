@@ -190,6 +190,26 @@ class ControllerService:
                         return
                     self._json(202, owner.state.idata_status(int(token)))
                     return
+                if self.path.startswith(f"{API_PREFIX}/idata/") and self.path.endswith("/persist/cancel"):
+                    token = self.path[
+                        len(f"{API_PREFIX}/idata/"):-len("/persist/cancel")
+                    ]
+                    try:
+                        request = self._read_json()
+                        action = owner.state.cancel_persistence(
+                            int(token), request.get("reason", "obsolete")
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200,
+                        {
+                            "action": action,
+                            "status": owner.state.idata_status(int(token)),
+                        },
+                    )
+                    return
                 if self.path.startswith(f"{API_PREFIX}/idata/") and self.path.endswith("/invalidate"):
                     token = self.path[
                         len(f"{API_PREFIX}/idata/"):-len("/invalidate")

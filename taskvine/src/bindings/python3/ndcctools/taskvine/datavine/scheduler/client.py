@@ -172,6 +172,14 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def cancel_persistence(self, data_id, reason="obsolete"):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/idata/{int(data_id)}/persist/cancel",
+            {"reason": str(reason)},
+        )
+        return json.loads(payload)
+
     def idata_status(self, data_id):
         payload, _ = self._request(
             "GET", f"{API_PREFIX}/idata/{int(data_id)}/status"

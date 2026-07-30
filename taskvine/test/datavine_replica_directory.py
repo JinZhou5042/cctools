@@ -283,6 +283,42 @@ def main():
     assert not failures
     assert concurrent.get_replica("e:1", source.replica_id).state == "invalid"
 
+    # A newer attempt may publish while an old-generation read is active.
+    # Attempt-specific replica identities keep the old lease releasable.
+    generations = ReplicaDirectory()
+    generations.join_worker("reader", 1)
+    old_source = generations.report_bytes(
+        "i:1",
+        "controller-i1-attempt-1",
+        1,
+        "controller-memory",
+        b"old",
+    )
+    old_lease = generations.acquire_source(
+        "i:1",
+        old_source.replica_id,
+        old_source.generation,
+        "reader",
+        1,
+    )
+    generations.report_bytes(
+        "i:1",
+        "controller-i1-attempt-2",
+        2,
+        "controller-memory",
+        b"new",
+    )
+    assert generations.get_replica(
+        "i:1", old_source.replica_id
+    ).state == "retiring"
+    generations.release_source(old_lease.lease_id, True)
+    assert generations.get_replica(
+        "i:1", old_source.replica_id
+    ).state == "invalid"
+    assert [
+        value.replica_id for value in generations.candidates("i:1")
+    ] == ["controller-i1-attempt-2"]
+
     # Each metadata collection has an explicit admission bound and terminal
     # records can be forgotten after revision-checked logical pruning.
     bounded = ReplicaDirectory(
