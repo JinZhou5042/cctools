@@ -1,6 +1,7 @@
 """Standalone Data Controller HTTP service running on its own thread."""
 
 import base64
+import dataclasses
 import http.server
 import json
 import threading
@@ -145,18 +146,182 @@ class ControllerService:
                         return
                     payload = record.serialized_bytes
                     self.send_response(200)
-                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header(
+                        "Content-Type", "application/octet-stream"
+                    )
                     self.send_header("Content-Length", str(len(payload)))
                     self.send_header("X-DataVine-SHA256", record.content_hash)
                     self.send_header("X-DataVine-Attempt", str(record.attempt))
                     self.end_headers()
                     self.wfile.write(payload)
                     return
+                replica_prefix = f"{API_PREFIX}/replicas/"
+                if (
+                    parsed.path.startswith(replica_prefix)
+                    and parsed.path.endswith("/sources")
+                ):
+                    token = parsed.path[
+                        len(replica_prefix):-len("/sources")
+                    ]
+                    pieces = token.strip("/").split("/")
+                    if (
+                        len(pieces) != 2
+                        or pieces[0] not in ("e", "i")
+                        or not pieces[1].isdigit()
+                    ):
+                        self._error(400, "invalid qualified DataID")
+                        return
+                    data_key = f"{pieces[0]}:{int(pieces[1])}"
+                    try:
+                        sources = owner.state.replicas.candidates(data_key)
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200,
+                        {
+                            "data_id": data_key,
+                            "sources": [
+                                source.source_dict()
+                                for source in sources
+                            ],
+                        },
+                    )
+                    return
                 self._error(404, "not found")
 
             def do_POST(self):
                 if not self._authorized():
                     self._error(403, "forbidden")
+                    return
+                if self.path == f"{API_PREFIX}/workers/join":
+                    try:
+                        request = self._read_json()
+                        worker = owner.state.join_worker(
+                            request["worker_id"], request["epoch"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, dataclasses.asdict(worker))
+                    return
+                if self.path == f"{API_PREFIX}/workers/disconnect":
+                    try:
+                        request = self._read_json()
+                        worker = owner.state.disconnect_worker(
+                            request["worker_id"], request["epoch"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, dataclasses.asdict(worker))
+                    return
+                if self.path == f"{API_PREFIX}/workers/reconcile":
+                    try:
+                        request = self._read_json()
+                        disconnected = owner.state.reconcile_workers(
+                            request["active_worker_ids"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200,
+                        {
+                            "disconnected": [
+                                dataclasses.asdict(worker)
+                                for worker in disconnected
+                            ]
+                        },
+                    )
+                    return
+                if self.path in (
+                    f"{API_PREFIX}/replicas/prepare",
+                    f"{API_PREFIX}/replicas/report",
+                ):
+                    try:
+                        request = self._read_json()
+                        arguments = (
+                            request["data_id"],
+                            request["replica_id"],
+                            request["attempt"],
+                            request["tier"],
+                            request["content_hash"],
+                            request["size"],
+                            request["worker_id"],
+                            request["worker_epoch"],
+                        )
+                        if self.path.endswith("/prepare"):
+                            replica = owner.state.prepare_worker_replica(
+                                *arguments
+                            )
+                        else:
+                            replica = owner.state.report_worker_replica(
+                                *arguments
+                            )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, replica.source_dict())
+                    return
+                if self.path == f"{API_PREFIX}/replicas/commit":
+                    try:
+                        request = self._read_json()
+                        replica = owner.state.commit_worker_replica(
+                            request["data_id"],
+                            request["replica_id"],
+                            request["generation"],
+                            request["attempt"],
+                            request["content_hash"],
+                            request["size"],
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, replica.source_dict())
+                    return
+                if self.path == f"{API_PREFIX}/replicas/invalidate":
+                    try:
+                        request = self._read_json()
+                        replica = (
+                            owner.state.replicas.invalidate_worker_replica(
+                                request["data_id"],
+                                request["replica_id"],
+                                request["generation"],
+                                request["worker_id"],
+                                request["worker_epoch"],
+                            )
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, replica.source_dict())
+                    return
+                if self.path == f"{API_PREFIX}/replicas/acquire":
+                    try:
+                        request = self._read_json()
+                        lease = owner.state.replicas.acquire_source(
+                            request["data_id"],
+                            request["replica_id"],
+                            request["generation"],
+                            request["destination_worker_id"],
+                            request["destination_worker_epoch"],
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, dataclasses.asdict(lease))
+                    return
+                if self.path == f"{API_PREFIX}/replicas/release":
+                    try:
+                        request = self._read_json()
+                        lease = owner.state.replicas.release_source(
+                            request["lease_id"], request["success"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, dataclasses.asdict(lease))
                     return
                 if self.path == f"{API_PREFIX}/idata/allocate":
                     try:
@@ -179,7 +344,10 @@ class ControllerService:
                         return
                     self._json(200, record.to_dict())
                     return
-                if self.path.startswith(f"{API_PREFIX}/idata/") and self.path.endswith("/persist"):
+                if (
+                    self.path.startswith(f"{API_PREFIX}/idata/")
+                    and self.path.endswith("/persist")
+                ):
                     token = self.path[
                         len(f"{API_PREFIX}/idata/"):-len("/persist")
                     ]
@@ -190,7 +358,10 @@ class ControllerService:
                         return
                     self._json(202, owner.state.idata_status(int(token)))
                     return
-                if self.path.startswith(f"{API_PREFIX}/idata/") and self.path.endswith("/persist/cancel"):
+                if (
+                    self.path.startswith(f"{API_PREFIX}/idata/")
+                    and self.path.endswith("/persist/cancel")
+                ):
                     token = self.path[
                         len(f"{API_PREFIX}/idata/"):-len("/persist/cancel")
                     ]
@@ -210,7 +381,10 @@ class ControllerService:
                         },
                     )
                     return
-                if self.path.startswith(f"{API_PREFIX}/idata/") and self.path.endswith("/invalidate"):
+                if (
+                    self.path.startswith(f"{API_PREFIX}/idata/")
+                    and self.path.endswith("/invalidate")
+                ):
                     token = self.path[
                         len(f"{API_PREFIX}/idata/"):-len("/invalidate")
                     ]
@@ -229,7 +403,10 @@ class ControllerService:
                         },
                     )
                     return
-                if self.path.startswith(f"{API_PREFIX}/idata/") and self.path.endswith("/publish"):
+                if (
+                    self.path.startswith(f"{API_PREFIX}/idata/")
+                    and self.path.endswith("/publish")
+                ):
                     token = self.path[
                         len(f"{API_PREFIX}/idata/"):-len("/publish")
                     ]

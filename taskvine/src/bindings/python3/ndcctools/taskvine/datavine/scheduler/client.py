@@ -52,6 +52,171 @@ class ControllerClient:
         payload, _ = self._request("GET", f"{API_PREFIX}/snapshot")
         return json.loads(payload)
 
+    def join_worker(self, worker_id, epoch=1):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/workers/join",
+            {"worker_id": str(worker_id), "epoch": int(epoch)},
+        )
+        return json.loads(payload)
+
+    def disconnect_worker(self, worker_id, epoch=1):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/workers/disconnect",
+            {"worker_id": str(worker_id), "epoch": int(epoch)},
+        )
+        return json.loads(payload)
+
+    def reconcile_workers(self, active_worker_ids):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/workers/reconcile",
+            {
+                "active_worker_ids": sorted(
+                    str(worker_id) for worker_id in active_worker_ids
+                )
+            },
+        )
+        return json.loads(payload)
+
+    def report_replica(
+        self,
+        data_id,
+        replica_id,
+        attempt,
+        tier,
+        content_hash,
+        size,
+        worker_id,
+        worker_epoch=1,
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/replicas/report",
+            {
+                "data_id": str(data_id),
+                "replica_id": str(replica_id),
+                "attempt": int(attempt),
+                "tier": str(tier),
+                "content_hash": str(content_hash),
+                "size": int(size),
+                "worker_id": str(worker_id),
+                "worker_epoch": int(worker_epoch),
+            },
+        )
+        return json.loads(payload)
+
+    def prepare_replica(
+        self,
+        data_id,
+        replica_id,
+        attempt,
+        tier,
+        content_hash,
+        size,
+        worker_id,
+        worker_epoch=1,
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/replicas/prepare",
+            {
+                "data_id": str(data_id),
+                "replica_id": str(replica_id),
+                "attempt": int(attempt),
+                "tier": str(tier),
+                "content_hash": str(content_hash),
+                "size": int(size),
+                "worker_id": str(worker_id),
+                "worker_epoch": int(worker_epoch),
+            },
+        )
+        return json.loads(payload)
+
+    def commit_replica(
+        self,
+        data_id,
+        replica_id,
+        generation,
+        attempt,
+        content_hash,
+        size,
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/replicas/commit",
+            {
+                "data_id": str(data_id),
+                "replica_id": str(replica_id),
+                "generation": int(generation),
+                "attempt": int(attempt),
+                "content_hash": str(content_hash),
+                "size": int(size),
+            },
+        )
+        return json.loads(payload)
+
+    def invalidate_replica(
+        self,
+        data_id,
+        replica_id,
+        generation,
+        worker_id,
+        worker_epoch=1,
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/replicas/invalidate",
+            {
+                "data_id": str(data_id),
+                "replica_id": str(replica_id),
+                "generation": int(generation),
+                "worker_id": str(worker_id),
+                "worker_epoch": int(worker_epoch),
+            },
+        )
+        return json.loads(payload)
+
+    def replica_sources(self, data_id):
+        kind, token = str(data_id).split(":", 1)
+        payload, _ = self._request(
+            "GET",
+            f"{API_PREFIX}/replicas/{kind}/{int(token)}/sources",
+        )
+        return json.loads(payload)
+
+    def acquire_replica(
+        self,
+        data_id,
+        replica_id,
+        generation,
+        destination_worker_id,
+        destination_worker_epoch=1,
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/replicas/acquire",
+            {
+                "data_id": str(data_id),
+                "replica_id": str(replica_id),
+                "generation": int(generation),
+                "destination_worker_id": str(destination_worker_id),
+                "destination_worker_epoch": int(
+                    destination_worker_epoch
+                ),
+            },
+        )
+        return json.loads(payload)
+
+    def release_replica(self, lease_id, success):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/replicas/release",
+            {"lease_id": str(lease_id), "success": bool(success)},
+        )
+        return json.loads(payload)
+
     def register_edata(self, metadata, serialized_bytes):
         payload, _ = self._request(
             "POST",

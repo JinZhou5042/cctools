@@ -5,7 +5,12 @@ import hashlib
 from pathlib import Path
 import threading
 
-from ..models import EDataRecord, IDataRecord, SerializationMetadata, TaskRecord
+from ..models import (
+    EDataRecord,
+    IDataRecord,
+    SerializationMetadata,
+    TaskRecord,
+)
 from ..persistence.manager import PersistenceRequest
 from .replicas import ReplicaDirectory
 
@@ -106,7 +111,8 @@ class ControllerState:
                 record = self._edata[data_id]
                 if record.serialized_bytes == serialized_bytes:
                     return record
-            if self._edata_bytes + len(serialized_bytes) > self.max_edata_bytes:
+            projected_bytes = self._edata_bytes + len(serialized_bytes)
+            if projected_bytes > self.max_edata_bytes:
                 raise MemoryError("Controller EData capacity exceeded")
             data_id = self._next_edata_id
             record = EDataRecord(
@@ -157,7 +163,9 @@ class ControllerState:
                     raise ValueError(f"conflicting TaskID {task.task_id}")
                 return task
             if task.function_data_id not in self._edata:
-                raise KeyError(f"unknown function EDataID {task.function_data_id}")
+                raise KeyError(
+                    f"unknown function EDataID {task.function_data_id}"
+                )
             for kind, data_id in task.positional:
                 self._validate_binding(kind, data_id)
             for _, binding in task.keyword:
@@ -203,7 +211,10 @@ class ControllerState:
                 raise ValueError("stale IData publication")
             digest = hashlib.sha256(serialized_bytes).hexdigest()
             if attempt == old.attempt and old.serialized_bytes is not None:
-                if old.content_hash != digest or old.serialized_bytes != serialized_bytes:
+                if (
+                    old.content_hash != digest
+                    or old.serialized_bytes != serialized_bytes
+                ):
                     raise ValueError("conflicting IData publication")
                 return old
             if attempt > old.attempt:
@@ -231,10 +242,130 @@ class ControllerState:
                 attempt,
                 "volatile",
                 None,
+                len(serialized_bytes),
             )
             self._idata[data_id] = record
             self._publications += 1
             return record
+
+    def join_worker(self, worker_id, epoch):
+        return self.replicas.join_worker(worker_id, epoch)
+
+    def disconnect_worker(self, worker_id, epoch):
+        return self.replicas.disconnect_worker(worker_id, epoch)
+
+    def reconcile_workers(self, active_worker_ids):
+        return self.replicas.reconcile_workers(active_worker_ids)
+
+    def _validate_replica_identity(
+        self, data_key, attempt, content_hash, size
+    ):
+        try:
+            kind, token = str(data_key).split(":", 1)
+            data_id = int(token)
+        except (TypeError, ValueError):
+            raise ValueError("invalid qualified DataID") from None
+        attempt = int(attempt)
+        size = int(size)
+        if kind == "e":
+            record = self.get_edata(data_id)
+            expected_attempt = 1
+            expected_hash = record.content_hash
+            expected_size = len(record.serialized_bytes)
+        elif kind == "i":
+            record = self.get_idata(data_id)
+            expected_attempt = record.attempt
+            expected_hash = record.content_hash
+            expected_size = record.serialized_size
+        else:
+            raise ValueError("invalid qualified DataID")
+        if (
+            attempt != expected_attempt
+            or content_hash != expected_hash
+            or size != expected_size
+        ):
+            raise ValueError("replica does not match logical data identity")
+        return record
+
+    def prepare_worker_replica(
+        self,
+        data_key,
+        replica_id,
+        attempt,
+        tier,
+        content_hash,
+        size,
+        worker_id,
+        worker_epoch,
+    ):
+        with self._lock:
+            self._validate_replica_identity(
+                data_key, attempt, content_hash, size
+            )
+            if tier not in ("worker-dram", "worker-disk"):
+                raise ValueError("worker report requires worker tier")
+            return self.replicas.prepare_replica(
+                data_key,
+                replica_id,
+                attempt,
+                tier,
+                content_hash,
+                size,
+                worker_id,
+                worker_epoch,
+            )
+
+    def commit_worker_replica(
+        self,
+        data_key,
+        replica_id,
+        generation,
+        attempt,
+        content_hash,
+        size,
+    ):
+        with self._lock:
+            self._validate_replica_identity(
+                data_key, attempt, content_hash, size
+            )
+            return self.replicas.commit_replica(
+                data_key,
+                replica_id,
+                generation,
+                attempt,
+                content_hash,
+                size,
+            )
+
+    def report_worker_replica(
+        self,
+        data_key,
+        replica_id,
+        attempt,
+        tier,
+        content_hash,
+        size,
+        worker_id,
+        worker_epoch,
+    ):
+        replica = self.prepare_worker_replica(
+            data_key,
+            replica_id,
+            attempt,
+            tier,
+            content_hash,
+            size,
+            worker_id,
+            worker_epoch,
+        )
+        return self.commit_worker_replica(
+            data_key,
+            replica_id,
+            replica.generation,
+            attempt,
+            content_hash,
+            size,
+        )
 
     def request_persistence(self, data_id):
         with self._lock:
@@ -396,6 +527,7 @@ class ControllerState:
                 "available": value.serialized_bytes is not None,
                 "attempt": value.attempt,
                 "content_hash": value.content_hash,
+                "size": value.serialized_size,
                 "durability": value.durability,
                 "durable_path": value.durable_path,
                 "persistence_error": self._persistence_failures.get(

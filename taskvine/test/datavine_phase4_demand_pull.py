@@ -13,7 +13,11 @@ import tempfile
 import threading
 import time
 
-from ndcctools.taskvine.datavine import ControllerClient, TaskSchedulerThread, Workflow
+from ndcctools.taskvine.datavine import (
+    ControllerClient,
+    TaskSchedulerThread,
+    Workflow,
+)
 
 
 SHARED = b"datavine-demand-pull\n" * 32768
@@ -280,6 +284,15 @@ def main():
         ).hexdigest()
         recovery_snapshot = run_case(
             "worker-loss", recovery, target.task_id, oracle, inject_loss=True
+        )
+        replica_states = recovery_snapshot[
+            "replica_directory"
+        ]["replica_states"]
+        assert replica_states["preparing"] == 0
+        assert replica_states["invalid"] >= 1
+        assert (
+            recovery_snapshot["replica_directory"]["active_workers"]
+            == 1
         )
 
     print(

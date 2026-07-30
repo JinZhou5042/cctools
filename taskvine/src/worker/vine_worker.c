@@ -2245,6 +2245,12 @@ void vine_worker_create_structures()
 	total_resources = vine_resources_create();
 
 	worker_id = make_worker_id();
+	/*
+	Expose the unique worker incarnation to DataVine task processes.  This is
+	soft-state identity, not an authentication credential; Controller requests
+	remain token-authenticated.
+	*/
+	setenv("VINE_WORKER_ID", worker_id, 1);
 }
 
 /* Final cleanup of all worker structures before exiting */

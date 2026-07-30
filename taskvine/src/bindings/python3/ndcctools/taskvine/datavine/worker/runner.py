@@ -1,8 +1,10 @@
-"""Worker entry point: resolve DataIDs, execute, and publish serialized output."""
+"""Resolve DataIDs on a worker, execute a task, and publish its output."""
 
 import argparse
 import cloudpickle
 import copy
+import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -21,8 +23,43 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     client = ControllerClient(args.controller, args.token)
+    worker_id = os.environ.get("VINE_WORKER_ID")
+    if not worker_id:
+        raise RuntimeError("TaskVine worker incarnation is unavailable")
+    worker_epoch = 1
+    client.join_worker(worker_id, worker_epoch)
     task = client.get_task(args.task_id)
     objects = {}
+
+    def replica_id(data_key):
+        return (
+            f"taskvine-{worker_id}-{data_key.replace(':', '-')}"
+        )
+
+    def report_local(data_key, attempt, content_hash, payload):
+        client.report_replica(
+            data_key,
+            replica_id(data_key),
+            attempt,
+            "worker-disk",
+            content_hash,
+            len(payload),
+            worker_id,
+            worker_epoch,
+        )
+
+    def reject_reported_local(data_key):
+        local_replica_id = replica_id(data_key)
+        for source in client.replica_sources(data_key)["sources"]:
+            if source["replica_id"] == local_replica_id:
+                client.invalidate_replica(
+                    data_key,
+                    local_replica_id,
+                    source["generation"],
+                    worker_id,
+                    worker_epoch,
+                )
+                return
 
     def fetch_edata(data_id):
         cache_path = Path(f"datavine-edata-{data_id}.pkl")
@@ -36,7 +73,11 @@ def main(argv=None):
             ):
                 # A worker cache or peer replica is soft state. Reject it and
                 # fall back to the Controller-owned stable source.
+                reject_reported_local(f"e:{data_id}")
                 return client.fetch_edata_record(data_id)[1]
+            report_local(
+                f"e:{data_id}", 1, info["content_hash"], payload
+            )
             return payload
         return client.fetch_edata_record(data_id)[1]
 
@@ -64,14 +105,19 @@ def main(argv=None):
             if cache_path.is_file():
                 payload = cache_path.read_bytes()
                 status = client.idata_status(data_id)
-                import hashlib
                 if (
-                    len(payload) == 0
-                    or hashlib.sha256(payload).hexdigest()
+                    hashlib.sha256(payload).hexdigest()
                     != status["content_hash"]
                 ):
+                    reject_reported_local(f"i:{data_id}")
                     payload = client.fetch_idata(data_id)
                 else:
+                    report_local(
+                        f"i:{data_id}",
+                        status["attempt"],
+                        status["content_hash"],
+                        payload,
+                    )
                     print(f"DATAVINE_LOCAL_IDATA i{data_id}")
             else:
                 payload = client.fetch_idata(data_id)
@@ -96,14 +142,46 @@ def main(argv=None):
             stream.flush()
             os.fsync(stream.fileno())
         staged_payload = stage.read_bytes()
-        client.publish_idata(
+        publication = client.publish_idata(
             task.output_data_id, args.attempt, staged_payload
+        )
+        prepared = client.prepare_replica(
+            f"i:{task.output_data_id}",
+            (
+                f"taskvine-{worker_id}-i-{task.output_data_id}-"
+                f"attempt-{args.attempt}"
+            ),
+            args.attempt,
+            "worker-disk",
+            publication["content_hash"],
+            publication["size"],
+            worker_id,
+            worker_epoch,
+        )
+        print(
+            "DATAVINE_REPLICA_PREPARED "
+            + json.dumps(
+                {
+                    "data_id": prepared["data_id"],
+                    "replica_id": prepared["replica_id"],
+                    "generation": prepared["generation"],
+                    "attempt": prepared["attempt"],
+                    "content_hash": prepared["content_hash"],
+                    "size": prepared["size"],
+                    "worker_id": worker_id,
+                    "worker_epoch": worker_epoch,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         )
     finally:
         if args.output_file is None:
             stage.unlink(missing_ok=True)
     print(
-        f"DATAVINE task={task.task_id} output=i{task.output_data_id} bytes={len(payload)}"
+        "DATAVINE "
+        f"task={task.task_id} output=i{task.output_data_id} "
+        f"bytes={len(payload)}"
     )
     return 0
 

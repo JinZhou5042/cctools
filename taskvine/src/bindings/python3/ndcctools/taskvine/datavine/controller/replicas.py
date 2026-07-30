@@ -70,6 +70,7 @@ class ReplicaRecord:
             "tier": self.tier,
             "content_hash": self.content_hash,
             "size": self.size,
+            "state": self.state,
             "load": self.active_leases,
             "worker_id": self.worker_id,
             "worker_epoch": self.worker_epoch,
@@ -170,6 +171,26 @@ class ReplicaDirectory:
             self._invalidate_worker_replicas(worker_id, epoch)
             self._changed()
             return self._workers[worker_id]
+
+    def reconcile_workers(self, active_worker_ids):
+        """Invalidate active incarnations absent from Scheduler truth."""
+        active_worker_ids = {
+            str(worker_id) for worker_id in active_worker_ids
+        }
+        with self._lock:
+            disconnected = []
+            for worker_id, worker in tuple(self._workers.items()):
+                if worker.active and worker_id not in active_worker_ids:
+                    self._workers[worker_id] = dataclasses.replace(
+                        worker, active=False
+                    )
+                    self._invalidate_worker_replicas(
+                        worker.worker_id, worker.epoch
+                    )
+                    disconnected.append(self._workers[worker_id])
+            if disconnected:
+                self._changed()
+            return tuple(disconnected)
 
     def _invalidate_worker_replicas(self, worker_id, epoch):
         for key, record in tuple(self._replicas.items()):
@@ -540,6 +561,29 @@ class ReplicaDirectory:
             self._replicas[key] = record
             self._changed()
             return record
+
+    def invalidate_worker_replica(
+        self,
+        data_id,
+        replica_id,
+        generation,
+        worker_id,
+        worker_epoch,
+    ):
+        key = (self._normalize_data_id(data_id), str(replica_id))
+        with self._lock:
+            self._validate_worker(worker_id, worker_epoch)
+            record = self._replicas.get(key)
+            if record is None:
+                raise KeyError("unknown replica")
+            if (
+                record.worker_id != str(worker_id)
+                or record.worker_epoch != int(worker_epoch)
+            ):
+                raise ValueError("worker cannot invalidate foreign replica")
+            return self.invalidate_replica(
+                data_id, replica_id, generation
+            )
 
     def quarantine(
         self,

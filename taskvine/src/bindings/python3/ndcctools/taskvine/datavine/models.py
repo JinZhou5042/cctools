@@ -57,6 +57,7 @@ class IDataRecord:
     attempt: int = 0
     durability: str = "volatile"
     durable_path: str | None = None
+    serialized_size: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)

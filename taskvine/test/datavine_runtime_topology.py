@@ -146,13 +146,35 @@ def main():
                     token,
                     "--task-id",
                     "1",
+                    "--output-file",
+                    f"datavine-idata-{output_id}.pkl",
                 ],
                 cwd=temp_dir,
+                env={
+                    **os.environ,
+                    "VINE_WORKER_ID": "topology-worker",
+                },
                 text=True,
                 capture_output=True,
                 timeout=30,
             )
             assert fallback.returncode == 0, fallback.stderr
+            prepared_line = next(
+                line
+                for line in fallback.stdout.splitlines()
+                if line.startswith("DATAVINE_REPLICA_PREPARED ")
+            )
+            prepared = json.loads(
+                prepared_line[len("DATAVINE_REPLICA_PREPARED "):]
+            )
+            client.commit_replica(
+                prepared["data_id"],
+                prepared["replica_id"],
+                prepared["generation"],
+                prepared["attempt"],
+                prepared["content_hash"],
+                prepared["size"],
+            )
             assert cloudpickle.loads(client.fetch_idata(output_id)) == 42
         finally:
             if scheduler is not None:

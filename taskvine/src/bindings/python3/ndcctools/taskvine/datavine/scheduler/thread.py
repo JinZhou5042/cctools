@@ -2,6 +2,7 @@
 
 import concurrent.futures
 import cloudpickle
+import json
 import queue
 import shlex
 import threading
@@ -33,6 +34,7 @@ class TaskSchedulerThread:
         self._attempts = {}
         self._last_run_report = {}
         self._nested_idata_by_task = {}
+        self._worker_by_task = {}
 
     @property
     def thread_ident(self):
@@ -104,7 +106,19 @@ class TaskSchedulerThread:
         # Drive the manager event loop so newly connected workers become
         # visible even before the first logical task is submitted.
         self._manager.wait(1)
+        self._sync_worker_epochs()
         return len(self._manager.status("workers"))
+
+    def _sync_worker_epochs(self):
+        workers = self._manager.status("workers")
+        worker_ids = {
+            worker["workerid"]
+            for worker in workers
+            if worker.get("workerid")
+        }
+        if len(worker_ids) != len(workers):
+            raise RuntimeError("TaskVine worker status lacks workerid")
+        return self.controller.reconcile_workers(worker_ids)
 
     def _op_last_run_report(self):
         self._assert_owner()
@@ -138,9 +152,9 @@ class TaskSchedulerThread:
         workflow.validate()
         self._logical_outputs = {}
         for task in workflow.tasks:
-            self._logical_outputs[task.task_id] = self.controller.allocate_idata(
+            self._logical_outputs[
                 task.task_id
-            )
+            ] = self.controller.allocate_idata(task.task_id)
             self._idata_files[
                 self._logical_outputs[task.task_id]
             ] = self._manager.declare_temp()
@@ -224,7 +238,8 @@ class TaskSchedulerThread:
         while pending or running or prefetch_running:
             for completed_task_id in tuple(done):
                 output_data_id = output_ids[completed_task_id]
-                if not self.controller.idata_status(output_data_id)["available"]:
+                output_status = self.controller.idata_status(output_data_id)
+                if not output_status["available"]:
                     self._manager.prune_file(
                         self._idata_files[output_data_id]
                     )
@@ -248,6 +263,7 @@ class TaskSchedulerThread:
             if not running and not prefetch_running:
                 raise RuntimeError("workflow cannot make progress")
             completed = self._manager.wait(wait_timeout)
+            self._sync_worker_epochs()
             if completed is None:
                 continue
             if completed.id in prefetch_running:
@@ -268,6 +284,37 @@ class TaskSchedulerThread:
                     f"TaskID {logical_id} failed: result={completed.result} "
                     f"exit={completed.exit_code} stdout={completed.output}"
                 )
+            preparation_lines = [
+                line[len("DATAVINE_REPLICA_PREPARED "):]
+                for line in completed.output.splitlines()
+                if line.startswith("DATAVINE_REPLICA_PREPARED ")
+            ]
+            if len(preparation_lines) != 1:
+                raise RuntimeError(
+                    f"TaskID {logical_id} returned "
+                    f"{len(preparation_lines)} replica preparations"
+                )
+            preparation = json.loads(preparation_lines[0])
+            if (
+                preparation["data_id"]
+                != f"i:{output_ids[logical_id]}"
+                or preparation["attempt"] != self._attempts[logical_id]
+            ):
+                raise RuntimeError(
+                    f"TaskID {logical_id} returned mismatched replica"
+                )
+            self.controller.commit_replica(
+                preparation["data_id"],
+                preparation["replica_id"],
+                preparation["generation"],
+                preparation["attempt"],
+                preparation["content_hash"],
+                preparation["size"],
+            )
+            self._worker_by_task[logical_id] = (
+                preparation["worker_id"],
+                preparation["worker_epoch"],
+            )
             # Publication is the completion contract, not process exit alone.
             self.controller.fetch_idata(output_ids[logical_id])
             if persist_outputs:
@@ -289,7 +336,13 @@ class TaskSchedulerThread:
                 if not cvine.vine_manager_release_random_worker(
                     self._manager._taskvine
                 ):
-                    raise RuntimeError("no worker available for loss injection")
+                    raise RuntimeError(
+                        "no worker available for loss injection"
+                    )
+                worker_id, worker_epoch = self._worker_by_task[logical_id]
+                self.controller.disconnect_worker(
+                    worker_id, worker_epoch
+                )
                 self.controller.invalidate_idata(
                     output_ids[logical_id]
                 )

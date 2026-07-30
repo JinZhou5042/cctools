@@ -118,7 +118,7 @@ struct jx *vine_worker_to_jx(struct vine_worker_info *w)
 	jx_insert_string(j, "version", w->version);
 	if (w->factory_name)
 		jx_insert_string(j, "factory_name", w->factory_name);
-	if (w->factory_name)
+	if (w->workerid)
 		jx_insert_string(j, "workerid", w->workerid);
 
 	vine_resources_add_to_jx(w->resources, j);
