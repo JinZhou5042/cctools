@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 multi-output identity and partial downstream demand**
-- Validated code commit: `fafead8bde`
+- Active task: **Phase 9 multi-output partial-publication failure**
+- Validated code commit: `605426341`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +25,40 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 stable multi-output identity checkpoint
+
+Commit `605426341` replaces the single-output TaskRecord assumption with an
+ordered set of logical output slots. The Controller allocates and validates
+one stable IDataID for each `(TaskID, output index)`, pruning lineage records
+all slots, worker assignments stage and publish every slot independently, and
+Scheduler refuses logical completion until every expected publication and
+replica preparation is validated.
+
+The deterministic E2E creates two equal-byte outputs with distinct IDataIDs,
+consumes only output zero through a cyclic nested container, and repeats the
+same OutputRef at three locations. Worker reconstruction preserves both the
+container cycle and object alias identity. Loss of demanded IData 1 causes one
+ordinary replay of the original TaskID: output IDs remain `[1, 2]`, both slot
+attempts become two, the consumer remains at attempt one, the exact oracle is
+returned, and no legacy recovery task runs.
+
+The prescribed clean build/install and all 18 installed-path regressions pass.
+Three local repetitions produce identical machine-readable output hashes.
+Package SHA-256 is
+`662acb77d961016f4717581728a00adc2d5fe1138c7ad8cf6c2ac591b53a3e9f`;
+`poncho_package_run` verifies cloudpickle 3.1.2 and the multi-output API.
+Package-only factory `datavine-multi-605426341` passes the normal and recovery
+cases with two requested workers, and factory shutdown removes both workers.
+Evidence: `acceptance/artifacts/multi-output-605426341.json`.
+
+Self-review status is **PASS for this scoped checkpoint and FAIL for Ultimate
+Acceptance**. The test does not kill a worker between output-slot publications,
+does not exercise partial publication cleanup, and does not combine
+multi-output with persistence cancellation or pruning. The next smallest safe
+task is deterministic worker loss after one slot is published but before the
+remaining slots publish, proving that no partial logical completion is
+observable and that retry reuses every original output IDataID.
 
 ### Phase 9 two-frontier minimum recoverable cut checkpoint
 

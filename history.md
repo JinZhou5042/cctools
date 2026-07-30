@@ -1,5 +1,29 @@
 # DataVine History
 
+## 2026-07-30 — Stable multi-output identity and partial demand
+
+- Replaced the one-output TaskRecord assumption with ordered output slots.
+  Controller-owned IData identity now includes producer TaskID and output
+  index, and task registration rejects mismatched producer slots.
+- Worker execution stages, serializes, publishes, and prepares every output
+  slot. Scheduler validates and commits all expected slots before marking the
+  logical task complete. Nested OutputRefs resolve the selected output index.
+- Added a deterministic two-output workflow with equal serialized bytes,
+  cyclic nested containers, repeated-reference alias identity, partial demand,
+  and loss/recovery of only the demanded slot. Retry keeps IDataIDs `[1, 2]`,
+  moves both slots to attempt two, and uses zero legacy recovery tasks.
+- The required clean build/install and all 18 installed regressions pass.
+  Three local repetitions have identical output hashes. Package-only factory
+  `datavine-multi-605426341` passes normal and recovery modes and removes both
+  workers on shutdown.
+- Code commit: `605426341`; package SHA-256:
+  `662acb77d961016f4717581728a00adc2d5fe1138c7ad8cf6c2ac591b53a3e9f`.
+- Evidence: `acceptance/artifacts/multi-output-605426341.json`.
+- Self-review status: **PASS for the scoped checkpoint, FAIL for Ultimate
+  Acceptance**. Mid-publication worker death, partial-slot cleanup,
+  multi-output persistence/pruning races, scale, and the Grand Challenge
+  remain unresolved.
+
 ## 2026-07-30 — Persistence/global-loss/pruning recovery barrier
 
 - Added a deterministic runtime interleaving that loses the only volatile
