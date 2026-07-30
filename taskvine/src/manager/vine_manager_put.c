@@ -241,7 +241,10 @@ vine_result_code_t vine_manager_put_url_now(struct vine_manager *q, struct vine_
 	url_encode(source_url, source_encoded, sizeof(source_encoded));
 	url_encode(f->cached_name, cached_name_encoded, sizeof(cached_name_encoded));
 
-	char *transfer_id = vine_current_transfers_add(q, dest_worker, source_worker, source_url);
+	char *transfer_id = vine_current_transfers_add(q, dest_worker, source_worker, source_url, f);
+	if (!transfer_id) {
+		return VINE_MGR_FAILURE;
+	}
 
 	vine_manager_send(q, dest_worker, "puturl_now %s %s %d %lld 0%o %s\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id);
 
@@ -279,7 +282,10 @@ vine_result_code_t vine_manager_put_url(struct vine_manager *q, struct vine_work
 	url_encode(f->source, source_encoded, sizeof(source_encoded));
 	url_encode(f->cached_name, cached_name_encoded, sizeof(cached_name_encoded));
 
-	char *transfer_id = vine_current_transfers_add(q, dest_worker, source_worker, f->source);
+	char *transfer_id = vine_current_transfers_add(q, dest_worker, source_worker, f->source, f);
+	if (!transfer_id) {
+		return VINE_MGR_FAILURE;
+	}
 
 	vine_manager_send(q, dest_worker, "puturl %s %s %d %lld 0%o %s\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id);
 

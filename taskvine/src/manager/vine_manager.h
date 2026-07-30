@@ -179,6 +179,10 @@ struct vine_manager {
 	int peer_transfers_enabled;
 	int file_source_max_transfers;
 	int worker_source_max_transfers;
+	char *datavine_controller_endpoint;
+	char *datavine_controller_host;
+	int datavine_controller_port;
+	char *datavine_controller_token;
 
 	/* Hungry call optimization */
 	timestamp_t time_last_hungry;      /* Last time vine_hungry_computation was called. */

@@ -737,6 +737,9 @@ the manager declaration table.
 */
 int vine_file_delete(struct vine_file *f);
 
+/** Attach a Controller-qualified DataVine identity to a declared file. */
+int vine_file_set_datavine_data_id(struct vine_file *f, const char *data_id);
+
 /** Get the length of a vine file.
 @param f A file object.
 @return The length of the file, or zero if unknown.
@@ -1183,6 +1186,9 @@ int vine_enable_peer_transfers(struct vine_manager *m);
 
 /** Disable taskvine peer transfers to be scheduled by the manager **/
 int vine_disable_peer_transfers(struct vine_manager *m);
+
+/** Configure Controller authority for observed TaskVine peer transfers. */
+int vine_set_datavine_controller(struct vine_manager *m, const char *endpoint, const char *token);
 
 /** Enable external recovery handling by returning recovery tasks from vine_wait.
 By default, recovery tasks are handled internally by the manager. **/

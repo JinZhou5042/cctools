@@ -51,7 +51,7 @@ def wait_json(path, timeout=15):
     raise TimeoutError(path)
 
 
-def start_worker(port, workspace=None):
+def start_worker(port, workspace=None, cores=2):
     workspace_args = []
     if workspace is not None:
         workspace_args = [
@@ -65,7 +65,7 @@ def start_worker(port, workspace=None):
             "127.0.0.1",
             str(port),
             "--cores",
-            "2",
+            str(cores),
             *workspace_args,
         ],
         stdout=subprocess.DEVNULL,
@@ -97,6 +97,7 @@ def run_case(
     bulk_origin_parent=None,
     max_edata_bytes=64 * 1024 * 1024,
     max_serving_bytes=64 * 1024 * 1024,
+    worker_cores=2,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -191,6 +192,7 @@ def run_case(
                             if apply_pruning
                             else None
                         ),
+                        worker_cores,
                     )
                     for index in range(worker_count)
                 )
@@ -222,14 +224,16 @@ def run_case(
             ):
                 replacement_timer = threading.Timer(
                     replacement_worker_delay,
-                    lambda: workers.append(start_worker(port)),
+                    lambda: workers.append(
+                        start_worker(port, cores=worker_cores)
+                    ),
                 )
                 replacement_timer.start()
             if inject_loss:
                 time.sleep(1.5)
                 os.killpg(workers[-1].pid, signal.SIGKILL)
                 workers[-1].wait(timeout=10)
-                workers.append(start_worker(port))
+                workers.append(start_worker(port, cores=worker_cores))
             results = future.result(
                 timeout=600 if factory_manager else 90
             )
@@ -257,6 +261,7 @@ def run_case(
                 "last_run_report"
             )
             worker_ids = set()
+            worker_by_task = {}
             worker_disconnections = 0
             running_task_ids = []
             for transaction_log in (root / "run-info").rglob("transactions"):
@@ -268,7 +273,9 @@ def run_case(
                         and fields[4] == "RUNNING"
                     ):
                         worker_ids.add(fields[5])
-                        running_task_ids.append(int(fields[3]))
+                        running_task_id = int(fields[3])
+                        running_task_ids.append(running_task_id)
+                        worker_by_task[str(running_task_id)] = fields[5]
                     if (
                         len(fields) > 5
                         and fields[2] == "WORKER"
@@ -280,6 +287,7 @@ def run_case(
                 worker_disconnections
             )
             snapshot["taskvine_running_order"] = running_task_ids
+            snapshot["taskvine_worker_by_task"] = worker_by_task
             snapshot["pruning_result"] = pruning_result
             snapshot["worker_cache_before_pruning"] = cache_before
             snapshot["worker_cache_after_pruning"] = cache_after

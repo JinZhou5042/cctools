@@ -54,6 +54,13 @@ class File(object):
         if self._file:
             return cvine.vine_file_set_mode(self._file, mode)
 
+    def set_datavine_data_id(self, data_id):
+        """Bind this physical file to one Controller-qualified DataID."""
+        if self._file:
+            return cvine.vine_file_set_datavine_data_id(
+                self._file, str(data_id)
+            )
+
     ##
     # Return the contents of a file object as a string.
     # Typically used to return the contents of an output buffer.

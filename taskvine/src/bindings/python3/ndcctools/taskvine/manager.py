@@ -530,6 +530,12 @@ class Manager(object):
     def disable_peer_transfers(self):
         return cvine.vine_disable_peer_transfers(self._taskvine)
 
+    def set_datavine_controller(self, endpoint, token):
+        """Require Controller leases for DataVine-bound peer transfers."""
+        return cvine.vine_set_datavine_controller(
+            self._taskvine, str(endpoint), str(token)
+        )
+
     ##
     # Change the project name for the given manager.
     #

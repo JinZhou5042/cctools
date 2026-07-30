@@ -8,6 +8,7 @@ See the file COPYING for details.
 #include "vine_blocklist.h"
 #include "vine_counters.h"
 #include "vine_current_transfers.h"
+#include "vine_datavine.h"
 #include "vine_factory_info.h"
 #include "vine_fair.h"
 #include "vine_file.h"
@@ -4401,6 +4402,11 @@ int vine_disable_peer_transfers(struct vine_manager *q)
 	return 1;
 }
 
+int vine_set_datavine_controller(struct vine_manager *q, const char *endpoint, const char *token)
+{
+	return vine_datavine_configure(q, endpoint, token);
+}
+
 int vine_enable_external_recovery_handling(struct vine_manager *q)
 {
 	debug(D_VINE, "External recovery handling enabled");
@@ -4680,6 +4686,9 @@ void vine_delete(struct vine_manager *q)
 	}
 
 	free(q->runtime_directory);
+	free(q->datavine_controller_endpoint);
+	free(q->datavine_controller_host);
+	free(q->datavine_controller_token);
 	free(q->stats);
 	free(q->stats_measure);
 
@@ -5591,6 +5600,10 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 
 		// Check if any temp files need replication and start replicating
 		BEGIN_ACCUM_TIME(q, time_internal);
+		result = vine_current_transfers_retry_releases(q, 4);
+		if (result) {
+			events += result;
+		}
 		result = vine_temp_start_replication(q);
 		END_ACCUM_TIME(q, time_internal);
 		if (result) {

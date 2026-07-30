@@ -144,6 +144,8 @@ class TaskSchedulerThread:
             # performs the authoritative reconciliation.
             self._worker_reconciliation_deferrals += 1
             return worker_ids
+        for worker_id in sorted(worker_ids):
+            self.controller.claim_worker(worker_id)
         self.controller.reconcile_workers(worker_ids)
         return worker_ids
 
@@ -268,6 +270,12 @@ class TaskSchedulerThread:
         if run_info_path is not None:
             kwargs["run_info_path"] = run_info_path
         self._manager = Manager(**kwargs)
+        if not self._manager.set_datavine_controller(
+            self.controller.endpoint, self.controller.token
+        ):
+            raise RuntimeError(
+                "TaskVine Manager rejected Data Controller configuration"
+            )
         if peer_transfers:
             self._manager.enable_peer_transfers()
         else:
@@ -333,6 +341,11 @@ class TaskSchedulerThread:
             self._idata_files[
                 self._logical_outputs[task.task_id]
             ] = self._manager.declare_temp()
+            self._idata_files[
+                self._logical_outputs[task.task_id]
+            ].set_datavine_data_id(
+                f"i:{self._logical_outputs[task.task_id]}"
+            )
         for task in workflow.tasks:
             self._nested_idata_by_task[task.task_id] = set()
             positional = tuple(
@@ -596,6 +609,10 @@ class TaskSchedulerThread:
                     url, cache="worker", peer_transfer=True
                 )
             self._edata_files[data_id] = file_object
+            if not file_object.set_datavine_data_id(f"e:{data_id}"):
+                raise RuntimeError(
+                    f"could not bind TaskVine file to EDataID e:{data_id}"
+                )
         return file_object
 
     def _submit_prefetches(

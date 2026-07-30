@@ -27,6 +27,16 @@ See the file COPYING for details.
 /* Internal use: when the worker uses the client library, do not recompute cached names. */
 int vine_hack_do_not_compute_cached_name = 0;
 
+int vine_file_set_datavine_data_id(struct vine_file *f, const char *data_id)
+{
+	if (!f || !data_id || !data_id[0]) {
+		return 0;
+	}
+	free(f->datavine_data_id);
+	f->datavine_data_id = xxstrdup(data_id);
+	return 1;
+}
+
 /* Returns file refcount. If refcount is 0, the file has been deleted. */
 int vine_file_delete(struct vine_file *f)
 {
@@ -67,6 +77,7 @@ int vine_file_delete(struct vine_file *f)
 		vine_task_delete(f->mini_task);
 		free(f->source);
 		free(f->cached_name);
+		free(f->datavine_data_id);
 		free(f->data);
 		free(f);
 	}
@@ -237,6 +248,9 @@ struct vine_file *vine_file_substitute_url(struct vine_file *f, const char *sour
 {
 	struct vine_file *sub = vine_file_create(source, f->cached_name, 0, f->size, VINE_URL, 0, 0, 0);
 	sub->source_worker = w;
+	if (f->datavine_data_id) {
+		vine_file_set_datavine_data_id(sub, f->datavine_data_id);
+	}
 	return sub;
 }
 

@@ -51,6 +51,7 @@ def main():
         target.task_id,
         expected,
         worker_count=2,
+        worker_cores=1,
         factory_manager=args.factory_manager,
         prefetch=False,
     )
@@ -62,6 +63,13 @@ def main():
         "worker cache/peer reuse did not occur"
     )
     assert snapshot["taskvine_workers_used"] == 2, snapshot
+    transfer_metrics = snapshot["replica_directory"]
+    assert transfer_metrics["observed_transfer_acquires"] >= 1, snapshot
+    assert (
+        transfer_metrics["observed_transfer_acquires"]
+        == transfer_metrics["observed_transfer_releases"]
+    ), snapshot
+    assert transfer_metrics["active_leases"] == 0, snapshot
     assert snapshot["edata_bytes"] <= snapshot["edata_capacity_bytes"]
     rollback = run_case(
         "phase5-peer-disabled",
@@ -69,11 +77,15 @@ def main():
         target.task_id,
         expected,
         worker_count=2,
+        worker_cores=1,
         peer_transfers=False,
         factory_manager=args.factory_manager,
         prefetch=False,
     )
     assert rollback["available_idata"] == len(workflow.tasks)
+    assert (
+        rollback["replica_directory"]["observed_transfer_acquires"] == 0
+    ), rollback
     print(json.dumps({"peer_on": snapshot, "peer_off": rollback}, sort_keys=True))
     print(
         f"DataVine Phase 5 peer cache E2E PASS shared=e{shared_id} "
