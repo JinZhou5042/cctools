@@ -1,0 +1,707 @@
+"""Controller-owned physical replica, worker epoch, and source lease state."""
+
+import dataclasses
+import hashlib
+import collections
+import re
+import secrets
+import threading
+import time
+
+
+REPLICA_TIERS = frozenset(
+    (
+        "controller-memory",
+        "worker-dram",
+        "worker-disk",
+        "sharedfs",
+        "external",
+    )
+)
+WORKER_TIERS = frozenset(("worker-dram", "worker-disk"))
+REPLICA_STATES = frozenset(
+    (
+        "preparing",
+        "available",
+        "retiring",
+        "invalid",
+        "quarantined",
+        "pruned",
+    )
+)
+TIER_COST = {
+    "worker-dram": 0,
+    "worker-disk": 1,
+    "controller-memory": 2,
+    "sharedfs": 3,
+    "external": 4,
+}
+DATA_KEY_PATTERN = re.compile(r"^[ei]:[1-9][0-9]*$")
+
+
+@dataclasses.dataclass(frozen=True)
+class WorkerEpoch:
+    worker_id: str
+    epoch: int
+    active: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class ReplicaRecord:
+    data_id: str
+    replica_id: str
+    generation: int
+    attempt: int
+    tier: str
+    content_hash: str
+    size: int
+    state: str
+    worker_id: str | None = None
+    worker_epoch: int | None = None
+    active_leases: int = 0
+    quarantine_until: float | None = None
+
+    def source_dict(self):
+        return {
+            "data_id": self.data_id,
+            "replica_id": self.replica_id,
+            "generation": self.generation,
+            "attempt": self.attempt,
+            "tier": self.tier,
+            "content_hash": self.content_hash,
+            "size": self.size,
+            "load": self.active_leases,
+            "worker_id": self.worker_id,
+            "worker_epoch": self.worker_epoch,
+        }
+
+
+@dataclasses.dataclass(frozen=True)
+class SourceLease:
+    lease_id: str
+    data_id: str
+    replica_id: str
+    generation: int
+    destination_worker_id: str
+    destination_worker_epoch: int
+    active: bool = True
+    success: bool | None = None
+
+
+class ReplicaDirectory:
+    """Fail-closed physical directory; logical lineage lives elsewhere."""
+
+    def __init__(
+        self,
+        max_replicas=100000,
+        max_workers=10000,
+        max_active_leases=1024,
+        max_completed_leases=1024,
+    ):
+        capacities = {
+            "max_replicas": int(max_replicas),
+            "max_workers": int(max_workers),
+            "max_active_leases": int(max_active_leases),
+            "max_completed_leases": int(max_completed_leases),
+        }
+        if any(value < 1 for value in capacities.values()):
+            raise ValueError("replica directory capacities must be positive")
+        self._lock = threading.RLock()
+        self._workers = {}
+        self._replicas = {}
+        self._active_leases = {}
+        self._completed_leases = collections.OrderedDict()
+        self._max_replicas = capacities["max_replicas"]
+        self._max_workers = capacities["max_workers"]
+        self._max_active_leases = capacities["max_active_leases"]
+        self._max_completed_leases = capacities[
+            "max_completed_leases"
+        ]
+        self._latest_attempt = {}
+        self._revision = 0
+        self._stale_rejections = 0
+        self._lease_high_water = 0
+        self._replica_high_water = 0
+
+    @property
+    def revision(self):
+        with self._lock:
+            return self._revision
+
+    def _changed(self):
+        self._revision += 1
+
+    def _reject_stale(self, message):
+        self._stale_rejections += 1
+        raise ValueError(message)
+
+    def join_worker(self, worker_id, epoch):
+        worker_id = str(worker_id)
+        epoch = int(epoch)
+        if not worker_id or epoch < 1:
+            raise ValueError("invalid worker identity or epoch")
+        with self._lock:
+            old = self._workers.get(worker_id)
+            if old is not None:
+                if old.epoch == epoch and old.active:
+                    return old
+                if epoch <= old.epoch:
+                    self._reject_stale("stale worker epoch")
+                self._invalidate_worker_replicas(old.worker_id, old.epoch)
+            elif len(self._workers) >= self._max_workers:
+                raise RuntimeError("worker directory capacity exceeded")
+            record = WorkerEpoch(worker_id, epoch, True)
+            self._workers[worker_id] = record
+            self._changed()
+            return record
+
+    def disconnect_worker(self, worker_id, epoch):
+        worker_id = str(worker_id)
+        epoch = int(epoch)
+        with self._lock:
+            old = self._workers.get(worker_id)
+            if old is None or old.epoch != epoch:
+                self._reject_stale("stale worker disconnect")
+            if not old.active:
+                return old
+            self._workers[worker_id] = dataclasses.replace(
+                old, active=False
+            )
+            self._invalidate_worker_replicas(worker_id, epoch)
+            self._changed()
+            return self._workers[worker_id]
+
+    def _invalidate_worker_replicas(self, worker_id, epoch):
+        for key, record in tuple(self._replicas.items()):
+            if (
+                record.worker_id == worker_id
+                and record.worker_epoch == epoch
+                and record.state in ("preparing", "available")
+            ):
+                state = (
+                    "retiring" if record.active_leases else "invalid"
+                )
+                self._replicas[key] = dataclasses.replace(
+                    record, state=state
+                )
+
+    def _validate_hash(self, content_hash):
+        content_hash = str(content_hash)
+        if len(content_hash) != 64:
+            raise ValueError("content hash must be SHA-256 hex")
+        try:
+            bytes.fromhex(content_hash)
+        except ValueError as exc:
+            raise ValueError("content hash must be SHA-256 hex") from exc
+        return content_hash
+
+    def _normalize_data_id(self, data_id):
+        data_id = str(data_id)
+        if DATA_KEY_PATTERN.fullmatch(data_id) is None:
+            raise ValueError("DataID must be qualified as e:<id> or i:<id>")
+        return data_id
+
+    def _validate_worker(self, worker_id, worker_epoch):
+        current = self._workers.get(str(worker_id))
+        if (
+            current is None
+            or not current.active
+            or current.epoch != int(worker_epoch)
+        ):
+            self._reject_stale("replica report from stale worker epoch")
+
+    def advance_attempt(self, data_id, attempt):
+        data_id = self._normalize_data_id(data_id)
+        attempt = int(attempt)
+        if attempt < 1:
+            raise ValueError("invalid attempt")
+        with self._lock:
+            old = self._latest_attempt.get(data_id, 0)
+            if attempt < old:
+                self._reject_stale("stale logical attempt")
+            if attempt == old:
+                return old
+            self._latest_attempt[data_id] = attempt
+            for key, record in tuple(self._replicas.items()):
+                if (
+                    record.data_id == data_id
+                    and record.attempt < attempt
+                    and record.tier not in ("sharedfs", "external")
+                    and record.state
+                    in ("preparing", "available", "retiring")
+                ):
+                    self._replicas[key] = dataclasses.replace(
+                        record,
+                        state=(
+                            "retiring"
+                            if record.active_leases
+                            else "invalid"
+                        ),
+                    )
+            self._changed()
+            return attempt
+
+    def prepare_replica(
+        self,
+        data_id,
+        replica_id,
+        attempt,
+        tier,
+        content_hash,
+        size,
+        worker_id=None,
+        worker_epoch=None,
+    ):
+        data_id = self._normalize_data_id(data_id)
+        replica_id = str(replica_id)
+        attempt = int(attempt)
+        tier = str(tier)
+        size = int(size)
+        content_hash = self._validate_hash(content_hash)
+        if not replica_id or size < 0:
+            raise ValueError("invalid replica identity or size")
+        if tier not in REPLICA_TIERS:
+            raise ValueError(f"invalid replica tier {tier!r}")
+        with self._lock:
+            if tier in WORKER_TIERS:
+                if worker_id is None or worker_epoch is None:
+                    raise ValueError("worker replica requires worker epoch")
+                self._validate_worker(worker_id, worker_epoch)
+            elif worker_id is not None or worker_epoch is not None:
+                raise ValueError("non-worker replica has worker identity")
+            self.advance_attempt(data_id, attempt)
+            key = (data_id, replica_id)
+            old = self._replicas.get(key)
+            identity = (
+                attempt,
+                tier,
+                content_hash,
+                size,
+                worker_id,
+                worker_epoch,
+            )
+            if old is not None and old.state in (
+                "preparing", "available"
+            ):
+                old_identity = (
+                    old.attempt,
+                    old.tier,
+                    old.content_hash,
+                    old.size,
+                    old.worker_id,
+                    old.worker_epoch,
+                )
+                if old_identity == identity:
+                    return old
+                raise ValueError("conflicting live replica declaration")
+            if old is None and len(self._replicas) >= self._max_replicas:
+                raise RuntimeError("replica directory capacity exceeded")
+            generation = 1 if old is None else old.generation + 1
+            record = ReplicaRecord(
+                data_id=data_id,
+                replica_id=replica_id,
+                generation=generation,
+                attempt=attempt,
+                tier=tier,
+                content_hash=content_hash,
+                size=size,
+                state="preparing",
+                worker_id=(
+                    str(worker_id) if worker_id is not None else None
+                ),
+                worker_epoch=(
+                    int(worker_epoch)
+                    if worker_epoch is not None
+                    else None
+                ),
+            )
+            self._replicas[key] = record
+            self._replica_high_water = max(
+                self._replica_high_water, len(self._replicas)
+            )
+            self._changed()
+            return record
+
+    def commit_replica(
+        self,
+        data_id,
+        replica_id,
+        generation,
+        attempt,
+        content_hash,
+        size,
+    ):
+        data_id = self._normalize_data_id(data_id)
+        key = (data_id, str(replica_id))
+        generation = int(generation)
+        attempt = int(attempt)
+        content_hash = self._validate_hash(content_hash)
+        size = int(size)
+        with self._lock:
+            record = self._replicas.get(key)
+            if record is None:
+                raise KeyError("unknown replica")
+            if record.generation != generation:
+                self._reject_stale("stale replica generation")
+            if attempt < self._latest_attempt.get(data_id, 0):
+                self._reject_stale("stale replica completion attempt")
+            if record.state == "available":
+                if (
+                    record.attempt == attempt
+                    and record.content_hash == content_hash
+                    and record.size == size
+                ):
+                    return record
+                raise ValueError("conflicting duplicate replica commit")
+            if record.state != "preparing":
+                raise ValueError(
+                    f"cannot commit replica in state {record.state}"
+                )
+            if record.tier in WORKER_TIERS:
+                self._validate_worker(
+                    record.worker_id, record.worker_epoch
+                )
+            if (
+                record.attempt != attempt
+                or record.content_hash != content_hash
+                or record.size != size
+            ):
+                raise ValueError("replica content metadata mismatch")
+            record = dataclasses.replace(record, state="available")
+            self._replicas[key] = record
+            self._changed()
+            return record
+
+    def report_bytes(
+        self,
+        data_id,
+        replica_id,
+        attempt,
+        tier,
+        payload,
+        worker_id=None,
+        worker_epoch=None,
+    ):
+        payload = bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        record = self.prepare_replica(
+            data_id,
+            replica_id,
+            attempt,
+            tier,
+            digest,
+            len(payload),
+            worker_id,
+            worker_epoch,
+        )
+        return self.commit_replica(
+            data_id,
+            replica_id,
+            record.generation,
+            attempt,
+            digest,
+            len(payload),
+        )
+
+    def candidates(self, data_id):
+        data_id = self._normalize_data_id(data_id)
+        with self._lock:
+            records = []
+            for record in self._replicas.values():
+                if record.data_id != data_id or record.state != "available":
+                    continue
+                if record.tier in WORKER_TIERS:
+                    worker = self._workers.get(record.worker_id)
+                    if (
+                        worker is None
+                        or not worker.active
+                        or worker.epoch != record.worker_epoch
+                    ):
+                        continue
+                records.append(record)
+            return tuple(
+                sorted(
+                    records,
+                    key=lambda value: (
+                        value.active_leases,
+                        TIER_COST[value.tier],
+                        value.replica_id,
+                    ),
+                )
+            )
+
+    def acquire_source(
+        self,
+        data_id,
+        replica_id,
+        generation,
+        destination_worker_id,
+        destination_worker_epoch,
+    ):
+        data_id = self._normalize_data_id(data_id)
+        key = (data_id, str(replica_id))
+        with self._lock:
+            self._validate_worker(
+                destination_worker_id, destination_worker_epoch
+            )
+            if len(self._active_leases) >= self._max_active_leases:
+                raise RuntimeError("source lease admission capacity exceeded")
+            record = self._replicas.get(key)
+            if (
+                record is None
+                or record.generation != int(generation)
+                or record.state != "available"
+            ):
+                self._reject_stale(
+                    "selected source disappeared before transfer"
+                )
+            if record.tier in WORKER_TIERS:
+                self._validate_worker(
+                    record.worker_id, record.worker_epoch
+                )
+            lease_id = secrets.token_hex(16)
+            while (
+                lease_id in self._active_leases
+                or lease_id in self._completed_leases
+            ):
+                lease_id = secrets.token_hex(16)
+            lease = SourceLease(
+                lease_id=lease_id,
+                data_id=data_id,
+                replica_id=record.replica_id,
+                generation=record.generation,
+                destination_worker_id=str(destination_worker_id),
+                destination_worker_epoch=int(destination_worker_epoch),
+            )
+            self._active_leases[lease_id] = lease
+            self._replicas[key] = dataclasses.replace(
+                record, active_leases=record.active_leases + 1
+            )
+            self._lease_high_water = max(
+                self._lease_high_water, len(self._active_leases)
+            )
+            self._changed()
+            return lease
+
+    def release_source(self, lease_id, success):
+        lease_id = str(lease_id)
+        with self._lock:
+            lease = self._active_leases.get(lease_id)
+            if lease is None:
+                lease = self._completed_leases.get(lease_id)
+                if lease is None:
+                    raise KeyError("unknown source lease")
+                if lease.success == bool(success):
+                    return lease
+                raise ValueError("conflicting duplicate lease release")
+            key = (lease.data_id, lease.replica_id)
+            record = self._replicas[key]
+            if record.generation != lease.generation:
+                self._reject_stale("lease references stale generation")
+            leases = record.active_leases - 1
+            state = record.state
+            if state == "retiring" and leases == 0:
+                state = "invalid"
+            self._replicas[key] = dataclasses.replace(
+                record, active_leases=leases, state=state
+            )
+            lease = dataclasses.replace(
+                lease, active=False, success=bool(success)
+            )
+            del self._active_leases[lease_id]
+            self._completed_leases[lease_id] = lease
+            while (
+                len(self._completed_leases)
+                > self._max_completed_leases
+            ):
+                self._completed_leases.popitem(last=False)
+            self._changed()
+            return lease
+
+    def invalidate_replica(self, data_id, replica_id, generation):
+        key = (self._normalize_data_id(data_id), str(replica_id))
+        with self._lock:
+            record = self._replicas.get(key)
+            if record is None:
+                raise KeyError("unknown replica")
+            if record.generation != int(generation):
+                self._reject_stale("stale invalidation generation")
+            if record.state in ("invalid", "pruned"):
+                return record
+            if record.state == "quarantined":
+                raise ValueError("quarantined replica needs prune or restore")
+            state = "retiring" if record.active_leases else "invalid"
+            record = dataclasses.replace(record, state=state)
+            self._replicas[key] = record
+            self._changed()
+            return record
+
+    def quarantine(
+        self,
+        data_id,
+        replica_id,
+        generation,
+        grace_seconds,
+        expected_revision,
+        now=None,
+    ):
+        key = (self._normalize_data_id(data_id), str(replica_id))
+        grace_seconds = float(grace_seconds)
+        now = time.time() if now is None else float(now)
+        if grace_seconds < 0:
+            raise ValueError("negative quarantine grace period")
+        with self._lock:
+            if int(expected_revision) != self._revision:
+                self._reject_stale("pruning proof revision changed")
+            record = self._replicas.get(key)
+            if record is None:
+                raise KeyError("unknown replica")
+            if (
+                record.generation != int(generation)
+                or record.state != "available"
+                or record.tier != "sharedfs"
+                or record.active_leases
+            ):
+                raise ValueError("replica is not safe to quarantine")
+            record = dataclasses.replace(
+                record,
+                state="quarantined",
+                quarantine_until=now + grace_seconds,
+            )
+            self._replicas[key] = record
+            self._changed()
+            return record
+
+    def restore_quarantine(self, data_id, replica_id, generation):
+        key = (self._normalize_data_id(data_id), str(replica_id))
+        with self._lock:
+            record = self._replicas.get(key)
+            if (
+                record is None
+                or record.generation != int(generation)
+                or record.state != "quarantined"
+            ):
+                raise ValueError("replica is not quarantined")
+            record = dataclasses.replace(
+                record, state="available", quarantine_until=None
+            )
+            self._replicas[key] = record
+            self._changed()
+            return record
+
+    def hard_delete_quarantine(
+        self,
+        data_id,
+        replica_id,
+        generation,
+        expected_revision,
+        now=None,
+    ):
+        key = (self._normalize_data_id(data_id), str(replica_id))
+        now = time.time() if now is None else float(now)
+        with self._lock:
+            if int(expected_revision) != self._revision:
+                self._reject_stale("quarantine proof revision changed")
+            record = self._replicas.get(key)
+            if (
+                record is None
+                or record.generation != int(generation)
+                or record.state != "quarantined"
+                or record.active_leases
+                or record.quarantine_until is None
+                or now < record.quarantine_until
+            ):
+                raise ValueError("quarantine cannot be hard deleted")
+            record = dataclasses.replace(
+                record, state="pruned", quarantine_until=None
+            )
+            self._replicas[key] = record
+            self._changed()
+            return record
+
+    def globally_available(self, data_id):
+        return bool(self.candidates(data_id))
+
+    def forget_data(self, data_id, expected_revision):
+        """Forget terminal physical history after logical pruning."""
+        data_id = self._normalize_data_id(data_id)
+        with self._lock:
+            if int(expected_revision) != self._revision:
+                self._reject_stale("cleanup proof revision changed")
+            keys = [
+                key
+                for key, record in self._replicas.items()
+                if record.data_id == data_id
+            ]
+            if any(
+                self._replicas[key].state not in ("invalid", "pruned")
+                or self._replicas[key].active_leases
+                for key in keys
+            ):
+                raise ValueError("live replica prevents data cleanup")
+            for key in keys:
+                del self._replicas[key]
+            self._latest_attempt.pop(data_id, None)
+            if keys:
+                self._changed()
+            return len(keys)
+
+    def forget_worker(self, worker_id, expected_epoch):
+        """Forget an inactive epoch once all of its replicas are cleaned."""
+        worker_id = str(worker_id)
+        expected_epoch = int(expected_epoch)
+        with self._lock:
+            worker = self._workers.get(worker_id)
+            if (
+                worker is None
+                or worker.active
+                or worker.epoch != expected_epoch
+            ):
+                raise ValueError("worker epoch is not forgettable")
+            if any(
+                record.worker_id == worker_id
+                for record in self._replicas.values()
+            ):
+                raise ValueError("worker replicas prevent epoch cleanup")
+            del self._workers[worker_id]
+            self._changed()
+            return worker
+
+    def get_replica(self, data_id, replica_id):
+        with self._lock:
+            try:
+                return self._replicas[
+                    (self._normalize_data_id(data_id), str(replica_id))
+                ]
+            except KeyError:
+                raise KeyError("unknown replica") from None
+
+    def snapshot(self):
+        with self._lock:
+            states = {
+                state: sum(
+                    record.state == state
+                    for record in self._replicas.values()
+                )
+                for state in sorted(REPLICA_STATES)
+            }
+            return {
+                "revision": self._revision,
+                "workers": len(self._workers),
+                "active_workers": sum(
+                    worker.active for worker in self._workers.values()
+                ),
+                "replicas": len(self._replicas),
+                "replica_states": states,
+                "replica_high_water": self._replica_high_water,
+                "replica_capacity": self._max_replicas,
+                "active_leases": len(self._active_leases),
+                "active_lease_capacity": self._max_active_leases,
+                "completed_lease_tombstones": len(
+                    self._completed_leases
+                ),
+                "completed_lease_capacity": self._max_completed_leases,
+                "worker_capacity": self._max_workers,
+                "lease_high_water": self._lease_high_water,
+                "stale_rejections": self._stale_rejections,
+            }
