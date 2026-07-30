@@ -125,6 +125,7 @@ def run_case(
     frontier_pruning_ack_delay=0,
     runtime_controller_hook=None,
     controller_client_wrapper=None,
+    inject_peer_source_losses=0,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -288,6 +289,7 @@ def run_case(
                 worker_loss_process_shutdown,
                 inject_partial_publication_after,
                 frontier_pruning_ack_delay,
+                inject_peer_source_losses,
             )
             if runtime_controller_hook is not None:
                 runtime_hook_handle = runtime_controller_hook(client)
@@ -390,6 +392,25 @@ def run_case(
             )
             snapshot["taskvine_running_order"] = running_task_ids
             snapshot["taskvine_worker_by_task"] = worker_by_task
+            snapshot["taskvine_worker_process_returncodes"] = (
+                [worker.poll() for worker in workers]
+                if not factory_manager
+                else []
+            )
+            if not factory_manager:
+                process_groups_alive = []
+                for worker in workers:
+                    try:
+                        os.killpg(worker.pid, 0)
+                    except ProcessLookupError:
+                        process_groups_alive.append(False)
+                    else:
+                        process_groups_alive.append(True)
+                snapshot["taskvine_worker_process_groups_alive"] = (
+                    process_groups_alive
+                )
+            else:
+                snapshot["taskvine_worker_process_groups_alive"] = []
             snapshot["pruning_result"] = pruning_result
             snapshot["worker_cache_before_pruning"] = cache_before
             snapshot["worker_cache_after_pruning"] = cache_after

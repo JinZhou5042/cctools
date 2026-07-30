@@ -1001,6 +1001,21 @@ class Manager(object):
     def tune(self, name, value):
         return cvine.vine_tune(self._taskvine, name, value)
 
+    def datavine_peer_transfer_fault_stats(self):
+        """Return deterministic peer-transfer start/fault counters."""
+        return {
+            "peer_transfer_starts": int(
+                cvine.vine_manager_datavine_peer_transfer_starts(
+                    self._taskvine
+                )
+            ),
+            "peer_source_losses_injected": int(
+                cvine.vine_manager_datavine_peer_source_losses_injected(
+                    self._taskvine
+                )
+            ),
+        }
+
     ##
     # Enable task result caching.
     #

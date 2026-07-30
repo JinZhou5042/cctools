@@ -127,6 +127,7 @@ class ReplicaDirectory:
         self._observed_transfer_acquires = 0
         self._observed_transfer_idempotent = 0
         self._observed_transfer_releases = 0
+        self._observed_transfer_failures = 0
         self._worker_loss_lease_expirations = 0
 
     @property
@@ -686,6 +687,8 @@ class ReplicaDirectory:
             self._completed_leases.popitem(last=False)
         if lease_id.startswith("taskvine:"):
             self._observed_transfer_releases += 1
+            if not success:
+                self._observed_transfer_failures += 1
         self._changed()
         return lease
 
@@ -1029,6 +1032,9 @@ class ReplicaDirectory:
                 ),
                 "observed_transfer_releases": (
                     self._observed_transfer_releases
+                ),
+                "observed_transfer_failures": (
+                    self._observed_transfer_failures
                 ),
                 "worker_loss_lease_expirations": (
                     self._worker_loss_lease_expirations

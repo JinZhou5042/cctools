@@ -29,3 +29,16 @@ void vine_current_transfers_clear( struct vine_manager *q );
 int vine_current_transfers_get_table_size(struct vine_manager *q);
 
 int vine_current_transfers_retry_releases(struct vine_manager *q, int limit);
+
+/* True only for an active worker-to-worker transfer whose lifetime is
+ * protected by a Data Controller lease. */
+int vine_current_transfers_is_datavine_peer(struct vine_manager *q, const char *id);
+
+/* Validate that the reporting worker is the destination bound to the lease. */
+int vine_current_transfers_is_datavine_peer_destination(
+		struct vine_manager *q,
+		const char *id,
+		struct vine_worker_info *destination);
+
+/* Abruptly lose the source endpoint of an active DataVine peer lease. */
+int vine_current_transfers_abort_source(struct vine_manager *q, const char *id);

@@ -621,6 +621,34 @@ static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_w
 	return VINE_MSG_PROCESSED;
 }
 
+static vine_msg_code_t handle_cache_transfer_start(
+		struct vine_manager *q,
+		struct vine_worker_info *w,
+		const char *line)
+{
+	char transfer_id[VINE_LINE_MAX];
+	if (sscanf(line, "cache-transfer-start %s", transfer_id) != 1) {
+		return VINE_MSG_FAILURE;
+	}
+	int valid_destination =
+			vine_current_transfers_is_datavine_peer_destination(
+					q, transfer_id, w);
+	if (valid_destination) {
+		q->datavine_peer_transfer_starts++;
+	}
+	if (q->datavine_fault_peer_source_loss_remaining > 0 &&
+			valid_destination) {
+		q->datavine_fault_peer_source_loss_remaining--;
+		q->datavine_peer_source_losses_injected++;
+		debug(D_VINE,
+				"DataVine fault injection: abruptly losing source after destination %s started leased peer transfer %s",
+				w->workerid ? w->workerid : "(unknown)",
+				transfer_id);
+		vine_current_transfers_abort_source(q, transfer_id);
+	}
+	return VINE_MSG_PROCESSED;
+}
+
 /*
 A cache-invalid message coming from the worker means that a requested
 remote transfer or command did not succeed, and the intended file is
@@ -997,6 +1025,8 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		result = handle_info(q, w, line);
 	} else if (string_prefix_is(line, "cache-update")) {
 		result = handle_cache_update(q, w, line);
+	} else if (string_prefix_is(line, "cache-transfer-start")) {
+		result = handle_cache_transfer_start(q, w, line);
 	} else if (string_prefix_is(line, "cache-invalid")) {
 		result = handle_cache_invalid(q, w, line);
 	} else if (string_prefix_is(line, "cache-unlinked")) {
@@ -4505,6 +4535,9 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->manager_preferred_connection = xxstrdup("by_ip");
 
 	q->enforce_worker_eviction_interval = 0;
+	q->datavine_fault_peer_source_loss_remaining = 0;
+	q->datavine_peer_transfer_starts = 0;
+	q->datavine_peer_source_losses_injected = 0;
 	q->time_start_worker_eviction = 0;
 
 	if ((envstring = getenv("VINE_BANDWIDTH"))) {
@@ -6342,6 +6375,9 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 			}
 		}
 
+	} else if (!strcmp(name, "datavine-fault-peer-source-loss")) {
+		q->datavine_fault_peer_source_loss_remaining = MAX(0, (int)value);
+
 	} else if (!strcmp(name, "load-from-shared-filesystem")) {
 		q->load_from_shared_fs_enabled = !!((int)value);
 
@@ -6398,6 +6434,18 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 	}
 
 	return 0;
+}
+
+uint64_t vine_manager_datavine_peer_transfer_starts(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_transfer_starts : 0;
+}
+
+uint64_t vine_manager_datavine_peer_source_losses_injected(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_source_losses_injected : 0;
 }
 
 void vine_manager_enable_process_shortcut(struct vine_manager *q)

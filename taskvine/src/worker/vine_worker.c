@@ -105,6 +105,7 @@ static struct itable *procs_complete = NULL;
 
 /* Table of current transfers and their id. */
 static struct hash_table *current_transfers = NULL;
+static struct link *active_manager_link = NULL;
 
 /* The cache manager object keeping track of files stored by the worker. */
 struct vine_cache *cache_manager = 0;
@@ -609,6 +610,21 @@ void vine_worker_send_cache_invalid(struct link *manager, const char *cachename,
 		send_async_message(manager, "cache-invalid %s %d\n", cachename, length);
 	}
 	link_write(manager, message, length, time(0) + options->active_timeout);
+}
+
+void vine_worker_send_cache_transfer_start(const char *cachename)
+{
+	if (!active_manager_link || !cachename) {
+		return;
+	}
+	const char *transfer_id = hash_table_lookup(
+			current_transfers, cachename);
+	if (transfer_id) {
+		send_async_message(
+				active_manager_link,
+				"cache-transfer-start %s\n",
+				transfer_id);
+	}
 }
 
 void vine_worker_send_cache_capacity_update(struct link *manager)
@@ -1504,6 +1520,14 @@ static int handle_manager(struct link *manager)
 		} else if (!strncmp(line, "exit", 5)) {
 			abort_flag = 1;
 			r = 1;
+		} else if (!strncmp(line, "abort-worker", 13)) {
+			/*
+			 * Deterministic abrupt-loss hook.  SIGKILL intentionally
+			 * bypasses worker cleanup so manager and Controller recovery
+			 * see the same boundary as an external process loss.
+			 */
+			kill(-getpgrp(), SIGKILL);
+			r = 0;
 		} else if (!strncmp(line, "check", 6)) {
 			r = send_keepalive(manager, 0);
 		} else if (!strncmp(line, "auth", 4)) {
@@ -1837,6 +1861,7 @@ static void vine_worker_serve_manager(struct link *manager)
 	sigset_t mask;
 
 	debug(D_VINE, "working for manager at %s:%d.\n", current_manager_address->addr, current_manager_address->port);
+	active_manager_link = manager;
 
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGCHLD);
@@ -1974,6 +1999,7 @@ static void vine_worker_serve_manager(struct link *manager)
 			reset_idle_timer();
 		}
 	}
+	active_manager_link = NULL;
 }
 
 /* Attempt to connect, authenticate, and work with the manager at this specific host and port. */

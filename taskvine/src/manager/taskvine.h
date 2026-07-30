@@ -1545,6 +1545,9 @@ value disables this DataVine admission gate. (default=-1)
  - "datavine-cache-capacity-bytes" Worker-cache serialized-byte limit. Inputs
 are reserved before dispatch and workers fail closed when actual publication
 would exceed the limit. A negative value disables the gate. (default=-1)
+ - "datavine-fault-peer-source-loss" Test-only count of leased peer transfers
+whose real source worker is abruptly lost after the destination starts its
+transfer child. Disabled by default. (default=0)
  - "transient-error-interval" Time to wait in seconds after a resource failure before attempting to use it again
 (default=15)
  - "resource_management_interval" Seconds between measurement of manager local resources. (default=30)
@@ -1559,6 +1562,15 @@ would exceed the limit. A negative value disables the gate. (default=-1)
 @return 0 on succes, -1 on failure.
 */
 int vine_tune(struct vine_manager *m, const char *name, double value);
+
+/** Return the number of leased DataVine peer transfers whose destination
+transfer process was observed starting. */
+uint64_t vine_manager_datavine_peer_transfer_starts(
+		struct vine_manager *m);
+
+/** Return the number of deterministic abrupt peer-source losses injected. */
+uint64_t vine_manager_datavine_peer_source_losses_injected(
+		struct vine_manager *m);
 
 /** Sets the maximum resources a task without an explicit category ("default" category).
 rm specifies the maximum resources a task in the default category may use.

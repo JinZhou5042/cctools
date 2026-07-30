@@ -349,6 +349,48 @@ int vine_current_transfers_get_table_size(struct vine_manager *q)
 	return hash_table_size(q->current_transfer_table);
 }
 
+int vine_current_transfers_is_datavine_peer(struct vine_manager *q, const char *id)
+{
+	struct vine_transfer_pair *p;
+	if (!q || !id) {
+		return 0;
+	}
+	p = hash_table_lookup(q->current_transfer_table, id);
+	return p && p->datavine_lease && p->source_worker && p->dest_worker && !p->completed;
+}
+
+int vine_current_transfers_is_datavine_peer_destination(
+		struct vine_manager *q,
+		const char *id,
+		struct vine_worker_info *destination)
+{
+	struct vine_transfer_pair *p;
+	if (!q || !id || !destination) {
+		return 0;
+	}
+	p = hash_table_lookup(q->current_transfer_table, id);
+	return p && p->datavine_lease && p->source_worker &&
+			p->dest_worker == destination && !p->completed;
+}
+
+int vine_current_transfers_abort_source(struct vine_manager *q, const char *id)
+{
+	struct vine_transfer_pair *p;
+	struct vine_worker_info *source;
+	if (!q || !id) {
+		return 0;
+	}
+	p = hash_table_lookup(q->current_transfer_table, id);
+	if (!p || !p->datavine_lease || p->completed || !p->source_worker) {
+		return 0;
+	}
+	source = p->source_worker;
+	vine_manager_send(q, source, "abort-worker\n");
+	vine_manager_remove_worker(
+			q, source, VINE_WORKER_DISCONNECT_FAILURE);
+	return 1;
+}
+
 int vine_current_transfers_retry_releases(struct vine_manager *q, int limit)
 {
 	if (!q || limit < 1) {

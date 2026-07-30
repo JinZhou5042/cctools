@@ -934,6 +934,9 @@ vine_cache_status_t vine_cache_ensure(struct vine_cache *c, const char *cachenam
 	} else if (f->pid > 0) {
 		f->status = VINE_CACHE_STATUS_PROCESSING;
 		hash_table_insert(c->processing_transfers, cachename, NULL);
+		if (f->cache_type == VINE_CACHE_TRANSFER) {
+			vine_worker_send_cache_transfer_start(cachename);
+		}
 		switch (f->cache_type) {
 		case VINE_CACHE_TRANSFER:
 			debug(D_VINE, "cache: transferring %s to %s", f->source, cachename);

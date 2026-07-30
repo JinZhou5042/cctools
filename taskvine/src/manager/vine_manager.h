@@ -255,6 +255,9 @@ struct vine_manager {
 	/* Testing mode parameters */
 	timestamp_t enforce_worker_eviction_interval;   /* Enforce worker eviction interval in seconds */
 	timestamp_t time_start_worker_eviction;         /* Track the time when we start evicting workers */
+	int datavine_fault_peer_source_loss_remaining; /* One-shot failures after a leased peer request is dispatched. */
+	uint64_t datavine_peer_transfer_starts;
+	uint64_t datavine_peer_source_losses_injected;
 };
 
 /*
