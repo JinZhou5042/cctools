@@ -10,9 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 SharedFS failure, overload, and persistence
-  responsiveness**
-- Validated code commit: `426ea2195`
+- Active task: **Phase 9 persistence/global-loss/pruning race integration**
+- Validated code commit: `c4d5258b6`
 
 ## Ultimate acceptance reset
 
@@ -144,6 +143,51 @@ of failed and temporarily unavailable SharedFS writes, with bounded retry,
 admission/backpressure, independent Controller responsiveness measurement,
 and no Scheduler starvation. Evidence:
 `acceptance/artifacts/worker-persistence-cancel-426ea2195.json`.
+
+### Phase 9 bounded SharedFS failure recovery checkpoint
+
+Commit `c4d5258b6` gives worker persistence explicit, Scheduler-owned failure
+recovery rather than relying on TaskVine's opaque task retries. Each failed
+attempt reaches a terminal Controller state; retry uses a new persistence
+request for the same attempt-stable IDataID. Retry count, exponential delay,
+and maximum delay are independently bounded. Zero allowed retries produces an
+explicit workflow failure.
+
+The worker failure injection writes part of the SharedFS temporary file,
+delays while ordinary work can run, reports a stable failure marker, and
+raises. The worker error path removes the temporary and tells Controller that
+the request failed. Two consecutive injected failures are required before the
+accepted third request can publish durable.
+
+Self-review rejected the first implementation even though the failure workflow
+completed: Controller-inline and worker persistence had separate admission
+checks, so a configured concurrency of one reached a global high-water of two.
+The accepted Controller has one active-request authority across both paths.
+A second review correction added a separate maximum retry delay; a finite
+retry count alone was not accepted as a complete time bound.
+
+After the final prescribed clean build/install, all 16 installed-path
+regressions pass. Local contracts additionally prove that Controller state
+queries remain responsive while streaming durability validation is
+deliberately blocked, no `.tmp` survives, normal compute completes while
+persistence is active, and a permanent failure is visible.
+
+The package-only factory run at exact commit `c4d5258b6` uses archive SHA-256
+`592cc09333d91ff2b36ce94a06d18189de18b874dcedcb202b88dcd00684ac2a`.
+It observes two partial-write failures, two bounded retries totaling 0.75 s,
+global persistence high-water one, one ordinary compute completion during
+persistence, no temporary files, one 2,097,161-byte successful worker write,
+one worker-loss recovery replay, zero legacy recovery tasks, exact output, and
+79 bytes of Controller IData high-water. Both package workers were removed.
+Evidence:
+`acceptance/artifacts/worker-persistence-failure-c4d5258b6.json`.
+
+Self-review keeps `PERSIST`, `RACES`, `PERF-FS`, Review B, and Ultimate
+Acceptance **OPEN/FAIL**. The next smallest safe task is a single deterministic
+runtime schedule that races persistence completion with global-loss detection
+and pruning proof evaluation. Scale-level separate read/write admission,
+queue/fairness measurement, real filesystem outage behavior, and the Grand
+Challenge remain unproved.
 
 ### Phase 9 worker-enforced disk cache capacity and combined recovery checkpoint
 

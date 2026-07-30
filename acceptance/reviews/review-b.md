@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `426ea2195`
+Reviewed through code commit: `c4d5258b6`
 Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
@@ -119,6 +119,18 @@ without Controller byte retention.
 
 B1 remains open for worker DRAM, active transfer/cancellation, SharedFS
 overload retry, Controller metadata cleanup, and scale/fairness evidence.
+
+Correction checkpoint `c4d5258b6` adds bounded worker-persistence failure
+recovery. Two package-worker partial writes fail and clean their temporary
+files before a new request reaches durable. One Controller active set now
+limits Controller-inline and worker writes together; self-review rejected the
+first passing version after it reached global high-water two under capacity
+one. Normal compute completes while persistence is active, and Controller
+state remains responsive during deliberately blocked stream validation.
+
+B1 remains open for worker DRAM, active peer-transfer loss, persistence
+completion concurrent with global loss/pruning, metadata cleanup, and
+scale-level I/O/fairness evidence.
 
 ### B2 — Stable-root reproducibility is assumed, not proved by Controller state
 

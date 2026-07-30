@@ -1,0 +1,81 @@
+{
+	"artifact_version": 1,
+	"status": "PASS_COMPONENT_CHECKPOINT",
+	"accepted_at": "2026-07-30T08:07:00-04:00",
+	"branch": "datavine",
+	"commit": "c4d5258b632e7457a1ee5a463d3c097b8af0c8dd",
+	"package": {
+		"path": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+		"sha256": "592cc09333d91ff2b36ce94a06d18189de18b874dcedcb202b88dcd00684ac2a",
+		"poncho_package_run": "PASS TaskVine, TaskSchedulerThread, and worker.persist imports"
+	},
+	"build": {
+		"command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+		"status": "PASS",
+		"source_installed_hashes_match": true,
+		"controller_state_sha256": "cf9ae84fbee39d0e028baccfd67e6d7705220a059680b812c7788ba836305198",
+		"scheduler_thread_sha256": "1ac4a8ca9d0a663a2b043ac4b54e9ca5a86816f66d25dfecca190f3ec5cd7c68",
+		"worker_persist_sha256": "8d4db36a65cf10e025805916e8e610fb11c599a139fd0f4ea046d25bb09023bf"
+	},
+	"regression": {
+		"command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/test && for test_path in ./TR_datavine_*.sh; do \"$test_path\" run; done",
+		"passed": 16,
+		"total": 16,
+		"permanent_failure_visible": true,
+		"controller_status_during_validation": "PASS under 0.5 seconds"
+	},
+	"factory": {
+		"entrypoint": "bash /users/jzhou24/graph_optimization/factories/run_factory.sh --manager-name datavine-persist-fail-c4d5258b6 --workers 2 --cores 1 --memory 2 --disk 4 --poncho-env /users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+		"test_command": "python3 datavine_idata_capacity.py --factory-manager datavine-persist-fail-c4d5258b6 --persistence-mode failure",
+		"workers_requested": 2,
+		"workers_removed": 2,
+		"status": "PASS"
+	},
+	"workflow": {
+		"large_logical_bytes": 2097152,
+		"large_serialized_bytes": 2097161,
+		"controller_idata_capacity_bytes": 131072,
+		"controller_idata_bytes_high_water": 79,
+		"logical_tasks": 2,
+		"physical_attempts": 3,
+		"worker_loss_injected": true,
+		"recovery_reexecutions": 1,
+		"legacy_recovery_tasks": 0,
+		"exact_oracle_match": true
+	},
+	"persistence": {
+		"injected_failures": 2,
+		"injected_failures_observed": 2,
+		"failure_stage": "after partial SharedFS temporary-file write",
+		"retries": 2,
+		"retry_delays_seconds": [0.25, 0.5],
+		"retry_delay_total_seconds": 0.75,
+		"retry_delay_max_seconds": 0.5,
+		"maximum_retries": 2,
+		"persistence_max_active": 1,
+		"temporary_files_after_completion": 0,
+		"persistence_tasks_completed": 1,
+		"persistence_worker_bytes": 2097161,
+		"compute_completions_while_persistence_active": 1,
+		"controller_inline_and_worker_admission_unified": true,
+		"permanent_failure_with_zero_retries": "PASS explicit RuntimeError"
+	},
+	"rejected_implementations": [
+		{
+			"reason": "Controller-inline and worker persistence used separate local admission checks, permitting a global persistence high-water of two under a configured capacity of one.",
+			"correction": "All persistence modes now acquire one Controller-owned active request set."
+		},
+		{
+			"reason": "Retry count was bounded but exponential delay had no independent maximum.",
+			"correction": "Retry delay now has an explicit configurable maximum and bounded exponent."
+		}
+	],
+	"remaining_blockers": [
+		"Persistence completion concurrent with global-loss detection and pruning needs one deterministic runtime schedule.",
+		"SharedFS read and write admission need separate or experimentally justified shared limits at scale.",
+		"Large-scale queue and fairness bounds remain unmeasured.",
+		"Real external filesystem outage semantics beyond deterministic partial-write injection remain unproved.",
+		"Grand Challenge remains absent."
+	],
+	"ultimate_acceptance": "FAIL"
+}

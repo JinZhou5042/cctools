@@ -26,7 +26,7 @@ is never a pass.
 | PREFETCH | Bounded/cancellable/priority-safe independent progress | OPEN | Byte/item/priority gates pass; unverified prefetched replicas safely fall back at `ef605c343`; concurrency/cancel/final architecture open |
 | PUBLISH | Exactly-once staged idempotent publication and cleanup | OPEN | Two-phase worker prepare/Scheduler commit passes; large output publishes attempt/hash/size without byte POST at `53db69f1e`; full publication fault matrix open |
 | PLACE | Multi-source, load/epoch, bulk bypass, peer fallback | OPEN | Actual TaskVine peer movement acquires epoch-checked Controller leases and unverified sources fall back at `ef605c343`; transfer-loss/load adaptation remain open |
-| PERSIST | Bounded/cancellable/backpressured atomic durability | OPEN | Controller-inline queue/cancel/overload passes at `17577b058`; worker-driven 2 MiB atomic persistence and durable return pass at `4e8f19f1f`; active external cancellation before acknowledgement and during final compare-and-commit passes at `426ea2195`; SharedFS failure/overload retry, fairness, and full failure matrix remain open |
+| PERSIST | Bounded/cancellable/backpressured atomic durability | OPEN | Controller-inline queue/cancel/overload passes at `17577b058`; worker-driven 2 MiB atomic persistence and durable return pass at `4e8f19f1f`; active external cancellation before acknowledgement and during final compare-and-commit passes at `426ea2195`; two partial-write failures, bounded retry/exhaustion, unified global write admission, cleanup, and compute overlap pass at `c4d5258b6`; persistence/global-loss/pruning races and scale I/O limits remain open |
 | RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | One ordinary replay of a lost worker-only 2 MiB IData completes with stable IDs and zero special TaskVine recovery tasks at `53db69f1e`; repeated loss, minimum rollback, and durability-frontier bounds remain absent |
 | PRUNE-SHADOW | Reference/incremental equivalence and proof records | PASS | `artifacts/phase9-shadow-20260729.json`, commit `2108b68a8` |
 | PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | OPEN | Multi-replica deletion plus generation-exact targeted dead-data eviction and pending-ACK worker-loss cleanup pass through `c20db01a1`; active-read races, DRAM pruning, and recovery-after-prune remain |
@@ -35,7 +35,7 @@ is never a pass.
 | RACES | Mandatory cross-component race/corner-case matrix | OPEN | Unified deterministic harness absent |
 | PERF-MGR | Manager/Controller/serialization/metadata metrics | FAIL | Required independent resource metrics absent |
 | PERF-WORKER | Cache/staging/peer/overlap/idle metrics | FAIL | Partial transfer counts only |
-| PERF-FS | Bounded read/write/metadata/storage metrics | FAIL | Persistence active count only |
+| PERF-FS | Bounded read/write/metadata/storage metrics | FAIL | Unified write high-water and worker bytes are recorded at `c4d5258b6`; separate read/write, metadata, peak-storage, and scale metrics remain absent |
 | PERF-COMP | Three repetitions, median/variation, scaling cause | FAIL | Not run |
 | REVIEW-A | Before-pruning architecture review | FAIL | `reviews/review-a.md` |
 | REVIEW-B | After shadow-pruning review | FAIL | `reviews/review-b.md`; physical deletion blocked |

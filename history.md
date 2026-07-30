@@ -1,5 +1,32 @@
 # DataVine History
 
+## 2026-07-30 — Bounded worker persistence failure recovery
+
+- Replaced TaskVine-level persistence-task retries with Scheduler-owned,
+  request-aware retry. Failed requests become terminal, retries receive new
+  request IDs for the same IDataID/attempt, and exhaustion fails explicitly.
+- Added independent bounds for retry count, exponential backoff, and maximum
+  delay.
+- Added deterministic partial-SharedFS-write failure with temporary-file
+  cleanup and stable worker failure telemetry.
+- Rejected the first passing design after self-review observed global write
+  concurrency two under capacity one: Controller-inline and worker writes had
+  separate admission checks. Unified both beneath the Controller active set.
+- Rejected count-only backoff boundedness and added an explicit maximum delay.
+- Required two consecutive transient failures before success, and proved
+  ordinary compute completion while persistence remained active.
+- The final clean build/install and all 16 installed regressions pass.
+  Package-only factory `datavine-persist-fail-c4d5258b6` passed through two
+  failed partial writes, two retries, worker churn, and ordinary recovery;
+  global persistence high-water stayed one and no temporary file remained.
+- Code commit: `c4d5258b6`; package SHA-256:
+  `592cc09333d91ff2b36ce94a06d18189de18b874dcedcb202b88dcd00684ac2a`.
+- Evidence:
+  `acceptance/artifacts/worker-persistence-failure-c4d5258b6.json`.
+- Ultimate Acceptance remains FAIL pending persistence/global-loss/pruning
+  races, scale I/O limits, remaining architecture rows, and the Grand
+  Challenge.
+
 ## 2026-07-30 — Active worker-persistence cancellation and commit race
 
 - Added active external-persistence cancellation with explicit `cancelling`
