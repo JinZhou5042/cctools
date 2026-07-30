@@ -1,0 +1,751 @@
+# DataVine Progress
+
+## Current status
+
+- Phase: **Phase 8 — prefetch and adaptive placement complete**
+- Branch: `datavine`
+- Starting point: `origin/task-graph` / PR #4253 head `345dc7fcde3851400bebb81ccfd877c93a93cdca`
+- New runtime root: `ndcctools.taskvine.datavine`
+- Local Phase 4 acceptance: **PASS**
+- Prescribed factory acceptance: **PASS**
+- Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
+  Phase 4A and is no longer the DataVine implementation.
+- Active task: **Phase 4B–8 acceptance complete; no later phase started**
+- Validated code commit: `ab6b7666d`
+
+## Phase 8 acceptance
+
+The independent Scheduler now derives deterministic prefetch candidates from
+the already-materialized logical graph. It selects only repeated EData inputs
+under explicit byte and item budgets, submits zero-core prefetch operations at
+priority `-1000`, and leaves ready demand tasks at the normal priority. The
+policy never registers or serializes application values a second time.
+
+The accepted two-worker workflow has a slow ready root and six consumers of a
+shared 1,638,409-byte EData object. In both local and factory runs:
+
+- three deterministic candidates totaling 1,638,959 bytes were selected under
+  the 8 MiB test budget;
+- all three prefetch operations completed and overlapped useful execution;
+- the first running TaskVine ID was demand task 4, ahead of prefetch IDs 1–3;
+- the eight logical demand tasks completed through exactly eight physical
+  demand executions;
+- the workflow performed 21 registrations in enabled, failure, and disabled
+  modes, proving policy inspection adds no serialization/registration work;
+- injected failure made all three prefetch operations fail without changing
+  the exact workflow result;
+- disabling prefetch selected zero candidates and produced the same result.
+
+Nested `OutputRef` bindings are also restored in the new runtime. Composite
+arguments are reconstructed from a copied template with an OutputRef-to-IData
+memo, so repeated nested references preserve alias identity. The two-task
+nested case produces the exact result and records a validated local IData hit.
+
+The exact prescribed clean build/install passed after the final source change.
+The complete local topology plus Phase 4–8 regression passed. With the rebuilt
+package, the two-worker Phase 8 factory suite passed all four modes and a final
+combined Phase 4–7 factory regression also passed. The final package-only
+rerun used `datavine-phase8-postlint-20260729`; it was stopped and both workers
+were removed.
+The accepted package SHA-256 is
+`4a283955d934c6f6a4123fc877ff9a4c185ca70afd1634dcd5ad6a162e7c85c5`.
+`poncho_package_run` also imports the installed
+`ndcctools.taskvine.datavine` package successfully with cloudpickle 3.1.2.
+
+Machine-readable results:
+
+- `phase0-artifacts/baseline-datavine-phase8-local-20260729.json`
+- `phase0-artifacts/baseline-datavine-phase8-factory-20260729.json`
+
+### Phase 8 self-review / self-critique
+
+- The first policy draft serialized candidate values during fanout analysis,
+  doubling registrations from 21 to 42. That design was rejected. The accepted
+  policy reads only existing TaskRecords and DataIDs; all three main modes now
+  remain at exactly 21 registrations.
+- Merely observing completed prefetch tasks would not prove priority. The gate
+  checks the TaskVine running transaction order and requires a ready demand
+  task to begin before every low-priority prefetch ID.
+- Successful speculative traffic is insufficient correctness evidence.
+  Injected prefetch failures and the explicit prefetch-off rollback both retain
+  the exact result.
+- The combined factory regression initially waited unusually long after many
+  short-lived managers reused one project name and left catalog endpoints
+  visible. It was allowed to reach its actual two-worker gates; no one-worker
+  result was accepted as two-worker evidence. All four phases passed.
+- Final lint found three project-style slice-spacing violations and one unused
+  import. After the mechanical cleanup, the prescribed clean build/install,
+  project-rule flake8, topology test, local Phase 4–8 suites, package rebuild,
+  `poncho_package_run`, and two-worker factory Phase 8 suite all passed again.
+- The policy is deliberately conservative: static fanout, size, and fixed
+  budgets, with TaskVine priority providing demand precedence. It does not yet
+  model network topology or continuously changing worker load.
+- Phase 9 recovery-aware pruning is a separate roadmap phase and has not been
+  started under the Phase 4B–8 objective.
+
+## Phase 7 acceptance
+
+IData is now both a logical Controller record and a TaskVine temporary object.
+The producing worker stages/fsyncs canonical bytes, publishes the logical
+IData, and exposes the same bytes as a worker-local TaskVine output. Downstream
+workers mount that IData by ID, validate its Controller-owned content hash, and
+consume it locally or through TaskVine peer transfer before falling back to
+Controller bytes.
+
+Global loss is distinct from a local miss. When a non-durable IData has no
+accepted realization, the Controller marks it unavailable. The Scheduler
+removes the original producer from `done`, prunes obsolete physical state, and
+submits that same logical TaskID with the same IDataID and an incremented
+attempt. No separate recovery-task semantic is created.
+
+Accepted recovery evidence:
+
+- one worker is connected and runs producer TaskID 1;
+- TaskVine intentionally evicts that worker after volatile publication;
+- Controller invalidates the only non-durable realization;
+- a replacement worker runs producer TaskID 1 attempt 2;
+- four logical tasks complete through five normal physical executions;
+- exactly one lineage recovery re-execution occurs;
+- local test records two worker IDs; factory records the explicit worker
+  disconnection/reconnection lifecycle;
+- downstream execution records four validated worker-local IData hits;
+- no-loss rollback executes four physical tasks and zero recovery replays.
+
+Phase 4, 5, and 6 suites continue to pass with the new worker-local IData
+mounts. Clean build/install and local/factory recovery/no-loss modes pass.
+Factory `datavine-phase7-accept-20260729` was stopped and its worker removed.
+The accepted package SHA-256 is
+`30491e946851aa892c9f0f36f0ae5365dbd0a13f30b95ff5ea3df8f2c690f62a`.
+
+### Phase 7 self-review / self-critique
+
+- The first loss test invalidated logical bytes but did not guarantee that the
+  evicted worker held the producer replica. It was rejected. The accepted
+  local test begins with exactly one worker, evicts it, and starts a replacement
+  after the loss.
+- Factory workers may reconnect with the same stable WorkerID. Therefore
+  “two WorkerIDs” is not a valid distributed loss oracle; the factory gate uses
+  the TaskVine DISCONNECTION record plus the five-execution recovery report.
+- IData temporary files reuse TaskVine's proven physical cache and peer
+  transfer, while recovery authority is in the new Scheduler/Controller. The
+  old VineGraph special recovery task is not used by this runtime.
+- Controller memory remains a fallback replica. The failure injection removes
+  it deliberately to exercise global loss; ordinary local misses do not cause
+  recomputation.
+- Nested output references are still not supported by the independent Workflow
+  API. This remains a compatibility gap to close before final acceptance.
+
+## Phase 6 acceptance
+
+Worker output now crosses explicit state boundaries:
+
+```text
+serialized → worker-local staged and fsynced → published volatile
+→ queued → writing → atomically renamed and directory-fsynced → durable
+```
+
+The Controller exposes durability separately from availability. Persistence is
+handled by a configured bounded queue; the accepted configuration permits one
+write at a time. Every durable acknowledgement follows a reread/hash check and
+atomic rename. The Scheduler can require durability, or persistence can be
+disabled without changing the workflow result.
+
+The seven-output, two-worker workflow passes in all modes:
+
+- enabled: seven durable files, seven valid hashes, maximum active writes 1;
+- injected first-write failure: eight requests, one retry, seven durable
+  outputs, zero final failures;
+- disabled rollback: seven volatile outputs, zero persistence requests/files.
+
+Clean TaskVine build/install, Phase 4/5 regressions, topology test, local
+three-mode suite, and the two-worker factory three-mode suite pass. Factory
+`datavine-phase6-accept-20260729` was stopped and both workers were removed.
+The accepted `datavine.tar.gz` SHA-256 is
+`c4b66e32a920c6a4546e33a12e8633bb30d536cc93a2348f683541a929bf5736`.
+
+### Phase 6 self-review / self-critique
+
+- An early implementation persisted Controller-memory bytes but did not expose
+  a worker-local staging boundary. It was not accepted; the worker now stages
+  and fsyncs before publication and cleans the stage file after acknowledgement.
+- A deterministic first-write fault initially had no retry contract. The final
+  path records `failed`, retries once through the same queue, and only reports
+  success after `durable`.
+- The persistence thread is a physical I/O executor; Controller semantic state
+  remains serialized by the Controller service/state lock. Maximum active
+  writers is measured, not inferred.
+- The backend is a local/shared path supplied to the standalone Controller.
+  Object-store backends and cancellation of queued obsolete writes remain
+  future extensions.
+- The initial Phase 6 build command was mistakenly launched at repository root
+  and interrupted. No source was lost, but local build products outside
+  TaskVine were cleaned. The full repository was rebuilt/installed, followed
+  by the exact required TaskVine clean build/install; the interrupted command
+  is not counted as evidence.
+- Phase 6 still retains Controller memory as the volatile IData source.
+  Worker-local volatile publication and lineage-driven loss recovery are the
+  Phase 7 transition.
+
+## Phase 5 acceptance
+
+Phase 5 reuses TaskVine's worker-lifetime disk cache and transfer server through
+a narrow DataVine placement adapter. EData URLs are Controller-authorized,
+worker-driven transfers; cached objects are content-validated before
+deserialization. TaskVine peer transfer is enabled by default and can be
+disabled as an explicit correctness rollback.
+
+The two-worker staged workflow proves real peer reuse: a 1,769,481-byte shared
+EData object is first warmed on one worker and then consumed concurrently on
+two distinct workers. With peer transfer enabled, the Controller served that
+payload once. With peer transfer disabled, it served the same payload twice.
+Both modes produced the exact eight-task result.
+
+Additional Phase 5 gates:
+
+- corrupt cached/peer bytes are rejected and fetched again from the Controller
+  stable source before execution;
+- Controller total EData bytes never exceed the configured 64 MiB bound;
+- the Phase 4 normal/shared/worker-loss suite still passes;
+- two worker IDs are present in TaskVine transaction evidence;
+- clean build/install and standalone topology tests pass;
+- the rebuilt-package two-worker factory passed peer-on and peer-off modes;
+- factory shutdown removed both workers.
+
+Machine-readable local result:
+`phase0-artifacts/baseline-datavine-phase5-local-20260729.json`.
+The accepted archive SHA-256 is
+`bd9fd463988ba5dff2244996584a9c61787270ee357eaeaf0b1dfb902d708164`.
+
+### Phase 5 self-review / self-critique
+
+- The first distributed attempts allowed execution after only one worker
+  connected, so they could not prove peer transfer. Those attempts are
+  rejected. The Scheduler now drives its own TaskVine event loop while waiting
+  and requires the requested worker count before submission.
+- `workers_connected` statistics were stale before a wait cycle; status-only
+  polling was therefore invalid. The accepted gate uses `Manager.wait(1)` on
+  the owner thread followed by worker-status enumeration.
+- Controller payload counts plus two distinct TaskVine worker IDs distinguish
+  peer reuse from single-worker cache reuse.
+- Worker capacity currently follows TaskVine's worker-reported disk bound,
+  while Controller EData uses a hard total bound. A value-based eviction policy
+  is deliberately deferred; correctness currently fails closed on Controller
+  capacity exhaustion.
+- The signed URL places the workflow token in the transfer URL. It is scoped to
+  the workflow but may appear in debug logs; a later protocol hardening task
+  should replace it with short-lived object capabilities.
+- Phase 5 does not make IData volatile replicas peer-readable. That semantic
+  transition belongs to Phase 7.
+
+The architecture was reset in response to the project organization contract.
+The new DataVine system is an independent package. The Task Scheduler owns its
+TaskVine manager and compute state from one dedicated
+`datavine-task-scheduler` thread. The Data Controller is launched through the
+separate `datavine_controller` command in another process, where one dedicated
+`datavine-controller` thread serializes Controller state transitions. They
+share no Python objects and communicate through protocol version 1.
+
+Phase 4 now has a real data path: TaskVine task commands contain a TaskID and
+endpoint credentials, not functions or argument payloads. Workers fetch the
+Task record and canonical EData/IData bytes from the Controller, cache one
+deserialized object per qualified DataID for the duration of execution,
+execute, serialize the output once, publish it under the stable IDataID, and
+only then may the Scheduler mark the logical task complete.
+
+### Phase 4 acceptance and evidence
+
+1. Standalone process/thread topology, authentication, capacity rejection,
+   hash deduplication, checksum validation, and cleanup: PASS.
+2. Normal two-task DAG exact result: PASS.
+3. Repeated shared input: PASS; 17 registrations produced seven unique EData
+   records and ten deduplicated registrations.
+4. Repeated references to the same EDataID preserve Python alias identity
+   within an execution: PASS.
+5. Worker process-group loss during execution followed by a replacement
+   worker and exact completion: PASS.
+6. Clean prescribed build/install after the runtime source change: PASS.
+7. Rebuilt `datavine.tar.gz` factory normal and shared-input workflows: PASS.
+8. Controller and worker processes cleaned up after each case: PASS.
+
+Local snapshots:
+
+| Case | Tasks | Unique EData | Registrations | Deduplicated | Available IData |
+|---|---:|---:|---:|---:|---:|
+| normal | 2 | 4 | 5 | 1 | 2 |
+| repeated shared input | 5 | 7 | 17 | 10 | 5 |
+| worker loss | 2 | 4 | 4 | 0 | 2 |
+
+The accepted factory archive SHA-256 is
+`45fa55d134567018b7e23031361a8c380b5b22218a0459ef4ecdd7448af5c6b4`.
+The one-worker factory `datavine-phase4-20260729` completed both distributed
+cases and was shut down with all workers removed.
+
+### Phase 4 self-review / self-critique
+
+- The first shared-input run failed because repeated references were
+  independently deserialized and lost alias identity. The test was retained;
+  the worker now memoizes by qualified DataID, and the exact assertion passes.
+- The first worker-loss harness killed only the worker parent, allowing its
+  child and inherited connection to survive. The harness now starts a distinct
+  process group and kills the whole group; recovery passes with a genuinely
+  lost execution.
+- EData registration control messages still use base64 JSON, although worker
+  demand reads and IData publication use binary bodies. Phase 5 must remove
+  this avoidable registration expansion.
+- The Controller is still the only stable byte source and stores all IData in
+  memory. That is correct for Phase 4 but not bounded distributed caching.
+- Worker-loss recovery currently relies on TaskVine physical retry. It is not
+  the Phase 7 lineage invalidation/re-execution model and is not claimed as
+  such.
+- Only direct output references are supported by the new public Workflow.
+  Nested binding support must be restored before the new runtime can supersede
+  all useful `vine_graph` workflows.
+
+## Phase 4A implementation
+
+`worker_data_agent.py` introduces qualified EData/IData inventory keys,
+immutable stable-source and preparation records, and one inventory per
+Workflow in each long-lived task-runner process. The Controller now provides:
+
+- deterministic required DataID sets for each TaskID;
+- compact wire assignments such as `T2|e1,e3,i1`;
+- strict assignment parsing and comparison;
+- stable source resolution to Controller context, legacy frontend file,
+  legacy parent result, or legacy produced file.
+
+The C materializer adds the compact assignment as the second task-runner
+argument without embedding serialized payloads. Before user execution, the
+worker verifies the assignment and sources, updates its local inventory, and
+writes an audit marker. After successful execution and output validation, the
+C completion path verifies that exact marker and records one preparation
+audit. Recovery tasks deliberately do not create a second logical preparation
+audit; the existing TaskVine recovery adapter continues to restore the
+original output.
+
+### Phase 4A acceptance
+
+All gates pass:
+
+1. Empty, partial, complete, and stale inventories are deterministic; a stale
+   item with no available stable source fails closed.
+2. Unknown TaskIDs/DataIDs, altered assignments, unrequired DataIDs, and
+   missing Controller prerequisites are rejected.
+3. Assignments contain only compact TaskID and qualified DataIDs, never
+   serialized bytes or physical payloads.
+4. Worker reports are validated by the actual C completion path exactly once
+   for every successful logical task.
+5. Normal, repeated-shared-input, worker-loss, and the 13-task
+   nested/container/file workflow pass with Phase 4A enabled.
+6. Worker Agent-on, Controller-only, Phase 2-only, Phase 1-only, and full-off
+   modes pass the full deterministic baseline.
+7. A clean prescribed rebuild/install and the rebuilt-package factory suite
+   pass.
+
+Machine-readable results:
+
+- `phase0-artifacts/baseline-phase4-worker-agent-local-20260729.json`
+- `phase0-artifacts/baseline-phase4-worker-agent-factory-20260729.json`
+
+| Runtime / case | Physical tasks | Worker audits | Makespan | Mismatches |
+|---|---:|---:|---:|---:|
+| local normal | 4 | 4 | 0.310761 s | 0 |
+| local repeated shared input | 5 | 5 | 3.378136 s | 0 |
+| local one-worker loss | 7, including 3 recovery | 4 | 6.777762 s | 0 |
+| factory normal | 4 | 4 | 0.100564 s | 0 |
+| factory repeated shared input | 5 | 5 | 0.107700 s | 0 |
+| factory one-worker loss | 7, including 3 recovery | 4 | 7.041292 s | 0 |
+
+The final factory archive was rebuilt with `poncho_package_create` from the
+DataVine environment and installed at
+`/users/jzhou24/graph_optimization/factories/datavine.tar.gz`. Its SHA-256 is
+`2a3a150a967204cc2f1783dc357b41e5425cbfab9291ce10b6adc965810383a6`.
+Condor job `4942.0` supplied the worker and was removed after acceptance.
+
+## Phase 3 implementation
+
+`data_controller.py` introduces an immutable Controller registry and compact
+per-task materialization plans. When `data-controller=1`,
+`Workflow.finalize()` transfers the validated Phase 1 identity and Phase 2
+shadow state into the Controller and drops the two duplicate public
+authorities. The Controller owns:
+
+- canonical serialized EData bytes and serialization metadata;
+- unique lineage-owned IData records;
+- workflow key to TaskID and input/output file to DataID mappings;
+- callable, argument, return, file, producer, and parent bindings;
+- initial EData `controller` availability and IData `unproduced` state.
+
+At the Python-to-C bridge, each logical task queries its Controller plan. The
+legacy parent/input/output mounts are checked against that plan before
+execution. The C executor checks the expected mount counts again at the actual
+submit-time materialization boundary, rejects disagreement or duplicate
+materialization, and exposes per-task and aggregate audit counts.
+
+Physical data lifecycle behavior intentionally does not change in this phase:
+existing `vine_file` transport, TaskVine replicas, worker caches, recovery
+tasks, deletion, and pruning remain adapters. `task-group` is explicitly
+rejected when Controller authority is enabled because grouped materialization
+does not yet have a one-logical-task/one-audit mapping.
+
+### Phase 3 acceptance
+
+All Phase 3 gates pass:
+
+1. Controller mappings and records reject mutation, including after a
+   cloudpickle round trip.
+2. Every TaskID lookup returns the exact Phase 1/2 bindings, lineage, and file
+   DataIDs.
+3. Injected Python binding mismatches and direct C mount-count mismatches fail
+   closed.
+4. Every submitted logical task is audited exactly once at actual C
+   materialization; all accepted runs report zero mismatches.
+5. The 13-task nested/container/file corner workflow passes Controller-on.
+6. Controller-on, Phase 2-only, Phase 1-only, and full-off modes pass the
+   deterministic normal/shared-input/worker-loss baseline.
+7. The final Controller-on local and prescribed-factory suites both pass
+   worker-loss recovery.
+
+Machine-readable results:
+
+- `phase0-artifacts/baseline-phase3-controller-local-20260729.json`
+- `phase0-artifacts/baseline-phase3-factory-final-20260729.json`
+
+| Runtime / case | Physical tasks | Logical audits | Makespan | Mismatches |
+|---|---:|---:|---:|---:|
+| local normal | 4 | 4 | 0.318092 s | 0 |
+| local repeated shared input | 5 | 5 | 3.424605 s | 0 |
+| local one-worker loss | 7, including 3 recovery | 4 | 6.771064 s | 0 |
+| factory normal | 4 | 4 | 0.163347 s | 0 |
+| factory repeated shared input | 5 | 5 | 0.152987 s | 0 |
+| factory one-worker loss | 7, including 3 recovery | 4 | 7.200750 s | 0 |
+
+The final factory archive was rebuilt with `poncho_package_create` from
+`/groups/dthain/users/jzhou24/miniconda/envs/datavine` and installed as
+`/users/jzhou24/graph_optimization/factories/datavine.tar.gz`. Its SHA-256 is
+`13d79ae8bdc1644e5c38ba6bca902d5c20ec783c5fea48ad4d6fb54be5118f61`.
+Condor job `4941.0` supplied the worker and was removed after acceptance. Its
+first manager attempt hit the suite's 240-second global timeout while the
+worker was queued; with the already-started worker and a 600-second bound, the
+complete suite passed. This was an infrastructure wait, not a correctness
+failure.
+
+## Phase 2 implementation
+
+`shadow_data_graph.py` introduces compact shadow Task, EData, IData, and
+consumer nodes. `ShadowDataGraph.from_workflow()` derives them exclusively
+from the validated Phase 1 identity snapshot and fails closed if it finds:
+
+- a missing or extra TaskID, EDataID, or IDataID;
+- a producer mapping that differs from the Workflow;
+- task dependency edges that differ from the Workflow;
+- a non-controller initial EData availability or non-unproduced initial IData
+  state.
+
+`Workflow.finalize(indexed_data_identity=True, shadow_data_graph=True)`
+constructs the graph. The separately controlled VineGraph parameter
+`shadow-data-graph` defaults to zero and requires
+`indexed-data-identity=1`. The graph is observational only: legacy task
+materialization, `vine_file` transport, TaskVine recovery, pruning, and
+deletion remain authoritative.
+
+### Phase 2 acceptance
+
+All locally applicable gates pass:
+
+1. The component workflow contains three tasks, four IData nodes, three
+   dependency edges, and four producers; all relations match exactly.
+2. Direct, nested, positional, keyword, return, and file bindings produce
+   deterministic consumer records.
+3. Every EData node starts at `controller`; every IData node starts
+   `unproduced`.
+4. Rebuilding produces byte-identical comparison JSON.
+5. An injected Workflow dependency mismatch is rejected rather than reported
+   as healthy.
+6. The full normal/shared-input/worker-loss suite reports zero mismatches.
+7. The 13-task nested/container/file corner suite reports zero mismatches.
+8. Phase 2-on, Phase 1-only, and full-off modes all pass the full deterministic
+   baseline, including loss of the only worker replica.
+9. Clean build/install, compile checks, shell checks, component tests, exact
+   workflow oracles, recovery, and cleanup pass.
+
+Machine-readable Phase 2 result:
+`phase0-artifacts/baseline-phase2-shadow-20260729.json`.
+
+| Case | Tasks | EData | IData | Dependency edges | Consumer edges | Mismatches |
+|---|---:|---:|---:|---:|---:|---:|
+| normal | 4 | 7 | 4 | 4 | 12 | 0 |
+| repeated shared input | 5 | 7 | 5 | 4 | 21 | 0 |
+| one worker loss | 4 | 6 | 4 | 3 | 10 | 0 |
+
+The corresponding makespans were 0.440546 s normal, 3.690010 s repeated
+input, and 4.088521 s worker loss. These remain small regression samples, not
+performance improvement claims.
+
+## Phase 1 implementation
+
+`data_identity.py` introduces:
+
+- compact positive integer TaskIDs, EDataIDs, and IDataIDs;
+- fixed-protocol cloudpickle serialization for callables, positional
+  arguments, keyword values, and structured argument templates;
+- raw-content identity for declared input files;
+- SHA-256 identity over serialization metadata and serialized bytes;
+- workflow-global collision buckets which byte-compare before reusing an ID;
+- unique lineage-owned IDataIDs for every Python return and declared output
+  file slot;
+- positional, keyword, return, and file binding records;
+- explicit IData references for direct and nested task-output dependencies;
+- an invariant validator which rejects unknown IDs, missing task bindings, and
+  conflicting IData producers.
+
+`Workflow.finalize(indexed_data_identity=True)` constructs the representation.
+The VineGraph parameter `indexed-data-identity` controls it and defaults to
+zero. Legacy `task_dict`, task-runner serialization, `vine_file` mounts,
+recovery tasks, and executor deletion remain authoritative.
+
+### Phase 1 acceptance
+
+All locally applicable gates pass:
+
+1. Equal but distinct serialized values reuse one EDataID.
+2. Forced hash collision buckets keep unequal serialized bytes separate.
+3. Serializer, serializer version, protocol, Python version, and Python type
+   metadata participate in identity.
+4. Every task has compact input/output binding records and no unknown IDs.
+5. Every logical return and output-file slot has a stable unique IDataID.
+6. Re-finalizing after normal execution or worker-loss recovery preserves all
+   TaskIDs, IDataIDs, and bindings.
+7. The repeated-input workflow makes 17 registration attempts, stores seven
+   unique EData records, and maps all eight uses of its 950,272-byte payload to
+   one EDataID.
+8. The complete normal/shared-input/worker-loss suite passes with the feature
+   enabled and disabled.
+9. The 13-task nested/container/file corner-case workflow passes with the
+   feature enabled and disabled.
+10. Clean build/install, compile checks, shell checks, invariant component
+    tests, exact workflow oracles, recovery, and process cleanup pass.
+
+Machine-readable results:
+
+- `phase0-artifacts/baseline-phase1-enabled-20260729.json`
+- `phase0-artifacts/baseline-phase1-disabled-20260729.json`
+
+Enabled identity counts:
+
+| Case | Tasks | EData registrations | Unique EData | Deduplicated | IData |
+|---|---:|---:|---:|---:|---:|
+| normal | 4 | 8 | 7 | 1 | 4 |
+| repeated shared input | 5 | 17 | 7 | 10 | 5 |
+| one worker loss | 4 | 7 | 6 | 1 | 4 |
+
+The performance samples from the final enabled recovery run were 0.472830 s
+normal, 3.615482 s repeated input, and 6.754381 s worker loss. Phase 1 is
+shadow bookkeeping, so these values are regression evidence, not a performance
+improvement claim.
+
+## Phase 0 acceptance criteria
+
+Phase 0 is accepted locally when all of the following hold:
+
+1. A clean `make clean && make -j8 && make install` succeeds.
+2. Normal execution returns its exact oracle with no recovery tasks.
+3. Four tasks repeatedly consuming the same 950,272-byte object return exact
+   size and SHA-256 oracles and preserve within-task alias identity.
+4. A four-node chain loses its only worker replica, releases exactly one
+   worker, completes at least one recovery task, and returns its exact oracle.
+5. Each case records workflow serialization size/hash, makespan, wall time,
+   throughput, manager transfer/recovery counters, and post-cleanup storage.
+6. Existing VineGraph corner-case execution still passes end to end.
+7. No manager, local worker, output file, or checkpoint file remains after the
+   accepted local test.
+
+All seven local criteria pass.
+
+## Phase 0 baseline suite
+
+Source:
+
+- `taskvine/test/vine_graph_phase0_baseline.py`
+- `taskvine/test/TR_vine_graph_phase0_baseline.sh`
+
+Machine-readable accepted result:
+`phase0-artifacts/baseline-local-20260729.json`.
+
+| Case | Correctness | Workflow pickle | Makespan | Manager bytes sent / received | Recovery |
+|---|---:|---:|---:|---:|---:|
+| normal, 4 tasks | PASS | 2,101 B | 0.324973 s | 49,959 / 138 B | 0 |
+| shared input, 5 tasks | PASS | 952,693 B | 3.833482 s | 990,961 / 446 B | 0 |
+| one worker loss, 4 logical tasks | PASS | 2,418 B | 6.765726 s | 90,818 / 191 B | 3 recovery tasks |
+
+The worker-loss case released and removed exactly one worker. It completed
+seven physical tasks: four user tasks and three TaskVine recovery tasks.
+All explicit output and checkpoint directories contained zero files after
+executor cleanup. The manager runtime directory contained nine log/cache files
+using 169,617 bytes before manager exit.
+
+Performance values are a small deterministic regression baseline, not a
+capacity benchmark. They were collected with one local two-core worker on
+2026-07-29.
+
+## Prescribed factory result
+
+The initial factory attempts were invalid because `run_factory.sh` defaulted
+to the unrelated `dagvine-env.tar.gz`. That archive used Python 3.11 while the
+manager used Python 3.10, producing:
+
+```text
+TypeError: code() argument 13 must be str, not int
+```
+
+This was a package-selection and environment-refresh error, not a valid
+DataVine blocker. The correct package was rebuilt from the active DataVine
+environment with:
+
+```bash
+poncho_package_create \
+  /groups/dthain/users/jzhou24/miniconda/envs/datavine \
+  /users/jzhou24/graph_optimization/factories/datavine.tar.gz
+```
+
+The rebuilt archive contains Python 3.10.20 and cloudpickle 3.1.2.
+`run_factory.sh` now defaults to `datavine.tar.gz`. Condor job `4939.0`
+attached to the unique Phase 2 manager and the complete distributed baseline
+passed:
+
+| Case | Completed tasks | Makespan | Result |
+|---|---:|---:|---:|
+| normal | 4 | 0.110303 s | PASS |
+| repeated shared input | 5 | 0.129617 s | PASS |
+| one worker loss | 7, including 3 recovery | 7.101868 s | PASS |
+
+All Phase 2 shadow comparisons reported zero mismatches. The accepted result
+is `phase0-artifacts/baseline-phase2-factory-fixed-20260729.json`; worker
+evidence is under `phase0-artifacts/factory-phase2-fixed-worker-logs/`.
+Job `4939.0` and its worker were removed during cleanup.
+
+## Current implementation map
+
+### Compute graph
+
+- `Workflow` owns Python task keys, callable indices, arguments, keyword
+  arguments, parent/child sets, file declarations, and generated task IDs.
+- `VineGraph.build_capi_bridge()` mirrors the Python DAG into a C
+  `vine_graph`; C node IDs are mapped back to Python workflow keys.
+- `vine_graph_executor` owns readiness, priority, submission, retry queues,
+  completion handling, target retrieval, grouping, and progress.
+
+### Task materialization
+
+- C graph nodes initially have no `vine_task`.
+- `vine_graph_executor_materialize_node()` creates a library call only when a
+  node is submitted, mounts parent result files and declared file handles,
+  declares outputs, and adds a small JSON infile containing scheduler keys.
+- The whole Python `Workflow` is nevertheless embedded in the task-runner
+  library context, so the small per-task infile does not mean task data has
+  independent identity.
+
+### Serialization
+
+- The frontend cloudpickles the entire `Workflow` into the library context.
+- With Phase 1 enabled, the frontend also serializes and interns each callable,
+  positional argument, keyword value, structured binding template, and input
+  file independently. This representation is validated but not authoritative.
+- Library generation separately cloudpickles functions and context metadata.
+- Each worker task loads parent result files, executes the callable, wraps its
+  result in `TaskOutputWrapper`, and cloudpickles it into a per-node outfile.
+- The legacy workflow pickle still benefits only from its own memo. The Phase 1
+  registry separately interns equal serialized EData and assigns DataIDs, but
+  those identities do not control movement yet.
+
+### Data movement and storage
+
+- Task dependencies are `vine_file` mounts, not logical data bindings.
+- Non-target outputs default to `VINE_TEMP`; targets use managed local files.
+- A configured checkpoint fraction changes selected outputs to direct
+  shared-filesystem paths. There is no queued/rate-limited persistence state.
+- Existing TaskVine replica tables, peer-transfer selection, temp replication,
+  manager transfer accounting, and worker caches perform physical movement.
+- Executor deletion undeclares files and removes local/shared outputs.
+
+### Recovery
+
+- A temp `vine_file` retains its producer/recovery task.
+- Removing the only replica causes TaskVine to submit special recovery tasks.
+- `vine_graph_executor` maps recovery completions back to the original graph
+  node via `recovery_source_task_id`, resets cut/prune flags, and postprocesses
+  the recovered output.
+- Recovery therefore works, but currently depends on a separate semantic class
+  of recovery task rather than normal invalidation and recomputation.
+
+### Pruning
+
+- Cut propagation deletes an output when every child is anchored or cut and no
+  child is mid-recovery.
+- `prune-depth` independently releases temporary outputs after descendants
+  within the configured depth complete.
+- Recovery clears `cut` and `released_by_prune_depth`.
+- These rules are tied to completion depth and special recovery state; they do
+  not prove preservation of a minimum recoverable data cut.
+
+## Component disposition
+
+| Component | Decision | Phase 0 conclusion |
+|---|---|---|
+| TaskVine manager/worker protocol and event loop | Reuse | Mature scheduling, worker lifecycle, statistics, and transport foundation. |
+| `vine_file`, replica tables, peer transfer, worker cache | Adapt | Reuse physical mechanisms behind Data Controller-owned logical identity and availability. |
+| Python `Workflow`, handles, topology validation | Adapt | Useful public graph construction layer; split embedded values from task bindings. |
+| C `vine_graph` topology, node IDs, ready scheduling | Adapt | Useful compute-plane base; remove data authority from nodes/tasks over later phases. |
+| Lazy task materialization | Reuse and narrow | Preserve submit-time construction, but materialize compact DataID bindings instead of parent file bundles. |
+| Whole-workflow cloudpickle library context | Replace | Monolithic, ABI-coupled, and not independently interned or transferable. |
+| Per-node cloudpickle result files as logical identity | Replace | Keep serialized bytes as a transport form, but give outputs stable IDataIDs independent of paths/replicas. |
+| Special TaskVine recovery tasks | Replace | Move to graph invalidation and normal producer re-execution once Data Controller authority exists. |
+| `checkpoint-fraction` direct SharedFS writes | Replace | Introduce staged, admitted, acknowledged persistence. |
+| Cut/prune-depth deletion rules | Replace | Retain only as disabled/reference behavior until recovery-aware pruning proves safety. |
+| Dask/legacy adaptors | Isolate or remove later | Keep outside the Data Controller core; no old internal data-architecture compatibility requirement. |
+
+## Validation record
+
+- PASS: final clean build and install after Phase 1 source changes.
+- PASS: final clean build and install after Phase 2 source changes.
+- PASS: final clean build and install after Phase 3 source changes.
+- PASS: final clean build and install after Phase 4A source changes.
+- PASS: `python -m compileall` for changed VineGraph Python and Phase 0 test code.
+- PASS: `TR_vine_graph_data_identity.sh`.
+- PASS: `TR_vine_graph_shadow_data_graph.sh`.
+- PASS: `TR_vine_graph_data_controller.sh`.
+- PASS: `TR_vine_graph_worker_data_agent.sh`.
+- PASS: `TR_vine_graph_phase0_baseline.sh`.
+- PASS: Phase 0 suite in Phase 2-on, Phase 1-only, and full-off modes.
+- PASS: `TR_vine_graph_workflow_examples.sh` with
+  Phase 2 enabled (13-task corner-case workflow).
+- BLOCKED: Dask adaptor execution because `dask` is not installed.
+- PASS: prescribed factory normal/shared-input/worker-loss baseline using the
+  rebuilt `datavine.tar.gz`.
+
+## Smallest safe next Phase 4 task
+
+Add independent demand pull for Controller-owned non-file EData only. On a
+worker inventory miss, the Worker Data Agent should fetch the Controller's
+canonical serialized bytes through one bounded, checksummed source endpoint
+instead of relying on the whole-workflow context copy. IData and declared
+files remain on legacy mounts, which limits the first movement change to
+immutable, already-content-addressed EData.
+
+Acceptance:
+
+1. A worker with an empty inventory pulls each required non-file EDataID once,
+   verifies metadata plus SHA-256, and reuses the identical serialized bytes.
+2. Repeated shared inputs produce one pull per worker, not one pull per task.
+3. Corrupt, truncated, unknown, unavailable, and mismatched responses fail
+   closed and never enter inventory.
+4. Demand traffic is bounded; no unbounded thread, request, or memory growth is
+   introduced.
+5. IData and declared-file mounts, recovery, pruning, and deletion remain
+   unchanged.
+6. Disabling demand pull restores the accepted Phase 4A legacy-source path.
+7. Component, corner, five-mode local baseline, worker-loss, clean rebuild,
+   rebuilt package, and factory recovery all pass with exact pull telemetry.
+
+This is the smallest real data-movement transition because immutable EData is
+already canonical and content-addressed, while volatile IData recovery remains
+outside the change.
