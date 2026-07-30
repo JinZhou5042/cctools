@@ -132,10 +132,64 @@ def worker_byte_rejection():
             manager._free()
 
 
+def prefetch_recovery_case(factory_manager=None):
+    workflow, target, oracle = build_workflow(6)
+    combined = run_case(
+        "cache-capacity-prefetch-recovery",
+        workflow,
+        target,
+        oracle,
+        factory_manager=factory_manager,
+        worker_count=1,
+        worker_cores=1,
+        prefetch=True,
+        inject_worker_loss_after=1,
+        replacement_worker_delay=None if factory_manager else 1,
+        worker_disk_cache_bytes=238743,
+        worker_disk_cache_items=6,
+        worker_disk_cache_admission_items=6,
+        worker_disk_cache_admission_bytes=238743,
+    )
+    report = combined["scheduler_report"]
+    assert report["worker_loss_injected"], report
+    assert report["recovery_reexecutions"] >= 1, report
+    assert report["prefetch_selected"] > 0, report
+    assert all(
+        worker["cache_items_high_water"] <= 6
+        and worker["cache_bytes_high_water"] <= 238743
+        and worker["worker_cache_items_high_water"] <= 6
+        and worker["worker_cache_bytes_high_water"] <= 238743
+        and worker["cache_capacity_configured"]
+        for worker in report["worker_physical_cache"]
+    ), report
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--factory-manager")
+    parser.add_argument(
+        "--factory-recovery-only",
+        action="store_true",
+        help=(
+            "run one recovery Manager for an unambiguous factory test; "
+            "requires --factory-manager"
+        ),
+    )
     args = parser.parse_args()
+
+    if args.factory_recovery_only:
+        if not args.factory_manager:
+            parser.error("--factory-recovery-only requires --factory-manager")
+        report = prefetch_recovery_case(args.factory_manager)
+        print(
+            json.dumps(
+                {"prefetch_recovery": report, "status": "PASS"},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
 
     bounded_workflow, bounded_target, bounded_oracle = build_workflow()
     bounded = run_case(
@@ -242,35 +296,7 @@ def main():
     ), zero_report
     assert zero["replica_directory"]["active_leases"] == 0
 
-    combined_workflow, combined_target, combined_oracle = build_workflow(6)
-    combined = run_case(
-        "cache-capacity-prefetch-recovery",
-        combined_workflow,
-        combined_target,
-        combined_oracle,
-        factory_manager=args.factory_manager,
-        worker_count=1,
-        worker_cores=1,
-        prefetch=True,
-        inject_worker_loss_after=1,
-        replacement_worker_delay=None if args.factory_manager else 1,
-        worker_disk_cache_bytes=238743,
-        worker_disk_cache_items=6,
-        worker_disk_cache_admission_items=6,
-        worker_disk_cache_admission_bytes=238743,
-    )
-    combined_report = combined["scheduler_report"]
-    assert combined_report["worker_loss_injected"], combined_report
-    assert combined_report["recovery_reexecutions"] >= 1, combined_report
-    assert combined_report["prefetch_selected"] > 0, combined_report
-    assert all(
-        worker["cache_items_high_water"] <= 6
-        and worker["cache_bytes_high_water"] <= 238743
-        and worker["worker_cache_items_high_water"] <= 6
-        and worker["worker_cache_bytes_high_water"] <= 238743
-        and worker["cache_capacity_configured"]
-        for worker in combined_report["worker_physical_cache"]
-    ), combined_report
+    combined_report = prefetch_recovery_case(args.factory_manager)
 
     unlink_loss = pending_unlink_worker_loss()
     byte_rejection = worker_byte_rejection()
