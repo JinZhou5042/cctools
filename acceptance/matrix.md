@@ -15,19 +15,19 @@ is never a pass.
 | EDATA-ID | Independent function/arg/kwarg/file identity and collision checks | OPEN | Function/value/container domains, repeated-reference one-time serialization, bulk hash/path validation pass at `13193c99a`; dependency-file path and explicit collision injection remain |
 | IDATA-ID | Stable output-slot identity and complete explainable lineage | OPEN | Runtime lineage includes nested dependencies at `347f60531`; multi-output remains absent |
 | LIGHTWEIGHT | Compact dispatch/queues scale with IDs and bindings | OPEN | Small records exist; 100k-binding bound unmeasured |
-| SERIAL | Exactly-once serialization and byte-preserving movement | OPEN | A repeated 4 MiB EData object serializes once and preserves validated bytes at `13193c99a`; IData/full movement fault proof remains |
+| SERIAL | Exactly-once serialization and byte-preserving movement | OPEN | A repeated 4 MiB EData object serializes once at `13193c99a`; a 2 MiB IData is serialized/fsynced once per attempt and metadata-published without Controller byte retention at `53db69f1e`; full movement fault proof remains |
 | AUTHORITY | Controller sole data/lineage/durability/pruning authority | FAIL | Actual TaskVine peer sources require Controller authorization at `ef605c343`; consumer lifecycle and restart authority remain incomplete |
 | STATE | Validated logical/physical/durability/recovery/pruning transitions | OPEN | SharedFS transitions and acknowledged worker-local deletion pass at `3f993f15b`; full races remain |
-| CTRL-BOUND | Bounded memory, serving, metadata, queues, cleanup | FAIL | Request/byte admission passes at `d694bef4a`; stable bulk bypass passes at `13193c99a`; complete metadata/history cleanup remains absent |
+| CTRL-BOUND | Bounded memory, serving, metadata, queues, cleanup | FAIL | Request/byte admission passes at `d694bef4a`; EData bulk bypass at `13193c99a`; retained IData total/object bounds plus metadata-only large-IData bypass at `53db69f1e`; metadata/history cleanup remains absent |
 | CTRL-FAIL | Auth, idempotency, epochs, stale/partial/restart behavior | FAIL | Runtime epochs and stale completion pass at `fbddcc70d`; Controller-owned reconnect claims pass at `643cddd68`; restart/auth-isolation contract remains absent |
-| SCHED | Independent data progress, minimal rollback, fairness, termination | OPEN | Future-used IData rematerializes with ordinary logical attempts and zero TaskVine recovery tasks at `f1237b8b8`; repeated/minimal rollback, fairness, and termination combinations remain open |
+| SCHED | Independent data progress, minimal rollback, fairness, termination | OPEN | Future-used IData rematerializes with ordinary logical attempts at `f1237b8b8`; worker-only large IData loss rolls back through the same logical task with zero legacy recovery at `53db69f1e`; repeated/minimal rollback, fairness, and termination combinations remain open |
 | WORKER-PREP | Batched validated resolution with direct source fallback | FAIL | Controller returns validated candidates; worker still resolves per object without direct candidate pulls |
 | CACHE | Strict DRAM/disk bounds, admission, eviction, zero mode | FAIL | Worker/Manager bounds plus future-used IData eviction/rematerialization remain within six items and the byte limit at `f1237b8b8`; DRAM, active-transfer eviction, true process loss, soft-metadata cleanup, and scale cost remain open |
 | PREFETCH | Bounded/cancellable/priority-safe independent progress | OPEN | Byte/item/priority gates pass; unverified prefetched replicas safely fall back at `ef605c343`; concurrency/cancel/final architecture open |
-| PUBLISH | Exactly-once staged idempotent publication and cleanup | OPEN | Two-phase worker prepare/Scheduler commit passes; full publication fault matrix open |
+| PUBLISH | Exactly-once staged idempotent publication and cleanup | OPEN | Two-phase worker prepare/Scheduler commit passes; large output publishes attempt/hash/size without byte POST at `53db69f1e`; full publication fault matrix open |
 | PLACE | Multi-source, load/epoch, bulk bypass, peer fallback | OPEN | Actual TaskVine peer movement acquires epoch-checked Controller leases and unverified sources fall back at `ef605c343`; transfer-loss/load adaptation remain open |
 | PERSIST | Bounded/cancellable/backpressured atomic durability | OPEN | Queue, cancel, overload, attempt-safe acknowledgement pass at `17577b058`; pruning integration and full failure matrix open |
-| RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | One ordinary-task replay plus future-IData rematerialization complete with zero special TaskVine recovery tasks at `f1237b8b8`; repeated loss, minimum rollback, and durability-frontier bounds remain absent |
+| RECOVERY | Replica-aware repeated minimal recovery from frontier | FAIL | One ordinary replay of a lost worker-only 2 MiB IData completes with stable IDs and zero special TaskVine recovery tasks at `53db69f1e`; repeated loss, minimum rollback, and durability-frontier bounds remain absent |
 | PRUNE-SHADOW | Reference/incremental equivalence and proof records | PASS | `artifacts/phase9-shadow-20260729.json`, commit `2108b68a8` |
 | PRUNE-LOCAL | Safe DRAM/disk pruning with declining storage | OPEN | Multi-replica deletion plus generation-exact targeted dead-data eviction and pending-ACK worker-loss cleanup pass through `c20db01a1`; active-read races, DRAM pruning, and recovery-after-prune remain |
 | PRUNE-SHAREDFS | Quarantine/grace/recovery/hard-delete audit | OPEN | Real revision-safe component path passes at `347f60531`; restart persistence, pins, and scale comparison open |
@@ -129,6 +129,19 @@ true process death, soft-record cleanup, and scale remain open. `RECOVERY`
 remains FAIL because only one replay occurs and no durability-frontier bound is
 proved. `CTRL-BOUND` remains FAIL because ordinary IData bytes are still held
 by the Controller.
+
+Bounded-IData evidence at runtime commit `53db69f1e` and test commit
+`e6ef08b16` removes the ordinary-byte-retention blocker without claiming the
+whole row. A 2 MiB intermediate exceeds the 64 KiB inline limit and is
+metadata-published twice across one worker-loss recovery; Controller IData
+high-water remains 79 bytes under a 128 KiB capacity. The local and rebuilt
+package factory runs return the exact oracle through three ordinary attempts
+and zero TaskVine recovery tasks. `CTRL-BOUND` remains FAIL because logical
+metadata and completed history are not reclaimed. `PERSIST` remains OPEN
+because metadata-only IData has no worker-driven durable write path.
+`RECOVERY` remains FAIL because only one loss cycle is covered and no
+durability-frontier bound is proved. Evidence:
+`artifacts/idata-capacity-e6ef08b16.json`.
 
 Controller admission evidence at commit `d694bef4a` covers hard request-thread,
 byte-response concurrency, and in-flight-byte capacities; immediate overload;

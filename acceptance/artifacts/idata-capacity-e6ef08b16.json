@@ -1,0 +1,72 @@
+{
+	"artifact_version": 1,
+	"status": "PASS_COMPONENT_CHECKPOINT",
+	"accepted_at": "2026-07-30T06:46:47-04:00",
+	"branch": "datavine",
+	"runtime_code_commit": "53db69f1ed5cb80e7e8b09114dc91549dd1861a2",
+	"test_commit": "e6ef08b168ceeae7ae99b282125e389abc4ea882",
+	"package": {
+		"path": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+		"sha256": "f56ea4078e90cebcf58f4f5592c899761544931ad55bc7771e06386b7570ad07",
+		"poncho_package_run_capacity_probe": {
+			"idata_capacity_bytes": 8,
+			"idata_inline_object_capacity_bytes": 6
+		}
+	},
+	"build": {
+		"command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+		"status": "PASS",
+		"source_worker_sha256": "2b7e27d4a050623f2b97601fabf4e78a0ab2f7cbb57e7fbca66d58b7283e7109",
+		"installed_worker_sha256": "2b7e27d4a050623f2b97601fabf4e78a0ab2f7cbb57e7fbca66d58b7283e7109"
+	},
+	"local_regression": {
+		"command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/test && for test_script in TR_datavine_*.sh; do ./$test_script run; done",
+		"passed": 16,
+		"total": 16
+	},
+	"factory": {
+		"entrypoint": "bash /users/jzhou24/graph_optimization/factories/run_factory.sh --manager-name datavine-idata-e6ef08b16 --workers 2 --cores 1 --memory 2 --disk 4 --poncho-env /users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+		"test_command": "python3 datavine_idata_capacity.py --factory-manager datavine-idata-e6ef08b16",
+		"manager_name": "datavine-idata-e6ef08b16",
+		"workers_requested": 2,
+		"workers_removed_after_test": 2,
+		"status": "PASS"
+	},
+	"workflow": {
+		"large_intermediate_bytes": 2097152,
+		"controller_idata_capacity_bytes": 131072,
+		"controller_inline_object_capacity_bytes": 65536,
+		"controller_idata_bytes": 79,
+		"controller_idata_bytes_high_water": 79,
+		"idata_inline_records": 1,
+		"idata_metadata_records": 1,
+		"idata_metadata_publications": 2,
+		"logical_tasks": 2,
+		"physical_attempts": 3,
+		"recovery_reexecutions": 1,
+		"legacy_recovery_tasks": 0,
+		"worker_loss_injected": true,
+		"local_idata_hits": 1,
+		"exact_oracle_match": true
+	},
+	"self_review": {
+		"rejected_runs": [
+			"Initial large-IData run exposed stale availability followed by terminal consumer failure.",
+			"First complete regression stopped because the new state-only test omitted TaskRecord registration.",
+			"Phase 7 exposed non-atomic deterministic worker-loss injection before downstream dispatch."
+		],
+		"corrections": [
+			"Consumer failure now reconciles worker epochs and converts globally lost IData into ordinary logical rollback.",
+			"Deterministic worker release revokes logical completion in the same scheduler event.",
+			"Input-use counts are decremented only once per logical task across recovery attempts.",
+			"Capacity tests register complete Controller lineage before publication."
+		],
+		"remaining_blockers": [
+			"Controller metadata and completed workflow history cleanup are not bounded.",
+			"Large IData cannot yet be persisted by a worker-driven bulk path.",
+			"Large final results are not returned through a non-Controller byte path.",
+			"DRAM cache, repeated churn, full failure matrix, and Grand Challenge remain open."
+		],
+		"ultimate_acceptance": "FAIL"
+	}
+}

@@ -1,7 +1,7 @@
 # Architecture Review B — After Shadow Pruning
 
 Date: 2026-07-29
-Reviewed through code commit: `6d3b77042`
+Reviewed through code commit: `53db69f1e`
 Status: **FAIL — SCOPED PHYSICAL DELETION PASSES, CRITICAL GAPS REMAIN**
 
 ## Accepted shadow evidence
@@ -96,6 +96,19 @@ B1 remains open because the Controller still stores ordinary IData bytes,
 DRAM is absent, true worker process loss is untested, and active peer-transfer
 eviction has not passed. The current solution establishes authority but does
 not yet establish the required volatile worker-local/bulk-data behavior.
+
+Correction checkpoint `53db69f1e` removes ordinary large-IData retention from
+the Controller. A configurable inline threshold keeps only small stable
+fallbacks; a 2 MiB output publishes immutable attempt/hash/size metadata and
+remains in the worker/peer cache identity. Loss of its only worker replica
+reuses the original logical task and IDataID, and local plus package-only
+factory runs report zero legacy recovery tasks. Controller retained-IData
+high-water is 79 bytes under a 128 KiB limit.
+
+B1 still remains open. Worker DRAM is absent, active-transfer loss is not
+covered, and large worker-only IData cannot yet enter durable storage or
+return as a large final result without a new worker-driven path. Controller
+metadata/history cleanup also remains unresolved under `CTRL-BOUND`.
 
 ### B2 — Stable-root reproducibility is assumed, not proved by Controller state
 

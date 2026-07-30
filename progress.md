@@ -12,7 +12,7 @@
   Phase 4A and is no longer the DataVine implementation.
 - Active task: **Phase 9 bounded ordinary-IData storage and large-IData
   bypass**
-- Validated code commit: `f1237b8b8`
+- Validated code commit: `e6ef08b16`
 
 ## Ultimate acceptance reset
 
@@ -26,6 +26,50 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 bounded Controller IData and worker-local large-IData checkpoint
+
+Runtime commit `53db69f1e` adds explicit Controller retained-IData and
+per-object inline capacities. Outputs at or below the inline threshold retain
+the existing validated Controller fallback; larger outputs publish only
+stable IDataID, attempt, SHA-256, and serialized size. Their serialized bytes
+remain in the attempt-qualified TaskVine worker/peer cache identity. Logical
+availability now derives from current physical replicas, while
+`rematerializable` separately means a stable non-worker Controller or durable
+source. The cache policy can no longer delete the last worker-only future
+input merely because some volatile replica is currently observable.
+
+The first large-IData run was rejected: a released worker remained briefly
+visible and a downstream task failed terminally after its selected source
+disappeared. The correction reconciles worker epochs on input failure and
+turns global loss into ordinary logical rollback. A later complete regression
+exposed that deterministic worker-loss injection itself could dispatch a
+consumer before asynchronous status convergence. The accepted scheduler
+revokes producer completion in the same injection event and decrements
+logical input-use counts only once across attempts. Test commit `e6ef08b16`
+requires the same churn in the factory run.
+
+After the final prescribed clean build/install, all 16 installed-path
+regressions pass. The accepted local and package-only factory workload creates
+a 2,097,152-byte intermediate with Controller retained-IData capacity 131,072
+bytes and inline-object limit 65,536 bytes. It completes the exact digest
+oracle after one worker release using three ordinary attempts for two logical
+tasks, one recovery replay, and zero legacy recovery tasks. The Controller
+retains only the 79-byte final result; its IData high-water is 79 bytes and
+the large intermediate produces two metadata-only publications.
+
+The rebuilt package SHA-256 is
+`f56ea4078e90cebcf58f4f5592c899761544931ad55bc7771e06386b7570ad07`;
+`poncho_package_run -e` verified the new capacity behavior. Factory
+`datavine-idata-e6ef08b16` used two requested package workers, injected churn,
+passed, and removed both workers.
+
+Self-review keeps `CTRL-BOUND`, `PERSIST`, `RECOVERY`, Review B, and Ultimate
+Acceptance **FAIL**. Retained bytes are bounded, but Controller metadata and
+completed workflow history are not cleaned; large IData lacks worker-driven
+persistence and large final-result return; repeated churn, DRAM, and the Grand
+Challenge remain open. Evidence:
+`acceptance/artifacts/idata-capacity-e6ef08b16.json`.
 
 ### Phase 9 worker-enforced disk cache capacity and combined recovery checkpoint
 

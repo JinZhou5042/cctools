@@ -1,5 +1,36 @@
 # DataVine History
 
+## 2026-07-30 — Bounded Controller IData and large-output bypass
+
+- Added hard total and per-object Controller IData byte capacities with
+  high-water metrics and fail-closed over-capacity publication.
+- Added metadata-only publication for large IData. Workers serialize and fsync
+  once, publish attempt/hash/size, and retain bytes in the worker/peer cache
+  path instead of POSTing them to Controller memory.
+- Split logical physical availability from stable rematerializability, and
+  prevented future-input eviction from treating the last volatile worker
+  replica as a stable fallback.
+- Added selected-result retrieval so large intermediates need not be fetched
+  through the Controller merely to return an unrelated small final result.
+- Rejected the first E2E after it exposed stale source visibility during worker
+  release. Added input-loss reconciliation and ordinary logical rollback.
+- Rejected a later Phase 7 regression that exposed non-atomic deterministic
+  loss injection. The accepted scheduler revokes logical completion in the
+  same event and does not double-decrement input-use counts on recovery.
+- Required clean build/install and all 16 installed-path regressions pass.
+- Rebuilt `datavine.tar.gz`, verified it with `poncho_package_run -e`, and
+  passed a two-worker package-only factory run with a 2 MiB worker-local
+  intermediate, one worker release, exact output, one ordinary recovery, and
+  zero legacy recovery tasks. Controller IData high-water was 79 bytes under
+  a 128 KiB limit.
+- Runtime code commit: `53db69f1e`; factory-test commit: `e6ef08b16`; archive
+  SHA-256:
+  `f56ea4078e90cebcf58f4f5592c899761544931ad55bc7771e06386b7570ad07`.
+- Evidence: `acceptance/artifacts/idata-capacity-e6ef08b16.json`.
+- Ultimate Acceptance remains FAIL: metadata/history cleanup, worker-driven
+  large-IData persistence/final return, repeated churn, DRAM, and Grand
+  Challenge evidence remain absent.
+
 ## 2026-07-29 — Ultimate Acceptance reopened
 
 - Adopted `acceptance/README.md` as the binding final contract and created the
