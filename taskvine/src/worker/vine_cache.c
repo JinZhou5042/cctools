@@ -176,6 +176,35 @@ static void vine_cache_reject(
 	free(message);
 }
 
+int vine_cache_reserve_output(
+		struct vine_cache *c, const char *cachename, struct link *manager)
+{
+	struct vine_cache_file *existing = hash_table_lookup(
+			c->table, cachename);
+	if (existing) {
+		return 1;
+	}
+	if (!vine_cache_admit(c, cachename, 0)) {
+		vine_cache_reject(c, cachename, 0, manager);
+		return 0;
+	}
+	struct vine_cache_file *reservation = vine_cache_file_create(
+			VINE_CACHE_OUTPUT, "task-output", 0);
+	hash_table_insert(c->table, cachename, reservation);
+	vine_cache_update_high_water(c);
+	return 1;
+}
+
+int vine_cache_release_output(struct vine_cache *c, const char *cachename)
+{
+	struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
+	if (!f || f->cache_type != VINE_CACHE_OUTPUT
+			|| f->status != VINE_CACHE_STATUS_PENDING) {
+		return 0;
+	}
+	return vine_cache_remove(c, cachename, 0);
+}
+
 /*
 Load existing cache directory into cache structure.
 */
@@ -783,6 +812,10 @@ static void vine_cache_worker_process(struct vine_cache_file *f, struct vine_cac
 	case VINE_CACHE_MINI_TASK:
 		result = do_mini_task(c, f, &error_message);
 		break;
+	case VINE_CACHE_OUTPUT:
+		/* Output reservations are materialized only by task stageout. */
+		result = 0;
+		break;
 	}
 
 	/* At this point the file is now in the transfer path.  The parent will move it to the cache path. */
@@ -831,6 +864,11 @@ vine_cache_status_t vine_cache_ensure(struct vine_cache *c, const char *cachenam
 	if (!f) {
 		debug(D_VINE, "cache: %s is unknown, perhaps it failed to transfer earlier?", cachename);
 		return VINE_CACHE_STATUS_UNKNOWN;
+	}
+
+	if (f->cache_type == VINE_CACHE_OUTPUT && f->status == VINE_CACHE_STATUS_PENDING) {
+		debug(D_VINE, "cache: %s is an unpublished task output", cachename);
+		return VINE_CACHE_STATUS_FAILED;
 	}
 
 	switch (f->status) {
@@ -904,6 +942,9 @@ vine_cache_status_t vine_cache_ensure(struct vine_cache *c, const char *cachenam
 			break;
 		case VINE_CACHE_FILE:
 			debug(D_VINE, "cache: checking if %s is present in cache", cachename);
+			break;
+		case VINE_CACHE_OUTPUT:
+			debug(D_VINE, "cache: invalid attempt to materialize unpublished output %s", cachename);
 			break;
 		}
 		return f->status;

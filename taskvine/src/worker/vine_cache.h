@@ -28,6 +28,7 @@ typedef enum {
 	VINE_CACHE_FILE,               /**< A normal file provided by the manager. */
 	VINE_CACHE_TRANSFER,           /**< Obtain the file by performing a transfer. */
 	VINE_CACHE_MINI_TASK,          /**< Obtain the file by executing a mini-task. */
+	VINE_CACHE_OUTPUT,             /**< A reserved output slot for an assigned task. */
 } vine_cache_type_t;
 
 typedef enum {
@@ -51,6 +52,8 @@ void vine_cache_scan( struct vine_cache *c, struct link *manager );
 void vine_cache_prune( struct vine_cache *c, vine_cache_level_t level );
 int vine_cache_set_capacity( struct vine_cache *c, int64_t capacity_items, int64_t capacity_bytes );
 void vine_cache_get_usage( struct vine_cache *c, int64_t *items, int64_t *bytes, int64_t *items_high_water, int64_t *bytes_high_water, int64_t *admission_rejections );
+int vine_cache_reserve_output( struct vine_cache *c, const char *cachename, struct link *manager );
+int vine_cache_release_output( struct vine_cache *c, const char *cachename );
 
 char *vine_cache_data_path( struct vine_cache *c, const char *cachename );
 char *vine_cache_meta_path( struct vine_cache *c, const char *cachename );

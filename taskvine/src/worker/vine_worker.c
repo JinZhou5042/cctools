@@ -946,7 +946,19 @@ Generate a vine_process wrapped around a vine_task,
 and deposit it into the waiting list.
 */
 
-static struct vine_task *do_task_body(struct link *manager, int task_id, time_t stoptime)
+static void release_task_output_reservations(struct vine_task *task)
+{
+	struct vine_mount *output;
+	LIST_ITERATE(task->output_mounts, output)
+	{
+		if (output->file && output->file->cached_name) {
+			vine_cache_release_output(
+					cache_manager, output->file->cached_name);
+		}
+	}
+}
+
+static struct vine_task *do_task_body(struct link *manager, int task_id, time_t stoptime, int reserve_outputs)
 {
 	char line[VINE_LINE_MAX];
 	char localname[VINE_LINE_MAX];
@@ -987,6 +999,7 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			vine_task_func_exec_mode_t func_exec_mode = n;
 			if (func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_INVALID) {
 				debug(D_VINE | D_NOTICE, "invalid func_exec_mode from manager: %s", line);
+				release_task_output_reservations(task);
 				vine_task_delete(task);
 				return 0;
 			}
@@ -999,6 +1012,16 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			url_decode(taskname_encoded, taskname, VINE_LINE_MAX);
 			vine_hack_do_not_compute_cached_name = 1;
 			vine_task_add_output_file(task, localname, taskname, flags);
+			if (reserve_outputs && !vine_cache_reserve_output(
+						cache_manager, localname, manager)) {
+				debug(
+						D_VINE,
+						"worker cache rejected output reservation %s",
+						localname);
+				release_task_output_reservations(task);
+				vine_task_delete(task);
+				return 0;
+			}
 		} else if (sscanf(line, "cores %" PRId64, &n)) {
 			vine_task_set_cores(task, n);
 		} else if (sscanf(line, "memory %" PRId64, &n)) {
@@ -1026,6 +1049,7 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			free(env);
 		} else {
 			debug(D_VINE | D_NOTICE, "invalid command from manager: %s", line);
+			release_task_output_reservations(task);
 			vine_task_delete(task);
 			return 0;
 		}
@@ -1038,7 +1062,7 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 
 static int do_task(struct link *manager, int task_id, time_t stoptime)
 {
-	struct vine_task *task = do_task_body(manager, task_id, stoptime);
+	struct vine_task *task = do_task_body(manager, task_id, stoptime, 1);
 	if (!task)
 		return 0;
 
@@ -1131,7 +1155,7 @@ static int do_put_mini_task(struct link *manager, time_t stoptime, const char *c
 {
 	mini_task_id++;
 
-	struct vine_task *mini_task = do_task_body(manager, mini_task_id, stoptime);
+	struct vine_task *mini_task = do_task_body(manager, mini_task_id, stoptime, 0);
 	if (!mini_task)
 		return 0;
 
@@ -1220,6 +1244,8 @@ static int do_kill(int task_id)
 
 	itable_remove(procs_complete, p->task->task_id);
 	list_remove(procs_waiting, p);
+
+	release_task_output_reservations(p->task);
 
 	vine_watcher_remove_process(watcher, p);
 

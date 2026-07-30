@@ -234,6 +234,7 @@ int vine_sandbox_stageout(struct vine_process *p, struct vine_cache *cache, stru
 	LIST_ITERATE(p->task->output_mounts, m)
 	{
 		if (!stage_output_file(p, m, m->file, cache, manager)) {
+			vine_cache_release_output(cache, m->file->cached_name);
 			result = 0;
 		}
 	}
