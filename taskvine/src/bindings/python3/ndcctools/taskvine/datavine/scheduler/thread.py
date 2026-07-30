@@ -1,5 +1,6 @@
 """Single-owner Task Scheduler thread."""
 
+import collections
 import concurrent.futures
 import cloudpickle
 import dataclasses
@@ -416,6 +417,11 @@ class TaskSchedulerThread:
         worker_disk_cache_admission_bytes=None,
         result_task_ids=None,
         inject_external_persistence_cancel=False,
+        inject_external_persistence_failures=0,
+        external_persistence_max_retries=3,
+        external_persistence_retry_base_seconds=0.25,
+        external_persistence_retry_max_seconds=5,
+        external_persistence_failure_delay=2,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -582,6 +588,39 @@ class TaskSchedulerThread:
         persistence_tasks_completed = 0
         persistence_worker_bytes = 0
         persistence_cancellations = 0
+        persistence_failures = 0
+        persistence_injected_failures_observed = 0
+        persistence_retries = 0
+        persistence_retry_delay_seconds = 0.0
+        compute_completions_while_persistence_active = 0
+        injected_external_persistence_failures = 0
+        inject_external_persistence_failures = int(
+            inject_external_persistence_failures
+        )
+        external_persistence_max_retries = int(
+            external_persistence_max_retries
+        )
+        external_persistence_retry_base_seconds = float(
+            external_persistence_retry_base_seconds
+        )
+        external_persistence_retry_max_seconds = float(
+            external_persistence_retry_max_seconds
+        )
+        external_persistence_failure_delay = float(
+            external_persistence_failure_delay
+        )
+        if (
+            inject_external_persistence_failures < 0
+            or external_persistence_max_retries < 0
+            or external_persistence_retry_base_seconds < 0
+            or external_persistence_retry_max_seconds < 0
+            or external_persistence_failure_delay < 0
+        ):
+            raise ValueError(
+                "external persistence failure/retry values "
+                "cannot be negative"
+            )
+        persistence_retry_counts = collections.defaultdict(int)
         persistence_capacity = int(
             (
                 controller_snapshot.get("persistence_executor")
@@ -653,17 +692,28 @@ class TaskSchedulerThread:
                 persistence_pending
                 and len(persistence_running) < persistence_capacity
             ):
-                data_id, request = persistence_pending.pop(0)
+                persistence_pending.sort(key=lambda entry: entry[0])
+                not_before, data_id, request = persistence_pending[0]
+                if not_before > time.monotonic():
+                    break
+                persistence_pending.pop(0)
                 physical = self._make_persistence_task(
                     data_id, request, environment
                 )
                 physical_id = self._manager.submit(physical)
-                persistence_running[physical_id] = data_id
+                persistence_running[physical_id] = (data_id, request)
             if (
                 not running
                 and not prefetch_running
                 and not persistence_running
             ):
+                if persistence_pending:
+                    delay = max(
+                        0,
+                        persistence_pending[0][0] - time.monotonic(),
+                    )
+                    time.sleep(min(float(wait_timeout), delay))
+                    continue
                 if self._cache_admission.evictions:
                     self._manager.wait(wait_timeout)
                     self._sync_worker_epochs()
@@ -678,7 +728,7 @@ class TaskSchedulerThread:
                     inject_external_persistence_cancel
                     and persistence_cancellations == 0
                 ):
-                    for data_id in persistence_running.values():
+                    for data_id, _ in persistence_running.values():
                         status = self.controller.idata_status(data_id)
                         if status["durability"] == "writing":
                             response = (
@@ -717,14 +767,98 @@ class TaskSchedulerThread:
                     prefetch_overlapped = True
                 continue
             if completed.id in persistence_running:
-                data_id = persistence_running.pop(completed.id)
+                data_id, request = persistence_running.pop(completed.id)
                 if not completed.successful():
-                    raise RuntimeError(
-                        f"IDataID {data_id} persistence task failed: "
-                        f"result={completed.result} "
-                        f"exit={completed.exit_code} "
-                        f"stdout={completed.output}"
-                    )
+                    if (
+                        "DATAVINE_PERSISTENCE_INJECTED_FAILURE"
+                        in completed.output
+                    ):
+                        persistence_injected_failures_observed += 1
+                    status = self.controller.idata_status(data_id)
+                    if status["durability"] not in (
+                        "failed",
+                        "cancelled",
+                        "durable",
+                    ):
+                        self.controller.fail_external_persistence(
+                            data_id,
+                            request["request_id"],
+                            (
+                                "worker persistence task failed: "
+                                f"result={completed.result} "
+                                f"exit={completed.exit_code}"
+                            ),
+                        )
+                        status = self.controller.idata_status(data_id)
+                    if status["durability"] == "durable":
+                        pass
+                    elif status["durability"] == "cancelled":
+                        retry_status = self.controller.persist_idata(
+                            data_id
+                        )
+                        persistence_pending.append(
+                            (
+                                time.monotonic(),
+                                data_id,
+                                retry_status["persistence_request"],
+                            )
+                        )
+                        continue
+                    elif status["durability"] == "failed":
+                        persistence_failures += 1
+                        retry_key = (
+                            data_id,
+                            int(request["attempt"]),
+                        )
+                        retries = persistence_retry_counts[retry_key]
+                        if retries >= external_persistence_max_retries:
+                            raise RuntimeError(
+                                f"IDataID {data_id} persistence exhausted "
+                                f"{retries} retries: "
+                                f"stdout={completed.output}"
+                            )
+                        delay = (
+                            external_persistence_retry_base_seconds
+                            * (2 ** min(retries, 30))
+                        )
+                        delay = min(
+                            delay,
+                            external_persistence_retry_max_seconds,
+                        )
+                        persistence_retry_counts[retry_key] += 1
+                        persistence_retries += 1
+                        persistence_retry_delay_seconds += delay
+                        retry_status = self.controller.persist_idata(
+                            data_id
+                        )
+                        retry_request = retry_status[
+                            "persistence_request"
+                        ]
+                        if (
+                            injected_external_persistence_failures
+                            < inject_external_persistence_failures
+                        ):
+                            retry_request = {
+                                **retry_request,
+                                "inject_failure_during_write": True,
+                                "inject_failure_delay": (
+                                    external_persistence_failure_delay
+                                ),
+                            }
+                            injected_external_persistence_failures += 1
+                        persistence_pending.append(
+                            (
+                                time.monotonic() + delay,
+                                data_id,
+                                retry_request,
+                            )
+                        )
+                        continue
+                    else:
+                        raise RuntimeError(
+                            f"IDataID {data_id} persistence task failed "
+                            f"without a terminal Controller state"
+                        )
                 status = self.controller.idata_status(data_id)
                 if status["durability"] == "cancelled":
                     retry_status = self.controller.persist_idata(
@@ -732,6 +866,7 @@ class TaskSchedulerThread:
                     )
                     persistence_pending.append(
                         (
+                            time.monotonic(),
                             data_id,
                             retry_status["persistence_request"],
                         )
@@ -748,6 +883,8 @@ class TaskSchedulerThread:
                 persistence_worker_bytes += int(status["size"])
                 continue
             logical_id = running.pop(completed.id)
+            if persistence_running or persistence_pending:
+                compute_completions_while_persistence_active += 1
             local_idata_hits += completed.output.count(
                 "DATAVINE_LOCAL_IDATA"
             )
@@ -842,8 +979,24 @@ class TaskSchedulerThread:
                             **request,
                             "inject_cancel_delay": True,
                         }
+                    if (
+                        injected_external_persistence_failures
+                        < inject_external_persistence_failures
+                    ):
+                        request = {
+                            **request,
+                            "inject_failure_during_write": True,
+                            "inject_failure_delay": (
+                                external_persistence_failure_delay
+                            ),
+                        }
+                        injected_external_persistence_failures += 1
                     persistence_pending.append(
-                        (output_ids[logical_id], request)
+                        (
+                            time.monotonic(),
+                            output_ids[logical_id],
+                            request,
+                        )
                     )
             self.controller.set_task_state(logical_id, "completed")
             done.add(logical_id)
@@ -873,10 +1026,23 @@ class TaskSchedulerThread:
                 self.controller.invalidate_idata(
                     output_ids[logical_id]
                 )
+                removed_persistence = [
+                    entry
+                    for entry in persistence_pending
+                    if entry[1] == output_ids[logical_id]
+                ]
+                injected_external_persistence_failures -= sum(
+                    bool(
+                        entry[2].get(
+                            "inject_failure_during_write"
+                        )
+                    )
+                    for entry in removed_persistence
+                )
                 persistence_pending = [
                     entry
                     for entry in persistence_pending
-                    if entry[0] != output_ids[logical_id]
+                    if entry[1] != output_ids[logical_id]
                 ]
                 worker_loss_injected = True
                 # Deterministic injection is a scheduler event: revoke the
@@ -945,6 +1111,17 @@ class TaskSchedulerThread:
             ),
             "persistence_worker_bytes": persistence_worker_bytes,
             "persistence_cancellations": persistence_cancellations,
+            "persistence_failures": persistence_failures,
+            "persistence_injected_failures_observed": (
+                persistence_injected_failures_observed
+            ),
+            "persistence_retries": persistence_retries,
+            "persistence_retry_delay_seconds": (
+                persistence_retry_delay_seconds
+            ),
+            "compute_completions_while_persistence_active": (
+                compute_completions_while_persistence_active
+            ),
             "prefetch_selected": len(prefetch_selected),
             "prefetch_completed": prefetch_completed,
             "prefetch_failed": prefetch_failed,
@@ -1257,13 +1434,22 @@ class TaskSchedulerThread:
                     if request.get("inject_cancel_delay")
                     else ()
                 ),
+                *(
+                    (
+                        "--inject-failure-during-write",
+                        "--delay-before-failure",
+                        str(request.get("inject_failure_delay", 0)),
+                    )
+                    if request.get("inject_failure_during_write")
+                    else ()
+                ),
             )
         )
         task = Task(command)
         task.set_tag(f"persist-i{int(data_id)}")
         task.set_cores(0)
         task.set_priority(-500)
-        task.set_retries(5)
+        task.set_retries(0)
         task.add_input(self._idata_files[int(data_id)], input_name)
         if environment is not None:
             task.add_environment(environment)

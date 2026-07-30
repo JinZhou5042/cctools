@@ -17,6 +17,10 @@ def main(argv=None):
     parser.add_argument("--request-id", required=True)
     parser.add_argument("--input-file", required=True)
     parser.add_argument("--delay-before-complete", type=float, default=0)
+    parser.add_argument(
+        "--inject-failure-during-write", action="store_true"
+    )
+    parser.add_argument("--delay-before-failure", type=float, default=0)
     args = parser.parse_args(argv)
     client = ControllerClient(args.controller, args.token)
     request = client.begin_external_persistence(
@@ -45,6 +49,18 @@ def main(argv=None):
                 size += len(chunk)
                 digest.update(chunk)
                 writer.write(chunk)
+                if args.inject_failure_during_write:
+                    writer.flush()
+                    if args.delay_before_failure > 0:
+                        time.sleep(args.delay_before_failure)
+                    print(
+                        "DATAVINE_PERSISTENCE_INJECTED_FAILURE "
+                        f"i:{args.data_id} {args.request_id}",
+                        flush=True,
+                    )
+                    raise OSError(
+                        "injected temporary SharedFS unavailability"
+                    )
             writer.flush()
             os.fsync(writer.fileno())
         if (

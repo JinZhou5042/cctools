@@ -3,10 +3,10 @@
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 from unittest import mock
 
 from datavine_phase4_demand_pull import run_case
@@ -178,19 +178,44 @@ def external_persistence_cancel_retry_contract():
                 record.data_id, cancelled["request_id"]
             )
             Path(cancelled["target_path"]).write_bytes(payload)
-            validation_finished = threading.Event()
-            allow_commit = threading.Event()
-            original_open = os.open
+            validation_started = threading.Event()
+            allow_validation = threading.Event()
+            original_path_open = Path.open
             result = {}
             failure = {}
 
-            def block_directory_fsync(*args, **kwargs):
-                validation_finished.set()
-                if not allow_commit.wait(5):
-                    raise TimeoutError(
-                        "test did not release persistence completion"
-                    )
-                return original_open(*args, **kwargs)
+            class BlockingReader:
+                def __init__(self, stream):
+                    self.stream = stream
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return self.stream.__exit__(*args)
+
+                def read(self, *args, **kwargs):
+                    validation_started.set()
+                    if not allow_validation.wait(5):
+                        raise TimeoutError(
+                            "test did not release persistence validation"
+                        )
+                    return self.stream.read(*args, **kwargs)
+
+            def block_target_read(path, *args, **kwargs):
+                stream = original_path_open(path, *args, **kwargs)
+                mode = (
+                    args[0]
+                    if args
+                    else kwargs.get("mode", "r")
+                )
+                if (
+                    Path(path) == Path(cancelled["target_path"])
+                    and "r" in mode
+                    and "b" in mode
+                ):
+                    return BlockingReader(stream)
+                return stream
 
             def complete_persistence():
                 try:
@@ -203,19 +228,24 @@ def external_persistence_cancel_retry_contract():
                 except Exception as exc:
                     failure["error"] = exc
 
-            with mock.patch(
-                "ndcctools.taskvine.datavine.controller.state.os.open",
-                side_effect=block_directory_fsync,
-            ):
+            with mock.patch.object(Path, "open", block_target_read):
                 completion_thread = threading.Thread(
                     target=complete_persistence
                 )
                 completion_thread.start()
-                assert validation_finished.wait(5)
+                assert validation_started.wait(5)
+                status_started = time.monotonic()
+                assert state.get_idata(record.data_id).durability == (
+                    "writing"
+                )
+                validation_status_latency = (
+                    time.monotonic() - status_started
+                )
+                assert validation_status_latency < 0.5
                 assert state.cancel_persistence(
                     record.data_id, "test-active-cancel"
                 ) == "cancelling"
-                allow_commit.set()
+                allow_validation.set()
                 completion_thread.join(5)
             assert not completion_thread.is_alive()
             assert "error" not in failure, failure
@@ -261,7 +291,11 @@ def external_persistence_cancel_retry_contract():
                 record.data_id, final["request_id"]
             )
             assert durable.durability == "durable"
-            return state.snapshot()
+            snapshot = state.snapshot()
+            snapshot["validation_status_latency_seconds"] = (
+                validation_status_latency
+            )
+            return snapshot
         finally:
             state.stop()
 
@@ -274,7 +308,9 @@ def payload_digest(payload):
     return hashlib.sha256(payload).hexdigest()
 
 
-def run_bounded_case(factory_manager=None):
+def run_bounded_case(factory_manager=None, persistence_mode="cancel"):
+    if persistence_mode not in ("cancel", "failure"):
+        raise ValueError("unknown persistence test mode")
     workflow = Workflow()
     large = workflow.add_task(make_large_payload, LARGE_SIZE)
     target = workflow.add_task(payload_digest, large.output())
@@ -282,7 +318,7 @@ def run_bounded_case(factory_manager=None):
         bytes(index % 251 for index in range(LARGE_SIZE))
     ).hexdigest()
     snapshot = run_case(
-        "idata-capacity",
+        f"idata-capacity-{persistence_mode}",
         workflow,
         target.task_id,
         oracle,
@@ -302,7 +338,16 @@ def run_bounded_case(factory_manager=None):
             else None
         ),
         additional_result_task_ids=(large.task_id,),
-        inject_external_persistence_cancel=True,
+        inject_external_persistence_cancel=(
+            persistence_mode == "cancel"
+        ),
+        inject_external_persistence_failures=(
+            2 if persistence_mode == "failure" else 0
+        ),
+        external_persistence_max_retries=2,
+        external_persistence_retry_base_seconds=0.25,
+        external_persistence_retry_max_seconds=0.5,
+        external_persistence_failure_delay=2,
     )
     report = snapshot["scheduler_report"]
     assert snapshot["idata_capacity_bytes"] == CONTROLLER_IDATA_LIMIT
@@ -320,13 +365,28 @@ def run_bounded_case(factory_manager=None):
     assert snapshot["external_persistence_requests"] == 1
     assert snapshot["external_persistence_durable"] == 1
     assert snapshot["durable_hashes_valid"]
+    assert snapshot["persistence_temporary_files"] == []
     assert (
         snapshot["durable_recovery_actions"]["1"]
         == "validated-durable"
     )
     assert len(snapshot["durable_files"]) == 2
     assert report["persistence_tasks_completed"] == 1
-    assert report["persistence_cancellations"] == 1
+    if persistence_mode == "cancel":
+        assert report["persistence_cancellations"] == 1
+        assert report["persistence_failures"] == 0
+        assert report["persistence_retries"] == 0
+    else:
+        assert report["persistence_cancellations"] == 0
+        assert report["persistence_failures"] == 2
+        assert report["persistence_injected_failures_observed"] == 2
+        assert report["persistence_retries"] == 2
+        assert report["persistence_retry_delay_seconds"] == 0.75
+        assert (
+            report["compute_completions_while_persistence_active"]
+            >= 1
+        ), report
+        assert snapshot["persistence_max_active"] == 1
     assert report["persistence_worker_bytes"] > LARGE_SIZE
     assert (
         snapshot["result_summaries"][str(large.task_id)][
@@ -336,21 +396,70 @@ def run_bounded_case(factory_manager=None):
     )
     assert report["local_idata_hits"] >= 1, report
     assert report["legacy_recovery_tasks"] == 0, report
-    if not factory_manager:
-        assert report["worker_loss_injected"], report
-        assert report["recovery_reexecutions"] >= 1, report
-        assert report["physical_attempts"] > report["logical_tasks"], report
+    assert report["worker_loss_injected"], report
+    assert report["recovery_reexecutions"] >= 1, report
+    assert report["physical_attempts"] > report["logical_tasks"], report
     return snapshot
+
+
+def permanent_persistence_failure_contract():
+    workflow = Workflow()
+    large = workflow.add_task(make_large_payload, LARGE_SIZE)
+    target = workflow.add_task(payload_digest, large.output())
+    oracle = hashlib.sha256(
+        bytes(index % 251 for index in range(LARGE_SIZE))
+    ).hexdigest()
+    try:
+        run_case(
+            "idata-persistence-permanent-failure",
+            workflow,
+            target.task_id,
+            oracle,
+            worker_count=1,
+            worker_cores=1,
+            prefetch=False,
+            persistence=True,
+            max_idata_bytes=CONTROLLER_IDATA_LIMIT,
+            max_inline_idata_bytes=INLINE_LIMIT,
+            additional_result_task_ids=(large.task_id,),
+            inject_external_persistence_failures=1,
+            external_persistence_max_retries=0,
+            external_persistence_failure_delay=0,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "persistence exhausted 0 retries" in message
+        return message
+    raise AssertionError("permanent persistence failure was not visible")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--factory-manager")
+    parser.add_argument(
+        "--persistence-mode",
+        choices=("cancel", "failure", "both"),
+        default="both",
+    )
     args = parser.parse_args()
     contract = state_capacity_contract()
     idempotency = external_persistence_idempotency_contract()
     cancel_retry = external_persistence_cancel_retry_contract()
-    snapshot = run_bounded_case(args.factory_manager)
+    permanent_failure = (
+        permanent_persistence_failure_contract()
+        if args.factory_manager is None
+        else "covered by local installed-path contract"
+    )
+    modes = (
+        ("cancel", "failure")
+        if args.persistence_mode == "both"
+        else (args.persistence_mode,)
+    )
+    snapshots = {
+        mode: run_bounded_case(args.factory_manager, mode)
+        for mode in modes
+    }
+    snapshot = snapshots[modes[0]]
     print(
         json.dumps(
             {
@@ -394,8 +503,31 @@ def main():
                     "active": cancel_retry[
                         "persistence_active"
                     ],
+                    "validation_status_latency_seconds": (
+                        cancel_retry[
+                            "validation_status_latency_seconds"
+                        ]
+                    ),
                 },
+                "permanent_persistence_failure": permanent_failure,
                 "scheduler_report": snapshot["scheduler_report"],
+                "workflow_modes": {
+                    mode: {
+                        "controller_idata_bytes_high_water": value[
+                            "idata_bytes_high_water"
+                        ],
+                        "persistence_max_active": value[
+                            "persistence_max_active"
+                        ],
+                        "temporary_files": value[
+                            "persistence_temporary_files"
+                        ],
+                        "scheduler_report": value[
+                            "scheduler_report"
+                        ],
+                    }
+                    for mode, value in snapshots.items()
+                },
                 "status": "PASS",
             },
             indent=2,

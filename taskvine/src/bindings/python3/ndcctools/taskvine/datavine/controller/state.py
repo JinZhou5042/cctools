@@ -838,14 +838,12 @@ class ControllerState:
                 raise ValueError(
                     f"cannot begin persistence in state {job['state']}"
                 )
-            active = sum(
-                value.get("mode") == "worker"
-                and value["state"] == "writing"
-                for value in self._persistence_jobs.values()
-            )
-            if active >= self._persistence.worker_count:
+            if (
+                len(self._persistence_active_ids)
+                >= self._persistence.worker_count
+            ):
                 raise RuntimeError(
-                    "external persistence concurrency exceeded"
+                    "global persistence concurrency exceeded"
                 )
             job["state"] = "writing"
             self._idata[old.data_id] = dataclasses.replace(
@@ -1107,6 +1105,13 @@ class ControllerState:
                 or current_idata.content_hash != request.content_hash
             ):
                 return
+            if (
+                len(self._persistence_active_ids)
+                >= self._persistence.worker_count
+            ):
+                raise RuntimeError(
+                    "global persistence concurrency exceeded"
+                )
             job["state"] = "writing"
             self._persistence_active_ids.add(request.request_id)
             self._persistence_active = len(

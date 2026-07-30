@@ -109,6 +109,11 @@ def run_case(
     persistence_parent=None,
     additional_result_task_ids=(),
     inject_external_persistence_cancel=False,
+    inject_external_persistence_failures=0,
+    external_persistence_max_retries=3,
+    external_persistence_retry_base_seconds=0.25,
+    external_persistence_retry_max_seconds=5,
+    external_persistence_failure_delay=2,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -255,6 +260,11 @@ def run_case(
                     ),
                 ],
                 inject_external_persistence_cancel,
+                inject_external_persistence_failures,
+                external_persistence_max_retries,
+                external_persistence_retry_base_seconds,
+                external_persistence_retry_max_seconds,
+                external_persistence_failure_delay,
             )
             if (
                 replacement_worker_delay is not None
@@ -350,6 +360,10 @@ def run_case(
             snapshot["durable_files"] = sorted(
                 path.name
                 for path in persistence_dir.glob("idata-*.pkl")
+            ) if persistence else []
+            snapshot["persistence_temporary_files"] = sorted(
+                path.name
+                for path in persistence_dir.glob(".*.tmp")
             ) if persistence else []
             if persistence:
                 durable_recovery_actions = {}
