@@ -12,6 +12,7 @@
 
 void vine_worker_send_cache_update( struct link *manager, const char *cachename, struct vine_cache_file *f );
 void vine_worker_send_cache_invalid( struct link *manager, const char *cachename, const char *message );
+void vine_worker_send_cache_capacity_update( struct link *manager );
 
 extern struct vine_workspace *workspace;
 extern struct vine_worker_options *options;

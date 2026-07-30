@@ -27,13 +27,20 @@ See the file COPYING for details.
 #include <math.h>
 
 static void cache_projection_add_mounts(
-		struct hash_table *names, struct list *mounts)
+		struct hash_table *names, struct list *mounts, int64_t *bytes)
 {
 	struct vine_mount *m;
 	LIST_ITERATE(mounts, m)
 	{
-		if (m && m->file && m->file->cached_name) {
+		if (m && m->file && m->file->cached_name
+				&& !hash_table_lookup(names, m->file->cached_name)) {
 			hash_table_insert(names, m->file->cached_name, (void *)1);
+			if (m->file->size > (uint64_t)INT64_MAX
+					|| (int64_t)m->file->size > INT64_MAX - *bytes) {
+				*bytes = INT64_MAX;
+			} else {
+				*bytes += m->file->size;
+			}
 		}
 	}
 }
@@ -48,33 +55,49 @@ static int datavine_cache_items_fit(
 		struct vine_worker_info *w,
 		struct vine_task *candidate)
 {
-	if (q->datavine_cache_capacity_items < 0) {
+	if (q->datavine_cache_capacity_items < 0
+			&& q->datavine_cache_capacity_bytes < 0) {
 		return 1;
+	}
+	if (!w->cache_capacity_configured) {
+		return 0;
 	}
 
 	struct hash_table *names = hash_table_create(0, 0);
 	char *cachename;
 	struct vine_file_replica *replica;
 	int iteration;
+	int64_t projected_bytes = w->cache_prune_pending_bytes;
 	HASH_TABLE_ITERATE(w->current_files, iteration, cachename, replica)
 	{
 		hash_table_insert(names, cachename, (void *)1);
+		if (replica->size > INT64_MAX - projected_bytes) {
+			projected_bytes = INT64_MAX;
+		} else {
+			projected_bytes += replica->size;
+		}
 	}
 
 	uint64_t task_id;
 	struct vine_task *assigned;
 	ITABLE_ITERATE(w->current_tasks, iteration, task_id, assigned)
 	{
-		cache_projection_add_mounts(names, assigned->output_mounts);
+		cache_projection_add_mounts(
+				names, assigned->output_mounts, &projected_bytes);
 	}
-	cache_projection_add_mounts(names, candidate->input_mounts);
-	cache_projection_add_mounts(names, candidate->output_mounts);
+	cache_projection_add_mounts(
+			names, candidate->input_mounts, &projected_bytes);
+	cache_projection_add_mounts(
+			names, candidate->output_mounts, &projected_bytes);
 
 	int64_t projected = (
 		hash_table_size(names) + w->cache_prune_pending_items
 	);
 	hash_table_delete(names);
-	if (projected > q->datavine_cache_capacity_items) {
+	if ((q->datavine_cache_capacity_items >= 0
+				&& projected > q->datavine_cache_capacity_items)
+			|| (q->datavine_cache_capacity_bytes >= 0
+				&& projected_bytes > q->datavine_cache_capacity_bytes)) {
 		w->cache_admission_rejections++;
 		return 0;
 	}

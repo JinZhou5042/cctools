@@ -117,12 +117,24 @@ struct vine_prune_tracker {
 	struct hash_table *pending;
 };
 
+struct vine_prune_operation {
+	struct vine_worker_info *worker;
+	int64_t size;
+};
+
+static void vine_prune_operation_delete(void *value)
+{
+	free(value);
+}
+
 static void vine_prune_tracker_delete(void *value)
 {
 	struct vine_prune_tracker *tracker = value;
 	if (!tracker) {
 		return;
 	}
+	hash_table_clear(
+			tracker->pending, (void *)vine_prune_operation_delete);
 	hash_table_delete(tracker->pending);
 	free(tracker);
 }
@@ -321,6 +333,18 @@ __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager 
 	return result;
 }
 
+static int vine_manager_configure_worker_cache(
+		struct vine_manager *q, struct vine_worker_info *w)
+{
+	w->cache_capacity_configured = 0;
+	return vine_manager_send(
+			q,
+			w,
+			"cache-capacity %" PRId64 " %" PRId64 "\n",
+			q->datavine_cache_capacity_items,
+			q->datavine_cache_capacity_bytes);
+}
+
 /* Handle a name message coming back from the worker, requesting the manager's project name. */
 
 static vine_msg_code_t handle_name(struct vine_manager *q, struct vine_worker_info *w, char *line)
@@ -404,6 +428,43 @@ static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_in
 		handle_library_update(q, w, value);
 	} else if (string_prefix_is(field, "transfer_port_bind_failed")) {
 		notice(D_VINE, "Worker %s (%s) could not bind transfer port; peer transfers disabled.", w->hostname, w->addrport);
+	} else if (string_prefix_is(field, "cache-capacity-status")) {
+		int64_t capacity_items;
+		int64_t capacity_bytes;
+		int64_t items;
+		int64_t bytes;
+		int64_t items_high_water;
+		int64_t bytes_high_water;
+		int64_t admission_rejections;
+		int accepted;
+		if (sscanf(
+					value,
+					"%" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64 " %d",
+					&capacity_items,
+					&capacity_bytes,
+					&items,
+					&bytes,
+					&items_high_water,
+					&bytes_high_water,
+					&admission_rejections,
+					&accepted) != 8) {
+			return VINE_MSG_FAILURE;
+		}
+		w->cache_capacity_items = capacity_items;
+		w->cache_capacity_bytes = capacity_bytes;
+		w->worker_cache_items = items;
+		w->worker_cache_bytes = bytes;
+		w->worker_cache_items_high_water = MAX(
+				w->worker_cache_items_high_water, items_high_water);
+		w->worker_cache_bytes_high_water = MAX(
+				w->worker_cache_bytes_high_water, bytes_high_water);
+		w->worker_cache_admission_rejections = MAX(
+				w->worker_cache_admission_rejections,
+				admission_rejections);
+		w->cache_capacity_configured = (
+				accepted
+				&& capacity_items == q->datavine_cache_capacity_items
+				&& capacity_bytes == q->datavine_cache_capacity_bytes);
 	}
 
 	// Note we always mark info messages as processed, as they are optional.
@@ -438,6 +499,25 @@ static int process_replica_on_event(struct vine_manager *q, struct vine_worker_i
 	return 1;
 }
 
+static void update_worker_cache_snapshot(
+		struct vine_worker_info *w,
+		int64_t items,
+		int64_t bytes,
+		int64_t items_high_water,
+		int64_t bytes_high_water,
+		int64_t admission_rejections)
+{
+	w->worker_cache_items = items;
+	w->worker_cache_bytes = bytes;
+	w->worker_cache_items_high_water = MAX(
+			w->worker_cache_items_high_water, items_high_water);
+	w->worker_cache_bytes_high_water = MAX(
+			w->worker_cache_bytes_high_water, bytes_high_water);
+	w->worker_cache_admission_rejections = MAX(
+			w->worker_cache_admission_rejections,
+			admission_rejections);
+}
+
 /*
 A cache-update message coming from the worker means that a requested
 remote transfer or command was successful, and know we know the size
@@ -453,9 +533,40 @@ static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_w
 	long long mtime;
 	long long transfer_time;
 	long long start_time;
+	long long cache_items;
+	long long cache_bytes;
+	long long cache_items_high_water;
+	long long cache_bytes_high_water;
+	long long cache_admission_rejections;
 	char id[VINE_LINE_MAX];
 
-	if (sscanf(line, "cache-update %s %d %d %lld %lld %lld %lld %s", cachename, &type, &cache_level, &size, &mtime, &transfer_time, &start_time, id) == 8) {
+	int fields = sscanf(
+			line,
+			"cache-update %s %d %d %lld %lld %lld %lld %s"
+			" %lld %lld %lld %lld %lld",
+			cachename,
+			&type,
+			&cache_level,
+			&size,
+			&mtime,
+			&transfer_time,
+			&start_time,
+			id,
+			&cache_items,
+			&cache_bytes,
+			&cache_items_high_water,
+			&cache_bytes_high_water,
+			&cache_admission_rejections);
+	if (fields >= 8) {
+		if (fields == 13) {
+			update_worker_cache_snapshot(
+					w,
+					cache_items,
+					cache_bytes,
+					cache_items_high_water,
+					cache_bytes_high_water,
+					cache_admission_rejections);
+		}
 		/*
 		If an unsolicited cache-update arrives, there are several possibilities:
 		- The worker is telling us about an item from a previous run.
@@ -578,9 +689,34 @@ static vine_msg_code_t handle_cache_unlinked(struct vine_manager *q, struct vine
 	char cachename[VINE_LINE_MAX];
 	char operation_id[UUID_LEN + 1];
 	int success = 0;
+	long long cache_items;
+	long long cache_bytes;
+	long long cache_items_high_water;
+	long long cache_bytes_high_water;
+	long long cache_admission_rejections;
 
-	if (sscanf(line, "cache-unlinked %s %36s %d", cachename_encoded, operation_id, &success) != 3) {
+	int fields = sscanf(
+			line,
+			"cache-unlinked %s %36s %d %lld %lld %lld %lld %lld",
+			cachename_encoded,
+			operation_id,
+			&success,
+			&cache_items,
+			&cache_bytes,
+			&cache_items_high_water,
+			&cache_bytes_high_water,
+			&cache_admission_rejections);
+	if (fields < 3) {
 		return VINE_MSG_FAILURE;
+	}
+	if (fields == 8) {
+		update_worker_cache_snapshot(
+				w,
+				cache_items,
+				cache_bytes,
+				cache_items_high_water,
+				cache_bytes_high_water,
+				cache_admission_rejections);
 	}
 
 	url_decode(cachename_encoded, cachename, sizeof(cachename));
@@ -590,19 +726,23 @@ static vine_msg_code_t handle_cache_unlinked(struct vine_manager *q, struct vine
 		return VINE_MSG_PROCESSED;
 	}
 
-	struct vine_worker_info *expected_worker = hash_table_lookup(tracker->pending, operation_id);
-	if (!expected_worker || expected_worker != w) {
+	struct vine_prune_operation *operation = hash_table_lookup(
+			tracker->pending, operation_id);
+	if (!operation || operation->worker != w) {
 		debug(D_VINE, "ignoring duplicate, stale, or mismatched cache-unlinked operation %s", operation_id);
 		return VINE_MSG_PROCESSED;
 	}
 	hash_table_remove(tracker->pending, operation_id);
-	if (w->cache_prune_pending_items < 1) {
+	if (w->cache_prune_pending_items < 1
+			|| w->cache_prune_pending_bytes < operation->size) {
 		fatal(
 			"cache prune acknowledgement underflow for worker %s",
 			w->workerid ? w->workerid : "unknown"
 		);
 	}
 	w->cache_prune_pending_items--;
+	w->cache_prune_pending_bytes -= operation->size;
+	vine_prune_operation_delete(operation);
 
 	if (success) {
 		tracker->confirmed++;
@@ -1704,6 +1844,7 @@ static vine_msg_code_t handle_taskvine(struct vine_manager *q, struct vine_worke
 	w->version = strdup(items[3]);
 
 	w->type = VINE_WORKER_TYPE_WORKER;
+	vine_manager_configure_worker_cache(q, w);
 
 	q->stats->workers_joined++;
 	debug(D_VINE, "%d workers are connected in total now", count_workers(q, VINE_WORKER_TYPE_WORKER));
@@ -4255,6 +4396,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->worker_selection_algorithm = VINE_SCHEDULE_FILES;
 	q->process_pending_check = 0;
 	q->datavine_cache_capacity_items = -1;
+	q->datavine_cache_capacity_bytes = -1;
 
 	q->short_timeout = 5;
 	q->long_timeout = 3600;
@@ -6150,6 +6292,27 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "datavine-cache-capacity-items")) {
 		q->datavine_cache_capacity_items = MAX(-1, (int64_t)value);
+		struct vine_worker_info *w;
+		char *key;
+		int iteration;
+		HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+		{
+			if (w->type == VINE_WORKER_TYPE_WORKER) {
+				vine_manager_configure_worker_cache(q, w);
+			}
+		}
+
+	} else if (!strcmp(name, "datavine-cache-capacity-bytes")) {
+		q->datavine_cache_capacity_bytes = MAX(-1, (int64_t)value);
+		struct vine_worker_info *w;
+		char *key;
+		int iteration;
+		HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+		{
+			if (w->type == VINE_WORKER_TYPE_WORKER) {
+				vine_manager_configure_worker_cache(q, w);
+			}
+		}
 
 	} else if (!strcmp(name, "load-from-shared-filesystem")) {
 		q->load_from_shared_fs_enabled = !!((int)value);
@@ -6694,11 +6857,20 @@ static int vine_prune_file_from_worker(struct vine_manager *m, struct vine_file 
 	}
 	process_replica_on_event(m, w, f->cached_name, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_UNLINK);
 	struct vine_file_replica *removed_replica = vine_file_replica_table_remove(m, w, f->cached_name);
+	int64_t removed_size = 0;
 	if (removed_replica) {
+		removed_size = removed_replica->size;
 		vine_file_replica_delete(removed_replica);
 	}
+	struct vine_prune_operation *operation = calloc(1, sizeof(*operation));
+	if (!operation) {
+		fatal("out of memory creating cache prune operation");
+	}
+	operation->worker = w;
+	operation->size = removed_size;
 	w->cache_prune_pending_items++;
-	hash_table_insert(tracker->pending, operation_id.str, w);
+	w->cache_prune_pending_bytes += removed_size;
+	hash_table_insert(tracker->pending, operation_id.str, operation);
 	tracker->requested++;
 	return 1;
 }
@@ -6715,8 +6887,11 @@ static void vine_prune_track_worker_loss(struct vine_manager *m, struct vine_wor
 			continue;
 		}
 		for (int i = 0; operation_ids[i]; i++) {
-			if (hash_table_lookup(tracker->pending, operation_ids[i]) == w) {
+			struct vine_prune_operation *operation = hash_table_lookup(
+					tracker->pending, operation_ids[i]);
+			if (operation && operation->worker == w) {
 				hash_table_remove(tracker->pending, operation_ids[i]);
+				vine_prune_operation_delete(operation);
 				/*
 				 * The incarnation is unavailable, but a persistent
 				 * workspace may remain. Resolve the tracker without

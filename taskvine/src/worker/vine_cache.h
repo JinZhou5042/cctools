@@ -49,6 +49,8 @@ void vine_cache_delete( struct vine_cache *c );
 void vine_cache_load( struct vine_cache *c );
 void vine_cache_scan( struct vine_cache *c, struct link *manager );
 void vine_cache_prune( struct vine_cache *c, vine_cache_level_t level );
+int vine_cache_set_capacity( struct vine_cache *c, int64_t capacity_items, int64_t capacity_bytes );
+void vine_cache_get_usage( struct vine_cache *c, int64_t *items, int64_t *bytes, int64_t *items_high_water, int64_t *bytes_high_water, int64_t *admission_rejections );
 
 char *vine_cache_data_path( struct vine_cache *c, const char *cachename );
 char *vine_cache_meta_path( struct vine_cache *c, const char *cachename );
@@ -56,8 +58,8 @@ char *vine_cache_transfer_path( struct vine_cache *c, const char *cachename );
 char *vine_cache_error_path( struct vine_cache *c, const char *cachename );
 
 int vine_cache_add_file( struct vine_cache *c, const char *cachename, const char *transfer_path, vine_cache_level_t level, int mode, uint64_t size, time_t mtime, timestamp_t start_time, timestamp_t transfer_time, struct link *manager );
-int vine_cache_add_transfer( struct vine_cache *c, const char *cachename, const char *source, vine_cache_level_t level, int mode, uint64_t size, vine_cache_flags_t flags );
-int vine_cache_add_mini_task( struct vine_cache *c, const char *cachename, const char *source, struct vine_task *mini_task, vine_cache_level_t level, int mode, uint64_t size );
+int vine_cache_add_transfer( struct vine_cache *c, const char *cachename, const char *source, vine_cache_level_t level, int mode, uint64_t size, vine_cache_flags_t flags, struct link *manager );
+int vine_cache_add_mini_task( struct vine_cache *c, const char *cachename, const char *source, struct vine_task *mini_task, vine_cache_level_t level, int mode, uint64_t size, struct link *manager );
 
 vine_cache_status_t vine_cache_ensure( struct vine_cache *c, const char *cachename);
 int vine_cache_remove( struct vine_cache *c, const char *cachename, struct link *manager );

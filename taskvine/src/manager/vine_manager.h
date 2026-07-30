@@ -184,6 +184,7 @@ struct vine_manager {
 	int datavine_controller_port;
 	char *datavine_controller_token;
 	int64_t datavine_cache_capacity_items;
+	int64_t datavine_cache_capacity_bytes;
 
 	/* Hungry call optimization */
 	timestamp_t time_last_hungry;      /* Last time vine_hungry_computation was called. */

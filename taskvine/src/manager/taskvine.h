@@ -1534,6 +1534,9 @@ a times series, if this feature is enabled. See @ref vine_enable_monitoring.
  - "datavine-cache-capacity-items" Strict projected worker-cache item limit,
 including assigned-task outputs and pending acknowledged unlinks. A negative
 value disables this DataVine admission gate. (default=-1)
+ - "datavine-cache-capacity-bytes" Worker-cache serialized-byte limit. Inputs
+are reserved before dispatch and workers fail closed when actual publication
+would exceed the limit. A negative value disables the gate. (default=-1)
  - "transient-error-interval" Time to wait in seconds after a resource failure before attempting to use it again
 (default=15)
  - "resource_management_interval" Seconds between measurement of manager local resources. (default=30)

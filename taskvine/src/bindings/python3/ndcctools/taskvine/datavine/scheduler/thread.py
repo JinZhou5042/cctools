@@ -420,6 +420,7 @@ class TaskSchedulerThread:
         worker_disk_cache_bytes=None,
         worker_disk_cache_items=None,
         worker_disk_cache_admission_items=None,
+        worker_disk_cache_admission_bytes=None,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -441,6 +442,21 @@ class TaskSchedulerThread:
         ) != 0:
             raise RuntimeError(
                 "TaskVine Manager rejected cache admission capacity"
+            )
+        admission_bytes = (
+            -1
+            if worker_disk_cache_admission_bytes is None
+            else int(worker_disk_cache_admission_bytes)
+        )
+        if admission_bytes < -1:
+            raise ValueError(
+                "worker disk cache admission byte capacity is negative"
+            )
+        if self._manager.tune(
+            "datavine-cache-capacity-bytes", admission_bytes
+        ) != 0:
+            raise RuntimeError(
+                "TaskVine Manager rejected cache byte admission capacity"
             )
         output_ids = self._op_register_workflow(workflow)
         task_by_id = {task.task_id: task for task in workflow.tasks}
@@ -490,6 +506,40 @@ class TaskSchedulerThread:
                 f"{worker_disk_cache_admission_items} cannot fit the "
                 f"largest task working set of {max_task_cache_items} items"
             )
+        cache_known_sizes = {}
+        for data_key in remaining_cache_uses:
+            kind, token = data_key.split(":", 1)
+            if kind == "e":
+                metadata = self.controller.get_edata_metadata(int(token))
+                cache_known_sizes[data_key] = int(
+                    metadata["size"] or 0
+                )
+            else:
+                metadata = self.controller.idata_status(int(token))
+                cache_known_sizes[data_key] = int(
+                    metadata["size"] or 0
+                )
+        max_task_known_cache_bytes = max(
+            (
+                sum(
+                    max(0, cache_known_sizes[data_key])
+                    for data_key in keys
+                )
+                for keys in task_cache_inputs.values()
+            ),
+            default=0,
+        )
+        if (
+            worker_disk_cache_admission_bytes is not None
+            and int(worker_disk_cache_admission_bytes)
+            < max_task_known_cache_bytes
+        ):
+            raise ValueError(
+                "worker disk cache admission capacity "
+                f"{worker_disk_cache_admission_bytes} bytes cannot fit "
+                "the largest known task input working set of "
+                f"{max_task_known_cache_bytes} bytes"
+            )
         effective_retention_items = worker_disk_cache_items
         if worker_disk_cache_admission_items is not None:
             admission_headroom = max(
@@ -502,6 +552,19 @@ class TaskSchedulerThread:
                 or int(effective_retention_items) > admission_headroom
             ):
                 effective_retention_items = admission_headroom
+        effective_retention_bytes = worker_disk_cache_bytes
+        if worker_disk_cache_admission_bytes is not None:
+            admission_byte_headroom = max(
+                0,
+                int(worker_disk_cache_admission_bytes)
+                - max_task_known_cache_bytes,
+            )
+            if (
+                effective_retention_bytes is None
+                or int(effective_retention_bytes)
+                > admission_byte_headroom
+            ):
+                effective_retention_bytes = admission_byte_headroom
         pending = set(task_by_id)
         running = {}
         prefetch_running = set()
@@ -560,7 +623,7 @@ class TaskSchedulerThread:
                 self._cache_admission.enforce(
                     self._manager,
                     self._file_for_data_key,
-                    worker_disk_cache_bytes,
+                    effective_retention_bytes,
                     effective_retention_items,
                     remaining_cache_uses,
                     {
@@ -658,7 +721,7 @@ class TaskSchedulerThread:
             self._cache_admission.enforce(
                 self._manager,
                 self._file_for_data_key,
-                worker_disk_cache_bytes,
+                effective_retention_bytes,
                 effective_retention_items,
                 remaining_cache_uses,
                 {
@@ -682,7 +745,7 @@ class TaskSchedulerThread:
             self._cache_admission.enforce(
                 self._manager,
                 self._file_for_data_key,
-                worker_disk_cache_bytes,
+                effective_retention_bytes,
                 effective_retention_items,
                 remaining_cache_uses,
                 (),
@@ -723,6 +786,15 @@ class TaskSchedulerThread:
                 worker_disk_cache_admission_items
             ),
             "worker_disk_cache_max_task_items": max_task_cache_items,
+            "worker_disk_cache_admission_bytes": (
+                worker_disk_cache_admission_bytes
+            ),
+            "worker_disk_cache_max_known_task_input_bytes": (
+                max_task_known_cache_bytes
+            ),
+            "worker_disk_cache_effective_retention_bytes": (
+                effective_retention_bytes
+            ),
             "worker_disk_cache_effective_retention_items": (
                 effective_retention_items
             ),
@@ -732,9 +804,20 @@ class TaskSchedulerThread:
                     for key in (
                         "workerid",
                         "cache_items",
+                        "cache_bytes",
                         "cache_items_high_water",
+                        "cache_bytes_high_water",
                         "cache_prune_pending_items",
+                        "cache_prune_pending_bytes",
                         "cache_admission_rejections",
+                        "cache_capacity_configured",
+                        "cache_capacity_items",
+                        "cache_capacity_bytes",
+                        "worker_cache_items",
+                        "worker_cache_bytes",
+                        "worker_cache_items_high_water",
+                        "worker_cache_bytes_high_water",
+                        "worker_cache_admission_rejections",
                     )
                 }
                 for worker in physical_cache_workers

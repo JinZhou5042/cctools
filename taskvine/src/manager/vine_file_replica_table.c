@@ -36,6 +36,10 @@ int vine_file_replica_table_insert(struct vine_manager *m, struct vine_worker_in
 	if (cache_items > w->cache_items_high_water) {
 		w->cache_items_high_water = cache_items;
 	}
+	int64_t cache_bytes = w->inuse_cache + w->cache_prune_pending_bytes;
+	if (cache_bytes > w->cache_bytes_high_water) {
+		w->cache_bytes_high_water = cache_bytes;
+	}
 
 	if (prev_available >= m->current_max_worker->disk) {
 		/* the current worker may have been the one with the maximum available space, so we update it. */
