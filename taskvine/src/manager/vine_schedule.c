@@ -26,6 +26,61 @@ See the file COPYING for details.
 #include <limits.h>
 #include <math.h>
 
+static void cache_projection_add_mounts(
+		struct hash_table *names, struct list *mounts)
+{
+	struct vine_mount *m;
+	LIST_ITERATE(mounts, m)
+	{
+		if (m && m->file && m->file->cached_name) {
+			hash_table_insert(names, m->file->cached_name, (void *)1);
+		}
+	}
+}
+
+/*
+Project the physical cache item count through all tasks already assigned to a
+worker and one candidate task. A pending acknowledged unlink still occupies a
+physical slot until the worker confirms it.
+*/
+static int datavine_cache_items_fit(
+		struct vine_manager *q,
+		struct vine_worker_info *w,
+		struct vine_task *candidate)
+{
+	if (q->datavine_cache_capacity_items < 0) {
+		return 1;
+	}
+
+	struct hash_table *names = hash_table_create(0, 0);
+	char *cachename;
+	struct vine_file_replica *replica;
+	int iteration;
+	HASH_TABLE_ITERATE(w->current_files, iteration, cachename, replica)
+	{
+		hash_table_insert(names, cachename, (void *)1);
+	}
+
+	uint64_t task_id;
+	struct vine_task *assigned;
+	ITABLE_ITERATE(w->current_tasks, iteration, task_id, assigned)
+	{
+		cache_projection_add_mounts(names, assigned->output_mounts);
+	}
+	cache_projection_add_mounts(names, candidate->input_mounts);
+	cache_projection_add_mounts(names, candidate->output_mounts);
+
+	int64_t projected = (
+		hash_table_size(names) + w->cache_prune_pending_items
+	);
+	hash_table_delete(names);
+	if (projected > q->datavine_cache_capacity_items) {
+		w->cache_admission_rejections++;
+		return 0;
+	}
+	return 1;
+}
+
 /* check whether worker has all fixed locations required for task */
 int check_fixed_location_worker(struct vine_manager *m, struct vine_worker_info *w, struct vine_task *t)
 {
@@ -266,6 +321,10 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 	}
 
 	if (!check_worker_have_enough_disk_with_inputs(q, w, t)) {
+		return 0;
+	}
+
+	if (!datavine_cache_items_fit(q, w, t)) {
 		return 0;
 	}
 

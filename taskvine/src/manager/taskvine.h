@@ -1531,6 +1531,9 @@ loop (wait_retrieve_many mode). (default=0)
 a times series, if this feature is enabled. See @ref vine_enable_monitoring.
  - "update_interval"  Seconds between updates to the catalog. (default=60)
  - "temp-replica-count" Degree of replication across workers for remote temp files (default=0)
+ - "datavine-cache-capacity-items" Strict projected worker-cache item limit,
+including assigned-task outputs and pending acknowledged unlinks. A negative
+value disables this DataVine admission gate. (default=-1)
  - "transient-error-interval" Time to wait in seconds after a resource failure before attempting to use it again
 (default=15)
  - "resource_management_interval" Seconds between measurement of manager local resources. (default=30)

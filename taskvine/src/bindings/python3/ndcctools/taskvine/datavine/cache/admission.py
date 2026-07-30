@@ -113,6 +113,7 @@ class WorkerCacheAdmission:
         capacity_bytes,
         capacity_items,
         remaining_uses,
+        protected_data=(),
     ):
         if capacity_bytes is None and capacity_items is None:
             return
@@ -137,7 +138,13 @@ class WorkerCacheAdmission:
                 if key[0] == worker_id
                 and key not in self.evictions
                 and record["data_id"] not in self.prune_by_data
-                and int(remaining_uses.get(record["data_id"], 0)) == 0
+                and record["data_id"] not in protected_data
+                and (
+                    record["data_id"].startswith("e:")
+                    or int(
+                        remaining_uses.get(record["data_id"], 0)
+                    ) == 0
+                )
                 and file_resolver(record["data_id"]) is not None
             ]
             candidates.sort(

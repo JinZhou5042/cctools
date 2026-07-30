@@ -596,6 +596,13 @@ static vine_msg_code_t handle_cache_unlinked(struct vine_manager *q, struct vine
 		return VINE_MSG_PROCESSED;
 	}
 	hash_table_remove(tracker->pending, operation_id);
+	if (w->cache_prune_pending_items < 1) {
+		fatal(
+			"cache prune acknowledgement underflow for worker %s",
+			w->workerid ? w->workerid : "unknown"
+		);
+	}
+	w->cache_prune_pending_items--;
 
 	if (success) {
 		tracker->confirmed++;
@@ -4247,6 +4254,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->worker_selection_algorithm = VINE_SCHEDULE_FILES;
 	q->process_pending_check = 0;
+	q->datavine_cache_capacity_items = -1;
 
 	q->short_timeout = 5;
 	q->long_timeout = 3600;
@@ -6140,6 +6148,9 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 	} else if (!strcmp(name, "worker-source-max-transfers")) {
 		q->worker_source_max_transfers = MAX(1, (int)value);
 
+	} else if (!strcmp(name, "datavine-cache-capacity-items")) {
+		q->datavine_cache_capacity_items = MAX(-1, (int64_t)value);
+
 	} else if (!strcmp(name, "load-from-shared-filesystem")) {
 		q->load_from_shared_fs_enabled = !!((int)value);
 
@@ -6686,6 +6697,7 @@ static int vine_prune_file_from_worker(struct vine_manager *m, struct vine_file 
 	if (removed_replica) {
 		vine_file_replica_delete(removed_replica);
 	}
+	w->cache_prune_pending_items++;
 	hash_table_insert(tracker->pending, operation_id.str, w);
 	tracker->requested++;
 	return 1;

@@ -419,6 +419,7 @@ class TaskSchedulerThread:
         inject_prefetch_failure=False,
         worker_disk_cache_bytes=None,
         worker_disk_cache_items=None,
+        worker_disk_cache_admission_items=None,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -426,6 +427,21 @@ class TaskSchedulerThread:
         reconciliation_deferrals_before = (
             self._worker_reconciliation_deferrals
         )
+        admission_items = (
+            -1
+            if worker_disk_cache_admission_items is None
+            else int(worker_disk_cache_admission_items)
+        )
+        if admission_items < -1:
+            raise ValueError(
+                "worker disk cache admission item capacity is negative"
+            )
+        if self._manager.tune(
+            "datavine-cache-capacity-items", admission_items
+        ) != 0:
+            raise RuntimeError(
+                "TaskVine Manager rejected cache admission capacity"
+            )
         output_ids = self._op_register_workflow(workflow)
         task_by_id = {task.task_id: task for task in workflow.tasks}
         dependencies = {
@@ -460,6 +476,32 @@ class TaskSchedulerThread:
                 remaining_cache_uses[data_key] = (
                     remaining_cache_uses.get(data_key, 0) + 1
                 )
+        max_task_cache_items = max(
+            (len(keys) + 1 for keys in task_cache_inputs.values()),
+            default=0,
+        )
+        if (
+            worker_disk_cache_admission_items is not None
+            and int(worker_disk_cache_admission_items)
+            < max_task_cache_items
+        ):
+            raise ValueError(
+                "worker disk cache admission capacity "
+                f"{worker_disk_cache_admission_items} cannot fit the "
+                f"largest task working set of {max_task_cache_items} items"
+            )
+        effective_retention_items = worker_disk_cache_items
+        if worker_disk_cache_admission_items is not None:
+            admission_headroom = max(
+                0,
+                int(worker_disk_cache_admission_items)
+                - max_task_cache_items,
+            )
+            if (
+                effective_retention_items is None
+                or int(effective_retention_items) > admission_headroom
+            ):
+                effective_retention_items = admission_headroom
         pending = set(task_by_id)
         running = {}
         prefetch_running = set()
@@ -519,8 +561,13 @@ class TaskSchedulerThread:
                     self._manager,
                     self._file_for_data_key,
                     worker_disk_cache_bytes,
-                    worker_disk_cache_items,
+                    effective_retention_items,
                     remaining_cache_uses,
+                    {
+                        data_key
+                        for logical_id in running.values()
+                        for data_key in task_cache_inputs[logical_id]
+                    },
                 )
                 continue
             if completed.id in prefetch_running:
@@ -612,8 +659,15 @@ class TaskSchedulerThread:
                 self._manager,
                 self._file_for_data_key,
                 worker_disk_cache_bytes,
-                worker_disk_cache_items,
+                effective_retention_items,
                 remaining_cache_uses,
+                {
+                    data_key
+                    for running_logical_id in running.values()
+                    for data_key in task_cache_inputs[
+                        running_logical_id
+                    ]
+                },
             )
         cache_deadline = time.monotonic() + 30
         while (
@@ -629,8 +683,9 @@ class TaskSchedulerThread:
                 self._manager,
                 self._file_for_data_key,
                 worker_disk_cache_bytes,
-                worker_disk_cache_items,
+                effective_retention_items,
                 remaining_cache_uses,
+                (),
             )
             if time.monotonic() >= cache_deadline:
                 raise TimeoutError(
@@ -639,6 +694,7 @@ class TaskSchedulerThread:
         if persist_outputs:
             for output_data_id in output_ids.values():
                 self._wait_durable(output_data_id)
+        physical_cache_workers = self._manager.status("workers")
         self._last_run_report = {
             "logical_tasks": len(output_ids),
             "physical_attempts": sum(self._attempts.values()),
@@ -663,6 +719,26 @@ class TaskSchedulerThread:
                 self._worker_reconciliation_deferrals
                 - reconciliation_deferrals_before
             ),
+            "worker_disk_cache_admission_items": (
+                worker_disk_cache_admission_items
+            ),
+            "worker_disk_cache_max_task_items": max_task_cache_items,
+            "worker_disk_cache_effective_retention_items": (
+                effective_retention_items
+            ),
+            "worker_physical_cache": [
+                {
+                    key: worker.get(key)
+                    for key in (
+                        "workerid",
+                        "cache_items",
+                        "cache_items_high_water",
+                        "cache_prune_pending_items",
+                        "cache_admission_rejections",
+                    )
+                }
+                for worker in physical_cache_workers
+            ],
             **self._cache_admission.report(
                 worker_disk_cache_bytes,
                 worker_disk_cache_items,
