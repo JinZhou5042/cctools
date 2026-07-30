@@ -10,8 +10,8 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 deferred-lease pruning completion**
-- Validated code commit: `a8bd9609c`
+- Active task: **Phase 9 source-loss lease cleanup and terminal protocol idempotency**
+- Validated code commit: `a1d273444`
 
 ## Ultimate acceptance reset
 
@@ -25,6 +25,47 @@ multi-output identity, large-data bypass, bounded byte serving and queues,
 persistence cancellation, repeated frontier-aware recovery, all pruning
 algorithms, and the Grand Challenge comparison. No final completion claim is
 permitted while those rows remain open or failed.
+
+### Phase 9 lease-aware pruning race checkpoint
+
+Commit `a1d273444` makes active source leases an explicit deferred-pruning
+obligation. Applying a current pruning proof retires only the actively leased
+replica and leaves alternate replicas readable. Duplicate apply returns the
+same deferred record. After lease release the Controller revalidates the
+newest proof and replica generation before returning exact physical deletion
+actions. If the proof changed, retirement is cancelled, the replica returns to
+available, and the Scheduler records the cancellation without falsely
+reporting the IData as pruned.
+
+The deterministic E2E covers both outcomes. In lease-release mode the root and
+middle IData `[1,2]` are physically pruned. In proof-invalidation mode the root
+becomes required while its replica is retiring, so the root is restored to
+available and only the middle IData is pruned. Unrelated compute still
+completes while pruning is deferred. Three local repetitions have semantic
+SHA-256
+`f970be44292d84b5846c57cdab85a02fabb8baa4c96544cfe10655d7a052f76d`.
+
+The prescribed clean build/install, `flake8`, and all 21 installed-path
+regressions pass. The correct rebuilt package SHA-256 is
+`e391cf570b5a005cbb5bd95ce5fa7d6ddbccebcce4d815c6d4a30bb1bc035036`;
+`poncho_package_run -e` verifies cloudpickle 3.1.2 and the packaged import.
+Factory `datavine-lease-a1d273444` passes both modes with package-only workers;
+both managers complete five tasks and shutdown reports `all workers removed`.
+Evidence: `acceptance/artifacts/pruning-lease-race-a1d273444.json`.
+
+Self-review rejected four unsafe or unstable designs: retirement that made the
+logical IData unavailable and invalidated its own proof; cancellation that
+left the Scheduler frontier obligation unresolved; duplicate apply that could
+bypass the deferred record and prune other replicas; and timing windows too
+short for deterministic overlap evidence.
+
+Status is **PASS for this scoped Controller-lease/pruning checkpoint and FAIL
+for Ultimate Acceptance**. The test does not kill an actual peer source during
+byte transfer. A dead source epoch must explicitly retire its outstanding
+leases, and successful continuation still needs a bounded terminal result so a
+lost/repeated response is idempotent. Dynamic task registration, scale, and
+the Grand Challenge remain open. Those protocol obligations are the next
+smallest safe task.
 
 ### Phase 9 asynchronous frontier-pruning checkpoint
 

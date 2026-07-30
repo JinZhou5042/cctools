@@ -1,5 +1,31 @@
 # DataVine History
 
+## 2026-07-30 — Lease-aware pruning proof revalidation
+
+- Added explicit deferred pruning for actively leased Controller sources.
+  Alternate replicas remain readable, and duplicate proof application returns
+  the same deferred record without changing other replicas.
+- Lease release resumes through the newest proof and exact replica generation.
+  A valid proof proceeds to physical deletion; an invalidated proof cancels
+  retirement and restores source availability.
+- Scheduler now treats safe cancellation as a resolved frontier obligation
+  while excluding cancelled IData from the runtime-pruned set.
+- The deterministic two-mode E2E proves both `[1,2]` deletion after normal
+  release and root restoration with only `[2]` deletion after proof
+  invalidation. Unrelated compute progresses during the wait.
+- Rejected self-invalidating retirement, deadlocking cancellation, duplicate
+  apply that bypassed the deferred record, and nondeterministic short timing.
+- Required clean build, all 21 installed regressions, `flake8`, three identical
+  repetitions, packaged-environment verification, and a two-manager
+  package-only factory run pass. Factory shutdown removes all workers.
+- Code commit: `a1d273444`; package SHA-256:
+  `e391cf570b5a005cbb5bd95ce5fa7d6ddbccebcce4d815c6d4a30bb1bc035036`.
+- Evidence: `acceptance/artifacts/pruning-lease-race-a1d273444.json`.
+- Self-review: **PASS for the scoped checkpoint, FAIL for Ultimate
+  Acceptance**. Actual peer-transfer source death, source-epoch lease cleanup,
+  terminal continuation idempotency, dynamic task insertion, scale, and the
+  Grand Challenge remain unresolved.
+
 ## 2026-07-30 — Asynchronous frontier pruning and compute overlap
 
 - Replaced the frontier-pruning global drain barrier with an explicit active

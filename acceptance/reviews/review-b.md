@@ -311,3 +311,19 @@ to retiring, but the Scheduler currently fails closed instead of waiting for
 lease release, revalidating the proof/generation, and completing deletion.
 Dynamic consumer insertion during that wait is also untested. Those are
 critical blockers to accepting concurrent active-read pruning.
+
+Correction checkpoint `a1d273444` closes the Controller-level active-lease
+ordering identified above. Pruning is deferred without hiding alternate
+sources, duplicate apply is idempotent, and continuation revalidates both the
+newest proof and replica generation. If an existing output becomes required
+during the wait, retirement is cancelled and the replica is restored rather
+than deleted. The package-only two-mode factory E2E is recorded in
+`../artifacts/pruning-lease-race-a1d273444.json`.
+
+Review B remains **FAIL**. The lease test does not interrupt a real peer byte
+transfer, source-worker epoch loss does not yet prove bounded cleanup of every
+outstanding lease, and a continuation response lost after successful
+processing cannot yet be replayed from a bounded terminal record. Dynamic
+registration of a new consumer is also not exercised; the accepted test
+invalidates the proof through an existing output becoming required. These
+remain critical before transfer-coupled pruning can pass this review.
