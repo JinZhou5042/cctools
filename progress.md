@@ -23,6 +23,15 @@ commit in `acceptance/artifacts/regression-latest.json`. This does not satisfy
 the final gate: clean-build and Grand Challenge commands, factory acceptance,
 and the comparative resource/failure matrix remain open.
 
+### Grand Challenge smoke checkpoint
+
+`acceptance/scripts/datavine_grand_challenge.py` and its wrapper now provide a
+configurable graph generator. A 20-requested-task smoke run expands to 27
+logical tasks and validates exact output, nested alias identity, multi-output
+slots, peer transfers, and prefetch. It is component-only evidence; the
+required 10,000-task scale, 100,000 bindings, durable/bulk data mix, failure
+schedule, eight modes, and Legacy comparison remain open.
+
 ### Phase 9 transfer-loss recovery and pruning-proof race checkpoint
 
 Commit `adb0236b0` closes the failure path found when a worker loses a source

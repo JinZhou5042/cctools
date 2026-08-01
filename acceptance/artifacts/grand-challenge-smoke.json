@@ -1,0 +1,24 @@
+{
+  "artifact_type": "datavine-grand-challenge-smoke",
+  "status": "PASS_COMPONENT_ONLY",
+  "ultimate_acceptance": false,
+  "configuration": {
+    "requested_tasks": 20,
+    "actual_logical_tasks": 27,
+    "workers": 2,
+    "prefetch": true,
+    "persistence": false,
+    "failure_schedule": []
+  },
+  "observations": {
+    "exact_oracle": true,
+    "nested_alias_identity": true,
+    "multi_output_slots": true,
+    "peer_transfer_starts": 12,
+    "prefetch_completed": 8,
+    "edata_serializations": 10,
+    "legacy_recovery_tasks": 0
+  },
+  "command": "DATAVINE_GRAND_TASKS=20 acceptance/scripts/TR_datavine_grand_challenge.sh",
+  "note": "Development smoke only. The required 10000-task scale, 100000 bindings, eight comparison modes, deterministic failures, resource limits, and Legacy comparison remain open."
+}

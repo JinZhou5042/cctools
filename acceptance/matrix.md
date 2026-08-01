@@ -7,7 +7,7 @@ is never a pass.
 | ID | Requirement group | Status | Evidence / blocker |
 |---|---|---|---|
 | GC-SCALE | 10k tasks, 100k bindings, churn, storage pressure | OPEN | Grand Challenge not implemented |
-| GC-SHAPE | All graph/data shapes in one workflow | OPEN | Grand Challenge not implemented |
+| GC-SHAPE | All graph/data shapes in one workflow | OPEN | `acceptance/scripts/datavine_grand_challenge.py` now exercises repeated edata, nested aliasing, multi-output slots, fan-out/diamonds and peer/prefetch in a smoke run; full required data classes and scale remain open |
 | GC-MODES | Eight mandatory comparison modes | OPEN | Unified mode runner absent |
 | GC-LEGACY | Architectural Legacy limit demonstrated | OPEN | Comparable Legacy driver absent |
 | CORRECT | Exact oracle, failures equal normal, safe explicit failure | OPEN | Small Phase 4–8 cases only |
@@ -42,7 +42,7 @@ is never a pass.
 | REVIEW-C | Final architecture review | OPEN | Blocked on all acceptance work |
 | QUALITY | Modular ownership, invariants, cleanup, lint/sanitizers | OPEN | Phase 8 lint passes; ultimate implementation not reviewed |
 | GIT | Reviewable commits/checkpoints/builds/artifacts/bisection | FAIL | Earlier phases consolidated into one code commit |
-| REPRO | One-command build/regression/challenge and clean runs | OPEN | `acceptance/scripts/run_regression.sh` now records a machine-readable 26/26 local regression artifact at `107041d67`; clean-build and Grand Challenge entry points remain absent |
+| REPRO | One-command build/regression/challenge and clean runs | OPEN | Regression runner and `TR_datavine_grand_challenge.sh` now exist; smoke artifact is `artifacts/grand-challenge-smoke.json`; clean-build command and accepted-scale challenge remain open |
 | THESIS | Direct evidence for every paper-thesis clause | FAIL | Grand Challenge comparison absent |
 
 ## Mandatory cross-component tests
