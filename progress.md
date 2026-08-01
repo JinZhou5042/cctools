@@ -37,6 +37,9 @@ factory package was rebuilt with `poncho_package_create`; SHA-256 is
 `poncho_package_run -e` verifies cloudpickle 3.1.2 and Workflow import.
 The attempted factory run is **not accepted**: workers remained in
 waiting-connection state, so no distributed correctness claim is made.
+Debug worker logs show the packaged worker starts and reaches the catalog, but
+the advertised manager is either `Connection refused` or `matches 0 managers`;
+the factory manager process is absent. The worker queue was stopped cleanly.
 Evidence: `acceptance/artifacts/transfer-failure-recovery-adb0236b0.json`.
 
 Self-review is **PASS for the scoped transfer-loss/recovery/pruning-race

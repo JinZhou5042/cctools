@@ -27,7 +27,8 @@
   "factory": {
     "result": "NOT_ACCEPTED",
     "reason": "Factory workers remained in waiting-connection state during this run; no distributed correctness claim is made.",
-    "entrypoint_issue": "run_factory.sh lacks executable permission; bash run_factory.sh was used from its package directory."
+    "entrypoint_issue": "run_factory.sh lacks executable permission; bash run_factory.sh was used from its package directory.",
+    "diagnostic": "Debug worker logs show vine_worker starts and reaches catalog, but the advertised manager is either Connection refused or matches 0 managers; the factory manager process is absent."
   },
   "self_review": {
     "scoped_checkpoint": "PASS",

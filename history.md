@@ -15,7 +15,9 @@
 - Rebuilt the factory package with `poncho_package_create`; SHA-256:
   `ed2a93d3e27f8664602fe9b491b81467c19c48c5ae9bf924fdded582cb69d70a`.
   Factory validation is not accepted because workers stayed in
-  waiting-connection state; no distributed claim is made.
+  waiting-connection state. Debug logs show packaged workers reach the catalog
+  but the advertised manager is absent (`Connection refused`/`matches 0
+  managers`); no distributed claim is made.
 - Code commit: `adb0236b0`.
 - Evidence: `acceptance/artifacts/transfer-failure-recovery-adb0236b0.json`.
 - Self-review: **PASS for this scoped checkpoint, FAIL for Review B and
