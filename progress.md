@@ -7,7 +7,7 @@
 - Starting point: `origin/task-graph` / PR #4253 head `345dc7fcde3851400bebb81ccfd877c93a93cdca`
 - New runtime root: `ndcctools.taskvine.datavine`
 - Local Phase 4 acceptance: **PASS**
-- Prescribed factory acceptance: **PASS**
+- Prescribed factory acceptance: **NOT ACCEPTED (latest run blocked by idle Condor slots)**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
 - Active task: **Phase 9 factory validation and Ultimate Acceptance gaps**
@@ -36,7 +36,12 @@ factory package was rebuilt with `poncho_package_create`; SHA-256 is
 `ed2a93d3e27f8664602fe9b491b81467c19c48c5ae9bf924fdded582cb69d70a`, and
 `poncho_package_run -e` verifies cloudpickle 3.1.2 and Workflow import.
 The attempted factory run is **not accepted**: workers remained in
-waiting-connection state, so no distributed correctness claim is made.
+waiting-connection state, so no distributed correctness claim is made. The
+latest retry reached the catalog and created the test Manager, but Condor left
+the requested worker jobs idle (`condor_q`: two jobs, zero running), so the
+two-worker gate could not start. The prescribed launcher is now executable;
+this changes only invocation ergonomics and is not factory correctness
+evidence.
 Debug worker logs show the packaged worker starts and reaches the catalog, but
 the advertised manager is either `Connection refused` or `matches 0 managers`;
 the factory manager process is absent. The worker queue was stopped cleanly.

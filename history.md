@@ -1,5 +1,20 @@
 # DataVine History
 
+## 2026-08-01 — Factory retry blocked by external Condor capacity
+
+- Re-ran the prescribed package workflow with a fresh Manager name after
+  cleaning the interrupted diagnostic processes.
+- The packaged Controller and Manager were reachable and advertised, but the
+  two Condor worker jobs remained idle (`condor_q`: two idle, zero running),
+  so the test never reached its two-worker gate. The run was stopped and the
+  jobs were explicitly removed; no factory PASS is recorded.
+- Marked `/users/jzhou24/graph_optimization/factories/run_factory.sh`
+  executable so the required direct entrypoint works; this external mode bit
+  is not a repository code change.
+- Self-review: **FAIL for factory acceptance and Ultimate Acceptance**;
+  resource availability is an external blocker for this repetition, while
+  the local 26-test checkpoint remains valid.
+
 ## 2026-08-01 — Positive-byte transfer loss recovery and pruning-proof retry
 
 - Surfaced unavailable IData inputs when TaskVine internally retries a
