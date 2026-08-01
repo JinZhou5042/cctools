@@ -125,6 +125,19 @@ def main():
     parser.add_argument("--medium-bytes", type=int, default=64 * 1024)
     parser.add_argument("--large-bytes", type=int, default=0)
     parser.add_argument("--worker-loss", action="store_true")
+    parser.add_argument(
+        "--mode",
+        choices=(
+            "full",
+            "failures",
+            "no-prefetch",
+            "peer-off",
+            "pruning-off",
+            "persistence-legacy",
+            "legacy",
+        ),
+        default="full",
+    )
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--worker-cores", type=int, default=2)
     parser.add_argument("--factory-manager")
@@ -139,6 +152,13 @@ def main():
         parser.error("--workers must be positive")
     if args.worker_cores < 1:
         parser.error("--worker-cores must be positive")
+    if args.mode == "legacy":
+        print(json.dumps({"status": "UNAVAILABLE", "mode": "legacy"}))
+        return 2
+    failure_mode = args.worker_loss or args.mode == "failures"
+    peer_transfers = args.mode != "peer-off"
+    prefetch = args.mode != "no-prefetch"
+    persistence = args.mode == "persistence-legacy"
     workflow, target, expected = build_workflow(
         args.tasks, args.medium_bytes, args.large_bytes
     )
@@ -154,17 +174,19 @@ def main():
         factory_manager=args.factory_manager,
         worker_count=args.workers,
         worker_cores=args.worker_cores,
-        prefetch=True,
-        persistence=False,
-        inject_worker_loss_after=(1.0 if args.worker_loss else None),
-        replacement_worker_delay=(1 if args.worker_loss else None),
+        peer_transfers=peer_transfers,
+        prefetch=prefetch,
+        persistence=persistence,
+        inject_worker_loss_after=(1.0 if failure_mode else None),
+        replacement_worker_delay=(1 if failure_mode else None),
     )
     report = {
         "artifact_type": "datavine-grand-challenge-run",
         "status": "PASS",
         "tasks": len(workflow.tasks),
         "target_task_id": target,
-        "failure_mode": "worker-loss" if args.worker_loss else "none",
+        "failure_mode": "worker-loss" if failure_mode else "none",
+        "mode": args.mode,
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "scheduler_report": snapshot["scheduler_report"],
     }

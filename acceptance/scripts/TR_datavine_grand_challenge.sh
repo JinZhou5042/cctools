@@ -11,8 +11,9 @@ FAILURE_ARGS=()
 if [[ "${DATAVINE_GRAND_WORKER_LOSS:-0}" == "1" ]]; then
   FAILURE_ARGS+=(--worker-loss)
 fi
+MODE=${DATAVINE_GRAND_MODE:-full}
 cd "$ROOT/taskvine/test"
 exec python "$ROOT/acceptance/scripts/datavine_grand_challenge.py" \
   --tasks "$TASKS" --workers "$WORKERS" --worker-cores "$WORKER_CORES" \
-  --medium-bytes "$MEDIUM_BYTES" \
+  --mode "$MODE" --medium-bytes "$MEDIUM_BYTES" \
   --large-bytes "$LARGE_BYTES" --json "${FAILURE_ARGS[@]}"

@@ -16,6 +16,10 @@
   Python RSS at the highest parallelism.
 - A final control run with eight workers at sixteen cores each also timed out,
   ruling out worker-process count as the sole cause.
+- Wired the same workload through full, no-prefetch, and peer-off modes; all
+  three smoke runs passed with expected movement telemetry. Legacy, pruning,
+  persistence-equivalent, and full failure modes remain open.
+- Evidence: `acceptance/artifacts/grand-challenge-modes-smoke.json`.
   This exposes the current control-plane/task-materialization bottleneck and
   is recorded as a failed checkpoint, not acceptance evidence.
 - Evidence: `acceptance/artifacts/grand-challenge-scale-timeout.json`.

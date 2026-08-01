@@ -1,0 +1,12 @@
+{
+  "artifact_type": "datavine-grand-challenge-modes-smoke",
+  "status": "PASS_COMPONENT_ONLY",
+  "ultimate_acceptance": false,
+  "modes": {
+    "full": {"status": "PASS", "prefetch_completed": 10, "peer_transfer_starts": 11},
+    "no-prefetch": {"status": "PASS", "prefetch_completed": 0, "peer_transfer_starts": 11},
+    "peer-off": {"status": "PASS", "prefetch_completed": 10, "peer_transfer_starts": 0}
+  },
+  "command_pattern": "DATAVINE_GRAND_MODE=<full|no-prefetch|peer-off> DATAVINE_GRAND_TASKS=20 acceptance/scripts/TR_datavine_grand_challenge.sh",
+  "note": "Three DataVine modes pass the same oracle. Legacy, failures, pruning-off, and persistence-equivalent modes still require full runner evidence; this is not Ultimate Acceptance."
+}
