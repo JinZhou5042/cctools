@@ -125,6 +125,7 @@ def main():
     parser.add_argument("--medium-bytes", type=int, default=64 * 1024)
     parser.add_argument("--large-bytes", type=int, default=0)
     parser.add_argument("--worker-loss", action="store_true")
+    parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--factory-manager")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -133,6 +134,8 @@ def main():
 
     if args.medium_bytes < 0 or args.large_bytes < 0:
         parser.error("payload sizes must be non-negative")
+    if args.workers < 1:
+        parser.error("--workers must be positive")
     workflow, target, expected = build_workflow(
         args.tasks, args.medium_bytes, args.large_bytes
     )
@@ -146,7 +149,7 @@ def main():
         target,
         expected,
         factory_manager=args.factory_manager,
-        worker_count=2 if args.factory_manager else 2,
+        worker_count=args.workers,
         worker_cores=2,
         prefetch=True,
         persistence=False,

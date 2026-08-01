@@ -37,6 +37,14 @@ The same smoke configuration now has a deterministic worker-loss variant;
 normal and failure runs both pass the exact oracle, with one ordinary
 re-execution. This is still not the required repeated-failure matrix.
 
+The first accepted-scale attempt is a deliberate failure checkpoint:
+10,000 requested tasks timed out at 600 seconds with both two and sixteen
+workers. Python RSS stayed near 53 MB, while scheduler CPU remained active;
+this identifies control-plane/task-materialization overhead as the next
+correction target. Evidence is
+`acceptance/artifacts/grand-challenge-scale-timeout.json`; no scale PASS is
+claimed.
+
 ### Phase 9 transfer-loss recovery and pruning-proof race checkpoint
 
 Commit `adb0236b0` closes the failure path found when a worker loses a source
