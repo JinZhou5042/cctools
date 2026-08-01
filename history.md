@@ -4,9 +4,11 @@
 
 - Added a configurable workload generator with repeated hot edata, nested
   aliased containers, stable multi-output slots, fan-out/diamond branches,
-  peer movement, and prefetch.
-- The development smoke run completed 27 logical tasks with an exact oracle,
-  alias identity validation, 12 peer transfers, and 8 completed prefetches.
+  peer movement, prefetch, and medium/large payload classes consumed by the
+  final oracle.
+- The development smoke run completed 30 logical tasks with 64 KiB medium and
+  256 KiB large payloads, an exact oracle, alias identity validation, peer
+  transfers, and completed prefetches.
 - This is explicitly component-only evidence. The accepted 10,000-task/
   100,000-binding scale, large/medium/volatile/durable data mix, deterministic
   failure schedule, eight comparison modes, resource limits, and Legacy

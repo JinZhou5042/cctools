@@ -35,14 +35,26 @@ def combine(left, right, *, config):
     return left + right
 
 
-def finalize(value, *, config, alias):
+def make_payload(size, seed, *, config):
+    assert config == HOT
+    return bytes((index + seed) % 251 for index in range(size))
+
+
+def summarize_payloads(medium, large, *, config):
+    assert config == HOT
+    return (len(medium), len(large), hashlib.sha256(medium + large).hexdigest())
+
+
+def finalize(value, payload_summary, *, config, alias):
     assert config == HOT
     assert alias[0] is alias[1]["nested"]
     assert alias[0] == config
-    return hashlib.sha256(f"{value}:{config['version']}".encode()).hexdigest()
+    return hashlib.sha256(
+        f"{value}:{payload_summary}:{config['version']}".encode()
+    ).hexdigest()
 
 
-def build_workflow(task_count):
+def build_workflow(task_count, medium_bytes, large_bytes):
     workflow = Workflow()
     roots = []
     # Two-output roots exercise slot identity and repeated immutable edata.
@@ -77,15 +89,32 @@ def build_workflow(task_count):
 
     if not leaves:
         raise ValueError("task_count must be at least 4")
+    medium = workflow.add_task(
+        make_payload, medium_bytes, 17, config=HOT
+    )
+    large = workflow.add_task(
+        make_payload, large_bytes, 29, config=HOT
+    )
+    payload_summary = workflow.add_task(
+        summarize_payloads, medium.output(), large.output(), config=HOT
+    )
     final = workflow.add_task(
         finalize,
         leaves[-1].output(),
+        payload_summary.output(),
         config=HOT,
         alias=[HOT, {"nested": HOT}],
     )
     workflow.validate()
+    medium_payload = bytes((index + 17) % 251 for index in range(medium_bytes))
+    large_payload = bytes((index + 29) % 251 for index in range(large_bytes))
+    payload_summary_value = (
+        len(medium_payload),
+        len(large_payload),
+        hashlib.sha256(medium_payload + large_payload).hexdigest(),
+    )
     expected = hashlib.sha256(
-        f"{leaf_values[-1]}:{HOT['version']}".encode()
+        f"{leaf_values[-1]}:{payload_summary_value}:{HOT['version']}".encode()
     ).hexdigest()
     return workflow, final.task_id, expected
 
@@ -93,13 +122,19 @@ def build_workflow(task_count):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tasks", type=int, default=100)
+    parser.add_argument("--medium-bytes", type=int, default=64 * 1024)
+    parser.add_argument("--large-bytes", type=int, default=0)
     parser.add_argument("--factory-manager")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     if args.tasks < 4:
         parser.error("--tasks must be at least 4")
 
-    workflow, target, expected = build_workflow(args.tasks)
+    if args.medium_bytes < 0 or args.large_bytes < 0:
+        parser.error("payload sizes must be non-negative")
+    workflow, target, expected = build_workflow(
+        args.tasks, args.medium_bytes, args.large_bytes
+    )
     # The final digest is deterministic but depends on the generated graph.
     # The target is fetched from the scheduler snapshot rather than guessed
     # from task ordering, which keeps retries and output slots testable.

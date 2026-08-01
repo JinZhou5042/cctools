@@ -26,9 +26,10 @@ and the comparative resource/failure matrix remain open.
 ### Grand Challenge smoke checkpoint
 
 `acceptance/scripts/datavine_grand_challenge.py` and its wrapper now provide a
-configurable graph generator. A 20-requested-task smoke run expands to 27
-logical tasks and validates exact output, nested alias identity, multi-output
-slots, peer transfers, and prefetch. It is component-only evidence; the
+configurable graph generator. A 20-requested-task smoke run with 64 KiB medium
+and 256 KiB large payloads expands to 30 logical tasks and validates exact
+output, nested alias identity, multi-output slots, peer transfers, prefetch,
+and consumption of both payload classes. It is component-only evidence; the
 required 10,000-task scale, 100,000 bindings, durable/bulk data mix, failure
 schedule, eight modes, and Legacy comparison remain open.
 
