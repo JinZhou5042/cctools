@@ -547,7 +547,7 @@ Queue a remote file transfer to produce a file.
 This entry will be materialized later in vine_cache_ensure.
 */
 
-int vine_cache_add_transfer(struct vine_cache *c, const char *cachename, const char *source, vine_cache_level_t level, int mode, uint64_t size, const char *expected_sha256, int inject_corruption, vine_cache_flags_t flags, struct link *manager)
+int vine_cache_add_transfer(struct vine_cache *c, const char *cachename, const char *source, vine_cache_level_t level, int mode, uint64_t size, const char *expected_sha256, int inject_corruption, uint64_t pause_after_progress_usec, vine_cache_flags_t flags, struct link *manager)
 {
 	/* Has this transfer already been queued? */
 	struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
@@ -579,6 +579,7 @@ int vine_cache_add_transfer(struct vine_cache *c, const char *cachename, const c
 		f->expected_sha256 = xxstrdup(expected_sha256);
 	}
 	f->inject_corruption = !!inject_corruption;
+	f->pause_after_progress_usec = pause_after_progress_usec;
 
 	/*
 	XXX Note that VINE_URL may not be right b/c puturl may be used to
@@ -1226,6 +1227,21 @@ static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *
 				vine_worker_send_cache_transfer_progress(
 						cachename,
 						f->transfer_bytes_observed);
+				if (f->pause_after_progress_usec > 0) {
+					uint64_t pause_usec =
+							f->pause_after_progress_usec;
+					f->pause_after_progress_usec = 0;
+					kill(f->pid, SIGSTOP);
+					while (pause_usec > 0) {
+						uint64_t chunk =
+								pause_usec > 500000
+								? 500000
+								: pause_usec;
+						usleep(chunk);
+						pause_usec -= chunk;
+					}
+					kill(f->pid, SIGCONT);
+				}
 			}
 			free(transfer_path);
 		}

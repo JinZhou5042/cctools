@@ -21,6 +21,7 @@ struct vine_cache_file {
 	char *source;
 	char *expected_sha256;
 	int inject_corruption;
+	uint64_t pause_after_progress_usec;
 	struct vine_task *mini_task;
 
 	/* Dynamic state tracking process to materialize the file. */

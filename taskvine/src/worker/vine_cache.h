@@ -61,7 +61,7 @@ char *vine_cache_transfer_path( struct vine_cache *c, const char *cachename );
 char *vine_cache_error_path( struct vine_cache *c, const char *cachename );
 
 int vine_cache_add_file( struct vine_cache *c, const char *cachename, const char *transfer_path, vine_cache_level_t level, int mode, uint64_t size, time_t mtime, timestamp_t start_time, timestamp_t transfer_time, struct link *manager );
-int vine_cache_add_transfer( struct vine_cache *c, const char *cachename, const char *source, vine_cache_level_t level, int mode, uint64_t size, const char *expected_sha256, int inject_corruption, vine_cache_flags_t flags, struct link *manager );
+int vine_cache_add_transfer( struct vine_cache *c, const char *cachename, const char *source, vine_cache_level_t level, int mode, uint64_t size, const char *expected_sha256, int inject_corruption, uint64_t pause_after_progress_usec, vine_cache_flags_t flags, struct link *manager );
 int vine_cache_add_mini_task( struct vine_cache *c, const char *cachename, const char *source, struct vine_task *mini_task, vine_cache_level_t level, int mode, uint64_t size, struct link *manager );
 
 vine_cache_status_t vine_cache_ensure( struct vine_cache *c, const char *cachename);

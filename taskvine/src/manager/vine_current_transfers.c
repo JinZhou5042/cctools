@@ -134,6 +134,20 @@ int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 	struct vine_transfer_pair *p;
 	p = hash_table_lookup(q->current_transfer_table, id);
 	if (p) {
+		if (q->datavine_deferred_peer_source_loss_transfer_id
+				&& !strcmp(
+						q->datavine_deferred_peer_source_loss_transfer_id,
+						id)) {
+			free(q->datavine_deferred_peer_source_loss_transfer_id);
+			q->datavine_deferred_peer_source_loss_transfer_id = 0;
+			free(
+					q->datavine_deferred_peer_source_loss_destination_workerid);
+			q->datavine_deferred_peer_source_loss_destination_workerid =
+					0;
+			if (!q->datavine_deferred_peer_source_loss_triggering) {
+				q->datavine_deferred_peer_source_loss_expirations++;
+			}
+		}
 		if (p->datavine_lease) {
 			int injected_failure =
 					p->datavine_data_id

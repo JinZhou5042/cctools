@@ -261,7 +261,14 @@ vine_result_code_t vine_manager_put_url_now(struct vine_manager *q, struct vine_
 		q->datavine_peer_corruptions_injected++;
 		inject_corruption = 1;
 	}
-	vine_manager_send(q, dest_worker, "puturl_now %s %s %d %lld 0%o %s %s %d\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id, expected_hash, inject_corruption);
+	uint64_t pause_after_progress_usec =
+			source_worker
+					&& q->datavine_fault_peer_source_loss_after_bytes_deferred
+					&& q->datavine_fault_peer_source_loss_after_bytes_remaining
+							> 0
+			? 5000000
+			: 0;
+	vine_manager_send(q, dest_worker, "puturl_now %s %s %d %lld 0%o %s %s %d %" PRIu64 "\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id, expected_hash, inject_corruption, pause_after_progress_usec);
 
 	vine_file_replica_table_get_or_create(q, dest_worker, f->cached_name, f->type, f->cache_level, f->size, f->mtime);
 
@@ -317,7 +324,14 @@ vine_result_code_t vine_manager_put_url(struct vine_manager *q, struct vine_work
 		q->datavine_peer_corruptions_injected++;
 		inject_corruption = 1;
 	}
-	vine_manager_send(q, dest_worker, "puturl %s %s %d %lld 0%o %s %s %d\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id, expected_hash, inject_corruption);
+	uint64_t pause_after_progress_usec =
+			source_worker
+					&& q->datavine_fault_peer_source_loss_after_bytes_deferred
+					&& q->datavine_fault_peer_source_loss_after_bytes_remaining
+							> 0
+			? 5000000
+			: 0;
+	vine_manager_send(q, dest_worker, "puturl %s %s %d %lld 0%o %s %s %d %" PRIu64 "\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id, expected_hash, inject_corruption, pause_after_progress_usec);
 
 	vine_file_replica_table_get_or_create(q, dest_worker, f->cached_name, f->type, f->cache_level, f->size, f->mtime);
 

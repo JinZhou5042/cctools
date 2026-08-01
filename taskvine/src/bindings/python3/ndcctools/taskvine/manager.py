@@ -1019,6 +1019,26 @@ class Manager(object):
                     self._taskvine
                 )
             ),
+            "deferred_peer_source_loss_pending": int(
+                cvine.vine_manager_datavine_deferred_peer_source_loss_pending(
+                    self._taskvine
+                )
+            ),
+            "deferred_peer_source_loss_pauses": int(
+                cvine.vine_manager_datavine_deferred_peer_source_loss_pauses(
+                    self._taskvine
+                )
+            ),
+            "deferred_peer_source_loss_triggers": int(
+                cvine.vine_manager_datavine_deferred_peer_source_loss_triggers(
+                    self._taskvine
+                )
+            ),
+            "deferred_peer_source_loss_expirations": int(
+                cvine.vine_manager_datavine_deferred_peer_source_loss_expirations(
+                    self._taskvine
+                )
+            ),
             "peer_transfer_cleanup_reports": int(
                 cvine.vine_manager_datavine_peer_transfer_cleanup_reports(
                     self._taskvine

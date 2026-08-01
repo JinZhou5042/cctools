@@ -258,6 +258,13 @@ struct vine_manager {
 	int datavine_fault_peer_source_loss_remaining; /* One-shot failures after a leased peer request is dispatched. */
 	int datavine_fault_peer_source_loss_after_bytes_remaining;
 	uint64_t datavine_fault_peer_source_loss_after_bytes_threshold;
+	int datavine_fault_peer_source_loss_after_bytes_deferred;
+	char *datavine_deferred_peer_source_loss_transfer_id;
+	char *datavine_deferred_peer_source_loss_destination_workerid;
+	int datavine_deferred_peer_source_loss_triggering;
+	uint64_t datavine_deferred_peer_source_loss_pauses;
+	uint64_t datavine_deferred_peer_source_loss_triggers;
+	uint64_t datavine_deferred_peer_source_loss_expirations;
 	uint64_t datavine_peer_transfer_starts;
 	uint64_t datavine_peer_transfer_progress_events;
 	uint64_t datavine_peer_transfer_progress_max_bytes;

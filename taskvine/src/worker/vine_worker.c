@@ -1196,9 +1196,9 @@ static int do_put(struct link *manager, const char *cachename, vine_cache_level_
 Accept a url specification and queue it for later transfer.
 */
 
-static int do_put_url(struct link *manager, const char *cache_name, vine_cache_level_t cache_level, int64_t size, int mode, const char *source, const char *expected_sha256, int inject_corruption)
+static int do_put_url(struct link *manager, const char *cache_name, vine_cache_level_t cache_level, int64_t size, int mode, const char *source, const char *expected_sha256, int inject_corruption, uint64_t pause_after_progress_usec)
 {
-	vine_cache_add_transfer(cache_manager, cache_name, source, cache_level, mode, size, expected_sha256, inject_corruption, VINE_CACHE_FLAGS_ON_TASK, manager);
+	vine_cache_add_transfer(cache_manager, cache_name, source, cache_level, mode, size, expected_sha256, inject_corruption, pause_after_progress_usec, VINE_CACHE_FLAGS_ON_TASK, manager);
 	return 1;
 }
 
@@ -1206,9 +1206,9 @@ static int do_put_url(struct link *manager, const char *cache_name, vine_cache_l
 Accept a url specification and transfer immediately.
 */
 
-static int do_put_url_now(struct link *manager, const char *cache_name, vine_cache_level_t cache_level, int64_t size, int mode, const char *source, const char *expected_sha256, int inject_corruption)
+static int do_put_url_now(struct link *manager, const char *cache_name, vine_cache_level_t cache_level, int64_t size, int mode, const char *source, const char *expected_sha256, int inject_corruption, uint64_t pause_after_progress_usec)
 {
-	vine_cache_add_transfer(cache_manager, cache_name, source, cache_level, mode, size, expected_sha256, inject_corruption, VINE_CACHE_FLAGS_NOW, manager);
+	vine_cache_add_transfer(cache_manager, cache_name, source, cache_level, mode, size, expected_sha256, inject_corruption, pause_after_progress_usec, VINE_CACHE_FLAGS_NOW, manager);
 	return 1;
 }
 
@@ -1503,6 +1503,7 @@ static int handle_manager(struct link *manager)
 	char transfer_id[VINE_LINE_MAX];
 	char expected_sha256[65];
 	int inject_corruption;
+	uint64_t pause_after_progress_usec;
 	char operation_id[UUID_LEN + 1];
 	int64_t length;
 	int64_t cache_capacity_items;
@@ -1519,29 +1520,41 @@ static int handle_manager(struct link *manager)
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = do_put(manager, filename, cache_level, length);
 			reset_idle_timer();
+		} else if (sscanf(line, "puturl %s %s %d %" SCNd64 " %o %s %64s %d %" SCNu64, source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id, expected_sha256, &inject_corruption, &pause_after_progress_usec) == 9) {
+			url_decode(filename_encoded, filename, sizeof(filename));
+			url_decode(source_encoded, source, sizeof(source));
+			hash_table_insert(current_transfers, filename, strdup(transfer_id));
+			r = do_put_url(manager, filename, cache_level, length, mode, source, expected_sha256, inject_corruption, pause_after_progress_usec);
+			reset_idle_timer();
 		} else if (sscanf(line, "puturl %s %s %d %" SCNd64 " %o %s %64s %d", source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id, expected_sha256, &inject_corruption) == 8) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			url_decode(source_encoded, source, sizeof(source));
 			hash_table_insert(current_transfers, filename, strdup(transfer_id));
-			r = do_put_url(manager, filename, cache_level, length, mode, source, expected_sha256, inject_corruption);
+			r = do_put_url(manager, filename, cache_level, length, mode, source, expected_sha256, inject_corruption, 0);
 			reset_idle_timer();
 		} else if (sscanf(line, "puturl %s %s %d %" SCNd64 " %o %s", source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id) == 6) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			url_decode(source_encoded, source, sizeof(source));
 			hash_table_insert(current_transfers, filename, strdup(transfer_id));
-			r = do_put_url(manager, filename, cache_level, length, mode, source, NULL, 0);
+			r = do_put_url(manager, filename, cache_level, length, mode, source, NULL, 0, 0);
+			reset_idle_timer();
+		} else if (sscanf(line, "puturl_now %s %s %d %" SCNd64 " %o %s %64s %d %" SCNu64, source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id, expected_sha256, &inject_corruption, &pause_after_progress_usec) == 9) {
+			url_decode(filename_encoded, filename, sizeof(filename));
+			url_decode(source_encoded, source, sizeof(source));
+			hash_table_insert(current_transfers, filename, strdup(transfer_id));
+			r = do_put_url_now(manager, filename, cache_level, length, mode, source, expected_sha256, inject_corruption, pause_after_progress_usec);
 			reset_idle_timer();
 		} else if (sscanf(line, "puturl_now %s %s %d %" SCNd64 " %o %s %64s %d", source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id, expected_sha256, &inject_corruption) == 8) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			url_decode(source_encoded, source, sizeof(source));
 			hash_table_insert(current_transfers, filename, strdup(transfer_id));
-			r = do_put_url_now(manager, filename, cache_level, length, mode, source, expected_sha256, inject_corruption);
+			r = do_put_url_now(manager, filename, cache_level, length, mode, source, expected_sha256, inject_corruption, 0);
 			reset_idle_timer();
 		} else if (sscanf(line, "puturl_now %s %s %d %" SCNd64 " %o %s", source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id) == 6) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			url_decode(source_encoded, source, sizeof(source));
 			hash_table_insert(current_transfers, filename, strdup(transfer_id));
-			r = do_put_url_now(manager, filename, cache_level, length, mode, source, NULL, 0);
+			r = do_put_url_now(manager, filename, cache_level, length, mode, source, NULL, 0, 0);
 			reset_idle_timer();
 		} else if (sscanf(line, "mini_task %s %s %d %" SCNd64 " %o", source_encoded, filename_encoded, &cache_level, &length, &mode) == 5) {
 			url_decode(source_encoded, source, sizeof(source));

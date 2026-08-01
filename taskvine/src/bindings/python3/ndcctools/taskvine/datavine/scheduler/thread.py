@@ -21,6 +21,7 @@ from ..cache import WorkerCacheAdmission
 from ..placement.policy import PrefetchCandidate, select_prefetch
 from ..serialization import serialize
 from ..workflow import OutputRef, iter_output_refs
+from ..protocol import DataVineRemoteError
 
 
 class TaskSchedulerThread:
@@ -445,6 +446,8 @@ class TaskSchedulerThread:
         frontier_pruning_ack_delay=0,
         inject_peer_source_losses=0,
         inject_peer_source_loss_after_bytes=0,
+        defer_peer_source_loss_after_bytes=False,
+        peer_transfer_pruning_probe_task_ids=(),
         inject_peer_corruptions=0,
         inject_idata_release_failures=0,
         peer_release_retry_seconds=0.1,
@@ -512,6 +515,24 @@ class TaskSchedulerThread:
                 "TaskVine Manager rejected byte-counted "
                 "peer source-loss injection"
             )
+        defer_peer_source_loss_after_bytes = bool(
+            defer_peer_source_loss_after_bytes
+        )
+        if (
+            defer_peer_source_loss_after_bytes
+            and peer_source_loss_after_bytes <= 0
+        ):
+            raise ValueError(
+                "deferred peer source loss requires a positive "
+                "byte threshold"
+            )
+        if self._manager.tune(
+            "datavine-fault-peer-source-loss-after-bytes-deferred",
+            int(defer_peer_source_loss_after_bytes),
+        ) != 0:
+            raise RuntimeError(
+                "TaskVine Manager rejected deferred peer source loss"
+            )
         peer_corruptions = int(inject_peer_corruptions)
         if peer_corruptions < 0:
             raise ValueError("peer corruption count is negative")
@@ -554,6 +575,23 @@ class TaskSchedulerThread:
                 "TaskVine Manager rejected peer release capacity"
             )
         output_ids = self._op_register_workflow(workflow)
+        peer_transfer_pruning_probe_task_ids = tuple(
+            sorted(
+                {
+                    int(task_id)
+                    for task_id
+                    in peer_transfer_pruning_probe_task_ids
+                }
+            )
+        )
+        unknown_probe_tasks = (
+            set(peer_transfer_pruning_probe_task_ids) - set(output_ids)
+        )
+        if unknown_probe_tasks:
+            raise ValueError(
+                "peer transfer pruning probe has unknown TaskIDs "
+                f"{sorted(unknown_probe_tasks)}"
+            )
         producer_by_data_id = {
             data_id: task_id
             for task_id, data_ids in self._logical_output_slots.items()
@@ -919,6 +957,7 @@ class TaskSchedulerThread:
         completed_once = set()
         recovery_reexecutions = 0
         recovery_waves = []
+        unavailable_input_recoveries = []
         loss_injected = False
         worker_loss_injections = 0
         worker_loss_events = []
@@ -926,6 +965,8 @@ class TaskSchedulerThread:
         partial_publication_failures = []
         partial_publication_triggered = set()
         partial_publication_cancelled = {}
+        peer_transfer_pruning_probes = []
+        peer_transfer_pruning_probe_triggered = False
 
         def queue_frontier_pruning_if_ready(frontier_task_id):
             if (
@@ -1305,14 +1346,28 @@ class TaskSchedulerThread:
                     prune_data_ids = frontier_pruning_pending.pop(
                         frontier_task_id
                     )
-                    plan = self.controller.pruning_plan()
-                    result = self.controller.apply_pruning(
-                        plan["records"][0]["graph_revision"],
-                        plan["records"][0]["state_revision"],
-                        0,
-                        prune_data_ids,
-                        None,
-                    )
+                    # Worker reconciliation and recovery can advance the
+                    # Controller proof between the read and POST.  Retry
+                    # only this optimistic revision check with a fresh proof;
+                    # never apply a stale pruning decision.
+                    for pruning_retry in range(3):
+                        plan = self.controller.pruning_plan()
+                        try:
+                            result = self.controller.apply_pruning(
+                                plan["records"][0]["graph_revision"],
+                                plan["records"][0]["state_revision"],
+                                0,
+                                prune_data_ids,
+                                None,
+                            )
+                            break
+                        except DataVineRemoteError as exc:
+                            if (
+                                "pruning proof revision changed"
+                                not in str(exc)
+                                or pruning_retry == 2
+                            ):
+                                raise
                     now_value = time.monotonic()
                     frontier_pruning_active = {
                         "frontier_task_id": frontier_task_id,
@@ -1524,6 +1579,96 @@ class TaskSchedulerThread:
             completed = self._manager.wait(wait_timeout)
             self._sync_worker_epochs()
             self._cache_admission.poll(self._manager)
+
+            # TaskVine workers may forsake a task whose input transfer fails
+            # and the C manager will normally retry that physical task
+            # internally.  DataVine must regain ownership of this failure so
+            # that the logical task can be recovered from stable lineage
+            # instead of looping on a stale attempt indefinitely.
+            for physical_id, logical_id in tuple(running.items()):
+                missing_inputs = []
+                for input_data_id in self.controller.get_task(
+                    logical_id
+                ).input_data_ids:
+                    if not self.controller.idata_status(
+                        input_data_id
+                    )["available"]:
+                        missing_inputs.append(input_data_id)
+                if not missing_inputs:
+                    continue
+                # The C manager may already have moved this attempt into its
+                # own retrieval/retry path.  In that case cancellation is no
+                # longer owned by DataVine; leave the attempt there and wait
+                # for the normal Manager event rather than treating ordinary
+                # capacity backpressure as global loss.
+                if not self._manager.cancel_by_task_id(physical_id):
+                    continue
+                running.pop(physical_id)
+                pending.add(logical_id)
+                self.controller.set_task_state(logical_id, "pending")
+                for output_data_id in self._logical_output_slots[
+                    logical_id
+                ]:
+                    self.controller.invalidate_idata(output_data_id)
+                recovery_reexecutions += 1
+                unavailable_input_recoveries.append(
+                    {
+                        "task_id": logical_id,
+                        "physical_task_id": physical_id,
+                        "missing_inputs": missing_inputs,
+                        "attempt": self._attempts[logical_id],
+                    }
+                )
+            if (
+                defer_peer_source_loss_after_bytes
+                and not peer_transfer_pruning_probe_triggered
+            ):
+                peer_faults = (
+                    self._manager.datavine_peer_transfer_fault_stats()
+                )
+                if peer_faults[
+                    "deferred_peer_source_loss_pending"
+                ]:
+                    plan = self.controller.pruning_plan()
+                    records = {
+                        int(record["data_id"]): record
+                        for record in plan["records"]
+                    }
+                    selected = []
+                    for task_id in (
+                        peer_transfer_pruning_probe_task_ids
+                    ):
+                        for data_id in self._logical_output_slots[
+                            task_id
+                        ]:
+                            selected.append(records[int(data_id)])
+                    peer_transfer_pruning_probes.append(
+                        {
+                            "partial_bytes": peer_faults[
+                                "peer_transfer_progress_max_bytes"
+                            ],
+                            "records": selected,
+                            "graph_revision": (
+                                selected[0]["graph_revision"]
+                                if selected
+                                else None
+                            ),
+                            "state_revision": (
+                                selected[0]["state_revision"]
+                                if selected
+                                else None
+                            ),
+                        }
+                    )
+                    if self._manager.tune(
+                        "datavine-trigger-deferred-peer-source-loss",
+                        1,
+                    ) != 0:
+                        raise RuntimeError(
+                            "deferred peer source loss disappeared "
+                            "before explicit Scheduler trigger"
+                        )
+                    peer_transfer_pruning_probe_triggered = True
             if completed is None:
                 for physical_id, logical_id in tuple(running.items()):
                     output_index = (
@@ -1849,6 +1994,12 @@ class TaskSchedulerThread:
                 queue_frontier_pruning_if_ready(
                     producer_by_data_id[data_id]
                 )
+                continue
+            # A physical attempt that DataVine cancelled while reclaiming an
+            # unavailable input may still be returned by Manager.wait.  Its
+            # logical task has already been moved back to pending; late
+            # completion must be ignored rather than treated as a duplicate.
+            if completed.id not in running:
                 continue
             logical_id = running.pop(completed.id)
             if frontier_pruning_active is not None:
@@ -2207,6 +2358,15 @@ class TaskSchedulerThread:
         if persist_outputs:
             for output_data_id in sorted(persistence_required):
                 self._wait_durable(output_data_id)
+        if (
+            defer_peer_source_loss_after_bytes
+            and not peer_transfer_pruning_probe_triggered
+        ):
+            raise RuntimeError(
+                "deferred peer source loss never reached its "
+                "positive-byte pruning probe: "
+                f"{self._manager.datavine_peer_transfer_fault_stats()}"
+            )
         peer_release_drain_started = time.monotonic()
         peer_release_drain_iterations = 0
         peer_release_drain_deadline = (
@@ -2264,6 +2424,9 @@ class TaskSchedulerThread:
             ),
             "physical_attempts": sum(self._attempts.values()),
             "recovery_reexecutions": recovery_reexecutions,
+            "unavailable_input_recoveries": (
+                unavailable_input_recoveries
+            ),
             "recovery_waves": recovery_waves,
             "legacy_recovery_tasks": int(
                 self._manager.stats.tasks_recovery
@@ -2280,6 +2443,15 @@ class TaskSchedulerThread:
             "peer_source_losses_requested": peer_source_losses,
             "peer_source_loss_after_bytes_requested": (
                 peer_source_loss_after_bytes
+            ),
+            "deferred_peer_source_loss_after_bytes": (
+                defer_peer_source_loss_after_bytes
+            ),
+            "peer_transfer_pruning_probe_task_ids": list(
+                peer_transfer_pruning_probe_task_ids
+            ),
+            "peer_transfer_pruning_probes": (
+                peer_transfer_pruning_probes
             ),
             "peer_corruptions_requested": peer_corruptions,
             "idata_release_failures_requested": (

@@ -1559,6 +1559,11 @@ Disabled by default. (default=0)
  - "datavine-fault-peer-corruption" Test-only count of leased peer transfers
 whose received bytes are corrupted before worker-side SHA-256 validation.
 Disabled by default. (default=0)
+ - "datavine-fault-peer-source-loss-after-bytes-deferred" Test-only mode that
+retains a byte-threshold source-loss fault until an explicit trigger, allowing
+deterministic inspection of the positive-partial-write window. (default=0)
+ - "datavine-trigger-deferred-peer-source-loss" Test-only trigger for the
+currently retained byte-threshold source-loss fault. Fails if none is pending.
  - "datavine-fault-idata-release-failure" Test-only count of successful
 IData peer transfers whose first Controller lease release is retained for
 bounded retry. Disabled by default. (default=0)
@@ -1593,6 +1598,14 @@ uint64_t vine_manager_datavine_peer_transfer_progress_events(
 
 /** Return the largest validated partial peer-transfer byte observation. */
 uint64_t vine_manager_datavine_peer_transfer_progress_max_bytes(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_deferred_peer_source_loss_pending(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_deferred_peer_source_loss_pauses(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_deferred_peer_source_loss_triggers(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_deferred_peer_source_loss_expirations(
 		struct vine_manager *m);
 
 /** Return reports issued after failed partial-transfer cleanup. */
