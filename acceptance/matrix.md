@@ -8,7 +8,7 @@ is never a pass.
 |---|---|---|---|
 | GC-SCALE | 10k tasks, 100k bindings, churn, storage pressure | FAIL | `artifacts/grand-challenge-scale-timeout.json`: 10,000-task workload timed out at 600s with both 2 and 16 local workers; control-plane batching/materialization must be corrected |
 | GC-SHAPE | All graph/data shapes in one workflow | OPEN | `acceptance/scripts/datavine_grand_challenge.py` now exercises repeated edata, nested aliasing, multi-output slots, fan-out/diamonds and peer/prefetch in a smoke run; full required data classes and scale remain open |
-| GC-MODES | Eight mandatory comparison modes | OPEN | Workload runner exists, but mode matrix and Legacy driver remain absent |
+| GC-MODES | Eight mandatory comparison modes | OPEN | Five DataVine smoke modes pass at `artifacts/grand-challenge-modes-smoke.json`; Legacy and pruning-disabled accepted runs plus scale/resource comparison remain absent |
 | GC-LEGACY | Architectural Legacy limit demonstrated | OPEN | Comparable Legacy driver absent |
 | CORRECT | Exact oracle, failures equal normal, safe explicit failure | OPEN | Small Phase 4–8 cases only |
 | MULTIOUT | Multiple outputs and partial downstream demand | PASS | `artifacts/partial-publication-79bcbc832.json`, commit `79bcbc832` |
