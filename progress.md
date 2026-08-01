@@ -11,7 +11,17 @@
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
 - Active task: **Phase 9 factory validation and Ultimate Acceptance gaps**
-- Validated code commit: `adb0236b0`
+- Validated code commit: `adb0236b0`; latest acceptance/docs commit:
+  `8c2602c89`
+
+### Reproducibility checkpoint
+
+`acceptance/scripts/run_regression.sh` is now the bounded one-command local
+regression entry point. Its first committed end-to-end run passed all 26
+`TR_datavine_*.sh` workflows and recorded per-test timings and the exact Git
+commit in `acceptance/artifacts/regression-latest.json`. This does not satisfy
+the final gate: clean-build and Grand Challenge commands, factory acceptance,
+and the comparative resource/failure matrix remain open.
 
 ### Phase 9 transfer-loss recovery and pruning-proof race checkpoint
 
