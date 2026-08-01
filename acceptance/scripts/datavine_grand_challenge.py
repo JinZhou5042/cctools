@@ -177,6 +177,7 @@ def main():
         peer_transfers=peer_transfers,
         prefetch=prefetch,
         persistence=persistence,
+        persistence_attempts_by_task=({target: 1} if persistence else None),
         inject_worker_loss_after=(1.0 if failure_mode else None),
         replacement_worker_delay=(1 if failure_mode else None),
     )

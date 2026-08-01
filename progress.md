@@ -51,6 +51,10 @@ peer-off configurations. All three pass the oracle; telemetry shows the
 expected prefetch and peer-transfer deltas. This is only partial mode coverage
 and does not close the eight-mode requirement.
 
+Failure-injection and persistence-equivalent modes also pass the smoke oracle;
+the persistence path records one Controller durability completion. Legacy and
+pruning-disabled modes, accepted scale, and resource comparisons remain open.
+
 ### Phase 9 transfer-loss recovery and pruning-proof race checkpoint
 
 Commit `adb0236b0` closes the failure path found when a worker loses a source

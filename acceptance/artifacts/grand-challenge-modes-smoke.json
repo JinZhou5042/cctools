@@ -6,7 +6,9 @@
     "full": {"status": "PASS", "prefetch_completed": 10, "peer_transfer_starts": 11},
     "no-prefetch": {"status": "PASS", "prefetch_completed": 0, "peer_transfer_starts": 11},
     "peer-off": {"status": "PASS", "prefetch_completed": 10, "peer_transfer_starts": 0}
+    ,"failures": {"status": "PASS", "recovery_reexecutions": 1}
+    ,"persistence-legacy": {"status": "PASS", "persistence_controller_tasks_completed": 1}
   },
   "command_pattern": "DATAVINE_GRAND_MODE=<full|no-prefetch|peer-off> DATAVINE_GRAND_TASKS=20 acceptance/scripts/TR_datavine_grand_challenge.sh",
-  "note": "Three DataVine modes pass the same oracle. Legacy, failures, pruning-off, and persistence-equivalent modes still require full runner evidence; this is not Ultimate Acceptance."
+  "note": "Five DataVine modes pass the same oracle in smoke runs. Legacy and pruning-off remain; the scale, fault breadth, resource metrics, and comparison evidence are not Ultimate Acceptance."
 }

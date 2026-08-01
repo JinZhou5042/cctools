@@ -19,6 +19,9 @@
 - Wired the same workload through full, no-prefetch, and peer-off modes; all
   three smoke runs passed with expected movement telemetry. Legacy, pruning,
   persistence-equivalent, and full failure modes remain open.
+- Added smoke coverage for deterministic failures and persistence-equivalent
+  execution; both pass the oracle, and persistence records one Controller
+  durability completion.
 - Evidence: `acceptance/artifacts/grand-challenge-modes-smoke.json`.
   This exposes the current control-plane/task-materialization bottleneck and
   is recorded as a failed checkpoint, not acceptance evidence.
