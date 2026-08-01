@@ -38,8 +38,8 @@ normal and failure runs both pass the exact oracle, with one ordinary
 re-execution. This is still not the required repeated-failure matrix.
 
 The first accepted-scale attempt is a deliberate failure checkpoint:
-10,000 requested tasks timed out at 600 seconds with both two and sixteen
-workers. Python RSS stayed near 53 MB, while scheduler CPU remained active;
+10,000 requested tasks timed out at 600 seconds with two, sixteen, and
+sixty-four workers. Python RSS stayed near 56 MB, while scheduler CPU remained active;
 this identifies control-plane/task-materialization overhead as the next
 correction target. Evidence is
 `acceptance/artifacts/grand-challenge-scale-timeout.json`; no scale PASS is

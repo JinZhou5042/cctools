@@ -11,8 +11,9 @@
   transfers, and completed prefetches.
 - Added the same workload's deterministic worker-loss mode; paired normal and
   failure runs both passed the exact oracle with one ordinary re-execution.
-- Attempted the 10,000-task scale with 2 and 16 local workers under a 600-second
-  bound; both timed out before the oracle, with approximately 53 MB Python RSS.
+- Attempted the 10,000-task scale with 2, 16, and 64 local workers under a
+  600-second bound; all timed out before the oracle, with approximately 56 MB
+  Python RSS at the highest parallelism.
   This exposes the current control-plane/task-materialization bottleneck and
   is recorded as a failed checkpoint, not acceptance evidence.
 - Evidence: `acceptance/artifacts/grand-challenge-scale-timeout.json`.
