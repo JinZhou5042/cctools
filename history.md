@@ -1,5 +1,15 @@
 # DataVine History
 
+## 2026-08-01 — One-command local regression runner
+
+- Added `acceptance/scripts/run_regression.sh`, which runs every
+  `TR_datavine_*.sh` script with a bounded timeout and writes a machine-readable
+  result containing the exact Git commit and per-test durations.
+- The first end-to-end invocation passed all 26 DataVine regressions.
+- This closes only the local regression-entry-point portion of REPRO; clean
+  build and Grand Challenge commands remain open.
+- Evidence: `acceptance/artifacts/regression-latest.json`.
+
 ## 2026-08-01 — Factory retry blocked by external Condor capacity
 
 - Re-ran the prescribed package workflow with a fresh Manager name after

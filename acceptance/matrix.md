@@ -42,7 +42,7 @@ is never a pass.
 | REVIEW-C | Final architecture review | OPEN | Blocked on all acceptance work |
 | QUALITY | Modular ownership, invariants, cleanup, lint/sanitizers | OPEN | Phase 8 lint passes; ultimate implementation not reviewed |
 | GIT | Reviewable commits/checkpoints/builds/artifacts/bisection | FAIL | Earlier phases consolidated into one code commit |
-| REPRO | One-command build/regression/challenge and clean runs | FAIL | Acceptance entry points absent |
+| REPRO | One-command build/regression/challenge and clean runs | OPEN | `acceptance/scripts/run_regression.sh` now records a machine-readable 26/26 local regression artifact at `107041d67`; clean-build and Grand Challenge entry points remain absent |
 | THESIS | Direct evidence for every paper-thesis clause | FAIL | Grand Challenge comparison absent |
 
 ## Mandatory cross-component tests
