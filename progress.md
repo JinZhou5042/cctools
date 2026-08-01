@@ -10,8 +10,40 @@
 - Prescribed factory acceptance: **PASS**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 byte-counted transfer failure during pruning**
-- Validated code commit: `f60fe7582`
+- Active task: **Phase 9 factory validation and Ultimate Acceptance gaps**
+- Validated code commit: `adb0236b0`
+
+### Phase 9 transfer-loss recovery and pruning-proof race checkpoint
+
+Commit `adb0236b0` closes the failure path found when a worker loses a source
+after a positive-byte peer transfer. TaskVine can internally retry a
+`FORSAKEN` physical attempt without returning it to Python; DataVine now
+observes unavailable inputs, cancels only an owned stale attempt, returns the
+logical TaskID to pending, and reuses ordinary lineage recovery. Late results
+from cancelled physical attempts are ignored by physical TaskID. Capacity
+backpressure remains on the C-managed path when cancellation is no longer
+owned by DataVine.
+
+The same deterministic window records a pruning proof while bytes are still
+in flight. A fresh-proof retry handles Controller revision advancement
+between proof read and apply; stale proof is never applied. The new
+48,600,009-byte EData workflow records positive transfer bytes, one source
+loss, `keep` during the pruning probe, source attempt count two, two worker
+prunes, one cleanup report, and zero legacy recovery tasks.
+
+The exact clean build/install and all 26 local DataVine regressions pass. The
+factory package was rebuilt with `poncho_package_create`; SHA-256 is
+`ed2a93d3e27f8664602fe9b491b81467c19c48c5ae9bf924fdded582cb69d70a`, and
+`poncho_package_run -e` verifies cloudpickle 3.1.2 and Workflow import.
+The attempted factory run is **not accepted**: workers remained in
+waiting-connection state, so no distributed correctness claim is made.
+Evidence: `acceptance/artifacts/transfer-failure-recovery-adb0236b0.json`.
+
+Self-review is **PASS for the scoped transfer-loss/recovery/pruning-race
+checkpoint; FAIL for Review B and Ultimate Acceptance**. The next correction
+is factory startup/worker-connectivity diagnosis, followed by the required
+factory repetitions. Grand Challenge scale, Legacy comparison, Controller
+restart, and remaining checklist rows are still open.
 
 ## Ultimate acceptance reset
 

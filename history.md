@@ -1,5 +1,27 @@
 # DataVine History
 
+## 2026-08-01 — Positive-byte transfer loss recovery and pruning-proof retry
+
+- Surfaced unavailable IData inputs when TaskVine internally retries a
+  `FORSAKEN` physical attempt, cancelling only attempts still owned by
+  DataVine and returning the logical task to ordinary lineage recovery.
+- Ignored late completion for cancelled physical attempts by physical TaskID.
+- Added fresh-proof retry for Controller pruning revision conflicts; stale
+  pruning proofs are never applied.
+- Added the deterministic 48,600,009-byte transfer-loss/pruning workflow.
+  All 26 local DataVine regression scripts pass; the new workflow records
+  positive bytes, `keep` during the probe, source attempt 2, two worker
+  prunes, one cleanup report, and zero legacy recovery tasks.
+- Rebuilt the factory package with `poncho_package_create`; SHA-256:
+  `ed2a93d3e27f8664602fe9b491b81467c19c48c5ae9bf924fdded582cb69d70a`.
+  Factory validation is not accepted because workers stayed in
+  waiting-connection state; no distributed claim is made.
+- Code commit: `adb0236b0`.
+- Evidence: `acceptance/artifacts/transfer-failure-recovery-adb0236b0.json`.
+- Self-review: **PASS for this scoped checkpoint, FAIL for Review B and
+  Ultimate Acceptance**. Factory connectivity, scale, Legacy comparison,
+  Controller restart, and remaining Grand Challenge requirements remain.
+
 ## 2026-07-30 — Dynamic pruning invalidation and terminal release drain
 
 - Registered a new Controller lineage consumer while a real IData source
