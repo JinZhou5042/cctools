@@ -14,6 +14,8 @@
 - Attempted the 10,000-task scale with 2, 16, and 64 local workers under a
   600-second bound; all timed out before the oracle, with approximately 56 MB
   Python RSS at the highest parallelism.
+- A final control run with eight workers at sixteen cores each also timed out,
+  ruling out worker-process count as the sole cause.
   This exposes the current control-plane/task-materialization bottleneck and
   is recorded as a failed checkpoint, not acceptance evidence.
 - Evidence: `acceptance/artifacts/grand-challenge-scale-timeout.json`.

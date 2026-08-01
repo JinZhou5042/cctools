@@ -8,15 +8,16 @@
     "medium_bytes": 65536,
     "large_bytes": 1048576,
     "timeout_seconds": 600,
-    "worker_runs": [2, 16, 64]
+    "worker_runs": [2, 16, 64, "8x16cores"]
   },
   "observations": {
     "two_worker_return_code": 124,
     "sixteen_worker_return_code": 124,
     "sixty_four_worker_return_code": 124,
+    "eight_worker_sixteen_core_return_code": 124,
     "peak_python_rss_kb": 53412,
     "worker_processes_cleaned": true,
     "output_oracle": "not reached"
   },
-    "interpretation": "The current independent runtime does not complete the requested scale within ten minutes even after increasing local worker parallelism to 64 workers. The bounded RSS but prolonged scheduler CPU indicates a control-plane/task-materialization bottleneck. This is a failed acceptance attempt and a required correction target, not a PASS."
+    "interpretation": "The current independent runtime does not complete the requested scale within ten minutes with 2, 16, or 64 workers, nor with 8 workers at 16 cores each. The bounded RSS but prolonged scheduler CPU indicates a control-plane/task-materialization bottleneck. This is a failed acceptance attempt and a required correction target, not a PASS."
 }
