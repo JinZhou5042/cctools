@@ -10,12 +10,14 @@
     "workers": 2,
     "prefetch": true,
     "persistence": false,
-    "failure_schedule": []
+    "failure_schedule": ["worker-loss-after-1s"]
   },
   "observations": {
     "exact_oracle": true,
     "nested_alias_identity": true,
     "medium_and_large_payloads_consumed": true,
+    "normal_and_worker_loss_oracles_equal": true,
+    "worker_loss_reexecutions": 1,
     "multi_output_slots": true,
     "peer_transfer_starts": 12,
     "prefetch_completed": 8,
@@ -23,5 +25,5 @@
     "legacy_recovery_tasks": 0
   },
   "command": "DATAVINE_GRAND_TASKS=20 DATAVINE_GRAND_LARGE_BYTES=262144 acceptance/scripts/TR_datavine_grand_challenge.sh",
-  "note": "Development smoke only. The required 10000-task scale, 100000 bindings, eight comparison modes, deterministic failures, resource limits, and Legacy comparison remain open."
+  "note": "Development smoke only. Normal and deterministic worker-loss runs both passed. The required 10000-task scale, 100000 bindings, eight comparison modes, broader failure schedule, resource limits, and Legacy comparison remain open."
 }

@@ -9,6 +9,8 @@
 - The development smoke run completed 30 logical tasks with 64 KiB medium and
   256 KiB large payloads, an exact oracle, alias identity validation, peer
   transfers, and completed prefetches.
+- Added the same workload's deterministic worker-loss mode; paired normal and
+  failure runs both passed the exact oracle with one ordinary re-execution.
 - This is explicitly component-only evidence. The accepted 10,000-task/
   100,000-binding scale, large/medium/volatile/durable data mix, deterministic
   failure schedule, eight comparison modes, resource limits, and Legacy

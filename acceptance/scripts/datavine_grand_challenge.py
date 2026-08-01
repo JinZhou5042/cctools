@@ -124,6 +124,7 @@ def main():
     parser.add_argument("--tasks", type=int, default=100)
     parser.add_argument("--medium-bytes", type=int, default=64 * 1024)
     parser.add_argument("--large-bytes", type=int, default=0)
+    parser.add_argument("--worker-loss", action="store_true")
     parser.add_argument("--factory-manager")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -149,12 +150,15 @@ def main():
         worker_cores=2,
         prefetch=True,
         persistence=False,
+        inject_worker_loss_after=(1.0 if args.worker_loss else None),
+        replacement_worker_delay=(1 if args.worker_loss else None),
     )
     report = {
         "artifact_type": "datavine-grand-challenge-run",
         "status": "PASS",
         "tasks": len(workflow.tasks),
         "target_task_id": target,
+        "failure_mode": "worker-loss" if args.worker_loss else "none",
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "scheduler_report": snapshot["scheduler_report"],
     }

@@ -33,6 +33,10 @@ and consumption of both payload classes. It is component-only evidence; the
 required 10,000-task scale, 100,000 bindings, durable/bulk data mix, failure
 schedule, eight modes, and Legacy comparison remain open.
 
+The same smoke configuration now has a deterministic worker-loss variant;
+normal and failure runs both pass the exact oracle, with one ordinary
+re-execution. This is still not the required repeated-failure matrix.
+
 ### Phase 9 transfer-loss recovery and pruning-proof race checkpoint
 
 Commit `adb0236b0` closes the failure path found when a worker loses a source
