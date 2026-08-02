@@ -1206,3 +1206,33 @@
   `acceptance/artifacts/targeted-recovery-734a88a55.json`.
 - Self-review: **FAIL for Ultimate Acceptance** pending 10k scale and the full
   comparison/failure/resource matrix.
+
+## 2026-08-02 — Grand Challenge normal 10k/100k scale checkpoint
+
+- Rejected an exact 10k run that lost a Controller connection during an
+  idempotent replica commit. Added bounded idempotent Controller retries in
+  `3bcc321da`; unsafe POST operations remain non-replayable.
+- Added Scheduler retry telemetry in `d6d3d4d6e` and then rejected a run that
+  completed compute but starved one peer-release retry behind a continuously
+  ready queue. Commit `ad6ca7c26` services one due release after each dispatch.
+- Rejected a later long run after its release lease aged out of the 1,024-entry
+  replay history. Commit `3919ab575` makes completed-lease capacity explicit
+  and bounded at 65,536 by default while retaining tiny-capacity eviction tests.
+- Rejected the next compute-complete run when the terminal Controller snapshot
+  timed out in an IData-by-replica quadratic scan. Commit `621f2a83a` replaces
+  it with a single-pass availability aggregation; 10,000 records snapshot in
+  0.026456 seconds in the component test.
+- At exact commit `621f2a83a`, the prescribed clean build/install passes and
+  the complete local regression passes 26/26.
+- The accepted full-DataVine normal run expands 7,000 requested tasks into
+  10,438 logical tasks and 124,201 bindings. It completes the exact oracle in
+  1,575.663 seconds with 10,438 physical attempts, 137 EData serializations,
+  4,889 peer transfers, 63 successful release retries, zero pending releases,
+  and zero legacy recovery tasks.
+- Evidence: `acceptance/artifacts/grand-challenge-scale-621f2a83a.json`.
+- Self-review: **PASS only for normal 10k-task/100k-binding execution; FAIL for
+  GC-SCALE as a whole and Ultimate Acceptance**. This run does not include
+  worker churn or storage pressure, its cache capacities are unset, and it
+  provides neither Legacy comparison nor three-run performance statistics.
+  The next smallest safe step is deterministic repeated worker loss in the
+  same workload with exact oracle equality and bounded recovery evidence.

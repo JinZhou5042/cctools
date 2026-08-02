@@ -1,0 +1,97 @@
+{
+  "artifact_type": "datavine-grand-challenge-normal-scale-checkpoint",
+  "status": "PASS",
+  "ultimate_status": "FAIL",
+  "commit": "621f2a83a6582f356bdd9896c05189624845500c",
+  "command": "env DATAVINE_GRAND_TASKS=7000 DATAVINE_GRAND_WORKERS=64 DATAVINE_GRAND_WORKER_CORES=2 DATAVINE_GRAND_MEDIUM_BYTES=1048576 DATAVINE_GRAND_LARGE_BYTES=16777216 DATAVINE_GRAND_WORKFLOW_TIMEOUT=2400 timeout 3000 acceptance/scripts/TR_datavine_grand_challenge.sh",
+  "configuration": {
+    "requested_tasks": 7000,
+    "workers": 64,
+    "worker_cores": 2,
+    "medium_bytes": 1048576,
+    "large_bytes": 16777216,
+    "workflow_timeout_seconds": 2400
+  },
+  "build": {
+    "command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+    "status": "PASS"
+  },
+  "regression": {
+    "status": "PASS",
+    "passed": 26,
+    "total": 26,
+    "sha256": "d943a872781b9efef398fdd27f1435a70fe1362110cad36ab5484be8c6f7a41a"
+  },
+  "run": {
+    "elapsed_seconds": 1575.663,
+    "logical_tasks": 10438,
+    "task_to_data_bindings": 124201,
+    "physical_attempts": 10438,
+    "all_attempts": 1,
+    "logical_outputs": 10566,
+    "available_outputs": 10566,
+    "volatile_outputs": 10566,
+    "deterministic_oracle_assertion": "PASS",
+    "legacy_recovery_tasks": 0,
+    "edata_serializations": 137,
+    "bulk_edata_serializations": 0,
+    "local_idata_hits": 20616,
+    "scheduler_controller_requests": 88699,
+    "scheduler_controller_retries": 0,
+    "worker_controller_retries": 295,
+    "peer_transfer_starts": 4889,
+    "peer_release_pending_high_water": 13,
+    "peer_release_retries_succeeded": 63,
+    "peer_release_pending_at_exit": 0,
+    "prefetch_selected": 16,
+    "prefetch_completed": 16,
+    "prefetch_failed": 0,
+    "prefetch_bytes": 1473,
+    "manager_bytes_received": 18476156,
+    "manager_bytes_sent": 2828069,
+    "worker_disk_cache_observed_items_high_water": 390,
+    "worker_disk_cache_observed_bytes_high_water": 17834302,
+    "worker_disk_cache_capacity_configured": false,
+    "final_snapshot_seconds": 0.014093
+  },
+  "controller_request_counts": {
+    "GET /v1/edata/{id}/metadata": 411,
+    "GET /v1/idata/{id}": 10565,
+    "GET /v1/idata/{id}/status": 24828,
+    "GET /v1/snapshot": 1,
+    "POST /v1/edata/register": 137,
+    "POST /v1/idata/allocate": 10566,
+    "POST /v1/pruning/task-state": 20876,
+    "POST /v1/replicas/commit": 10566,
+    "POST /v1/tasks/register": 10438,
+    "POST /v1/workers/claim": 303,
+    "POST /v1/workers/reconcile": 8
+  },
+  "manager_timing_us": {
+    "application": 912150922,
+    "internal": 54547440,
+    "polling": 5279699,
+    "receive": 5583846,
+    "scheduling": 4455244,
+    "send": 442785648,
+    "status_messages": 83734824,
+    "workers_execute": 12361034237
+  },
+  "snapshot_scaling_component": {
+    "idata_records": 10000,
+    "replicas": 10000,
+    "available": 10000,
+    "elapsed_seconds": 0.02645637490786612,
+    "algorithm": "single-pass replica aggregation"
+  },
+  "raw_run_sha256": "baf8db12a0a7ce0fdf4730b700ff637240d26cb2e0cd81ae4f7b9c1dc9e60b84",
+  "scope": "Normal full-DataVine scale subcondition only",
+  "remaining": [
+    "deterministic repeated worker churn at accepted scale",
+    "storage-pressure and pruning-enabled versus pruning-disabled comparison",
+    "Legacy comparison",
+    "all mandatory modes and failure schedule",
+    "configured worker cache bounds",
+    "three accepted performance repetitions"
+  ]
+}

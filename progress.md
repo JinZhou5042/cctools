@@ -10,9 +10,33 @@
 - Prescribed factory acceptance: **NOT ACCEPTED (latest run blocked by idle Condor slots)**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Phase 9 factory validation and Ultimate Acceptance gaps**
-- Validated code commit: `adb0236b0`; latest acceptance/docs commit:
-  `8c2602c89`
+- Active task: **Grand Challenge deterministic churn at accepted scale**
+- Validated code commit: `621f2a83a`; acceptance documentation is being
+  advanced from that exact checkpoint.
+
+### Grand Challenge normal-scale checkpoint
+
+The first accepted normal full-DataVine scale run now passes at commit
+`621f2a83a`. With 7,000 requested tasks, the generated workflow contains
+10,438 logical tasks and 124,201 task-to-data bindings. It completes the exact
+deterministic oracle in 1,575.663 seconds using 64 two-core workers. All 10,438
+logical tasks complete on attempt one, all 10,566 IData outputs are available,
+and zero legacy recovery tasks are created.
+
+The run performs only 137 EData serializations/registrations for 124,201
+bindings, records 4,889 peer-transfer starts and 20,616 local IData hits, and
+drains all peer-release obligations despite 63 successful release retries.
+The final Controller snapshot takes 0.014093 seconds. A separate 10,000-replica
+component measurement takes 0.026456 seconds after replacing the quadratic
+snapshot path with a single-pass aggregation. The required clean build/install
+and all 26 regressions pass on the same commit. Evidence:
+`acceptance/artifacts/grand-challenge-scale-621f2a83a.json`.
+
+This is **PASS only for the normal 10k-task/100k-binding subcondition and FAIL
+for Ultimate Acceptance**. It has no worker churn, storage-pressure comparison,
+Legacy comparison, mandatory failure schedule, or three-run performance
+statistics. Worker disk-cache capacity is also unset in this run, so its
+17,834,302-byte observed high-water mark is not a proof of bounded caching.
 
 ### Reproducibility checkpoint
 
@@ -37,14 +61,15 @@ The same smoke configuration now has a deterministic worker-loss variant;
 normal and failure runs both pass the exact oracle, with one ordinary
 re-execution. This is still not the required repeated-failure matrix.
 
-The first accepted-scale attempt is a deliberate failure checkpoint:
+The first accepted-scale attempt remains a useful deliberate failure checkpoint:
 10,000 requested tasks timed out at 600 seconds with two, sixteen, and
 sixty-four workers, and with eight workers at sixteen cores each. Python RSS
 stayed near 56 MB, while scheduler CPU remained active;
-this identifies control-plane/task-materialization overhead as the next
-correction target. Evidence is
-`acceptance/artifacts/grand-challenge-scale-timeout.json`; no scale PASS is
-claimed.
+this identified control-plane/task-materialization overhead. Persistent
+execution, event-driven recovery audits, bounded retry replay, fair release
+retry, and a linear Controller snapshot subsequently produced the accepted
+normal-scale result above. Evidence for the rejected attempts remains
+`acceptance/artifacts/grand-challenge-scale-timeout.json`.
 
 The mode switch now runs the same smoke workload in full, no-prefetch, and
 peer-off configurations. All three pass the oracle; telemetry shows the
