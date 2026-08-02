@@ -1,0 +1,54 @@
+{
+  "artifact_type": "datavine-persistent-worker-library-checkpoint",
+  "commit": "72d06c4fc",
+  "status": "PARTIAL",
+  "accepted": {
+    "clean_build_install": "PASS",
+    "process_runner_regression": "PASS",
+    "persistent_library_normal": {
+      "status": "PASS",
+      "configured_tasks": 90,
+      "logical_tasks": 126,
+      "physical_attempts": 126,
+      "elapsed_seconds": 20.425,
+      "worker_status_polls": 16,
+      "worker_reconciliations": 1,
+      "legacy_recovery_tasks": 0
+    },
+    "persistent_library_worker_loss": {
+      "status": "PASS",
+      "configured_tasks": 90,
+      "logical_tasks": 126,
+      "physical_attempts": 127,
+      "elapsed_seconds": 23.154,
+      "worker_loss_injections": 1,
+      "worker_loss_events": 1,
+      "recovery_reexecutions": 1,
+      "recovery_waves": 1,
+      "legacy_recovery_tasks": 0
+    }
+  },
+  "rejected": {
+    "configured_990_tasks_8_workers": {
+      "status": "TIMEOUT",
+      "timeout_seconds": 240,
+      "accepted_as_scale_evidence": false
+    },
+    "configured_990_tasks_32_workers": {
+      "status": "TIMEOUT",
+      "timeout_seconds": 240,
+      "accepted_as_scale_evidence": false
+    },
+    "nonblocking_manager_wait": {
+      "status": "REVERTED",
+      "reason": "wait(0) did not make sufficient network progress"
+    }
+  },
+  "commands": [
+    "cd taskvine/src && make clean && make -j8 && make install",
+    "DATAVINE_GRAND_TASKS=90 DATAVINE_GRAND_WORKERS=8 DATAVINE_GRAND_WORKER_CORES=4 DATAVINE_GRAND_MEDIUM_BYTES=4096 timeout 120 acceptance/scripts/TR_datavine_grand_challenge.sh",
+    "DATAVINE_GRAND_TASKS=90 DATAVINE_GRAND_WORKERS=8 DATAVINE_GRAND_WORKER_CORES=4 DATAVINE_GRAND_MEDIUM_BYTES=4096 DATAVINE_GRAND_MODE=failures timeout 150 acceptance/scripts/TR_datavine_grand_challenge.sh",
+    "cd taskvine/test && timeout 300 ./TR_datavine_phase4_demand_pull.sh run"
+  ],
+  "next_bottleneck": "TaskVine manager completion/event-loop throughput remains approximately five logical task completions per second in this workload"
+}

@@ -6,7 +6,7 @@ is never a pass.
 
 | ID | Requirement group | Status | Evidence / blocker |
 |---|---|---|---|
-| GC-SCALE | 10k tasks, 100k bindings, churn, storage pressure | FAIL | `artifacts/grand-challenge-scale-timeout.json`: 10,000-task workload timed out at 600s with both 2 and 16 local workers; control-plane batching/materialization must be corrected |
+| GC-SCALE | 10k tasks, 100k bindings, churn, storage pressure | FAIL | `artifacts/grand-challenge-scale-timeout.json`: initial 10,000-task runs timed out at 600s. `artifacts/persistent-worker-library-72d06c4fc.json` removes per-task Python startup and normal full-running-task scans, but configured 990-task runs still time out at 240s with 8 and 32 workers; manager completion throughput remains the blocker |
 | GC-SHAPE | All graph/data shapes in one workflow | OPEN | `acceptance/scripts/datavine_grand_challenge.py` now exercises repeated edata, nested aliasing, multi-output slots, fan-out/diamonds and peer/prefetch in a smoke run; full required data classes and scale remain open |
 | GC-MODES | Eight mandatory comparison modes | OPEN | Five DataVine smoke modes pass at `artifacts/grand-challenge-modes-smoke.json`; Legacy and pruning-disabled accepted runs plus scale/resource comparison remain absent |
 | GC-LEGACY | Architectural Legacy limit demonstrated | OPEN | Comparable Legacy driver absent |
@@ -14,7 +14,7 @@ is never a pass.
 | MULTIOUT | Multiple outputs and partial downstream demand | PASS | `artifacts/partial-publication-79bcbc832.json`, commit `79bcbc832` |
 | EDATA-ID | Independent function/arg/kwarg/file identity and collision checks | OPEN | Function/value/container domains, repeated-reference one-time serialization, bulk hash/path validation pass at `13193c99a`; dependency-file path and explicit collision injection remain |
 | IDATA-ID | Stable output-slot identity and complete explainable lineage | OPEN | Runtime lineage includes nested dependencies at `347f60531`; per-slot producer identity and retry-stable multi-output IDs pass at `605426341`; full explainability and scale remain |
-| LIGHTWEIGHT | Compact dispatch/queues scale with IDs and bindings | OPEN | Small records exist; 100k-binding bound unmeasured |
+| LIGHTWEIGHT | Compact dispatch/queues scale with IDs and bindings | OPEN | Commit `72d06c4fc` dispatches persistent-library calls with TaskID, attempt, output names, Controller coordinates, and thresholds while worker caches reuse immutable task/EData metadata. The 100k-binding bound remains unmeasured |
 | SERIAL | Exactly-once serialization and byte-preserving movement | OPEN | A repeated 4 MiB EData object serializes once at `13193c99a`; a 2 MiB IData is serialized/fsynced once per attempt and metadata-published without Controller byte retention at `53db69f1e`; full movement fault proof remains |
 | AUTHORITY | Controller sole data/lineage/durability/pruning authority | FAIL | Actual TaskVine peer sources require Controller authorization at `ef605c343`; consumer lifecycle and restart authority remain incomplete |
 | STATE | Validated logical/physical/durability/recovery/pruning transitions | OPEN | SharedFS transitions and acknowledged worker-local deletion pass at `3f993f15b`; full races remain |

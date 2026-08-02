@@ -1920,6 +1920,30 @@ Job `4939.0` and its worker were removed during cleanup.
 
 ## Validation record
 
+### 2026-08-02 persistent worker execution checkpoint
+
+- Commit `72d06c4fc` replaces one Python process per fine-grained DataVine
+  attempt with an optional persistent TaskVine function library. Dispatch
+  still carries TaskID/DataID bindings; the library reuses Controller clients,
+  immutable task records, EData metadata, and the worker epoch claim.
+- Task-local event sinks permit four direct calls per library without
+  process-global stdout races. Normal completion no longer performs a
+  full-running-task recovery scan or repeated worker authority reconciliation;
+  failures and worker-set changes retain the explicit recovery scan.
+- The prescribed clean build/install and the existing Phase 4 process-runner
+  regression pass. A 126-logical-task persistent run passes in 20.425 seconds
+  with 126 physical attempts, 16 worker-status polls, one reconciliation, and
+  zero legacy recovery tasks.
+- Deterministic worker loss passes in 23.154 seconds with 127 physical
+  attempts, one ordinary reexecution, one recovery wave, exact oracle output,
+  and zero legacy recovery tasks.
+- Ultimate Acceptance remains **FAIL**. Configured 990-task runs still exceed
+  the 240-second limit with both 8 and 32 local workers. The remaining observed
+  ceiling is about five manager completion events per second; 10k scale,
+  100k bindings, all eight modes, resource bounds, and comparison repetitions
+  remain unproved. Evidence:
+  `acceptance/artifacts/persistent-worker-library-72d06c4fc.json`.
+
 - PASS: final clean build and install after Phase 1 source changes.
 - PASS: final clean build and install after Phase 2 source changes.
 - PASS: final clean build and install after Phase 3 source changes.

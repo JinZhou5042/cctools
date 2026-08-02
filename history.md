@@ -1164,3 +1164,22 @@
   checkpoint is linear and pruning uses a global drain barrier; branch/join
   optimality, asynchronous pruning, DRAM, active-transfer loss, scale, and the
   Grand Challenge remain open.
+
+## 2026-08-02 — Persistent worker execution checkpoint
+
+- Added an optional TaskVine direct function library for DataVine attempts,
+  eliminating a fresh Python interpreter and repeated immutable Controller
+  lookups from every fine-grained task.
+- Removed normal-path full-running-task recovery scans and duplicate worker
+  reconciliation. Worker loss and failed attempts force immediate authority
+  synchronization and retain ordinary-task recovery.
+- Accepted: required clean build/install; 126-task normal and deterministic
+  worker-loss Grand Challenge runs; existing process-runner Phase 4 E2E.
+- Rejected: 990-task runs with 8 and 32 workers both timed out at 240 seconds;
+  a nonblocking manager wait experiment reduced event-loop progress and was
+  reverted before commit.
+- Code commit: `72d06c4fc`.
+- Evidence: `acceptance/artifacts/persistent-worker-library-72d06c4fc.json`.
+- Self-review status: **FAIL for Ultimate Acceptance**. Persistent execution is
+  correct at the accepted checkpoint scale, but manager completion throughput
+  still prevents the required 10k run.
