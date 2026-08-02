@@ -4,13 +4,55 @@ import argparse
 import json
 from pathlib import Path
 import tempfile
+import time
 
 from datavine_phase4_demand_pull import run_case, start_worker
 from ndcctools.taskvine import Manager, Task, cvine
 from ndcctools.taskvine.datavine import Workflow
+from ndcctools.taskvine.datavine.cache import WorkerCacheAdmission
 
 
 HOT = b"datavine-hot-cache-value\n" * 4096
+
+
+def cache_accounting_scale():
+    policy = WorkerCacheAdmission(None)
+    started = time.monotonic()
+    for index in range(10000):
+        policy.observe(
+            {
+                "worker_id": f"worker-{index % 64}",
+                "data_id": f"e:{index}",
+                "size": 64,
+            }
+        )
+    observe_seconds = time.monotonic() - started
+    assert observe_seconds < 2, observe_seconds
+    usage = policy.usage()
+    assert sum(item["items"] for item in usage.values()) == 10000
+    assert sum(item["bytes"] for item in usage.values()) == 640000
+
+    resolver_calls = 0
+
+    def unexpected_resolver(_):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        raise AssertionError("under-capacity enforcement scanned candidates")
+
+    policy.enforce(object(), unexpected_resolver, 20000, 200, {})
+    assert resolver_calls == 0
+    policy.observe(
+        {"worker_id": "worker-0", "data_id": "e:0", "size": 128}
+    )
+    usage_after_update = policy.usage()
+    assert usage_after_update["worker-0"]["items"] == 157
+    assert usage_after_update["worker-0"]["bytes"] == 10112
+    return {
+        "records": len(policy.records),
+        "workers": len(usage_after_update),
+        "observe_seconds": observe_seconds,
+        "under_capacity_resolver_calls": resolver_calls,
+    }
 
 
 def consume(hot, unique, previous, ordinal):
@@ -178,6 +220,7 @@ def main():
         ),
     )
     args = parser.parse_args()
+    accounting_scale = cache_accounting_scale()
 
     if args.factory_recovery_only:
         if not args.factory_manager:
@@ -306,6 +349,7 @@ def main():
     print(
         json.dumps(
             {
+                "accounting_scale": accounting_scale,
                 "bounded": bounded_report,
                 "undersized": undersized,
                 "zero": zero_report,

@@ -6,6 +6,8 @@ class WorkerCacheAdmission:
         self.controller = controller
         self.clock = 0
         self.records = {}
+        self.records_by_worker = {}
+        self.usage_by_worker = {}
         self.evictions = {}
         self.prune_by_data = set()
         self.eviction_count = 0
@@ -18,31 +20,54 @@ class WorkerCacheAdmission:
         self.active_worker_ids = set(worker_ids)
         for key in tuple(self.records):
             if key[0] not in worker_ids and key not in self.evictions:
-                del self.records[key]
+                self._remove_record(key)
+
+    def _remove_record(self, key):
+        record = self.records.pop(key)
+        worker_id = record["worker_id"]
+        usage = self.usage_by_worker[worker_id]
+        usage["bytes"] -= int(record["size"])
+        usage["items"] -= 1
+        worker_records = self.records_by_worker[worker_id]
+        worker_records.remove(key)
+        if not worker_records:
+            del self.records_by_worker[worker_id]
+        if not usage["items"]:
+            if usage["bytes"]:
+                raise RuntimeError("worker cache byte accounting leaked")
+            del self.usage_by_worker[worker_id]
+
+    def _store_record(self, key, record):
+        current = self.records.get(key)
+        if current is not None:
+            self._remove_record(key)
+        worker_id = record["worker_id"]
+        self.records[key] = record
+        self.records_by_worker.setdefault(worker_id, set()).add(key)
+        usage = self.usage_by_worker.setdefault(
+            worker_id, {"bytes": 0, "items": 0}
+        )
+        usage["bytes"] += int(record["size"])
+        usage["items"] += 1
+        self.observed_bytes_high_water = max(
+            self.observed_bytes_high_water, usage["bytes"]
+        )
+        self.observed_items_high_water = max(
+            self.observed_items_high_water, usage["items"]
+        )
 
     def observe(self, record):
         self.clock += 1
         key = (str(record["worker_id"]), str(record["data_id"]))
-        self.records[key] = {**record, "last_touch": self.clock}
-        usage = self.usage()
-        self.observed_bytes_high_water = max(
-            self.observed_bytes_high_water,
-            *(value["bytes"] for value in usage.values()),
-        )
-        self.observed_items_high_water = max(
-            self.observed_items_high_water,
-            *(value["items"] for value in usage.values()),
+        self._store_record(
+            key, {**record, "last_touch": self.clock}
         )
 
     def usage(self):
-        usage = {}
-        for record in self.records.values():
-            worker = usage.setdefault(
-                record["worker_id"], {"bytes": 0, "items": 0}
-            )
-            worker["bytes"] += int(record["size"])
-            worker["items"] += 1
-        return usage
+        return {
+            worker_id: dict(value)
+            for worker_id, value in self.usage_by_worker.items()
+        }
 
     def within_capacity(self, capacity_bytes, capacity_items):
         if capacity_bytes is None and capacity_items is None:
@@ -86,7 +111,7 @@ class WorkerCacheAdmission:
                 and int(current["generation"])
                 == int(pending["generation"])
             ):
-                del self.records[key]
+                self._remove_record(key)
             del self.evictions[key]
             self.prune_by_data.remove(pending["data_id"])
             self.eviction_count += 1
@@ -146,9 +171,26 @@ class WorkerCacheAdmission:
         for worker_id in sorted(usage):
             projected_bytes = usage[worker_id]["bytes"]
             projected_items = usage[worker_id]["items"]
+            for pending in self.evictions.values():
+                if pending["worker_id"] != worker_id:
+                    continue
+                projected_bytes -= int(pending["size"])
+                projected_items -= 1
+            if (
+                (
+                    byte_limit is None
+                    or projected_bytes <= byte_limit
+                )
+                and (
+                    item_limit is None
+                    or projected_items <= item_limit
+                )
+            ):
+                continue
             candidates = [
                 (key, record)
-                for key, record in self.records.items()
+                for key in self.records_by_worker.get(worker_id, ())
+                for record in (self.records[key],)
                 if key[0] == worker_id
                 and key not in self.evictions
                 and record["data_id"] not in self.prune_by_data
@@ -204,7 +246,7 @@ class WorkerCacheAdmission:
                         "cache eviction invalidation did not fail closed"
                     )
                 if invalidated["state"] == "pruned":
-                    del self.records[key]
+                    self._remove_record(key)
                     projected_bytes -= int(record["size"])
                     projected_items -= 1
                     continue
