@@ -10,9 +10,32 @@
 - Prescribed factory acceptance: **NOT ACCEPTED (latest run blocked by idle Condor slots)**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Grand Challenge durability-frontier recovery at scale**
-- Validated code commit: `9468464b4`; latest evidence documentation follows
+- Active task: **Grand Challenge durability-frontier recovery at accepted scale**
+- Validated code commit: `c7405bcfa`; latest evidence documentation follows
   that exact checkpoint.
+
+### Advancing durability-frontier checkpoint
+
+Commit `c7405bcfa` adds three durable checkpoints to the Grand Challenge's
+ordered spine. It deliberately loses volatile segments after each frontier;
+ordinary-task recovery depths decrease from three to two to one. As each newer
+frontier becomes durable, the previous checkpoint and covered segment are
+pruned. Thirteen IData records are removed while the newest checkpoint remains
+durable and hash-valid.
+
+The first combined run was rejected because Scheduler termination still waited
+for an old checkpoint after its SharedFS replica had been correctly quarantined.
+The fix preserves all persistence requests for audit but separates the current
+terminal obligation set. The accepted run records requests `[133,139,142]` and
+only `[142]` outstanding at exit, with no temporary files, legacy recovery, or
+peer release leaks. The exact clean build and all 26 regressions pass. Evidence:
+`acceptance/artifacts/durability-frontier-c7405bcfa.json`.
+
+Self-review is **PASS for small advancing-frontier recovery and superseded
+checkpoint retirement; FAIL for Ultimate Acceptance**. The checkpoint uses
+small Controller-inline durable values, three worker losses, and only 128
+logical tasks. Accepted scale, worker-driven persistence faults, concurrent
+pruning races, and storage reduction remain open.
 
 ### Grand Challenge accepted-scale churn checkpoint
 

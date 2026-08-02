@@ -1288,3 +1288,30 @@
   cache; FAIL for Ultimate Acceptance**. The losses exercise only depth-one
   volatile recovery. Durability-frontier depth, full failure stages,
   pruning/storage comparison, Legacy modes, DRAM, and repetitions remain.
+
+## 2026-08-02 — Advancing durability-frontier checkpoint
+
+- Extended the Grand Challenge spine with three deterministic durability
+  frontiers, three later volatile-loss segments, and recovery depths designed
+  to decrease from three to two to one.
+- Rejected the first combined E2E after all recoveries ran but terminal drain
+  waited forever for IData 133. A newer durable frontier had correctly made
+  that checkpoint prunable and quarantined its SharedFS replica, but Scheduler
+  still treated every historical persistence request as a live exit obligation.
+- Commit `59e844e9c` separates auditable persistence-request history from live
+  terminal obligations. Completed pruning retires only proof-covered,
+  non-cancelled obligations. The minimum-cut regression now also quarantines
+  its superseded first checkpoint and retains only the second at exit.
+- Commit `c7405bcfa` adds the configurable Grand Challenge frontier schedule and
+  asserts exact recovery depths, persistence IDs, newest-frontier obligation,
+  durable hashes, temporary-file cleanup, ordinary recomputation, and release
+  drain.
+- At exact commit `c7405bcfa`, the prescribed build and all 26 regressions pass.
+  The 128-task/1,218-binding E2E completes in 16.792 seconds, persists three
+  checkpoints, prunes 13 covered IData records, performs six recomputations
+  through depths `[3,2,1]`, and returns the exact oracle.
+- Evidence: `acceptance/artifacts/durability-frontier-c7405bcfa.json`.
+- Self-review: **PASS for the scoped advancing-frontier checkpoint; FAIL for
+  Ultimate Acceptance**. The same combined schedule remains unrun at accepted
+  scale; all values are Controller-inline, and persistence/pruning failures,
+  storage comparison, and the complete failure matrix remain open.

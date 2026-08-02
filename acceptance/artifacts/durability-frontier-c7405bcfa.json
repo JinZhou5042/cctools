@@ -1,0 +1,57 @@
+{
+  "artifact_type": "datavine-advancing-durability-frontier-checkpoint",
+  "status": "PASS",
+  "ultimate_status": "FAIL",
+  "commit": "c7405bcfa86da2367384a7c23a017b473d67528a",
+  "command": "env DATAVINE_GRAND_TASKS=80 DATAVINE_GRAND_WORKERS=6 DATAVINE_GRAND_WORKER_CORES=2 DATAVINE_GRAND_MEDIUM_BYTES=65536 DATAVINE_GRAND_LARGE_BYTES=262144 DATAVINE_GRAND_WORKFLOW_TIMEOUT=300 DATAVINE_GRAND_MODE=failures DATAVINE_GRAND_FRONTIER_RECOVERY=1 timeout 360 acceptance/scripts/TR_datavine_grand_challenge.sh",
+  "build": {
+    "command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+    "status": "PASS"
+  },
+  "regression": {
+    "status": "PASS",
+    "passed": 26,
+    "total": 26,
+    "sha256": "56fd94f4b470bd8a64f70de10aae2ad6c252bc7a7778df89f28237c7765c9add"
+  },
+  "run": {
+    "elapsed_seconds": 16.792,
+    "logical_tasks": 128,
+    "task_to_data_bindings": 1218,
+    "physical_attempts": 134,
+    "recovery_reexecutions": 6,
+    "worker_process_losses": 3,
+    "recovery_depths": [3, 2, 1],
+    "durability_frontier_task_ids": [113, 119, 122],
+    "durability_frontier_data_ids": [133, 139, 142],
+    "worker_loss_task_ids": [116, 121, 123],
+    "persistence_requests": [133, 139, 142],
+    "persistence_outstanding_at_exit": [142],
+    "controller_persistence_completions": 3,
+    "pruned_data_ids": [129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141],
+    "legacy_recovery_tasks": 0,
+    "peer_release_pending_at_exit": 0,
+    "durable_hashes_valid": true,
+    "persistence_temporary_files": [],
+    "deterministic_oracle_assertion": "PASS"
+  },
+  "terminal_obligation_fix": {
+    "historical_persistence_requests_preserved": true,
+    "superseded_frontiers_retired_from_terminal_obligations": true,
+    "latest_frontier_remains_durable": true
+  },
+  "raw_run_sha256": "01da39ffbf1ed4ebdd3e87cc7ab637321061955e2918afd88fae9301f11414da",
+  "rejected_predecessor": {
+    "status": "FAIL",
+    "error": "IDataID 133 persistence did not complete",
+    "root_cause": "Terminal persistence obligations retained a checkpoint after a newer durability frontier made it prunable and its SharedFS replica was quarantined."
+  },
+  "scope": "Small end-to-end advancing durability-frontier recovery and superseded-checkpoint pruning",
+  "remaining": [
+    "repeat the same frontier schedule at accepted scale",
+    "worker-driven persistence of medium and large IData",
+    "failure during persistence and pruning in the unified workload",
+    "storage high-water and pruning-disabled comparison",
+    "full mandatory failure matrix"
+  ]
+}
