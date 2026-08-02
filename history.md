@@ -1315,3 +1315,28 @@
   Ultimate Acceptance**. The same combined schedule remains unrun at accepted
   scale; all values are Controller-inline, and persistence/pruning failures,
   storage comparison, and the complete failure matrix remain open.
+
+## 2026-08-02 — Accepted-scale advancing durability frontiers
+
+- Executed the combined frontier/failure mode at exact code commit
+  `3bfb8e7aa1ff4f148ad669e244e5940a931886d6`: 10,566 logical tasks, 124,714
+  bindings, and 10,694 stable logical output slots in 1,203.833 seconds.
+- Three exact volatile-replica owner processes were shut down after successive
+  durable checkpoints. The ordinary-task recovery waves replayed 24, 16, and
+  8 tasks respectively, producing 48 attempt-two executions and no legacy
+  recovery tasks.
+- The Controller preserved all three persistence requests for audit, retired
+  the first two from live terminal obligations, retained the newest durable
+  checkpoint, and proof-pruned 104 covered IData records. The 10,590 remaining
+  output slots were available and the deterministic oracle matched.
+- Worker disk-cache high-water was 17,833,949 bytes and 497 items under
+  configured 64 MiB/2,048-item limits. The run performed 6,583 peer transfers,
+  recovered 50 transient release failures, and exited with zero pending
+  releases or persistence temporary files.
+- Raw machine-readable report SHA-256:
+  `b162e345e57c712626557189bc8135aa3ea42db8a4ed8753cc76a4d210d98f4a`.
+  Evidence: `acceptance/artifacts/durability-frontier-scale-3bfb8e7aa.json`.
+- Self-review: **PASS for accepted-scale frontier-bounded repeated recovery and
+  pruning; FAIL for Ultimate Acceptance**. This run persists only 51 bytes via
+  the Controller. Worker-driven bulk persistence, persistence/pruning fault
+  overlap, storage comparison, Legacy/mode comparisons, and repetitions remain.

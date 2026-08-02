@@ -10,9 +10,36 @@
 - Prescribed factory acceptance: **NOT ACCEPTED (latest run blocked by idle Condor slots)**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Grand Challenge durability-frontier recovery at accepted scale**
-- Validated code commit: `c7405bcfa`; latest evidence documentation follows
+- Active task: **Grand Challenge storage accounting and pruning-enabled versus
+  pruning-disabled comparison**
+- Validated code commit: `3bfb8e7aa`; latest accepted-scale evidence executes
   that exact checkpoint.
+
+### Accepted-scale durability-frontier checkpoint
+
+The exact `3bfb8e7aa` code completes the combined failure workflow in 1,203.833
+seconds with 10,566 logical tasks and 124,714 bindings. Three deterministic
+process losses remove the only volatile replicas for chain segments of 24, 16,
+and 8 tasks. Recovery reuses those 48 original logical tasks at attempt two;
+the observed rollback depths exactly match `[24,16,8]`, zero legacy recovery
+tasks are created, and the deterministic oracle passes.
+
+Three checkpoints advance the durability frontier. Their historical
+persistence IDs are `[10595,10643,10667]`, only the newest remains a live exit
+obligation, and recovery-aware pruning removes 104 covered logical outputs.
+The other 10,590 outputs remain available, the newest checkpoint is durable
+and hash-valid, no persistence temporary files remain, and all peer release
+obligations drain. Worker disk-cache high-water is 17,833,949 bytes/497 items
+under explicit 64 MiB/2,048-item bounds. Evidence:
+`acceptance/artifacts/durability-frontier-scale-3bfb8e7aa.json`.
+
+Self-review is **PASS for accepted-scale advancing frontiers, decreasing
+rollback depth, repeated process loss, and recovery-aware pruning; FAIL for
+Ultimate Acceptance**. Persistence in this run is Controller-inline and only
+51 bytes. It does not yet prove worker-driven medium/large persistence,
+failure during persistence/pruning, storage-budget reduction versus pruning
+disabled, Legacy limitations, the complete mode/fault matrix, or three-run
+statistics.
 
 ### Advancing durability-frontier checkpoint
 
@@ -32,10 +59,9 @@ peer release leaks. The exact clean build and all 26 regressions pass. Evidence:
 `acceptance/artifacts/durability-frontier-c7405bcfa.json`.
 
 Self-review is **PASS for small advancing-frontier recovery and superseded
-checkpoint retirement; FAIL for Ultimate Acceptance**. The checkpoint uses
-small Controller-inline durable values, three worker losses, and only 128
-logical tasks. Accepted scale, worker-driven persistence faults, concurrent
-pruning races, and storage reduction remain open.
+checkpoint retirement; FAIL for Ultimate Acceptance**. Accepted-scale coverage
+is now recorded above; worker-driven persistence faults, concurrent pruning
+races, and storage reduction remain open.
 
 ### Grand Challenge accepted-scale churn checkpoint
 

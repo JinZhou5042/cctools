@@ -1,0 +1,71 @@
+{
+  "artifact_type": "datavine-accepted-scale-durability-frontier-checkpoint",
+  "status": "PASS",
+  "ultimate_status": "FAIL",
+  "commit": "3bfb8e7aa1ff4f148ad669e244e5940a931886d6",
+  "command": "env DATAVINE_GRAND_TASKS=7000 DATAVINE_GRAND_WORKERS=64 DATAVINE_GRAND_WORKER_CORES=2 DATAVINE_GRAND_MEDIUM_BYTES=1048576 DATAVINE_GRAND_LARGE_BYTES=16777216 DATAVINE_GRAND_WORKFLOW_TIMEOUT=2400 DATAVINE_GRAND_MODE=failures DATAVINE_GRAND_FRONTIER_RECOVERY=1 timeout 3000 acceptance/scripts/TR_datavine_grand_challenge.sh",
+  "build": {
+    "command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+    "status": "PASS"
+  },
+  "regression": {
+    "status": "PASS",
+    "passed": 26,
+    "total": 26,
+    "sha256": "56fd94f4b470bd8a64f70de10aae2ad6c252bc7a7778df89f28237c7765c9add"
+  },
+  "run": {
+    "elapsed_seconds": 1203.833,
+    "logical_tasks": 10566,
+    "task_to_data_bindings": 124714,
+    "logical_output_slots": 10694,
+    "available_output_slots_at_exit": 10590,
+    "proof_pruned_output_slots_at_exit": 104,
+    "physical_attempts": 10614,
+    "recovery_reexecutions": 48,
+    "attempt_histogram": {"1": 10518, "2": 48},
+    "worker_process_losses": 3,
+    "recovery_depths": [24, 16, 8],
+    "durability_frontier_task_ids": [10467, 10515, 10539],
+    "durability_frontier_data_ids": [10595, 10643, 10667],
+    "worker_loss_task_ids": [10491, 10531, 10547],
+    "lost_tasks_per_wave": [24, 16, 8],
+    "persistence_requests": [10595, 10643, 10667],
+    "persistence_outstanding_at_exit": [10667],
+    "controller_persistence_completions": 3,
+    "controller_persistence_bytes": 51,
+    "worker_persistence_bytes": 0,
+    "pruned_data_id_count": 104,
+    "legacy_recovery_tasks": 0,
+    "edata_serializations": 138,
+    "peer_transfer_starts": 6583,
+    "peer_release_retries_succeeded": 50,
+    "peer_release_pending_at_exit": 0,
+    "scheduler_controller_retries": 0,
+    "worker_controller_retries": 168,
+    "worker_disk_cache_bytes_high_water": 17833949,
+    "worker_disk_cache_items_high_water": 497,
+    "worker_disk_cache_capacity_bytes": 67108864,
+    "worker_disk_cache_capacity_items": 2048,
+    "durable_hashes_valid": true,
+    "persistence_temporary_files": [],
+    "deterministic_oracle_assertion": "PASS"
+  },
+  "frontier_proof": {
+    "exact_expected_recovery_depths_observed": true,
+    "recovery_depth_decreases_as_frontier_advances": true,
+    "stable_logical_tasks_reused_for_recovery": true,
+    "superseded_frontiers_retired_from_terminal_obligations": true,
+    "latest_frontier_remains_durable": true,
+    "proof_pruned_outputs_are_not_required_at_exit": true
+  },
+  "raw_run_sha256": "b162e345e57c712626557189bc8135aa3ea42db8a4ed8753cc76a4d210d98f4a",
+  "scope": "Accepted-scale advancing durability frontiers, deterministic process loss, bounded rollback, and recovery-aware pruning",
+  "remaining": [
+    "worker-driven persistence of medium and large IData",
+    "failure during persistence and pruning in the unified workload",
+    "storage high-water and pruning-disabled comparison",
+    "Legacy and optimization-disabled comparison modes",
+    "complete mandatory failure matrix and three accepted repetitions"
+  ]
+}
