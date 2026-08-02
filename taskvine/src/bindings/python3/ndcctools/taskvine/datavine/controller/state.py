@@ -1869,6 +1869,7 @@ class ControllerState:
 
     def snapshot(self):
         with self._lock:
+            replica_snapshot = self.replicas.snapshot()
             return {
                 "edata": len(self._edata),
                 "edata_bytes": self._edata_bytes,
@@ -1915,10 +1916,9 @@ class ControllerState:
                 "idata_metadata_publications": (
                     self._idata_metadata_publications
                 ),
-                "available_idata": sum(
-                    bool(self.replicas.candidates(f"i:{value.data_id}"))
-                    for value in self._idata.values()
-                ),
+                "available_idata": replica_snapshot[
+                    "available_idata"
+                ],
                 "publications": self._publications,
                 "durability": {
                     state: sum(
@@ -1957,7 +1957,7 @@ class ControllerState:
                     if self._persistence is not None
                     else None
                 ),
-                "replica_directory": self.replicas.snapshot(),
+                "replica_directory": replica_snapshot,
                 "pruning": self.pruning.snapshot(),
                 "deferred_pruning": {
                     str(data_id): list(records)

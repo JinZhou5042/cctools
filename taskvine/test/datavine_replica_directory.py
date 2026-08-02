@@ -3,7 +3,9 @@
 import hashlib
 import json
 import threading
+import time
 
+from ndcctools.taskvine.datavine.controller.state import ControllerState
 from ndcctools.taskvine.datavine.controller.replicas import (
     ReplicaDirectory,
 )
@@ -382,7 +384,36 @@ def main():
     assert snapshot["lease_high_water"] == 1
     assert snapshot["active_leases"] == 0
     assert snapshot["completed_lease_capacity"] == 2
+
+    scale_state = ControllerState()
+    for task_id in range(1, 10001):
+        data = scale_state.allocate_idata(task_id)
+        scale_state.replicas.report_bytes(
+            f"i:{data.data_id}",
+            f"scale-{data.data_id}",
+            1,
+            "external",
+            b"x",
+        )
+    started = time.monotonic()
+    scale_snapshot = scale_state.snapshot()
+    snapshot_seconds = time.monotonic() - started
+    assert scale_snapshot["idata"] == 10000
+    assert scale_snapshot["available_idata"] == 10000
+    assert scale_snapshot["replica_directory"][
+        "available_idata"
+    ] == 10000
+    assert snapshot_seconds < 5, snapshot_seconds
     print(json.dumps(snapshot, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "scale_idata": 10000,
+                "snapshot_seconds": snapshot_seconds,
+            },
+            sort_keys=True,
+        )
+    )
     print("DataVine Controller replica directory component test PASS")
 
 

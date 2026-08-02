@@ -1004,6 +1004,15 @@ class ReplicaDirectory:
 
     def snapshot(self):
         with self._lock:
+            available_data_ids = {
+                record.data_id
+                for record in self._replicas.values()
+                if (
+                    record.state == "available"
+                    and record.attempt
+                    == self._latest_attempt.get(record.data_id, 0)
+                )
+            }
             states = {
                 state: sum(
                     record.state == state
@@ -1018,6 +1027,15 @@ class ReplicaDirectory:
                     worker.active for worker in self._workers.values()
                 ),
                 "replicas": len(self._replicas),
+                "available_data": len(available_data_ids),
+                "available_edata": sum(
+                    data_id.startswith("e:")
+                    for data_id in available_data_ids
+                ),
+                "available_idata": sum(
+                    data_id.startswith("i:")
+                    for data_id in available_data_ids
+                ),
                 "replica_states": states,
                 "replica_high_water": self._replica_high_water,
                 "replica_capacity": self._max_replicas,
