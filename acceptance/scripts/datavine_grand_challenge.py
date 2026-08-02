@@ -196,7 +196,7 @@ def main():
     parser.add_argument(
         "--worker-disk-cache-admission-bytes",
         type=int,
-        default=8 * 1024 * 1024,
+        default=64 * 1024 * 1024,
     )
     parser.add_argument(
         "--worker-disk-cache-admission-items", type=int, default=512
@@ -224,6 +224,12 @@ def main():
         args.worker_disk_cache_admission_items,
     ) < 0:
         parser.error("worker cache bounds must be non-negative")
+    minimum_output_admission = max(args.medium_bytes, args.large_bytes) + 4096
+    if args.worker_disk_cache_admission_bytes < minimum_output_admission:
+        parser.error(
+            "worker cache byte admission must fit the largest generated "
+            f"output ({minimum_output_admission} bytes including margin)"
+        )
     if args.mode == "legacy":
         print(json.dumps({"status": "UNAVAILABLE", "mode": "legacy"}))
         return 2
