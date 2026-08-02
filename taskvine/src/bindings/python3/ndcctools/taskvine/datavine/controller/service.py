@@ -626,25 +626,25 @@ class ControllerService:
                 if self.path == f"{API_PREFIX}/pruning/task-state":
                     try:
                         request = self._read_json()
-                        plan = owner.state.set_task_state(
+                        acknowledgement = owner.state.set_task_state(
                             request["task_id"], request["state"]
                         )
                     except Exception as exc:
                         self._error(400, exc)
                         return
-                    self._json(200, plan)
+                    self._json(200, acknowledgement)
                     return
                 if self.path == f"{API_PREFIX}/pruning/required-output":
                     try:
                         request = self._read_json()
-                        plan = owner.state.set_required_output(
+                        acknowledgement = owner.state.set_required_output(
                             request["data_id"],
                             request.get("required", True),
                         )
                     except Exception as exc:
                         self._error(400, exc)
                         return
-                    self._json(200, plan)
+                    self._json(200, acknowledgement)
                     return
                 if self.path == f"{API_PREFIX}/pruning/apply":
                     try:

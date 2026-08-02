@@ -232,15 +232,37 @@ def invalid_transitions_fail_closed():
         raise AssertionError("resurrected a cancelled task")
 
 
+def bounded_mutation_acknowledgements():
+    graph = LineageGraph()
+    for task_id in range(1, 4097):
+        graph.add_task(task_id, (), (task_id,))
+    pruner = IncrementalPruner(graph)
+    acknowledgement = pruner.set_task_state(1, "running")
+    encoded = json.dumps(acknowledgement.to_dict(), sort_keys=True)
+    assert len(encoded) < 160
+    assert acknowledgement.graph_revision == 4096
+    assert acknowledgement.state_revision == 1
+    assert acknowledgement.changed
+    assert acknowledgement.touched_records == 0
+    assert "records" not in acknowledgement.to_dict()
+    assert len(pruner.plan().records) == 4096
+    return {
+        "graph_records": 4096,
+        "acknowledgement_bytes": len(encoded.encode("utf-8")),
+    }
+
+
 def main():
     deterministic = deterministic_frontier_case()
     random_report = random_equivalence_cases()
     invalid_transitions_fail_closed()
+    bounded_acknowledgement = bounded_mutation_acknowledgements()
     print(
         json.dumps(
             {
                 "deterministic": deterministic,
                 "random": random_report,
+                "bounded_acknowledgement": bounded_acknowledgement,
             },
             sort_keys=True,
         )

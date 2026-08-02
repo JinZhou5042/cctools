@@ -46,6 +46,7 @@ class ReconciliationRecorder:
 
     def reconcile_workers(self, worker_ids):
         self.observations.append(set(worker_ids))
+        return {"affected_data_ids": []}
 
 
 def worker_status_contract():

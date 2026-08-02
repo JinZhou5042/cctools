@@ -167,6 +167,7 @@ class TaskSchedulerThread:
             # observation as global-loss truth. A later complete snapshot
             # performs the authoritative reconciliation.
             self._worker_reconciliation_deferrals += 1
+            self._last_worker_status_poll = 0.0
             return worker_ids
         observed_worker_ids = frozenset(worker_ids)
         if observed_worker_ids == self._active_worker_ids:
@@ -769,6 +770,10 @@ class TaskSchedulerThread:
             }
             for task in workflow.tasks
         }
+        dependents = {task_id: set() for task_id in task_by_id}
+        for task_id, parent_ids in dependencies.items():
+            for parent_id in parent_ids:
+                dependents[parent_id].add(task_id)
         task_cache_inputs = {}
         remaining_cache_uses = {}
         for task_id in sorted(task_by_id):
@@ -1152,7 +1157,41 @@ class TaskSchedulerThread:
                     require_available(input_data_id)
 
             if recovery_audit_data_ids:
-                audit_data_ids = sorted(recovery_audit_data_ids)
+                affected_by_task = {}
+                for data_id in recovery_audit_data_ids:
+                    affected_by_task.setdefault(
+                        producer_by_data_id[data_id], []
+                    ).append(data_id)
+                affected_tasks = set(affected_by_task)
+                ancestor_closure = set(affected_tasks)
+                stack = list(affected_tasks)
+                while stack:
+                    ancestor = stack.pop()
+                    for parent_id in dependencies[ancestor]:
+                        if parent_id in ancestor_closure:
+                            continue
+                        ancestor_closure.add(parent_id)
+                        stack.append(parent_id)
+                has_affected_descendant = {}
+                for task in reversed(workflow.tasks):
+                    task_id = task.task_id
+                    if task_id not in ancestor_closure:
+                        continue
+                    has_affected_descendant[task_id] = any(
+                        child_id in affected_tasks
+                        or has_affected_descendant.get(child_id, False)
+                        for child_id in dependents[task_id]
+                        if child_id in ancestor_closure
+                    )
+                covered_ancestors = {
+                    task_id
+                    for task_id in affected_tasks
+                    if has_affected_descendant[task_id]
+                }
+                audit_data_ids = sorted(
+                    min(affected_by_task[task_id])
+                    for task_id in affected_tasks - covered_ancestors
+                )
                 recovery_audit_data_ids.clear()
                 for data_id in audit_data_ids:
                     require_available(data_id)

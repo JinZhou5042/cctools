@@ -87,6 +87,19 @@ class PruningPlan:
         }
 
 
+@dataclasses.dataclass(frozen=True)
+class PruningMutation:
+    """Bounded acknowledgement for an incremental pruning-state mutation."""
+
+    graph_revision: int
+    state_revision: int
+    touched_records: int
+    changed: bool
+
+    def to_dict(self):
+        return dataclasses.asdict(self)
+
+
 class LineageGraph:
     """Append-only logical producer/consumer graph for pruning proofs."""
 
@@ -113,13 +126,21 @@ class LineageGraph:
             raise ValueError(f"duplicate TaskID {task_id}")
         if not outputs:
             raise ValueError("a task must have at least one output")
-        unknown = set(inputs) - set(self.producer_by_data)
+        unknown = {
+            data_id
+            for data_id in inputs
+            if data_id not in self.producer_by_data
+        }
         if unknown:
             raise KeyError(
                 f"TaskID {task_id} has unknown input IDataIDs "
                 f"{sorted(unknown)}"
             )
-        duplicate = set(outputs) & set(self.producer_by_data)
+        duplicate = {
+            data_id
+            for data_id in outputs
+            if data_id in self.producer_by_data
+        }
         if duplicate:
             raise ValueError(
                 f"duplicate output IDataIDs {sorted(duplicate)}"
@@ -460,7 +481,9 @@ class IncrementalPruner:
             raise ValueError(f"invalid task state {state!r}")
         old = self.task_states[task_id]
         if old == state:
-            return self.plan()
+            return PruningMutation(
+                self.graph.revision, self.state_revision, 0, False
+            )
         allowed = {
             "pending": {"running", "completed", "cancelled"},
             "running": {"pending", "completed", "cancelled"},
@@ -479,14 +502,21 @@ class IncrementalPruner:
         self._end_event()
         self.state_revision += 1
         self._refresh(touched)
-        return self.plan()
+        return PruningMutation(
+            self.graph.revision,
+            self.state_revision,
+            len(touched),
+            True,
+        )
 
     def set_data_state(self, data_id, **changes):
         data_id = int(data_id)
         old = self.data_states[data_id]
         new = dataclasses.replace(old, **changes).validate()
         if old == new:
-            return self.plan()
+            return PruningMutation(
+                self.graph.revision, self.state_revision, 0, False
+            )
         self._begin_event()
         affected = set(self._ancestor_targets[data_id])
         self.data_states[data_id] = new
@@ -508,7 +538,12 @@ class IncrementalPruner:
         self._end_event()
         self.state_revision += 1
         self._refresh(touched)
-        return self.plan()
+        return PruningMutation(
+            self.graph.revision,
+            self.state_revision,
+            len(touched),
+            True,
+        )
 
     def add_task(self, task_id, inputs, outputs):
         self._begin_event()
@@ -526,7 +561,12 @@ class IncrementalPruner:
         touched.update(self._add_task_obligations(int(task_id)))
         self._end_event()
         self._refresh(touched)
-        return self.plan()
+        return PruningMutation(
+            self.graph.revision,
+            self.state_revision,
+            len(touched),
+            True,
+        )
 
     def plan(self):
         records = tuple(
