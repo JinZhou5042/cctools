@@ -10,9 +10,37 @@
 - Prescribed factory acceptance: **NOT ACCEPTED (latest run blocked by idle Condor slots)**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Grand Challenge deterministic churn at accepted scale**
-- Validated code commit: `621f2a83a`; acceptance documentation is being
-  advanced from that exact checkpoint.
+- Active task: **Grand Challenge durability-frontier recovery at scale**
+- Validated code commit: `9468464b4`; latest evidence documentation follows
+  that exact checkpoint.
+
+### Grand Challenge accepted-scale churn checkpoint
+
+Commit `9468464b4` completes the bounded-cache failure workflow in 1,215.995
+seconds: 10,566 logical tasks, 124,714 task-to-data bindings, a 128-task
+lineage chain, and eight deterministic shutdowns of the exact workers holding
+selected volatile outputs. Eight recovery waves rerun exactly eight original
+logical tasks at attempt two; all 10,694 outputs are available, the oracle
+passes, zero legacy recovery tasks are created, and all peer releases drain.
+
+Each worker has explicit 64 MiB/2,048-item disk-cache bounds. The observed
+high-water marks are 17,833,353 bytes and 428 items. The run performs 138 EData
+serializations for 124,714 bindings, 6,784 peer transfers, and 49 successful
+release retries. The final Controller snapshot takes 0.015310 seconds.
+Evidence: `acceptance/artifacts/grand-challenge-churn-scale-9468464b4.json`.
+
+The first identical bounded-cache scale run was rejected after crossing the
+2,400-second workflow timeout. Cache observation and under-capacity enforcement
+were rescanning all retained replica history. Incremental per-worker accounting
+and a no-overflow fast path reduce a 10,000-record component observation to
+0.036600 seconds with zero candidate scans. The corrected full run reaches the
+failure chain roughly 29 minutes earlier.
+
+Self-review is **PASS for accepted-scale deterministic churn and bounded disk
+cache; FAIL for Ultimate Acceptance**. Every injected loss is on a volatile
+chain and has rollback depth one. Durable frontier progression, deep recovery,
+remaining failure stages, storage/pruning comparison, Legacy, DRAM bounds, and
+three repetitions remain open.
 
 ### Grand Challenge normal-scale checkpoint
 
@@ -32,7 +60,7 @@ snapshot path with a single-pass aggregation. The required clean build/install
 and all 26 regressions pass on the same commit. Evidence:
 `acceptance/artifacts/grand-challenge-scale-621f2a83a.json`.
 
-This is **PASS only for the normal 10k-task/100k-binding subcondition and FAIL
+This earlier result is **PASS only for the normal 10k-task/100k-binding subcondition and FAIL
 for Ultimate Acceptance**. It has no worker churn, storage-pressure comparison,
 Legacy comparison, mandatory failure schedule, or three-run performance
 statistics. Worker disk-cache capacity is also unset in this run, so its

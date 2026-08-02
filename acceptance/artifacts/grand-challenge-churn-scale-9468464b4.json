@@ -1,0 +1,95 @@
+{
+  "artifact_type": "datavine-grand-challenge-churn-scale-checkpoint",
+  "status": "PASS",
+  "ultimate_status": "FAIL",
+  "commit": "9468464b470d33ce005669be0aefbae6a4ad04d6",
+  "command": "env DATAVINE_GRAND_TASKS=7000 DATAVINE_GRAND_WORKERS=64 DATAVINE_GRAND_WORKER_CORES=2 DATAVINE_GRAND_MEDIUM_BYTES=1048576 DATAVINE_GRAND_LARGE_BYTES=16777216 DATAVINE_GRAND_WORKFLOW_TIMEOUT=2400 DATAVINE_GRAND_MODE=failures DATAVINE_GRAND_WORKER_LOSS_COUNT=8 timeout 3000 acceptance/scripts/TR_datavine_grand_challenge.sh",
+  "build": {
+    "command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+    "status": "PASS"
+  },
+  "regression": {
+    "status": "PASS",
+    "passed": 26,
+    "total": 26,
+    "sha256": "10be7eb4f61077121589c639c31e2d5fba20d5f3d4981916206f1bcd271f0a68"
+  },
+  "run": {
+    "elapsed_seconds": 1215.995,
+    "logical_tasks": 10566,
+    "task_to_data_bindings": 124714,
+    "lineage_chain_tasks": 128,
+    "logical_outputs": 10694,
+    "available_outputs": 10694,
+    "volatile_outputs": 10694,
+    "worker_process_losses": 8,
+    "unique_workers_terminated": 8,
+    "recovery_waves": 8,
+    "recovery_reexecutions": 8,
+    "maximum_rollback_depth": 1,
+    "physical_attempts": 10574,
+    "attempt_one_tasks": 10558,
+    "attempt_two_tasks": 8,
+    "legacy_recovery_tasks": 0,
+    "deterministic_oracle_assertion": "PASS",
+    "edata_serializations": 138,
+    "scheduler_controller_requests": 90472,
+    "scheduler_controller_retries": 0,
+    "worker_controller_retries": 154,
+    "peer_transfer_starts": 6784,
+    "peer_release_pending_high_water": 15,
+    "peer_release_retries_succeeded": 49,
+    "peer_release_pending_at_exit": 0,
+    "prefetch_selected": 16,
+    "prefetch_completed": 16,
+    "prefetch_failed": 0,
+    "prefetch_bytes": 2116,
+    "final_snapshot_seconds": 0.01531,
+    "manager_bytes_received": 18715065,
+    "manager_bytes_sent": 2849965
+  },
+  "worker_disk_cache": {
+    "capacity_bytes": 67108864,
+    "capacity_items": 2048,
+    "observed_bytes_high_water": 17833353,
+    "observed_items_high_water": 428,
+    "within_bounds": true
+  },
+  "cache_accounting_component": {
+    "records": 10000,
+    "workers": 64,
+    "observe_seconds": 0.03659975994378328,
+    "under_capacity_resolver_calls": 0,
+    "sha256": "ce8e18a9458d13c085ba13b079e7ccf95310c87d942b02d21fab8731fa17e6b9"
+  },
+  "worker_loss_schedule": [10449, 10463, 10477, 10491, 10506, 10520, 10534, 10548],
+  "manager_timing_us": {
+    "application": 435045332,
+    "internal": 45190812,
+    "polling": 17151357,
+    "receive": 7367304,
+    "scheduling": 7671095,
+    "send": 553981460,
+    "status_messages": 72590612,
+    "workers_execute": 9961893070
+  },
+  "raw_run_sha256": "5db3dd523bfc0b290c615ff2b1005b6e5e1cd789c1a852808c680b9e9d4745f0",
+  "rejected_predecessor": {
+    "commit": "3b52c86cb",
+    "status": "FAIL",
+    "workflow_timeout_seconds": 2400,
+    "observed_elapsed_before_cleanup_seconds": 2873,
+    "worker_process_losses_observed_during_cleanup": 8,
+    "maximum_manager_rss_observed_bytes": 206258176,
+    "root_cause": "WorkerCacheAdmission rescanned all replica history on every observation and completion, producing quadratic cache-accounting work."
+  },
+  "scope": "10k-task, 100k-binding, bounded-cache execution with eight deterministic process losses",
+  "remaining": [
+    "durability-frontier-aware deep recovery at accepted scale",
+    "full mandatory failure-stage schedule",
+    "pruning-enabled and pruning-disabled storage comparison",
+    "Legacy comparison and remaining modes",
+    "DRAM cache and large one-time data bypass",
+    "three accepted repetitions"
+  ]
+}

@@ -1262,3 +1262,29 @@
   Acceptance**. Recovery depth is one on a single spine. Accepted-scale churn,
   deeper durability-frontier recovery, all specified failure stages, pruning
   storage evidence, Legacy comparison, and repeated performance runs remain.
+
+## 2026-08-02 — Accepted-scale bounded-cache churn checkpoint
+
+- Rejected the first 10k/100k bounded-cache churn run after it crossed the
+  2,400-second workflow timeout. It remained correct enough to reach all eight
+  ordered shutdowns during cleanup, but no accepted JSON was emitted.
+- Root cause was quadratic Scheduler cache accounting: every replica
+  observation scanned all retained records, and every under-capacity
+  enforcement rebuilt every worker's eviction candidates.
+- Commit `9468464b4` maintains usage and record indexes incrementally and skips
+  candidate construction for workers already within capacity. The scale
+  component observes 10,000 records across 64 workers in 0.036600 seconds and
+  performs zero file-resolution calls on the under-capacity fast path.
+- The prescribed clean build/install, real bounded/zero-cache eviction E2E,
+  and all 26 regressions pass on the exact commit.
+- The corrected full run completes in 1,215.995 seconds: 10,566 logical tasks,
+  124,714 bindings, 10,574 physical attempts, eight unique-worker process
+  losses, eight ordinary attempt-two recomputations, exact oracle, zero legacy
+  recovery, 49 successful release retries, and zero pending releases.
+- Worker disk-cache high-water is 17,833,353 bytes/428 items under configured
+  64 MiB/2,048-item limits. All 10,694 logical outputs remain available.
+- Evidence: `acceptance/artifacts/grand-challenge-churn-scale-9468464b4.json`.
+- Self-review: **PASS for accepted-scale deterministic churn and bounded disk
+  cache; FAIL for Ultimate Acceptance**. The losses exercise only depth-one
+  volatile recovery. Durability-frontier depth, full failure stages,
+  pruning/storage comparison, Legacy modes, DRAM, and repetitions remain.
