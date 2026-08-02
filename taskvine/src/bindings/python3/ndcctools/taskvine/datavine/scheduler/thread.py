@@ -2669,6 +2669,11 @@ class TaskSchedulerThread:
                 if hasattr(self.controller, "request_metrics")
                 else None
             ),
+            "scheduler_controller_retries": (
+                self.controller.transient_retry_count
+                if hasattr(self.controller, "transient_retry_count")
+                else None
+            ),
             "worker_disk_cache_admission_items": (
                 worker_disk_cache_admission_items
             ),
