@@ -94,7 +94,7 @@ def main():
         },
         prune_after_persistence_by_task={
             second_frontier: tuple(
-                stage.task_id for stage in stages[1:4]
+                stage.task_id for stage in stages[0:4]
             )
         },
         worker_loss_process_shutdown=True,
@@ -125,16 +125,21 @@ def main():
         first_frontier,
         second_frontier,
     ]
+    assert report["persistence_outstanding_data_ids"] == [
+        second_frontier
+    ]
     assert len(report["recovery_waves"]) == 2, report
-    assert report["runtime_pruned_data_ids"] == [2, 3, 4]
+    assert report["runtime_pruned_data_ids"] == [1, 2, 3, 4]
     assert len(report["frontier_pruning"]) == 1
     pruning = report["frontier_pruning"][0]
     assert pruning["frontier_task_id"] == second_frontier
-    assert pruning["data_ids"] == [2, 3, 4]
-    assert all(
-        record["action"] == "invalidate-worker-pending-delete"
+    assert pruning["data_ids"] == [1, 2, 3, 4]
+    pruning_actions = {
+        record["action"]
         for record in pruning["result"]["controller"]["applied"]
-    )
+    }
+    assert "quarantine-sharedfs" in pruning_actions
+    assert "invalidate-worker-pending-delete" in pruning_actions
     assert all(
         worker_prune["requested"] == worker_prune["confirmed"]
         and worker_prune["tracker_released"]
@@ -154,9 +159,11 @@ def main():
     assert recovery_depths == [4, 3], recovery_depths
     assert snapshot["durable_hashes_valid"]
     assert snapshot["persistence_temporary_files"] == []
-    assert len(snapshot["durable_files"]) == 2
+    assert len(snapshot["durable_files"]) == 1
+    assert snapshot["superseded_persistence_data_ids"] == [
+        first_frontier
+    ]
     assert snapshot["durable_recovery_actions"] == {
-        str(first_frontier): "validated-durable",
         str(second_frontier): "validated-durable",
     }
     assert snapshot["idata_bytes_high_water"] <= 128 * 1024

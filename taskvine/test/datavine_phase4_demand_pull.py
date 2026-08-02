@@ -455,9 +455,22 @@ def run_case(
             ) if persistence else []
             if persistence:
                 durable_recovery_actions = {}
-                persisted_data_ids = snapshot["scheduler_report"][
-                    "persistence_required_data_ids"
-                ]
+                requested_data_ids = set(
+                    snapshot["scheduler_report"][
+                        "persistence_required_data_ids"
+                    ]
+                )
+                persisted_data_ids = snapshot["scheduler_report"].get(
+                    "persistence_outstanding_data_ids",
+                    sorted(requested_data_ids),
+                )
+                superseded_data_ids = sorted(
+                    requested_data_ids - set(persisted_data_ids)
+                )
+                for data_id in superseded_data_ids:
+                    status = client.idata_status(data_id)
+                    assert status["durability"] != "durable", status
+                    assert status["durable_path"] is None, status
                 for data_id in persisted_data_ids:
                     status = client.idata_status(data_id)
                     durable_bytes = Path(
@@ -472,6 +485,9 @@ def run_case(
                             client.invalidate_idata(data_id)["action"]
                         )
                 snapshot["durable_hashes_valid"] = True
+                snapshot["superseded_persistence_data_ids"] = (
+                    superseded_data_ids
+                )
                 snapshot["durable_recovery_actions"] = (
                     durable_recovery_actions
                 )

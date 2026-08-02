@@ -887,6 +887,7 @@ class TaskSchedulerThread:
         persistence_tasks_completed = 0
         persistence_controller_tasks_completed = 0
         persistence_required = set()
+        persistence_requested = set()
         frontier_pruning = []
         frontier_pruning_applied = set()
         frontier_pruning_pending = {}
@@ -1387,6 +1388,14 @@ class TaskSchedulerThread:
                                 ]
                             ),
                         }
+                    )
+                    persistence_required.difference_update(
+                        set(
+                            frontier_pruning_active["data_ids"]
+                        )
+                        - frontier_pruning_active[
+                            "cancelled_data_ids"
+                        ]
                     )
                     frontier_pruning_applied.add(frontier_task_id)
                     frontier_pruning_active = None
@@ -2270,6 +2279,7 @@ class TaskSchedulerThread:
                         output_data_id
                     )
                     persistence_required.add(output_data_id)
+                    persistence_requested.add(output_data_id)
                     request = persistence_status.get(
                         "persistence_request", {}
                     )
@@ -2587,6 +2597,9 @@ class TaskSchedulerThread:
                 in inject_worker_loss_data_by_task.items()
             },
             "persistence_required_data_ids": sorted(
+                persistence_requested
+            ),
+            "persistence_outstanding_data_ids": sorted(
                 persistence_required
             ),
             "frontier_pruning": frontier_pruning,
