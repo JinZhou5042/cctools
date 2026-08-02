@@ -1,0 +1,10 @@
+{
+  "artifact_type": "datavine-targeted-recovery-checkpoint",
+  "commit": "734a88a55",
+  "status": "PARTIAL",
+  "scale_run": {"status": "PASS", "configured_tasks": 990, "logical_tasks": 1422, "physical_attempts": 1422, "elapsed_seconds": 217.531, "workflow_timeout_seconds": 300, "controller_requests": 13274, "idata_status_requests": 3790, "legacy_recovery_tasks": 0, "peer_release_pending": 0},
+  "worker_loss": {"status": "PASS", "logical_tasks": 126, "physical_attempts": 127, "worker_loss_events": 1, "recovery_reexecutions": 1, "recovery_waves": 1, "legacy_recovery_tasks": 0, "elapsed_seconds": 11.654},
+  "component": {"replica_protocol": "PASS", "clean_build_install": "PASS"},
+  "ultimate_status": "FAIL",
+  "remaining": "10k tasks, 100k bindings, eight modes, repeated churn, resource limits, Legacy comparison, and three repetitions are not accepted"
+}

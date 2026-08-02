@@ -1960,6 +1960,21 @@ Job `4939.0` and its worker were removed during cleanup.
   targeted rollback. Evidence:
   `acceptance/artifacts/event-driven-recovery-a25013477.json`.
 
+### 2026-08-02 targeted recovery checkpoint
+
+- Commit `734a88a55` makes worker reconciliation return the exact DataIDs whose
+  replicas were affected. Scheduler recovery now starts from those IDataIDs,
+  and an idle manager wait no longer triggers a full running-task scan.
+- The Grand Challenge harness now records an explicit workflow timeout instead
+  of silently imposing a 90-second local limit.
+- A configured 990-task run materialized 1,422 logical tasks and completed all
+  1,422 attempts in 217.531 seconds with exact oracle output, zero legacy
+  recovery tasks, and zero pending peer releases. Deterministic worker loss and
+  replica protocol regressions pass.
+- Ultimate Acceptance remains **FAIL**: this is a 1k-scale checkpoint, not the
+  required 10k/100k-binding, eight-mode, repeated-churn comparison. Evidence:
+  `acceptance/artifacts/targeted-recovery-734a88a55.json`.
+
 - PASS: final clean build and install after Phase 1 source changes.
 - PASS: final clean build and install after Phase 2 source changes.
 - PASS: final clean build and install after Phase 3 source changes.

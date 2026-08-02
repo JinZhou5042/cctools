@@ -6,7 +6,7 @@ is never a pass.
 
 | ID | Requirement group | Status | Evidence / blocker |
 |---|---|---|---|
-| GC-SCALE | 10k tasks, 100k bindings, churn, storage pressure | FAIL | `artifacts/grand-challenge-scale-timeout.json`: initial 10,000-task runs timed out at 600s. `artifacts/persistent-worker-library-72d06c4fc.json` removes per-task Python startup. `artifacts/event-driven-recovery-a25013477.json` reduces 126-task Scheduler RPCs from 7,714 to 1,463, but the 1,238-logical-task run still times out at 240s; worker-loss audit must become targeted by lost IDataID |
+| GC-SCALE | 10k tasks, 100k bindings, churn, storage pressure | FAIL | Initial 10k attempts timed out (`artifacts/grand-challenge-scale-timeout.json`). Persistent execution and event-driven audits reduce control traffic. `artifacts/targeted-recovery-734a88a55.json` is the first accepted 1k-scale checkpoint: 1,422 logical tasks finish in 217.531s with zero legacy recovery and drained releases. Required 10k/100k-binding scale remains unrun |
 | GC-SHAPE | All graph/data shapes in one workflow | OPEN | `acceptance/scripts/datavine_grand_challenge.py` now exercises repeated edata, nested aliasing, multi-output slots, fan-out/diamonds and peer/prefetch in a smoke run; full required data classes and scale remain open |
 | GC-MODES | Eight mandatory comparison modes | OPEN | Five DataVine smoke modes pass at `artifacts/grand-challenge-modes-smoke.json`; Legacy and pruning-disabled accepted runs plus scale/resource comparison remain absent |
 | GC-LEGACY | Architectural Legacy limit demonstrated | OPEN | Comparable Legacy driver absent |

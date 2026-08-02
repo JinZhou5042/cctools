@@ -1194,3 +1194,15 @@
 - Rejected the 1,238-logical-task run after its 240-second timeout.
 - Code commit: `a25013477`; evidence:
   `acceptance/artifacts/event-driven-recovery-a25013477.json`.
+
+## 2026-08-02 — Targeted worker-loss recovery checkpoint
+
+- Controller reconciliation now reports affected DataIDs; Scheduler audits
+  only affected IData lineage and no longer equates an idle wait with loss.
+- Fixed the Grand Challenge harness's hidden 90-second local workflow timeout.
+- Accepted 1,422 logical tasks in 217.531 seconds, deterministic worker loss,
+  replica protocol, and the prescribed clean build/install.
+- Code commit: `734a88a55`; evidence:
+  `acceptance/artifacts/targeted-recovery-734a88a55.json`.
+- Self-review: **FAIL for Ultimate Acceptance** pending 10k scale and the full
+  comparison/failure/resource matrix.
