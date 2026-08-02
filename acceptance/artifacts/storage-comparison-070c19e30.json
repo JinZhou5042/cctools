@@ -1,0 +1,65 @@
+{
+  "artifact_type": "datavine-sharedfs-storage-comparison-checkpoint",
+  "status": "PASS",
+  "ultimate_status": "FAIL",
+  "commit": "070c19e305fa597cccc861d421e92c20f171b846",
+  "command": "acceptance/scripts/TR_datavine_storage_comparison.sh",
+  "build": {
+    "command": "cd /users/jzhou24/cctools_repo/datavine/taskvine/src && make clean && make -j8 && make install",
+    "status": "PASS"
+  },
+  "regression": {
+    "command": "timeout 1800 acceptance/scripts/run_regression.sh",
+    "status": "PASS",
+    "passed": 27,
+    "total": 27,
+    "elapsed_seconds_for_storage_test": 38.352,
+    "artifact_sha256": "b8873e9faaad23c4006a0e53a5572ce73c6f278f93079d3bfe70f1af71921151"
+  },
+  "workload": {
+    "logical_tasks": 72,
+    "task_to_data_bindings": 642,
+    "lineage_tasks": 16,
+    "lineage_payload_bytes_per_task": 262144,
+    "controller_inline_idata_capacity_bytes": 65536,
+    "durability_frontiers": 3,
+    "worker_process_losses": 3,
+    "recovery_depths": [3, 2, 1],
+    "pruning_grace_seconds": 0.1
+  },
+  "comparison": {
+    "same_logical_workload": true,
+    "same_worker_persistence_bytes": 786459,
+    "controller_persistence_bytes": 0,
+    "pruning_enabled": {
+      "retained_sharedfs_bytes": 262153,
+      "retained_durable_files": 1,
+      "hard_deleted_files": 2,
+      "quarantine_files_at_exit": 0
+    },
+    "pruning_disabled": {
+      "retained_sharedfs_bytes": 786459,
+      "retained_durable_files": 3,
+      "hard_deleted_files": 0,
+      "quarantine_files_at_exit": 0
+    },
+    "retained_storage_ratio": 0.3333333333333333,
+    "exact_oracle_both_modes": true,
+    "durable_hashes_valid_both_modes": true,
+    "temporary_files_both_modes": []
+  },
+  "raw_summary_sha256": "833149209f526b49efd671401c5be56dc91011818a156d91763b9e7ee0ea5cb0",
+  "rejected_predecessor": {
+    "status": "FAIL",
+    "error": "run_case assumed every unpruned historical IData remained globally available",
+    "root_cause": "Worker loss can remove unrelated, no-longer-required volatile replicas once outputs bypass Controller memory; those logical values remain lineage-rematerializable and need not remain physically available."
+  },
+  "scope": "Small same-workload worker-persistence, quarantine-grace, hard-delete, and pruning-off SharedFS comparison",
+  "remaining": [
+    "dense checkpoint workload exceeding an explicit storage budget",
+    "accepted-scale pruning-enabled and pruning-disabled runs",
+    "SharedFS read/write concurrency and metadata measurements",
+    "failure during quarantine grace and hard deletion",
+    "Legacy comparison and three accepted repetitions"
+  ]
+}

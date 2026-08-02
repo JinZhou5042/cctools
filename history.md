@@ -1340,3 +1340,27 @@
   pruning; FAIL for Ultimate Acceptance**. This run persists only 51 bytes via
   the Controller. Worker-driven bulk persistence, persistence/pruning fault
   overlap, storage comparison, Legacy/mode comparisons, and repetitions remain.
+
+## 2026-08-02 — Worker-driven SharedFS pruning comparison
+
+- Commit `40f306b7e` adds configurable non-inline lineage payloads, genuine
+  `pruning-off` behavior, SharedFS file/byte accounting, configurable quarantine
+  grace, and optional proof-validated hard deletion after the grace expires.
+- Rejected the first large-IData runs because the common E2E helper assumed all
+  historical, unpruned IData must stay globally available. Once values bypass
+  Controller memory, process loss may remove unrelated dead outputs; the helper
+  now checks the Controller's exact per-IData availability report while keeping
+  the explicit all-pruned assertion.
+- Commit `070c19e30` puts the two-mode comparison in the standard regression
+  discovery path. The prescribed clean build succeeds and the suite expands
+  from 26 to 27 tests, all passing on that exact commit.
+- In the 72-task/642-binding A/B, both modes persist 786,459 bytes from workers,
+  execute three process losses with recovery depths `[3,2,1]`, and match the
+  exact oracle. Pruning enabled hard-deletes two proof-covered files after a
+  0.1-second quarantine grace and retains 262,153 bytes; pruning disabled keeps
+  all three files and 786,459 bytes.
+- Evidence: `acceptance/artifacts/storage-comparison-070c19e30.json`.
+- Self-review: **PASS for the scoped worker-persistence/storage checkpoint;
+  FAIL for Ultimate Acceptance**. It proves a 3x retained difference, but not
+  yet a configured budget crossing, accepted scale, hard-delete failure races,
+  Legacy comparison, or three-run statistics.

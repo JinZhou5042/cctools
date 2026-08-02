@@ -10,10 +10,32 @@
 - Prescribed factory acceptance: **NOT ACCEPTED (latest run blocked by idle Condor slots)**
 - Reference runtime: `ndcctools.taskvine.vine_graph` is frozen at accepted
   Phase 4A and is no longer the DataVine implementation.
-- Active task: **Grand Challenge storage accounting and pruning-enabled versus
-  pruning-disabled comparison**
-- Validated code commit: `3bfb8e7aa`; latest accepted-scale evidence executes
-  that exact checkpoint.
+- Active task: **dense-frontier Grand Challenge storage-budget comparison**
+- Validated code commit: `070c19e30`; latest accepted-scale frontier evidence
+  remains tied to `3bfb8e7aa`.
+
+### SharedFS storage comparison checkpoint
+
+Commit `070c19e30` adds real `pruning-off` semantics, configurable lineage
+payloads and Controller-inline threshold, a configurable SharedFS quarantine
+grace period, proof revalidation before hard deletion, and exact retained-byte
+accounting. The same 72-task/642-binding workflow passes in both modes after
+three worker process losses and recovery depths `[3,2,1]`. All 786,459 bytes
+are persisted by workers; Controller persistence is zero.
+
+With pruning enabled, two superseded checkpoints are quarantined, survive the
+0.1-second grace, pass a fresh recoverability proof, and are hard deleted. One
+262,153-byte durable checkpoint remains. With pruning disabled, all three files
+and 786,459 bytes remain. Both modes pass the exact oracle and hash validation,
+with no temporary or quarantine files at exit. The prescribed clean build and
+the expanded 27/27 regression suite pass. Evidence:
+`acceptance/artifacts/storage-comparison-070c19e30.json`.
+
+Self-review is **PASS for small worker-driven persistence, real mode isolation,
+grace-before-delete, and a 3x retained-storage difference; FAIL for Ultimate
+Acceptance**. Three checkpoints do not yet cross an explicit operational
+budget, and the comparison is not at accepted scale. Dense frontiers, scale,
+hard-delete races, Legacy, and repetitions remain open.
 
 ### Accepted-scale durability-frontier checkpoint
 

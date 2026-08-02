@@ -1,165 +1,171 @@
 {
-  "artifact_type": "datavine-regression-suite",
-  "commit": "107041d67",
-  "passed_count": 26,
-  "results": [
-    {
-      "elapsed_seconds": 17.76,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_async_pruning.sh"
-    },
-    {
-      "elapsed_seconds": 6.696,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_branched_cut.sh"
-    },
-    {
-      "elapsed_seconds": 4.718,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_bulk_origin.sh"
-    },
-    {
-      "elapsed_seconds": 57.868,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_cache_capacity.sh"
-    },
-    {
-      "elapsed_seconds": 2.041,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_controller_admission.sh"
-    },
-    {
-      "elapsed_seconds": 40.914,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_idata_capacity.sh"
-    },
-    {
-      "elapsed_seconds": 13.069,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_local_pruning.sh"
-    },
-    {
-      "elapsed_seconds": 15.624,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_minimum_cut.sh"
-    },
-    {
-      "elapsed_seconds": 14.291,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_multi_output.sh"
-    },
-    {
-      "elapsed_seconds": 25.198,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_peer_corruption.sh"
-    },
-    {
-      "elapsed_seconds": 28.818,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_peer_partial_loss.sh"
-    },
-    {
-      "elapsed_seconds": 31.488,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_peer_source_loss.sh"
-    },
-    {
-      "elapsed_seconds": 1.046,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_persistence_races.sh"
-    },
-    {
-      "elapsed_seconds": 22.191,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_phase4_demand_pull.sh"
-    },
-    {
-      "elapsed_seconds": 13.663,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_phase5_peer_cache.sh"
-    },
-    {
-      "elapsed_seconds": 16.673,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_phase6_persistence.sh"
-    },
-    {
-      "elapsed_seconds": 12.484,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_phase7_recovery.sh"
-    },
-    {
-      "elapsed_seconds": 37.08,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_phase8_prefetch.sh"
-    },
-    {
-      "elapsed_seconds": 24.349,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_phase9_pruning_shadow.sh"
-    },
-    {
-      "elapsed_seconds": 1.4,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_pruning_executor.sh"
-    },
-    {
-      "elapsed_seconds": 19.393,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_pruning_lease_race.sh"
-    },
-    {
-      "elapsed_seconds": 0.755,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_replica_directory.sh"
-    },
-    {
-      "elapsed_seconds": 1.276,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_replica_protocol.sh"
-    },
-    {
-      "elapsed_seconds": 2.46,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_runtime_topology.sh"
-    },
-    {
-      "elapsed_seconds": 16.384,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_transfer_failure_pruning.sh"
-    },
-    {
-      "elapsed_seconds": 45.605,
-      "passed": true,
-      "returncode": 0,
-      "test": "TR_datavine_transfer_pruning_race.sh"
-    }
-  ],
-  "status": "PASS",
-  "test_count": 26
+	"artifact_type": "datavine-regression-suite",
+	"commit": "070c19e305fa597cccc861d421e92c20f171b846",
+	"passed_count": 27,
+	"results": [
+		{
+			"elapsed_seconds": 18.886,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_async_pruning.sh"
+		},
+		{
+			"elapsed_seconds": 6.205,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_branched_cut.sh"
+		},
+		{
+			"elapsed_seconds": 4.281,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_bulk_origin.sh"
+		},
+		{
+			"elapsed_seconds": 52.979,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_cache_capacity.sh"
+		},
+		{
+			"elapsed_seconds": 2.708,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_controller_admission.sh"
+		},
+		{
+			"elapsed_seconds": 88.326,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_idata_capacity.sh"
+		},
+		{
+			"elapsed_seconds": 18.401,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_local_pruning.sh"
+		},
+		{
+			"elapsed_seconds": 14.52,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_minimum_cut.sh"
+		},
+		{
+			"elapsed_seconds": 14.051,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_multi_output.sh"
+		},
+		{
+			"elapsed_seconds": 24.108,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_peer_corruption.sh"
+		},
+		{
+			"elapsed_seconds": 28.822,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_peer_partial_loss.sh"
+		},
+		{
+			"elapsed_seconds": 25.512,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_peer_source_loss.sh"
+		},
+		{
+			"elapsed_seconds": 0.995,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_persistence_races.sh"
+		},
+		{
+			"elapsed_seconds": 22.83,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_phase4_demand_pull.sh"
+		},
+		{
+			"elapsed_seconds": 13.058,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_phase5_peer_cache.sh"
+		},
+		{
+			"elapsed_seconds": 16.555,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_phase6_persistence.sh"
+		},
+		{
+			"elapsed_seconds": 11.507,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_phase7_recovery.sh"
+		},
+		{
+			"elapsed_seconds": 30.278,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_phase8_prefetch.sh"
+		},
+		{
+			"elapsed_seconds": 22.949,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_phase9_pruning_shadow.sh"
+		},
+		{
+			"elapsed_seconds": 1.15,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_pruning_executor.sh"
+		},
+		{
+			"elapsed_seconds": 19.948,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_pruning_lease_race.sh"
+		},
+		{
+			"elapsed_seconds": 12.193,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_replica_directory.sh"
+		},
+		{
+			"elapsed_seconds": 1.133,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_replica_protocol.sh"
+		},
+		{
+			"elapsed_seconds": 2.13,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_runtime_topology.sh"
+		},
+		{
+			"elapsed_seconds": 38.352,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_storage_comparison.sh"
+		},
+		{
+			"elapsed_seconds": 15.62,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_transfer_failure_pruning.sh"
+		},
+		{
+			"elapsed_seconds": 43.51,
+			"passed": true,
+			"returncode": 0,
+			"test": "TR_datavine_transfer_pruning_race.sh"
+		}
+	],
+	"status": "PASS",
+	"test_count": 27
 }
