@@ -67,6 +67,8 @@ def main():
                 token,
                 "--max-edata-bytes",
                 "1048576",
+                "--completed-lease-capacity",
+                "4096",
                 "--ready-file",
                 str(ready_file),
             ],
@@ -106,6 +108,9 @@ def main():
             assert snapshot["edata"] == 1
             assert snapshot["registrations"] == 2
             assert snapshot["deduplicated_registrations"] == 1
+            assert snapshot["replica_directory"][
+                "completed_lease_capacity"
+            ] == 4096
 
             try:
                 ControllerClient(endpoint, "wrong-token").health()

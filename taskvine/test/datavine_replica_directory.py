@@ -23,6 +23,10 @@ def expect_error(fragment, function, *args, **kwargs):
 
 
 def main():
+    assert (
+        ReplicaDirectory().snapshot()["completed_lease_capacity"]
+        == 65536
+    )
     directory = ReplicaDirectory(max_completed_leases=2)
     directory.join_worker("w1", 1)
     directory.join_worker("w2", 1)

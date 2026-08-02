@@ -98,7 +98,7 @@ class ReplicaDirectory:
         max_replicas=100000,
         max_workers=10000,
         max_active_leases=1024,
-        max_completed_leases=1024,
+        max_completed_leases=65536,
     ):
         capacities = {
             "max_replicas": int(max_replicas),

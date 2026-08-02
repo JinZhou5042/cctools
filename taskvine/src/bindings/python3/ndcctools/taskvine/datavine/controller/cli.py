@@ -33,6 +33,11 @@ def main(argv=None):
         default=1024,
     )
     parser.add_argument(
+        "--completed-lease-capacity",
+        type=int,
+        default=65536,
+    )
+    parser.add_argument(
         "--completed-pruning-operation-bytes",
         type=int,
         default=64 * 1024 * 1024,
@@ -62,6 +67,7 @@ def main(argv=None):
         bulk_origin_root=args.bulk_origin_dir,
         max_idata_bytes=args.max_idata_bytes,
         max_inline_idata_bytes=args.max_inline_idata_bytes,
+        completed_lease_capacity=args.completed_lease_capacity,
         completed_pruning_operation_capacity=(
             args.completed_pruning_operation_capacity
         ),

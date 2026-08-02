@@ -35,6 +35,7 @@ class ControllerState:
         bulk_origin_root=None,
         max_idata_bytes=256 * 1024 * 1024,
         max_inline_idata_bytes=8 * 1024 * 1024,
+        completed_lease_capacity=65536,
         completed_pruning_operation_capacity=1024,
         completed_pruning_operation_bytes=64 * 1024 * 1024,
     ):
@@ -53,6 +54,10 @@ class ControllerState:
         if int(completed_pruning_operation_capacity) < 1:
             raise ValueError(
                 "completed pruning operation capacity must be positive"
+            )
+        if int(completed_lease_capacity) < 1:
+            raise ValueError(
+                "completed lease capacity must be positive"
             )
         if int(completed_pruning_operation_bytes) < 1:
             raise ValueError(
@@ -94,7 +99,9 @@ class ControllerState:
         self._persistence_active_ids = set()
         self._persistence_stale_completions = 0
         self._persistence_cleanup_failures = 0
-        self.replicas = replica_directory or ReplicaDirectory()
+        self.replicas = replica_directory or ReplicaDirectory(
+            max_completed_leases=int(completed_lease_capacity)
+        )
         self.pruning = PruningAuthority(pruning_audit_capacity)
         self._deferred_pruning = {}
         self._completed_pruning_operation_capacity = int(
