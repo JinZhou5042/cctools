@@ -6012,6 +6012,13 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 				// sent at least one task
 				events++;
 				sent_in_previous_cycle = 1;
+				// A continuously non-empty ready queue must not starve
+				// Controller lease-release obligations.  Retry one due
+				// release per successful dispatch so lost responses are
+				// replayed while the bounded Controller tombstone remains.
+				BEGIN_ACCUM_TIME(q, time_internal);
+				events += vine_current_transfers_retry_releases(q, 1);
+				END_ACCUM_TIME(q, time_internal);
 				continue;
 			}
 		}
