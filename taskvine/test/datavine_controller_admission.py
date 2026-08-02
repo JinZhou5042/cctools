@@ -17,6 +17,21 @@ from ndcctools.taskvine.datavine.scheduler.client import ControllerClient
 from ndcctools.taskvine.datavine.serialization import serialize
 
 
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
+        self.headers = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return self.payload
+
+
 def start_blocked_fetch(client, data_id, entered, release, result):
     def run():
         try:
@@ -64,7 +79,10 @@ def byte_serving_case():
     )
     _, port = service.start()
     client = ControllerClient(
-        f"http://127.0.0.1:{port}", "admission-token", timeout=5
+        f"http://127.0.0.1:{port}",
+        "admission-token",
+        timeout=5,
+        idempotent_transient_retries=0,
     )
     result = {}
     thread = start_blocked_fetch(
@@ -119,7 +137,10 @@ def request_admission_case():
     )
     _, port = service.start()
     client = ControllerClient(
-        f"http://127.0.0.1:{port}", "request-token", timeout=5
+        f"http://127.0.0.1:{port}",
+        "request-token",
+        timeout=5,
+        idempotent_transient_retries=0,
     )
     result = {}
     thread = start_blocked_fetch(
@@ -199,6 +220,53 @@ def worker_retry_case():
     }
 
 
+def idempotent_retry_case():
+    client = ControllerClient(
+        "http://controller.invalid",
+        "retry-policy-token",
+        transient_retries=0,
+        idempotent_transient_retries=1,
+        retry_base_seconds=0,
+        retry_max_seconds=0,
+    )
+    original = urllib.request.urlopen
+    attempts = {}
+
+    def reset_once(request, timeout):
+        key = (request.method, request.full_url)
+        attempts[key] = attempts.get(key, 0) + 1
+        if attempts[key] == 1:
+            raise ConnectionResetError("deterministic reset")
+        return FakeResponse(b'{"status":"PASS"}')
+
+    urllib.request.urlopen = reset_once
+    try:
+        assert client.health() == {"status": "PASS"}
+        commit = client.commit_replica(
+            "i:1", "replica-1", 1, 1, "abc", 3
+        )
+        assert commit == {"status": "PASS"}
+        try:
+            client._request("POST", "/unsafe", {"value": 1})
+        except ConnectionResetError:
+            pass
+        else:
+            raise AssertionError("non-idempotent POST was replayed")
+    finally:
+        urllib.request.urlopen = original
+    assert attempts[("GET", "http://controller.invalid/v1/health")] == 2
+    assert attempts[
+        ("POST", "http://controller.invalid/v1/replicas/commit")
+    ] == 2
+    assert attempts[("POST", "http://controller.invalid/unsafe")] == 1
+    return {
+        "get_attempts": 2,
+        "commit_attempts": 2,
+        "unsafe_post_attempts": 1,
+        "status": "PASS",
+    }
+
+
 def idata_attempt_source_case():
     state = ControllerState(max_edata_bytes=1024 * 1024)
     metadata, function_payload = serialize(bytes)
@@ -253,6 +321,7 @@ def main():
         "byte_serving": byte_serving_case(),
         "request_admission": request_admission_case(),
         "worker_retry": worker_retry_case(),
+        "idempotent_retry": idempotent_retry_case(),
         "idata_attempt_source": idata_attempt_source_case(),
         "elapsed_seconds": time.monotonic() - started,
         "status": "PASS",

@@ -25,6 +25,7 @@ class ControllerClient:
         token,
         timeout=30,
         transient_retries=0,
+        idempotent_transient_retries=8,
         retry_base_seconds=0.01,
         retry_max_seconds=0.25,
     ):
@@ -32,9 +33,15 @@ class ControllerClient:
         self.token = token
         self.timeout = timeout
         self.transient_retries = int(transient_retries)
+        self.idempotent_transient_retries = int(
+            idempotent_transient_retries
+        )
         self.retry_base_seconds = float(retry_base_seconds)
         self.retry_max_seconds = float(retry_max_seconds)
-        if self.transient_retries < 0:
+        if (
+            self.transient_retries < 0
+            or self.idempotent_transient_retries < 0
+        ):
             raise ValueError("transient retries cannot be negative")
         if self.retry_base_seconds < 0 or self.retry_max_seconds < 0:
             raise ValueError("retry delays cannot be negative")
@@ -52,8 +59,13 @@ class ControllerClient:
     def thread_transient_retry_count(self):
         return int(getattr(self._retry_local, "count", 0))
 
-    def _open(self, request_factory):
-        for retry in range(self.transient_retries + 1):
+    def _open(self, request_factory, transient_retries=None):
+        retry_limit = (
+            self.transient_retries
+            if transient_retries is None
+            else int(transient_retries)
+        )
+        for retry in range(retry_limit + 1):
             try:
                 return urllib.request.urlopen(
                     request_factory(), timeout=self.timeout
@@ -61,7 +73,7 @@ class ControllerClient:
             except urllib.error.HTTPError as exc:
                 if (
                     exc.code not in (429, 503)
-                    or retry >= self.transient_retries
+                    or retry >= retry_limit
                 ):
                     raise
                 exc.close()
@@ -70,7 +82,7 @@ class ControllerClient:
                 ConnectionError,
                 TimeoutError,
             ):
-                if retry >= self.transient_retries:
+                if retry >= retry_limit:
                     raise
             with self._metrics_lock:
                 self._transient_retry_count += 1
@@ -85,7 +97,7 @@ class ControllerClient:
                 time.sleep(delay)
         raise AssertionError("unreachable Controller retry state")
 
-    def _request(self, method, path, value=None):
+    def _request(self, method, path, value=None, idempotent=None):
         started = time.monotonic()
         data = None
         headers = {TOKEN_HEADER: self.token}
@@ -93,13 +105,24 @@ class ControllerClient:
             data = json.dumps(value).encode("utf-8")
             headers["Content-Type"] = "application/json"
         try:
+            if idempotent is None:
+                idempotent = method in ("GET", "HEAD")
+            retry_limit = (
+                max(
+                    self.transient_retries,
+                    self.idempotent_transient_retries,
+                )
+                if idempotent
+                else self.transient_retries
+            )
             with self._open(
                 lambda: urllib.request.Request(
                     self.endpoint + path,
                     data=data,
                     headers=headers,
                     method=method,
-                )
+                ),
+                transient_retries=retry_limit,
             ) as response:
                 result = response.read(), response.headers
         except urllib.error.HTTPError as exc:
@@ -247,6 +270,7 @@ class ControllerClient:
                 "content_hash": str(content_hash),
                 "size": int(size),
             },
+            idempotent=True,
         )
         return json.loads(payload)
 
