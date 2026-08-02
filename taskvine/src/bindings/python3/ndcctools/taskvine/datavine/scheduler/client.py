@@ -2,6 +2,9 @@
 
 import base64
 import json
+import re
+import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -20,8 +23,11 @@ class ControllerClient:
         self.endpoint = endpoint.rstrip("/")
         self.token = token
         self.timeout = timeout
+        self._metrics_lock = threading.Lock()
+        self._request_metrics = {}
 
     def _request(self, method, path, value=None):
+        started = time.monotonic()
         data = None
         headers = {TOKEN_HEADER: self.token}
         if value is not None:
@@ -37,12 +43,33 @@ class ControllerClient:
             with urllib.request.urlopen(
                 request, timeout=self.timeout
             ) as response:
-                return response.read(), response.headers
+                result = response.read(), response.headers
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")
             raise DataVineRemoteError(
                 f"Controller HTTP {exc.code}: {body}"
             ) from exc
+        finally:
+            elapsed = time.monotonic() - started
+            route = re.sub(r"/\d+(?=/|$)", "/{id}", path)
+            key = f"{method} {route}"
+            with self._metrics_lock:
+                record = self._request_metrics.setdefault(
+                    key, {"count": 0, "seconds": 0.0}
+                )
+                record["count"] += 1
+                record["seconds"] += elapsed
+        return result
+
+    def request_metrics(self):
+        with self._metrics_lock:
+            return {
+                key: {
+                    "count": value["count"],
+                    "seconds": round(value["seconds"], 6),
+                }
+                for key, value in sorted(self._request_metrics.items())
+            }
 
     def health(self):
         payload, _ = self._request("GET", f"{API_PREFIX}/health")

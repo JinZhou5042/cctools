@@ -54,6 +54,7 @@ class TaskSchedulerThread:
         self._manager = None
         self._logical_outputs = {}
         self._logical_output_slots = {}
+        self._task_records = {}
         self._edata_files = {}
         self._idata_files = {}
         self._attempts = {}
@@ -368,6 +369,7 @@ class TaskSchedulerThread:
         workflow.validate()
         self._logical_outputs = {}
         self._logical_output_slots = {}
+        self._task_records = {}
         self._edata_by_object = {}
         self._serialization_count = 0
         self._bulk_serialization_count = 0
@@ -409,9 +411,17 @@ class TaskSchedulerThread:
                 ),
             )
             self.controller.register_task(record)
+            self._task_records[task.task_id] = record
         result = dict(self._logical_outputs)
         self._edata_by_object.clear()
         return result
+
+    def _task_record(self, task_id):
+        record = self._task_records.get(int(task_id))
+        if record is None:
+            record = self.controller.get_task(task_id)
+            self._task_records[int(task_id)] = record
+        return record
 
     def _binding(self, task_id, value):
         if isinstance(value, OutputRef):
@@ -757,7 +767,7 @@ class TaskSchedulerThread:
         task_cache_inputs = {}
         remaining_cache_uses = {}
         for task_id in sorted(task_by_id):
-            record = self.controller.get_task(task_id)
+            record = self._task_record(task_id)
             keys = {f"e:{record.function_data_id}"}
             keys.update(
                 f"{'e' if kind == 'c' else kind}:{data_id}"
@@ -989,6 +999,7 @@ class TaskSchedulerThread:
         partial_publication_cancelled = {}
         peer_transfer_pruning_probes = []
         peer_transfer_pruning_probe_triggered = False
+        recovery_audit_required = False
 
         def queue_frontier_pruning_if_ready(frontier_task_id):
             if (
@@ -1131,21 +1142,23 @@ class TaskSchedulerThread:
                 pending.add(task_id)
                 recovery_reexecutions += 1
                 recovery_wave.append(task_id)
-                producer_record = self.controller.get_task(task_id)
+                producer_record = self._task_record(task_id)
                 for input_data_id in producer_record.input_data_ids:
                     require_available(input_data_id)
 
-            for pending_task_id in sorted(pending):
-                pending_record = self.controller.get_task(
-                    pending_task_id
-                )
-                for input_data_id in pending_record.input_data_ids:
-                    require_available(input_data_id)
-            for result_task_id in sorted(result_task_ids):
-                for result_data_id in self._logical_output_slots[
-                    result_task_id
-                ]:
-                    require_available(result_data_id)
+            if recovery_audit_required:
+                recovery_audit_required = False
+                for pending_task_id in sorted(pending):
+                    pending_record = self._task_record(
+                        pending_task_id
+                    )
+                    for input_data_id in pending_record.input_data_ids:
+                        require_available(input_data_id)
+                for result_task_id in sorted(result_task_ids):
+                    for result_data_id in self._logical_output_slots[
+                        result_task_id
+                    ]:
+                        require_available(result_data_id)
             if recovery_wave:
                 plan = self.controller.pruning_plan()
                 recovery_waves.append(
@@ -1548,7 +1561,7 @@ class TaskSchedulerThread:
                 for task_id in sorted(pending):
                     unavailable_inputs = []
                     persistence_frontiers = {}
-                    for input_data_id in self.controller.get_task(
+                    for input_data_id in self._task_record(
                         task_id
                     ).input_data_ids:
                         status = self.controller.idata_status(
@@ -1602,7 +1615,9 @@ class TaskSchedulerThread:
             completed = self._manager.wait(wait_timeout)
             workers_before_sync = self._active_worker_ids
             active_workers = frozenset(self._sync_worker_epochs())
-            workers_changed = active_workers != workers_before_sync
+            workers_lost = workers_before_sync - active_workers
+            if workers_lost:
+                recovery_audit_required = True
             self._cache_admission.poll(self._manager)
 
             # TaskVine workers may forsake a task whose input transfer fails
@@ -1610,10 +1625,10 @@ class TaskSchedulerThread:
             # internally.  DataVine must regain ownership of this failure so
             # that the logical task can be recovered from stable lineage
             # instead of looping on a stale attempt indefinitely.
-            if workers_changed or completed is None:
+            if workers_lost or completed is None:
                 for physical_id, logical_id in tuple(running.items()):
                     missing_inputs = []
-                    for input_data_id in self.controller.get_task(
+                    for input_data_id in self._task_record(
                         logical_id
                     ).input_data_ids:
                         if not self.controller.idata_status(
@@ -2241,6 +2256,7 @@ class TaskSchedulerThread:
                 self.controller.invalidate_idata(
                     output_ids[logical_id]
                 )
+                recovery_audit_required = True
                 loss_injected = True
             if (
                 worker_loss_injections < len(worker_loss_schedule)
@@ -2312,6 +2328,7 @@ class TaskSchedulerThread:
                     self._manager.prune_file(
                         self._idata_files[output_ids[lost_task_id]]
                     )
+                recovery_audit_required = True
                 removed_persistence = [
                     entry
                     for entry in persistence_pending
@@ -2421,6 +2438,7 @@ class TaskSchedulerThread:
         )
         physical_cache_workers = self._manager.status("workers")
         self._manager._refresh_stats()
+        manager_stats = self._manager.stats
         self._last_run_report = {
             "logical_tasks": len(output_ids),
             "execution_boundary": (
@@ -2564,6 +2582,28 @@ class TaskSchedulerThread:
             ),
             "worker_reconciliations": self._worker_reconciliations,
             "worker_status_polls": self._worker_status_polls,
+            "manager_timing_us": {
+                name: int(getattr(manager_stats, name))
+                for name in (
+                    "time_send",
+                    "time_receive",
+                    "time_status_msgs",
+                    "time_internal",
+                    "time_polling",
+                    "time_application",
+                    "time_scheduling",
+                    "time_workers_execute",
+                )
+            },
+            "manager_bytes": {
+                "sent": int(manager_stats.bytes_sent),
+                "received": int(manager_stats.bytes_received),
+            },
+            "scheduler_controller_requests": (
+                self.controller.request_metrics()
+                if hasattr(self.controller, "request_metrics")
+                else None
+            ),
             "worker_disk_cache_admission_items": (
                 worker_disk_cache_admission_items
             ),
@@ -2712,7 +2752,7 @@ class TaskSchedulerThread:
 
         fanout = {}
         for task_id in sorted(self._logical_outputs):
-            record = self.controller.get_task(task_id)
+            record = self._task_record(task_id)
             data_ids = [record.function_data_id]
             data_ids.extend(
                 data_id
@@ -2786,7 +2826,7 @@ class TaskSchedulerThread:
     ):
         from ndcctools.taskvine import FunctionCall, Task
 
-        record = self.controller.get_task(task_id)
+        record = self._task_record(task_id)
         output_names = tuple(
             f"datavine-idata-{data_id}.pkl"
             for data_id in record.output_data_ids
