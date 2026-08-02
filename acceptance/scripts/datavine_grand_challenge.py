@@ -174,6 +174,7 @@ def main():
     parser.add_argument("--large-bytes", type=int, default=0)
     parser.add_argument("--worker-loss", action="store_true")
     parser.add_argument("--worker-loss-count", type=int, default=2)
+    parser.add_argument("--frontier-recovery", action="store_true")
     parser.add_argument(
         "--mode",
         choices=(
@@ -234,17 +235,78 @@ def main():
         print(json.dumps({"status": "UNAVAILABLE", "mode": "legacy"}))
         return 2
     failure_mode = args.worker_loss or args.mode == "failures"
+    if args.frontier_recovery and not failure_mode:
+        parser.error("--frontier-recovery requires a failure mode")
     peer_transfers = args.mode != "peer-off"
     prefetch = args.mode != "no-prefetch"
-    persistence = args.mode == "persistence-legacy"
+    persistence = (
+        args.mode == "persistence-legacy" or args.frontier_recovery
+    )
     workflow, target, expected, chain_task_ids = build_workflow(
         args.tasks, args.medium_bytes, args.large_bytes
     )
-    loss_schedule = (
-        select_loss_schedule(chain_task_ids, args.worker_loss_count)
-        if failure_mode
-        else ()
-    )
+    persistence_attempts = None
+    prune_after_persistence = None
+    worker_loss_data = None
+    expected_rollback_depths = []
+    durability_frontiers = []
+    if args.frontier_recovery:
+        chain_length = len(chain_task_ids)
+        frontier_indexes = (
+            chain_length // 4,
+            (chain_length * 5) // 8,
+            (chain_length * 13) // 16,
+        )
+        rollback_depths = (
+            max(1, (chain_length * 3) // 16),
+            max(1, chain_length // 8),
+            max(1, chain_length // 16),
+        )
+        loss_indexes = tuple(
+            frontier + depth
+            for frontier, depth in zip(
+                frontier_indexes, rollback_depths
+            )
+        )
+        if loss_indexes[-1] >= chain_length:
+            parser.error("deterministic chain is too short for frontiers")
+        durability_frontiers = [
+            chain_task_ids[index] for index in frontier_indexes
+        ]
+        loss_schedule = tuple(
+            chain_task_ids[index] for index in loss_indexes
+        )
+        persistence_attempts = {
+            task_id: 1 for task_id in durability_frontiers
+        }
+        worker_loss_data = {
+            chain_task_ids[loss_index]: tuple(
+                chain_task_ids[frontier_index + 1:loss_index + 1]
+            )
+            for frontier_index, loss_index in zip(
+                frontier_indexes, loss_indexes
+            )
+        }
+        prune_after_persistence = {}
+        previous_frontier = 0
+        for position, frontier_index in enumerate(frontier_indexes):
+            prune_after_persistence[
+                chain_task_ids[frontier_index]
+            ] = tuple(
+                chain_task_ids[
+                    previous_frontier:frontier_index
+                ]
+            )
+            previous_frontier = frontier_index
+        expected_rollback_depths = list(rollback_depths)
+    else:
+        loss_schedule = (
+            select_loss_schedule(
+                chain_task_ids, args.worker_loss_count
+            )
+            if failure_mode
+            else ()
+        )
     # The final digest is deterministic but depends on the generated graph.
     # The target is fetched from the scheduler snapshot rather than guessed
     # from task ordering, which keeps retries and output slots testable.
@@ -268,14 +330,24 @@ def main():
             args.worker_disk_cache_admission_items
         ),
         persistence=persistence,
-        persistence_attempts_by_task=({target: 1} if persistence else None),
+        persistence_attempts_by_task=(
+            persistence_attempts
+            if args.frontier_recovery
+            else ({target: 1} if persistence else None)
+        ),
+        prune_after_persistence_by_task=prune_after_persistence,
         use_worker_library=not args.process_runner,
         scheduler_wait_timeout=1,
         workflow_timeout=args.workflow_timeout,
         inject_worker_loss_schedule=loss_schedule,
+        inject_worker_loss_data_by_task=worker_loss_data,
         worker_loss_process_shutdown=failure_mode,
     )
     scheduler_report = snapshot["scheduler_report"]
+    durability_frontier_data_ids = sorted(
+        scheduler_report["logical_output_slots"][str(task_id)][0]
+        for task_id in durability_frontiers
+    )
     if failure_mode:
         if scheduler_report["worker_loss_injections"] != len(loss_schedule):
             raise AssertionError(
@@ -293,6 +365,30 @@ def main():
             "peer_release_pending"
         ]:
             raise AssertionError("peer release obligations remain pending")
+        if args.frontier_recovery:
+            rollback_depths = [
+                wave["rollback_depth"]
+                for wave in scheduler_report["recovery_waves"]
+            ]
+            if rollback_depths != expected_rollback_depths:
+                raise AssertionError(
+                    "durability frontier recovery depths do not match: "
+                    f"{rollback_depths} != {expected_rollback_depths}"
+                )
+            if scheduler_report[
+                "persistence_required_data_ids"
+            ] != durability_frontier_data_ids:
+                raise AssertionError("durability frontiers were not persisted")
+            if scheduler_report[
+                "persistence_outstanding_data_ids"
+            ] != durability_frontier_data_ids[-1:]:
+                raise AssertionError(
+                    "superseded durability obligations did not retire"
+                )
+            if not snapshot["durable_hashes_valid"]:
+                raise AssertionError("durable frontier hash validation failed")
+            if snapshot["persistence_temporary_files"]:
+                raise AssertionError("persistence temporary files leaked")
     report = {
         "artifact_type": "datavine-grand-challenge-run",
         "status": "PASS",
@@ -304,10 +400,16 @@ def main():
         "target_task_id": target,
         "failure_mode": "worker-loss" if failure_mode else "none",
         "worker_loss_schedule": list(loss_schedule),
-        "worker_loss_count_requested": (
-            args.worker_loss_count if failure_mode else 0
-        ),
+        "worker_loss_count_requested": len(loss_schedule),
         "lineage_chain_tasks": len(chain_task_ids),
+        "frontier_recovery": args.frontier_recovery,
+        "durability_frontiers": durability_frontiers,
+        "durability_frontier_data_ids": durability_frontier_data_ids,
+        "expected_rollback_depths": expected_rollback_depths,
+        "durable_hashes_valid": snapshot["durable_hashes_valid"],
+        "persistence_temporary_files": snapshot[
+            "persistence_temporary_files"
+        ],
         "worker_disk_cache": {
             "capacity_bytes": args.worker_disk_cache_bytes,
             "capacity_items": args.worker_disk_cache_items,

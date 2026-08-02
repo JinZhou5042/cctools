@@ -17,6 +17,9 @@ FAILURE_ARGS=()
 if [[ "${DATAVINE_GRAND_WORKER_LOSS:-0}" == "1" ]]; then
   FAILURE_ARGS+=(--worker-loss)
 fi
+if [[ "${DATAVINE_GRAND_FRONTIER_RECOVERY:-0}" == "1" ]]; then
+  FAILURE_ARGS+=(--frontier-recovery)
+fi
 MODE=${DATAVINE_GRAND_MODE:-full}
 if [[ "${DATAVINE_GRAND_PROCESS_RUNNER:-0}" == "1" ]]; then
   FAILURE_ARGS+=(--process-runner)
