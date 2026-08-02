@@ -1183,3 +1183,14 @@
 - Self-review status: **FAIL for Ultimate Acceptance**. Persistent execution is
   correct at the accepted checkpoint scale, but manager completion throughput
   still prevents the required 10k run.
+
+## 2026-08-02 — Event-driven recovery audit checkpoint
+
+- Added per-route Controller request metrics and TaskVine manager timing.
+- Cached immutable TaskRecords in the Scheduler and limited normal recovery
+  audits to actual loss events instead of every completion cycle.
+- Accepted normal 126/414-task runs, deterministic worker loss, the prescribed
+  clean build/install, and the Phase 4 process-runner regression.
+- Rejected the 1,238-logical-task run after its 240-second timeout.
+- Code commit: `a25013477`; evidence:
+  `acceptance/artifacts/event-driven-recovery-a25013477.json`.

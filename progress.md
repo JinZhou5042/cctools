@@ -1944,6 +1944,22 @@ Job `4939.0` and its worker were removed during cleanup.
   remain unproved. Evidence:
   `acceptance/artifacts/persistent-worker-library-72d06c4fc.json`.
 
+### 2026-08-02 event-driven recovery audit checkpoint
+
+- Commit `a25013477` adds Manager/Controller timing and request telemetry,
+  caches immutable Scheduler task records, and removes recovery lineage scans
+  from ordinary completion cycles.
+- A 126-task profile reduced Scheduler Controller requests from 7,714 to 1,463,
+  task-record GETs from 4,353 to zero, and IData-status GETs from 2,405 to 500.
+- Normal 414-task execution passes in 44.089 seconds. Deterministic worker loss
+  still produces exactly one ordinary reexecution and one recovery wave with
+  zero legacy recovery tasks. The existing process-runner Phase 4 E2E passes.
+- Ultimate Acceptance remains **FAIL**: the 1,238-logical-task run still times
+  out at 240 seconds. A real worker-set reduction still triggers a full active
+  lineage audit; the next correction is Controller-reported lost IDataIDs plus
+  targeted rollback. Evidence:
+  `acceptance/artifacts/event-driven-recovery-a25013477.json`.
+
 - PASS: final clean build and install after Phase 1 source changes.
 - PASS: final clean build and install after Phase 2 source changes.
 - PASS: final clean build and install after Phase 3 source changes.
