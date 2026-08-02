@@ -204,6 +204,8 @@ def main():
     parser.add_argument("--worker-loss", action="store_true")
     parser.add_argument("--worker-loss-count", type=int, default=2)
     parser.add_argument("--frontier-recovery", action="store_true")
+    parser.add_argument("--storage-frontier-stride", type=int, default=0)
+    parser.add_argument("--storage-budget-bytes", type=int, default=0)
     parser.add_argument(
         "--mode",
         choices=(
@@ -256,6 +258,14 @@ def main():
         parser.error("--worker-cores must be positive")
     if args.worker_loss_count < 1:
         parser.error("--worker-loss-count must be positive")
+    if args.storage_frontier_stride < 0:
+        parser.error("--storage-frontier-stride must be non-negative")
+    if args.storage_budget_bytes < 0:
+        parser.error("--storage-budget-bytes must be non-negative")
+    if args.storage_frontier_stride and not args.frontier_recovery:
+        parser.error(
+            "--storage-frontier-stride requires --frontier-recovery"
+        )
     if args.pruning_grace_seconds < 0:
         parser.error("--pruning-grace-seconds must be non-negative")
     if min(
@@ -301,20 +311,46 @@ def main():
     durability_frontiers = []
     if args.frontier_recovery:
         chain_length = len(chain_task_ids)
-        frontier_indexes = (
-            chain_length // 4,
-            (chain_length * 5) // 8,
-            (chain_length * 13) // 16,
-        )
-        rollback_depths = (
-            max(1, (chain_length * 3) // 16),
-            max(1, chain_length // 8),
-            max(1, chain_length // 16),
-        )
+        if args.storage_frontier_stride:
+            stride = args.storage_frontier_stride
+            if stride < 4:
+                parser.error(
+                    "--storage-frontier-stride must be at least four "
+                    "to contain the three deterministic recovery depths"
+                )
+            frontier_indexes = list(
+                range(stride - 1, chain_length, stride)
+            )
+            if not frontier_indexes or frontier_indexes[-1] != chain_length - 1:
+                frontier_indexes.append(chain_length - 1)
+            eligible_frontiers = frontier_indexes[:-1]
+            if len(eligible_frontiers) < 3:
+                parser.error(
+                    "dense storage schedule requires at least four frontiers"
+                )
+            selected_frontier_indexes = tuple(
+                eligible_frontiers[
+                    ((position + 1) * len(eligible_frontiers)) // 4
+                ]
+                for position in range(3)
+            )
+            rollback_depths = (3, 2, 1)
+        else:
+            frontier_indexes = (
+                chain_length // 4,
+                (chain_length * 5) // 8,
+                (chain_length * 13) // 16,
+            )
+            selected_frontier_indexes = frontier_indexes
+            rollback_depths = (
+                max(1, (chain_length * 3) // 16),
+                max(1, chain_length // 8),
+                max(1, chain_length // 16),
+            )
         loss_indexes = tuple(
             frontier + depth
             for frontier, depth in zip(
-                frontier_indexes, rollback_depths
+                selected_frontier_indexes, rollback_depths
             )
         )
         if loss_indexes[-1] >= chain_length:
@@ -333,7 +369,7 @@ def main():
                 chain_task_ids[frontier_index + 1:loss_index + 1]
             )
             for frontier_index, loss_index in zip(
-                frontier_indexes, loss_indexes
+                selected_frontier_indexes, loss_indexes
             )
         }
         prune_after_persistence = {}
@@ -402,6 +438,23 @@ def main():
         ),
     )
     scheduler_report = snapshot["scheduler_report"]
+    retained_sharedfs_bytes = sum(
+        snapshot["sharedfs_storage"][key]
+        for key in ("durable_bytes", "quarantine_bytes")
+    )
+    storage_budget_exceeded = bool(
+        args.storage_budget_bytes
+        and retained_sharedfs_bytes > args.storage_budget_bytes
+    )
+    if args.storage_budget_bytes:
+        if args.mode == "pruning-off" and not storage_budget_exceeded:
+            raise AssertionError(
+                "pruning-off mode did not exceed the storage budget"
+            )
+        if args.mode != "pruning-off" and storage_budget_exceeded:
+            raise AssertionError(
+                "pruning-enabled mode exceeded the storage budget"
+            )
     durability_frontier_data_ids = sorted(
         scheduler_report["logical_output_slots"][str(task_id)][0]
         for task_id in durability_frontiers
@@ -481,6 +534,12 @@ def main():
             "persistence_temporary_files"
         ],
         "sharedfs_storage": snapshot["sharedfs_storage"],
+        "storage_budget": {
+            "limit_bytes": args.storage_budget_bytes,
+            "retained_bytes": retained_sharedfs_bytes,
+            "exceeded": storage_budget_exceeded,
+        },
+        "storage_frontier_stride": args.storage_frontier_stride,
         "pruning_grace_seconds": args.pruning_grace_seconds,
         "hard_delete_pruned_sharedfs": (
             args.hard_delete_pruned_sharedfs

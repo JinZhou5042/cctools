@@ -18,6 +18,8 @@ run_mode() {
     DATAVINE_GRAND_CONTROLLER_INLINE_IDATA_BYTES=65536 \
     DATAVINE_GRAND_PRUNING_GRACE_SECONDS=0.1 \
     DATAVINE_GRAND_HARD_DELETE_PRUNED_SHAREDFS=1 \
+	DATAVINE_GRAND_STORAGE_FRONTIER_STRIDE=4 \
+	DATAVINE_GRAND_STORAGE_BUDGET_BYTES=524288 \
     DATAVINE_GRAND_WORKFLOW_TIMEOUT=300 \
     DATAVINE_GRAND_MODE="$mode" \
     DATAVINE_GRAND_FRONTIER_RECOVERY=1 \
@@ -53,7 +55,7 @@ enabled_scheduler = enabled["scheduler_report"]
 disabled_scheduler = disabled["scheduler_report"]
 assert enabled_scheduler["runtime_pruned_data_ids"], enabled_scheduler
 assert not disabled_scheduler["runtime_pruned_data_ids"], disabled_scheduler
-assert len(enabled_scheduler["sharedfs_hard_delete"]["deleted"]) == 2
+assert len(enabled_scheduler["sharedfs_hard_delete"]["deleted"]) == 3
 assert disabled_scheduler["sharedfs_hard_delete"] is None
 
 enabled_storage = enabled["sharedfs_storage"]
@@ -61,10 +63,12 @@ disabled_storage = disabled["sharedfs_storage"]
 assert enabled_storage["quarantine_files"] == 0, enabled_storage
 assert disabled_storage["quarantine_files"] == 0, disabled_storage
 assert enabled_storage["durable_files"] == 1, enabled_storage
-assert disabled_storage["durable_files"] == 3, disabled_storage
-assert enabled_storage["durable_bytes"] * 3 == disabled_storage[
+assert disabled_storage["durable_files"] == 4, disabled_storage
+assert enabled_storage["durable_bytes"] * 4 == disabled_storage[
     "durable_bytes"
 ], (enabled_storage, disabled_storage)
+assert not enabled["storage_budget"]["exceeded"], enabled
+assert disabled["storage_budget"]["exceeded"], disabled
 
 print(json.dumps({
     "status": "PASS",
@@ -79,6 +83,13 @@ print(json.dumps({
         enabled_storage["durable_bytes"]
         / disabled_storage["durable_bytes"]
     ),
+	"storage_budget_bytes": enabled["storage_budget"]["limit_bytes"],
+	"pruning_enabled_budget_exceeded": enabled["storage_budget"][
+		"exceeded"
+	],
+	"pruning_disabled_budget_exceeded": disabled["storage_budget"][
+		"exceeded"
+	],
     "hard_deleted_files": len(
         enabled_scheduler["sharedfs_hard_delete"]["deleted"]
     ),
