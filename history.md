@@ -1236,3 +1236,29 @@
   provides neither Legacy comparison nor three-run performance statistics.
   The next smallest safe step is deterministic repeated worker loss in the
   same workload with exact oracle equality and bounded recovery evidence.
+
+## 2026-08-02 — Deterministic repeated worker-churn checkpoint
+
+- Added a deterministic long lineage spine to the Grand Challenge and selects
+  ordered loss points from that spine. The failure mode now closes the exact
+  process holding the only volatile output replica instead of releasing one
+  random worker once.
+- Added runtime assertions requiring every scheduled loss, actual process
+  shutdown, at least one ordinary recomputation per loss, zero legacy recovery
+  tasks, and zero pending peer-release obligations.
+- Configured worker disk caches at 64 MiB/2,048 items. The harness rejects a
+  physical admission working set too small for its largest generated output.
+- Rejected an 8 MiB admission run that could never retrieve its 16 MiB declared
+  output. Also rejected a later PASS because installed code was not an exact
+  clean build of the recorded commit; both results are excluded from accepted
+  history.
+- At exact clean-built commit `54aaae6fe`, all 26 regressions pass and the
+  1k-class failure run completes 1,471 tasks/16,206 bindings in 144.039 seconds
+  through eight ordered unique-worker process losses and eight attempt-two
+  ordinary recomputations. Cache high-water remains 17,831,486 bytes/263 items,
+  releases drain to zero, and the deterministic oracle passes.
+- Evidence: `acceptance/artifacts/repeated-churn-54aaae6fe.json`.
+- Self-review: **PASS for this repeated-churn checkpoint; FAIL for Ultimate
+  Acceptance**. Recovery depth is one on a single spine. Accepted-scale churn,
+  deeper durability-frontier recovery, all specified failure stages, pruning
+  storage evidence, Legacy comparison, and repeated performance runs remain.

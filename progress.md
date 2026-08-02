@@ -38,6 +38,26 @@ Legacy comparison, mandatory failure schedule, or three-run performance
 statistics. Worker disk-cache capacity is also unset in this run, so its
 17,834,302-byte observed high-water mark is not a proof of bounded caching.
 
+### Deterministic repeated-churn checkpoint
+
+Commit `54aaae6fe` adds a 49-task ordered lineage spine to the 1k-class Grand
+Challenge and deterministically closes the process holding the selected
+volatile output at eight ordered points. The clean-build run completes the
+exact oracle after eight process losses, eight ordinary recomputations, and
+eight recovery waves. All TaskID/IDataID values remain stable, zero legacy
+recovery tasks are created, and peer releases drain to zero.
+
+The same run configures each worker disk cache at 64 MiB and 2,048 items. Its
+observed high-water marks are 17,831,486 bytes and 263 items. The prescribed
+clean build/install and all 26 regressions pass on the exact commit. Evidence:
+`acceptance/artifacts/repeated-churn-54aaae6fe.json`.
+
+Self-review is **PASS for repeated deterministic 1k-class process loss and
+FAIL for Ultimate Acceptance**. The recovery points are all on one volatile
+spine and each rollback depth is one; this does not yet prove churn at accepted
+10k/100k scale, durability-frontier-bounded deep recovery, concurrent failure
+stages, or storage behavior.
+
 ### Reproducibility checkpoint
 
 `acceptance/scripts/run_regression.sh` is now the bounded one-command local
