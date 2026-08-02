@@ -410,6 +410,17 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def set_task_states(self, task_ids, state):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/pruning/task-states",
+            {
+                "task_ids": [int(task_id) for task_id in task_ids],
+                "state": str(state),
+            },
+        )
+        return json.loads(payload)
+
     def set_required_output(self, data_id, required=True):
         payload, _ = self._request(
             "POST",
@@ -494,6 +505,24 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def register_edata_batch(self, values):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/edata/register-batch",
+            {
+                "values": [
+                    {
+                        "metadata": metadata.to_dict(),
+                        "serialized_bytes": base64.b64encode(value).decode(
+                            "ascii"
+                        ),
+                    }
+                    for metadata, value in values
+                ]
+            },
+        )
+        return json.loads(payload)
+
     def register_edata_origin(
         self, metadata, origin_path, content_hash, size
     ):
@@ -564,6 +593,19 @@ class ControllerClient:
         )
         return json.loads(payload)["data_id"]
 
+    def allocate_idata_batch(self, producer_slots):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/idata/allocate-batch",
+            {
+                "producer_slots": [
+                    [int(task_id), int(output_index)]
+                    for task_id, output_index in producer_slots
+                ]
+            },
+        )
+        return tuple(json.loads(payload)["data_ids"])
+
     def register_task(self, task):
         if not isinstance(task, TaskRecord):
             raise TypeError("task must be TaskRecord")
@@ -571,6 +613,26 @@ class ControllerClient:
             "POST", f"{API_PREFIX}/tasks/register", task.to_dict()
         )
         return TaskRecord.from_dict(json.loads(payload))
+
+    def register_tasks(self, tasks):
+        tasks = tuple(tasks)
+        if any(not isinstance(task, TaskRecord) for task in tasks):
+            raise TypeError("tasks must contain TaskRecord values")
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/tasks/register-batch",
+            {
+                "tasks": [task.to_dict() for task in tasks],
+                "bounded_acknowledgement": True,
+            },
+        )
+        acknowledgement = json.loads(payload)
+        if acknowledgement.get("registered") != len(tasks):
+            raise DataVineRemoteError(
+                "Controller returned an invalid task registration "
+                "acknowledgement"
+            )
+        return tasks
 
     def get_task(self, task_id):
         payload, _ = self._request(
@@ -611,6 +673,25 @@ class ControllerClient:
             raise DataVineRemoteError(
                 f"Controller HTTP {exc.code}: {body}"
             ) from exc
+
+    def publish_idata_batch(self, publications):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/idata/publish-batch",
+            {
+                "publications": [
+                    {
+                        "data_id": int(data_id),
+                        "attempt": int(attempt),
+                        "payload": base64.b64encode(serialized).decode(
+                            "ascii"
+                        ),
+                    }
+                    for data_id, attempt, serialized in publications
+                ]
+            },
+        )
+        return json.loads(payload)
 
     def publish_idata_metadata(
         self, data_id, attempt, content_hash, serialized_size
@@ -672,6 +753,14 @@ class ControllerClient:
     def idata_status(self, data_id):
         payload, _ = self._request(
             "GET", f"{API_PREFIX}/idata/{int(data_id)}/status"
+        )
+        return json.loads(payload)
+
+    def idata_status_batch(self, data_ids):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/idata/status-batch",
+            {"data_ids": [int(data_id) for data_id in data_ids]},
         )
         return json.loads(payload)
 

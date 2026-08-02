@@ -289,8 +289,10 @@ def main():
     assert bounded_report["legacy_recovery_tasks"] == 0, bounded_report
     assert bounded_report[
         "worker_disk_cache_effective_retention_items"
-    ] == 0
-    assert bounded_report["worker_disk_cache_max_task_items"] == 6
+    ] == 1, bounded_report
+    assert bounded_report["worker_disk_cache_max_task_items"] == 5, (
+        bounded_report
+    )
 
     undersized_workflow, undersized_target, undersized_oracle = (
         build_workflow(2)
@@ -304,11 +306,11 @@ def main():
             worker_count=1,
             worker_cores=1,
             prefetch=False,
-            worker_disk_cache_items=4,
-            worker_disk_cache_admission_items=5,
+            worker_disk_cache_items=3,
+            worker_disk_cache_admission_items=3,
         )
     except ValueError as error:
-        assert "largest task working set of 6 items" in str(error)
+        assert "largest task working set of 4 items" in str(error)
         undersized = {"status": "REJECTED", "error": str(error)}
     else:
         raise AssertionError("undersized cache admission did not fail closed")

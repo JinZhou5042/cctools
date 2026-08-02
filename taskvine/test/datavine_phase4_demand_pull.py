@@ -100,6 +100,7 @@ def run_case(
     max_idata_bytes=64 * 1024 * 1024,
     max_inline_idata_bytes=8 * 1024 * 1024,
     max_serving_bytes=64 * 1024 * 1024,
+    max_replicas=10_000_000,
     worker_cores=2,
     worker_disk_cache_bytes=None,
     worker_disk_cache_items=None,
@@ -139,6 +140,8 @@ def run_case(
     workflow_timeout=None,
     frontier_pruning_grace_seconds=30,
     hard_delete_pruned_sharedfs=False,
+    library_batch_size=4096,
+    detailed_report=True,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -190,6 +193,8 @@ def run_case(
                 str(max_inline_idata_bytes),
                 "--max-serving-bytes",
                 str(max_serving_bytes),
+                "--max-replicas",
+                str(max_replicas),
                 *(
                     ["--bulk-origin-dir", str(bulk_origin)]
                     if bulk_origin is not None
@@ -265,6 +270,9 @@ def run_case(
                         f"expected {worker_count} TaskVine workers"
                     )
                 time.sleep(1)
+            if use_worker_library:
+                scheduler.call("warm_worker_library")
+            workflow_started = time.monotonic()
             future = scheduler.submit(
                 "run_workflow",
                 workflow,
@@ -313,6 +321,8 @@ def run_case(
                 use_worker_library,
                 frontier_pruning_grace_seconds,
                 hard_delete_pruned_sharedfs,
+                library_batch_size,
+                detailed_report,
             )
             if runtime_controller_hook is not None:
                 runtime_hook_handle = runtime_controller_hook(client)
@@ -349,6 +359,7 @@ def run_case(
                     else (600 if factory_manager else 90)
                 )
             )
+            workflow_elapsed = time.monotonic() - workflow_started
             if (
                 runtime_hook_handle is not None
                 and hasattr(runtime_hook_handle, "join")
@@ -387,6 +398,7 @@ def run_case(
                 cache_after = []
                 pruning_result = None
             snapshot = client.snapshot()
+            snapshot["workflow_elapsed_seconds"] = workflow_elapsed
             snapshot["scheduler_report"] = scheduler.call(
                 "last_run_report"
             )
@@ -476,6 +488,9 @@ def run_case(
                 path.name
                 for path in persistence_dir.glob(".*.tmp")
             ) if persistence else []
+            snapshot["durable_hashes_valid"] = not persistence
+            snapshot["superseded_persistence_data_ids"] = []
+            snapshot["durable_recovery_actions"] = {}
             if persistence:
                 durable_recovery_actions = {}
                 requested_data_ids = set(
@@ -517,17 +532,18 @@ def run_case(
                 snapshot["idata_bytes_after_durable_recovery"] = (
                     client.snapshot()["idata_bytes"]
                 )
-            reported_available = sum(
-                bool(status["available"])
-                for status in snapshot["scheduler_report"][
-                    "logical_output_status"
-                ].values()
-            )
-            assert snapshot["available_idata"] == (
-                0
-                if apply_pruning
-                else reported_available
-            )
+            if detailed_report:
+                reported_available = sum(
+                    bool(status["available"])
+                    for status in snapshot["scheduler_report"][
+                        "logical_output_status"
+                    ].values()
+                )
+                assert snapshot["available_idata"] == (
+                    0
+                    if apply_pruning
+                    else reported_available
+                )
             assert snapshot["tasks"] == (
                 len(workflow.tasks)
                 + int(expected_additional_controller_tasks)
@@ -595,11 +611,17 @@ def main():
         2 * len(SHARED) + 3,
         factory_manager=args.factory_manager,
     )
-    assert shared_snapshot["registrations"] == 7
+    assert shared_snapshot["registrations"] == 3, shared_snapshot[
+        "registrations"
+    ]
     assert shared_snapshot["deduplicated_registrations"] == 0
     assert (
         shared_snapshot["scheduler_report"]["edata_serializations"]
         == 7
+    )
+    assert (
+        shared_snapshot["scheduler_report"]["inline_task_values"]
+        == 4
     )
 
     recovery_snapshot = None

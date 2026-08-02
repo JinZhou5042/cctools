@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TEST_DIR="$ROOT/taskvine/test"
 TIMEOUT_SECONDS=${DATAVINE_TEST_TIMEOUT:-180}
-REPORT=${DATAVINE_REGRESSION_REPORT:-"$ROOT/acceptance/artifacts/regression-latest.json"}
+REPORT=${DATAVINE_REGRESSION_REPORT:-"${TMPDIR:-/tmp}/datavine-regression-latest.json"}
 
 mkdir -p "$(dirname "$REPORT")"
 export ROOT TEST_DIR TIMEOUT_SECONDS REPORT

@@ -95,7 +95,7 @@ class ReplicaDirectory:
 
     def __init__(
         self,
-        max_replicas=100000,
+        max_replicas=10_000_000,
         max_workers=10000,
         max_active_leases=1024,
         max_completed_leases=65536,
@@ -111,6 +111,7 @@ class ReplicaDirectory:
         self._lock = threading.RLock()
         self._workers = {}
         self._replicas = {}
+        self._replica_keys_by_data = {}
         self._active_leases = {}
         self._completed_leases = collections.OrderedDict()
         self._max_replicas = capacities["max_replicas"]
@@ -298,7 +299,8 @@ class ReplicaDirectory:
             if attempt == old:
                 return old
             self._latest_attempt[data_id] = attempt
-            for key, record in tuple(self._replicas.items()):
+            for key in tuple(self._replica_keys_by_data.get(data_id, ())):
+                record = self._replicas[key]
                 if (
                     record.data_id == data_id
                     and record.attempt < attempt
@@ -392,6 +394,7 @@ class ReplicaDirectory:
                 ),
             )
             self._replicas[key] = record
+            self._replica_keys_by_data.setdefault(data_id, set()).add(key)
             self._replica_high_water = max(
                 self._replica_high_water, len(self._replicas)
             )
@@ -484,7 +487,8 @@ class ReplicaDirectory:
         with self._lock:
             records = []
             latest_attempt = self._latest_attempt.get(data_id, 0)
-            for record in self._replicas.values():
+            for key in self._replica_keys_by_data.get(data_id, ()):
+                record = self._replicas[key]
                 if (
                     record.data_id != data_id
                     or record.state != "available"
@@ -628,8 +632,9 @@ class ReplicaDirectory:
             latest_attempt = self._latest_attempt.get(data_id, 0)
             candidates = sorted(
                 (
-                    record
-                    for record in self._replicas.values()
+                    self._replicas[key]
+                    for key in self._replica_keys_by_data.get(data_id, ())
+                    for record in (self._replicas[key],)
                     if record.data_id == data_id
                     and record.state == "available"
                     and record.attempt == latest_attempt
@@ -937,9 +942,10 @@ class ReplicaDirectory:
             return tuple(
                 sorted(
                     (
-                        record
-                        for record in self._replicas.values()
-                        if record.data_id == data_id
+                        self._replicas[key]
+                        for key in self._replica_keys_by_data.get(
+                            data_id, ()
+                        )
                     ),
                     key=lambda record: (
                         record.replica_id,
@@ -954,11 +960,7 @@ class ReplicaDirectory:
         with self._lock:
             if int(expected_revision) != self._revision:
                 self._reject_stale("cleanup proof revision changed")
-            keys = [
-                key
-                for key, record in self._replicas.items()
-                if record.data_id == data_id
-            ]
+            keys = list(self._replica_keys_by_data.get(data_id, ()))
             if any(
                 self._replicas[key].state not in ("invalid", "pruned")
                 or self._replicas[key].active_leases
@@ -967,6 +969,7 @@ class ReplicaDirectory:
                 raise ValueError("live replica prevents data cleanup")
             for key in keys:
                 del self._replicas[key]
+            self._replica_keys_by_data.pop(data_id, None)
             self._latest_attempt.pop(data_id, None)
             if keys:
                 self._changed()

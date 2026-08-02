@@ -252,17 +252,53 @@ def bounded_mutation_acknowledgements():
     }
 
 
+def batched_data_state_equivalence():
+    sequential = IncrementalPruner(build_diverse_graph())
+    batched = IncrementalPruner(build_diverse_graph())
+    for pruner in (sequential, batched):
+        for data_id in pruner.graph.data_ids:
+            pruner.set_data_state(data_id, available=True)
+        for task_id in range(1, 8):
+            pruner.set_task_state(task_id, "completed")
+        pruner.set_data_state(3, durable=True)
+        pruner.set_data_state(6, durable=True)
+        pruner.set_data_state(9, required_output=True)
+
+    updates = (
+        (3, {"durable": False}),
+        (4, {"required_output": True}),
+        (6, {"durable": False}),
+        (9, {"available": False, "required_output": False}),
+    )
+    for data_id, changes in updates:
+        sequential.set_data_state(data_id, **changes)
+    acknowledgement = batched.set_data_states(updates)
+    sequential_plan = assert_equivalent(sequential)
+    batched_plan = assert_equivalent(batched)
+    assert sequential_plan.semantic() == batched_plan.semantic()
+    assert acknowledgement.changed
+    assert acknowledgement.touched_records <= len(
+        batched.graph.data_ids
+    )
+    return {
+        "updates": len(updates),
+        "touched_records": acknowledgement.touched_records,
+    }
+
+
 def main():
     deterministic = deterministic_frontier_case()
     random_report = random_equivalence_cases()
     invalid_transitions_fail_closed()
     bounded_acknowledgement = bounded_mutation_acknowledgements()
+    batched_data_state = batched_data_state_equivalence()
     print(
         json.dumps(
             {
                 "deterministic": deterministic,
                 "random": random_report,
                 "bounded_acknowledgement": bounded_acknowledgement,
+                "batched_data_state": batched_data_state,
             },
             sort_keys=True,
         )

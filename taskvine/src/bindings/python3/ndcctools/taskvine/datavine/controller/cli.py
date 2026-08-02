@@ -38,6 +38,9 @@ def main(argv=None):
         default=65536,
     )
     parser.add_argument(
+        "--max-replicas", type=int, default=10_000_000
+    )
+    parser.add_argument(
         "--completed-pruning-operation-bytes",
         type=int,
         default=64 * 1024 * 1024,
@@ -68,6 +71,7 @@ def main(argv=None):
         max_idata_bytes=args.max_idata_bytes,
         max_inline_idata_bytes=args.max_inline_idata_bytes,
         completed_lease_capacity=args.completed_lease_capacity,
+        max_replicas=args.max_replicas,
         completed_pruning_operation_capacity=(
             args.completed_pruning_operation_capacity
         ),

@@ -2,6 +2,7 @@
 
 import collections
 import concurrent.futures
+import base64
 import cloudpickle
 import dataclasses
 import hashlib
@@ -24,7 +25,26 @@ from ..workflow import OutputRef, iter_output_refs
 from ..protocol import DataVineRemoteError
 
 
+class _LogicalCompletion:
+    """Per-logical-task view of a batched physical completion."""
+
+    def __init__(self, physical, output):
+        self.id = physical.id
+        self.output = output
+        self.result = physical.result
+        self.exit_code = physical.exit_code
+        self._successful = (
+            physical.successful()
+            and "DATAVINE_TASK_FAILURE " not in output
+        )
+
+    def successful(self):
+        return self._successful
+
+
 class TaskSchedulerThread:
+    _registration_batch_size = 4096
+
     def __init__(
         self,
         controller_client,
@@ -56,6 +76,10 @@ class TaskSchedulerThread:
         self._logical_output_slots = {}
         self._task_records = {}
         self._edata_files = {}
+        self._edata_info = {}
+        self._edata_payloads = {}
+        self._inline_value_payloads = {}
+        self._inline_task_values = 0
         self._idata_files = {}
         self._attempts = {}
         self._last_run_report = {}
@@ -63,6 +87,7 @@ class TaskSchedulerThread:
         self._edata_by_object = {}
         self._serialization_count = 0
         self._bulk_serialization_count = 0
+        self._registration_timing = {}
         self._worker_reconciliation_deferrals = 0
         self._active_worker_ids = frozenset()
         self._worker_reconciliations = 0
@@ -127,6 +152,31 @@ class TaskSchedulerThread:
                 "Task Scheduler state mutation outside scheduler thread"
             )
 
+    @staticmethod
+    def _logical_outputs_from_batch(output, task_ids):
+        task_ids = tuple(task_ids)
+        if (
+            len(task_ids) == 1
+            or not isinstance(output, str)
+            or "DATAVINE_TASK_BEGIN " not in output
+        ):
+            return {task_id: output for task_id in task_ids}
+        selected = {task_id: [] for task_id in task_ids}
+        active = None
+        for line in output.splitlines():
+            if line.startswith("DATAVINE_TASK_BEGIN "):
+                active = int(line.rsplit(" ", 1)[1])
+                continue
+            if line.startswith("DATAVINE_TASK_END "):
+                active = None
+                continue
+            if active in selected:
+                selected[active].append(line)
+        return {
+            task_id: "\n".join(lines) + ("\n" if lines else "")
+            for task_id, lines in selected.items()
+        }
+
     def _op_register_edata(self, metadata, serialized_bytes):
         self._assert_owner()
         return self.controller.register_edata(metadata, serialized_bytes)
@@ -143,6 +193,36 @@ class TaskSchedulerThread:
         # visible even before the first logical task is submitted.
         self._manager.wait(1)
         return len(self._sync_worker_epochs(force=True))
+
+    def _op_warm_worker_library(self):
+        self._assert_owner()
+        if self._manager is None:
+            raise RuntimeError("TaskVine Manager is not initialized")
+        self._ensure_worker_library()
+        from ndcctools.taskvine import FunctionCall
+
+        task = FunctionCall(
+            "datavine-worker-v2",
+            "execute_datavine_tasks",
+            self.controller.endpoint,
+            self.controller.token,
+            (),
+            {},
+            {},
+            1,
+        )
+        task.set_exec_method("fork")
+        task_id = self._manager.submit(task)
+        while True:
+            completed = self._manager.wait(1)
+            if completed is None or completed.id != task_id:
+                continue
+            if not completed.successful():
+                raise RuntimeError(
+                    "DataVine worker library warmup failed: "
+                    f"{completed.output!r}"
+                )
+            return True
 
     def _sync_worker_epochs(self, force=False):
         self._reconciled_affected_data_ids = ()
@@ -372,26 +452,109 @@ class TaskSchedulerThread:
         else:
             result = self.controller.register_edata(metadata, payload)
         data_id = int(result["data_id"])
+        self._edata_info[data_id] = result
+        if (
+            result.get("storage") == "controller-memory"
+            and len(payload) <= 64 * 1024
+        ):
+            self._edata_payloads[data_id] = payload
         self._edata_by_object[cache_key] = (value, data_id)
         return data_id
 
+    def _register_workflow_values(self, tasks):
+        candidates = []
+        seen = set()
+        for task in tasks:
+            values = ((task.function, "function"),)
+            values += tuple(
+                (
+                    value,
+                    "container" if tuple(iter_output_refs(value)) else "value",
+                )
+                for value in (*task.args, *task.kwargs.values())
+                if not isinstance(value, OutputRef)
+            )
+            for value, domain in values:
+                cache_key = (domain, id(value))
+                if cache_key in seen:
+                    continue
+                seen.add(cache_key)
+                cached = self._edata_by_object.get(cache_key)
+                if cached is not None and cached[0] is value:
+                    continue
+                metadata, payload = serialize(value)
+                metadata = dataclasses.replace(
+                    metadata, domain=str(domain)
+                )
+                if domain == "value" and len(payload) <= 1024:
+                    self._serialization_count += 1
+                    self._inline_value_payloads[cache_key] = (
+                        value,
+                        base64.b64encode(payload).decode("ascii"),
+                    )
+                    continue
+                if (
+                    self._bulk_origin_dir is not None
+                    and len(payload) >= self._bulk_threshold
+                ):
+                    self._register_value(value, domain)
+                    continue
+                self._serialization_count += 1
+                candidates.append(
+                    (cache_key, value, metadata, payload)
+                )
+        if not candidates:
+            return
+        results = self.controller.register_edata_batch(
+            (metadata, payload)
+            for _, _, metadata, payload in candidates
+        )
+        for (cache_key, value, _, payload), result in zip(
+            candidates, results
+        ):
+            data_id = int(result["data_id"])
+            self._edata_by_object[cache_key] = (value, data_id)
+            self._edata_info[data_id] = result
+            if len(payload) <= 64 * 1024:
+                self._edata_payloads[data_id] = payload
+
     def _op_register_workflow(self, workflow):
         self._assert_owner()
+        registration_started = time.monotonic()
         workflow.validate()
         self._logical_outputs = {}
         self._logical_output_slots = {}
         self._task_records = {}
         self._edata_by_object = {}
+        self._edata_info = {}
+        self._edata_payloads = {}
+        self._inline_value_payloads = {}
+        self._inline_task_values = 0
         self._serialization_count = 0
         self._bulk_serialization_count = 0
-        for task in workflow.tasks:
+        self._nested_idata_by_task = {}
+        self._attempts = {}
+        tasks = workflow.tasks
+        producer_slots = tuple(
+            (task.task_id, output_index)
+            for task in tasks
+            for output_index in range(task.output_count)
+        )
+        allocated = iter(self.controller.allocate_idata_batch(producer_slots))
+        idata_allocated = time.monotonic()
+        for task in tasks:
             output_data_ids = tuple(
-                self.controller.allocate_idata(task.task_id, output_index)
-                for output_index in range(task.output_count)
+                next(allocated) for _ in range(task.output_count)
             )
             self._logical_output_slots[task.task_id] = output_data_ids
             self._logical_outputs[task.task_id] = output_data_ids[0]
-        for task in workflow.tasks:
+        self._register_workflow_values(tasks)
+        values_registered = time.monotonic()
+        records = []
+        record_build_seconds = 0.0
+        task_registration_seconds = 0.0
+        build_started = time.monotonic()
+        for task in tasks:
             self._nested_idata_by_task[task.task_id] = set()
             positional = tuple(
                 self._binding(task.task_id, value) for value in task.args
@@ -421,10 +584,31 @@ class TaskSchedulerThread:
                     )
                 ),
             )
-            self.controller.register_task(record)
             self._task_records[task.task_id] = record
+            records.append(record)
+            if len(records) == self._registration_batch_size:
+                register_started = time.monotonic()
+                record_build_seconds += register_started - build_started
+                self.controller.register_tasks(records)
+                registered = time.monotonic()
+                task_registration_seconds += registered - register_started
+                records.clear()
+                build_started = registered
+        register_started = time.monotonic()
+        record_build_seconds += register_started - build_started
+        if records:
+            self.controller.register_tasks(records)
+        tasks_registered = time.monotonic()
+        task_registration_seconds += tasks_registered - register_started
+        self._registration_timing = {
+            "idata_allocation": idata_allocated - registration_started,
+            "edata": values_registered - idata_allocated,
+            "task_record_build": record_build_seconds,
+            "task_registration": task_registration_seconds,
+        }
         result = dict(self._logical_outputs)
         self._edata_by_object.clear()
+        self._inline_value_payloads.clear()
         return result
 
     def _task_record(self, task_id):
@@ -451,6 +635,11 @@ class TaskSchedulerThread:
                 for reference in references
             )
             return ("c", self._register_value(value, "container"))
+        cache_key = ("value", id(value))
+        cached = self._inline_value_payloads.get(cache_key)
+        if cached is not None and cached[0] is value:
+            self._inline_task_values += 1
+            return ("v", cached[1])
         return ("e", self._register_value(value))
 
     def _op_run_workflow(
@@ -495,12 +684,18 @@ class TaskSchedulerThread:
         use_worker_library=False,
         frontier_pruning_grace_seconds=30,
         hard_delete_pruned_sharedfs=False,
+        library_batch_size=4096,
+        detailed_report=False,
     ):
         self._assert_owner()
+        workflow_run_started = time.monotonic()
         if self._manager is None:
             raise RuntimeError("create_manager must be called first")
         if use_worker_library:
             self._ensure_worker_library()
+        library_batch_size = int(library_batch_size)
+        if library_batch_size < 1:
+            raise ValueError("library batch size must be positive")
         reconciliation_deferrals_before = (
             self._worker_reconciliation_deferrals
         )
@@ -619,7 +814,18 @@ class TaskSchedulerThread:
             raise RuntimeError(
                 "TaskVine Manager rejected peer release capacity"
             )
+        controller_snapshot = self.controller.snapshot()
+        idata_inline_threshold = int(
+            controller_snapshot[
+                "idata_inline_object_capacity_bytes"
+            ]
+        )
+        running = {}
+        physical_compute_submissions = 0
         output_ids = self._op_register_workflow(workflow)
+        workflow_registration_elapsed = (
+            time.monotonic() - workflow_run_started
+        )
         peer_transfer_pruning_probe_task_ids = tuple(
             sorted(
                 {
@@ -670,12 +876,6 @@ class TaskSchedulerThread:
                 raise KeyError(
                     f"unknown result TaskIDs {sorted(unknown_results)}"
                 )
-        controller_snapshot = self.controller.snapshot()
-        idata_inline_threshold = int(
-            controller_snapshot[
-                "idata_inline_object_capacity_bytes"
-            ]
-        )
         task_by_id = {task.task_id: task for task in workflow.tasks}
         explicit_persistence_frontiers = (
             persistence_attempts_by_task is not None
@@ -826,7 +1026,12 @@ class TaskSchedulerThread:
         for data_key in remaining_cache_uses:
             kind, token = data_key.split(":", 1)
             if kind == "e":
-                metadata = self.controller.get_edata_metadata(int(token))
+                metadata = self._edata_info.get(int(token))
+                if metadata is None:
+                    metadata = self.controller.get_edata_metadata(
+                        int(token)
+                    )
+                    self._edata_info[int(token)] = metadata
                 cache_known_sizes[data_key] = int(
                     metadata["size"] or 0
                 )
@@ -882,7 +1087,26 @@ class TaskSchedulerThread:
             ):
                 effective_retention_bytes = admission_byte_headroom
         pending = set(task_by_id)
-        running = {}
+        logical_completion_queue = collections.deque()
+        deferred_completed_states = []
+        unbatchable_tasks = set()
+        batch_worker_seconds = 0.0
+        physical_batch_metrics = []
+        effective_library_batch_size = (
+            library_batch_size
+            if (
+                use_worker_library
+                and not persist_outputs
+                and inject_global_loss_after is None
+                and not worker_loss_schedule
+                and not inject_partial_publication_after
+                and not peer_source_losses
+                and not peer_source_loss_after_bytes
+                and not peer_corruptions
+                and not idata_release_failures
+            )
+            else 1
+        )
         persistence_pending = []
         persistence_running = {}
         controller_persistence_pending = {}
@@ -1053,6 +1277,7 @@ class TaskSchedulerThread:
                 ]
             ]
 
+        workflow_execution_started = time.monotonic()
         while (
             pending
             or running
@@ -1419,10 +1644,9 @@ class TaskSchedulerThread:
             ):
                 active_inputs = {
                     data_key
-                    for running_logical_id in running.values()
-                    for data_key in task_cache_inputs[
-                        running_logical_id
-                    ]
+                    for logical_ids in running.values()
+                    for running_logical_id in logical_ids
+                    for data_key in task_cache_inputs[running_logical_id]
                 }
                 safe_frontiers = [
                     frontier_task_id
@@ -1544,23 +1768,91 @@ class TaskSchedulerThread:
                     & self._cache_admission.prune_by_data
                 )
             )
-            for task_id in ready:
-                attempt = self._attempts.get(task_id, 0) + 1
-                self._attempts[task_id] = attempt
-                physical = self._make_physical_task(
-                    task_id,
-                    environment,
-                    attempt,
-                    idata_inline_threshold,
-                    inject_partial_publication_after.get(task_id)
-                    if attempt == 1
-                    else None,
-                    use_worker_library,
+            ready_batches = []
+            batch = []
+            batch_data_keys = set()
+            batch_input_bytes = 0
+            batch_input_byte_limit = 16 * 1024 * 1024
+            connected_library_slots = max(
+                1, len(self._active_worker_ids) * 4
+            )
+            ready_batch_size = min(
+                effective_library_batch_size,
+                max(
+                    1,
+                    (len(ready) + connected_library_slots - 1)
+                    // connected_library_slots,
+                ),
+            )
+            for ready_task_id in ready:
+                if ready_task_id in unbatchable_tasks:
+                    if batch:
+                        ready_batches.append(batch)
+                        batch = []
+                        batch_data_keys = set()
+                        batch_input_bytes = 0
+                    ready_batches.append([ready_task_id])
+                    continue
+                new_keys = (
+                    task_cache_inputs[ready_task_id] - batch_data_keys
                 )
+                new_bytes = sum(
+                    cache_known_sizes[data_key]
+                    for data_key in new_keys
+                )
+                if batch and (
+                    len(batch) == ready_batch_size
+                    or batch_input_bytes + new_bytes
+                    > batch_input_byte_limit
+                ):
+                    ready_batches.append(batch)
+                    batch = []
+                    batch_data_keys = set()
+                    batch_input_bytes = 0
+                    new_keys = set(task_cache_inputs[ready_task_id])
+                    new_bytes = sum(
+                        cache_known_sizes[data_key]
+                        for data_key in new_keys
+                    )
+                batch.append(ready_task_id)
+                batch_data_keys.update(new_keys)
+                batch_input_bytes += new_bytes
+            if batch:
+                ready_batches.append(batch)
+            for task_ids in ready_batches:
+                attempts = []
+                for task_id in task_ids:
+                    attempt = self._attempts.get(task_id, 0) + 1
+                    self._attempts[task_id] = attempt
+                    attempts.append(attempt)
+                partial_output_index = (
+                    inject_partial_publication_after.get(task_ids[0])
+                    if len(task_ids) == 1 and attempts[0] == 1
+                    else None
+                )
+                if partial_output_index is not None:
+                    physical = self._make_physical_task(
+                        task_ids[0],
+                        environment,
+                        attempts[0],
+                        idata_inline_threshold,
+                        partial_output_index,
+                        use_worker_library,
+                    )
+                else:
+                    physical = self._make_physical_batch_task(
+                        task_ids,
+                        environment,
+                        attempts,
+                        idata_inline_threshold,
+                        use_worker_library,
+                    )
                 physical_id = self._manager.submit(physical)
-                self.controller.set_task_state(task_id, "running")
-                running[physical_id] = task_id
-                pending.remove(task_id)
+                physical_compute_submissions += 1
+                running[physical_id] = tuple(task_ids)
+                self.controller.set_task_states(task_ids, "running")
+                for task_id in task_ids:
+                    pending.remove(task_id)
             while (
                 persistence_pending
                 and len(persistence_running) < persistence_capacity
@@ -1676,33 +1968,43 @@ class TaskSchedulerThread:
                     f"frontier_pruning_pending="
                     f"{sorted(frontier_pruning_pending)}"
                 )
-            completed = self._manager.wait(wait_timeout)
+            queued_logical_id = None
+            if logical_completion_queue:
+                queued_logical_id, completed = (
+                    logical_completion_queue.popleft()
+                )
+            else:
+                completed = self._manager.wait(wait_timeout)
             workers_before_sync = self._active_worker_ids
-            active_workers = frozenset(self._sync_worker_epochs())
-            workers_lost = workers_before_sync - active_workers
+            if queued_logical_id is None:
+                active_workers = frozenset(self._sync_worker_epochs())
+                workers_lost = workers_before_sync - active_workers
+                self._cache_admission.poll(self._manager)
+            else:
+                active_workers = workers_before_sync
+                workers_lost = frozenset()
             if workers_lost:
                 recovery_audit_data_ids.update(
                     int(data_key.split(":", 1)[1])
                     for data_key in self._reconciled_affected_data_ids
                     if str(data_key).startswith("i:")
                 )
-            self._cache_admission.poll(self._manager)
-
             # TaskVine workers may forsake a task whose input transfer fails
             # and the C manager will normally retry that physical task
             # internally.  DataVine must regain ownership of this failure so
             # that the logical task can be recovered from stable lineage
             # instead of looping on a stale attempt indefinitely.
             if workers_lost:
-                for physical_id, logical_id in tuple(running.items()):
+                for physical_id, logical_ids in tuple(running.items()):
                     missing_inputs = []
-                    for input_data_id in self._task_record(
-                        logical_id
-                    ).input_data_ids:
-                        if not self.controller.idata_status(
-                            input_data_id
-                        )["available"]:
-                            missing_inputs.append(input_data_id)
+                    for logical_id in logical_ids:
+                        for input_data_id in self._task_record(
+                            logical_id
+                        ).input_data_ids:
+                            if not self.controller.idata_status(
+                                input_data_id
+                            )["available"]:
+                                missing_inputs.append(input_data_id)
                     if not missing_inputs:
                         continue
                     # The C manager may already have moved this attempt into
@@ -1712,19 +2014,25 @@ class TaskSchedulerThread:
                     if not self._manager.cancel_by_task_id(physical_id):
                         continue
                     running.pop(physical_id)
-                    pending.add(logical_id)
-                    self.controller.set_task_state(logical_id, "pending")
-                    for output_data_id in self._logical_output_slots[
-                        logical_id
-                    ]:
-                        self.controller.invalidate_idata(output_data_id)
-                    recovery_reexecutions += 1
+                    for logical_id in logical_ids:
+                        pending.add(logical_id)
+                        self.controller.set_task_state(
+                            logical_id, "pending"
+                        )
+                        for output_data_id in self._logical_output_slots[
+                            logical_id
+                        ]:
+                            self.controller.invalidate_idata(output_data_id)
+                    recovery_reexecutions += len(logical_ids)
                     unavailable_input_recoveries.append(
                         {
-                            "task_id": logical_id,
+                            "task_ids": list(logical_ids),
                             "physical_task_id": physical_id,
                             "missing_inputs": missing_inputs,
-                            "attempt": self._attempts[logical_id],
+                            "attempts": [
+                                self._attempts[logical_id]
+                                for logical_id in logical_ids
+                            ],
                         }
                     )
             if (
@@ -1778,9 +2086,12 @@ class TaskSchedulerThread:
                         )
                     peer_transfer_pruning_probe_triggered = True
             if completed is None:
-                for physical_id, logical_id in tuple(running.items()):
-                    output_index = (
-                        inject_partial_publication_after.get(logical_id)
+                for physical_id, logical_ids in tuple(running.items()):
+                    if len(logical_ids) != 1:
+                        continue
+                    logical_id = logical_ids[0]
+                    output_index = inject_partial_publication_after.get(
+                        logical_id
                     )
                     if (
                         output_index is None
@@ -1939,10 +2250,11 @@ class TaskSchedulerThread:
                     effective_retention_bytes,
                     effective_retention_items,
                     remaining_cache_uses,
-                    {
-                        data_key
-                        for logical_id in running.values()
-                        for data_key in task_cache_inputs[logical_id]
+                {
+                    data_key
+                    for logical_ids in running.values()
+                    for logical_id in logical_ids
+                    for data_key in task_cache_inputs[logical_id]
                     },
                 )
                 continue
@@ -2107,9 +2419,212 @@ class TaskSchedulerThread:
             # unavailable input may still be returned by Manager.wait.  Its
             # logical task has already been moved back to pending; late
             # completion must be ignored rather than treated as a duplicate.
-            if completed.id not in running:
-                continue
-            logical_id = running.pop(completed.id)
+            if queued_logical_id is None:
+                if completed.id not in running:
+                    continue
+                logical_ids = running.pop(completed.id)
+                physical_batch_metrics.append(
+                    {
+                        "physical_task_id": int(completed.id),
+                        "logical_tasks": len(logical_ids),
+                        **{
+                            name: int(completed.get_metric(name))
+                            for name in (
+                                "time_when_submitted",
+                                "time_when_done",
+                                "time_workers_execute_last",
+                                "bytes_sent",
+                                "bytes_received",
+                            )
+                        },
+                    }
+                )
+                inline_publications = []
+                inline_values = []
+                batch_events = []
+                structured_batch = (
+                    completed.output
+                    if (
+                        isinstance(completed.output, dict)
+                        and completed.output.get("protocol")
+                        == "datavine-batch-v1"
+                    )
+                    else None
+                )
+                if structured_batch is not None:
+                    batch_worker_seconds += float(
+                        structured_batch["worker_seconds"]
+                    )
+                    returned_task_ids = tuple(
+                        int(result["task_id"])
+                        for result in structured_batch["tasks"]
+                    )
+                    if returned_task_ids != tuple(logical_ids):
+                        raise RuntimeError(
+                            "batch returned mismatched logical TaskIDs"
+                        )
+                    for result in structured_batch["tasks"]:
+                        if result["error"] is not None:
+                            raise RuntimeError(
+                                "successful structured batch contained "
+                                f"TaskID {result['task_id']} error "
+                                f"{result['error']}"
+                            )
+                        batch_events.extend(result["events"])
+                        for (
+                            output_index,
+                            data_id,
+                            attempt,
+                            payload,
+                        ) in result["publications"]:
+                            value = {
+                                "task_id": int(result["task_id"]),
+                                "output_index": int(output_index),
+                                "data_id": int(data_id),
+                                "attempt": int(attempt),
+                                "payload": payload,
+                            }
+                            inline_values.append(value)
+                            inline_publications.append(
+                                (int(data_id), int(attempt), payload)
+                            )
+                elif isinstance(completed.output, str):
+                    batch_events = completed.output.splitlines()
+                    for line in completed.output.splitlines():
+                        if line.startswith("DATAVINE_BATCH_TIMING "):
+                            batch_worker_seconds += float(
+                                line.rsplit("seconds=", 1)[1]
+                            )
+                            continue
+                        if not line.startswith(
+                            "DATAVINE_INLINE_RESULT "
+                        ):
+                            continue
+                        value = json.loads(line.split(" ", 1)[1])
+                        inline_values.append(value)
+                        inline_publications.append(
+                            (
+                                value["data_id"],
+                                value["attempt"],
+                                base64.b64decode(
+                                    value["payload"], validate=True
+                                ),
+                            )
+                        )
+                if inline_publications:
+                    self.controller.publish_idata_batch(
+                        inline_publications
+                    )
+                fast_batch_complete = (
+                    effective_library_batch_size > 1
+                    and logical_ids
+                    and completed.successful()
+                    and (
+                        structured_batch is not None
+                        or "DATAVINE_TASK_FAILURE "
+                        not in completed.output
+                    )
+                    and len(inline_values)
+                    == sum(
+                        len(self._logical_output_slots[task_id])
+                        for task_id in logical_ids
+                    )
+                )
+                if fast_batch_complete:
+                    values_by_task = collections.defaultdict(dict)
+                    for value in inline_values:
+                        task_id = int(value["task_id"])
+                        output_index = int(value["output_index"])
+                        if (
+                            task_id not in logical_ids
+                            or output_index in values_by_task[task_id]
+                        ):
+                            raise RuntimeError(
+                                "batch returned invalid inline result slots"
+                            )
+                        values_by_task[task_id][output_index] = value
+                    for line in batch_events:
+                        if line.startswith("DATAVINE_REPLICA_OBSERVED "):
+                            self._cache_admission.observe(
+                                json.loads(
+                                    line[len("DATAVINE_REPLICA_OBSERVED "):]
+                                )
+                            )
+                    local_idata_hits += sum(
+                        line.count("DATAVINE_LOCAL_IDATA")
+                        for line in batch_events
+                    )
+                    worker_controller_retries += sum(
+                        int(line.split(" ", 1)[1])
+                        for line in batch_events
+                        if line.startswith(
+                            "DATAVINE_CONTROLLER_RETRIES "
+                        )
+                    )
+                    for logical_id in logical_ids:
+                        expected_output_ids = self._logical_output_slots[
+                            logical_id
+                        ]
+                        values = values_by_task[logical_id]
+                        if set(values) != set(
+                            range(len(expected_output_ids))
+                        ):
+                            raise RuntimeError(
+                                f"TaskID {logical_id} returned invalid "
+                                "inline output slots"
+                            )
+                        for output_index, output_data_id in enumerate(
+                            expected_output_ids
+                        ):
+                            value = values[output_index]
+                            if (
+                                int(value["data_id"]) != output_data_id
+                                or int(value["attempt"])
+                                != self._attempts[logical_id]
+                            ):
+                                raise RuntimeError(
+                                    f"TaskID {logical_id} returned "
+                                    "mismatched inline result"
+                                )
+                            if dependents[logical_id]:
+                                payload = value["payload"]
+                                if isinstance(payload, str):
+                                    payload = base64.b64decode(
+                                        payload, validate=True
+                                    )
+                                self._idata_files[output_data_id] = (
+                                    self._inline_idata_file(
+                                        output_data_id,
+                                        hashlib.sha256(payload).hexdigest(),
+                                    )
+                                )
+                        deferred_completed_states.append(logical_id)
+                        done.add(logical_id)
+                        if logical_id not in completed_once:
+                            completed_once.add(logical_id)
+                            for data_key in task_cache_inputs[logical_id]:
+                                remaining_cache_uses[data_key] -= 1
+                    continue
+                logical_outputs = self._logical_outputs_from_batch(
+                    completed.output, logical_ids
+                )
+                for batch_logical_id in logical_ids:
+                    logical_completion_queue.append(
+                        (
+                            batch_logical_id,
+                            _LogicalCompletion(
+                                completed,
+                                logical_outputs[batch_logical_id],
+                            ),
+                        )
+                    )
+                logical_id, completed = logical_completion_queue.popleft()
+                if logical_completion_queue:
+                    running[completed.id] = ()
+            else:
+                logical_id = queued_logical_id
+                if not logical_completion_queue:
+                    running.pop(completed.id, None)
             if frontier_pruning_active is not None:
                 compute_completions_while_frontier_pruning += 1
             if persistence_running or persistence_pending:
@@ -2128,6 +2643,13 @@ class TaskSchedulerThread:
                 if line.startswith("DATAVINE_CONTROLLER_RETRIES ")
             )
             if not completed.successful():
+                if "DATAVINE_INLINE_TOO_LARGE" in completed_output:
+                    unbatchable_tasks.add(logical_id)
+                    self.controller.set_task_state(
+                        logical_id, "pending"
+                    )
+                    pending.add(logical_id)
+                    continue
                 # A worker can disappear after its replica was selected but
                 # before a dependent task starts. Reconcile first, then turn
                 # a globally lost input into ordinary logical recomputation
@@ -2227,16 +2749,35 @@ class TaskSchedulerThread:
                 if line.startswith("DATAVINE_REPLICA_PREPARED ")
             ]
             expected_output_ids = self._logical_output_slots[logical_id]
-            if len(preparation_lines) != len(expected_output_ids):
-                raise RuntimeError(
-                    f"TaskID {logical_id} returned "
-                    f"{len(preparation_lines)} replica preparations; "
-                    f"expected {len(expected_output_ids)}"
-                )
-            preparations = {
-                int(preparation["output_index"]): preparation
-                for preparation in map(json.loads, preparation_lines)
-            }
+            inline_results = [
+                json.loads(line.split(" ", 1)[1])
+                for line in completed.output.splitlines()
+                if line.startswith("DATAVINE_INLINE_RESULT ")
+            ]
+            if inline_results:
+                preparations = {}
+                for value in inline_results:
+                    payload = base64.b64decode(
+                        value["payload"], validate=True
+                    )
+                    preparations[int(value["output_index"])] = {
+                        "data_id": f"i:{int(value['data_id'])}",
+                        "attempt": int(value["attempt"]),
+                        "content_hash": hashlib.sha256(payload).hexdigest(),
+                        "size": len(payload),
+                        "controller_inline": True,
+                    }
+            else:
+                if len(preparation_lines) != len(expected_output_ids):
+                    raise RuntimeError(
+                        f"TaskID {logical_id} returned "
+                        f"{len(preparation_lines)} replica preparations; "
+                        f"expected {len(expected_output_ids)}"
+                    )
+                preparations = {
+                    int(preparation["output_index"]): preparation
+                    for preparation in map(json.loads, preparation_lines)
+                }
             if set(preparations) != set(range(len(expected_output_ids))):
                 raise RuntimeError(
                     f"TaskID {logical_id} returned invalid output slots"
@@ -2253,34 +2794,44 @@ class TaskSchedulerThread:
                     raise RuntimeError(
                         f"TaskID {logical_id} returned mismatched replica"
                     )
-                self.controller.commit_replica(
-                    preparation["data_id"],
-                    preparation["replica_id"],
-                    preparation["generation"],
-                    preparation["attempt"],
-                    preparation["content_hash"],
-                    preparation["size"],
-                )
-                self._cache_admission.observe(preparation)
+                if not preparation.get("controller_inline"):
+                    self.controller.commit_replica(
+                        preparation["data_id"],
+                        preparation["replica_id"],
+                        preparation["generation"],
+                        preparation["attempt"],
+                        preparation["content_hash"],
+                        preparation["size"],
+                    )
+                    self._cache_admission.observe(preparation)
                 # Every output slot must be published before the logical task
                 # can complete.
-                output_status = self.controller.idata_status(
-                    output_data_id
-                )
-                if (
-                    not output_status["available"]
-                    or output_status["attempt"]
-                    != self._attempts[logical_id]
-                    or output_status["content_hash"]
-                    != preparation["content_hash"]
-                    or output_status["size"] != preparation["size"]
-                ):
-                    raise RuntimeError(
-                        f"TaskID {logical_id} output {output_index} "
-                        "publication is not available"
+                if not preparation.get("controller_inline"):
+                    output_status = self.controller.idata_status(
+                        output_data_id
                     )
-                if output_status["controller_inline"]:
-                    self.controller.fetch_idata(output_data_id)
+                    if (
+                        not output_status["available"]
+                        or output_status["attempt"]
+                        != self._attempts[logical_id]
+                        or output_status["content_hash"]
+                        != preparation["content_hash"]
+                        or output_status["size"] != preparation["size"]
+                    ):
+                        raise RuntimeError(
+                            f"TaskID {logical_id} output {output_index} "
+                            "publication is not available"
+                        )
+                    if output_status["controller_inline"]:
+                        self.controller.fetch_idata(output_data_id)
+                else:
+                    if dependents[logical_id]:
+                        self._idata_files[output_data_id] = (
+                            self._inline_idata_file(
+                                output_data_id,
+                                preparation["content_hash"],
+                            )
+                        )
             if (
                 persist_outputs
                 and logical_id in persistence_attempts_by_task
@@ -2328,7 +2879,10 @@ class TaskSchedulerThread:
                         controller_persistence_pending[
                             output_data_id
                         ] = time.monotonic()
-            self.controller.set_task_state(logical_id, "completed")
+            if effective_library_batch_size > 1:
+                deferred_completed_states.append(logical_id)
+            else:
+                self.controller.set_task_state(logical_id, "completed")
             done.add(logical_id)
             if logical_id not in completed_once:
                 completed_once.add(logical_id)
@@ -2464,19 +3018,28 @@ class TaskSchedulerThread:
                 worker_loss_injections += 1
                 # Prevent a downstream dispatch until the next scheduler
                 # turn computes the target-driven recovery closure.
-            self._cache_admission.enforce(
-                self._manager,
-                self._file_for_data_key,
-                effective_retention_bytes,
-                effective_retention_items,
-                remaining_cache_uses,
-                {
-                    data_key
-                    for running_logical_id in running.values()
-                    for data_key in task_cache_inputs[
-                        running_logical_id
-                    ]
-                },
+            if not logical_completion_queue:
+                self._cache_admission.enforce(
+                    self._manager,
+                    self._file_for_data_key,
+                    effective_retention_bytes,
+                    effective_retention_items,
+                    remaining_cache_uses,
+                    {
+                        data_key
+                        for logical_ids in running.values()
+                        for running_logical_id in logical_ids
+                        for data_key in task_cache_inputs[
+                            running_logical_id
+                        ]
+                    },
+                )
+        workflow_execution_elapsed = (
+            time.monotonic() - workflow_execution_started
+        )
+        if deferred_completed_states:
+            self.controller.set_task_states(
+                deferred_completed_states, "completed"
             )
         cache_deadline = time.monotonic() + 30
         while (
@@ -2557,6 +3120,26 @@ class TaskSchedulerThread:
         physical_cache_workers = self._manager.status("workers")
         self._manager._refresh_stats()
         manager_stats = self._manager.stats
+        report_data_ids = (
+            sorted(producer_by_data_id)
+            if detailed_report
+            else sorted(
+                data_id
+                for task_id in result_task_ids
+                for data_id in self._logical_output_slots[task_id]
+            )
+        )
+        report_task_ids = (
+            sorted(task_by_id)
+            if detailed_report
+            else sorted(set(result_task_ids))
+        )
+        final_output_status = {
+            int(status["data_id"]): status
+            for status in self.controller.idata_status_batch(
+                report_data_ids
+            )
+        }
         self._last_run_report = {
             "logical_tasks": len(output_ids),
             "execution_boundary": (
@@ -2564,9 +3147,10 @@ class TaskSchedulerThread:
             ),
             "logical_output_slots": {
                 str(task_id): list(data_ids)
-                for task_id, data_ids
-                in sorted(self._logical_output_slots.items())
+                for task_id in report_task_ids
+                for data_ids in (self._logical_output_slots[task_id],)
             },
+            "logical_output_slots_complete": bool(detailed_report),
             "logical_output_status": {
                 str(data_id): {
                     key: status[key]
@@ -2580,17 +3164,41 @@ class TaskSchedulerThread:
                         "durability",
                     )
                 }
-                for data_id in sorted(producer_by_data_id)
-                for status in (self.controller.idata_status(data_id),)
+                for data_id in report_data_ids
+                for status in (final_output_status[data_id],)
             },
+            "logical_output_status_complete": bool(detailed_report),
             "attempts_by_task": {
-                str(task_id): attempt
-                for task_id, attempt in sorted(self._attempts.items())
+                str(task_id): self._attempts[task_id]
+                for task_id in report_task_ids
             },
+            "attempts_by_task_complete": bool(detailed_report),
             "partial_publication_failures": (
                 partial_publication_failures
             ),
             "physical_attempts": sum(self._attempts.values()),
+            "physical_compute_submissions": physical_compute_submissions,
+            "library_batch_size": effective_library_batch_size,
+            "logical_tasks_per_physical_submission": (
+                sum(self._attempts.values()) / physical_compute_submissions
+                if physical_compute_submissions
+                else 0
+            ),
+            "batch_worker_seconds": batch_worker_seconds,
+            "physical_batch_metrics": physical_batch_metrics,
+            "workflow_timing_seconds": {
+                "registration": workflow_registration_elapsed,
+                "execution_loop": workflow_execution_elapsed,
+                "reporting_and_cleanup": (
+                    time.monotonic()
+                    - workflow_run_started
+                    - workflow_registration_elapsed
+                    - workflow_execution_elapsed
+                ),
+            },
+            "registration_timing_seconds": dict(
+                self._registration_timing
+            ),
             "recovery_reexecutions": recovery_reexecutions,
             "unavailable_input_recoveries": (
                 unavailable_input_recoveries
@@ -2701,6 +3309,7 @@ class TaskSchedulerThread:
                 for value in prefetch_selected
             ],
             "edata_serializations": self._serialization_count,
+            "inline_task_values": self._inline_task_values,
             "bulk_edata_serializations": self._bulk_serialization_count,
             "worker_reconciliation_deferrals": (
                 self._worker_reconciliation_deferrals
@@ -2818,7 +3427,13 @@ class TaskSchedulerThread:
     def _edata_file(self, data_id):
         file_object = self._edata_files.get(data_id)
         if file_object is None:
-            info = self.controller.get_edata_metadata(data_id)
+            info = self._edata_info.get(data_id)
+            if info is None or (
+                info.get("storage") == "bulk-origin"
+                and not info.get("origin_path")
+            ):
+                info = self.controller.get_edata_metadata(data_id)
+                self._edata_info[data_id] = info
             if info["storage"] == "bulk-origin":
                 file_object = self._manager.declare_file(
                     info["origin_path"],
@@ -2847,6 +3462,25 @@ class TaskSchedulerThread:
                 raise RuntimeError(
                     f"could not bind EDataID e:{data_id} content hash"
                 )
+        return file_object
+
+    def _inline_idata_file(self, data_id, content_hash):
+        url = (
+            self.controller.endpoint
+            + f"/v1/idata/{int(data_id)}?"
+            + urllib.parse.urlencode({"token": self.controller.token})
+        )
+        file_object = self._manager.declare_url(
+            url, cache="worker", peer_transfer=True
+        )
+        if not file_object.set_datavine_data_id(f"i:{int(data_id)}"):
+            raise RuntimeError(
+                f"could not bind TaskVine file to IDataID i{int(data_id)}"
+            )
+        if not file_object.set_datavine_content_hash(str(content_hash)):
+            raise RuntimeError(
+                f"could not bind IDataID i{int(data_id)} content hash"
+            )
         return file_object
 
     def _idata_output_file(self, data_id, attempt):
@@ -2995,7 +3629,7 @@ class TaskSchedulerThread:
         )
         if use_worker_library and kill_worker_after_output_index is None:
             task = FunctionCall(
-                "datavine-worker-v1",
+                "datavine-worker-v2",
                 "execute_datavine_task",
                 self.controller.endpoint,
                 self.controller.token,
@@ -3004,7 +3638,7 @@ class TaskSchedulerThread:
                 output_names,
                 idata_inline_threshold,
             )
-            task.set_exec_method("direct")
+            task.set_exec_method("fork")
         else:
             task = Task(command)
         task.set_tag(str(task_id))
@@ -3055,20 +3689,115 @@ class TaskSchedulerThread:
             task.add_environment(environment)
         return task
 
+    def _make_physical_batch_task(
+        self,
+        task_ids,
+        environment,
+        attempts,
+        idata_inline_threshold,
+        use_worker_library,
+    ):
+        task_ids = tuple(task_ids)
+        attempts = tuple(attempts)
+        if len(task_ids) == 1:
+            return self._make_physical_task(
+                task_ids[0],
+                environment,
+                attempts[0],
+                idata_inline_threshold,
+                None,
+                use_worker_library,
+            )
+        if not use_worker_library:
+            raise RuntimeError("process tasks cannot be physically batched")
+
+        from ndcctools.taskvine import FunctionCall
+
+        calls = []
+        edata_ids = set()
+        idata_ids = set()
+        for task_id, attempt in zip(task_ids, attempts):
+            record = self._task_record(task_id)
+            output_names = tuple(
+                f"datavine-idata-{data_id}.pkl"
+                for data_id in record.output_data_ids
+            )
+            calls.append((task_id, attempt, output_names))
+            edata_ids.add(record.function_data_id)
+            edata_ids.update(
+                data_id
+                for kind, data_id in record.positional
+                if kind in ("e", "c")
+            )
+            edata_ids.update(
+                data_id
+                for _, (kind, data_id) in record.keyword
+                if kind in ("e", "c")
+            )
+            idata_ids.update(
+                data_id
+                for kind, data_id in record.positional
+                if kind == "i"
+            )
+            idata_ids.update(
+                data_id
+                for _, (kind, data_id) in record.keyword
+                if kind == "i"
+            )
+            idata_ids.update(self._nested_idata_by_task.get(task_id, ()))
+
+        task = FunctionCall(
+            "datavine-worker-v2",
+            "execute_datavine_tasks",
+            self.controller.endpoint,
+            self.controller.token,
+            calls,
+            {
+                data_id: self._edata_payloads[data_id]
+                for data_id in edata_ids
+                if data_id in self._edata_payloads
+            },
+            {
+                task_id: self._task_record(task_id).to_dict()
+                for task_id in task_ids
+            },
+            idata_inline_threshold,
+        )
+        task.set_exec_method("fork")
+        task.set_tag(",".join(map(str, task_ids)))
+        task.set_cores(1)
+        task.set_retries(5)
+        for data_id in sorted(edata_ids):
+            if data_id in self._edata_payloads:
+                continue
+            task.add_input(
+                self._edata_file(data_id),
+                f"datavine-edata-{data_id}.pkl",
+            )
+        for data_id in sorted(idata_ids):
+            task.add_input(
+                self._idata_files[data_id],
+                f"datavine-idata-{data_id}.pkl",
+            )
+        if environment is not None:
+            task.add_environment(environment)
+        return task
+
     def _ensure_worker_library(self):
-        if self._manager.check_library_exists("datavine-worker-v1"):
+        if self._manager.check_library_exists("datavine-worker-v2"):
             return
-        from ..worker.library import execute_datavine_task
+        from ..worker.library import (
+            execute_datavine_task,
+            execute_datavine_tasks,
+        )
 
         library = self._manager.create_library_from_functions(
-            "datavine-worker-v1",
+            "datavine-worker-v2",
             execute_datavine_task,
+            execute_datavine_tasks,
             add_env=False,
-            exec_mode="direct",
+            exec_mode="fork",
         )
-        # Runner observations use a task-local event sink, so direct calls can
-        # safely make data preparation and execution progress concurrently.
-        library.set_function_slots(4)
         self._manager.install_library(library)
 
     def _make_persistence_task(self, data_id, request, environment):

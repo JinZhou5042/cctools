@@ -2,6 +2,13 @@
 *.dylib
 *.dSYM
 *.gz
+*.json
+!devel/umbrella/example/openmalaria/meta.json
+!doc/manuals/chirp/*.json
+!makeflow/example/example.json
+!makeflow/test/json/*.json
+!poncho/src/test.json
+!resource_monitor/src/file_watch_example.json
 *.o
 *.swp
 cctools.test.log
@@ -9,6 +16,13 @@ cctools.test.tmp
 cctools.test.fail
 cctools.lint.out
 /phase0-artifacts/
+/acceptance/artifacts/
+/acceptance/reviews/
+/acceptance/README.md
+/acceptance/matrix.md
+/agent-plans.md
+/history.md
+/progress.md
 /vine-run-info/
 configure.rerun
 config.mk

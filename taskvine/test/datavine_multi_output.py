@@ -48,8 +48,18 @@ def validate_snapshot(snapshot, producer, consumer, failure_mode=None):
     assert first_status["producer_output_index"] == 0
     assert second_status["producer_output_index"] == 1
     assert first_status["content_hash"] == second_status["content_hash"]
-    assert first_status["attempt"] == expected_attempts
-    assert second_status["attempt"] == expected_attempts
+    actual_attempts = (
+        first_status["attempt"], second_status["attempt"]
+    )
+    assert actual_attempts == (expected_attempts, expected_attempts), {
+        "failure_mode": failure_mode,
+        "expected_attempts": expected_attempts,
+        "output_attempts": actual_attempts,
+        "attempts_by_task": report["attempts_by_task"],
+        "partial_publication_failures": report[
+            "partial_publication_failures"
+        ],
+    }
     assert report["logical_output_slots"][str(consumer.task_id)] == [3]
     assert snapshot["idata"] == 3
     assert snapshot["available_idata"] == 3

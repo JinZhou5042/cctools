@@ -1,6 +1,7 @@
 """Resolve DataIDs on a worker, execute a task, and publish its output."""
 
 import argparse
+import base64
 import cloudpickle
 import copy
 import hashlib
@@ -10,7 +11,7 @@ from pathlib import Path
 import threading
 import time
 
-from ..models import EDataRecord
+from ..models import EDataRecord, TaskRecord
 from ..scheduler.client import ControllerClient
 from ..workflow import iter_output_refs
 
@@ -26,7 +27,7 @@ _REPLICA_REPORTS = {}
 _CACHE_LOCK = threading.RLock()
 
 
-def main(argv=None, emit=print):
+def _make_parser():
     parser = argparse.ArgumentParser(prog="datavine_worker_runner")
     parser.add_argument("--controller", required=True)
     parser.add_argument("--token", required=True)
@@ -34,16 +35,28 @@ def main(argv=None, emit=print):
     parser.add_argument("--attempt", default=1, type=int)
     parser.add_argument("--output-file", action="append", default=[])
     parser.add_argument(
-        "--pause-after-output-index",
-        default=-1,
-        type=int,
+        "--pause-after-output-index", default=-1, type=int
     )
     parser.add_argument(
         "--idata-inline-threshold",
         default=8 * 1024 * 1024,
         type=int,
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+_PARSER = _make_parser()
+
+
+def main(
+    argv=None,
+    emit=print,
+    capture_inline=None,
+    trust_taskvine_inputs=False,
+    inline_edata=None,
+    inline_tasks=None,
+):
+    args = _PARSER.parse_args(argv)
     if args.idata_inline_threshold < 0:
         raise ValueError("IData inline threshold cannot be negative")
 
@@ -69,6 +82,11 @@ def main(argv=None, emit=print):
             _WORKER_CLAIMS[claim_key] = worker_epoch
     task_key = (args.controller, args.token, args.task_id)
     task = _TASK_RECORDS.get(task_key)
+    if task is None and inline_tasks is not None:
+        value = inline_tasks.get(int(args.task_id))
+        if value is not None:
+            task = TaskRecord.from_dict(value)
+            _TASK_RECORDS[task_key] = task
     if task is None:
         task = client.get_task(args.task_id)
         _TASK_RECORDS[task_key] = task
@@ -149,6 +167,11 @@ def main(argv=None, emit=print):
                 return
 
     def fetch_edata(data_id):
+        if inline_edata is not None and int(data_id) in inline_edata:
+            return inline_edata[int(data_id)]
+        cache_path = Path(f"datavine-edata-{data_id}.pkl")
+        if trust_taskvine_inputs and cache_path.is_file():
+            return cache_path.read_bytes()
         metadata_key = (args.controller, args.token, int(data_id))
         info = _EDATA_METADATA.get(metadata_key)
         if info is None:
@@ -171,7 +194,6 @@ def main(argv=None, emit=print):
             emit(f"DATAVINE_BULK_ORIGIN e{data_id}")
             return payload
 
-        cache_path = Path(f"datavine-edata-{data_id}.pkl")
         if cache_path.is_file():
             payload = cache_path.read_bytes()
             if (
@@ -198,6 +220,8 @@ def main(argv=None, emit=print):
             return objects[key]
         if kind == "e":
             payload = fetch_edata(data_id)
+        elif kind == "v":
+            payload = base64.b64decode(data_id, validate=True)
         elif kind == "c":
             template = cloudpickle.loads(fetch_edata(data_id))
             memo = {}
@@ -208,6 +232,13 @@ def main(argv=None, emit=print):
                     reference.producer_task_id,
                 )
                 producer = _TASK_RECORDS.get(producer_key)
+                if producer is None and inline_tasks is not None:
+                    value = inline_tasks.get(
+                        int(reference.producer_task_id)
+                    )
+                    if value is not None:
+                        producer = TaskRecord.from_dict(value)
+                        _TASK_RECORDS[producer_key] = producer
                 if producer is None:
                     producer = client.get_task(
                         reference.producer_task_id
@@ -283,6 +314,20 @@ def main(argv=None, emit=print):
     ):
         payload = cloudpickle.dumps(output_value)
         total_bytes += len(payload)
+        if capture_inline is not None:
+            if len(payload) > args.idata_inline_threshold:
+                raise RuntimeError(
+                    "DATAVINE_INLINE_TOO_LARGE "
+                    f"task={task.task_id} slot={output_index} "
+                    f"bytes={len(payload)}"
+                )
+            capture_inline(output_index, output_data_id, payload)
+            emit(
+                "DATAVINE_INLINE_CAPTURE "
+                f"task={task.task_id} slot={output_index} "
+                f"output=i{output_data_id} bytes={len(payload)}"
+            )
+            continue
         stage = Path(
             args.output_file[output_index]
             if args.output_file

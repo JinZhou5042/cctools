@@ -143,11 +143,12 @@ def validate(snapshot):
     assert snapshot["byte_serving"]["bytes_served"] < BULK_SIZE
     assert snapshot["byte_serving"]["rejected"] == 0
     assert snapshot["taskvine_workers_used"] == 2
-    assert snapshot["registrations"] == 7
+    assert snapshot["registrations"] == 3
     assert snapshot["deduplicated_registrations"] == 0
     report = snapshot["scheduler_report"]
     assert report["edata_serializations"] == 7
     assert report["bulk_edata_serializations"] == 1
+    assert report["inline_task_values"] == 4
     return {
         "bulk_data_id": int(bulk_id),
         "bulk_bytes": snapshot["edata_bulk_bytes"],

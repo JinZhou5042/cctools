@@ -634,6 +634,17 @@ class ControllerService:
                         return
                     self._json(200, acknowledgement)
                     return
+                if self.path == f"{API_PREFIX}/pruning/task-states":
+                    try:
+                        request = self._read_json()
+                        acknowledgements = owner.state.set_task_states(
+                            request["task_ids"], request["state"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, acknowledgements)
+                    return
                 if self.path == f"{API_PREFIX}/pruning/required-output":
                     try:
                         request = self._read_json()
@@ -709,6 +720,63 @@ class ControllerService:
                         return
                     self._json(200, {"data_id": record.data_id})
                     return
+                if self.path == f"{API_PREFIX}/idata/allocate-batch":
+                    try:
+                        request = self._read_json()
+                        records = owner.state.allocate_idata_batch(
+                            request["producer_slots"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200,
+                        {"data_ids": [record.data_id for record in records]},
+                    )
+                    return
+                if self.path == f"{API_PREFIX}/idata/publish-batch":
+                    try:
+                        request = self._read_json()
+                        records = owner.state.publish_idata_batch(
+                            (
+                                value["data_id"],
+                                value["attempt"],
+                                base64.b64decode(
+                                    value["payload"], validate=True
+                                ),
+                            )
+                            for value in request["publications"]
+                        )
+                    except MemoryError as exc:
+                        self._error(507, exc)
+                        return
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200,
+                        [
+                            {
+                                "data_id": record.data_id,
+                                "content_hash": record.content_hash,
+                                "size": record.serialized_size,
+                                "attempt": record.attempt,
+                            }
+                            for record in records
+                        ],
+                    )
+                    return
+                if self.path == f"{API_PREFIX}/idata/status-batch":
+                    try:
+                        request = self._read_json()
+                        statuses = owner.state.idata_status_batch(
+                            request["data_ids"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, statuses)
+                    return
                 if self.path == f"{API_PREFIX}/tasks/register":
                     try:
                         record = owner.state.register_task(
@@ -718,6 +786,24 @@ class ControllerService:
                         self._error(400, exc)
                         return
                     self._json(200, record.to_dict())
+                    return
+                if self.path == f"{API_PREFIX}/tasks/register-batch":
+                    try:
+                        request = self._read_json()
+                        records = owner.state.register_tasks(
+                            TaskRecord.from_dict(value)
+                            for value in request["tasks"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    if request.get("bounded_acknowledgement") is True:
+                        self._json(200, {"registered": len(records)})
+                    else:
+                        self._json(
+                            200,
+                            [record.to_dict() for record in records],
+                        )
                     return
                 if (
                     self.path.startswith(f"{API_PREFIX}/idata/")
@@ -924,6 +1010,43 @@ class ControllerService:
                                 else "bulk-origin"
                             ),
                         },
+                    )
+                    return
+                if self.path == f"{API_PREFIX}/edata/register-batch":
+                    try:
+                        request = self._read_json()
+                        records = owner.state.register_edata_batch(
+                            (
+                                SerializationMetadata.from_dict(
+                                    value["metadata"]
+                                ),
+                                base64.b64decode(
+                                    value["serialized_bytes"],
+                                    validate=True,
+                                ),
+                            )
+                            for value in request["values"]
+                        )
+                    except MemoryError as exc:
+                        self._error(507, exc)
+                        return
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200,
+                        [
+                            {
+                                "data_id": record.data_id,
+                                "content_hash": record.content_hash,
+                                "serialized_sha256": (
+                                    record.serialized_sha256
+                                ),
+                                "size": record.serialized_size,
+                                "storage": "controller-memory",
+                            }
+                            for record in records
+                        ],
                     )
                     return
                 if self.path != f"{API_PREFIX}/edata/register":

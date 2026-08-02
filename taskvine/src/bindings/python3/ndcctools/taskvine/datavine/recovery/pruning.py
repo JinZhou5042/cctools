@@ -509,6 +509,89 @@ class IncrementalPruner:
             True,
         )
 
+    def add_tasks(self, tasks):
+        tasks = tuple(tasks)
+        if not tasks:
+            return PruningMutation(
+                self.graph.revision, self.state_revision, 0, False
+            )
+        self._begin_event()
+        touched = set()
+        for task_id, inputs, outputs in tasks:
+            outputs = tuple(outputs)
+            self.graph.add_task(task_id, inputs, outputs)
+            self.task_states[int(task_id)] = "pending"
+            for data_id in outputs:
+                data_id = int(data_id)
+                self.data_states[data_id] = DataState()
+                self._ancestor_targets[data_id] = set()
+                self._direct_sources[data_id] = set()
+                self._recovery_sources[data_id] = collections.Counter()
+            touched.update(int(value) for value in outputs)
+            touched.update(self._add_task_obligations(int(task_id)))
+        self._end_event()
+        self.state_revision += 1
+        self._refresh(touched)
+        return PruningMutation(
+            self.graph.revision,
+            self.state_revision,
+            len(touched),
+            True,
+        )
+
+    def set_task_states(self, task_ids, state):
+        task_ids = tuple(dict.fromkeys(int(value) for value in task_ids))
+        if state not in TASK_STATES:
+            raise ValueError(f"invalid task state {state!r}")
+        allowed = {
+            "pending": {"running", "completed", "cancelled"},
+            "running": {"pending", "completed", "cancelled"},
+            "completed": {"pending"},
+            "cancelled": set(),
+        }
+        changed = []
+        for task_id in task_ids:
+            old = self.task_states[task_id]
+            if old == state:
+                continue
+            if state not in allowed[old]:
+                raise ValueError(f"invalid task transition {old}->{state}")
+            changed.append(task_id)
+        if not changed:
+            mutation = PruningMutation(
+                self.graph.revision, self.state_revision, 0, False
+            )
+            return tuple(mutation for _ in task_ids)
+        self._begin_event()
+        touched = set()
+        for task_id in changed:
+            old = self.task_states[task_id]
+            if old in ACTIVE_TASK_STATES:
+                touched.update(self._remove_task_obligations(task_id))
+            self.task_states[task_id] = state
+            if state in ACTIVE_TASK_STATES:
+                touched.update(self._add_task_obligations(task_id))
+        self._end_event()
+        self.state_revision += 1
+        self._refresh(touched)
+        mutation = PruningMutation(
+            self.graph.revision,
+            self.state_revision,
+            len(touched),
+            True,
+        )
+        unchanged = PruningMutation(
+            self.graph.revision,
+            self.state_revision,
+            0,
+            False,
+        )
+        changed = set(changed)
+        return tuple(
+            mutation if task_id in changed else unchanged
+            for task_id in task_ids
+        )
+
     def set_data_state(self, data_id, **changes):
         data_id = int(data_id)
         old = self.data_states[data_id]
@@ -524,6 +607,61 @@ class IncrementalPruner:
         for target_id in tuple(affected):
             touched.update(self._recalculate_target(target_id))
         if old.required_output != new.required_output:
+            key = ("output", data_id, data_id)
+            if new.required_output:
+                touched.update(
+                    self._add_obligation(
+                        key, data_id, "required-output"
+                    )
+                )
+            else:
+                touched.update(
+                    self._remove_obligation(key, "required-output")
+                )
+        self._end_event()
+        self.state_revision += 1
+        self._refresh(touched)
+        return PruningMutation(
+            self.graph.revision,
+            self.state_revision,
+            len(touched),
+            True,
+        )
+
+    def set_data_states(self, updates):
+        normalized = {}
+        for data_id, changes in updates:
+            data_id = int(data_id)
+            changes = dict(changes)
+            old = self.data_states[data_id]
+            new = dataclasses.replace(old, **changes).validate()
+            previous = normalized.get(data_id)
+            if previous is not None and previous != new:
+                raise ValueError(
+                    f"conflicting data state updates for {data_id}"
+                )
+            normalized[data_id] = new
+        changed = {
+            data_id: (self.data_states[data_id], new)
+            for data_id, new in normalized.items()
+            if self.data_states[data_id] != new
+        }
+        if not changed:
+            return PruningMutation(
+                self.graph.revision, self.state_revision, 0, False
+            )
+
+        self._begin_event()
+        affected_targets = set()
+        touched = set(changed)
+        for data_id, (_, new) in changed.items():
+            affected_targets.update(self._ancestor_targets[data_id])
+            self.data_states[data_id] = new
+        for target_id in tuple(affected_targets):
+            touched.update(self._recalculate_target(target_id))
+        for data_id, (old, new) in changed.items():
+            if old.required_output == new.required_output:
+                continue
             key = ("output", data_id, data_id)
             if new.required_output:
                 touched.update(

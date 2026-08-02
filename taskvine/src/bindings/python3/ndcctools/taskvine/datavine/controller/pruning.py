@@ -60,11 +60,20 @@ class PruningAuthority:
     def register_task(self, task_id, inputs, outputs):
         return self.pruner.add_task(task_id, inputs, outputs)
 
+    def register_tasks(self, tasks):
+        return self.pruner.add_tasks(tasks)
+
     def set_task_state(self, task_id, state):
         return self.pruner.set_task_state(task_id, state)
 
+    def set_task_states(self, task_ids, state):
+        return self.pruner.set_task_states(task_ids, state)
+
     def set_data_state(self, data_id, **changes):
         return self.pruner.set_data_state(data_id, **changes)
+
+    def set_data_states(self, updates):
+        return self.pruner.set_data_states(updates)
 
     def plan(self):
         return self.pruner.assert_matches_reference()
