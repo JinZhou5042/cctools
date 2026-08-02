@@ -2396,6 +2396,18 @@ class TaskSchedulerThread:
                 workers_after = sorted(
                     self._sync_worker_epochs(force=True)
                 )
+                if worker_loss_process_shutdown:
+                    disconnect_deadline = time.monotonic() + 10
+                    while released_worker_id in workers_after:
+                        if time.monotonic() >= disconnect_deadline:
+                            raise TimeoutError(
+                                "deterministically shut down worker did not "
+                                f"disconnect: {released_worker_id}"
+                            )
+                        self._manager.wait(1)
+                        workers_after = sorted(
+                            self._sync_worker_epochs(force=True)
+                        )
                 if not worker_loss_process_shutdown:
                     released = sorted(
                         set(workers_before) - set(workers_after)
