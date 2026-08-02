@@ -47,21 +47,32 @@ def summarize_payloads(medium, large, *, config):
     return (len(medium), len(large), hashlib.sha256(medium + large).hexdigest())
 
 
-def advance_chain(value, step, *, config):
+def advance_chain(value, step, *, config, payload_bytes=0):
     assert config == HOT
-    return (value * 33 + step) % 1000000007
+    if isinstance(value, bytes):
+        value = int.from_bytes(value[:8], "big")
+    value = (value * 33 + step) % 1000000007
+    if not payload_bytes:
+        return value
+    seed = value.to_bytes(8, "big")
+    return (seed * ((payload_bytes + 7) // 8))[:payload_bytes]
 
 
 def finalize(value, chain_value, payload_summary, *, config, alias):
     assert config == HOT
     assert alias[0] is alias[1]["nested"]
     assert alias[0] == config
+    chain_token = (
+        hashlib.sha256(chain_value).hexdigest()
+        if isinstance(chain_value, bytes)
+        else chain_value
+    )
     return hashlib.sha256(
-        f"{value}:{chain_value}:{payload_summary}:{config['version']}".encode()
+        f"{value}:{chain_token}:{payload_summary}:{config['version']}".encode()
     ).hexdigest()
 
 
-def build_workflow(task_count, medium_bytes, large_bytes):
+def build_workflow(task_count, medium_bytes, large_bytes, lineage_bytes=0):
     workflow = Workflow()
     roots = []
     # Two-output roots exercise slot identity and repeated immutable edata.
@@ -114,11 +125,20 @@ def build_workflow(task_count, medium_bytes, large_bytes):
     chain_length = max(16, min(128, task_count // 20))
     for step in range(chain_length):
         chain_task = workflow.add_task(
-            advance_chain, chain_value, step, config=HOT
+            advance_chain,
+            chain_value,
+            step,
+            config=HOT,
+            payload_bytes=lineage_bytes,
         )
         chain_tasks.append(chain_task)
         chain_value = chain_task.output()
-        chain_expected = (chain_expected * 33 + step) % 1000000007
+        chain_expected = advance_chain(
+            chain_expected,
+            step,
+            config=HOT,
+            payload_bytes=lineage_bytes,
+        )
 
     medium = workflow.add_task(
         make_payload, medium_bytes, 17, config=HOT
@@ -145,8 +165,13 @@ def build_workflow(task_count, medium_bytes, large_bytes):
         len(large_payload),
         hashlib.sha256(medium_payload + large_payload).hexdigest(),
     )
+    chain_expected_token = (
+        hashlib.sha256(chain_expected).hexdigest()
+        if isinstance(chain_expected, bytes)
+        else chain_expected
+    )
     expected = hashlib.sha256(
-        f"{leaf_values[-1]}:{chain_expected}:{payload_summary_value}:"
+        f"{leaf_values[-1]}:{chain_expected_token}:{payload_summary_value}:"
         f"{HOT['version']}".encode()
     ).hexdigest()
     return workflow, final.task_id, expected, [
@@ -172,6 +197,10 @@ def main():
     parser.add_argument("--tasks", type=int, default=100)
     parser.add_argument("--medium-bytes", type=int, default=64 * 1024)
     parser.add_argument("--large-bytes", type=int, default=0)
+    parser.add_argument("--lineage-bytes", type=int, default=0)
+    parser.add_argument(
+        "--controller-inline-idata-bytes", type=int, default=8 * 1024 * 1024
+    )
     parser.add_argument("--worker-loss", action="store_true")
     parser.add_argument("--worker-loss-count", type=int, default=2)
     parser.add_argument("--frontier-recovery", action="store_true")
@@ -203,6 +232,10 @@ def main():
         "--worker-disk-cache-admission-items", type=int, default=512
     )
     parser.add_argument("--process-runner", action="store_true")
+    parser.add_argument("--pruning-grace-seconds", type=float, default=30)
+    parser.add_argument(
+        "--hard-delete-pruned-sharedfs", action="store_true"
+    )
     parser.add_argument("--workflow-timeout", type=float, default=600)
     parser.add_argument("--factory-manager")
     parser.add_argument("--json", action="store_true")
@@ -210,7 +243,12 @@ def main():
     if args.tasks < 4:
         parser.error("--tasks must be at least 4")
 
-    if args.medium_bytes < 0 or args.large_bytes < 0:
+    if min(
+        args.medium_bytes,
+        args.large_bytes,
+        args.lineage_bytes,
+        args.controller_inline_idata_bytes,
+    ) < 0:
         parser.error("payload sizes must be non-negative")
     if args.workers < 1:
         parser.error("--workers must be positive")
@@ -218,6 +256,8 @@ def main():
         parser.error("--worker-cores must be positive")
     if args.worker_loss_count < 1:
         parser.error("--worker-loss-count must be positive")
+    if args.pruning_grace_seconds < 0:
+        parser.error("--pruning-grace-seconds must be non-negative")
     if min(
         args.worker_disk_cache_bytes,
         args.worker_disk_cache_items,
@@ -225,7 +265,9 @@ def main():
         args.worker_disk_cache_admission_items,
     ) < 0:
         parser.error("worker cache bounds must be non-negative")
-    minimum_output_admission = max(args.medium_bytes, args.large_bytes) + 4096
+    minimum_output_admission = max(
+        args.medium_bytes, args.large_bytes, args.lineage_bytes
+    ) + 4096
     if args.worker_disk_cache_admission_bytes < minimum_output_admission:
         parser.error(
             "worker cache byte admission must fit the largest generated "
@@ -234,7 +276,11 @@ def main():
     if args.mode == "legacy":
         print(json.dumps({"status": "UNAVAILABLE", "mode": "legacy"}))
         return 2
-    failure_mode = args.worker_loss or args.mode == "failures"
+    failure_mode = (
+        args.worker_loss
+        or args.mode == "failures"
+        or args.frontier_recovery
+    )
     if args.frontier_recovery and not failure_mode:
         parser.error("--frontier-recovery requires a failure mode")
     peer_transfers = args.mode != "peer-off"
@@ -243,7 +289,10 @@ def main():
         args.mode == "persistence-legacy" or args.frontier_recovery
     )
     workflow, target, expected, chain_task_ids = build_workflow(
-        args.tasks, args.medium_bytes, args.large_bytes
+        args.tasks,
+        args.medium_bytes,
+        args.large_bytes,
+        args.lineage_bytes,
     )
     persistence_attempts = None
     prune_after_persistence = None
@@ -335,13 +384,22 @@ def main():
             if args.frontier_recovery
             else ({target: 1} if persistence else None)
         ),
-        prune_after_persistence_by_task=prune_after_persistence,
+        prune_after_persistence_by_task=(
+            None if args.mode == "pruning-off"
+            else prune_after_persistence
+        ),
+        max_inline_idata_bytes=args.controller_inline_idata_bytes,
         use_worker_library=not args.process_runner,
         scheduler_wait_timeout=1,
         workflow_timeout=args.workflow_timeout,
         inject_worker_loss_schedule=loss_schedule,
         inject_worker_loss_data_by_task=worker_loss_data,
         worker_loss_process_shutdown=failure_mode,
+        frontier_pruning_grace_seconds=args.pruning_grace_seconds,
+        hard_delete_pruned_sharedfs=(
+            args.hard_delete_pruned_sharedfs
+            and args.mode != "pruning-off"
+        ),
     )
     scheduler_report = snapshot["scheduler_report"]
     durability_frontier_data_ids = sorted(
@@ -379,12 +437,22 @@ def main():
                 "persistence_required_data_ids"
             ] != durability_frontier_data_ids:
                 raise AssertionError("durability frontiers were not persisted")
+            expected_outstanding = (
+                durability_frontier_data_ids
+                if args.mode == "pruning-off"
+                else durability_frontier_data_ids[-1:]
+            )
             if scheduler_report[
                 "persistence_outstanding_data_ids"
-            ] != durability_frontier_data_ids[-1:]:
+            ] != expected_outstanding:
                 raise AssertionError(
-                    "superseded durability obligations did not retire"
+                    "durability obligations do not match pruning mode"
                 )
+            runtime_pruned = scheduler_report["runtime_pruned_data_ids"]
+            if args.mode == "pruning-off" and runtime_pruned:
+                raise AssertionError("pruning-off mode pruned logical data")
+            if args.mode != "pruning-off" and not runtime_pruned:
+                raise AssertionError("frontier recovery did not prune data")
             if not snapshot["durable_hashes_valid"]:
                 raise AssertionError("durable frontier hash validation failed")
             if snapshot["persistence_temporary_files"]:
@@ -402,6 +470,8 @@ def main():
         "worker_loss_schedule": list(loss_schedule),
         "worker_loss_count_requested": len(loss_schedule),
         "lineage_chain_tasks": len(chain_task_ids),
+        "lineage_payload_bytes": args.lineage_bytes,
+        "controller_inline_idata_bytes": args.controller_inline_idata_bytes,
         "frontier_recovery": args.frontier_recovery,
         "durability_frontiers": durability_frontiers,
         "durability_frontier_data_ids": durability_frontier_data_ids,
@@ -410,6 +480,12 @@ def main():
         "persistence_temporary_files": snapshot[
             "persistence_temporary_files"
         ],
+        "sharedfs_storage": snapshot["sharedfs_storage"],
+        "pruning_grace_seconds": args.pruning_grace_seconds,
+        "hard_delete_pruned_sharedfs": (
+            args.hard_delete_pruned_sharedfs
+            and args.mode != "pruning-off"
+        ),
         "worker_disk_cache": {
             "capacity_bytes": args.worker_disk_cache_bytes,
             "capacity_items": args.worker_disk_cache_items,

@@ -493,6 +493,8 @@ class TaskSchedulerThread:
         peer_release_retry_seconds=0.1,
         peer_release_capacity=1024,
         use_worker_library=False,
+        frontier_pruning_grace_seconds=30,
+        hard_delete_pruned_sharedfs=False,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -899,6 +901,17 @@ class TaskSchedulerThread:
             raise ValueError(
                 "frontier pruning acknowledgement delay cannot be negative"
             )
+        frontier_pruning_grace_seconds = float(
+            frontier_pruning_grace_seconds
+        )
+        if frontier_pruning_grace_seconds < 0:
+            raise ValueError(
+                "frontier pruning grace period cannot be negative"
+            )
+        hard_delete_pruned_sharedfs = bool(
+            hard_delete_pruned_sharedfs
+        )
+        sharedfs_hard_delete = None
         compute_completions_while_frontier_pruning = 0
         persistence_worker_bytes = 0
         persistence_controller_bytes = 0
@@ -1442,7 +1455,7 @@ class TaskSchedulerThread:
                             result = self.controller.apply_pruning(
                                 plan["records"][0]["graph_revision"],
                                 plan["records"][0]["state_revision"],
-                                0,
+                                frontier_pruning_grace_seconds,
                                 prune_data_ids,
                                 None,
                             )
@@ -2478,6 +2491,25 @@ class TaskSchedulerThread:
         if persist_outputs:
             for output_data_id in sorted(persistence_required):
                 self._wait_durable(output_data_id)
+        if hard_delete_pruned_sharedfs and frontier_pruning:
+            if frontier_pruning_grace_seconds:
+                time.sleep(frontier_pruning_grace_seconds)
+            for delete_retry in range(3):
+                plan = self.controller.pruning_plan()
+                try:
+                    sharedfs_hard_delete = (
+                        self.controller.hard_delete_quarantined(
+                            plan["records"][0]["graph_revision"],
+                            plan["records"][0]["state_revision"],
+                        )
+                    )
+                    break
+                except DataVineRemoteError as exc:
+                    if (
+                        "quarantine proof revision changed" not in str(exc)
+                        or delete_retry == 2
+                    ):
+                        raise
         if (
             defer_peer_source_loss_after_bytes
             and not peer_transfer_pruning_probe_triggered
@@ -2603,6 +2635,10 @@ class TaskSchedulerThread:
                 persistence_required
             ),
             "frontier_pruning": frontier_pruning,
+            "frontier_pruning_grace_seconds": (
+                frontier_pruning_grace_seconds
+            ),
+            "sharedfs_hard_delete": sharedfs_hard_delete,
             "compute_completions_while_frontier_pruning": (
                 compute_completions_while_frontier_pruning
             ),

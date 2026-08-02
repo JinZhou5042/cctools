@@ -137,6 +137,8 @@ def run_case(
     use_worker_library=False,
     scheduler_wait_timeout=1,
     workflow_timeout=None,
+    frontier_pruning_grace_seconds=30,
+    hard_delete_pruned_sharedfs=False,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -309,6 +311,8 @@ def run_case(
                 peer_release_retry_seconds,
                 peer_release_capacity,
                 use_worker_library,
+                frontier_pruning_grace_seconds,
+                hard_delete_pruned_sharedfs,
             )
             if runtime_controller_hook is not None:
                 runtime_hook_handle = runtime_controller_hook(client)
@@ -445,10 +449,29 @@ def run_case(
                 if bulk_origin is not None
                 else []
             )
-            snapshot["durable_files"] = sorted(
-                path.name
-                for path in persistence_dir.glob("idata-*.pkl")
-            ) if persistence else []
+            durable_paths = (
+                sorted(persistence_dir.glob("idata-*.pkl"))
+                if persistence else []
+            )
+            quarantine_paths = (
+                sorted(
+                    (persistence_dir / ".datavine-quarantine").glob("*")
+                )
+                if persistence else []
+            )
+            snapshot["durable_files"] = [
+                path.name for path in durable_paths
+            ]
+            snapshot["sharedfs_storage"] = {
+                "durable_files": len(durable_paths),
+                "durable_bytes": sum(
+                    path.stat().st_size for path in durable_paths
+                ),
+                "quarantine_files": len(quarantine_paths),
+                "quarantine_bytes": sum(
+                    path.stat().st_size for path in quarantine_paths
+                ),
+            }
             snapshot["persistence_temporary_files"] = sorted(
                 path.name
                 for path in persistence_dir.glob(".*.tmp")
@@ -494,17 +517,16 @@ def run_case(
                 snapshot["idata_bytes_after_durable_recovery"] = (
                     client.snapshot()["idata_bytes"]
                 )
-            runtime_pruned = len(
-                snapshot["scheduler_report"].get(
-                    "runtime_pruned_data_ids", ()
-                )
+            reported_available = sum(
+                bool(status["available"])
+                for status in snapshot["scheduler_report"][
+                    "logical_output_status"
+                ].values()
             )
             assert snapshot["available_idata"] == (
                 0
                 if apply_pruning
-                else sum(
-                    task.output_count for task in workflow.tasks
-                ) - runtime_pruned
+                else reported_available
             )
             assert snapshot["tasks"] == (
                 len(workflow.tasks)

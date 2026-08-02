@@ -5,6 +5,9 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TASKS=${DATAVINE_GRAND_TASKS:-100}
 MEDIUM_BYTES=${DATAVINE_GRAND_MEDIUM_BYTES:-65536}
 LARGE_BYTES=${DATAVINE_GRAND_LARGE_BYTES:-0}
+LINEAGE_BYTES=${DATAVINE_GRAND_LINEAGE_BYTES:-0}
+CONTROLLER_INLINE_IDATA_BYTES=${DATAVINE_GRAND_CONTROLLER_INLINE_IDATA_BYTES:-8388608}
+PRUNING_GRACE_SECONDS=${DATAVINE_GRAND_PRUNING_GRACE_SECONDS:-30}
 WORKERS=${DATAVINE_GRAND_WORKERS:-2}
 WORKER_CORES=${DATAVINE_GRAND_WORKER_CORES:-2}
 WORKFLOW_TIMEOUT=${DATAVINE_GRAND_WORKFLOW_TIMEOUT:-600}
@@ -24,10 +27,16 @@ MODE=${DATAVINE_GRAND_MODE:-full}
 if [[ "${DATAVINE_GRAND_PROCESS_RUNNER:-0}" == "1" ]]; then
   FAILURE_ARGS+=(--process-runner)
 fi
+if [[ "${DATAVINE_GRAND_HARD_DELETE_PRUNED_SHAREDFS:-0}" == "1" ]]; then
+  FAILURE_ARGS+=(--hard-delete-pruned-sharedfs)
+fi
 cd "$ROOT/taskvine/test"
 exec python "$ROOT/acceptance/scripts/datavine_grand_challenge.py" \
   --tasks "$TASKS" --workers "$WORKERS" --worker-cores "$WORKER_CORES" \
   --mode "$MODE" --medium-bytes "$MEDIUM_BYTES" \
+  --lineage-bytes "$LINEAGE_BYTES" \
+  --controller-inline-idata-bytes "$CONTROLLER_INLINE_IDATA_BYTES" \
+  --pruning-grace-seconds "$PRUNING_GRACE_SECONDS" \
   --worker-loss-count "$WORKER_LOSS_COUNT" \
   --worker-disk-cache-bytes "$WORKER_DISK_CACHE_BYTES" \
   --worker-disk-cache-items "$WORKER_DISK_CACHE_ITEMS" \
