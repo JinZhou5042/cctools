@@ -189,6 +189,18 @@ def main():
     )
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--worker-cores", type=int, default=2)
+    parser.add_argument(
+        "--worker-disk-cache-bytes", type=int, default=64 * 1024 * 1024
+    )
+    parser.add_argument("--worker-disk-cache-items", type=int, default=2048)
+    parser.add_argument(
+        "--worker-disk-cache-admission-bytes",
+        type=int,
+        default=8 * 1024 * 1024,
+    )
+    parser.add_argument(
+        "--worker-disk-cache-admission-items", type=int, default=512
+    )
     parser.add_argument("--process-runner", action="store_true")
     parser.add_argument("--workflow-timeout", type=float, default=600)
     parser.add_argument("--factory-manager")
@@ -205,6 +217,13 @@ def main():
         parser.error("--worker-cores must be positive")
     if args.worker_loss_count < 1:
         parser.error("--worker-loss-count must be positive")
+    if min(
+        args.worker_disk_cache_bytes,
+        args.worker_disk_cache_items,
+        args.worker_disk_cache_admission_bytes,
+        args.worker_disk_cache_admission_items,
+    ) < 0:
+        parser.error("worker cache bounds must be non-negative")
     if args.mode == "legacy":
         print(json.dumps({"status": "UNAVAILABLE", "mode": "legacy"}))
         return 2
@@ -234,6 +253,14 @@ def main():
         worker_cores=args.worker_cores,
         peer_transfers=peer_transfers,
         prefetch=prefetch,
+        worker_disk_cache_bytes=args.worker_disk_cache_bytes,
+        worker_disk_cache_items=args.worker_disk_cache_items,
+        worker_disk_cache_admission_bytes=(
+            args.worker_disk_cache_admission_bytes
+        ),
+        worker_disk_cache_admission_items=(
+            args.worker_disk_cache_admission_items
+        ),
         persistence=persistence,
         persistence_attempts_by_task=({target: 1} if persistence else None),
         use_worker_library=not args.process_runner,
@@ -275,6 +302,12 @@ def main():
             args.worker_loss_count if failure_mode else 0
         ),
         "lineage_chain_tasks": len(chain_task_ids),
+        "worker_disk_cache": {
+            "capacity_bytes": args.worker_disk_cache_bytes,
+            "capacity_items": args.worker_disk_cache_items,
+            "admission_bytes": args.worker_disk_cache_admission_bytes,
+            "admission_items": args.worker_disk_cache_admission_items,
+        },
         "mode": args.mode,
         "execution_boundary": (
             "process" if args.process_runner else "persistent-library"
