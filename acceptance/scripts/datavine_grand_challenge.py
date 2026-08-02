@@ -47,12 +47,17 @@ def summarize_payloads(medium, large, *, config):
     return (len(medium), len(large), hashlib.sha256(medium + large).hexdigest())
 
 
-def finalize(value, payload_summary, *, config, alias):
+def advance_chain(value, step, *, config):
+    assert config == HOT
+    return (value * 33 + step) % 1000000007
+
+
+def finalize(value, chain_value, payload_summary, *, config, alias):
     assert config == HOT
     assert alias[0] is alias[1]["nested"]
     assert alias[0] == config
     return hashlib.sha256(
-        f"{value}:{payload_summary}:{config['version']}".encode()
+        f"{value}:{chain_value}:{payload_summary}:{config['version']}".encode()
     ).hexdigest()
 
 
@@ -100,6 +105,21 @@ def build_workflow(task_count, medium_bytes, large_bytes):
 
     if not leaves:
         raise ValueError("task_count must be at least 4")
+    # This ordered spine provides a deterministic long lineage and safe points
+    # for repeated process-loss injection. Each selected task can complete only
+    # after every earlier selected task has recovered.
+    chain_tasks = []
+    chain_value = roots[0].output(0)
+    chain_expected = 0
+    chain_length = max(16, min(128, task_count // 20))
+    for step in range(chain_length):
+        chain_task = workflow.add_task(
+            advance_chain, chain_value, step, config=HOT
+        )
+        chain_tasks.append(chain_task)
+        chain_value = chain_task.output()
+        chain_expected = (chain_expected * 33 + step) % 1000000007
+
     medium = workflow.add_task(
         make_payload, medium_bytes, 17, config=HOT
     )
@@ -112,6 +132,7 @@ def build_workflow(task_count, medium_bytes, large_bytes):
     final = workflow.add_task(
         finalize,
         leaves[-1].output(),
+        chain_value,
         payload_summary.output(),
         config=HOT,
         alias=[HOT, {"nested": HOT}],
@@ -125,9 +146,25 @@ def build_workflow(task_count, medium_bytes, large_bytes):
         hashlib.sha256(medium_payload + large_payload).hexdigest(),
     )
     expected = hashlib.sha256(
-        f"{leaf_values[-1]}:{payload_summary_value}:{HOT['version']}".encode()
+        f"{leaf_values[-1]}:{chain_expected}:{payload_summary_value}:"
+        f"{HOT['version']}".encode()
     ).hexdigest()
-    return workflow, final.task_id, expected
+    return workflow, final.task_id, expected, [
+        task.task_id for task in chain_tasks
+    ]
+
+
+def select_loss_schedule(chain_task_ids, count):
+    if count < 1:
+        raise ValueError("worker loss count must be positive")
+    if count > len(chain_task_ids):
+        raise ValueError(
+            "worker loss count exceeds deterministic chain length"
+        )
+    return tuple(
+        chain_task_ids[((index + 1) * len(chain_task_ids)) // (count + 1)]
+        for index in range(count)
+    )
 
 
 def main():
@@ -136,6 +173,7 @@ def main():
     parser.add_argument("--medium-bytes", type=int, default=64 * 1024)
     parser.add_argument("--large-bytes", type=int, default=0)
     parser.add_argument("--worker-loss", action="store_true")
+    parser.add_argument("--worker-loss-count", type=int, default=2)
     parser.add_argument(
         "--mode",
         choices=(
@@ -165,6 +203,8 @@ def main():
         parser.error("--workers must be positive")
     if args.worker_cores < 1:
         parser.error("--worker-cores must be positive")
+    if args.worker_loss_count < 1:
+        parser.error("--worker-loss-count must be positive")
     if args.mode == "legacy":
         print(json.dumps({"status": "UNAVAILABLE", "mode": "legacy"}))
         return 2
@@ -172,8 +212,13 @@ def main():
     peer_transfers = args.mode != "peer-off"
     prefetch = args.mode != "no-prefetch"
     persistence = args.mode == "persistence-legacy"
-    workflow, target, expected = build_workflow(
+    workflow, target, expected, chain_task_ids = build_workflow(
         args.tasks, args.medium_bytes, args.large_bytes
+    )
+    loss_schedule = (
+        select_loss_schedule(chain_task_ids, args.worker_loss_count)
+        if failure_mode
+        else ()
     )
     # The final digest is deterministic but depends on the generated graph.
     # The target is fetched from the scheduler snapshot rather than guessed
@@ -194,9 +239,27 @@ def main():
         use_worker_library=not args.process_runner,
         scheduler_wait_timeout=1,
         workflow_timeout=args.workflow_timeout,
-        inject_worker_loss_after=(1.0 if failure_mode else None),
-        replacement_worker_delay=(1 if failure_mode else None),
+        inject_worker_loss_schedule=loss_schedule,
+        worker_loss_process_shutdown=failure_mode,
     )
+    scheduler_report = snapshot["scheduler_report"]
+    if failure_mode:
+        if scheduler_report["worker_loss_injections"] != len(loss_schedule):
+            raise AssertionError(
+                "not every scheduled worker loss was injected"
+            )
+        if not scheduler_report["worker_loss_process_shutdown"]:
+            raise AssertionError("worker loss did not shut down a process")
+        if scheduler_report["recovery_reexecutions"] < len(loss_schedule):
+            raise AssertionError(
+                "repeated worker loss did not trigger ordinary recomputation"
+            )
+        if scheduler_report["legacy_recovery_tasks"]:
+            raise AssertionError("legacy recovery tasks were created")
+        if scheduler_report["peer_transfer_faults"][
+            "peer_release_pending"
+        ]:
+            raise AssertionError("peer release obligations remain pending")
     report = {
         "artifact_type": "datavine-grand-challenge-run",
         "status": "PASS",
@@ -207,13 +270,18 @@ def main():
         ),
         "target_task_id": target,
         "failure_mode": "worker-loss" if failure_mode else "none",
+        "worker_loss_schedule": list(loss_schedule),
+        "worker_loss_count_requested": (
+            args.worker_loss_count if failure_mode else 0
+        ),
+        "lineage_chain_tasks": len(chain_task_ids),
         "mode": args.mode,
         "execution_boundary": (
             "process" if args.process_runner else "persistent-library"
         ),
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "workflow_timeout_seconds": args.workflow_timeout,
-        "scheduler_report": snapshot["scheduler_report"],
+        "scheduler_report": scheduler_report,
     }
     print(json.dumps(report, sort_keys=True) if args.json else report)
 
