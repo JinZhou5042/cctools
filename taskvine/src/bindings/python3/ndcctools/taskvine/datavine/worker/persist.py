@@ -22,7 +22,11 @@ def main(argv=None):
     )
     parser.add_argument("--delay-before-failure", type=float, default=0)
     args = parser.parse_args(argv)
-    client = ControllerClient(args.controller, args.token)
+    client = ControllerClient(
+        args.controller,
+        args.token,
+        transient_retries=8,
+    )
     request = client.begin_external_persistence(
         args.data_id, args.request_id
     )

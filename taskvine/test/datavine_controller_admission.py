@@ -140,6 +140,65 @@ def request_admission_case():
     return admission
 
 
+def worker_retry_case():
+    entered = threading.Event()
+    release = threading.Event()
+
+    def serving_hook(data_key):
+        entered.set()
+        assert release.wait(10), data_key
+
+    state = ControllerState(max_edata_bytes=1024 * 1024)
+    metadata, payload = serialize(b"retry" * 1024)
+    record = state.register_edata(metadata, payload)
+    service = ControllerService(
+        "127.0.0.1",
+        0,
+        "retry-token",
+        state,
+        max_request_concurrency=1,
+        max_serving_concurrency=1,
+        max_serving_bytes=1024 * 1024,
+        serving_hook=serving_hook,
+    )
+    _, port = service.start()
+    endpoint = f"http://127.0.0.1:{port}"
+    blocking = ControllerClient(endpoint, "retry-token", timeout=5)
+    retrying = ControllerClient(
+        endpoint,
+        "retry-token",
+        timeout=5,
+        transient_retries=8,
+        retry_base_seconds=0.02,
+        retry_max_seconds=0.05,
+    )
+    result = {}
+    thread = start_blocked_fetch(
+        blocking, record.data_id, entered, release, result
+    )
+    timer = threading.Timer(0.12, release.set)
+    timer.start()
+    try:
+        assert retrying.health()["status"] == "ready"
+        assert retrying.transient_retry_count >= 1
+        snapshot = retrying.snapshot()
+    finally:
+        release.set()
+        timer.cancel()
+        timer.join(5)
+        thread.join(10)
+        service.stop()
+    assert result == {"payload": payload}, result
+    assert snapshot["request_admission"]["rejected"] >= 1
+    return {
+        "rejected_before_retry": snapshot["request_admission"][
+            "rejected"
+        ],
+        "client_retries": retrying.transient_retry_count,
+        "status": "PASS",
+    }
+
+
 def idata_attempt_source_case():
     state = ControllerState(max_edata_bytes=1024 * 1024)
     metadata, function_payload = serialize(bytes)
@@ -193,6 +252,7 @@ def main():
     result = {
         "byte_serving": byte_serving_case(),
         "request_admission": request_admission_case(),
+        "worker_retry": worker_retry_case(),
         "idata_attempt_source": idata_attempt_source_case(),
         "elapsed_seconds": time.monotonic() - started,
         "status": "PASS",

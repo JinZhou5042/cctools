@@ -51,8 +51,13 @@ def main(argv=None, emit=print):
     with _CACHE_LOCK:
         client = _CLIENTS.get(controller_key)
         if client is None:
-            client = ControllerClient(args.controller, args.token)
+            client = ControllerClient(
+                args.controller,
+                args.token,
+                transient_retries=8,
+            )
             _CLIENTS[controller_key] = client
+    retry_count_before = client.thread_transient_retry_count
     worker_id = os.environ.get("VINE_WORKER_ID")
     if not worker_id:
         raise RuntimeError("TaskVine worker incarnation is unavailable")
@@ -339,6 +344,10 @@ def main(argv=None, emit=print):
     emit(
         f"DATAVINE_OUTPUTS task={task.task_id} "
         f"count={len(task.output_data_ids)} bytes={total_bytes}"
+    )
+    emit(
+        "DATAVINE_CONTROLLER_RETRIES "
+        f"{client.thread_transient_retry_count - retry_count_before}"
     )
     return 0
 

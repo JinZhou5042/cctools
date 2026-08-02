@@ -19,12 +19,71 @@ from ..protocol import (
 
 
 class ControllerClient:
-    def __init__(self, endpoint, token, timeout=30):
+    def __init__(
+        self,
+        endpoint,
+        token,
+        timeout=30,
+        transient_retries=0,
+        retry_base_seconds=0.01,
+        retry_max_seconds=0.25,
+    ):
         self.endpoint = endpoint.rstrip("/")
         self.token = token
         self.timeout = timeout
+        self.transient_retries = int(transient_retries)
+        self.retry_base_seconds = float(retry_base_seconds)
+        self.retry_max_seconds = float(retry_max_seconds)
+        if self.transient_retries < 0:
+            raise ValueError("transient retries cannot be negative")
+        if self.retry_base_seconds < 0 or self.retry_max_seconds < 0:
+            raise ValueError("retry delays cannot be negative")
         self._metrics_lock = threading.Lock()
         self._request_metrics = {}
+        self._transient_retry_count = 0
+        self._retry_local = threading.local()
+
+    @property
+    def transient_retry_count(self):
+        with self._metrics_lock:
+            return self._transient_retry_count
+
+    @property
+    def thread_transient_retry_count(self):
+        return int(getattr(self._retry_local, "count", 0))
+
+    def _open(self, request_factory):
+        for retry in range(self.transient_retries + 1):
+            try:
+                return urllib.request.urlopen(
+                    request_factory(), timeout=self.timeout
+                )
+            except urllib.error.HTTPError as exc:
+                if (
+                    exc.code not in (429, 503)
+                    or retry >= self.transient_retries
+                ):
+                    raise
+                exc.close()
+            except (
+                urllib.error.URLError,
+                ConnectionError,
+                TimeoutError,
+            ):
+                if retry >= self.transient_retries:
+                    raise
+            with self._metrics_lock:
+                self._transient_retry_count += 1
+            self._retry_local.count = (
+                self.thread_transient_retry_count + 1
+            )
+            delay = min(
+                self.retry_base_seconds * (2 ** min(retry, 30)),
+                self.retry_max_seconds,
+            )
+            if delay:
+                time.sleep(delay)
+        raise AssertionError("unreachable Controller retry state")
 
     def _request(self, method, path, value=None):
         started = time.monotonic()
@@ -33,15 +92,14 @@ class ControllerClient:
         if value is not None:
             data = json.dumps(value).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(
-            self.endpoint + path,
-            data=data,
-            headers=headers,
-            method=method,
-        )
         try:
-            with urllib.request.urlopen(
-                request, timeout=self.timeout
+            with self._open(
+                lambda: urllib.request.Request(
+                    self.endpoint + path,
+                    data=data,
+                    headers=headers,
+                    method=method,
+                )
             ) as response:
                 result = response.read(), response.headers
         except urllib.error.HTTPError as exc:
@@ -513,16 +571,15 @@ class ControllerClient:
             "Content-Type": "application/octet-stream",
             "X-DataVine-Attempt": str(int(attempt)),
         }
-        request = urllib.request.Request(
-            self.endpoint
-            + f"{API_PREFIX}/idata/{int(data_id)}/publish",
-            data=serialized_bytes,
-            headers=headers,
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(
-                request, timeout=self.timeout
+            with self._open(
+                lambda: urllib.request.Request(
+                    self.endpoint
+                    + f"{API_PREFIX}/idata/{int(data_id)}/publish",
+                    data=serialized_bytes,
+                    headers=headers,
+                    method="POST",
+                )
             ) as response:
                 return json.loads(response.read())
         except urllib.error.HTTPError as exc:

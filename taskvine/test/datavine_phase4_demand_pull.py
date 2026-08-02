@@ -524,6 +524,12 @@ def run_case(
                 )
             if controller.returncode != 0:
                 raise AssertionError(stderr)
+            diagnostic_root = os.environ.get(
+                "DATAVINE_PRESERVE_RUNTIME_ROOT"
+            )
+            if diagnostic_root:
+                destination = Path(diagnostic_root) / name
+                shutil.copytree(root, destination, dirs_exist_ok=True)
 
 
 def main():

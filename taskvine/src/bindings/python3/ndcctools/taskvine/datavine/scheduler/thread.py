@@ -313,6 +313,11 @@ class TaskSchedulerThread:
         if run_info_path is not None:
             kwargs["run_info_path"] = run_info_path
         self._manager = Manager(**kwargs)
+        if os.environ.get("DATAVINE_WATCH_LIBRARY_LOGFILES"):
+            if self._manager.tune("watch-library-logfiles", 1) < 0:
+                raise RuntimeError(
+                    "TaskVine Manager rejected library log collection"
+                )
         if not self._manager.set_datavine_controller(
             self.controller.endpoint, self.controller.token
         ):
@@ -1004,6 +1009,7 @@ class TaskSchedulerThread:
         worker_loss_injections = 0
         worker_loss_events = []
         local_idata_hits = 0
+        worker_controller_retries = 0
         partial_publication_failures = []
         partial_publication_triggered = set()
         partial_publication_cancelled = {}
@@ -2086,8 +2092,18 @@ class TaskSchedulerThread:
                 compute_completions_while_frontier_pruning += 1
             if persistence_running or persistence_pending:
                 compute_completions_while_persistence_active += 1
-            local_idata_hits += (completed.output or "").count(
+            completed_output = (
+                completed.output
+                if isinstance(completed.output, str)
+                else ""
+            )
+            local_idata_hits += completed_output.count(
                 "DATAVINE_LOCAL_IDATA"
+            )
+            worker_controller_retries += sum(
+                int(line.split(" ", 1)[1])
+                for line in completed_output.splitlines()
+                if line.startswith("DATAVINE_CONTROLLER_RETRIES ")
             )
             if not completed.successful():
                 # A worker can disappear after its replica was selected but
@@ -2168,7 +2184,13 @@ class TaskSchedulerThread:
                 self.controller.set_task_state(logical_id, "pending")
                 raise RuntimeError(
                     f"TaskID {logical_id} failed: result={completed.result} "
-                    f"exit={completed.exit_code} stdout={completed.output}"
+                    f"exit={completed.exit_code} "
+                    f"stdout={completed.output!r}"
+                )
+            if not isinstance(completed.output, str):
+                raise RuntimeError(
+                    f"TaskID {logical_id} returned non-text successful "
+                    f"output {completed.output!r}"
                 )
             observation_lines = [
                 line[len("DATAVINE_REPLICA_OBSERVED "):]
@@ -2525,6 +2547,7 @@ class TaskSchedulerThread:
             ),
             "loss_injected": loss_injected,
             "local_idata_hits": local_idata_hits,
+            "worker_controller_retries": worker_controller_retries,
             "worker_loss_injected": bool(worker_loss_injections),
             "worker_loss_injections": worker_loss_injections,
             "worker_loss_schedule": list(worker_loss_schedule),
