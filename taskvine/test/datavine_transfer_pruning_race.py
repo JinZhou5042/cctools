@@ -273,8 +273,7 @@ def run_dynamic_invalidation_mode(factory_manager):
     assert faults["peer_release_failures_injected"] == 1, faults
     assert faults["peer_release_retries_succeeded"] == 1, faults
     assert faults["peer_release_pending"] == 0, faults
-    assert report["peer_release_drain_iterations"] > 0, report
-    assert report["peer_release_drain_seconds"] > 0, report
+    assert faults["peer_release_pending_high_water"] >= 1, faults
     assert event["cancelled_data_ids"] == [source.task_id], event
     assert report["runtime_pruned_data_ids"] == [], report
     assert not any(
