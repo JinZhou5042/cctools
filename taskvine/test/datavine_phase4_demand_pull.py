@@ -134,6 +134,8 @@ def run_case(
     peer_release_retry_seconds=0.1,
     peer_release_capacity=1024,
     expected_additional_controller_tasks=0,
+    use_worker_library=False,
+    scheduler_wait_timeout=1,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -264,7 +266,7 @@ def run_case(
                 "run_workflow",
                 workflow,
                 None,
-                1,
+                scheduler_wait_timeout,
                 persistence,
                 inject_global_loss_after,
                 inject_worker_loss_after,
@@ -305,6 +307,7 @@ def run_case(
                 inject_idata_release_failures,
                 peer_release_retry_seconds,
                 peer_release_capacity,
+                use_worker_library,
             )
             if runtime_controller_hook is not None:
                 runtime_hook_handle = runtime_controller_hook(client)

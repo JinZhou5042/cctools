@@ -140,6 +140,7 @@ def main():
     )
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--worker-cores", type=int, default=2)
+    parser.add_argument("--process-runner", action="store_true")
     parser.add_argument("--factory-manager")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -178,6 +179,8 @@ def main():
         prefetch=prefetch,
         persistence=persistence,
         persistence_attempts_by_task=({target: 1} if persistence else None),
+        use_worker_library=not args.process_runner,
+        scheduler_wait_timeout=1,
         inject_worker_loss_after=(1.0 if failure_mode else None),
         replacement_worker_delay=(1 if failure_mode else None),
     )
@@ -188,6 +191,9 @@ def main():
         "target_task_id": target,
         "failure_mode": "worker-loss" if failure_mode else "none",
         "mode": args.mode,
+        "execution_boundary": (
+            "process" if args.process_runner else "persistent-library"
+        ),
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "scheduler_report": snapshot["scheduler_report"],
     }

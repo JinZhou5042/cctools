@@ -63,6 +63,11 @@ class TaskSchedulerThread:
         self._serialization_count = 0
         self._bulk_serialization_count = 0
         self._worker_reconciliation_deferrals = 0
+        self._active_worker_ids = frozenset()
+        self._worker_reconciliations = 0
+        self._worker_status_polls = 0
+        self._last_worker_status_poll = 0.0
+        self._worker_status_poll_interval = 1.0
         self._cache_admission = WorkerCacheAdmission(controller_client)
 
     @property
@@ -135,10 +140,19 @@ class TaskSchedulerThread:
         # Drive the manager event loop so newly connected workers become
         # visible even before the first logical task is submitted.
         self._manager.wait(1)
-        return len(self._sync_worker_epochs())
+        return len(self._sync_worker_epochs(force=True))
 
-    def _sync_worker_epochs(self):
+    def _sync_worker_epochs(self, force=False):
+        now = time.monotonic()
+        if (
+            not force
+            and now - self._last_worker_status_poll
+            < self._worker_status_poll_interval
+        ):
+            return set(self._active_worker_ids)
         workers = self._manager.status("workers")
+        self._last_worker_status_poll = now
+        self._worker_status_polls += 1
         worker_ids = {
             worker["workerid"]
             for worker in workers
@@ -151,10 +165,15 @@ class TaskSchedulerThread:
             # performs the authoritative reconciliation.
             self._worker_reconciliation_deferrals += 1
             return worker_ids
+        observed_worker_ids = frozenset(worker_ids)
+        if observed_worker_ids == self._active_worker_ids:
+            return worker_ids
         for worker_id in sorted(worker_ids):
             self.controller.claim_worker(worker_id)
         self.controller.reconcile_workers(worker_ids)
         self._cache_admission.sync_workers(worker_ids)
+        self._active_worker_ids = observed_worker_ids
+        self._worker_reconciliations += 1
         return worker_ids
 
     def _file_for_data_key(self, data_key):
@@ -452,10 +471,13 @@ class TaskSchedulerThread:
         inject_idata_release_failures=0,
         peer_release_retry_seconds=0.1,
         peer_release_capacity=1024,
+        use_worker_library=False,
     ):
         self._assert_owner()
         if self._manager is None:
             raise RuntimeError("create_manager must be called first")
+        if use_worker_library:
+            self._ensure_worker_library()
         reconciliation_deferrals_before = (
             self._worker_reconciliation_deferrals
         )
@@ -1456,6 +1478,7 @@ class TaskSchedulerThread:
                     inject_partial_publication_after.get(task_id)
                     if attempt == 1
                     else None,
+                    use_worker_library,
                 )
                 physical_id = self._manager.submit(physical)
                 self.controller.set_task_state(task_id, "running")
@@ -1577,7 +1600,9 @@ class TaskSchedulerThread:
                     f"{sorted(frontier_pruning_pending)}"
                 )
             completed = self._manager.wait(wait_timeout)
-            self._sync_worker_epochs()
+            workers_before_sync = self._active_worker_ids
+            active_workers = frozenset(self._sync_worker_epochs())
+            workers_changed = active_workers != workers_before_sync
             self._cache_admission.poll(self._manager)
 
             # TaskVine workers may forsake a task whose input transfer fails
@@ -1585,40 +1610,40 @@ class TaskSchedulerThread:
             # internally.  DataVine must regain ownership of this failure so
             # that the logical task can be recovered from stable lineage
             # instead of looping on a stale attempt indefinitely.
-            for physical_id, logical_id in tuple(running.items()):
-                missing_inputs = []
-                for input_data_id in self.controller.get_task(
-                    logical_id
-                ).input_data_ids:
-                    if not self.controller.idata_status(
-                        input_data_id
-                    )["available"]:
-                        missing_inputs.append(input_data_id)
-                if not missing_inputs:
-                    continue
-                # The C manager may already have moved this attempt into its
-                # own retrieval/retry path.  In that case cancellation is no
-                # longer owned by DataVine; leave the attempt there and wait
-                # for the normal Manager event rather than treating ordinary
-                # capacity backpressure as global loss.
-                if not self._manager.cancel_by_task_id(physical_id):
-                    continue
-                running.pop(physical_id)
-                pending.add(logical_id)
-                self.controller.set_task_state(logical_id, "pending")
-                for output_data_id in self._logical_output_slots[
-                    logical_id
-                ]:
-                    self.controller.invalidate_idata(output_data_id)
-                recovery_reexecutions += 1
-                unavailable_input_recoveries.append(
-                    {
-                        "task_id": logical_id,
-                        "physical_task_id": physical_id,
-                        "missing_inputs": missing_inputs,
-                        "attempt": self._attempts[logical_id],
-                    }
-                )
+            if workers_changed or completed is None:
+                for physical_id, logical_id in tuple(running.items()):
+                    missing_inputs = []
+                    for input_data_id in self.controller.get_task(
+                        logical_id
+                    ).input_data_ids:
+                        if not self.controller.idata_status(
+                            input_data_id
+                        )["available"]:
+                            missing_inputs.append(input_data_id)
+                    if not missing_inputs:
+                        continue
+                    # The C manager may already have moved this attempt into
+                    # its own retrieval/retry path. In that case cancellation
+                    # is no longer owned by DataVine; wait for the normal
+                    # Manager event instead of treating backpressure as loss.
+                    if not self._manager.cancel_by_task_id(physical_id):
+                        continue
+                    running.pop(physical_id)
+                    pending.add(logical_id)
+                    self.controller.set_task_state(logical_id, "pending")
+                    for output_data_id in self._logical_output_slots[
+                        logical_id
+                    ]:
+                        self.controller.invalidate_idata(output_data_id)
+                    recovery_reexecutions += 1
+                    unavailable_input_recoveries.append(
+                        {
+                            "task_id": logical_id,
+                            "physical_task_id": physical_id,
+                            "missing_inputs": missing_inputs,
+                            "attempt": self._attempts[logical_id],
+                        }
+                    )
             if (
                 defer_peer_source_loss_after_bytes
                 and not peer_transfer_pruning_probe_triggered
@@ -2014,7 +2039,7 @@ class TaskSchedulerThread:
                 # before a dependent task starts. Reconcile first, then turn
                 # a globally lost input into ordinary logical recomputation
                 # instead of making the failed consumer terminal.
-                self._sync_worker_epochs()
+                self._sync_worker_epochs(force=True)
                 partial_failure = partial_publication_cancelled.pop(
                     completed.id, None
                 )
@@ -2223,7 +2248,9 @@ class TaskSchedulerThread:
                 == logical_id
             ):
                 from ndcctools.taskvine import cvine
-                workers_before = sorted(self._sync_worker_epochs())
+                workers_before = sorted(
+                    self._sync_worker_epochs(force=True)
+                )
                 if not workers_before:
                     raise RuntimeError(
                         "no worker available for loss injection"
@@ -2265,7 +2292,9 @@ class TaskSchedulerThread:
                         raise RuntimeError(
                             "could not release worker"
                         )
-                workers_after = sorted(self._sync_worker_epochs())
+                workers_after = sorted(
+                    self._sync_worker_epochs(force=True)
+                )
                 if not worker_loss_process_shutdown:
                     released = sorted(
                         set(workers_before) - set(workers_after)
@@ -2394,6 +2423,9 @@ class TaskSchedulerThread:
         self._manager._refresh_stats()
         self._last_run_report = {
             "logical_tasks": len(output_ids),
+            "execution_boundary": (
+                "persistent-library" if use_worker_library else "process"
+            ),
             "logical_output_slots": {
                 str(task_id): list(data_ids)
                 for task_id, data_ids
@@ -2530,6 +2562,8 @@ class TaskSchedulerThread:
                 self._worker_reconciliation_deferrals
                 - reconciliation_deferrals_before
             ),
+            "worker_reconciliations": self._worker_reconciliations,
+            "worker_status_polls": self._worker_status_polls,
             "worker_disk_cache_admission_items": (
                 worker_disk_cache_admission_items
             ),
@@ -2748,8 +2782,9 @@ class TaskSchedulerThread:
         attempt,
         idata_inline_threshold,
         kill_worker_after_output_index=None,
+        use_worker_library=False,
     ):
-        from ndcctools.taskvine import Task
+        from ndcctools.taskvine import FunctionCall, Task
 
         record = self.controller.get_task(task_id)
         output_names = tuple(
@@ -2787,7 +2822,20 @@ class TaskSchedulerThread:
                 ),
             )
         )
-        task = Task(command)
+        if use_worker_library and kill_worker_after_output_index is None:
+            task = FunctionCall(
+                "datavine-worker-v1",
+                "execute_datavine_task",
+                self.controller.endpoint,
+                self.controller.token,
+                task_id,
+                attempt,
+                output_names,
+                idata_inline_threshold,
+            )
+            task.set_exec_method("direct")
+        else:
+            task = Task(command)
         task.set_tag(str(task_id))
         task.set_cores(1)
         task.set_retries(
@@ -2835,6 +2883,22 @@ class TaskSchedulerThread:
         if environment is not None:
             task.add_environment(environment)
         return task
+
+    def _ensure_worker_library(self):
+        if self._manager.check_library_exists("datavine-worker-v1"):
+            return
+        from ..worker.library import execute_datavine_task
+
+        library = self._manager.create_library_from_functions(
+            "datavine-worker-v1",
+            execute_datavine_task,
+            add_env=False,
+            exec_mode="direct",
+        )
+        # Runner observations use a task-local event sink, so direct calls can
+        # safely make data preparation and execution progress concurrently.
+        library.set_function_slots(4)
+        self._manager.install_library(library)
 
     def _make_persistence_task(self, data_id, request, environment):
         from ndcctools.taskvine import Task

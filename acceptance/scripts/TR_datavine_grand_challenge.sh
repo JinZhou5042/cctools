@@ -12,6 +12,9 @@ if [[ "${DATAVINE_GRAND_WORKER_LOSS:-0}" == "1" ]]; then
   FAILURE_ARGS+=(--worker-loss)
 fi
 MODE=${DATAVINE_GRAND_MODE:-full}
+if [[ "${DATAVINE_GRAND_PROCESS_RUNNER:-0}" == "1" ]]; then
+  FAILURE_ARGS+=(--process-runner)
+fi
 cd "$ROOT/taskvine/test"
 exec python "$ROOT/acceptance/scripts/datavine_grand_challenge.py" \
   --tasks "$TASKS" --workers "$WORKERS" --worker-cores "$WORKER_CORES" \

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import threading
 import time
 
 from ..models import EDataRecord
@@ -14,7 +15,18 @@ from ..scheduler.client import ControllerClient
 from ..workflow import iter_output_refs
 
 
-def main(argv=None):
+# These caches live only for the lifetime of one Python execution process.
+# They are especially useful in the persistent TaskVine library, while the
+# legacy one-process-per-task path naturally starts with empty caches.
+_CLIENTS = {}
+_WORKER_CLAIMS = {}
+_TASK_RECORDS = {}
+_EDATA_METADATA = {}
+_REPLICA_REPORTS = {}
+_CACHE_LOCK = threading.RLock()
+
+
+def main(argv=None, emit=print):
     parser = argparse.ArgumentParser(prog="datavine_worker_runner")
     parser.add_argument("--controller", required=True)
     parser.add_argument("--token", required=True)
@@ -35,12 +47,26 @@ def main(argv=None):
     if args.idata_inline_threshold < 0:
         raise ValueError("IData inline threshold cannot be negative")
 
-    client = ControllerClient(args.controller, args.token)
+    controller_key = (args.controller, args.token)
+    with _CACHE_LOCK:
+        client = _CLIENTS.get(controller_key)
+        if client is None:
+            client = ControllerClient(args.controller, args.token)
+            _CLIENTS[controller_key] = client
     worker_id = os.environ.get("VINE_WORKER_ID")
     if not worker_id:
         raise RuntimeError("TaskVine worker incarnation is unavailable")
-    worker_epoch = int(client.claim_worker(worker_id)["epoch"])
-    task = client.get_task(args.task_id)
+    claim_key = (args.controller, args.token, worker_id)
+    with _CACHE_LOCK:
+        worker_epoch = _WORKER_CLAIMS.get(claim_key)
+        if worker_epoch is None:
+            worker_epoch = int(client.claim_worker(worker_id)["epoch"])
+            _WORKER_CLAIMS[claim_key] = worker_epoch
+    task_key = (args.controller, args.token, args.task_id)
+    task = _TASK_RECORDS.get(task_key)
+    if task is None:
+        task = client.get_task(args.task_id)
+        _TASK_RECORDS[task_key] = task
     objects = {}
 
     def replica_id(data_key):
@@ -49,17 +75,38 @@ def main(argv=None):
         )
 
     def report_local(data_key, attempt, content_hash, payload):
-        replica = client.report_replica(
-            data_key,
-            replica_id(data_key),
-            attempt,
-            "worker-disk",
-            content_hash,
-            len(payload),
+        report_key = (
+            args.controller,
+            args.token,
             worker_id,
             worker_epoch,
+            data_key,
+            int(attempt),
+            content_hash,
+            len(payload),
         )
-        print(
+        cached_report = _REPLICA_REPORTS.get(report_key)
+        if (
+            cached_report is None
+            or time.monotonic() - cached_report[0] >= 1.0
+        ):
+            replica = client.report_replica(
+                data_key,
+                replica_id(data_key),
+                attempt,
+                "worker-disk",
+                content_hash,
+                len(payload),
+                worker_id,
+                worker_epoch,
+            )
+            _REPLICA_REPORTS[report_key] = (
+                time.monotonic(),
+                replica,
+            )
+        else:
+            replica = cached_report[1]
+        emit(
             "DATAVINE_REPLICA_OBSERVED "
             + json.dumps(
                 {
@@ -88,10 +135,20 @@ def main(argv=None):
                     worker_id,
                     worker_epoch,
                 )
+                for report_key in tuple(_REPLICA_REPORTS):
+                    if (
+                        report_key[2] == worker_id
+                        and report_key[4] == data_key
+                    ):
+                        _REPLICA_REPORTS.pop(report_key, None)
                 return
 
     def fetch_edata(data_id):
-        info = client.get_edata_metadata(data_id)
+        metadata_key = (args.controller, args.token, int(data_id))
+        info = _EDATA_METADATA.get(metadata_key)
+        if info is None:
+            info = client.get_edata_metadata(data_id)
+            _EDATA_METADATA[metadata_key] = info
 
         def fallback():
             if info["storage"] != "bulk-origin":
@@ -106,7 +163,7 @@ def main(argv=None):
                 raise RuntimeError(
                     f"EDataID {data_id} bulk origin checksum mismatch"
                 )
-            print(f"DATAVINE_BULK_ORIGIN e{data_id}")
+            emit(f"DATAVINE_BULK_ORIGIN e{data_id}")
             return payload
 
         cache_path = Path(f"datavine-edata-{data_id}.pkl")
@@ -140,7 +197,17 @@ def main(argv=None):
             template = cloudpickle.loads(fetch_edata(data_id))
             memo = {}
             for reference in iter_output_refs(template):
-                producer = client.get_task(reference.producer_task_id)
+                producer_key = (
+                    args.controller,
+                    args.token,
+                    reference.producer_task_id,
+                )
+                producer = _TASK_RECORDS.get(producer_key)
+                if producer is None:
+                    producer = client.get_task(
+                        reference.producer_task_id
+                    )
+                    _TASK_RECORDS[producer_key] = producer
                 memo[id(reference)] = resolve(
                     (
                         "i",
@@ -169,7 +236,7 @@ def main(argv=None):
                         status["content_hash"],
                         payload,
                     )
-                    print(f"DATAVINE_LOCAL_IDATA i{data_id}")
+                    emit(f"DATAVINE_LOCAL_IDATA i{data_id}")
             else:
                 payload = client.fetch_idata(data_id)
         else:
@@ -242,7 +309,7 @@ def main(argv=None):
             worker_id,
             worker_epoch,
         )
-        print(
+        emit(
             "DATAVINE_REPLICA_PREPARED "
             + json.dumps(
                 {
@@ -262,14 +329,14 @@ def main(argv=None):
         )
         if not args.output_file:
             stage.unlink(missing_ok=True)
-        print(
+        emit(
             "DATAVINE "
             f"task={task.task_id} slot={output_index} "
             f"output=i{output_data_id} bytes={len(payload)}"
         )
         if output_index == args.pause_after_output_index:
             time.sleep(30)
-    print(
+    emit(
         f"DATAVINE_OUTPUTS task={task.task_id} "
         f"count={len(task.output_data_ids)} bytes={total_bytes}"
     )
