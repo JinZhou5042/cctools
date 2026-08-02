@@ -69,6 +69,7 @@ class TaskSchedulerThread:
         self._worker_status_polls = 0
         self._last_worker_status_poll = 0.0
         self._worker_status_poll_interval = 1.0
+        self._reconciled_affected_data_ids = ()
         self._cache_admission = WorkerCacheAdmission(controller_client)
 
     @property
@@ -144,6 +145,7 @@ class TaskSchedulerThread:
         return len(self._sync_worker_epochs(force=True))
 
     def _sync_worker_epochs(self, force=False):
+        self._reconciled_affected_data_ids = ()
         now = time.monotonic()
         if (
             not force
@@ -171,7 +173,10 @@ class TaskSchedulerThread:
             return worker_ids
         for worker_id in sorted(worker_ids):
             self.controller.claim_worker(worker_id)
-        self.controller.reconcile_workers(worker_ids)
+        reconciliation = self.controller.reconcile_workers(worker_ids)
+        self._reconciled_affected_data_ids = tuple(
+            reconciliation.get("affected_data_ids", ())
+        )
         self._cache_admission.sync_workers(worker_ids)
         self._active_worker_ids = observed_worker_ids
         self._worker_reconciliations += 1
@@ -999,7 +1004,7 @@ class TaskSchedulerThread:
         partial_publication_cancelled = {}
         peer_transfer_pruning_probes = []
         peer_transfer_pruning_probe_triggered = False
-        recovery_audit_required = False
+        recovery_audit_data_ids = set()
 
         def queue_frontier_pruning_if_ready(frontier_task_id):
             if (
@@ -1146,19 +1151,11 @@ class TaskSchedulerThread:
                 for input_data_id in producer_record.input_data_ids:
                     require_available(input_data_id)
 
-            if recovery_audit_required:
-                recovery_audit_required = False
-                for pending_task_id in sorted(pending):
-                    pending_record = self._task_record(
-                        pending_task_id
-                    )
-                    for input_data_id in pending_record.input_data_ids:
-                        require_available(input_data_id)
-                for result_task_id in sorted(result_task_ids):
-                    for result_data_id in self._logical_output_slots[
-                        result_task_id
-                    ]:
-                        require_available(result_data_id)
+            if recovery_audit_data_ids:
+                audit_data_ids = sorted(recovery_audit_data_ids)
+                recovery_audit_data_ids.clear()
+                for data_id in audit_data_ids:
+                    require_available(data_id)
             if recovery_wave:
                 plan = self.controller.pruning_plan()
                 recovery_waves.append(
@@ -1617,7 +1614,11 @@ class TaskSchedulerThread:
             active_workers = frozenset(self._sync_worker_epochs())
             workers_lost = workers_before_sync - active_workers
             if workers_lost:
-                recovery_audit_required = True
+                recovery_audit_data_ids.update(
+                    int(data_key.split(":", 1)[1])
+                    for data_key in self._reconciled_affected_data_ids
+                    if str(data_key).startswith("i:")
+                )
             self._cache_admission.poll(self._manager)
 
             # TaskVine workers may forsake a task whose input transfer fails
@@ -1625,7 +1626,7 @@ class TaskSchedulerThread:
             # internally.  DataVine must regain ownership of this failure so
             # that the logical task can be recovered from stable lineage
             # instead of looping on a stale attempt indefinitely.
-            if workers_lost or completed is None:
+            if workers_lost:
                 for physical_id, logical_id in tuple(running.items()):
                     missing_inputs = []
                     for input_data_id in self._task_record(
@@ -2256,7 +2257,7 @@ class TaskSchedulerThread:
                 self.controller.invalidate_idata(
                     output_ids[logical_id]
                 )
-                recovery_audit_required = True
+                recovery_audit_data_ids.add(output_ids[logical_id])
                 loss_injected = True
             if (
                 worker_loss_injections < len(worker_loss_schedule)
@@ -2328,7 +2329,9 @@ class TaskSchedulerThread:
                     self._manager.prune_file(
                         self._idata_files[output_ids[lost_task_id]]
                     )
-                recovery_audit_required = True
+                recovery_audit_data_ids.update(
+                    output_ids[task_id] for task_id in lost_task_ids
+                )
                 removed_persistence = [
                     entry
                     for entry in persistence_pending

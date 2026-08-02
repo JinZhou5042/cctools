@@ -136,6 +136,7 @@ def run_case(
     expected_additional_controller_tasks=0,
     use_worker_library=False,
     scheduler_wait_timeout=1,
+    workflow_timeout=None,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
         root = Path(root)
@@ -338,7 +339,11 @@ def run_case(
                 workers[-1].wait(timeout=10)
                 workers.append(start_worker(port, cores=worker_cores))
             results = future.result(
-                timeout=600 if factory_manager else 90
+                timeout=(
+                    float(workflow_timeout)
+                    if workflow_timeout is not None
+                    else (600 if factory_manager else 90)
+                )
             )
             if (
                 runtime_hook_handle is not None

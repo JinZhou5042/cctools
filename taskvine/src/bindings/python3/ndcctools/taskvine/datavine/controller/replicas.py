@@ -202,13 +202,16 @@ class ReplicaDirectory:
         }
         with self._lock:
             disconnected = []
+            affected_data_ids = set()
             for worker_id, worker in tuple(self._workers.items()):
                 if worker.active and worker_id not in active_worker_ids:
                     self._workers[worker_id] = dataclasses.replace(
                         worker, active=False
                     )
-                    self._invalidate_worker_replicas(
-                        worker.worker_id, worker.epoch
+                    affected_data_ids.update(
+                        self._invalidate_worker_replicas(
+                            worker.worker_id, worker.epoch
+                        )
                     )
                     self._expire_worker_leases(
                         worker.worker_id, worker.epoch
@@ -216,9 +219,10 @@ class ReplicaDirectory:
                     disconnected.append(self._workers[worker_id])
             if disconnected:
                 self._changed()
-            return tuple(disconnected)
+            return tuple(disconnected), tuple(sorted(affected_data_ids))
 
     def _invalidate_worker_replicas(self, worker_id, epoch):
+        affected_data_ids = set()
         for key, record in tuple(self._replicas.items()):
             if (
                 record.worker_id == worker_id
@@ -231,6 +235,8 @@ class ReplicaDirectory:
                 self._replicas[key] = dataclasses.replace(
                     record, state=state
                 )
+                affected_data_ids.add(record.data_id)
+        return affected_data_ids
 
     def _expire_worker_leases(self, worker_id, epoch):
         """Fail transfers owned by a dead source or destination epoch."""

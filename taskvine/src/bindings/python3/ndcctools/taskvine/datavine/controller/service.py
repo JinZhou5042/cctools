@@ -462,7 +462,10 @@ class ControllerService:
                 if self.path == f"{API_PREFIX}/workers/reconcile":
                     try:
                         request = self._read_json()
-                        disconnected = owner.state.reconcile_workers(
+                        (
+                            disconnected,
+                            affected_data_ids,
+                        ) = owner.state.reconcile_workers(
                             request["active_worker_ids"]
                         )
                     except Exception as exc:
@@ -474,7 +477,10 @@ class ControllerService:
                             "disconnected": [
                                 dataclasses.asdict(worker)
                                 for worker in disconnected
-                            ]
+                            ],
+                            "affected_data_ids": list(
+                                affected_data_ids
+                            ),
                         },
                     )
                     return

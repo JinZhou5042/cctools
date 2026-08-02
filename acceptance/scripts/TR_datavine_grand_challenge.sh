@@ -7,6 +7,7 @@ MEDIUM_BYTES=${DATAVINE_GRAND_MEDIUM_BYTES:-65536}
 LARGE_BYTES=${DATAVINE_GRAND_LARGE_BYTES:-0}
 WORKERS=${DATAVINE_GRAND_WORKERS:-2}
 WORKER_CORES=${DATAVINE_GRAND_WORKER_CORES:-2}
+WORKFLOW_TIMEOUT=${DATAVINE_GRAND_WORKFLOW_TIMEOUT:-600}
 FAILURE_ARGS=()
 if [[ "${DATAVINE_GRAND_WORKER_LOSS:-0}" == "1" ]]; then
   FAILURE_ARGS+=(--worker-loss)
@@ -19,4 +20,5 @@ cd "$ROOT/taskvine/test"
 exec python "$ROOT/acceptance/scripts/datavine_grand_challenge.py" \
   --tasks "$TASKS" --workers "$WORKERS" --worker-cores "$WORKER_CORES" \
   --mode "$MODE" --medium-bytes "$MEDIUM_BYTES" \
+  --workflow-timeout "$WORKFLOW_TIMEOUT" \
   --large-bytes "$LARGE_BYTES" --json "${FAILURE_ARGS[@]}"
