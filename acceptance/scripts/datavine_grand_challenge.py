@@ -23,6 +23,7 @@ from datavine_phase4_demand_pull import run_case
 
 
 HOT = {"kind": "hot-config", "version": 1, "salt": "datavine-grand"}
+REPEATED_HOT_BINDINGS = (HOT,) * 8
 
 
 def split_value(seed, config, *, ordinal):
@@ -30,8 +31,9 @@ def split_value(seed, config, *, ordinal):
     return seed * 3 + ordinal, seed * 5 + ordinal
 
 
-def combine(left, right, *, config):
+def combine(left, right, *repeated, config):
     assert config == HOT
+    assert repeated == REPEATED_HOT_BINDINGS
     return left + right
 
 
@@ -73,14 +75,23 @@ def build_workflow(task_count, medium_bytes, large_bytes):
             combine,
             root.output(0),
             root.output(1),
+            *REPEATED_HOT_BINDINGS,
             config=HOT,
         )
         if ordinal % 4 == 0:
             branch2 = workflow.add_task(
-                combine, branch.output(), root.output(0), config=HOT
+                combine,
+                branch.output(),
+                root.output(0),
+                *REPEATED_HOT_BINDINGS,
+                config=HOT,
             )
             branch = workflow.add_task(
-                combine, branch.output(), branch2.output(), config=HOT
+                combine,
+                branch.output(),
+                branch2.output(),
+                *REPEATED_HOT_BINDINGS,
+                config=HOT,
             )
             leaf_values.append(24 * (ordinal % len(roots)))
         else:
@@ -190,6 +201,10 @@ def main():
         "artifact_type": "datavine-grand-challenge-run",
         "status": "PASS",
         "tasks": len(workflow.tasks),
+        "task_to_data_bindings": sum(
+            1 + len(task.args) + len(task.kwargs)
+            for task in workflow.tasks
+        ),
         "target_task_id": target,
         "failure_mode": "worker-loss" if failure_mode else "none",
         "mode": args.mode,
