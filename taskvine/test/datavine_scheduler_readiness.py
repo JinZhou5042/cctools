@@ -1,12 +1,70 @@
 #!/usr/bin/env python3
 
+from types import SimpleNamespace
+
 from ndcctools.taskvine.datavine.scheduler.readiness import (
+    build_cache_plan,
     plan_ready_batches,
     select_ready_tasks,
 )
 
 
 def main():
+    records = {
+        1: SimpleNamespace(
+            function_data_id=10,
+            positional=(("c", 11), ("i", 20), ("v", 0)),
+            keyword=(("arg", ("e", 12)),),
+        ),
+        2: SimpleNamespace(
+            function_data_id=10,
+            positional=(("i", 20),),
+            keyword=(),
+        ),
+    }
+    cache_plan = build_cache_plan(
+        records,
+        records.__getitem__,
+        {1: (21,)},
+        {1: (30,), 2: (31, 32)},
+        {"e:10": 5, "e:11": 7, "e:12": 11, "i:20": 13, "i:21": 17}.__getitem__,
+        retention_items=9,
+        retention_bytes=100,
+        admission_items=8,
+        admission_bytes=60,
+    )
+    assert cache_plan.task_inputs == {
+        1: {"e:10", "e:11", "e:12", "i:20", "i:21"},
+        2: {"e:10", "i:20"},
+    }
+    assert cache_plan.remaining_uses["e:10"] == 2
+    assert cache_plan.max_task_items == 6
+    assert cache_plan.max_known_input_bytes == 53
+    assert cache_plan.retention_items == 2
+    assert cache_plan.retention_bytes == 7
+
+    for capacity_name, capacity in (("admission_items", 5), ("admission_bytes", 52)):
+        arguments = {capacity_name: capacity}
+        try:
+            build_cache_plan(
+                records,
+                records.__getitem__,
+                {1: (21,)},
+                {1: (30,), 2: (31, 32)},
+                {
+                    "e:10": 5,
+                    "e:11": 7,
+                    "e:12": 11,
+                    "i:20": 13,
+                    "i:21": 17,
+                }.__getitem__,
+                **arguments,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted insufficient {capacity_name}")
+
     dependencies = {
         1: set(),
         2: {1},

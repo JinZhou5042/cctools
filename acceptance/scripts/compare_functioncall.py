@@ -4,16 +4,15 @@
 import argparse
 import gc
 import json
-import os
 from pathlib import Path
-import signal
 import statistics
-import subprocess
 import sys
 import time
 
 from ndcctools.taskvine import FunctionCall, Manager
 from ndcctools.taskvine.datavine import Workflow
+
+from benchmark_support import start_worker, stop_workers, wait_for_workers
 
 
 TEST_DIR = Path(__file__).resolve().parents[2] / "taskvine" / "test"
@@ -23,45 +22,6 @@ from datavine_phase4_demand_pull import run_case  # noqa: E402
 
 def identity(value):
     return value
-
-
-def start_worker(port, cores):
-    return subprocess.Popen(
-        [
-            os.environ.get("VINE_WORKER", "vine_worker"),
-            "127.0.0.1",
-            str(port),
-            "--cores",
-            str(cores),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-
-
-def stop_workers(workers):
-    for worker in workers:
-        if worker.poll() is not None:
-            continue
-        try:
-            os.killpg(worker.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            continue
-    for worker in workers:
-        try:
-            worker.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            os.killpg(worker.pid, signal.SIGKILL)
-            worker.wait(timeout=10)
-
-
-def wait_for_workers(manager, expected, timeout=30):
-    deadline = time.monotonic() + timeout
-    while len(manager.status("workers")) < expected:
-        if time.monotonic() >= deadline:
-            raise TimeoutError(f"expected {expected} workers")
-        manager.wait(1)
 
 
 def run_functioncall(tasks, workers, cores):

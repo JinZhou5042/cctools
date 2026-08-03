@@ -27,7 +27,7 @@ from .execution_state import (
     PublicationState,
 )
 from .persistence import PersistencePolicy
-from .readiness import plan_ready_batches, select_ready_tasks
+from .readiness import build_cache_plan, plan_ready_batches, select_ready_tasks
 from .recovery import select_recovery_audit_data_ids
 from .registration import WorkflowRegistrar
 from .reporting import (
@@ -700,49 +700,7 @@ class TaskSchedulerThread:
         for task_id, parent_ids in dependencies.items():
             for parent_id in parent_ids:
                 dependents[parent_id].add(task_id)
-        task_cache_inputs = {}
-        remaining_cache_uses = {}
-        for task_id in sorted(task_by_id):
-            record = self._task_record(task_id)
-            keys = {f"e:{record.function_data_id}"}
-            keys.update(
-                f"{'e' if kind == 'c' else kind}:{data_id}"
-                for kind, data_id in record.positional
-                if kind in ("e", "c", "i")
-            )
-            keys.update(
-                f"{'e' if kind == 'c' else kind}:{data_id}"
-                for _, (kind, data_id) in record.keyword
-                if kind in ("e", "c", "i")
-            )
-            keys.update(
-                f"i:{data_id}"
-                for data_id in self._run_context.nested_idata_by_task.get(task_id, ())
-            )
-            task_cache_inputs[task_id] = keys
-            for data_key in keys:
-                remaining_cache_uses[data_key] = (
-                    remaining_cache_uses.get(data_key, 0) + 1
-                )
-        max_task_cache_items = max(
-            (
-                len(keys) + len(self._run_context.logical_output_slots[task_id])
-                for task_id, keys in task_cache_inputs.items()
-            ),
-            default=0,
-        )
-        if (
-            worker_disk_cache_admission_items is not None
-            and int(worker_disk_cache_admission_items)
-            < max_task_cache_items
-        ):
-            raise ValueError(
-                "worker disk cache admission capacity "
-                f"{worker_disk_cache_admission_items} cannot fit the "
-                f"largest task working set of {max_task_cache_items} items"
-            )
-        cache_known_sizes = {}
-        for data_key in remaining_cache_uses:
+        def cache_size(data_key):
             kind, token = data_key.split(":", 1)
             if kind == "e":
                 metadata = self._run_context.edata_info.get(int(token))
@@ -751,60 +709,29 @@ class TaskSchedulerThread:
                         int(token)
                     )
                     self._run_context.edata_info[int(token)] = metadata
-                cache_known_sizes[data_key] = int(
-                    metadata["size"] or 0
-                )
+                return metadata["size"]
             else:
                 metadata = self.controller.idata_status(int(token))
-                cache_known_sizes[data_key] = int(
-                    metadata["size"] or 0
-                )
-        max_task_known_cache_bytes = max(
-            (
-                sum(
-                    max(0, cache_known_sizes[data_key])
-                    for data_key in keys
-                )
-                for keys in task_cache_inputs.values()
-            ),
-            default=0,
+                return metadata["size"]
+
+        cache_plan = build_cache_plan(
+            task_by_id,
+            self._task_record,
+            self._run_context.nested_idata_by_task,
+            self._run_context.logical_output_slots,
+            cache_size,
+            retention_items=worker_disk_cache_items,
+            retention_bytes=worker_disk_cache_bytes,
+            admission_items=worker_disk_cache_admission_items,
+            admission_bytes=worker_disk_cache_admission_bytes,
         )
-        if (
-            worker_disk_cache_admission_bytes is not None
-            and int(worker_disk_cache_admission_bytes)
-            < max_task_known_cache_bytes
-        ):
-            raise ValueError(
-                "worker disk cache admission capacity "
-                f"{worker_disk_cache_admission_bytes} bytes cannot fit "
-                "the largest known task input working set of "
-                f"{max_task_known_cache_bytes} bytes"
-            )
-        effective_retention_items = worker_disk_cache_items
-        if worker_disk_cache_admission_items is not None:
-            admission_headroom = max(
-                0,
-                int(worker_disk_cache_admission_items)
-                - max_task_cache_items,
-            )
-            if (
-                effective_retention_items is None
-                or int(effective_retention_items) > admission_headroom
-            ):
-                effective_retention_items = admission_headroom
-        effective_retention_bytes = worker_disk_cache_bytes
-        if worker_disk_cache_admission_bytes is not None:
-            admission_byte_headroom = max(
-                0,
-                int(worker_disk_cache_admission_bytes)
-                - max_task_known_cache_bytes,
-            )
-            if (
-                effective_retention_bytes is None
-                or int(effective_retention_bytes)
-                > admission_byte_headroom
-            ):
-                effective_retention_bytes = admission_byte_headroom
+        task_cache_inputs = cache_plan.task_inputs
+        remaining_cache_uses = cache_plan.remaining_uses
+        cache_known_sizes = cache_plan.known_sizes
+        max_task_cache_items = cache_plan.max_task_items
+        max_task_known_cache_bytes = cache_plan.max_known_input_bytes
+        effective_retention_items = cache_plan.retention_items
+        effective_retention_bytes = cache_plan.retention_bytes
         effective_library_batch_size = (
             library_batch_size
             if (

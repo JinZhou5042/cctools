@@ -60,6 +60,10 @@ def start_worker(port, workspace=None, cores=2):
             str(workspace),
             "--keep-workspace",
         ]
+    debug_args = []
+    debug_file = os.environ.get("DATAVINE_WORKER_DEBUG_FILE")
+    if debug_file:
+        debug_args = ["--debug", "all", "--debug-file", debug_file]
     return subprocess.Popen(
         [
             os.environ.get("VINE_WORKER", "vine_worker"),
@@ -68,6 +72,7 @@ def start_worker(port, workspace=None, cores=2):
             "--cores",
             str(cores),
             *workspace_args,
+            *debug_args,
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -279,53 +284,87 @@ def run_case(
             future = scheduler.submit(
                 "run_workflow",
                 workflow,
-                None,
-                scheduler_wait_timeout,
-                persistence,
-                inject_global_loss_after,
-                inject_worker_loss_after,
-                prefetch,
-                prefetch_byte_budget,
-                prefetch_item_budget,
-                inject_prefetch_failure,
-                worker_disk_cache_bytes,
-                worker_disk_cache_items,
-                worker_disk_cache_admission_items,
-                worker_disk_cache_admission_bytes,
-                [
+                environment=None,
+                wait_timeout=scheduler_wait_timeout,
+                persist_outputs=persistence,
+                inject_global_loss_after=inject_global_loss_after,
+                inject_worker_loss_after=inject_worker_loss_after,
+                prefetch=prefetch,
+                prefetch_byte_budget=prefetch_byte_budget,
+                prefetch_item_budget=prefetch_item_budget,
+                inject_prefetch_failure=inject_prefetch_failure,
+                worker_disk_cache_bytes=worker_disk_cache_bytes,
+                worker_disk_cache_items=worker_disk_cache_items,
+                worker_disk_cache_admission_items=(
+                    worker_disk_cache_admission_items
+                ),
+                worker_disk_cache_admission_bytes=(
+                    worker_disk_cache_admission_bytes
+                ),
+                result_task_ids=[
                     target_task_id,
                     *(
                         int(value)
                         for value in additional_result_task_ids
                     ),
                 ],
-                inject_external_persistence_cancel,
-                inject_external_persistence_failures,
-                external_persistence_max_retries,
-                external_persistence_retry_base_seconds,
-                external_persistence_retry_max_seconds,
-                external_persistence_failure_delay,
-                inject_global_loss_during_persistence,
-                persistence_attempts_by_task,
-                inject_worker_loss_schedule,
-                inject_worker_loss_data_by_task,
-                prune_after_persistence_by_task,
-                worker_loss_process_shutdown,
-                inject_partial_publication_after,
-                frontier_pruning_ack_delay,
-                inject_peer_source_losses,
-                inject_peer_source_loss_after_bytes,
-                defer_peer_source_loss_after_bytes,
-                peer_transfer_pruning_probe_task_ids,
-                inject_peer_corruptions,
-                inject_idata_release_failures,
-                peer_release_retry_seconds,
-                peer_release_capacity,
-                use_worker_library,
-                frontier_pruning_grace_seconds,
-                hard_delete_pruned_sharedfs,
-                library_batch_size,
-                detailed_report,
+                inject_external_persistence_cancel=(
+                    inject_external_persistence_cancel
+                ),
+                inject_external_persistence_failures=(
+                    inject_external_persistence_failures
+                ),
+                external_persistence_max_retries=(
+                    external_persistence_max_retries
+                ),
+                external_persistence_retry_base_seconds=(
+                    external_persistence_retry_base_seconds
+                ),
+                external_persistence_retry_max_seconds=(
+                    external_persistence_retry_max_seconds
+                ),
+                external_persistence_failure_delay=(
+                    external_persistence_failure_delay
+                ),
+                inject_global_loss_during_persistence=(
+                    inject_global_loss_during_persistence
+                ),
+                persistence_attempts_by_task=persistence_attempts_by_task,
+                inject_worker_loss_schedule=inject_worker_loss_schedule,
+                inject_worker_loss_data_by_task=(
+                    inject_worker_loss_data_by_task
+                ),
+                prune_after_persistence_by_task=(
+                    prune_after_persistence_by_task
+                ),
+                worker_loss_process_shutdown=worker_loss_process_shutdown,
+                inject_partial_publication_after=(
+                    inject_partial_publication_after
+                ),
+                frontier_pruning_ack_delay=frontier_pruning_ack_delay,
+                inject_peer_source_losses=inject_peer_source_losses,
+                inject_peer_source_loss_after_bytes=(
+                    inject_peer_source_loss_after_bytes
+                ),
+                defer_peer_source_loss_after_bytes=(
+                    defer_peer_source_loss_after_bytes
+                ),
+                peer_transfer_pruning_probe_task_ids=(
+                    peer_transfer_pruning_probe_task_ids
+                ),
+                inject_peer_corruptions=inject_peer_corruptions,
+                inject_idata_release_failures=(
+                    inject_idata_release_failures
+                ),
+                peer_release_retry_seconds=peer_release_retry_seconds,
+                peer_release_capacity=peer_release_capacity,
+                use_worker_library=use_worker_library,
+                frontier_pruning_grace_seconds=(
+                    frontier_pruning_grace_seconds
+                ),
+                hard_delete_pruned_sharedfs=hard_delete_pruned_sharedfs,
+                library_batch_size=library_batch_size,
+                detailed_report=detailed_report,
             )
             if runtime_controller_hook is not None:
                 runtime_hook_handle = runtime_controller_hook(client)

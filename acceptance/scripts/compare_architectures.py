@@ -4,10 +4,7 @@
 import argparse
 import gc
 import json
-import os
 from pathlib import Path
-import signal
-import subprocess
 import sys
 import time
 
@@ -18,7 +15,11 @@ from benchmark_support import (
     BoundedLatencySampler,
     ProcessTreeSampler,
     latency_summary,
+    start_worker,
+    stop_workers,
     throughput_summary,
+    wait_for_task,
+    wait_for_workers,
 )
 
 
@@ -52,52 +53,6 @@ def make_payload(size):
         raise ValueError("payload size cannot be negative")
     block = bytes(range(251))
     return (block * ((size + len(block) - 1) // len(block)))[:size]
-
-
-def start_worker(port, cores):
-    return subprocess.Popen(
-        [
-            os.environ.get("VINE_WORKER", "vine_worker"),
-            "127.0.0.1",
-            str(port),
-            "--cores",
-            str(cores),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-
-
-def stop_workers(workers):
-    for worker in workers:
-        if worker.poll() is not None:
-            continue
-        try:
-            os.killpg(worker.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            continue
-    for worker in workers:
-        try:
-            worker.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            os.killpg(worker.pid, signal.SIGKILL)
-            worker.wait(timeout=10)
-
-
-def wait_for_workers(manager, expected, timeout=30):
-    deadline = time.monotonic() + timeout
-    while len(manager.status("workers")) < expected:
-        if time.monotonic() >= deadline:
-            raise TimeoutError(f"expected {expected} workers")
-        manager.wait(1)
-
-
-def _wait_for_task(manager, task_id):
-    while True:
-        completed = manager.wait(1)
-        if completed is not None and completed.id == task_id:
-            return completed
 
 
 def run_taskvine(
@@ -138,7 +93,7 @@ def run_taskvine(
         else:
             warmup = PythonTask(benchmark_work, -1, payload, compute_steps)
         manager.submit(warmup)
-        completed = _wait_for_task(manager, warmup.id)
+        completed = wait_for_task(manager, warmup.id)
         if completed.output != expected_result(-1, len(payload), compute_steps):
             raise RuntimeError(f"{mode} warmup returned wrong output")
 

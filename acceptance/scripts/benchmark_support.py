@@ -4,9 +4,61 @@
 import math
 import os
 from pathlib import Path
+import signal
 import statistics
+import subprocess
 import threading
 import time
+
+
+def start_worker(port, cores):
+    """Start one quiet local worker in its own process group."""
+    return subprocess.Popen(
+        [
+            os.environ.get("VINE_WORKER", "vine_worker"),
+            "127.0.0.1",
+            str(port),
+            "--cores",
+            str(cores),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def stop_workers(workers):
+    """Terminate worker process groups, escalating after ten seconds."""
+    for worker in workers:
+        if worker.poll() is not None:
+            continue
+        try:
+            os.killpg(worker.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+    for worker in workers:
+        try:
+            worker.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(worker.pid, signal.SIGKILL)
+            worker.wait(timeout=10)
+
+
+def wait_for_workers(manager, expected, timeout=30):
+    """Wait until the manager observes the requested worker count."""
+    deadline = time.monotonic() + timeout
+    while len(manager.status("workers")) < expected:
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"expected {expected} workers")
+        manager.wait(1)
+
+
+def wait_for_task(manager, task_id):
+    """Wait for a specific task, ignoring unrelated completions."""
+    while True:
+        completed = manager.wait(1)
+        if completed is not None and completed.id == task_id:
+            return completed
 
 
 def percentile(values, probability):

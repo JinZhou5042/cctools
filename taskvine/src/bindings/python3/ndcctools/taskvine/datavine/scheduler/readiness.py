@@ -1,7 +1,113 @@
 """Pure logical-task readiness and physical-batch planning."""
 
+from dataclasses import dataclass
+
 
 DEFAULT_BATCH_INPUT_BYTE_LIMIT = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class CachePlan:
+    """Cache demand and safe retention limits for one workflow run."""
+
+    task_inputs: dict
+    remaining_uses: dict
+    known_sizes: dict
+    max_task_items: int
+    max_known_input_bytes: int
+    retention_items: int | None
+    retention_bytes: int | None
+
+
+def build_cache_plan(
+    task_ids,
+    task_record,
+    nested_idata_by_task,
+    logical_output_slots,
+    size_for_key,
+    retention_items=None,
+    retention_bytes=None,
+    admission_items=None,
+    admission_bytes=None,
+):
+    """Build cache-use accounting and validate admission capacity."""
+
+    task_inputs = {}
+    remaining_uses = {}
+    for task_id in sorted(task_ids):
+        record = task_record(task_id)
+        keys = {f"e:{record.function_data_id}"}
+        keys.update(
+            f"{'e' if kind == 'c' else kind}:{data_id}"
+            for kind, data_id in record.positional
+            if kind in ("e", "c", "i")
+        )
+        keys.update(
+            f"{'e' if kind == 'c' else kind}:{data_id}"
+            for _, (kind, data_id) in record.keyword
+            if kind in ("e", "c", "i")
+        )
+        keys.update(
+            f"i:{data_id}"
+            for data_id in nested_idata_by_task.get(task_id, ())
+        )
+        task_inputs[task_id] = keys
+        for key in keys:
+            remaining_uses[key] = remaining_uses.get(key, 0) + 1
+
+    max_task_items = max(
+        (
+            len(keys) + len(logical_output_slots[task_id])
+            for task_id, keys in task_inputs.items()
+        ),
+        default=0,
+    )
+    if admission_items is not None and int(admission_items) < max_task_items:
+        raise ValueError(
+            "worker disk cache admission capacity "
+            f"{admission_items} cannot fit the largest task working set "
+            f"of {max_task_items} items"
+        )
+
+    known_sizes = {
+        key: max(0, int(size_for_key(key) or 0))
+        for key in remaining_uses
+    }
+    max_known_input_bytes = max(
+        (
+            sum(known_sizes[key] for key in keys)
+            for keys in task_inputs.values()
+        ),
+        default=0,
+    )
+    if (
+        admission_bytes is not None
+        and int(admission_bytes) < max_known_input_bytes
+    ):
+        raise ValueError(
+            "worker disk cache admission capacity "
+            f"{admission_bytes} bytes cannot fit the largest known task "
+            f"input working set of {max_known_input_bytes} bytes"
+        )
+
+    if admission_items is not None:
+        headroom = max(0, int(admission_items) - max_task_items)
+        if retention_items is None or int(retention_items) > headroom:
+            retention_items = headroom
+    if admission_bytes is not None:
+        headroom = max(0, int(admission_bytes) - max_known_input_bytes)
+        if retention_bytes is None or int(retention_bytes) > headroom:
+            retention_bytes = headroom
+
+    return CachePlan(
+        task_inputs=task_inputs,
+        remaining_uses=remaining_uses,
+        known_sizes=known_sizes,
+        max_task_items=max_task_items,
+        max_known_input_bytes=max_known_input_bytes,
+        retention_items=retention_items,
+        retention_bytes=retention_bytes,
+    )
 
 
 def select_ready_tasks(
