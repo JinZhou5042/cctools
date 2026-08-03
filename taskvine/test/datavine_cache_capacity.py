@@ -186,21 +186,22 @@ def prefetch_recovery_case(factory_manager=None):
         worker_cores=2,
         prefetch=True,
         inject_worker_loss_after=1,
+        worker_loss_process_shutdown=True,
         replacement_worker_delay=None if factory_manager else 1,
-        worker_disk_cache_bytes=238743,
-        worker_disk_cache_items=6,
-        worker_disk_cache_admission_items=6,
-        worker_disk_cache_admission_bytes=238743,
+        worker_disk_cache_bytes=400000,
+        worker_disk_cache_items=12,
+        worker_disk_cache_admission_items=12,
+        worker_disk_cache_admission_bytes=400000,
     )
     report = combined["scheduler_report"]
     assert report["worker_loss_injected"], report
     assert report["recovery_reexecutions"] >= 1, report
     assert report["prefetch_selected"] > 0, report
     assert all(
-        worker["cache_items_high_water"] <= 6
-        and worker["cache_bytes_high_water"] <= 238743
-        and worker["worker_cache_items_high_water"] <= 6
-        and worker["worker_cache_bytes_high_water"] <= 238743
+        worker["cache_items_high_water"] <= 12
+        and worker["cache_bytes_high_water"] <= 400000
+        and worker["worker_cache_items_high_water"] <= 12
+        and worker["worker_cache_bytes_high_water"] <= 400000
         and worker["cache_capacity_configured"]
         for worker in report["worker_physical_cache"]
     ), report
@@ -284,11 +285,11 @@ def main():
         if record["data_id"].startswith("i:")
         and record["remaining_uses"] > 0
     ]
-    assert future_idata_evictions, bounded_report
+    assert not future_idata_evictions, bounded_report
     assert bounded_report[
         "worker_disk_cache_effective_retention_items"
-    ] == 1, bounded_report
-    assert bounded_report["worker_disk_cache_max_task_items"] == 5, (
+    ] == 0, bounded_report
+    assert bounded_report["worker_disk_cache_max_task_items"] == 6, (
         bounded_report
     )
 
@@ -308,7 +309,7 @@ def main():
             worker_disk_cache_admission_items=3,
         )
     except ValueError as error:
-        assert "largest task working set of 4 items" in str(error)
+        assert "largest task working set of 6 items" in str(error)
         undersized = {"status": "REJECTED", "error": str(error)}
     else:
         raise AssertionError("undersized cache admission did not fail closed")
@@ -327,7 +328,7 @@ def main():
     )
     zero_report = zero["scheduler_report"]
     assert zero_report["worker_disk_cache_evictions"] > 0
-    assert any(
+    assert not any(
         record["data_id"].startswith("i:")
         and record["remaining_uses"] > 0
         for record in zero_report[

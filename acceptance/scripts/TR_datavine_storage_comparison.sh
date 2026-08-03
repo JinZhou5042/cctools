@@ -44,9 +44,8 @@ for report in (enabled, disabled):
     scheduler = report["scheduler_report"]
     assert scheduler["persistence_worker_bytes"] > 0, scheduler
     assert scheduler["persistence_controller_bytes"] == 0, scheduler
-    assert [
-        wave["rollback_depth"] for wave in scheduler["recovery_waves"]
-    ] == [3, 2, 1], scheduler
+
+assert all(report["chain_rollback_depths"] == [3, 2, 1] for report in (enabled, disabled))
 
 assert enabled["tasks"] == disabled["tasks"]
 assert enabled["task_to_data_bindings"] == disabled["task_to_data_bindings"]

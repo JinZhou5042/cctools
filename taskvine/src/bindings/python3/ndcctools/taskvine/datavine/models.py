@@ -1,6 +1,5 @@
 """Protocol-neutral immutable DataVine records."""
 
-import base64
 import dataclasses
 import hashlib
 import json
@@ -102,16 +101,12 @@ class TaskRecord:
         if len(set(output_data_ids)) != len(output_data_ids):
             raise ValueError("TaskRecord output IDataIDs must be unique")
         object.__setattr__(self, "output_data_ids", output_data_ids)
-        for kind, value in (
+        for kind, _ in (
             *self.positional,
             *(binding for _, binding in self.keyword),
         ):
-            if kind == "v":
-                payload = base64.b64decode(value, validate=True)
-                if len(payload) > 1024:
-                    raise ValueError(
-                        "inline task value exceeds 1024 bytes"
-                    )
+            if kind not in ("e", "c", "i"):
+                raise ValueError(f"invalid task binding kind {kind}")
 
     @property
     def output_data_id(self):
@@ -139,23 +134,13 @@ class TaskRecord:
             task_id=int(value["task_id"]),
             function_data_id=int(value["function_data_id"]),
             positional=tuple(
-                (
-                    str(kind),
-                    str(data_id) if str(kind) == "v" else int(data_id),
-                )
+                (str(kind), int(data_id))
                 for kind, data_id in value["positional"]
             ),
             keyword=tuple(
                 (
                     str(name),
-                    (
-                        str(binding[0]),
-                        (
-                            str(binding[1])
-                            if str(binding[0]) == "v"
-                            else int(binding[1])
-                        ),
-                    ),
+                    (str(binding[0]), int(binding[1])),
                 )
                 for name, binding in value["keyword"]
             ),

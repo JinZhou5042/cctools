@@ -1937,6 +1937,16 @@ class Manager(object):
         f = cvine.vine_declare_url(self._taskvine, url, cache_level, flags)
         return File(f)
 
+    def declare_url_cached(self, url, cached_name, cache=False, peer_transfer=True):
+        flags = Task._determine_file_flags(peer_transfer)
+        cache_level = Task._determine_cache_level(cache)
+        if not isinstance(url, str) or not isinstance(cached_name, str):
+            raise TypeError("url and cached_name must be strings")
+        f = cvine.vine_declare_url_cached(
+            self._taskvine, url, cached_name, cache_level, flags
+        )
+        return File(f)
+
     ##
     # Declare a file created from a buffer in memory.
     #

@@ -78,6 +78,8 @@ class ExecutionState:
     worker_loss_events: list = dataclasses.field(default_factory=list)
     recovery_audit_data_ids: set = dataclasses.field(default_factory=set)
     physical_submissions: int = 0
+    physical_task_build_seconds: float = 0.0
+    physical_task_submit_seconds: float = 0.0
     batch_worker_seconds: float = 0.0
     recovery_reexecutions: int = 0
     local_idata_hits: int = 0

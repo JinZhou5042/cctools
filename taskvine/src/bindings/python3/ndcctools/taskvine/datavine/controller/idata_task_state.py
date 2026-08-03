@@ -1,6 +1,5 @@
 """Controller IData publication and logical task state."""
 
-import base64
 import hashlib
 
 from ..models import IDataRecord, TaskRecord
@@ -105,13 +104,6 @@ class IDataTaskStateMixin:
             return tuple(results)
 
     def _validate_binding(self, kind, data_id):
-        if kind == "v":
-            payload = base64.b64decode(data_id, validate=True)
-            if len(payload) > 1024:
-                raise ValueError(
-                    "inline task value exceeds 1024 bytes"
-                )
-            return
         if kind in ("e", "c") and data_id in self._edata:
             return
         if kind == "i" and data_id in self._idata:
@@ -124,6 +116,10 @@ class IDataTaskStateMixin:
                 return self._tasks[int(task_id)]
             except KeyError:
                 raise KeyError(f"unknown TaskID {task_id}") from None
+
+    def get_tasks(self, task_ids):
+        with self._lock:
+            return tuple(self.get_task(task_id) for task_id in task_ids)
 
     def get_idata(self, data_id):
         with self._lock:

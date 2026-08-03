@@ -24,7 +24,7 @@ from ndcctools.taskvine.datavine.scheduler.client import ControllerClient
 def main():
     metadata, _ = serialize({"value": 1})
     assert decode_serialization_metadata(metadata.to_dict()) == metadata
-    record = TaskRecord(1, 2, (("v", "gAVLAS4="),), (), (3,), ())
+    record = TaskRecord(1, 2, (("e", 1),), (), (3,), ())
     assert decode_task_record(record.to_dict()) == record
     compact = encode_compact_task_record(record)
     assert decode_compact_task_record(compact) == record
@@ -33,7 +33,7 @@ def main():
         TaskRecord(
             task_id,
             2,
-            (("v", "gAVLAS4="),),
+            (("e", 1),),
             (("name", ("e", 1)),),
             (task_id + 1000,),
             (),
@@ -136,6 +136,10 @@ def main():
         function_data_id = compact_client.register_edata(
             function_metadata, function_payload
         )["data_id"]
+        value_metadata, value_payload = serialize(-1)
+        value_data_id = compact_client.register_edata(
+            value_metadata, value_payload
+        )["data_id"]
         output_ids = compact_client.allocate_idata_batch(
             (task_id, 0) for task_id in range(1, 101)
         )
@@ -143,7 +147,7 @@ def main():
             TaskRecord(
                 task_id,
                 function_data_id,
-                (("v", "gAVLAS4="),),
+                (("e", value_data_id),),
                 (),
                 (output_ids[task_id - 1],),
                 (),

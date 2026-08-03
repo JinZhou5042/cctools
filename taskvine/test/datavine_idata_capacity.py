@@ -364,9 +364,9 @@ def run_bounded_case(factory_manager=None, persistence_mode="cancel"):
     )
     assert snapshot["idata_metadata_records"] >= 1
     assert snapshot["idata_metadata_publications"] >= 1
-    assert snapshot["idata_inline_records"] >= 1
-    assert snapshot["external_persistence_requests"] == 1
-    assert snapshot["external_persistence_durable"] == 1
+    assert snapshot["idata_inline_records"] == 0
+    assert snapshot["external_persistence_requests"] == 2
+    assert snapshot["external_persistence_durable"] == 2
     assert snapshot["durable_hashes_valid"]
     assert snapshot["persistence_temporary_files"] == []
     assert (
@@ -375,9 +375,9 @@ def run_bounded_case(factory_manager=None, persistence_mode="cancel"):
     )
     assert len(snapshot["durable_files"]) == 2
     if persistence_mode == "loss-race":
-        assert report["persistence_tasks_completed"] >= 1
+        assert report["persistence_tasks_completed"] >= 2
     else:
-        assert report["persistence_tasks_completed"] == 1
+        assert report["persistence_tasks_completed"] == 2
     if persistence_mode == "cancel":
         assert report["persistence_cancellations"] == 1
         assert report["persistence_failures"] == 0
@@ -387,7 +387,7 @@ def run_bounded_case(factory_manager=None, persistence_mode="cancel"):
         assert report["persistence_failures"] == 2
         assert report["persistence_injected_failures_observed"] == 2
         assert report["persistence_retries"] == 2
-        assert report["persistence_retry_delay_seconds"] == 0.75
+        assert report["persistence_retry_delay_seconds"] == 0.5
         assert (
             report["compute_completions_while_persistence_active"]
             >= 1

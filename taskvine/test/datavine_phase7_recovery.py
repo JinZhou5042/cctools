@@ -94,10 +94,7 @@ def main():
     assert report["physical_attempts"] == len(workflow.tasks) + 1
     assert report["local_idata_hits"] >= 3
     assert recovered["available_idata"] == len(workflow.tasks)
-    if args.factory_manager:
-        assert recovered["taskvine_worker_disconnections"] >= 1
-    else:
-        assert recovered["taskvine_workers_used"] == 2
+    assert recovered["taskvine_worker_disconnections"] >= 1
 
     workflow, _, target, expected = build()
     rollback = run_case(

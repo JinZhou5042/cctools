@@ -75,7 +75,7 @@ def _decode_compact_binding(binding):
     if not isinstance(binding, list) or len(binding) != 2:
         raise ValueError("invalid compact task binding")
     kind = str(binding[0])
-    return kind, str(binding[1]) if kind == "v" else int(binding[1])
+    return kind, int(binding[1])
 
 
 def _decode_compact_keyword(binding):

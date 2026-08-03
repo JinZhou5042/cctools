@@ -70,8 +70,15 @@ def main():
     assert second.positional[0] == ("i", 102)
     assert second.positional[1][0] == "c"
     assert second.keyword[0][0] == "named"
-    assert second.keyword[0][1][0] == "v"
-    assert context.inline_task_values >= 2
+    assert second.keyword[0][1][0] == "e"
+    assert all(
+        kind in ("e", "c", "i")
+        for record in (first, second)
+        for kind, _ in (
+            *record.positional,
+            *(binding for _, binding in record.keyword),
+        )
+    )
     assert context.serialization_count > 0
     assert context.registration_timing.keys() == {
         "idata_allocation",
@@ -80,7 +87,6 @@ def main():
         "task_registration",
     }
     assert not context.edata_by_object
-    assert not context.inline_value_payloads
 
     for changes, expected in (
         ({"bulk_threshold": 0}, "bulk threshold"),

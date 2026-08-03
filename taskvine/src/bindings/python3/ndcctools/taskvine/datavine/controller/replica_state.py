@@ -200,6 +200,44 @@ class ReplicaStateMixin:
                 )
             return replica
 
+    def prepare_worker_outputs(self, worker_id, worker_epoch, outputs):
+        with self._lock:
+            prepared = []
+            for output in outputs:
+                data_id = int(output["data_id"])
+                record = self.publish_idata_metadata(
+                    data_id,
+                    output["attempt"],
+                    output["content_hash"],
+                    output["size"],
+                )
+                replica = self.prepare_worker_replica(
+                    f"i:{data_id}",
+                    output["replica_id"],
+                    record.attempt,
+                    "worker-disk",
+                    record.content_hash,
+                    record.serialized_size,
+                    worker_id,
+                    worker_epoch,
+                )
+                prepared.append(replica)
+            return tuple(prepared)
+
+    def commit_worker_outputs(self, outputs):
+        with self._lock:
+            return tuple(
+                self.commit_worker_replica(
+                    output["data_id"],
+                    output["replica_id"],
+                    output["generation"],
+                    output["attempt"],
+                    output["content_hash"],
+                    output["size"],
+                )
+                for output in outputs
+            )
+
     def report_worker_replica(
         self,
         data_key,

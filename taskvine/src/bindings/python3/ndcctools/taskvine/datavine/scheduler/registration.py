@@ -1,6 +1,5 @@
 """Workflow value and task registration."""
 
-import base64
 import dataclasses
 import os
 from pathlib import Path
@@ -164,11 +163,6 @@ class WorkflowRegistrar:
             result = self.controller.register_edata(metadata, payload)
         data_id = int(result["data_id"])
         context.edata_info[data_id] = result
-        if (
-            result.get("storage") == "controller-memory"
-            and len(payload) <= 64 * 1024
-        ):
-            context.edata_payloads[data_id] = payload
         context.edata_by_object[cache_key] = (value, data_id)
         return data_id
 
@@ -195,13 +189,6 @@ class WorkflowRegistrar:
                     continue
                 metadata, payload = serialize(value)
                 metadata = dataclasses.replace(metadata, domain=str(domain))
-                if domain == "value" and len(payload) <= 1024:
-                    context.serialization_count += 1
-                    context.inline_value_payloads[cache_key] = (
-                        value,
-                        base64.b64encode(payload).decode("ascii"),
-                    )
-                    continue
                 if (
                     self.bulk_origin_dir is not None
                     and len(payload) >= self.bulk_threshold
@@ -222,8 +209,6 @@ class WorkflowRegistrar:
             data_id = int(result["data_id"])
             context.edata_by_object[cache_key] = (value, data_id)
             context.edata_info[data_id] = result
-            if len(payload) <= 64 * 1024:
-                context.edata_payloads[data_id] = payload
 
     def _binding(self, context, task_id, value):
         if isinstance(value, OutputRef):
@@ -242,9 +227,4 @@ class WorkflowRegistrar:
                 for reference in references
             )
             return ("c", self._register_value(context, value, "container"))
-        cache_key = ("value", id(value))
-        cached = context.inline_value_payloads.get(cache_key)
-        if cached is not None and cached[0] is value:
-            context.inline_task_values += 1
-            return ("v", cached[1])
         return ("e", self._register_value(context, value))

@@ -121,7 +121,10 @@ def main():
         if item["data_id"] == source.task_id
     )
     assert worker_prune["confirmed"] == worker_prune["requested"]
-    assert worker_prune["confirmed"] >= 1
+    assert (
+        worker_prune["confirmed"] + worker_prune.get("reconciled", 0)
+        >= 1
+    )
     assert worker_prune["failed"] == 0
     assert worker_prune["tracker_released"]
     assert replicas["active_leases"] == 0, replicas

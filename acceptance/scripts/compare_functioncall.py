@@ -108,6 +108,12 @@ def run_datavine(tasks, workers, cores, library_batch_size=4096):
         "mode": "datavine-library",
         "logical_tasks": tasks,
         "physical_tasks": report["physical_compute_submissions"],
+        "physical_task_build_seconds": report[
+            "physical_task_build_seconds"
+        ],
+        "physical_task_submit_seconds": report[
+            "physical_task_submit_seconds"
+        ],
         "elapsed_seconds": elapsed,
         "tasks_per_second": tasks / elapsed,
         "controller_requests": request_count,
@@ -123,7 +129,6 @@ def run_datavine(tasks, workers, cores, library_batch_size=4096):
         ],
         "workflow_timing_seconds": report["workflow_timing_seconds"],
         "batch_worker_seconds": report["batch_worker_seconds"],
-        "inline_task_values": report["inline_task_values"],
         "physical_batch_metrics": report["physical_batch_metrics"],
         "manager_timing_us": report["manager_timing_us"],
         "registration_timing_seconds": report[

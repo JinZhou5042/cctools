@@ -784,6 +784,11 @@ be delete at the manager's site after it is not needed by the workflow (@ref vin
 struct vine_file *vine_declare_url(
 		struct vine_manager *m, const char *url, vine_cache_level_t cache, vine_file_flags_t flags);
 
+/** Declare an immutable URL using a caller-provided cache identity. */
+struct vine_file *vine_declare_url_cached(
+		struct vine_manager *m, const char *url, const char *cached_name,
+		vine_cache_level_t cache, vine_file_flags_t flags);
+
 /** Create a file object of a remote file accessible from an xrootd server.
 @param m A manager object
 @param source The URL address of the root file in text form as: "root://XROOTSERVER[:port]//path/to/file"

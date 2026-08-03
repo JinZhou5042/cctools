@@ -33,6 +33,11 @@ class FakeManager:
     def declare_url(self, value, **options):
         return self._declare("url", value, **options)
 
+    def declare_url_cached(self, value, cached_name, **options):
+        return self._declare(
+            "url", value, cached_name=cached_name, **options
+        )
+
     def declare_file(self, value, **options):
         return self._declare("file", value, **options)
 
@@ -80,21 +85,23 @@ def main():
     assert bulk.content_hash == "bulk-hash"
     assert factory.edata_file(1) is bulk
 
-    inline_edata = factory.edata_file(2)
-    assert inline_edata.declaration[0] == "url"
-    assert "/v1/edata/2?" in inline_edata.declaration[1]
-    assert "secret+token" in inline_edata.declaration[1]
-    assert inline_edata.data_id == "e:2"
-    assert inline_edata.content_hash == "hash-2"
+    controller_edata = factory.edata_file(2)
+    assert controller_edata.declaration[0] == "url"
+    assert "/v1/edata/2?" in controller_edata.declaration[1]
+    assert "secret+token" in controller_edata.declaration[1]
+    assert controller_edata.data_id == "e:2"
+    assert controller_edata.content_hash == "hash-2"
+    assert controller_edata.declaration[2]["cached_name"] == (
+        "datavine-e-2-hash-2"
+    )
     assert controller.metadata_fetches == 1
-
-    inline_idata = factory.inline_idata_file(3, "idata-hash")
-    assert inline_idata.data_id == "i:3"
-    assert inline_idata.content_hash == "idata-hash"
 
     output = factory.idata_output_file(4, 2)
     assert output.data_id == "i:4"
     assert "attempt=2" in output.declaration[1]
+    assert output.declaration[2]["cached_name"] == (
+        "datavine-i-4-attempt-2"
+    )
     assert idata_files[4] is output
 
     durable = factory.durable_idata_file(

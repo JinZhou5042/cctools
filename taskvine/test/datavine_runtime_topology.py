@@ -202,7 +202,12 @@ def main():
                 prepared["content_hash"],
                 prepared["size"],
             )
-            assert cloudpickle.loads(client.fetch_idata(output_id)) == 42
+            assert cloudpickle.loads(
+                (
+                    Path(temp_dir)
+                    / f"datavine-idata-{output_id}.pkl"
+                ).read_bytes()
+            ) == 42
         finally:
             if scheduler is not None:
                 scheduler.stop()

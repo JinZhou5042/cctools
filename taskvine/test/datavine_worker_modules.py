@@ -25,18 +25,12 @@ def main():
             "one.pkl",
             "--output-file",
             "two.pkl",
-            "--idata-inline-threshold",
-            "1024",
         ]
     )
     assert args.task_id == 7
     assert args.attempt == 2
     assert args.output_file == ["one.pkl", "two.pkl"]
-    assert args.idata_inline_threshold == 1024
-    for extra, text in (
-        (["--attempt", "0"], "attempt"),
-        (["--idata-inline-threshold", "-1"], "threshold"),
-    ):
+    for extra, text in ((["--attempt", "0"], "attempt"),):
         try:
             parse_worker_arguments(
                 [

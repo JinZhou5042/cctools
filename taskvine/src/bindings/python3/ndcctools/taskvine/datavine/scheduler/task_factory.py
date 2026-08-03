@@ -66,8 +66,11 @@ class TaskFactory:
                     {"token": self.controller.token}
                 )
             )
-            file_object = self.manager.declare_url(
-                url, cache="worker", peer_transfer=True
+            file_object = self.manager.declare_url_cached(
+                url,
+                f"datavine-e-{data_id}-{info['serialized_sha256']}",
+                cache="worker",
+                peer_transfer=True,
             )
         self.edata_files[data_id] = file_object
         if not file_object.set_datavine_data_id(f"e:{data_id}"):
@@ -82,25 +85,6 @@ class TaskFactory:
             )
         return file_object
 
-    def inline_idata_file(self, data_id, content_hash):
-        url = (
-            self.controller.endpoint
-            + f"/v1/idata/{int(data_id)}?"
-            + urllib.parse.urlencode({"token": self.controller.token})
-        )
-        file_object = self.manager.declare_url(
-            url, cache="worker", peer_transfer=True
-        )
-        if not file_object.set_datavine_data_id(f"i:{int(data_id)}"):
-            raise RuntimeError(
-                f"could not bind TaskVine file to IDataID i{int(data_id)}"
-            )
-        if not file_object.set_datavine_content_hash(str(content_hash)):
-            raise RuntimeError(
-                f"could not bind IDataID i{int(data_id)} content hash"
-            )
-        return file_object
-
     def idata_output_file(self, data_id, attempt):
         url = (
             self.controller.endpoint
@@ -112,8 +96,11 @@ class TaskFactory:
                 }
             )
         )
-        file_object = self.manager.declare_url(
-            url, cache="worker", peer_transfer=True
+        file_object = self.manager.declare_url_cached(
+            url,
+            f"datavine-i-{int(data_id)}-attempt-{int(attempt)}",
+            cache="worker",
+            peer_transfer=True,
         )
         if not file_object.set_datavine_data_id(f"i:{int(data_id)}"):
             raise RuntimeError(
@@ -127,7 +114,6 @@ class TaskFactory:
         task_id,
         environment,
         attempt,
-        idata_inline_threshold,
         kill_worker_after_output_index=None,
         use_worker_library=False,
     ):
@@ -157,8 +143,6 @@ class TaskFactory:
                     for output_name in output_names
                     for value in ("--output-file", output_name)
                 ),
-                "--idata-inline-threshold",
-                str(idata_inline_threshold),
                 *(
                     (
                         "--pause-after-output-index",
@@ -181,7 +165,6 @@ class TaskFactory:
                 task_id,
                 attempt,
                 output_names,
-                idata_inline_threshold,
             )
             task.set_exec_method("fork")
         else:
@@ -241,7 +224,6 @@ class TaskFactory:
         task_ids,
         environment,
         attempts,
-        idata_inline_threshold,
         use_worker_library,
     ):
         task_ids = tuple(task_ids)
@@ -251,7 +233,6 @@ class TaskFactory:
                 task_ids[0],
                 environment,
                 attempts[0],
-                idata_inline_threshold,
                 None,
                 use_worker_library,
             )
@@ -301,24 +282,12 @@ class TaskFactory:
             self.controller.endpoint,
             self.controller.token,
             calls,
-            {
-                data_id: self.context.edata_payloads[data_id]
-                for data_id in edata_ids
-                if data_id in self.context.edata_payloads
-            },
-            {
-                task_id: self.task_record(task_id).to_dict()
-                for task_id in task_ids
-            },
-            idata_inline_threshold,
         )
         task.set_exec_method("fork")
         task.set_tag(",".join(map(str, task_ids)))
         task.set_cores(1)
         task.set_retries(5)
         for data_id in sorted(edata_ids):
-            if data_id in self.context.edata_payloads:
-                continue
             task.add_input(
                 self.edata_file(data_id),
                 f"datavine-edata-{data_id}.pkl",
@@ -328,6 +297,14 @@ class TaskFactory:
                 self.idata_files[data_id],
                 f"datavine-idata-{data_id}.pkl",
             )
+        for task_id, attempt in zip(task_ids, attempts):
+            record = self.task_record(task_id)
+            for output_data_id in record.output_data_ids:
+                output_name = f"datavine-idata-{output_data_id}.pkl"
+                task.add_output(
+                    self.idata_output_file(output_data_id, attempt),
+                    output_name,
+                )
         if environment is not None:
             task.add_environment(environment)
         return task

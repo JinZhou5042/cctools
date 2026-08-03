@@ -7547,6 +7547,12 @@ struct vine_file *vine_declare_url(struct vine_manager *m, const char *source, v
 	return vine_manager_declare_file(m, f);
 }
 
+struct vine_file *vine_declare_url_cached(struct vine_manager *m, const char *source, const char *cached_name, vine_cache_level_t cache, vine_file_flags_t flags)
+{
+	struct vine_file *f = vine_file_url_cached(source, cached_name, cache, flags);
+	return vine_manager_declare_file(m, f);
+}
+
 struct vine_file *vine_declare_temp(struct vine_manager *m)
 {
 	if (m->peer_transfers_enabled) {

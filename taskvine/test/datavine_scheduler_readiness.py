@@ -13,7 +13,7 @@ def main():
     records = {
         1: SimpleNamespace(
             function_data_id=10,
-            positional=(("c", 11), ("i", 20), ("v", 0)),
+            positional=(("c", 11), ("i", 20), ("e", 12)),
             keyword=(("arg", ("e", 12)),),
         ),
         2: SimpleNamespace(

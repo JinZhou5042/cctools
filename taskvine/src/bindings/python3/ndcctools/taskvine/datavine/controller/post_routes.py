@@ -8,6 +8,7 @@ from ..codec import (
     decode_compact_task_record,
     decode_serialization_metadata,
     decode_task_record,
+    encode_compact_task_record,
 )
 from ..protocol import API_PREFIX, DataVineSchemaError
 
@@ -122,6 +123,36 @@ class PostRouteFactory:
                         self._error(400, exc)
                         return
                     self._json(200, replica.source_dict())
+                    return
+                if self.path == f"{API_PREFIX}/replicas/prepare-outputs":
+                    try:
+                        request = self._read_json()
+                        replicas = owner.state.prepare_worker_outputs(
+                            request["worker_id"],
+                            request["worker_epoch"],
+                            request["outputs"],
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200,
+                        [replica.source_dict() for replica in replicas],
+                    )
+                    return
+                if self.path == f"{API_PREFIX}/replicas/commit-outputs":
+                    try:
+                        request = self._read_json()
+                        replicas = owner.state.commit_worker_outputs(
+                            request["outputs"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200,
+                        [replica.source_dict() for replica in replicas],
+                    )
                     return
                 if self.path == f"{API_PREFIX}/replicas/invalidate":
                     try:
@@ -409,6 +440,26 @@ class PostRouteFactory:
                             200,
                             [record.to_dict() for record in records],
                         )
+                    return
+                if self.path == f"{API_PREFIX}/tasks/get-batch":
+                    try:
+                        request = self._read_json()
+                        records = owner.state.get_tasks(
+                            request["task_ids"]
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200,
+                        {
+                            "task_record_format": TASK_RECORD_COMPACT_FORMAT,
+                            "tasks": [
+                                encode_compact_task_record(record)
+                                for record in records
+                            ],
+                        },
+                    )
                     return
                 if (
                     self.path.startswith(f"{API_PREFIX}/idata/")

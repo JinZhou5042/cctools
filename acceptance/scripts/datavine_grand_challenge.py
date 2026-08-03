@@ -427,6 +427,9 @@ def main():
         inject_worker_loss_schedule=loss_schedule,
         inject_worker_loss_data_by_task=worker_loss_data,
         worker_loss_process_shutdown=failure_mode,
+        replacement_worker_delays=tuple(
+            5 * (index + 1) for index in range(len(loss_schedule))
+        ),
         frontier_pruning_grace_seconds=args.pruning_grace_seconds,
         hard_delete_pruned_sharedfs=(
             args.hard_delete_pruned_sharedfs
@@ -471,14 +474,16 @@ def main():
         ]:
             raise AssertionError("peer release obligations remain pending")
         if args.frontier_recovery:
-            rollback_depths = [
-                wave["rollback_depth"]
+            chain_task_set = set(chain_task_ids)
+            chain_rollback_depths = [
+                len(chain_task_set.intersection(wave["tasks"]))
                 for wave in scheduler_report["recovery_waves"]
             ]
-            if rollback_depths != expected_rollback_depths:
+            if chain_rollback_depths != expected_rollback_depths:
                 raise AssertionError(
-                    "durability frontier recovery depths do not match: "
-                    f"{rollback_depths} != {expected_rollback_depths}"
+                    "durability frontier chain recovery depths do not "
+                    f"match: {chain_rollback_depths} != "
+                    f"{expected_rollback_depths}"
                 )
             if scheduler_report[
                 "persistence_required_data_ids"
@@ -523,6 +528,9 @@ def main():
         "durability_frontiers": durability_frontiers,
         "durability_frontier_data_ids": durability_frontier_data_ids,
         "expected_rollback_depths": expected_rollback_depths,
+        "chain_rollback_depths": (
+            chain_rollback_depths if args.frontier_recovery else []
+        ),
         "durable_hashes_valid": snapshot["durable_hashes_valid"],
         "persistence_temporary_files": snapshot[
             "persistence_temporary_files"

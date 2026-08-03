@@ -3,7 +3,6 @@
 import cloudpickle
 import os
 
-from ..codec import decode_task_record
 from ..scheduler.client import ControllerClient
 from .arguments import parse_worker_arguments
 from .cache import PROCESS_CACHE
@@ -15,10 +14,8 @@ from .replicas import WorkerReplicaReporter
 def main(
     argv=None,
     emit=print,
-    capture_inline=None,
+    capture_output=None,
     trust_taskvine_inputs=False,
-    inline_edata=None,
-    inline_tasks=None,
 ):
     args = parse_worker_arguments(argv)
 
@@ -44,11 +41,6 @@ def main(
             PROCESS_CACHE.worker_claims[claim_key] = worker_epoch
     task_key = (args.controller, args.token, args.task_id)
     task = PROCESS_CACHE.task_records.get(task_key)
-    if task is None and inline_tasks is not None:
-        value = inline_tasks.get(int(args.task_id))
-        if value is not None:
-            task = decode_task_record(value)
-            PROCESS_CACHE.task_records[task_key] = task
     if task is None:
         task = client.get_task(args.task_id)
         PROCESS_CACHE.task_records[task_key] = task
@@ -69,8 +61,6 @@ def main(
         PROCESS_CACHE,
         emit,
         trust_taskvine_inputs,
-        inline_edata,
-        inline_tasks,
     )
     function = cloudpickle.loads(
         resolver.fetch_edata(task.function_data_id)
@@ -90,7 +80,7 @@ def main(
         worker_id,
         worker_epoch,
         emit,
-        capture_inline,
+        capture_output,
     )
 
     emit(

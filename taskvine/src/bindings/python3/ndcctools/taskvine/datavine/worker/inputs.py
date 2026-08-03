@@ -1,12 +1,10 @@
 """Worker-side EData/IData fetching and binding resolution."""
 
-import base64
 import cloudpickle
 import copy
 import hashlib
 from pathlib import Path
 
-from ..codec import decode_task_record
 from ..models import EDataRecord
 from ..workflow import iter_output_refs
 
@@ -21,8 +19,6 @@ class InputResolver:
         process_cache,
         emit,
         trust_taskvine_inputs=False,
-        inline_edata=None,
-        inline_tasks=None,
     ):
         self.controller = controller
         self.token = token
@@ -31,14 +27,10 @@ class InputResolver:
         self.process_cache = process_cache
         self.emit = emit
         self.trust_taskvine_inputs = bool(trust_taskvine_inputs)
-        self.inline_edata = inline_edata
-        self.inline_tasks = inline_tasks
         self.objects = {}
 
     def fetch_edata(self, data_id):
         data_id = int(data_id)
-        if self.inline_edata is not None and data_id in self.inline_edata:
-            return self.inline_edata[data_id]
         cache_path = Path(f"datavine-edata-{data_id}.pkl")
         if self.trust_taskvine_inputs and cache_path.is_file():
             return cache_path.read_bytes()
@@ -86,8 +78,6 @@ class InputResolver:
             return self.objects[key]
         if kind == "e":
             payload = self.fetch_edata(data_id)
-        elif kind == "v":
-            payload = base64.b64decode(data_id, validate=True)
         elif kind == "c":
             return self._resolve_container(key, data_id)
         elif kind == "i":
@@ -115,11 +105,6 @@ class InputResolver:
         task_id = int(task_id)
         producer_key = (self.controller, self.token, task_id)
         producer = self.process_cache.task_records.get(producer_key)
-        if producer is None and self.inline_tasks is not None:
-            value = self.inline_tasks.get(task_id)
-            if value is not None:
-                producer = decode_task_record(value)
-                self.process_cache.task_records[producer_key] = producer
         if producer is None:
             producer = self.client.get_task(task_id)
             self.process_cache.task_records[producer_key] = producer

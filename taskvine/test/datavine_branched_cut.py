@@ -111,10 +111,10 @@ def main():
     assert report["logical_tasks"] == 9
     assert report["physical_attempts"] == 11
     assert report["recovery_reexecutions"] == 2
-    assert report["persistence_tasks_completed"] == 0
-    assert report["persistence_controller_tasks_completed"] == 2
-    assert report["persistence_controller_bytes"] > 0
-    assert report["persistence_worker_bytes"] == 0
+    assert report["persistence_tasks_completed"] == 2
+    assert report["persistence_controller_tasks_completed"] == 0
+    assert report["persistence_controller_bytes"] == 0
+    assert report["persistence_worker_bytes"] > 0
     assert report["persistence_required_data_ids"] == [
         left_frontier.task_id,
         right_frontier.task_id,

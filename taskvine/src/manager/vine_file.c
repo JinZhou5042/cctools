@@ -262,6 +262,11 @@ struct vine_file *vine_file_url(const char *source, vine_cache_level_t cache, vi
 	return vine_file_create(source, 0, 0, 0, VINE_URL, 0, cache, flags);
 }
 
+struct vine_file *vine_file_url_cached(const char *source, const char *cached_name, vine_cache_level_t cache, vine_file_flags_t flags)
+{
+	return vine_file_create(source, cached_name, 0, 0, VINE_URL, 0, cache, flags);
+}
+
 struct vine_file *vine_file_substitute_url(struct vine_file *f, const char *source, struct vine_worker_info *w)
 {
 	struct vine_file *sub = vine_file_create(source, f->cached_name, 0, f->size, VINE_URL, 0, 0, 0);

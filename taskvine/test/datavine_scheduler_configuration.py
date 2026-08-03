@@ -49,11 +49,9 @@ def main():
     second = WorkflowRunContext()
     first.logical_outputs[1] = 10
     first.edata_by_object[("value", 1)] = (object(), 1)
-    first.inline_value_payloads[("value", 1)] = (object(), "AA==")
     first.release_registration_caches()
     assert first.logical_outputs == {1: 10}
     assert not first.edata_by_object
-    assert not first.inline_value_payloads
     assert not second.logical_outputs
 
     manager = FakeManager()

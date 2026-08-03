@@ -205,19 +205,13 @@ def run_case(
                     if bulk_origin is not None
                     else []
                 ),
+                "--persistence-dir",
+                str(persistence_dir),
+                "--persistence-workers",
+                "1",
                 *(
-                    [
-                        "--persistence-dir",
-                        str(persistence_dir),
-                        "--persistence-workers",
-                        "1",
-                        *(
-                            ["--persistence-fail-first"]
-                            if persistence_fail_first
-                            else []
-                        ),
-                    ]
-                    if persistence
+                    ["--persistence-fail-first"]
+                    if persistence_fail_first
                     else []
                 ),
             ],
@@ -665,17 +659,13 @@ def main():
         2 * len(SHARED) + 3,
         factory_manager=args.factory_manager,
     )
-    assert shared_snapshot["registrations"] == 3, shared_snapshot[
+    assert shared_snapshot["registrations"] == 7, shared_snapshot[
         "registrations"
     ]
     assert shared_snapshot["deduplicated_registrations"] == 0
     assert (
         shared_snapshot["scheduler_report"]["edata_serializations"]
         == 7
-    )
-    assert (
-        shared_snapshot["scheduler_report"]["inline_task_values"]
-        == 4
     )
 
     recovery_snapshot = None

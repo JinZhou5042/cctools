@@ -12,6 +12,7 @@ import hashlib
 
 from ..codec import (
     TASK_RECORD_COMPACT_FORMAT,
+    decode_compact_task_record,
     decode_serialization_metadata,
     decode_task_record,
     encode_compact_task_record,
@@ -286,6 +287,27 @@ class ControllerClient:
                 "content_hash": str(content_hash),
                 "size": int(size),
             },
+            idempotent=True,
+        )
+        return json.loads(payload)
+
+    def prepare_outputs(self, worker_id, worker_epoch, outputs):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/replicas/prepare-outputs",
+            {
+                "worker_id": str(worker_id),
+                "worker_epoch": int(worker_epoch),
+                "outputs": list(outputs),
+            },
+        )
+        return json.loads(payload)
+
+    def commit_outputs(self, outputs):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/replicas/commit-outputs",
+            {"outputs": list(outputs)},
             idempotent=True,
         )
         return json.loads(payload)
@@ -657,6 +679,25 @@ class ControllerClient:
             "GET", f"{API_PREFIX}/tasks/{int(task_id)}"
         )
         return decode_task_record(json.loads(payload))
+
+    def get_tasks(self, task_ids):
+        task_ids = tuple(int(task_id) for task_id in task_ids)
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/tasks/get-batch",
+            {"task_ids": task_ids},
+            idempotent=True,
+        )
+        response = json.loads(payload)
+        if response.get("task_record_format") != TASK_RECORD_COMPACT_FORMAT:
+            raise DataVineRemoteError("invalid task record batch format")
+        records = tuple(
+            decode_compact_task_record(value)
+            for value in response["tasks"]
+        )
+        if tuple(record.task_id for record in records) != task_ids:
+            raise DataVineRemoteError("mismatched task record batch")
+        return records
 
     def fetch_idata(self, data_id):
         payload, headers = self._request(

@@ -359,7 +359,16 @@ class PruningStateMixin:
                 generation,
                 path,
             )
-            applied.append(audit.to_dict())
+            applied_record = audit.to_dict()
+            if replica.tier in ("worker-dram", "worker-disk"):
+                applied_record.update(
+                    {
+                        "tier": replica.tier,
+                        "worker_id": replica.worker_id,
+                        "worker_epoch": replica.worker_epoch,
+                    }
+                )
+            applied.append(applied_record)
         self._idata[data_id] = dataclasses.replace(
             old,
             serialized_bytes=None,

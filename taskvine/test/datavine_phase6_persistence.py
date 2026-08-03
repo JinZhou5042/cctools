@@ -50,7 +50,7 @@ def main():
         expected,
         worker_count=2,
         persistence=True,
-        persistence_fail_first=True,
+        inject_external_persistence_failures=1,
         factory_manager=args.factory_manager,
     )
     assert recovered["durability"]["durable"] == len(workflow.tasks)
