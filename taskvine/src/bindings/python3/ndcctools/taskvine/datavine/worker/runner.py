@@ -5,6 +5,7 @@ import os
 import time
 
 from ..scheduler.client import ControllerClient
+from .batching import SourceResolver
 from .cache import PROCESS_CACHE
 from .inputs import InputResolver
 from .publication import publish_task_outputs
@@ -71,6 +72,12 @@ def execute_task(
         emit,
         PROCESS_CACHE,
     )
+    resolver_key = controller_key + (worker_id, worker_epoch)
+    with PROCESS_CACHE.lock:
+        source_resolver = PROCESS_CACHE.source_resolvers.get(resolver_key)
+        if source_resolver is None:
+            source_resolver = SourceResolver(client)
+            PROCESS_CACHE.source_resolvers[resolver_key] = source_resolver
     resolver = InputResolver(
         controller,
         token,
@@ -78,6 +85,7 @@ def execute_task(
         reporter,
         PROCESS_CACHE,
         emit,
+        source_resolver,
         cache_values,
         allow_peer_transfer,
     )

@@ -157,6 +157,8 @@ class SerializedDataCache:
 @dataclasses.dataclass
 class WorkerProcessCache:
     clients: dict = dataclasses.field(default_factory=dict)
+    output_publishers: dict = dataclasses.field(default_factory=dict)
+    source_resolvers: dict = dataclasses.field(default_factory=dict)
     worker_claims: dict = dataclasses.field(default_factory=dict)
     task_records: dict = dataclasses.field(default_factory=dict)
     functions: dict = dataclasses.field(default_factory=dict)
@@ -180,6 +182,10 @@ class WorkerProcessCache:
 
     def clear(self):
         with self.lock:
+            publishers = tuple(self.output_publishers.values())
+            publishers += tuple(self.source_resolvers.values())
+            self.output_publishers.clear()
+            self.source_resolvers.clear()
             self.clients.clear()
             self.worker_claims.clear()
             self.task_records.clear()
@@ -187,6 +193,8 @@ class WorkerProcessCache:
             self.edata_metadata.clear()
             self.replica_reports.clear()
             self.data.clear()
+        for publisher in publishers:
+            publisher.close()
 
 
 PROCESS_CACHE = WorkerProcessCache()

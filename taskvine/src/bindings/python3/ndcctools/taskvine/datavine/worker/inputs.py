@@ -19,6 +19,7 @@ class InputResolver:
         reporter,
         process_cache,
         emit,
+        source_resolver,
         cache_values=None,
         allow_peer_transfer=True,
     ):
@@ -28,6 +29,7 @@ class InputResolver:
         self.reporter = reporter
         self.process_cache = process_cache
         self.emit = emit
+        self.source_resolver = source_resolver
         self.objects = {}
         self.cache_values = cache_values or {}
         self.allow_peer_transfer = bool(allow_peer_transfer)
@@ -52,12 +54,14 @@ class InputResolver:
             return payload
         excluded = []
         while True:
-            resolved = self.client.resolve_edata_source(
-                data_id,
-                self.reporter.worker_id,
-                f"taskvine:{uuid.uuid4().hex}",
-                excluded,
-                self.allow_peer_transfer,
+            resolved = self.source_resolver.resolve(
+                {
+                    "data_id": data_id,
+                    "destination_worker_id": self.reporter.worker_id,
+                    "transfer_id": f"taskvine:{uuid.uuid4().hex}",
+                    "excluded_worker_ids": list(excluded),
+                    "allow_peer_transfer": self.allow_peer_transfer,
+                }
             )
             source_type = resolved["source_type"]
             if source_type != "peer":

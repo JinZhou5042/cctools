@@ -37,17 +37,19 @@ def run_functioncall(tasks, workers, cores):
     processes = [start_worker(manager.port, cores) for _ in range(workers)]
     try:
         wait_for_workers(manager, workers)
-        warmup = FunctionCall(
-            "datavine-performance-baseline", "identity", -1
-        )
-        warmup.set_exec_method("direct")
-        manager.submit(warmup)
-        while True:
+        warmups = set()
+        for value in range(workers * cores):
+            warmup = FunctionCall(
+                "datavine-performance-baseline", "identity", -value - 1
+            )
+            warmup.set_exec_method("direct")
+            warmups.add(manager.submit(warmup))
+        while warmups:
             completed = manager.wait(1)
-            if completed and completed.id == warmup.id:
-                if completed.output != -1:
+            if completed and completed.id in warmups:
+                if completed.output >= 0:
                     raise RuntimeError("FunctionCall warmup returned wrong output")
-                break
+                warmups.remove(completed.id)
 
         started = time.monotonic()
         for value in range(tasks):

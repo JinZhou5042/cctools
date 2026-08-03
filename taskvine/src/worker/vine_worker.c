@@ -1977,6 +1977,22 @@ static void check_libraries_ready(struct link *manager)
 	}
 }
 
+static int library_functions_running(void)
+{
+	uint64_t task_id;
+	struct vine_process *process;
+	int iteration;
+
+	ITABLE_ITERATE(procs_running, iteration, task_id, process)
+	{
+		if (process->type == VINE_PROCESS_TYPE_LIBRARY && process->functions_running > 0) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
 /* Start working for the (newly connected) manager on this given link. */
 
 static void vine_worker_serve_manager(struct link *manager)
@@ -2027,7 +2043,7 @@ static void vine_worker_serve_manager(struct link *manager)
 		hence a maximum wait time of five seconds is enforced.
 		*/
 
-		int wait_msec = vine_cache_transfer_count(cache_manager) > 0
+		int wait_msec = vine_cache_transfer_count(cache_manager) > 0 || library_functions_running()
 				? 1
 				: 5000;
 

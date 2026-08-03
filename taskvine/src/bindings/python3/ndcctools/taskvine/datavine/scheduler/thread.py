@@ -168,22 +168,30 @@ class TaskSchedulerThread:
         if self._manager is None:
             raise RuntimeError("TaskVine Manager is not initialized")
         ensure_worker_library(self._manager)
-        task = DataVineCall(
-            "datavine-worker-v2",
-            "warm_datavine_worker",
-        )
-        task_id = self._manager.submit(task)
-        while True:
+        workers = self._manager.status("workers")
+        task_ids = {
+            self._manager.submit(
+                DataVineCall(
+                    "datavine-worker-v2",
+                    "warm_datavine_worker",
+                )
+            )
+            for _ in range(
+                sum(int(worker["cores_total"]) for worker in workers)
+            )
+        }
+        while task_ids:
             self._raise_if_stopping()
             completed = self._manager.wait(1)
-            if completed is None or completed.id != task_id:
+            if completed is None or completed.id not in task_ids:
                 continue
             if not completed.successful():
                 raise RuntimeError(
                     "DataVine worker library warmup failed: "
                     f"{completed.output!r}"
                 )
-            return True
+            task_ids.remove(completed.id)
+        return True
 
     def _sync_worker_epochs(self, force=False):
         self._reconciled_affected_data_ids = ()

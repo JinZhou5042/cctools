@@ -4,6 +4,7 @@ import base64
 import http.client
 import json
 import re
+import struct
 import threading
 import time
 import urllib.error
@@ -759,6 +760,39 @@ class ControllerClient:
             value["metadata"]
         )
         return value
+
+    def resolve_edata_sources(self, requests):
+        payload, headers = self._request(
+            "POST",
+            f"{API_PREFIX}/edata/resolve-sources",
+            {"requests": list(requests)},
+        )
+        if (
+            headers.get_content_type()
+            != "application/x-datavine-resolve-batch"
+            or len(payload) < 4
+        ):
+            raise DataVineRemoteError("invalid EData batch response")
+        header_length = struct.unpack("!I", payload[:4])[0]
+        header_end = 4 + header_length
+        try:
+            values = json.loads(payload[4:header_end])
+        except Exception as exc:
+            raise DataVineRemoteError(
+                "invalid EData batch metadata"
+            ) from exc
+        offset = header_end
+        for value in values:
+            value["metadata"] = decode_serialization_metadata(
+                value["metadata"]
+            )
+            length = int(value.pop("payload_length"))
+            if length:
+                value["payload"] = payload[offset:offset + length]
+                offset += length
+        if offset != len(payload) or len(values) != len(requests):
+            raise DataVineRemoteError("invalid EData batch framing")
+        return values
 
     def allocate_idata(self, producer_task_id, producer_output_index=0):
         payload, _ = self._request(

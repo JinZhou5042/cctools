@@ -75,6 +75,7 @@ def execute_datavine_task(
 ):
     """Execute one logical task through the worker-owned data path."""
     from .runner import execute_task
+    from .batching import OutputPublisher
     from .cache import PROCESS_CACHE
     from ..models import TaskRecord
     from ..scheduler.client import ControllerClient
@@ -115,11 +116,24 @@ def execute_datavine_task(
             )
         publish_started = time.monotonic()
         if outputs:
-            published = client.publish_outputs(
+            publisher_key = controller_key + (
                 outputs[0]["worker_id"],
                 outputs[0]["worker_epoch"],
-                outputs,
             )
+            with PROCESS_CACHE.lock:
+                publisher = PROCESS_CACHE.output_publishers.get(
+                    publisher_key
+                )
+                if publisher is None:
+                    publisher = OutputPublisher(
+                        client,
+                        outputs[0]["worker_id"],
+                        outputs[0]["worker_epoch"],
+                    )
+                    PROCESS_CACHE.output_publishers[
+                        publisher_key
+                    ] = publisher
+            published = publisher.publish(outputs)
             if len(published) != len(outputs):
                 raise RuntimeError(
                     "Controller returned incomplete publications"
