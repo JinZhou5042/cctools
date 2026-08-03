@@ -56,15 +56,15 @@ def ensure_worker_library(manager):
         return
     from ..worker.library import (
         execute_datavine_task,
-        execute_datavine_tasks,
         persist_datavine_idata,
+        warm_datavine_worker,
     )
 
     library = manager.create_library_from_functions(
         "datavine-worker-v2",
         execute_datavine_task,
-        execute_datavine_tasks,
         persist_datavine_idata,
+        warm_datavine_worker,
         add_env=False,
         exec_mode="direct",
     )
@@ -279,95 +279,6 @@ class TaskFactory:
                 self.idata_output_file(output_data_id, attempt),
                 output_name,
             )
-        if environment is not None:
-            task.add_environment(environment)
-        return task
-
-    def make_physical_batch_task(
-        self,
-        task_ids,
-        environment,
-        attempts,
-        use_worker_library,
-    ):
-        task_ids = tuple(task_ids)
-        attempts = tuple(attempts)
-        if len(task_ids) == 1:
-            return self.make_physical_task(
-                task_ids[0],
-                environment,
-                attempts[0],
-                None,
-                use_worker_library,
-            )
-        if not use_worker_library:
-            raise RuntimeError("process tasks cannot be physically batched")
-
-        calls = []
-        edata_ids = set()
-        idata_ids = set()
-        for task_id, attempt in zip(task_ids, attempts):
-            record = self.task_record(task_id)
-            output_names = tuple(
-                f"datavine-idata-{data_id}.pkl"
-                for data_id in record.output_data_ids
-            )
-            calls.append((task_id, attempt, output_names))
-            edata_ids.add(record.function_data_id)
-            edata_ids.update(
-                data_id
-                for kind, data_id in record.positional
-                if kind in ("e", "c")
-            )
-            edata_ids.update(
-                data_id
-                for _, (kind, data_id) in record.keyword
-                if kind in ("e", "c")
-            )
-            idata_ids.update(
-                data_id
-                for kind, data_id in record.positional
-                if kind == "i"
-            )
-            idata_ids.update(
-                data_id
-                for _, (kind, data_id) in record.keyword
-                if kind == "i"
-            )
-            idata_ids.update(
-                self.context.nested_idata_by_task.get(task_id, ())
-            )
-
-        task = DataVineCall(
-            "datavine-worker-v2",
-            "execute_datavine_tasks",
-            self.controller.endpoint,
-            self.controller.token,
-            calls,
-            self.worker_dram_cache_bytes,
-            self.controller_inline_idata_bytes,
-        )
-        task.set_tag(",".join(map(str, task_ids)))
-        task.set_cores(1)
-        task.set_retries(0)
-        for data_id in sorted(edata_ids):
-            task.add_input(
-                self.edata_file(data_id),
-                f"datavine-edata-{data_id}.pkl",
-            )
-        for data_id in sorted(idata_ids):
-            task.add_input(
-                self.idata_files[data_id],
-                f"datavine-idata-{data_id}.pkl",
-            )
-        for task_id, attempt in zip(task_ids, attempts):
-            record = self.task_record(task_id)
-            for output_data_id in record.output_data_ids:
-                output_name = f"datavine-idata-{output_data_id}.pkl"
-                task.add_output(
-                    self.idata_output_file(output_data_id, attempt),
-                    output_name,
-                )
         if environment is not None:
             task.add_environment(environment)
         return task

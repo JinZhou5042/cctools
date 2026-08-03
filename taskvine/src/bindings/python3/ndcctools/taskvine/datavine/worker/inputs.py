@@ -7,6 +7,7 @@ from pathlib import Path
 import uuid
 
 from ..models import EDataRecord
+from ..protocol import DataVineRemoteError
 from ..workflow import iter_output_refs
 
 
@@ -66,8 +67,29 @@ class InputResolver:
             return self._local_payload("e", data_id, cache_path)
         metadata_key = (self.controller, self.token, data_id)
         info = self.process_cache.edata_metadata.get(metadata_key)
+        prefetched_payload = None
         if info is None:
-            info = self.client.get_edata_metadata(data_id)
+            try:
+                metadata, prefetched_payload = (
+                    self.client.fetch_edata_record(data_id)
+                )
+                info = {
+                    "data_id": data_id,
+                    "content_hash": EDataRecord.digest(
+                        metadata, prefetched_payload
+                    ),
+                    "serialized_sha256": hashlib.sha256(
+                        prefetched_payload
+                    ).hexdigest(),
+                    "size": len(prefetched_payload),
+                    "metadata": metadata,
+                    "storage": "controller-memory",
+                    "origin_path": None,
+                }
+            except DataVineRemoteError as exc:
+                if exc.status != 409:
+                    raise
+                info = self.client.get_edata_metadata(data_id)
             self.process_cache.edata_metadata[metadata_key] = info
         data_key = f"e:{data_id}"
         with self.process_cache.lock:
@@ -84,6 +106,8 @@ class InputResolver:
 
         def fallback():
             if info["storage"] != "bulk-origin":
+                if prefetched_payload is not None:
+                    return prefetched_payload
                 return self.client.fetch_edata_record(data_id)[1]
             origin = Path(info["origin_path"])
             payload = origin.read_bytes()

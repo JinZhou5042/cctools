@@ -151,6 +151,7 @@ class WorkerProcessCache:
     clients: dict = dataclasses.field(default_factory=dict)
     worker_claims: dict = dataclasses.field(default_factory=dict)
     task_records: dict = dataclasses.field(default_factory=dict)
+    functions: dict = dataclasses.field(default_factory=dict)
     edata_metadata: dict = dataclasses.field(default_factory=dict)
     replica_reports: dict = dataclasses.field(default_factory=dict)
     data_service: object | None = None
@@ -166,6 +167,7 @@ class WorkerProcessCache:
             self.clients.clear()
             self.worker_claims.clear()
             self.task_records.clear()
+            self.functions.clear()
             self.edata_metadata.clear()
             self.replica_reports.clear()
             self.data.clear()

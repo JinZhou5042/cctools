@@ -62,11 +62,10 @@ def main():
     )
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--minimum-datavine-ratio", type=float, default=1.0)
-    parser.add_argument("--library-batch-size", type=int, default=4096)
     parser.add_argument("--process-sample-interval", type=float, default=0.1)
     args = parser.parse_args()
-    if args.repetitions < 1 or args.library_batch_size < 1:
-        parser.error("repetitions and library batch size must be positive")
+    if args.repetitions < 1:
+        parser.error("repetitions must be positive")
     cases = args.cases or [parse_case(value) for value in DEFAULT_CASES]
 
     results = []
@@ -90,8 +89,6 @@ def main():
             str(args.repetitions),
             "--minimum-datavine-ratio",
             str(args.minimum_datavine_ratio),
-            "--library-batch-size",
-            str(args.library_batch_size),
             "--process-sample-interval",
             str(args.process_sample_interval),
         ]
@@ -133,7 +130,6 @@ def main():
             "modes": args.modes.split(","),
             "repetitions": args.repetitions,
             "minimum_datavine_ratio": args.minimum_datavine_ratio,
-            "library_batch_size": args.library_batch_size,
         },
         "cases": results,
     }

@@ -145,7 +145,6 @@ def run_case(
     workflow_timeout=None,
     frontier_pruning_grace_seconds=30,
     hard_delete_pruned_sharedfs=False,
-    library_batch_size=4096,
     detailed_report=True,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
@@ -355,7 +354,6 @@ def run_case(
                     frontier_pruning_grace_seconds
                 ),
                 hard_delete_pruned_sharedfs=hard_delete_pruned_sharedfs,
-                library_batch_size=library_batch_size,
                 detailed_report=detailed_report,
             )
             if runtime_controller_hook is not None:

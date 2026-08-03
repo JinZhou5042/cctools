@@ -171,7 +171,6 @@ def run_datavine(
     cores,
     payload,
     compute_steps,
-    library_batch_size,
     process_sample_interval,
 ):
     sampler = ProcessTreeSampler(
@@ -196,7 +195,6 @@ def run_datavine(
             worker_cores=cores,
             prefetch=False,
             use_worker_library=True,
-            library_batch_size=library_batch_size,
             workflow_timeout=max(180, tasks * 2),
             detailed_report=False,
         )
@@ -213,12 +211,12 @@ def run_datavine(
         value["count"]
         for value in report["scheduler_controller_requests"].values()
     )
-    batch_latencies = [
+    task_latencies = [
         (
-            batch["time_when_done"] - batch["time_when_submitted"]
+            task["time_when_done"] - task["time_when_submitted"]
         )
         / 1_000_000
-        for batch in report["physical_batch_metrics"]
+        for task in report["physical_task_metrics"]
     ]
     request_metrics = report["scheduler_controller_requests"]
     worker_cache_rejections = sum(
@@ -243,7 +241,8 @@ def run_datavine(
         "registration_timing_seconds": report["registration_timing_seconds"],
         "manager_timing_us": report["manager_timing_us"],
         "manager_bytes": report["manager_bytes"],
-        "physical_batch_latency": latency_summary(batch_latencies),
+        "worker_timing_seconds": report["worker_timing_seconds"],
+        "physical_task_latency": latency_summary(task_latencies),
         "data_path_metrics": {
             "local_idata_hits": report["local_idata_hits"],
             "controller_idata_fetches": request_metrics.get(
@@ -284,7 +283,6 @@ def main():
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--payload-bytes", type=int, default=0)
     parser.add_argument("--compute-steps", type=int, default=0)
-    parser.add_argument("--library-batch-size", type=int, default=4096)
     parser.add_argument("--latency-sample-capacity", type=int, default=10_000)
     parser.add_argument("--process-sample-interval", type=float, default=0.1)
     parser.add_argument(
@@ -301,11 +299,10 @@ def main():
         args.workers,
         args.cores,
         args.repetitions,
-        args.library_batch_size,
         args.latency_sample_capacity,
     ) < 1:
         parser.error(
-            "task, worker, core, repetition, batch, and sample counts "
+            "task, worker, core, repetition, and sample counts "
             "must be positive"
         )
     if min(
@@ -330,7 +327,6 @@ def main():
                     args.cores,
                     payload,
                     args.compute_steps,
-                    args.library_batch_size,
                     args.process_sample_interval,
                 )
             else:
@@ -375,7 +371,6 @@ def main():
             "repetitions": args.repetitions,
             "payload_bytes": args.payload_bytes,
             "compute_steps": args.compute_steps,
-            "library_batch_size": args.library_batch_size,
             "datavine_task_record_format": "task-record-row-v1",
             "modes": list(args.modes),
         },

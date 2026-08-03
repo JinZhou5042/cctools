@@ -80,7 +80,7 @@ def run_functioncall(tasks, workers, cores):
         gc.collect()
 
 
-def run_datavine(tasks, workers, cores, library_batch_size=4096):
+def run_datavine(tasks, workers, cores):
     workflow = Workflow()
     logical_tasks = [
         workflow.add_task(identity, value) for value in range(tasks)
@@ -94,7 +94,6 @@ def run_datavine(tasks, workers, cores, library_batch_size=4096):
         worker_cores=cores,
         prefetch=False,
         use_worker_library=True,
-        library_batch_size=library_batch_size,
         workflow_timeout=max(180, tasks * 2),
         detailed_report=False,
     )
@@ -128,8 +127,9 @@ def run_datavine(tasks, workers, cores, library_batch_size=4096):
             "scheduler_controller_requests"
         ],
         "workflow_timing_seconds": report["workflow_timing_seconds"],
-        "batch_worker_seconds": report["batch_worker_seconds"],
-        "physical_batch_metrics": report["physical_batch_metrics"],
+        "worker_seconds": report["worker_seconds"],
+        "worker_timing_seconds": report["worker_timing_seconds"],
+        "physical_task_metrics": report["physical_task_metrics"],
         "manager_timing_us": report["manager_timing_us"],
         "registration_timing_seconds": report[
             "registration_timing_seconds"
@@ -153,7 +153,6 @@ def main():
     parser.add_argument("--cores", type=int, default=4)
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--minimum-ratio", type=float, default=1.0)
-    parser.add_argument("--library-batch-size", type=int, default=4096)
     parser.add_argument("--datavine-only", action="store_true")
     args = parser.parse_args()
     if min(
@@ -161,7 +160,6 @@ def main():
         args.workers,
         args.cores,
         args.repetitions,
-        args.library_batch_size,
     ) < 1:
         parser.error("tasks, workers, cores, and repetitions must be positive")
 
@@ -171,7 +169,6 @@ def main():
                 args.tasks,
                 args.workers,
                 args.cores,
-                args.library_batch_size,
             )
             for _ in range(args.repetitions)
         ]
@@ -197,14 +194,7 @@ def main():
         )
         for runner in runners:
             result = (
-                runner(
-                    args.tasks,
-                    args.workers,
-                    args.cores,
-                    args.library_batch_size,
-                )
-                if runner is run_datavine
-                else runner(args.tasks, args.workers, args.cores)
+                runner(args.tasks, args.workers, args.cores)
             )
             samples[result["mode"]].append(result)
 
@@ -221,7 +211,6 @@ def main():
             "workers": args.workers,
             "cores_per_worker": args.cores,
             "repetitions": args.repetitions,
-            "library_batch_size": args.library_batch_size,
         },
         "samples": samples,
         "summary": {

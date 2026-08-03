@@ -13,7 +13,9 @@ from .outputs import normalize_output_values
 def publish_task_outputs(
     task,
     result,
-    args,
+    attempt,
+    output_files,
+    pause_after_output_index,
     client,
     reporter,
     worker_id,
@@ -22,7 +24,8 @@ def publish_task_outputs(
     capture_output=None,
 ):
     output_values = normalize_output_values(task, result)
-    if args.output_file and len(args.output_file) != len(
+    output_files = tuple(output_files)
+    if output_files and len(output_files) != len(
         task.output_data_ids
     ):
         raise ValueError(
@@ -34,15 +37,6 @@ def publish_task_outputs(
     ):
         payload = cloudpickle.dumps(output_value)
         total_bytes += len(payload)
-        stage = Path(
-            args.output_file[output_index]
-            if args.output_file
-            else f".datavine-idata-{output_data_id}.stage"
-        )
-        with stage.open("wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
         content_hash = hashlib.sha256(payload).hexdigest()
         if capture_output is not None:
             with reporter.process_cache.lock:
@@ -58,7 +52,7 @@ def publish_task_outputs(
                     "task_id": task.task_id,
                     "output_index": output_index,
                     "data_id": output_data_id,
-                    "attempt": args.attempt,
+                    "attempt": attempt,
                     "content_hash": content_hash,
                     "size": len(payload),
                     "payload": payload,
@@ -70,16 +64,21 @@ def publish_task_outputs(
                 }
             )
         else:
+            stage = Path(output_files[output_index])
+            with stage.open("wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
             publication = client.publish_idata_metadata(
                 output_data_id,
-                args.attempt,
+                attempt,
                 content_hash,
                 len(payload),
             )
             prepared = client.prepare_replica(
                 f"i:{output_data_id}",
                 reporter.replica_id(f"i:{output_data_id}"),
-                args.attempt,
+                attempt,
                 "worker-disk",
                 publication["content_hash"],
                 publication["size"],
@@ -104,14 +103,12 @@ def publish_task_outputs(
                     separators=(",", ":"),
                 )
             )
-        if not args.output_file:
-            stage.unlink(missing_ok=True)
         emit(
             "DATAVINE "
             f"task={task.task_id} slot={output_index} "
             f"output=i{output_data_id} bytes={len(payload)}"
         )
-        if output_index == args.pause_after_output_index:
+        if output_index == pause_after_output_index:
             time.sleep(30)
     emit(
         f"DATAVINE_OUTPUTS task={task.task_id} "

@@ -26,7 +26,7 @@ from .execution_state import (
     PublicationState,
 )
 from .persistence import PersistencePolicy
-from .readiness import ReadyQueue, build_cache_plan, plan_ready_batches
+from .readiness import ReadyQueue, build_cache_plan
 from .recovery import select_recovery_audit_data_ids
 from .registration import WorkflowRegistrar
 from .reporting import (
@@ -37,24 +37,6 @@ from .reporting import (
 )
 from .run_context import WorkflowRunContext
 from .task_factory import DataVineCall, TaskFactory, ensure_worker_library
-
-
-class _LogicalCompletion:
-    """Per-logical-task view of a batched physical completion."""
-
-    def __init__(self, physical, output):
-        self.id = physical.id
-        self.output = output
-        self.result = physical.result
-        self.exit_code = physical.exit_code
-        self._successful = (
-            physical.successful()
-            and "DATAVINE_TASK_FAILURE " not in output
-        )
-
-    def successful(self):
-        return self._successful
-
 
 class TaskSchedulerThread:
     _registration_batch_size = 4096
@@ -164,31 +146,6 @@ class TaskSchedulerThread:
                 "Task Scheduler state mutation outside scheduler thread"
             )
 
-    @staticmethod
-    def _logical_outputs_from_batch(output, task_ids):
-        task_ids = tuple(task_ids)
-        if (
-            len(task_ids) == 1
-            or not isinstance(output, str)
-            or "DATAVINE_TASK_BEGIN " not in output
-        ):
-            return {task_id: output for task_id in task_ids}
-        selected = {task_id: [] for task_id in task_ids}
-        active = None
-        for line in output.splitlines():
-            if line.startswith("DATAVINE_TASK_BEGIN "):
-                active = int(line.rsplit(" ", 1)[1])
-                continue
-            if line.startswith("DATAVINE_TASK_END "):
-                active = None
-                continue
-            if active in selected:
-                selected[active].append(line)
-        return {
-            task_id: "\n".join(lines) + ("\n" if lines else "")
-            for task_id, lines in selected.items()
-        }
-
     def _op_register_edata(self, metadata, serialized_bytes):
         self._assert_owner()
         return self.controller.register_edata(metadata, serialized_bytes)
@@ -213,14 +170,7 @@ class TaskSchedulerThread:
         ensure_worker_library(self._manager)
         task = DataVineCall(
             "datavine-worker-v2",
-            "execute_datavine_tasks",
-            self.controller.endpoint,
-            self.controller.token,
-            (),
-            0,
-            self.controller.snapshot()[
-                "idata_inline_object_capacity_bytes"
-            ],
+            "warm_datavine_worker",
         )
         task_id = self._manager.submit(task)
         while True:
@@ -481,7 +431,6 @@ class TaskSchedulerThread:
         use_worker_library=False,
         frontier_pruning_grace_seconds=30,
         hard_delete_pruned_sharedfs=False,
-        library_batch_size=4096,
         detailed_report=False,
     ):
         self._assert_owner()
@@ -498,7 +447,6 @@ class TaskSchedulerThread:
         )
         tuning = configure_runtime(
             self._manager,
-            library_batch_size=library_batch_size,
             worker_disk_cache_admission_items=(
                 worker_disk_cache_admission_items
             ),
@@ -517,7 +465,6 @@ class TaskSchedulerThread:
             peer_release_retry_seconds=peer_release_retry_seconds,
             peer_release_capacity=peer_release_capacity,
         )
-        library_batch_size = tuning.library_batch_size
         peer_source_losses = tuning.peer_source_losses
         peer_source_loss_after_bytes = (
             tuning.peer_source_loss_after_bytes
@@ -756,21 +703,6 @@ class TaskSchedulerThread:
         max_task_known_cache_bytes = cache_plan.max_known_input_bytes
         effective_retention_items = cache_plan.retention_items
         effective_retention_bytes = cache_plan.retention_bytes
-        effective_library_batch_size = (
-            library_batch_size
-            if (
-                use_worker_library
-                and not persist_outputs
-                and inject_global_loss_after is None
-                and not worker_loss_schedule
-                and not inject_partial_publication_after
-                and not peer_source_losses
-                and not peer_source_loss_after_bytes
-                and not peer_corruptions
-                and not idata_release_failures
-            )
-            else 1
-        )
         persistence = PersistenceState()
         pruning = PruningState()
         frontier_pruning_ack_delay = float(
@@ -930,14 +862,23 @@ class TaskSchedulerThread:
         prefetch_overlapped = False
         peer_transfer_pruning_probes = []
         peer_transfer_pruning_probe_triggered = False
+        completed_task_states = []
 
         def flush_completed_task_states():
-            if not execution.deferred_completed_states:
-                return
-            self.controller.set_task_states(
-                execution.deferred_completed_states, "completed"
-            )
-            execution.deferred_completed_states.clear()
+            if completed_task_states:
+                self.controller.set_task_states(
+                    completed_task_states, "completed"
+                )
+                completed_task_states.clear()
+
+        def record_completed_task_state(task_id):
+            completed_task_states.append(task_id)
+            if len(completed_task_states) >= 256:
+                flush_completed_task_states()
+
+        def record_pending_task_state(task_id):
+            flush_completed_task_states()
+            self.controller.set_task_state(task_id, "pending")
 
         def queue_frontier_pruning_if_ready(frontier_task_id):
             if (
@@ -1228,7 +1169,7 @@ class TaskSchedulerThread:
                 file_object = self._idata_files.get(data_id)
                 if file_object is not None:
                     self._manager.prune_file(file_object)
-                self.controller.set_task_state(task_id, "pending")
+                record_pending_task_state(task_id)
                 execution.done.remove(task_id)
                 execution.pending.add(task_id)
                 execution.recovery_reexecutions += 1
@@ -1249,6 +1190,7 @@ class TaskSchedulerThread:
                 for data_id in audit_data_ids:
                     require_available(data_id)
             if recovery_wave:
+                flush_completed_task_states()
                 recovered_inputs = {
                     f"i:{data_id}"
                     for task_id in recovery_wave
@@ -1256,30 +1198,22 @@ class TaskSchedulerThread:
                         task_id
                     ]
                 }
-                for physical_id, logical_ids in tuple(
+                for physical_id, logical_id in tuple(
                     execution.running.items()
                 ):
-                    if not any(
+                    if not (
                         task_cache_inputs[logical_id] & recovered_inputs
-                        for logical_id in logical_ids
                     ):
                         continue
                     if not self._manager.cancel_by_task_id(physical_id):
                         continue
                     execution.running.pop(physical_id)
-                    for logical_id in logical_ids:
-                        execution.pending.add(logical_id)
-                        self.controller.set_task_state(
-                            logical_id, "pending"
-                        )
-                        for output_data_id in (
-                            self._run_context.logical_output_slots[
-                                logical_id
-                            ]
-                        ):
-                            self.controller.invalidate_idata(
-                                output_data_id
-                            )
+                    execution.pending.add(logical_id)
+                    record_pending_task_state(logical_id)
+                    for output_data_id in (
+                        self._run_context.logical_output_slots[logical_id]
+                    ):
+                        self.controller.invalidate_idata(output_data_id)
                 plan = self.controller.pruning_plan()
                 execution.recovery_waves.append(
                     {
@@ -1494,8 +1428,7 @@ class TaskSchedulerThread:
             ):
                 active_inputs = {
                     data_key
-                    for logical_ids in execution.running.values()
-                    for running_logical_id in logical_ids
+                    for running_logical_id in execution.running.values()
                     for data_key in task_cache_inputs[running_logical_id]
                 }
                 safe_frontiers = [
@@ -1656,45 +1589,23 @@ class TaskSchedulerThread:
                     )
                 ),
             )
-            connected_library_slots = max(
-                1, len(self._active_worker_ids) * 4
-            )
-            ready_batches = plan_ready_batches(
-                ready,
-                execution.unbatchable,
-                task_cache_inputs,
-                cache_known_sizes,
-                effective_library_batch_size,
-                connected_library_slots,
-            )
             submitted_task_ids = []
-            for task_ids in ready_batches:
-                attempts = []
-                for task_id in task_ids:
-                    attempt = self._run_context.attempts.get(task_id, 0) + 1
-                    self._run_context.attempts[task_id] = attempt
-                    attempts.append(attempt)
+            for task_id in ready:
+                attempt = self._run_context.attempts.get(task_id, 0) + 1
+                self._run_context.attempts[task_id] = attempt
                 partial_output_index = (
-                    inject_partial_publication_after.get(task_ids[0])
-                    if len(task_ids) == 1 and attempts[0] == 1
+                    inject_partial_publication_after.get(task_id)
+                    if attempt == 1
                     else None
                 )
                 task_build_started = time.monotonic()
-                if partial_output_index is not None:
-                    physical = task_factory.make_physical_task(
-                        task_ids[0],
-                        environment,
-                        attempts[0],
-                        partial_output_index,
-                        use_worker_library,
-                    )
-                else:
-                    physical = task_factory.make_physical_batch_task(
-                        task_ids,
-                        environment,
-                        attempts,
-                        use_worker_library,
-                    )
+                physical = task_factory.make_physical_task(
+                    task_id,
+                    environment,
+                    attempt,
+                    partial_output_index,
+                    use_worker_library,
+                )
                 execution.physical_task_build_seconds += (
                     time.monotonic() - task_build_started
                 )
@@ -1704,10 +1615,9 @@ class TaskSchedulerThread:
                     time.monotonic() - task_submit_started
                 )
                 execution.physical_submissions += 1
-                execution.running[physical_id] = tuple(task_ids)
-                submitted_task_ids.extend(task_ids)
-                for task_id in task_ids:
-                    execution.pending.remove(task_id)
+                execution.running[physical_id] = task_id
+                submitted_task_ids.append(task_id)
+                execution.pending.remove(task_id)
             if submitted_task_ids:
                 self.controller.set_task_states(
                     submitted_task_ids, "running"
@@ -1825,23 +1735,14 @@ class TaskSchedulerThread:
                     f"frontier_pruning_pending="
                     f"{sorted(pruning.pending)}"
                 )
-            queued_logical_id = None
-            if execution.completion_queue:
-                queued_logical_id, completed = (
-                    execution.completion_queue.popleft()
-                )
-            elif physical_completion_queue:
+            if physical_completion_queue:
                 completed = physical_completion_queue.popleft()
             else:
                 completed = self._manager.wait(wait_timeout)
             workers_before_sync = self._active_worker_ids
-            if queued_logical_id is None:
-                active_workers = frozenset(self._sync_worker_epochs())
-                workers_lost = workers_before_sync - active_workers
-                self._cache_admission.poll(self._manager)
-            else:
-                active_workers = workers_before_sync
-                workers_lost = frozenset()
+            active_workers = frozenset(self._sync_worker_epochs())
+            workers_lost = workers_before_sync - active_workers
+            self._cache_admission.poll(self._manager)
             if workers_lost:
                 execution.recovery_audit_data_ids.update(
                     int(data_key.split(":", 1)[1])
@@ -1854,16 +1755,15 @@ class TaskSchedulerThread:
             # that the logical task can be recovered from stable lineage
             # instead of looping on a stale attempt indefinitely.
             if workers_lost:
-                for physical_id, logical_ids in tuple(execution.running.items()):
+                for physical_id, logical_id in tuple(execution.running.items()):
                     missing_inputs = []
-                    for logical_id in logical_ids:
-                        for input_data_id in self._task_record(
-                            logical_id
-                        ).input_data_ids:
-                            if not self.controller.idata_status(
-                                input_data_id
-                            )["available"]:
-                                missing_inputs.append(input_data_id)
+                    for input_data_id in self._task_record(
+                        logical_id
+                    ).input_data_ids:
+                        if not self.controller.idata_status(input_data_id)[
+                            "available"
+                        ]:
+                            missing_inputs.append(input_data_id)
                     if not missing_inputs:
                         continue
                     # The C manager may already have moved this attempt into
@@ -1873,26 +1773,20 @@ class TaskSchedulerThread:
                     if not self._manager.cancel_by_task_id(physical_id):
                         continue
                     execution.running.pop(physical_id)
-                    for logical_id in logical_ids:
-                        execution.pending.add(logical_id)
-                        ready_queue.mark_pending(logical_id)
-                        self.controller.set_task_state(
-                            logical_id, "pending"
-                        )
-                        for output_data_id in self._run_context.logical_output_slots[
-                            logical_id
-                        ]:
-                            self.controller.invalidate_idata(output_data_id)
-                    execution.recovery_reexecutions += len(logical_ids)
+                    execution.pending.add(logical_id)
+                    ready_queue.mark_pending(logical_id)
+                    record_pending_task_state(logical_id)
+                    for output_data_id in self._run_context.logical_output_slots[
+                        logical_id
+                    ]:
+                        self.controller.invalidate_idata(output_data_id)
+                    execution.recovery_reexecutions += 1
                     execution.unavailable_input_recoveries.append(
                         {
-                            "task_ids": list(logical_ids),
+                            "task_id": logical_id,
                             "physical_task_id": physical_id,
                             "missing_inputs": missing_inputs,
-                            "attempts": [
-                                self._run_context.attempts[logical_id]
-                                for logical_id in logical_ids
-                            ],
+                            "attempt": self._run_context.attempts[logical_id],
                         }
                     )
             if (
@@ -1946,10 +1840,7 @@ class TaskSchedulerThread:
                         )
                     peer_transfer_pruning_probe_triggered = True
             if completed is None:
-                for physical_id, logical_ids in tuple(execution.running.items()):
-                    if len(logical_ids) != 1:
-                        continue
-                    logical_id = logical_ids[0]
+                for physical_id, logical_id in tuple(execution.running.items()):
                     output_index = inject_partial_publication_after.get(
                         logical_id
                     )
@@ -2062,9 +1953,7 @@ class TaskSchedulerThread:
                         prune_requested = self._manager.prune_file(
                             file_object
                         )
-                        self.controller.set_task_state(
-                            logical_id, "pending"
-                        )
+                        record_pending_task_state(logical_id)
                         execution.done.remove(logical_id)
                         persistence.suspended_recovery[data_id] = {
                             "logical_id": logical_id,
@@ -2112,8 +2001,7 @@ class TaskSchedulerThread:
                     remaining_cache_uses,
                 {
                     data_key
-                    for logical_ids in execution.running.values()
-                    for logical_id in logical_ids
+                    for logical_id in execution.running.values()
                     for data_key in task_cache_inputs[logical_id]
                     },
                 )
@@ -2283,243 +2171,134 @@ class TaskSchedulerThread:
                     producer_by_data_id[data_id]
                 )
                 continue
-            # A physical attempt that DataVine cancelled while reclaiming an
-            # unavailable input may still be returned by Manager.wait.  Its
-            # logical task has already been moved back to execution.pending; late
-            # completion must be ignored rather than treated as a duplicate.
-            if queued_logical_id is None:
-                if completed.id not in execution.running:
-                    continue
-                logical_ids = execution.running.pop(completed.id)
-                execution.physical_batch_metrics.append(
-                    {
-                        "physical_task_id": int(completed.id),
-                        "logical_tasks": len(logical_ids),
-                        **{
-                            name: int(completed.get_metric(name))
-                            for name in (
-                                "time_when_submitted",
-                                "time_when_done",
-                                "time_workers_execute_last",
-                                "bytes_sent",
-                                "bytes_received",
-                            )
-                        },
-                    }
-                )
-                structured_batch = (
-                    completed.output
-                    if (
-                        isinstance(completed.output, dict)
-                        and completed.output.get("protocol")
-                        == "datavine-batch-v2"
-                    )
-                    else None
-                )
-                if structured_batch is not None:
-                    execution.batch_worker_seconds += float(
-                        structured_batch["worker_seconds"]
-                    )
-                    returned_task_ids = tuple(
-                        int(result["task_id"])
-                        for result in structured_batch["tasks"]
-                    )
-                    if returned_task_ids != tuple(logical_ids):
-                        raise RuntimeError(
-                            "batch returned mismatched logical TaskIDs"
+            # Cancelled attempts can arrive late after their logical task has
+            # already returned to pending.
+            if completed.id not in execution.running:
+                continue
+            logical_id = execution.running.pop(completed.id)
+            execution.physical_task_metrics.append(
+                {
+                    "physical_task_id": int(completed.id),
+                    **{
+                        name: int(completed.get_metric(name))
+                        for name in (
+                            "time_when_submitted",
+                            "time_when_done",
+                            "time_workers_execute_last",
+                            "bytes_sent",
+                            "bytes_received",
                         )
-                    failed_results = [
-                        result
-                        for result in structured_batch["tasks"]
-                        if result["error"] is not None
-                    ]
-                    if failed_results:
-                        if len(logical_ids) != 1:
-                            raise RuntimeError(
-                                "structured multi-task failure requires "
-                                "unbatched recovery"
-                            )
-                        logical_id = logical_ids[0]
-                        lost_inputs = [
-                            int(data_key.split(":", 1)[1])
-                            for data_key in task_cache_inputs[logical_id]
-                            if data_key.startswith("i:")
-                            and not self.controller.idata_status(
-                                int(data_key.split(":", 1)[1])
-                            )["available"]
-                        ]
-                        unavailable_error = (
-                            "IData is not available"
-                            in failed_results[0]["error"]
-                        )
-                        if not lost_inputs and not unavailable_error:
-                            raise RuntimeError(
-                                f"TaskID {logical_id} failed: "
-                                f"{failed_results[0]['error']}"
-                            )
-                        execution.recovery_audit_data_ids.update(
-                            lost_inputs
-                        )
-                        self.controller.set_task_state(
-                            logical_id, "pending"
-                        )
-                        execution.pending.add(logical_id)
-                        ready_queue.mark_pending(logical_id)
-                        continue
-                    outputs_by_task = {}
-                    outputs = []
-                    batch_events = []
-                    for result in structured_batch["tasks"]:
-                        batch_events.extend(result["events"])
-                        task_id = int(result["task_id"])
-                        task_outputs = result["outputs"]
-                        outputs_by_task[task_id] = task_outputs
-                        outputs.extend(task_outputs)
-                    expected_output_count = sum(
-                        len(self._run_context.logical_output_slots[task_id])
-                        for task_id in logical_ids
-                    )
-                    if len(outputs) != expected_output_count:
-                        raise RuntimeError(
-                            "batch returned an invalid output count"
-                        )
-                    for logical_id in logical_ids:
-                        expected_output_ids = (
-                            self._run_context.logical_output_slots[logical_id]
-                        )
-                        task_outputs = outputs_by_task[logical_id]
-                        if len(task_outputs) != len(expected_output_ids):
-                            raise RuntimeError(
-                                f"TaskID {logical_id} returned an invalid "
-                                "output count"
-                            )
-                        for output_index, output_data_id in enumerate(
-                            expected_output_ids
-                        ):
-                            output = task_outputs[output_index]
-                            if (
-                                int(output["task_id"]) != logical_id
-                                or int(output["output_index"])
-                                != output_index
-                                or output["data_id"]
-                                != f"i:{output_data_id}"
-                                or int(output["attempt"])
-                                != self._run_context.attempts[logical_id]
-                            ):
-                                raise RuntimeError(
-                                    f"TaskID {logical_id} returned a "
-                                    "mismatched output preparation"
-                                )
-                    unavailable_output_tasks = []
-                    for logical_id in logical_ids:
-                        for output in outputs_by_task[logical_id]:
-                            status = self.controller.idata_status(
-                                int(output["data_id"].split(":", 1)[1])
-                            )
-                            if (
-                                not status["available"]
-                                or status["attempt"]
-                                != int(output["attempt"])
-                                or status["content_hash"]
-                                != output["content_hash"]
-                            ):
-                                unavailable_output_tasks.append(logical_id)
-                                break
-                    if unavailable_output_tasks:
-                        for logical_id in unavailable_output_tasks:
-                            self.controller.set_task_state(
-                                logical_id, "pending"
-                            )
-                            execution.pending.add(logical_id)
-                            ready_queue.mark_pending(logical_id)
-                        continue
-                    if not structured_batch.get("outputs_committed"):
-                        committed = self.controller.commit_outputs(outputs)
-                        if len(committed) != len(outputs):
-                            raise RuntimeError(
-                                "Controller returned incomplete output commits"
-                            )
-                    for line in batch_events:
-                        if line.startswith("DATAVINE_REPLICA_OBSERVED "):
-                            self._cache_admission.observe(
-                                json.loads(
-                                    line[len("DATAVINE_REPLICA_OBSERVED "):]
-                                )
-                            )
-                    execution.local_idata_hits += sum(
-                        line.count("DATAVINE_LOCAL_IDATA")
-                        for line in batch_events
-                    )
-                    execution.peer_idata_fetches += sum(
-                        line.startswith("DATAVINE_PEER_FETCH i:")
-                        for line in batch_events
-                    )
-                    execution.worker_controller_retries += sum(
-                        int(line.split(" ", 1)[1])
-                        for line in batch_events
-                        if line.startswith(
-                            "DATAVINE_CONTROLLER_RETRIES "
-                        )
-                    )
-                    record_worker_dram_cache(batch_events)
-                    for logical_id in logical_ids:
-                        for output in outputs_by_task[logical_id]:
-                            if output.get("worker_id") and str(
-                                output.get("tier", "")
-                            ).startswith("worker-"):
-                                self._cache_admission.observe(output)
-                        queue_task_persistence(
-                            logical_id,
-                            self._run_context.logical_output_slots[
-                                logical_id
-                            ],
-                        )
-                        execution.deferred_completed_states.append(logical_id)
-                        execution.done.add(logical_id)
-                        ready_queue.mark_done(logical_id, execution.pending)
-                        if logical_id not in execution.completed_once:
-                            execution.completed_once.add(logical_id)
-                            for data_key in task_cache_inputs[logical_id]:
-                                remaining_cache_uses[data_key] -= 1
-                        maybe_inject_worker_loss(logical_id)
-                    continue
-                if len(logical_ids) > 1:
-                    if completed.successful():
-                        raise RuntimeError(
-                            "successful batch returned no v2 result"
-                        )
-                    for logical_id in logical_ids:
-                        execution.unbatchable.add(logical_id)
-                        self.controller.set_task_state(
-                            logical_id, "pending"
-                        )
-                        execution.pending.add(logical_id)
-                        ready_queue.mark_pending(logical_id)
-                    continue
-                logical_outputs = self._logical_outputs_from_batch(
-                    completed.output, logical_ids
-                )
-                for batch_logical_id in logical_ids:
-                    execution.completion_queue.append(
-                        (
-                            batch_logical_id,
-                            _LogicalCompletion(
-                                completed,
-                                logical_outputs[batch_logical_id],
-                            ),
-                        )
-                    )
-                logical_id, completed = execution.completion_queue.popleft()
-                if execution.completion_queue:
-                    execution.running[completed.id] = ()
-            else:
-                logical_id = queued_logical_id
-                if not execution.completion_queue:
-                    execution.running.pop(completed.id, None)
+                    },
+                }
+            )
             if pruning.active is not None:
                 pruning.completions_while_active += 1
             if persistence.running or persistence.pending:
                 persistence.compute_completions_while_active += 1
+            structured_task = (
+                completed.output
+                if (
+                    isinstance(completed.output, dict)
+                    and completed.output.get("protocol")
+                    == "datavine-task-v1"
+                )
+                else None
+            )
+            if structured_task is not None:
+                if int(structured_task["task_id"]) != logical_id:
+                    raise RuntimeError(
+                        "worker returned a mismatched logical TaskID"
+                    )
+                execution.worker_seconds += float(
+                    structured_task["worker_seconds"]
+                )
+                for name, seconds in structured_task[
+                    "timing_seconds"
+                ].items():
+                    execution.worker_timing_seconds[name] += float(seconds)
+                error = structured_task["error"]
+                if error is not None:
+                    lost_inputs = [
+                        int(data_key.split(":", 1)[1])
+                        for data_key in task_cache_inputs[logical_id]
+                        if data_key.startswith("i:")
+                        and not self.controller.idata_status(
+                            int(data_key.split(":", 1)[1])
+                        )["available"]
+                    ]
+                    if not lost_inputs and "IData is not available" not in error:
+                        raise RuntimeError(
+                            f"TaskID {logical_id} failed: {error}"
+                        )
+                    execution.recovery_audit_data_ids.update(lost_inputs)
+                    record_pending_task_state(logical_id)
+                    execution.pending.add(logical_id)
+                    ready_queue.mark_pending(logical_id)
+                    continue
+                outputs = structured_task["outputs"]
+                expected_output_ids = self._run_context.logical_output_slots[
+                    logical_id
+                ]
+                if len(outputs) != len(expected_output_ids):
+                    raise RuntimeError(
+                        f"TaskID {logical_id} returned an invalid output count"
+                    )
+                for output_index, output_data_id in enumerate(
+                    expected_output_ids
+                ):
+                    output = outputs[output_index]
+                    if (
+                        int(output["task_id"]) != logical_id
+                        or int(output["output_index"]) != output_index
+                        or output["data_id"] != f"i:{output_data_id}"
+                        or int(output["attempt"])
+                        != self._run_context.attempts[logical_id]
+                    ):
+                        raise RuntimeError(
+                            f"TaskID {logical_id} returned mismatched output"
+                        )
+                if not structured_task["outputs_committed"]:
+                    committed = self.controller.commit_outputs(outputs)
+                    if len(committed) != len(outputs):
+                        raise RuntimeError(
+                            "Controller returned incomplete output commits"
+                        )
+                events = structured_task["events"]
+                for line in events:
+                    if line.startswith("DATAVINE_REPLICA_OBSERVED "):
+                        self._cache_admission.observe(
+                            json.loads(
+                                line[len("DATAVINE_REPLICA_OBSERVED "):]
+                            )
+                        )
+                execution.local_idata_hits += sum(
+                    line.count("DATAVINE_LOCAL_IDATA") for line in events
+                )
+                execution.peer_idata_fetches += sum(
+                    line.startswith("DATAVINE_PEER_FETCH i:")
+                    for line in events
+                )
+                execution.worker_controller_retries += sum(
+                    int(line.split(" ", 1)[1])
+                    for line in events
+                    if line.startswith("DATAVINE_CONTROLLER_RETRIES ")
+                )
+                record_worker_dram_cache(events)
+                for output in outputs:
+                    if output.get("worker_id") and str(
+                        output.get("tier", "")
+                    ).startswith("worker-"):
+                        self._cache_admission.observe(output)
+                queue_task_persistence(logical_id, expected_output_ids)
+                record_completed_task_state(logical_id)
+                execution.done.add(logical_id)
+                ready_queue.mark_done(logical_id, execution.pending)
+                if logical_id not in execution.completed_once:
+                    execution.completed_once.add(logical_id)
+                    for data_key in task_cache_inputs[logical_id]:
+                        remaining_cache_uses[data_key] -= 1
+                maybe_inject_worker_loss(logical_id)
+                continue
             completed_output = (
                 completed.output
                 if isinstance(completed.output, str)
@@ -2550,9 +2329,7 @@ class TaskSchedulerThread:
                     publication.failures.append(
                         partial_failure
                     )
-                    self.controller.set_task_state(
-                        logical_id, "pending"
-                    )
+                    record_pending_task_state(logical_id)
                     execution.pending.add(logical_id)
                     ready_queue.mark_pending(logical_id)
                     continue
@@ -2594,9 +2371,7 @@ class TaskSchedulerThread:
                             ),
                         }
                     )
-                    self.controller.set_task_state(
-                        logical_id, "pending"
-                    )
+                    record_pending_task_state(logical_id)
                     execution.pending.add(logical_id)
                     ready_queue.mark_pending(logical_id)
                     continue
@@ -2611,13 +2386,11 @@ class TaskSchedulerThread:
                         lost_inputs.append(input_data_id)
                 if lost_inputs:
                     execution.recovery_audit_data_ids.update(lost_inputs)
-                    self.controller.set_task_state(
-                        logical_id, "pending"
-                    )
+                    record_pending_task_state(logical_id)
                     execution.pending.add(logical_id)
                     ready_queue.mark_pending(logical_id)
                     continue
-                self.controller.set_task_state(logical_id, "pending")
+                record_pending_task_state(logical_id)
                 raise RuntimeError(
                     f"TaskID {logical_id} failed: result={completed.result} "
                     f"exit={completed.exit_code} "
@@ -2694,10 +2467,7 @@ class TaskSchedulerThread:
                         "publication is not available"
                     )
             queue_task_persistence(logical_id, expected_output_ids)
-            if effective_library_batch_size > 1:
-                execution.deferred_completed_states.append(logical_id)
-            else:
-                self.controller.set_task_state(logical_id, "completed")
+            record_completed_task_state(logical_id)
             execution.done.add(logical_id)
             ready_queue.mark_done(logical_id, execution.pending)
             if logical_id not in execution.completed_once:
@@ -2714,26 +2484,22 @@ class TaskSchedulerThread:
                 execution.recovery_audit_data_ids.add(output_ids[logical_id])
                 execution.loss_injected = True
             maybe_inject_worker_loss(logical_id)
-            if not execution.completion_queue:
-                self._cache_admission.enforce(
-                    self._manager,
-                    self._file_for_data_key,
-                    effective_retention_bytes,
-                    effective_retention_items,
-                    remaining_cache_uses,
-                    {
-                        data_key
-                        for logical_ids in execution.running.values()
-                        for running_logical_id in logical_ids
-                        for data_key in task_cache_inputs[
-                            running_logical_id
-                        ]
-                    }
-                    | {
-                        f"i:{data_id}"
-                        for data_id in required_result_data_ids
-                    },
-                )
+            self._cache_admission.enforce(
+                self._manager,
+                self._file_for_data_key,
+                effective_retention_bytes,
+                effective_retention_items,
+                remaining_cache_uses,
+                {
+                    data_key
+                    for running_logical_id in execution.running.values()
+                    for data_key in task_cache_inputs[running_logical_id]
+                }
+                | {
+                    f"i:{data_id}"
+                    for data_id in required_result_data_ids
+                },
+            )
         workflow_execution_elapsed = (
             time.monotonic() - workflow_execution_started
         )
@@ -2889,14 +2655,16 @@ class TaskSchedulerThread:
             "physical_task_submit_seconds": (
                 execution.physical_task_submit_seconds
             ),
-            "library_batch_size": effective_library_batch_size,
             "logical_tasks_per_physical_submission": (
                 sum(self._run_context.attempts.values()) / execution.physical_submissions
                 if execution.physical_submissions
                 else 0
             ),
-            "batch_worker_seconds": execution.batch_worker_seconds,
-            "physical_batch_metrics": execution.physical_batch_metrics,
+            "worker_seconds": execution.worker_seconds,
+            "worker_timing_seconds": dict(
+                execution.worker_timing_seconds
+            ),
+            "physical_task_metrics": execution.physical_task_metrics,
             "workflow_timing_seconds": workflow_timing,
             "registration_timing_seconds": registration_timing,
             "performance_bottlenecks": rank_bottlenecks(

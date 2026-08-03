@@ -20,7 +20,6 @@ class FakeManager:
 
 def configure(manager, **changes):
     values = {
-        "library_batch_size": 4096,
         "worker_disk_cache_admission_items": None,
         "worker_disk_cache_admission_bytes": None,
         "peer_source_losses": 0,
@@ -57,7 +56,6 @@ def main():
     manager = FakeManager()
     result = configure(
         manager,
-        library_batch_size="2048",
         worker_disk_cache_admission_items="7",
         worker_disk_cache_admission_bytes="4096",
         peer_source_losses="2",
@@ -68,7 +66,6 @@ def main():
         peer_release_retry_seconds="0.25",
         peer_release_capacity="8",
     )
-    assert result.library_batch_size == 2048
     assert result.peer_source_losses == 2
     assert result.peer_source_loss_after_bytes == 1024
     assert result.defer_peer_source_loss_after_bytes
@@ -91,7 +88,6 @@ def main():
         ("datavine-transfer-release-capacity", 8),
     ]
 
-    expect_error(ValueError, "positive", library_batch_size=0)
     expect_error(
         ValueError,
         "positive byte threshold",

@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from ndcctools.taskvine.datavine.scheduler.readiness import (
     ReadyQueue,
     build_cache_plan,
-    plan_ready_batches,
 )
 
 
@@ -93,53 +92,6 @@ def main():
         ),
     )
     assert ready == (2, 3)
-
-    sizes = {
-        "shared": 8,
-        "two": 5,
-        "three": 5,
-        "five": 1,
-    }
-    assert plan_ready_batches(
-        ready,
-        set(),
-        cache_inputs,
-        sizes,
-        maximum_batch_size=8,
-        connected_slots=1,
-        input_byte_limit=18,
-    ) == ((2, 3),)
-    assert plan_ready_batches(
-        ready,
-        {2},
-        cache_inputs,
-        sizes,
-        maximum_batch_size=8,
-        connected_slots=1,
-        input_byte_limit=18,
-    ) == ((2,), (3,))
-    assert plan_ready_batches(
-        ready,
-        set(),
-        cache_inputs,
-        sizes,
-        maximum_batch_size=8,
-        connected_slots=2,
-        input_byte_limit=12,
-    ) == ((2,), (3,))
-    assert plan_ready_batches(
-        (), set(), cache_inputs, sizes, 1, 1
-    ) == ()
-
-    for position in range(3):
-        values = [1, 1, 1]
-        values[position] = 0
-        try:
-            plan_ready_batches((), set(), {}, {}, *values)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"accepted invalid planner values {values}")
 
     print("DataVine Scheduler readiness contract PASS")
 

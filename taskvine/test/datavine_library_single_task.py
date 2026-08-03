@@ -15,7 +15,7 @@ def main():
     for value in range(64):
         target = workflow.add_task(identity, value)
     snapshot = run_case(
-        "library-batching",
+        "library-single-task",
         workflow,
         target.task_id,
         63,
@@ -23,20 +23,19 @@ def main():
         worker_cores=4,
         prefetch=False,
         use_worker_library=True,
-        library_batch_size=32,
         detailed_report=False,
     )
     report = snapshot["scheduler_report"]
     assert report["logical_tasks"] == 64
-    assert report["physical_compute_submissions"] < 64
-    assert report["library_batch_size"] == 32
-    assert report["logical_tasks_per_physical_submission"] > 1
-    assert report["batch_worker_seconds"] >= 0
-    assert report["physical_batch_metrics"]
-    cache = report["worker_dram_cache"]
-    assert cache["hits"] > 0
-    assert cache["bytes"] <= cache["capacity_bytes_per_worker"]
-    print("DataVine worker-library batching E2E PASS")
+    assert report["physical_compute_submissions"] == 64
+    assert report["logical_tasks_per_physical_submission"] == 1
+    assert len(report["physical_task_metrics"]) == 64
+    assert report["worker_seconds"] > 0
+    status_requests = report["scheduler_controller_requests"].get(
+        "GET /v1/idata/{id}/status", {}
+    ).get("count", 0)
+    assert status_requests <= 2
+    print("DataVine native single-task library E2E PASS")
 
 
 if __name__ == "__main__":

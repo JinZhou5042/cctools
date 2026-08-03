@@ -21,6 +21,7 @@ class FakeResponse:
     def __init__(self, payload):
         self.payload = payload
         self.headers = {}
+        self.status = 200
 
     def __enter__(self):
         return self
@@ -229,36 +230,38 @@ def idempotent_retry_case():
         retry_base_seconds=0,
         retry_max_seconds=0,
     )
-    original = urllib.request.urlopen
     attempts = {}
 
-    def reset_once(request, timeout):
-        key = (request.method, request.full_url)
-        attempts[key] = attempts.get(key, 0) + 1
-        if attempts[key] == 1:
-            raise ConnectionResetError("deterministic reset")
-        return FakeResponse(b'{"status":"PASS"}')
+    class RetryConnection:
+        def request(self, method, path, **_kwargs):
+            key = (method, path)
+            attempts[key] = attempts.get(key, 0) + 1
+            if attempts[key] == 1:
+                raise ConnectionResetError("deterministic reset")
 
-    urllib.request.urlopen = reset_once
-    try:
-        assert client.health() == {"status": "PASS"}
-        commit = client.commit_replica(
-            "i:1", "replica-1", 1, 1, "abc", 3
-        )
-        assert commit == {"status": "PASS"}
-        try:
-            client._request("POST", "/unsafe", {"value": 1})
-        except ConnectionResetError:
+        def getresponse(self):
+            return FakeResponse(b'{"status":"PASS"}')
+
+        def close(self):
             pass
-        else:
-            raise AssertionError("non-idempotent POST was replayed")
-    finally:
-        urllib.request.urlopen = original
-    assert attempts[("GET", "http://controller.invalid/v1/health")] == 2
+
+    client._connection_type = lambda *_args, **_kwargs: RetryConnection()
+    assert client.health() == {"status": "PASS"}
+    commit = client.commit_replica(
+        "i:1", "replica-1", 1, 1, "abc", 3
+    )
+    assert commit == {"status": "PASS"}
+    try:
+        client._request("POST", "/unsafe", {"value": 1})
+    except ConnectionResetError:
+        pass
+    else:
+        raise AssertionError("non-idempotent POST was replayed")
+    assert attempts[("GET", "/v1/health")] == 2
     assert attempts[
-        ("POST", "http://controller.invalid/v1/replicas/commit")
+        ("POST", "/v1/replicas/commit")
     ] == 2
-    assert attempts[("POST", "http://controller.invalid/unsafe")] == 1
+    assert attempts[("POST", "/unsafe")] == 1
     return {
         "get_attempts": 2,
         "commit_attempts": 2,

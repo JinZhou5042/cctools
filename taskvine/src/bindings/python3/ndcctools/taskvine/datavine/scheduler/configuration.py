@@ -5,7 +5,6 @@ import dataclasses
 
 @dataclasses.dataclass(frozen=True)
 class RuntimeTuning:
-    library_batch_size: int
     peer_source_losses: int
     peer_source_loss_after_bytes: int
     defer_peer_source_loss_after_bytes: bool
@@ -23,7 +22,6 @@ def _tune(manager, name, value, rejection):
 def configure_runtime(
     manager,
     *,
-    library_batch_size,
     worker_disk_cache_admission_items,
     worker_disk_cache_admission_bytes,
     peer_source_losses,
@@ -35,10 +33,6 @@ def configure_runtime(
     peer_release_capacity,
 ):
     """Validate options, tune the Manager, and return canonical values."""
-
-    library_batch_size = int(library_batch_size)
-    if library_batch_size < 1:
-        raise ValueError("library batch size must be positive")
 
     admission_items = (
         -1
@@ -150,7 +144,6 @@ def configure_runtime(
     )
 
     return RuntimeTuning(
-        library_batch_size=library_batch_size,
         peer_source_losses=peer_source_losses,
         peer_source_loss_after_bytes=peer_source_loss_after_bytes,
         defer_peer_source_loss_after_bytes=(

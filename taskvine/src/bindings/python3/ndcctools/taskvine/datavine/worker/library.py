@@ -6,6 +6,10 @@ import time
 import traceback
 
 
+def warm_datavine_worker():
+    return True
+
+
 def persist_datavine_idata(
     controller,
     token,
@@ -71,7 +75,7 @@ def execute_datavine_task(
     controller_inline_idata_bytes,
 ):
     """Execute one logical task through the worker-owned data path."""
-    from .runner import main
+    from .runner import execute_task
     from .cache import PROCESS_CACHE
     from ..models import TaskRecord
     from ..scheduler.client import ControllerClient
@@ -90,32 +94,27 @@ def execute_datavine_task(
             (controller, token, int(task_id))
         ] = TaskRecord.from_dict(task_record)
 
-    argv = [
-        "--controller",
-        str(controller),
-        "--token",
-        str(token),
-        "--task-id",
-        str(int(task_id)),
-        "--attempt",
-        str(int(attempt)),
-    ]
-    for output_file in output_files:
-        argv.extend(("--output-file", str(output_file)))
     events = []
     outputs = []
+    timings = {}
     started = time.monotonic()
     error = None
     try:
-        result = main(
-            argv,
+        result = execute_task(
+            controller,
+            token,
+            task_id,
+            attempt,
+            output_files,
             emit=events.append,
             capture_output=outputs.append,
+            timings=timings,
         )
         if result:
             raise RuntimeError(
                 f"DataVine TaskID {task_id} runner returned {result}"
             )
+        publish_started = time.monotonic()
         if outputs:
             published = client.publish_outputs(
                 outputs[0]["worker_id"],
@@ -129,6 +128,9 @@ def execute_datavine_task(
                 )
             for output, replica in zip(outputs, published):
                 output.update(replica)
+        timings["controller_publication"] = (
+            time.monotonic() - publish_started
+        )
     except Exception:
         error = traceback.format_exc()
     finally:
@@ -136,129 +138,12 @@ def execute_datavine_task(
             output.pop("payload", None)
     events.append(_cache_event(PROCESS_CACHE))
     return {
-        "protocol": "datavine-batch-v2",
-        "tasks": [
-            {
-                "task_id": int(task_id),
-                "events": events,
-                "outputs": outputs,
-                "error": error,
-            }
-        ],
+        "protocol": "datavine-task-v1",
+        "task_id": int(task_id),
+        "events": events,
+        "outputs": outputs,
+        "error": error,
         "worker_seconds": time.monotonic() - started,
+        "timing_seconds": timings,
         "outputs_committed": error is None,
-    }
-
-
-def execute_datavine_tasks(
-    controller,
-    token,
-    calls,
-    worker_dram_cache_bytes,
-    controller_inline_idata_bytes,
-):
-    """Execute independent ready tasks in one physical library call."""
-    from .runner import main
-    from .cache import PROCESS_CACHE
-    from ..scheduler.client import ControllerClient
-
-    controller_key = (controller, token)
-    with PROCESS_CACHE.lock:
-        PROCESS_CACHE.data.configure(worker_dram_cache_bytes)
-        client = PROCESS_CACHE.clients.get(controller_key)
-        if client is None:
-            client = ControllerClient(
-                controller, token, transient_retries=8
-            )
-            PROCESS_CACHE.clients[controller_key] = client
-    records, cache_values = client.get_execution_bundle(
-        task_id for task_id, _, _ in calls
-    )
-    with PROCESS_CACHE.lock:
-        for record in records:
-            PROCESS_CACHE.task_records[
-                (controller, token, record.task_id)
-            ] = record
-
-    task_results = []
-    started = time.monotonic()
-    for task_id, attempt, output_files in calls:
-        events = []
-        outputs = []
-        argv = [
-            "--controller",
-            str(controller),
-            "--token",
-            str(token),
-            "--task-id",
-            str(int(task_id)),
-            "--attempt",
-            str(int(attempt)),
-        ]
-        for output_file in output_files:
-            argv.extend(("--output-file", str(output_file)))
-        error = None
-        try:
-            result = main(
-                argv,
-                emit=events.append,
-                capture_output=outputs.append,
-                trust_taskvine_inputs=True,
-                cache_values=cache_values,
-            )
-            if result:
-                raise RuntimeError(
-                    f"DataVine TaskID {task_id} runner returned {result}"
-                )
-        except Exception:
-            error = traceback.format_exc()
-        task_results.append(
-            {
-                "task_id": int(task_id),
-                "events": events,
-                "outputs": outputs,
-                "error": error,
-            }
-        )
-    worker_seconds = time.monotonic() - started
-    if task_results:
-        task_results[-1]["events"].append(_cache_event(PROCESS_CACHE))
-    if any(result["error"] is not None for result in task_results):
-        raise RuntimeError(
-            "; ".join(
-                f"TaskID {result['task_id']}: {result['error']}"
-                for result in task_results
-                if result["error"] is not None
-            )
-        )
-    outputs = [
-        output
-        for result in task_results
-        for output in result["outputs"]
-    ]
-    if outputs:
-        worker_id = outputs[0]["worker_id"]
-        worker_epoch = outputs[0]["worker_epoch"]
-        if any(
-            output["worker_id"] != worker_id
-            or output["worker_epoch"] != worker_epoch
-            for output in outputs
-        ):
-            raise RuntimeError("batch outputs span worker incarnations")
-        prepared = client.publish_outputs(
-            worker_id,
-            worker_epoch,
-            outputs,
-            controller_inline_idata_bytes,
-        )
-        if len(prepared) != len(outputs):
-            raise RuntimeError("Controller returned incomplete preparations")
-        for output, replica in zip(outputs, prepared):
-            output.pop("payload")
-            output.update(replica)
-    return {
-        "protocol": "datavine-batch-v2",
-        "tasks": task_results,
-        "worker_seconds": worker_seconds,
-        "outputs_committed": True,
     }

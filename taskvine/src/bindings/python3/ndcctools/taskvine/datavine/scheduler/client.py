@@ -1,11 +1,13 @@
 """Scheduler-side client for the standalone Data Controller."""
 
 import base64
+import http.client
 import json
 import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import hashlib
@@ -56,6 +58,17 @@ class ControllerClient:
         self._request_metrics = {}
         self._transient_retry_count = 0
         self._retry_local = threading.local()
+        endpoint_parts = urllib.parse.urlsplit(self.endpoint)
+        if endpoint_parts.scheme not in ("http", "https"):
+            raise ValueError("Controller endpoint must use HTTP or HTTPS")
+        self._connection_type = (
+            http.client.HTTPSConnection
+            if endpoint_parts.scheme == "https"
+            else http.client.HTTPConnection
+        )
+        self._connection_host = endpoint_parts.hostname
+        self._connection_port = endpoint_parts.port
+        self._connection_local = threading.local()
 
     @property
     def transient_retry_count(self):
@@ -115,31 +128,68 @@ class ControllerClient:
         if value is not None:
             data = json.dumps(value, separators=(",", ":")).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        try:
-            if idempotent is None:
-                idempotent = method in ("GET", "HEAD")
-            retry_limit = (
-                max(
-                    self.transient_retries,
-                    self.idempotent_transient_retries,
-                )
-                if idempotent
-                else self.transient_retries
+        if idempotent is None:
+            idempotent = method in ("GET", "HEAD")
+        retry_limit = (
+            max(
+                self.transient_retries,
+                self.idempotent_transient_retries,
             )
-            with self._open(
-                lambda: urllib.request.Request(
-                    self.endpoint + path,
-                    data=data,
-                    headers=headers,
-                    method=method,
-                ),
-                transient_retries=retry_limit,
-            ) as response:
-                result = response.read(), response.headers
-                response_bytes = len(result[0])
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace")
-            raise DataVineRemoteError.from_http(exc.code, body) from exc
+            if idempotent
+            else self.transient_retries
+        )
+        try:
+            for retry in range(retry_limit + 1):
+                connection = getattr(
+                    self._connection_local, "connection", None
+                )
+                if connection is None:
+                    connection = self._connection_type(
+                        self._connection_host,
+                        self._connection_port,
+                        timeout=self.timeout,
+                    )
+                    self._connection_local.connection = connection
+                try:
+                    connection.request(method, path, body=data, headers=headers)
+                    response = connection.getresponse()
+                    body = response.read()
+                    status = response.status
+                    result = body, response.headers
+                    response_bytes = len(body)
+                    if status < 400:
+                        break
+                    connection.close()
+                    self._connection_local.connection = None
+                    if status not in (429, 503) or retry >= retry_limit:
+                        raise DataVineRemoteError.from_http(
+                            status, body.decode("utf-8", "replace")
+                        )
+                except DataVineRemoteError:
+                    raise
+                except (
+                    http.client.HTTPException,
+                    OSError,
+                    ConnectionError,
+                    TimeoutError,
+                ):
+                    connection.close()
+                    self._connection_local.connection = None
+                    if retry >= retry_limit:
+                        raise
+                with self._metrics_lock:
+                    self._transient_retry_count += 1
+                self._retry_local.count = (
+                    self.thread_transient_retry_count + 1
+                )
+                delay = min(
+                    self.retry_base_seconds * (2 ** min(retry, 30)),
+                    self.retry_max_seconds,
+                )
+                if delay:
+                    time.sleep(delay)
+            else:
+                raise AssertionError("unreachable Controller retry state")
         finally:
             elapsed = time.monotonic() - started
             route = re.sub(r"/\d+(?=/|$)", "/{id}", path)
@@ -867,7 +917,7 @@ class ControllerClient:
 
     def persist_idata(self, data_id):
         payload, _ = self._request(
-            "POST", f"{API_PREFIX}/idata/{int(data_id)}/persist", {}
+            "POST", f"{API_PREFIX}/idata/{int(data_id)}/persist"
         )
         return json.loads(payload)
 
@@ -926,6 +976,5 @@ class ControllerClient:
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/idata/{int(data_id)}/invalidate",
-            {},
         )
         return json.loads(payload)

@@ -63,14 +63,7 @@ class ExecutionState:
     running: dict = dataclasses.field(default_factory=dict)
     done: set = dataclasses.field(default_factory=set)
     completed_once: set = dataclasses.field(default_factory=set)
-    completion_queue: collections.deque = dataclasses.field(
-        default_factory=collections.deque
-    )
-    deferred_completed_states: list = dataclasses.field(
-        default_factory=list
-    )
-    unbatchable: set = dataclasses.field(default_factory=set)
-    physical_batch_metrics: list = dataclasses.field(default_factory=list)
+    physical_task_metrics: list = dataclasses.field(default_factory=list)
     recovery_waves: list = dataclasses.field(default_factory=list)
     unavailable_input_recoveries: list = dataclasses.field(
         default_factory=list
@@ -80,7 +73,10 @@ class ExecutionState:
     physical_submissions: int = 0
     physical_task_build_seconds: float = 0.0
     physical_task_submit_seconds: float = 0.0
-    batch_worker_seconds: float = 0.0
+    worker_seconds: float = 0.0
+    worker_timing_seconds: dict = dataclasses.field(
+        default_factory=lambda: collections.defaultdict(float)
+    )
     recovery_reexecutions: int = 0
     local_idata_hits: int = 0
     peer_idata_fetches: int = 0
