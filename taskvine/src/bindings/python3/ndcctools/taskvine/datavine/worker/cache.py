@@ -53,17 +53,25 @@ class SerializedDataCache:
         payload,
         score=None,
     ):
+        prefix = (str(controller), str(token), str(data_key))
+        key = prefix + (str(content_hash), len(payload))
+        for existing in tuple(self._entries):
+            if existing[:3] == prefix and existing != key:
+                entry = self._entries.pop(existing)
+                self.bytes -= len(entry[0])
         return self.put(
-            (
-                str(controller),
-                str(token),
-                str(data_key),
-                str(content_hash),
-                len(payload),
-            ),
+            key,
             payload,
             score,
         )
+
+    def get_local_data(self, controller, token, data_key):
+        prefix = (str(controller), str(token), str(data_key))
+        for key in tuple(self._entries):
+            if key[:3] == prefix:
+                return self.get(key)
+        self.misses += 1
+        return None
 
     def find_data(self, data_key, content_hash, size):
         suffix = (str(data_key), str(content_hash), int(size))
@@ -161,6 +169,14 @@ class WorkerProcessCache:
     lock: threading.RLock = dataclasses.field(
         default_factory=threading.RLock
     )
+    fetch_locks: tuple = dataclasses.field(
+        default_factory=lambda: tuple(
+            threading.RLock() for _ in range(64)
+        )
+    )
+
+    def fetch_lock(self, key):
+        return self.fetch_locks[hash(key) % len(self.fetch_locks)]
 
     def clear(self):
         with self.lock:

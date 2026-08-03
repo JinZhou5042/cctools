@@ -62,6 +62,12 @@ class InputResolver:
 
     def fetch_edata(self, data_id):
         data_id = int(data_id)
+        with self.process_cache.fetch_lock(
+            (self.controller, self.token, "e", data_id)
+        ):
+            return self._fetch_edata_locked(data_id)
+
+    def _fetch_edata_locked(self, data_id):
         cache_path = Path(f"datavine-edata-{data_id}.pkl")
         if self.trust_taskvine_inputs and cache_path.is_file():
             return self._local_payload("e", data_id, cache_path)
@@ -240,21 +246,26 @@ class InputResolver:
         return producer
 
     def _fetch_idata(self, data_id):
+        data_id = int(data_id)
+        with self.process_cache.fetch_lock(
+            (self.controller, self.token, "i", data_id)
+        ):
+            return self._fetch_idata_locked(data_id)
+
+    def _fetch_idata_locked(self, data_id):
         cache_path = Path(f"datavine-idata-{data_id}.pkl")
-        status = self.client.idata_status(data_id)
         data_key = f"i:{data_id}"
         with self.process_cache.lock:
-            payload = self.process_cache.data.get_data(
+            payload = self.process_cache.data.get_local_data(
                 self.controller,
                 self.token,
                 data_key,
-                status["content_hash"],
-                status["size"],
             )
         if payload is not None:
             self.emit(f"DATAVINE_DRAM_HIT i{data_id}")
             self.emit(f"DATAVINE_LOCAL_IDATA i{data_id}")
             return payload
+        status = self.client.idata_status(data_id)
         if not cache_path.is_file():
             self.reporter.reject_local(data_key)
             payload = self._fetch_peer(

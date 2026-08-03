@@ -68,6 +68,12 @@ def ensure_worker_library(manager):
         add_env=False,
         exec_mode="direct",
     )
+    workers = manager.status("workers")
+    library.set_function_slots(
+        min(int(worker["cores_total"]) for worker in workers)
+        if workers
+        else 1
+    )
     manager.install_library(library)
 
 

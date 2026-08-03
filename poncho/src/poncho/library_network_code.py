@@ -11,16 +11,22 @@
 import json
 import os
 import fcntl
+import queue
 import sys
 import argparse
 import base64
+import concurrent.futures
 import traceback
 import cloudpickle
 import select
 import signal
+import threading
 import time
 from datetime import datetime
 import socket
+
+
+_sandbox_cwd_lock = threading.Lock()
 from threadpoolctl import threadpool_limits
 from ndcctools.taskvine.utils import load_variable_from_library
 
@@ -98,7 +104,7 @@ def _read_exact(fd, length):
 
 
 # Read one invocation frame and execute the function.
-def start_function(in_pipe_fd, thread_limit=1):
+def start_function(in_pipe_fd, thread_limit=1, read_only=False):
     # read length of buffer to read
     buffer_len = b""
     while True:
@@ -149,28 +155,49 @@ def start_function(in_pipe_fd, thread_limit=1):
         with open(os.path.join(function_sandbox, "infile"), "rb") as f:
             event = cloudpickle.load(f)
 
+    invocation = (
+        function_id,
+        function_name,
+        function_sandbox,
+        function_stdout_filename,
+        event,
+        bool(inline_event),
+    )
+    if read_only:
+        return invocation
+    return execute_function(invocation, thread_limit)
+
+
+def execute_function(invocation, thread_limit=1):
+    (
+        function_id,
+        function_name,
+        function_sandbox,
+        function_stdout_filename,
+        event,
+        inline_event,
+    ) = invocation
     with threadpool_limits(limits=thread_limit):
         if exec_method == "direct":
-            library_sandbox = os.getcwd()
             try:
-                os.chdir(function_sandbox)
-
-                result = globals()[function_name](event)
-                if not inline_event:
-                    with open("outfile", "wb") as f:
-                        cloudpickle.dump(result, f)
-
-                try:
-                    if not result["Success"]:
-                        raise Exception(result["Reason"])
-                except Exception:
-                    raise
-
+                if inline_event:
+                    result = globals()[function_name](event)
+                else:
+                    with _sandbox_cwd_lock:
+                        library_sandbox = os.getcwd()
+                        try:
+                            os.chdir(function_sandbox)
+                            result = globals()[function_name](event)
+                            with open("outfile", "wb") as f:
+                                cloudpickle.dump(result, f)
+                        finally:
+                            os.chdir(library_sandbox)
+                if not result["Success"]:
+                    raise RuntimeError(result["Reason"])
             except Exception as e:
-                stdout_timed_message(f"Library code: Function call failed due to {e}")
-                sys.exit(1)
-            finally:
-                os.chdir(library_sandbox)
+                raise RuntimeError(
+                    f"Library code: Function call failed due to {e}"
+                ) from e
             return -1, function_id, result if inline_event else None
         elif exec_method == "fork":
             p = os.fork()
@@ -381,6 +408,19 @@ def main():
     # set execution mode of functions in this library
     global exec_method
     exec_method = library_info['exec_mode']
+    direct_results = queue.SimpleQueue()
+    direct_executor = (
+        concurrent.futures.ThreadPoolExecutor(
+            max_workers=args.function_slots,
+            thread_name_prefix="vine-function",
+        )
+        if exec_method == "direct"
+        else None
+    )
+
+    def direct_done(function_id, future):
+        direct_results.put((function_id, future))
+        os.write(w, b"a")
 
     # send configuration of library, just its name for now
     config = {
@@ -422,13 +462,15 @@ def main():
             # worker has a function, run it
             if re == in_pipe_fd:
                 if exec_method == 'direct':
-                    _, func_id, result = start_function(in_pipe_fd, thread_limit)
-                    send_result(
-                        out_pipe_fd,
-                        args.worker_pid,
-                        func_id,
-                        0,
-                        result,
+                    invocation = start_function(
+                        in_pipe_fd, thread_limit, read_only=True
+                    )
+                    func_id = invocation[0]
+                    future = direct_executor.submit(
+                        execute_function, invocation, thread_limit
+                    )
+                    future.add_done_callback(
+                        lambda done, fid=func_id: direct_done(fid, done)
                     )
                 else:
                     pid, func_id, _ = start_function(in_pipe_fd, thread_limit)
@@ -448,6 +490,31 @@ def main():
                 # note that there might still be bytes in `r` but it's ok as they will
                 # be discarded in the next iterations.
                 os.read(r, 1)
+                if exec_method == "direct":
+                    while not direct_results.empty():
+                        func_id, future = direct_results.get()
+                        try:
+                            _, returned_id, result = future.result()
+                            if returned_id != func_id:
+                                raise RuntimeError(
+                                    "function result TaskID mismatch"
+                                )
+                            send_result(
+                                out_pipe_fd,
+                                args.worker_pid,
+                                func_id,
+                                0,
+                                result,
+                            )
+                        except BaseException:
+                            stdout_timed_message(traceback.format_exc())
+                            send_result(
+                                out_pipe_fd,
+                                args.worker_pid,
+                                func_id,
+                                1,
+                            )
+                    continue
                 while len(pid_to_func_id) > 0:
                     c_pid, c_exit_status = os.waitpid(-1, os.WNOHANG)
                     if c_pid > 0:

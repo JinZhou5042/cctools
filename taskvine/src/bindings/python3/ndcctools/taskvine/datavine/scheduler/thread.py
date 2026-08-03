@@ -681,9 +681,7 @@ class TaskSchedulerThread:
                     )
                     self._run_context.edata_info[int(token)] = metadata
                 return metadata["size"]
-            else:
-                metadata = self.controller.idata_status(int(token))
-                return metadata["size"]
+            return 0
 
         cache_plan = build_cache_plan(
             task_by_id,
@@ -2185,6 +2183,8 @@ class TaskSchedulerThread:
                             "time_when_submitted",
                             "time_when_done",
                             "time_workers_execute_last",
+                            "time_workers_execute_last_start",
+                            "time_workers_execute_last_end",
                             "bytes_sent",
                             "bytes_received",
                         )

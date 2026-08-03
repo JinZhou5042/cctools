@@ -9,16 +9,19 @@ def identity(value):
     return value
 
 
+def total(*values):
+    return sum(values)
+
+
 def main():
     workflow = Workflow()
-    target = None
-    for value in range(64):
-        target = workflow.add_task(identity, value)
+    leaves = [workflow.add_task(identity, value) for value in range(64)]
+    target = workflow.add_task(total, *(leaf.output() for leaf in leaves))
     snapshot = run_case(
         "library-single-task",
         workflow,
         target.task_id,
-        63,
+        sum(range(64)),
         worker_count=1,
         worker_cores=4,
         prefetch=False,
@@ -26,11 +29,21 @@ def main():
         detailed_report=False,
     )
     report = snapshot["scheduler_report"]
-    assert report["logical_tasks"] == 64
-    assert report["physical_compute_submissions"] == 64
+    assert report["logical_tasks"] == 65
+    assert report["physical_compute_submissions"] == 65
     assert report["logical_tasks_per_physical_submission"] == 1
-    assert len(report["physical_task_metrics"]) == 64
+    assert len(report["physical_task_metrics"]) == 65
     assert report["worker_seconds"] > 0
+    events = []
+    for task in report["physical_task_metrics"]:
+        events.append((task["time_workers_execute_last_start"], 1))
+        events.append((task["time_workers_execute_last_end"], -1))
+    active = 0
+    high_water = 0
+    for _, delta in sorted(events, key=lambda event: (event[0], -event[1])):
+        active += delta
+        high_water = max(high_water, active)
+    assert high_water >= 2
     status_requests = report["scheduler_controller_requests"].get(
         "GET /v1/idata/{id}/status", {}
     ).get("count", 0)
