@@ -76,7 +76,7 @@ class PruningAuthority:
         return self.pruner.set_data_states(updates)
 
     def plan(self):
-        return self.pruner.assert_matches_reference()
+        return self.pruner.plan()
 
     def validate_revision(self, graph_revision, state_revision):
         if (

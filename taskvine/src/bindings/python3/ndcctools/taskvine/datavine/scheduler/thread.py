@@ -26,7 +26,7 @@ from .execution_state import (
     PublicationState,
 )
 from .persistence import PersistencePolicy
-from .readiness import build_cache_plan, plan_ready_batches, select_ready_tasks
+from .readiness import ReadyQueue, build_cache_plan, plan_ready_batches
 from .recovery import select_recovery_audit_data_ids
 from .registration import WorkflowRegistrar
 from .reporting import (
@@ -724,6 +724,9 @@ class TaskSchedulerThread:
         for task_id, parent_ids in dependencies.items():
             for parent_id in parent_ids:
                 dependents[parent_id].add(task_id)
+        ready_queue = ReadyQueue(
+            dependencies, dependents, execution.pending, execution.done
+        )
         def cache_size(data_key):
             kind, token = data_key.split(":", 1)
             if kind == "e":
@@ -1213,6 +1216,7 @@ class TaskSchedulerThread:
                     )
                 execution.pending.add(recovery["logical_id"])
                 persistence.suspended_recovery.pop(data_id)
+                ready_queue.rebuild(execution.pending, execution.done)
             recovery_wave = []
 
             def require_available(data_id):
@@ -1287,6 +1291,7 @@ class TaskSchedulerThread:
                         "recovery_depths": plan["recovery_depths"],
                     }
                 )
+                ready_queue.rebuild(execution.pending, execution.done)
 
             if (
                 pruning.active is not None
@@ -1644,13 +1649,15 @@ class TaskSchedulerThread:
                         return False
                 return True
 
-            ready = select_ready_tasks(
+            ready = ready_queue.take(
                 execution.pending,
-                dependencies,
-                execution.done,
-                task_cache_inputs,
-                self._cache_admission.prune_by_data,
-                persistence_frontier_ready,
+                lambda task_id: (
+                    persistence_frontier_ready(task_id)
+                    and not (
+                        task_cache_inputs[task_id]
+                        & self._cache_admission.prune_by_data
+                    )
+                ),
             )
             connected_library_slots = max(
                 1, len(self._active_worker_ids) * 4
@@ -1871,6 +1878,7 @@ class TaskSchedulerThread:
                     execution.running.pop(physical_id)
                     for logical_id in logical_ids:
                         execution.pending.add(logical_id)
+                        ready_queue.mark_pending(logical_id)
                         self.controller.set_task_state(
                             logical_id, "pending"
                         )
@@ -2359,6 +2367,7 @@ class TaskSchedulerThread:
                             logical_id, "pending"
                         )
                         execution.pending.add(logical_id)
+                        ready_queue.mark_pending(logical_id)
                         continue
                     outputs_by_task = {}
                     outputs = []
@@ -2425,6 +2434,7 @@ class TaskSchedulerThread:
                                 logical_id, "pending"
                             )
                             execution.pending.add(logical_id)
+                            ready_queue.mark_pending(logical_id)
                         continue
                     if not structured_batch.get("outputs_committed"):
                         committed = self.controller.commit_outputs(outputs)
@@ -2469,6 +2479,7 @@ class TaskSchedulerThread:
                         )
                         execution.deferred_completed_states.append(logical_id)
                         execution.done.add(logical_id)
+                        ready_queue.mark_done(logical_id, execution.pending)
                         if logical_id not in execution.completed_once:
                             execution.completed_once.add(logical_id)
                             for data_key in task_cache_inputs[logical_id]:
@@ -2486,6 +2497,7 @@ class TaskSchedulerThread:
                             logical_id, "pending"
                         )
                         execution.pending.add(logical_id)
+                        ready_queue.mark_pending(logical_id)
                     continue
                 logical_outputs = self._logical_outputs_from_batch(
                     completed.output, logical_ids
@@ -2545,6 +2557,7 @@ class TaskSchedulerThread:
                         logical_id, "pending"
                     )
                     execution.pending.add(logical_id)
+                    ready_queue.mark_pending(logical_id)
                     continue
                 expected_output_ids = self._run_context.logical_output_slots[
                     logical_id
@@ -2588,6 +2601,7 @@ class TaskSchedulerThread:
                         logical_id, "pending"
                     )
                     execution.pending.add(logical_id)
+                    ready_queue.mark_pending(logical_id)
                     continue
                 lost_inputs = []
                 for data_key in task_cache_inputs[logical_id]:
@@ -2604,6 +2618,7 @@ class TaskSchedulerThread:
                         logical_id, "pending"
                     )
                     execution.pending.add(logical_id)
+                    ready_queue.mark_pending(logical_id)
                     continue
                 self.controller.set_task_state(logical_id, "pending")
                 raise RuntimeError(
@@ -2687,6 +2702,7 @@ class TaskSchedulerThread:
             else:
                 self.controller.set_task_state(logical_id, "completed")
             execution.done.add(logical_id)
+            ready_queue.mark_done(logical_id, execution.pending)
             if logical_id not in execution.completed_once:
                 execution.completed_once.add(logical_id)
                 for data_key in task_cache_inputs[logical_id]:

@@ -1,4 +1,4 @@
-"""Recovery-aware shadow pruning with reference and incremental evaluators."""
+"""Recovery-frontier pruning with bounded incremental state."""
 
 import collections
 import dataclasses
@@ -19,9 +19,7 @@ class DataState:
 
     def validate(self):
         if self.persistence not in PERSISTENCE_STATES:
-            raise ValueError(
-                f"invalid persistence state {self.persistence!r}"
-            )
+            raise ValueError(f"invalid persistence state {self.persistence!r}")
         if self.durable and not self.available:
             raise ValueError("durable data must be available")
         return self
@@ -63,13 +61,8 @@ class PruningPlan:
             "protected": self.protected,
             "recovery_depths": self.recovery_depths,
             "records": tuple(
-                (
-                    record.data_id,
-                    record.decision,
-                    record.reasons,
-                    record.recovery_targets,
-                )
-                for record in self.records
+                (r.data_id, r.decision, r.reasons, r.recovery_targets)
+                for r in self.records
             ),
         }
 
@@ -78,10 +71,7 @@ class PruningPlan:
             "prunable": list(self.prunable),
             "cancel_persistence": list(self.cancel_persistence),
             "protected": list(self.protected),
-            "recovery_depths": {
-                str(data_id): depth
-                for data_id, depth in self.recovery_depths
-            },
+            "recovery_depths": dict(self.recovery_depths),
             "records": [record.to_dict() for record in self.records],
             "nodes_examined": self.nodes_examined,
         }
@@ -89,8 +79,6 @@ class PruningPlan:
 
 @dataclasses.dataclass(frozen=True)
 class PruningMutation:
-    """Bounded acknowledgement for an incremental pruning-state mutation."""
-
     graph_revision: int
     state_revision: int
     touched_records: int
@@ -101,7 +89,7 @@ class PruningMutation:
 
 
 class LineageGraph:
-    """Append-only logical producer/consumer graph for pruning proofs."""
+    """Append-only, topologically ordered producer graph."""
 
     def __init__(self):
         self.inputs_by_task = {}
@@ -120,31 +108,24 @@ class LineageGraph:
 
     def add_task(self, task_id, inputs, outputs):
         task_id = int(task_id)
-        inputs = tuple(dict.fromkeys(int(value) for value in inputs))
-        outputs = tuple(dict.fromkeys(int(value) for value in outputs))
+        inputs = tuple(dict.fromkeys(map(int, inputs)))
+        outputs = tuple(dict.fromkeys(map(int, outputs)))
         if task_id in self.inputs_by_task:
             raise ValueError(f"duplicate TaskID {task_id}")
         if not outputs:
             raise ValueError("a task must have at least one output")
         unknown = {
-            data_id
-            for data_id in inputs
+            data_id for data_id in inputs
             if data_id not in self.producer_by_data
         }
         if unknown:
-            raise KeyError(
-                f"TaskID {task_id} has unknown input IDataIDs "
-                f"{sorted(unknown)}"
-            )
+            raise KeyError(f"TaskID {task_id} has unknown input IDataIDs {sorted(unknown)}")
         duplicate = {
-            data_id
-            for data_id in outputs
+            data_id for data_id in outputs
             if data_id in self.producer_by_data
         }
         if duplicate:
-            raise ValueError(
-                f"duplicate output IDataIDs {sorted(duplicate)}"
-            )
+            raise ValueError(f"duplicate output IDataIDs {sorted(duplicate)}")
         self.inputs_by_task[task_id] = inputs
         self.outputs_by_task[task_id] = outputs
         for data_id in inputs:
@@ -155,86 +136,27 @@ class LineageGraph:
         self.revision += 1
 
     def producer_inputs(self, data_id):
-        producer = self.producer_by_data[int(data_id)]
-        return self.inputs_by_task[producer]
+        return self.inputs_by_task[self.producer_by_data[int(data_id)]]
 
     def validate(self):
-        seen_tasks = set()
-        seen_data = set()
+        seen = set()
         for task_id in self.task_ids:
-            inputs = self.inputs_by_task[task_id]
-            if not set(inputs) <= seen_data:
+            if not set(self.inputs_by_task[task_id]) <= seen:
                 raise ValueError("lineage graph is not topologically ordered")
-            outputs = self.outputs_by_task[task_id]
-            if seen_data & set(outputs):
+            outputs = set(self.outputs_by_task[task_id])
+            if outputs & seen:
                 raise ValueError("IDataID has multiple producers")
-            seen_tasks.add(task_id)
-            seen_data.update(outputs)
-        if seen_tasks != set(self.outputs_by_task):
-            raise ValueError("task index mismatch")
-        if seen_data != set(self.producer_by_data):
+            seen.update(outputs)
+        if seen != set(self.producer_by_data):
             raise ValueError("data index mismatch")
         return True
 
 
-def _active_obligations(graph, task_states, data_states):
-    obligations = {}
-    direct_sources = {data_id: set() for data_id in graph.data_ids}
-    for task_id in graph.task_ids:
-        if task_states[task_id] not in ACTIVE_TASK_STATES:
-            continue
-        for data_id in graph.inputs_by_task[task_id]:
-            key = ("task", task_id, data_id)
-            obligations[key] = data_id
-            direct_sources[data_id].add(f"active-consumer:T{task_id}")
-    for data_id in graph.data_ids:
-        state = data_states[data_id]
-        if state.required_output:
-            key = ("output", data_id, data_id)
-            obligations[key] = data_id
-            direct_sources[data_id].add("required-output")
-    return obligations, direct_sources
-
-
-def _recovery_walk(graph, data_states, target_data_id):
-    anchors = set()
-    visited = set()
-    depths = {}
-
-    def visit(data_id):
-        if data_id in depths:
-            return depths[data_id]
-        visited.add(data_id)
-        state = data_states[data_id]
-        if state.available and state.durable:
-            anchors.add(data_id)
-            depth = 0
-        else:
-            parents = graph.producer_inputs(data_id)
-            depth = 1 + max(
-                (visit(parent_id) for parent_id in parents),
-                default=0,
-            )
-        depths[data_id] = depth
-        return depth
-
-    depth = visit(target_data_id)
-    return anchors, visited, depth
-
-
-def _make_record(
-    graph,
-    state_revision,
-    data_id,
-    state,
-    direct_sources,
-    recovery_sources,
-):
-    reasons = set(direct_sources.get(data_id, ()))
-    targets = tuple(sorted(recovery_sources.get(data_id, ())))
+def _record(graph, revision, data_id, state, direct, anchor_refs):
+    reasons = set(direct.get(data_id, ()))
     if state.pinned:
         reasons.add("pinned")
-    if targets:
+    if anchor_refs.get(data_id, 0):
         reasons.add("recovery-anchor")
     if state.persistence == "writing":
         reasons.add("persistence-writing")
@@ -250,206 +172,102 @@ def _make_record(
         reasons.add("obsolete-persistence")
     else:
         decision = "prune"
-        reasons.update(
-            ("lineage-reproducible", "no-live-consumer")
-        )
+        reasons.update(("lineage-reproducible", "no-live-consumer"))
     return PruningRecord(
-        data_id=data_id,
-        decision=decision,
-        reasons=tuple(sorted(reasons)),
-        recovery_targets=targets,
-        graph_revision=graph.revision,
-        state_revision=state_revision,
+        data_id,
+        decision,
+        tuple(sorted(reasons)),
+        (),
+        graph.revision,
+        revision,
     )
 
 
-def reference_pruning_plan(graph, task_states, data_states, state_revision=0):
-    """Full-scan oracle used to validate the incremental implementation."""
-
-    graph.validate()
-    obligations, direct_sources = _active_obligations(
-        graph, task_states, data_states
-    )
-    recovery_sources = {data_id: set() for data_id in graph.data_ids}
-    recovery_depths = {}
-    nodes_examined = 0
-    for target_data_id in obligations.values():
-        anchors, visited, depth = _recovery_walk(
-            graph, data_states, target_data_id
-        )
-        recovery_depths[target_data_id] = depth
-        nodes_examined += len(visited)
-        for anchor_id in anchors:
-            recovery_sources[anchor_id].add(target_data_id)
-    records = tuple(
-        _make_record(
-            graph,
-            state_revision,
-            data_id,
-            data_states[data_id],
-            direct_sources,
-            recovery_sources,
-        )
-        for data_id in graph.data_ids
-    )
-    return _plan_from_records(
-        records, nodes_examined, recovery_depths.items()
-    )
-
-
-def _plan_from_records(records, nodes_examined, recovery_depths=()):
+def _plan(records, examined, depths=()):
+    records = tuple(records)
     return PruningPlan(
-        prunable=tuple(
-            record.data_id
-            for record in records
-            if record.decision == "prune"
-        ),
-        cancel_persistence=tuple(
-            record.data_id
-            for record in records
-            if record.decision == "cancel-persistence"
-        ),
-        protected=tuple(
-            record.data_id
-            for record in records
-            if record.decision == "keep"
-        ),
-        recovery_depths=tuple(sorted(recovery_depths)),
-        records=tuple(records),
-        nodes_examined=nodes_examined,
+        tuple(r.data_id for r in records if r.decision == "prune"),
+        tuple(r.data_id for r in records if r.decision == "cancel-persistence"),
+        tuple(r.data_id for r in records if r.decision == "keep"),
+        tuple(sorted(depths)),
+        records,
+        examined,
     )
 
 
 class IncrementalPruner:
-    """Event-indexed shadow evaluator with oracle-comparable decisions."""
+    """Maintain the durable recovery boundary by reference propagation.
+
+    Each live consumer contributes demand to its inputs. Demand propagates
+    backward only while a datum is not durable. A zero-to-one or one-to-zero
+    transition is the only event that traverses another edge, so ordinary DAG
+    execution is linear in graph size and uses no per-target ancestor sets.
+    """
 
     def __init__(self, graph):
         graph.validate()
         self.graph = graph
-        self.task_states = {
-            task_id: "pending" for task_id in graph.task_ids
-        }
-        self.data_states = {
-            data_id: DataState() for data_id in graph.data_ids
-        }
+        self.task_states = {task_id: "pending" for task_id in graph.task_ids}
+        self.data_states = {data_id: DataState() for data_id in graph.data_ids}
         self.state_revision = 0
         self._obligations = {}
-        self._target_refcounts = collections.Counter()
-        self._target_anchors = {}
-        self._target_visited = {}
-        self._target_depths = {}
-        self._ancestor_targets = {
-            data_id: set() for data_id in graph.data_ids
-        }
-        self._direct_sources = {
-            data_id: set() for data_id in graph.data_ids
-        }
-        self._recovery_sources = {
-            data_id: collections.Counter() for data_id in graph.data_ids
-        }
+        self._direct = {data_id: set() for data_id in graph.data_ids}
+        self._demand = collections.Counter()
+        self._anchor_refs = collections.Counter()
         self._records = {}
-        self._last_nodes_examined = 0
-        self._begin_event()
+        self._last_examined = 0
+        touched = set()
         for task_id in graph.task_ids:
-            self._add_task_obligations(task_id)
-        self._end_event()
+            touched.update(self._add_task_obligations(task_id))
         self._refresh(graph.data_ids)
+        self._last_examined = len(touched)
 
-    def _begin_event(self):
-        self._event_memo = {}
-        self._event_examined = set()
-
-    def _end_event(self):
-        self._last_nodes_examined = len(self._event_examined)
-
-    def _calculate(self, target_data_id):
-        def visit(data_id):
-            if data_id in self._event_memo:
-                return self._event_memo[data_id]
-            self._event_examined.add(data_id)
-            state = self.data_states[data_id]
-            if state.available and state.durable:
-                result = ({data_id}, {data_id}, 0)
+    def _propagate(self, data_id, delta):
+        touched = set()
+        stack = [(int(data_id), int(delta))]
+        while stack:
+            current, change = stack.pop()
+            old = self._demand[current]
+            new = old + change
+            if new < 0:
+                raise RuntimeError(f"negative recovery demand for IDataID {current}")
+            if new:
+                self._demand[current] = new
             else:
-                anchors = set()
-                visited = {data_id}
-                parent_depths = []
-                for parent_id in self.graph.producer_inputs(data_id):
-                    (
-                        parent_anchors,
-                        parent_visited,
-                        parent_depth,
-                    ) = visit(parent_id)
-                    anchors.update(parent_anchors)
-                    visited.update(parent_visited)
-                    parent_depths.append(parent_depth)
-                result = (
-                    anchors,
-                    visited,
-                    1 + max(parent_depths, default=0),
-                )
-            self._event_memo[data_id] = result
-            return result
-
-        anchors, visited, depth = visit(target_data_id)
-        return set(anchors), set(visited), depth
-
-    def _add_target(self, data_id):
-        anchors, visited, depth = self._calculate(data_id)
-        self._target_anchors[data_id] = anchors
-        self._target_visited[data_id] = visited
-        self._target_depths[data_id] = depth
-        for visited_id in visited:
-            self._ancestor_targets[visited_id].add(data_id)
-        for anchor_id in anchors:
-            self._recovery_sources[anchor_id][data_id] += 1
-        return {data_id, *anchors}
-
-    def _remove_target(self, data_id):
-        anchors = self._target_anchors.pop(data_id)
-        visited = self._target_visited.pop(data_id)
-        self._target_depths.pop(data_id)
-        for visited_id in visited:
-            self._ancestor_targets[visited_id].discard(data_id)
-        for anchor_id in anchors:
-            del self._recovery_sources[anchor_id][data_id]
-        return {data_id, *anchors}
-
-    def _recalculate_target(self, data_id):
-        touched = self._remove_target(data_id)
-        touched.update(self._add_target(data_id))
+                self._demand.pop(current, None)
+            touched.add(current)
+            if old == 0 and new > 0:
+                if self.data_states[current].durable:
+                    self._anchor_refs[current] = 1
+                else:
+                    stack.extend((parent, 1) for parent in self.graph.producer_inputs(current))
+            elif old > 0 and new == 0:
+                if self.data_states[current].durable:
+                    self._anchor_refs.pop(current, None)
+                else:
+                    stack.extend((parent, -1) for parent in self.graph.producer_inputs(current))
         return touched
 
-    def _add_obligation(self, key, data_id, direct_reason):
+    def _add_obligation(self, key, data_id, reason):
         if key in self._obligations:
             return set()
         self._obligations[key] = data_id
-        self._direct_sources[data_id].add(direct_reason)
-        self._target_refcounts[data_id] += 1
-        if self._target_refcounts[data_id] == 1:
-            return self._add_target(data_id)
-        return {data_id}
+        self._direct[data_id].add(reason)
+        return self._propagate(data_id, 1)
 
-    def _remove_obligation(self, key, direct_reason):
+    def _remove_obligation(self, key, reason):
         data_id = self._obligations.pop(key)
-        self._direct_sources[data_id].discard(direct_reason)
-        self._target_refcounts[data_id] -= 1
-        if self._target_refcounts[data_id] == 0:
-            del self._target_refcounts[data_id]
-            return self._remove_target(data_id)
-        return {data_id}
+        self._direct[data_id].discard(reason)
+        return self._propagate(data_id, -1)
 
     def _add_task_obligations(self, task_id):
         touched = set()
-        if self.task_states[task_id] not in ACTIVE_TASK_STATES:
-            return touched
-        for data_id in self.graph.inputs_by_task[task_id]:
-            key = ("task", task_id, data_id)
-            touched.update(
-                self._add_obligation(
-                    key, data_id, f"active-consumer:T{task_id}"
-                )
-            )
+        if self.task_states[task_id] in ACTIVE_TASK_STATES:
+            for data_id in self.graph.inputs_by_task[task_id]:
+                touched.update(self._add_obligation(
+                    ("task", task_id, data_id), data_id,
+                    f"active-consumer:T{task_id}",
+                ))
         return touched
 
     def _remove_task_obligations(self, task_id):
@@ -457,254 +275,134 @@ class IncrementalPruner:
         for data_id in self.graph.inputs_by_task[task_id]:
             key = ("task", task_id, data_id)
             if key in self._obligations:
-                touched.update(
-                    self._remove_obligation(
-                        key, f"active-consumer:T{task_id}"
-                    )
-                )
+                touched.update(self._remove_obligation(key, f"active-consumer:T{task_id}"))
         return touched
 
     def _refresh(self, data_ids):
         for data_id in data_ids:
-            self._records[data_id] = _make_record(
-                self.graph,
-                self.state_revision,
-                data_id,
-                self.data_states[data_id],
-                self._direct_sources,
-                self._recovery_sources,
+            self._records[data_id] = _record(
+                self.graph, self.state_revision, data_id,
+                self.data_states[data_id], self._direct, self._anchor_refs,
             )
+
+    def _mutation(self, touched, changed=True):
+        self._last_examined = len(touched)
+        if changed:
+            self.state_revision += 1
+            self._refresh(touched)
+        return PruningMutation(
+            self.graph.revision, self.state_revision, len(touched), changed
+        )
+
+    @staticmethod
+    def _check_transition(old, new):
+        allowed = {
+            "pending": {"running", "completed", "cancelled"},
+            "running": {"pending", "completed", "cancelled"},
+            "completed": {"pending"},
+            "cancelled": set(),
+        }
+        if new not in TASK_STATES:
+            raise ValueError(f"invalid task state {new!r}")
+        if old != new and new not in allowed[old]:
+            raise ValueError(f"invalid task transition {old}->{new}")
 
     def set_task_state(self, task_id, state):
         task_id = int(task_id)
-        if state not in TASK_STATES:
-            raise ValueError(f"invalid task state {state!r}")
         old = self.task_states[task_id]
+        self._check_transition(old, state)
         if old == state:
-            return PruningMutation(
-                self.graph.revision, self.state_revision, 0, False
-            )
-        allowed = {
-            "pending": {"running", "completed", "cancelled"},
-            "running": {"pending", "completed", "cancelled"},
-            "completed": {"pending"},
-            "cancelled": set(),
-        }
-        if state not in allowed[old]:
-            raise ValueError(f"invalid task transition {old}->{state}")
-        self._begin_event()
-        touched = set()
-        if old in ACTIVE_TASK_STATES:
-            touched.update(self._remove_task_obligations(task_id))
+            return self._mutation(set(), False)
+        touched = self._remove_task_obligations(task_id)
         self.task_states[task_id] = state
-        if state in ACTIVE_TASK_STATES:
-            touched.update(self._add_task_obligations(task_id))
-        self._end_event()
-        self.state_revision += 1
-        self._refresh(touched)
-        return PruningMutation(
-            self.graph.revision,
-            self.state_revision,
-            len(touched),
-            True,
-        )
-
-    def add_tasks(self, tasks):
-        tasks = tuple(tasks)
-        if not tasks:
-            return PruningMutation(
-                self.graph.revision, self.state_revision, 0, False
-            )
-        self._begin_event()
-        touched = set()
-        for task_id, inputs, outputs in tasks:
-            outputs = tuple(outputs)
-            self.graph.add_task(task_id, inputs, outputs)
-            self.task_states[int(task_id)] = "pending"
-            for data_id in outputs:
-                data_id = int(data_id)
-                self.data_states[data_id] = DataState()
-                self._ancestor_targets[data_id] = set()
-                self._direct_sources[data_id] = set()
-                self._recovery_sources[data_id] = collections.Counter()
-            touched.update(int(value) for value in outputs)
-            touched.update(self._add_task_obligations(int(task_id)))
-        self._end_event()
-        self.state_revision += 1
-        self._refresh(touched)
-        return PruningMutation(
-            self.graph.revision,
-            self.state_revision,
-            len(touched),
-            True,
-        )
+        touched.update(self._add_task_obligations(task_id))
+        return self._mutation(touched)
 
     def set_task_states(self, task_ids, state):
-        task_ids = tuple(dict.fromkeys(int(value) for value in task_ids))
-        if state not in TASK_STATES:
-            raise ValueError(f"invalid task state {state!r}")
-        allowed = {
-            "pending": {"running", "completed", "cancelled"},
-            "running": {"pending", "completed", "cancelled"},
-            "completed": {"pending"},
-            "cancelled": set(),
-        }
+        task_ids = tuple(dict.fromkeys(map(int, task_ids)))
         changed = []
         for task_id in task_ids:
             old = self.task_states[task_id]
-            if old == state:
-                continue
-            if state not in allowed[old]:
-                raise ValueError(f"invalid task transition {old}->{state}")
-            changed.append(task_id)
+            self._check_transition(old, state)
+            if old != state:
+                changed.append(task_id)
         if not changed:
-            mutation = PruningMutation(
-                self.graph.revision, self.state_revision, 0, False
-            )
+            mutation = self._mutation(set(), False)
             return tuple(mutation for _ in task_ids)
-        self._begin_event()
         touched = set()
         for task_id in changed:
-            old = self.task_states[task_id]
-            if old in ACTIVE_TASK_STATES:
-                touched.update(self._remove_task_obligations(task_id))
+            touched.update(self._remove_task_obligations(task_id))
             self.task_states[task_id] = state
-            if state in ACTIVE_TASK_STATES:
-                touched.update(self._add_task_obligations(task_id))
-        self._end_event()
-        self.state_revision += 1
-        self._refresh(touched)
-        mutation = PruningMutation(
-            self.graph.revision,
-            self.state_revision,
-            len(touched),
-            True,
-        )
-        unchanged = PruningMutation(
-            self.graph.revision,
-            self.state_revision,
-            0,
-            False,
-        )
+            touched.update(self._add_task_obligations(task_id))
+        mutation = self._mutation(touched)
+        unchanged = PruningMutation(self.graph.revision, self.state_revision, 0, False)
         changed = set(changed)
-        return tuple(
-            mutation if task_id in changed else unchanged
-            for task_id in task_ids
-        )
+        return tuple(mutation if task_id in changed else unchanged for task_id in task_ids)
 
-    def set_data_state(self, data_id, **changes):
-        data_id = int(data_id)
+    def _set_data(self, data_id, new):
         old = self.data_states[data_id]
-        new = dataclasses.replace(old, **changes).validate()
-        if old == new:
-            return PruningMutation(
-                self.graph.revision, self.state_revision, 0, False
-            )
-        self._begin_event()
-        affected = set(self._ancestor_targets[data_id])
-        self.data_states[data_id] = new
         touched = {data_id}
-        for target_id in tuple(affected):
-            touched.update(self._recalculate_target(target_id))
+        demanded = self._demand[data_id] > 0
+        if demanded and old.durable != new.durable:
+            if new.durable:
+                for parent in self.graph.producer_inputs(data_id):
+                    touched.update(self._propagate(parent, -1))
+                self._anchor_refs[data_id] = 1
+            else:
+                self._anchor_refs.pop(data_id, None)
+                for parent in self.graph.producer_inputs(data_id):
+                    touched.update(self._propagate(parent, 1))
+        self.data_states[data_id] = new
         if old.required_output != new.required_output:
             key = ("output", data_id, data_id)
             if new.required_output:
-                touched.update(
-                    self._add_obligation(
-                        key, data_id, "required-output"
-                    )
-                )
+                touched.update(self._add_obligation(key, data_id, "required-output"))
             else:
-                touched.update(
-                    self._remove_obligation(key, "required-output")
-                )
-        self._end_event()
-        self.state_revision += 1
-        self._refresh(touched)
-        return PruningMutation(
-            self.graph.revision,
-            self.state_revision,
-            len(touched),
-            True,
-        )
+                touched.update(self._remove_obligation(key, "required-output"))
+        return touched
+
+    def set_data_state(self, data_id, **changes):
+        data_id = int(data_id)
+        new = dataclasses.replace(self.data_states[data_id], **changes).validate()
+        if new == self.data_states[data_id]:
+            return self._mutation(set(), False)
+        return self._mutation(self._set_data(data_id, new))
 
     def set_data_states(self, updates):
         normalized = {}
         for data_id, changes in updates:
             data_id = int(data_id)
-            changes = dict(changes)
-            old = self.data_states[data_id]
-            new = dataclasses.replace(old, **changes).validate()
-            previous = normalized.get(data_id)
-            if previous is not None and previous != new:
-                raise ValueError(
-                    f"conflicting data state updates for {data_id}"
-                )
+            new = dataclasses.replace(self.data_states[data_id], **dict(changes)).validate()
+            if data_id in normalized and normalized[data_id] != new:
+                raise ValueError(f"conflicting data state updates for {data_id}")
             normalized[data_id] = new
-        changed = {
-            data_id: (self.data_states[data_id], new)
-            for data_id, new in normalized.items()
-            if self.data_states[data_id] != new
-        }
+        changed = {k: v for k, v in normalized.items() if self.data_states[k] != v}
         if not changed:
-            return PruningMutation(
-                self.graph.revision, self.state_revision, 0, False
-            )
-
-        self._begin_event()
-        affected_targets = set()
-        touched = set(changed)
-        for data_id, (_, new) in changed.items():
-            affected_targets.update(self._ancestor_targets[data_id])
-            self.data_states[data_id] = new
-        for target_id in tuple(affected_targets):
-            touched.update(self._recalculate_target(target_id))
-        for data_id, (old, new) in changed.items():
-            if old.required_output == new.required_output:
-                continue
-            key = ("output", data_id, data_id)
-            if new.required_output:
-                touched.update(
-                    self._add_obligation(
-                        key, data_id, "required-output"
-                    )
-                )
-            else:
-                touched.update(
-                    self._remove_obligation(key, "required-output")
-                )
-        self._end_event()
-        self.state_revision += 1
-        self._refresh(touched)
-        return PruningMutation(
-            self.graph.revision,
-            self.state_revision,
-            len(touched),
-            True,
-        )
+            return self._mutation(set(), False)
+        touched = set()
+        for data_id, new in changed.items():
+            touched.update(self._set_data(data_id, new))
+        return self._mutation(touched)
 
     def add_task(self, task_id, inputs, outputs):
-        self._begin_event()
-        outputs = tuple(outputs)
-        self.graph.add_task(task_id, inputs, outputs)
-        self.task_states[int(task_id)] = "pending"
-        for data_id in outputs:
-            data_id = int(data_id)
-            self.data_states[data_id] = DataState()
-            self._ancestor_targets[data_id] = set()
-            self._direct_sources[data_id] = set()
-            self._recovery_sources[data_id] = collections.Counter()
-        self.state_revision += 1
-        touched = set(int(value) for value in outputs)
-        touched.update(self._add_task_obligations(int(task_id)))
-        self._end_event()
-        self._refresh(touched)
-        return PruningMutation(
-            self.graph.revision,
-            self.state_revision,
-            len(touched),
-            True,
-        )
+        return self.add_tasks(((task_id, inputs, outputs),))
+
+    def add_tasks(self, tasks):
+        tasks = tuple(tasks)
+        if not tasks:
+            return self._mutation(set(), False)
+        touched = set()
+        for task_id, inputs, outputs in tasks:
+            outputs = tuple(outputs)
+            self.graph.add_task(task_id, inputs, outputs)
+            task_id = int(task_id)
+            self.task_states[task_id] = "pending"
+            for data_id in map(int, outputs):
+                self.data_states[data_id] = DataState()
+                self._direct[data_id] = set()
+                touched.add(data_id)
+            touched.update(self._add_task_obligations(task_id))
+        return self._mutation(touched)
 
     def plan(self):
         records = tuple(
@@ -715,27 +413,39 @@ class IncrementalPruner:
             )
             for data_id in self.graph.data_ids
         )
-        return _plan_from_records(
-            records,
-            self._last_nodes_examined,
-            self._target_depths.items(),
-        )
+        return _plan(records, self._last_examined)
 
-    def reference_plan(self):
-        return reference_pruning_plan(
-            self.graph,
-            self.task_states,
-            self.data_states,
-            self.state_revision,
-        )
 
-    def assert_matches_reference(self):
-        incremental = self.plan()
-        reference = self.reference_plan()
-        if incremental.semantic() != reference.semantic():
-            raise AssertionError(
-                "incremental pruning differs from reference: "
-                f"incremental={incremental.semantic()} "
-                f"reference={reference.semantic()}"
-            )
-        return incremental
+def reference_pruning_plan(graph, task_states, data_states, state_revision=0):
+    """Independent iterative oracle for tests, never used by production."""
+
+    graph.validate()
+    direct = {data_id: set() for data_id in graph.data_ids}
+    demanded = set()
+    anchors = collections.Counter()
+    stack = []
+    for task_id in graph.task_ids:
+        if task_states[task_id] in ACTIVE_TASK_STATES:
+            for data_id in graph.inputs_by_task[task_id]:
+                direct[data_id].add(f"active-consumer:T{task_id}")
+                stack.append(data_id)
+    for data_id in graph.data_ids:
+        if data_states[data_id].required_output:
+            direct[data_id].add("required-output")
+            stack.append(data_id)
+    examined = 0
+    while stack:
+        data_id = stack.pop()
+        if data_id in demanded:
+            continue
+        demanded.add(data_id)
+        examined += 1
+        if data_states[data_id].durable:
+            anchors[data_id] = 1
+        else:
+            stack.extend(graph.producer_inputs(data_id))
+    records = (
+        _record(graph, state_revision, data_id, data_states[data_id], direct, anchors)
+        for data_id in graph.data_ids
+    )
+    return _plan(records, examined)

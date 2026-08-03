@@ -1,5 +1,6 @@
-"""Pure logical-task readiness and physical-batch planning."""
+"""Event-driven logical-task readiness and physical-batch planning."""
 
+import heapq
 from dataclasses import dataclass
 
 
@@ -110,25 +111,63 @@ def build_cache_plan(
     )
 
 
-def select_ready_tasks(
-    pending,
-    dependencies,
-    done,
-    task_cache_inputs,
-    pruning_data_keys,
-    persistence_ready,
-):
-    """Return deterministic logical TaskIDs that may be submitted now."""
+class ReadyQueue:
+    """Dependency-counter ready queue with O(V+E) workflow progression."""
 
-    return tuple(
-        sorted(
-            task_id
-            for task_id in pending
-            if dependencies[task_id] <= done
-            and persistence_ready(task_id)
-            and not (task_cache_inputs[task_id] & pruning_data_keys)
-        )
-    )
+    def __init__(self, dependencies, dependents, pending, done=()):
+        self.dependencies = dependencies
+        self.dependents = dependents
+        self._remaining = {}
+        self._heap = []
+        self._queued = set()
+        self.rebuild(pending, done)
+
+    def rebuild(self, pending, done):
+        """Rebuild after the rare multi-task recovery rollback."""
+
+        done = set(done)
+        self._remaining = {
+            task_id: len(parent_ids - done)
+            for task_id, parent_ids in self.dependencies.items()
+        }
+        self._heap.clear()
+        self._queued.clear()
+        for task_id in pending:
+            self.mark_pending(task_id)
+
+    def mark_pending(self, task_id):
+        if self._remaining[task_id] or task_id in self._queued:
+            return
+        heapq.heappush(self._heap, task_id)
+        self._queued.add(task_id)
+
+    def mark_done(self, task_id, pending):
+        for child_id in self.dependents[task_id]:
+            remaining = self._remaining[child_id]
+            if remaining <= 0:
+                continue
+            remaining -= 1
+            self._remaining[child_id] = remaining
+            if remaining == 0 and child_id in pending:
+                self.mark_pending(child_id)
+
+    def take(self, pending, eligible):
+        """Take currently eligible tasks while retaining temporary blocks."""
+
+        ready = []
+        blocked = []
+        while self._heap:
+            task_id = heapq.heappop(self._heap)
+            self._queued.discard(task_id)
+            if task_id not in pending or self._remaining[task_id]:
+                continue
+            if eligible(task_id):
+                ready.append(task_id)
+            else:
+                blocked.append(task_id)
+        for task_id in blocked:
+            self.mark_pending(task_id)
+        return tuple(ready)
 
 
 def plan_ready_batches(

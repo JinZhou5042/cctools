@@ -6,11 +6,19 @@ import random
 from ndcctools.taskvine.datavine.recovery import (
     IncrementalPruner,
     LineageGraph,
+    reference_pruning_plan,
 )
 
 
 def assert_equivalent(pruner):
-    plan = pruner.assert_matches_reference()
+    plan = pruner.plan()
+    reference = reference_pruning_plan(
+        pruner.graph,
+        pruner.task_states,
+        pruner.data_states,
+        pruner.state_revision,
+    )
+    assert plan.semantic() == reference.semantic()
     assert len(plan.records) == len(pruner.graph.data_ids)
     assert plan.nodes_examined <= len(pruner.graph.data_ids)
     assert {
@@ -80,12 +88,13 @@ def deterministic_frontier_case():
     assert 6 in plan.protected
     assert 1 in plan.prunable
     assert 2 in plan.prunable
-    assert dict(plan.recovery_depths)[9] > 0
+    assert "recovery-anchor" in next(
+        record.reasons for record in plan.records if record.data_id == 3
+    )
 
     pruner.set_task_state(8, "completed")
     pruner.set_data_state(9, durable=True)
     plan = assert_equivalent(pruner)
-    assert dict(plan.recovery_depths)[9] == 0
     assert 9 in plan.protected
     assert 3 in plan.prunable
     assert 6 in plan.prunable

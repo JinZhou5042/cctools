@@ -3,9 +3,9 @@
 from types import SimpleNamespace
 
 from ndcctools.taskvine.datavine.scheduler.readiness import (
+    ReadyQueue,
     build_cache_plan,
     plan_ready_batches,
-    select_ready_tasks,
 )
 
 
@@ -79,15 +79,20 @@ def main():
         4: {"pruning"},
         5: {"five"},
     }
-    ready = select_ready_tasks(
-        {5, 4, 3, 2, 1},
-        dependencies,
-        {1},
-        cache_inputs,
-        {"pruning"},
-        lambda task_id: task_id != 5,
+    dependents = {task_id: set() for task_id in dependencies}
+    for task_id, parent_ids in dependencies.items():
+        for parent_id in parent_ids:
+            dependents[parent_id].add(task_id)
+    pending = {2, 3, 4, 5}
+    ready_queue = ReadyQueue(dependencies, dependents, pending, {1})
+    ready = ready_queue.take(
+        pending,
+        lambda task_id: (
+            not (cache_inputs[task_id] & {"pruning"})
+            and task_id != 5
+        ),
     )
-    assert ready == (1, 2, 3)
+    assert ready == (2, 3)
 
     sizes = {
         "shared": 8,
@@ -103,7 +108,7 @@ def main():
         maximum_batch_size=8,
         connected_slots=1,
         input_byte_limit=18,
-    ) == ((1, 2, 3),)
+    ) == ((2, 3),)
     assert plan_ready_batches(
         ready,
         {2},
@@ -112,7 +117,7 @@ def main():
         maximum_batch_size=8,
         connected_slots=1,
         input_byte_limit=18,
-    ) == ((1,), (2,), (3,))
+    ) == ((2,), (3,))
     assert plan_ready_batches(
         ready,
         set(),
@@ -121,7 +126,7 @@ def main():
         maximum_batch_size=8,
         connected_slots=2,
         input_byte_limit=12,
-    ) == ((1,), (2,), (3,))
+    ) == ((2,), (3,))
     assert plan_ready_batches(
         (), set(), cache_inputs, sizes, 1, 1
     ) == ()
