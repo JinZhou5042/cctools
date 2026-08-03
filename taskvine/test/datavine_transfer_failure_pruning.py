@@ -129,8 +129,8 @@ def main():
     assert worker_prune["tracker_released"]
     assert replicas["active_leases"] == 0, replicas
     assert (
-        replicas["observed_transfer_acquires"]
-        == replicas["observed_transfer_releases"]
+        replicas["peer_transfer_acquires"]
+        == replicas["peer_transfer_releases"]
     ), replicas
     assert snapshot["durable_hashes_valid"], snapshot
     assert snapshot["persistence_temporary_files"] == [], snapshot

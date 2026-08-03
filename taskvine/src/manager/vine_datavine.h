@@ -10,8 +10,9 @@ See the file COPYING for details.
 struct vine_manager;
 
 int vine_datavine_configure(struct vine_manager *q, const char *endpoint, const char *token);
-int vine_datavine_acquire_transfer(struct vine_manager *q, const char *data_id, const char *source_worker_id,
-		const char *destination_worker_id, const char *transfer_id);
+int vine_datavine_resolve_transfer(struct vine_manager *q, const char *data_id,
+		const char *destination_worker_id, const char *excluded_worker_id,
+		const char *transfer_id, char **source_worker_id);
 int vine_datavine_release_transfer(struct vine_manager *q, const char *transfer_id, int success);
 
 #endif

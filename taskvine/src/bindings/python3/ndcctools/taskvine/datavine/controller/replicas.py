@@ -125,10 +125,12 @@ class ReplicaDirectory:
         self._stale_rejections = 0
         self._lease_high_water = 0
         self._replica_high_water = 0
-        self._observed_transfer_acquires = 0
-        self._observed_transfer_idempotent = 0
-        self._observed_transfer_releases = 0
-        self._observed_transfer_failures = 0
+        self._peer_transfer_acquires = 0
+        self._peer_transfer_idempotent = 0
+        self._peer_transfer_releases = 0
+        self._peer_transfer_failures = 0
+        self._source_selection_requests = 0
+        self._source_selection_misses = 0
         self._worker_loss_lease_expirations = 0
 
     @property
@@ -515,6 +517,95 @@ class ReplicaDirectory:
                 )
             )
 
+    def _select_worker_source(
+        self, data_id, destination_worker_id, excluded_worker_ids=()
+    ):
+        data_id = self._normalize_data_id(data_id)
+        destination_worker_id = str(destination_worker_id)
+        excluded = {
+            str(worker_id) for worker_id in excluded_worker_ids
+        }
+        with self._lock:
+            self._source_selection_requests += 1
+            destination = self._workers.get(destination_worker_id)
+            if destination is None or not destination.active:
+                self._source_selection_misses += 1
+                self._reject_stale(
+                    "destination worker is unavailable"
+                )
+            latest_attempt = self._latest_attempt.get(data_id, 0)
+            candidates = []
+            for key in self._replica_keys_by_data.get(data_id, ()):
+                record = self._replicas[key]
+                worker = self._workers.get(record.worker_id)
+                if (
+                    record.state != "available"
+                    or record.attempt != latest_attempt
+                    or record.tier not in WORKER_TIERS
+                    or record.worker_id == destination_worker_id
+                    or record.worker_id in excluded
+                    or worker is None
+                    or not worker.active
+                    or worker.epoch != record.worker_epoch
+                ):
+                    continue
+                candidates.append(record)
+            if not candidates:
+                self._source_selection_misses += 1
+                raise KeyError("no available worker source")
+            return min(
+                candidates,
+                key=lambda record: (
+                    record.active_leases,
+                    TIER_COST[record.tier],
+                    record.replica_id,
+                ),
+            )
+
+    def resolve_worker_source(
+        self,
+        data_id,
+        destination_worker_id,
+        transfer_id,
+        excluded_worker_ids=(),
+    ):
+        transfer_id = str(transfer_id)
+        if (
+            TRANSFER_ID_PATTERN.fullmatch(transfer_id) is None
+            or not transfer_id.startswith("taskvine:")
+        ):
+            raise ValueError("invalid transfer identity")
+        with self._lock:
+            existing = self._active_leases.get(transfer_id)
+            if existing is not None:
+                if (
+                    existing.data_id == self._normalize_data_id(data_id)
+                    and existing.destination_worker_id
+                    == str(destination_worker_id)
+                ):
+                    source = self._replicas[
+                        (existing.data_id, existing.replica_id)
+                    ]
+                    self._peer_transfer_idempotent += 1
+                    return source, existing
+                raise ValueError("conflicting transfer identity")
+            if transfer_id in self._completed_leases:
+                raise ValueError("transfer identity already completed")
+            source = self._select_worker_source(
+                data_id,
+                destination_worker_id,
+                excluded_worker_ids,
+            )
+            destination = self._workers[str(destination_worker_id)]
+            lease = self._acquire_record(
+                source,
+                destination.worker_id,
+                destination.epoch,
+                transfer_id,
+            )
+            self._peer_transfer_acquires += 1
+            return self._replicas[(source.data_id, source.replica_id)], lease
+
     def acquire_source(
         self,
         data_id,
@@ -583,84 +674,6 @@ class ReplicaDirectory:
         self._changed()
         return lease
 
-    def acquire_observed_transfer(
-        self,
-        data_id,
-        source_worker_id,
-        destination_worker_id,
-        transfer_id,
-    ):
-        data_id = self._normalize_data_id(data_id)
-        source_worker_id = str(source_worker_id)
-        destination_worker_id = str(destination_worker_id)
-        transfer_id = str(transfer_id)
-        if (
-            TRANSFER_ID_PATTERN.fullmatch(transfer_id) is None
-            or not transfer_id.startswith("taskvine:")
-        ):
-            raise ValueError("invalid transfer identity")
-        with self._lock:
-            source = self._workers.get(source_worker_id)
-            destination = self._workers.get(destination_worker_id)
-            if source is None or not source.active:
-                self._reject_stale("observed source worker is unavailable")
-            if destination is None or not destination.active:
-                self._reject_stale(
-                    "observed destination worker is unavailable"
-                )
-            existing = self._active_leases.get(transfer_id)
-            if existing is not None:
-                if (
-                    existing.data_id == data_id
-                    and existing.destination_worker_id
-                    == destination_worker_id
-                    and existing.destination_worker_epoch
-                    == destination.epoch
-                ):
-                    record = self._replicas[
-                        (existing.data_id, existing.replica_id)
-                    ]
-                    if (
-                        record.worker_id == source_worker_id
-                        and record.worker_epoch == source.epoch
-                    ):
-                        self._observed_transfer_idempotent += 1
-                        return existing
-                raise ValueError("conflicting observed transfer identity")
-            if transfer_id in self._completed_leases:
-                raise ValueError("observed transfer already completed")
-            latest_attempt = self._latest_attempt.get(data_id, 0)
-            candidates = sorted(
-                (
-                    self._replicas[key]
-                    for key in self._replica_keys_by_data.get(data_id, ())
-                    for record in (self._replicas[key],)
-                    if record.data_id == data_id
-                    and record.state == "available"
-                    and record.attempt == latest_attempt
-                    and record.tier in WORKER_TIERS
-                    and record.worker_id == source_worker_id
-                    and record.worker_epoch == source.epoch
-                ),
-                key=lambda record: (
-                    record.active_leases,
-                    TIER_COST[record.tier],
-                    record.replica_id,
-                ),
-            )
-            if not candidates:
-                self._reject_stale(
-                    "observed source has no current available replica"
-                )
-            lease = self._acquire_record(
-                candidates[0],
-                destination_worker_id,
-                destination.epoch,
-                transfer_id,
-            )
-            self._observed_transfer_acquires += 1
-            return lease
-
     def release_source(self, lease_id, success):
         lease_id = str(lease_id)
         with self._lock:
@@ -697,9 +710,9 @@ class ReplicaDirectory:
         while len(self._completed_leases) > self._max_completed_leases:
             self._completed_leases.popitem(last=False)
         if lease_id.startswith("taskvine:"):
-            self._observed_transfer_releases += 1
+            self._peer_transfer_releases += 1
             if not success:
-                self._observed_transfer_failures += 1
+                self._peer_transfer_failures += 1
         self._changed()
         return lease
 
@@ -1051,17 +1064,23 @@ class ReplicaDirectory:
                 "worker_capacity": self._max_workers,
                 "lease_high_water": self._lease_high_water,
                 "stale_rejections": self._stale_rejections,
-                "observed_transfer_acquires": (
-                    self._observed_transfer_acquires
+                "peer_transfer_acquires": (
+                    self._peer_transfer_acquires
                 ),
-                "observed_transfer_idempotent": (
-                    self._observed_transfer_idempotent
+                "peer_transfer_idempotent": (
+                    self._peer_transfer_idempotent
                 ),
-                "observed_transfer_releases": (
-                    self._observed_transfer_releases
+                "peer_transfer_releases": (
+                    self._peer_transfer_releases
                 ),
-                "observed_transfer_failures": (
-                    self._observed_transfer_failures
+                "peer_transfer_failures": (
+                    self._peer_transfer_failures
+                ),
+                "source_selection_requests": (
+                    self._source_selection_requests
+                ),
+                "source_selection_misses": (
+                    self._source_selection_misses
                 ),
                 "worker_loss_lease_expirations": (
                     self._worker_loss_lease_expirations

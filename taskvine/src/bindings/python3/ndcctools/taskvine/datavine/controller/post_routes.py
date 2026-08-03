@@ -207,22 +207,27 @@ class PostRouteFactory:
                         return
                     self._json(200, dataclasses.asdict(lease))
                     return
-                if (
-                    self.path
-                    == f"{API_PREFIX}/replicas/acquire-observed"
-                ):
+                if self.path == f"{API_PREFIX}/replicas/resolve-source":
                     try:
                         request = self._read_json()
-                        lease = owner.state.acquire_observed_transfer(
+                        resolved = owner.state.resolve_worker_source(
                             request["data_id"],
-                            request["source_worker_id"],
                             request["destination_worker_id"],
                             request["transfer_id"],
+                            request.get("excluded_worker_ids", ()),
                         )
                     except Exception as exc:
                         self._error(400, exc)
                         return
-                    self._json(200, dataclasses.asdict(lease))
+                    self._json(
+                        200,
+                        {
+                            "source": resolved["source"],
+                            "lease": dataclasses.asdict(
+                                resolved["lease"]
+                            ),
+                        },
+                    )
                     return
                 if self.path == f"{API_PREFIX}/replicas/release":
                     try:

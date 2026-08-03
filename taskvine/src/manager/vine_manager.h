@@ -183,6 +183,7 @@ struct vine_manager {
 	char *datavine_controller_host;
 	int datavine_controller_port;
 	char *datavine_controller_token;
+	struct link *datavine_controller_link;
 	int64_t datavine_cache_capacity_items;
 	int64_t datavine_cache_capacity_bytes;
 

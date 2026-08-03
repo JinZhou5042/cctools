@@ -3789,6 +3789,37 @@ If a file can be fetched from a substitute source,
 this function modifies the file->substitute field to reflect that source.
 */
 
+static struct vine_worker_info *vine_manager_worker_by_id(
+		struct vine_manager *q, const char *worker_id)
+{
+	char *key;
+	struct vine_worker_info *worker;
+	int iteration;
+	HASH_TABLE_ITERATE(q->worker_table, iteration, key, worker)
+	{
+		if (worker->workerid && !strcmp(worker->workerid, worker_id)) {
+			return worker;
+		}
+	}
+	return NULL;
+}
+
+static int vine_manager_peer_source_ready(
+		struct vine_manager *q,
+		struct vine_worker_info *peer,
+		const char *cached_name)
+{
+	if (!peer || !peer->transfer_port_active
+			|| peer->outgoing_xfer_counter >= q->worker_source_max_transfers
+			|| timestamp_get() - peer->last_transfer_failure
+					< q->transient_error_interval) {
+		return 0;
+	}
+	struct vine_file_replica *replica = hash_table_lookup(
+			peer->current_files, cached_name);
+	return replica && replica->state == VINE_FILE_REPLICA_STATE_READY;
+}
+
 int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
 {
 	struct vine_mount *m;
@@ -3801,7 +3832,7 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 		if ((replica = vine_file_replica_table_lookup(w, m->file->cached_name)))
 			continue;
 
-		struct vine_worker_info *peer;
+		struct vine_worker_info *peer = NULL;
 		int found_match = 0;
 
 		/* If there is a singly declared mini task dependency linked to multiple created tasks, they
@@ -3810,6 +3841,12 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 		 * We must clear the substitute pointer each task we send to ensure we aren't using
 		 * a previously scheduled url. */
 		if (m->substitute) {
+			if (m->substitute->datavine_lease_id) {
+				vine_datavine_release_transfer(
+						q,
+						m->substitute->datavine_lease_id,
+						0);
+			}
 			vine_file_delete(m->substitute);
 			m->substitute = NULL;
 		}
@@ -3828,16 +3865,54 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 			const char *excluded_source = hash_table_lookup(
 					q->datavine_corrupt_source_expectations,
 					m->file->cached_name);
-			peer = excluded_source
-					? vine_file_replica_table_find_worker_except(
-							q,
-							m->file->cached_name,
-							excluded_source)
-					: vine_file_replica_table_find_worker(
-							q, m->file->cached_name);
+			if (m->file->datavine_data_id && w->workerid) {
+				cctools_uuid_t transfer_uuid;
+				cctools_uuid_create(&transfer_uuid);
+				char *selected_worker_id = NULL;
+				int source_reserved = 0;
+				if (vine_datavine_resolve_transfer(
+						q,
+						m->file->datavine_data_id,
+						w->workerid,
+						excluded_source,
+						transfer_uuid.str,
+						&selected_worker_id)) {
+					source_reserved = 1;
+					peer = vine_manager_worker_by_id(
+							q, selected_worker_id);
+					debug(D_VINE,
+							"DataVine selected WorkerID %s as source for %s to %s",
+							selected_worker_id,
+							m->file->datavine_data_id,
+							w->workerid);
+				}
+				free(selected_worker_id);
+				if (!vine_manager_peer_source_ready(
+						q, peer, m->file->cached_name)) {
+					if (source_reserved) {
+						vine_datavine_release_transfer(
+								q, transfer_uuid.str, 0);
+					}
+					peer = NULL;
+				} else {
+					free(m->file->datavine_lease_id);
+					m->file->datavine_lease_id = xxstrdup(
+							transfer_uuid.str);
+				}
+			} else {
+				peer = excluded_source
+						? vine_file_replica_table_find_worker_except(
+								q,
+								m->file->cached_name,
+								excluded_source)
+						: vine_file_replica_table_find_worker(
+								q, m->file->cached_name);
+			}
 			if (peer) {
 				char *peer_source = string_format("%s/%s", peer->transfer_url, m->file->cached_name);
 				m->substitute = vine_file_substitute_url(m->file, peer_source, peer);
+				free(m->file->datavine_lease_id);
+				m->file->datavine_lease_id = NULL;
 				free(peer_source);
 				found_match = 1;
 			}
@@ -5093,6 +5168,7 @@ void vine_delete(struct vine_manager *q)
 	free(q->datavine_controller_endpoint);
 	free(q->datavine_controller_host);
 	free(q->datavine_controller_token);
+	link_close(q->datavine_controller_link);
 	free(q->stats);
 	free(q->stats_measure);
 

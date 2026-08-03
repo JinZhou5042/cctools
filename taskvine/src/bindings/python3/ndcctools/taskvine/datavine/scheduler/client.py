@@ -374,6 +374,28 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def resolve_worker_source(
+        self,
+        data_id,
+        destination_worker_id,
+        transfer_id,
+        excluded_worker_ids=(),
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/replicas/resolve-source",
+            {
+                "data_id": str(data_id),
+                "destination_worker_id": str(destination_worker_id),
+                "transfer_id": str(transfer_id),
+                "excluded_worker_ids": [
+                    str(worker_id)
+                    for worker_id in excluded_worker_ids
+                ],
+            },
+        )
+        return json.loads(payload)
+
     def acquire_replica(
         self,
         data_id,
@@ -393,27 +415,6 @@ class ControllerClient:
                 "destination_worker_epoch": int(
                     destination_worker_epoch
                 ),
-            },
-        )
-        return json.loads(payload)
-
-    def acquire_observed_transfer(
-        self,
-        data_id,
-        source_worker_id,
-        destination_worker_id,
-        transfer_id,
-    ):
-        payload, _ = self._request(
-            "POST",
-            f"{API_PREFIX}/replicas/acquire-observed",
-            {
-                "data_id": str(data_id),
-                "source_worker_id": str(source_worker_id),
-                "destination_worker_id": str(
-                    destination_worker_id
-                ),
-                "transfer_id": str(transfer_id),
             },
         )
         return json.loads(payload)

@@ -88,11 +88,11 @@ def main():
         ]
         assert len(killed) == 1, snapshot
         assert not group_alive[killed[0]], snapshot
-    assert replicas["observed_transfer_acquires"] >= 1, replicas
-    assert replicas["observed_transfer_failures"] >= 1, replicas
+    assert replicas["peer_transfer_acquires"] >= 1, replicas
+    assert replicas["peer_transfer_failures"] >= 1, replicas
     assert (
-        replicas["observed_transfer_acquires"]
-        == replicas["observed_transfer_releases"]
+        replicas["peer_transfer_acquires"]
+        == replicas["peer_transfer_releases"]
     ), replicas
     assert replicas["active_leases"] == 0, replicas
     assert snapshot["available_idata"] == len(workflow.tasks), snapshot

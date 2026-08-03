@@ -93,10 +93,17 @@ static void vine_transfer_pair_complete(struct vine_transfer_pair *p)
 // add a current transaction to the transfer table
 char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, struct vine_file *f)
 {
-	cctools_uuid_t uuid;
-	cctools_uuid_create(&uuid);
-
-	char *transfer_id = strdup(uuid.str);
+	char *transfer_id = NULL;
+	int lease_reserved = f && f->datavine_lease_id;
+	if (lease_reserved) {
+		transfer_id = xxstrdup(f->datavine_lease_id);
+		free(f->datavine_lease_id);
+		f->datavine_lease_id = NULL;
+	} else {
+		cctools_uuid_t uuid;
+		cctools_uuid_create(&uuid);
+		transfer_id = xxstrdup(uuid.str);
+	}
 	struct vine_transfer_pair *t = vine_transfer_pair_create(
 			dest_worker,
 			source_worker,
@@ -111,12 +118,25 @@ char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info
 					"DataVine peer release queue is full; using stable origin for %s",
 					f->datavine_data_id);
 			vine_transfer_pair_delete(t);
+			if (lease_reserved) {
+				vine_datavine_release_transfer(q, transfer_id, 0);
+			}
 			free(transfer_id);
 			return 0;
 		}
-		if (!source_worker->workerid || !dest_worker || !dest_worker->workerid ||
-				!vine_datavine_acquire_transfer(q, f->datavine_data_id, source_worker->workerid, dest_worker->workerid, transfer_id)) {
+		if (!source_worker->workerid || !dest_worker || !dest_worker->workerid) {
 			debug(D_VINE, "DataVine rejected peer transfer lease for %s; using stable origin", f->datavine_data_id);
+			vine_transfer_pair_delete(t);
+			if (lease_reserved) {
+				vine_datavine_release_transfer(q, transfer_id, 0);
+			}
+			free(transfer_id);
+			return 0;
+		}
+		if (!lease_reserved) {
+			debug(D_VINE,
+					"DataVine rejected peer transfer without a Controller lease for %s",
+					f->datavine_data_id);
 			vine_transfer_pair_delete(t);
 			free(transfer_id);
 			return 0;

@@ -35,20 +35,24 @@ class ReplicaStateMixin:
                 destination_worker_epoch,
             )
 
-    def acquire_observed_transfer(
+    def resolve_worker_source(
         self,
         data_id,
-        source_worker_id,
         destination_worker_id,
         transfer_id,
+        excluded_worker_ids=(),
     ):
         with self._lock:
-            return self.replicas.acquire_observed_transfer(
+            source, lease = self.replicas.resolve_worker_source(
                 data_id,
-                source_worker_id,
                 destination_worker_id,
                 transfer_id,
+                excluded_worker_ids,
             )
+            return {
+                "source": source.source_dict(),
+                "lease": lease,
+            }
 
     def release_replica(self, lease_id, success):
         with self._lock:

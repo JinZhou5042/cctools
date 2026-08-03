@@ -192,10 +192,10 @@ def run_pruning_mode(factory_manager):
     assert report["runtime_pruned_data_ids"] == [
         source.task_id
     ], report
-    assert replicas["observed_transfer_acquires"] >= 1, replicas
+    assert replicas["peer_transfer_acquires"] >= 1, replicas
     assert (
-        replicas["observed_transfer_acquires"]
-        == replicas["observed_transfer_releases"]
+        replicas["peer_transfer_acquires"]
+        == replicas["peer_transfer_releases"]
     ), replicas
     assert replicas["active_leases"] == 0, replicas
     assert snapshot["durable_hashes_valid"], snapshot
@@ -351,10 +351,10 @@ def run_capacity_mode(factory_manager):
     assert faults["peer_release_failures_injected"] == 1, faults
     assert faults["peer_release_retries_succeeded"] == 1, faults
     assert faults["peer_release_pending"] == 0, faults
-    assert replicas["observed_transfer_acquires"] >= 2, replicas
+    assert replicas["peer_transfer_acquires"] >= 2, replicas
     assert (
-        replicas["observed_transfer_acquires"]
-        == replicas["observed_transfer_releases"]
+        replicas["peer_transfer_acquires"]
+        == replicas["peer_transfer_releases"]
     ), replicas
     assert replicas["active_leases"] == 0, replicas
     assert snapshot["taskvine_worker_disconnections"] == 0, snapshot

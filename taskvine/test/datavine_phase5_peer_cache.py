@@ -64,10 +64,10 @@ def main():
     )
     assert snapshot["taskvine_workers_used"] == 2, snapshot
     transfer_metrics = snapshot["replica_directory"]
-    assert transfer_metrics["observed_transfer_acquires"] >= 1, snapshot
+    assert transfer_metrics["peer_transfer_acquires"] >= 1, snapshot
     assert (
-        transfer_metrics["observed_transfer_acquires"]
-        == transfer_metrics["observed_transfer_releases"]
+        transfer_metrics["peer_transfer_acquires"]
+        == transfer_metrics["peer_transfer_releases"]
     ), snapshot
     assert transfer_metrics["active_leases"] == 0, snapshot
     assert snapshot["edata_bytes"] <= snapshot["edata_capacity_bytes"]
@@ -84,7 +84,7 @@ def main():
     )
     assert rollback["available_idata"] == len(workflow.tasks)
     assert (
-        rollback["replica_directory"]["observed_transfer_acquires"] == 0
+        rollback["replica_directory"]["peer_transfer_acquires"] == 0
     ), rollback
     print(json.dumps({"peer_on": snapshot, "peer_off": rollback}, sort_keys=True))
     print(

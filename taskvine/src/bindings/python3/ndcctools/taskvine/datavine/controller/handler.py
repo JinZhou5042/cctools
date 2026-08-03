@@ -12,6 +12,9 @@ class ControllerHandlerFactory:
     @staticmethod
     def create(owner):
         class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+            disable_nagle_algorithm = True
+
             def _authorized(self):
                 return request_authorized(
                     self.path, self.headers, owner.token

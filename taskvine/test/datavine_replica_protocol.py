@@ -80,44 +80,56 @@ def main():
             "w2-edata",
             "w1-edata",
         ]
-
-        transfer_id = "taskvine:transfer-contract-1"
-        observed = client.acquire_observed_transfer(
-            f"e:{edata.data_id}", "w2", "w1", transfer_id
-        )
-        duplicate_observed = client.acquire_observed_transfer(
-            f"e:{edata.data_id}", "w2", "w1", transfer_id
-        )
-        assert duplicate_observed == observed
-        expect_remote_error(
-            "conflicting observed transfer identity",
-            client.acquire_observed_transfer,
+        resolved = client.resolve_worker_source(
             f"e:{edata.data_id}",
             "w1",
-            "w1",
-            transfer_id,
+            "taskvine:resolved-contract-1",
         )
-        retiring_observed = client.invalidate_replica(
+        assert resolved["source"]["worker_id"] == "w2"
+        assert resolved["lease"]["lease_id"] == (
+            "taskvine:resolved-contract-1"
+        )
+        assert client.resolve_worker_source(
+            f"e:{edata.data_id}",
+            "w1",
+            "taskvine:resolved-contract-1",
+        ) == resolved
+        client.release_replica(
+            resolved["lease"]["lease_id"], True
+        )
+        expect_remote_error(
+            "no available worker source",
+            client.resolve_worker_source,
+            f"e:{edata.data_id}",
+            "w1",
+            "taskvine:resolved-contract-excluded",
+            ("w2",),
+        )
+
+        transfer_id = "taskvine:transfer-contract-1"
+        client.resolve_worker_source(
+            f"e:{edata.data_id}", "w1", transfer_id
+        )
+        retiring_source = client.invalidate_replica(
             f"e:{edata.data_id}",
             "w2-edata",
             1,
             "w2",
             1,
         )
-        assert retiring_observed["state"] == "retiring"
-        released_observed = client.release_replica(
+        assert retiring_source["state"] == "retiring"
+        released_transfer = client.release_replica(
             transfer_id, False
         )
-        assert not released_observed["active"]
-        assert released_observed["success"] is False
+        assert not released_transfer["active"]
+        assert released_transfer["success"] is False
         assert client.release_replica(
             transfer_id, False
-        ) == released_observed
+        ) == released_transfer
         expect_remote_error(
-            "observed transfer already completed",
-            client.acquire_observed_transfer,
+            "transfer identity already completed",
+            client.resolve_worker_source,
             f"e:{edata.data_id}",
-            "w2",
             "w1",
             transfer_id,
         )
@@ -399,9 +411,11 @@ def main():
         snapshot = client.snapshot()["replica_directory"]
         assert snapshot["stale_rejections"] >= 1
         assert snapshot["lease_high_water"] == 2
-        assert snapshot["observed_transfer_acquires"] == 1
-        assert snapshot["observed_transfer_idempotent"] == 1
-        assert snapshot["observed_transfer_releases"] == 1
+        assert snapshot["peer_transfer_acquires"] == 2
+        assert snapshot["peer_transfer_idempotent"] == 1
+        assert snapshot["peer_transfer_releases"] == 2
+        assert snapshot["source_selection_requests"] == 3
+        assert snapshot["source_selection_misses"] == 1
         assert snapshot["active_leases"] == 0
         assert snapshot["worker_loss_lease_expirations"] == 2
         print(json.dumps(snapshot, sort_keys=True))

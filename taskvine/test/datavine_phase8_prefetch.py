@@ -90,10 +90,13 @@ def main():
         not in report["prefetch_task_ids"]
     ), "prefetch traffic ran ahead of ready demand work"
     transfer_metrics = enabled["replica_directory"]
-    assert transfer_metrics["stale_rejections"] >= 1
+    assert transfer_metrics["source_selection_requests"] > 0
+    assert transfer_metrics["source_selection_requests"] >= (
+        transfer_metrics["peer_transfer_acquires"]
+    )
     assert (
-        transfer_metrics["observed_transfer_acquires"]
-        == transfer_metrics["observed_transfer_releases"]
+        transfer_metrics["peer_transfer_acquires"]
+        == transfer_metrics["peer_transfer_releases"]
     )
     assert transfer_metrics["active_leases"] == 0
 

@@ -96,6 +96,7 @@ int vine_file_delete(struct vine_file *f)
 		free(f->cached_name);
 		free(f->datavine_data_id);
 		free(f->datavine_content_hash);
+		free(f->datavine_lease_id);
 		free(f->data);
 		free(f);
 	}
@@ -277,6 +278,9 @@ struct vine_file *vine_file_substitute_url(struct vine_file *f, const char *sour
 	if (f->datavine_content_hash) {
 		vine_file_set_datavine_content_hash(
 				sub, f->datavine_content_hash);
+	}
+	if (f->datavine_lease_id) {
+		sub->datavine_lease_id = xxstrdup(f->datavine_lease_id);
 	}
 	return sub;
 }

@@ -66,10 +66,10 @@ def main():
     assert faults["peer_source_losses_injected"] == 0, report
     assert snapshot["taskvine_worker_disconnections"] == 0, snapshot
     assert snapshot["taskvine_workers_used"] == 3, snapshot
-    assert replicas["observed_transfer_acquires"] >= 2, replicas
+    assert replicas["peer_transfer_acquires"] >= 2, replicas
     assert (
-        replicas["observed_transfer_acquires"]
-        == replicas["observed_transfer_releases"]
+        replicas["peer_transfer_acquires"]
+        == replicas["peer_transfer_releases"]
     ), replicas
     assert replicas["active_leases"] == 0, replicas
     assert snapshot["available_idata"] == len(workflow.tasks), snapshot
