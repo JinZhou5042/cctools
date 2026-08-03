@@ -13,6 +13,7 @@ import os
 import fcntl
 import sys
 import argparse
+import base64
 import traceback
 import cloudpickle
 import select
@@ -84,7 +85,19 @@ def sigchld_handler(signum, frame):
     os.write(w, b"a")
 
 
-# Read data from worker, start function, and dump result to `outfile`.
+def _read_exact(fd, length):
+    chunks = []
+    remaining = length
+    while remaining:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            raise EOFError(f"short read from fd {fd}")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+# Read one invocation frame and execute the function.
 def start_function(in_pipe_fd, thread_limit=1):
     # read length of buffer to read
     buffer_len = b""
@@ -98,18 +111,25 @@ def start_function(in_pipe_fd, thread_limit=1):
         else:
             buffer_len += c
     buffer_len = int(buffer_len)
-    # now read the buffer to get invocation details
-    line = str(os.read(in_pipe_fd, buffer_len), encoding="utf-8")
+    frame = _read_exact(in_pipe_fd, buffer_len)
+    header, separator, inline_event = frame.partition(b"\n")
+    if not separator:
+        stdout_timed_message("function frame has no header terminator")
+        exit(1)
 
     try:
         (
             function_id,
             function_name,
             function_sandbox,
-            function_stdout_filename
-        ) = line.split(" ", maxsplit=3)
+            function_stdout_filename,
+            inline_length,
+        ) = header.decode("utf-8").split(" ", maxsplit=4)
+        inline_length = int(inline_length)
+        if inline_length != len(inline_event):
+            raise ValueError("inline invocation length mismatch")
     except Exception as e:
-        stdout_timed_message(f"error: not enough values to unpack from {line} (expected 4 items), exception: {e}")
+        stdout_timed_message(f"invalid function frame: {e}")
         exit(1)
 
     try:
@@ -120,8 +140,14 @@ def start_function(in_pipe_fd, thread_limit=1):
 
     if not function_name:
         # malformed message from worker so we exit
-        stdout_timed_message(f"error: invalid function name, malformed message {line} from worker")
+        stdout_timed_message("error: invalid function name")
         exit(1)
+
+    if inline_event:
+        event = cloudpickle.loads(inline_event)
+    else:
+        with open(os.path.join(function_sandbox, "infile"), "rb") as f:
+            event = cloudpickle.load(f)
 
     with threadpool_limits(limits=thread_limit):
         if exec_method == "direct":
@@ -129,19 +155,10 @@ def start_function(in_pipe_fd, thread_limit=1):
             try:
                 os.chdir(function_sandbox)
 
-                # parameters are represented as infile.
-                with open("infile", "rb") as f:
-                    event = cloudpickle.load(f)
-
-                # output of execution should be dumped to outfile.
                 result = globals()[function_name](event)
-                try:
+                if not inline_event:
                     with open("outfile", "wb") as f:
                         cloudpickle.dump(result, f)
-                except Exception:
-                    if os.path.exists("outfile"):
-                        os.remove("outfile")
-                    raise
 
                 try:
                     if not result["Success"]:
@@ -154,15 +171,8 @@ def start_function(in_pipe_fd, thread_limit=1):
                 sys.exit(1)
             finally:
                 os.chdir(library_sandbox)
-            return -1, function_id
+            return -1, function_id, result if inline_event else None
         elif exec_method == "fork":
-            try:
-                arg_infile = os.path.join(function_sandbox, "infile")
-                with open(arg_infile, "rb") as f:
-                    event = cloudpickle.load(f)
-            except Exception:
-                stdout_timed_message(f"TASK {function_id} error: can't load the arguments from {arg_infile}")
-                return -1, function_id
             p = os.fork()
             if p == 0:
                 exit_status = 1
@@ -216,21 +226,26 @@ def start_function(in_pipe_fd, thread_limit=1):
                     os._exit(exit_status)
             elif p < 0:
                 stdout_timed_message(f"TASK {function_id} error: unable to fork to execute {function_name}")
-                return -1, function_id
+                return -1, function_id, None
 
             # return pid and function id of child process to parent.
             else:
-                return p, function_id
+                return p, function_id, None
         else:
             stdout_timed_message(f"error: invalid execution method {exec_method}")
-            return -1, function_id
+            return -1, function_id, None
 
 
 # Send result of a function execution to worker. Wake worker up to do work with SIGCHLD.
-def send_result(out_pipe_fd, worker_pid, task_id, exit_code):
-    buff = bytes(f"{task_id} {exit_code}", "utf-8")
-    buff = bytes(str(len(buff)), "utf-8") + b"\n" + buff
-    os.writev(out_pipe_fd, [buff])
+def send_result(out_pipe_fd, worker_pid, task_id, exit_code, result=None):
+    payload = (
+        base64.b64encode(cloudpickle.dumps(result))
+        if result is not None
+        else b""
+    )
+    header = f"{task_id} {exit_code} {len(payload)}\n".encode()
+    frame = header + payload
+    os.writev(out_pipe_fd, [str(len(frame)).encode(), b"\n", frame])
     os.kill(worker_pid, signal.SIGCHLD)
 
 
@@ -407,15 +422,16 @@ def main():
             # worker has a function, run it
             if re == in_pipe_fd:
                 if exec_method == 'direct':
-                    _, func_id = start_function(in_pipe_fd, thread_limit)
+                    _, func_id, result = start_function(in_pipe_fd, thread_limit)
                     send_result(
                         out_pipe_fd,
                         args.worker_pid,
                         func_id,
                         0,
+                        result,
                     )
                 else:
-                    pid, func_id = start_function(in_pipe_fd, thread_limit)
+                    pid, func_id, _ = start_function(in_pipe_fd, thread_limit)
                     # pid == -1 indicates a failure during fork/setup of the function execution
                     if pid == -1:
                         send_result(

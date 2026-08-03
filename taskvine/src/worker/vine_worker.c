@@ -280,9 +280,15 @@ void send_async_message(struct link *l, const char *fmt, ...)
 	assert(l);
 
 	va_list va;
-	char *message = malloc(VINE_LINE_MAX);
 	va_start(va, fmt);
-	vsprintf(message, fmt, va);
+	int length = vsnprintf(NULL, 0, fmt, va);
+	va_end(va);
+	if (length < 0)
+		fatal("could not format worker message");
+
+	char *message = xxmalloc((size_t)length + 1);
+	va_start(va, fmt);
+	vsnprintf(message, (size_t)length + 1, fmt, va);
 	va_end(va);
 
 	list_push_tail(pending_async_messages, message);
@@ -298,7 +304,19 @@ void send_complete_tasks(struct link *l)
 	struct vine_process *p;
 	for (visited = 0; visited < size; visited++) {
 		p = itable_pop(procs_complete);
-		if (p->output_length <= 1024 && p->output_length > 0) {
+		if (p->function_output) {
+			send_async_message(l,
+					"complete %d %d %lld %lld %llu %llu %d %d\n%s",
+					p->result,
+					p->exit_code,
+					(long long)p->output_length,
+					(long long)p->output_length,
+					(unsigned long long)p->execution_start,
+					(unsigned long long)p->execution_end,
+					p->sandbox_size,
+					p->task->task_id,
+					p->function_output);
+		} else if (p->output_length <= 1024 && p->output_length > 0) {
 
 			char *output;
 			int output_file = open(p->output_file_name, O_RDONLY);
@@ -841,7 +859,9 @@ static void reap_process(struct vine_process *p, struct link *manager)
 	itable_insert(procs_complete, p->task->task_id, p);
 
 	struct stat info;
-	if (!stat(p->output_file_name, &info)) {
+	if (p->function_output) {
+		/* The function result is already in memory. */
+	} else if (!stat(p->output_file_name, &info)) {
 		p->output_length = info.st_size;
 	} else {
 		p->output_length = 0;
@@ -945,6 +965,8 @@ static int handle_completed_tasks(struct link *manager)
 	int iteration;
 	uint64_t done_task_id;
 	int done_exit_code;
+	char *function_output;
+	size_t function_output_length;
 
 	struct list *failed_libraries = list_create();
 
@@ -965,11 +987,20 @@ static int handle_completed_tasks(struct link *manager)
 		}
 
 		/* If p is a library, check to see if any results waiting. */
-		while (vine_process_library_get_result(p, &done_task_id, &done_exit_code)) {
+		while (vine_process_library_get_result(p, &done_task_id, &done_exit_code, &function_output, &function_output_length)) {
 			fp = itable_lookup(procs_table, done_task_id);
 			if (fp) {
 				fp->exit_code = done_exit_code;
+				if (function_output_length) {
+					free(fp->function_output);
+					fp->function_output = function_output;
+					fp->output_length = function_output_length;
+				} else {
+					free(function_output);
+				}
 				reap_process(fp, manager);
+			} else {
+				free(function_output);
 			}
 		}
 	}
@@ -1054,6 +1085,21 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			free(cmd);
 		} else if (sscanf(line, "needs_library %s", library_name) == 1) {
 			vine_task_set_library_required(task, library_name);
+		} else if (sscanf(line, "function_input %" PRId64, &n) == 1) {
+			if (n <= 0 || n > 1024LL * 1024 * 1024) {
+				release_task_output_reservations(task);
+				vine_task_delete(task);
+				return 0;
+			}
+			char *input = malloc(n);
+			if (link_read(manager, input, n, stoptime) != n) {
+				free(input);
+				release_task_output_reservations(task);
+				vine_task_delete(task);
+				return 0;
+			}
+			vine_task_set_function_input(task, input, n);
+			free(input);
 		} else if (sscanf(line, "provides_library %s", library_name) == 1) {
 			vine_task_set_library_provided(task, library_name);
 		} else if (sscanf(line, "function_slots %" PRId64, &n) == 1) {

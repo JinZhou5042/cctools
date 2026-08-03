@@ -1,7 +1,52 @@
 """TaskVine file declarations and physical task construction."""
 
+import base64
+import cloudpickle
 import shlex
 import urllib.parse
+
+from ndcctools.taskvine import Task
+from ndcctools.taskvine import cvine
+
+
+class DataVineCall(Task):
+    """Function invocation carried entirely by TaskVine control frames."""
+
+    def __init__(self, library, function, *args, **kwargs):
+        super().__init__(function)
+        self.set_library_required(library)
+        self._invocation = cloudpickle.dumps(
+            {
+                "fn_args": args,
+                "fn_kwargs": kwargs,
+                "remote_task_exec_method": "direct",
+            }
+        )
+        self._decoded_output = None
+
+    def submit_finalize(self):
+        if not self.manager.check_library_exists(
+            self.get_library_required()
+        ):
+            raise ValueError("DataVine worker library is not installed")
+        cvine.vine_task_set_function_input(
+            self._task, self._invocation
+        )
+        self._invocation = None
+
+    @property
+    def output(self):
+        if self._decoded_output is None:
+            encoded = self.std_output
+            envelope = cloudpickle.loads(
+                base64.b64decode(encoded.encode("ascii"), validate=True)
+            )
+            self._decoded_output = (
+                envelope["Result"]
+                if envelope["Success"]
+                else envelope["Reason"]
+            )
+        return self._decoded_output
 
 
 def ensure_worker_library(manager):
@@ -127,8 +172,6 @@ class TaskFactory:
         kill_worker_after_output_index=None,
         use_worker_library=False,
     ):
-        from ndcctools.taskvine import FunctionCall, Task
-
         record = self.task_record(task_id)
         output_names = tuple(
             f"datavine-idata-{data_id}.pkl"
@@ -167,7 +210,7 @@ class TaskFactory:
             use_worker_library
             and kill_worker_after_output_index is None
         ):
-            task = FunctionCall(
+            task = DataVineCall(
                 "datavine-worker-v2",
                 "execute_datavine_task",
                 self.controller.endpoint,
@@ -179,7 +222,6 @@ class TaskFactory:
                 record.to_dict(),
                 self.controller_inline_idata_bytes,
             )
-            task.set_exec_method("direct")
         else:
             task = Task(command)
         task.set_tag(str(task_id))
@@ -261,8 +303,6 @@ class TaskFactory:
         if not use_worker_library:
             raise RuntimeError("process tasks cannot be physically batched")
 
-        from ndcctools.taskvine import FunctionCall
-
         calls = []
         edata_ids = set()
         idata_ids = set()
@@ -298,7 +338,7 @@ class TaskFactory:
                 self.context.nested_idata_by_task.get(task_id, ())
             )
 
-        task = FunctionCall(
+        task = DataVineCall(
             "datavine-worker-v2",
             "execute_datavine_tasks",
             self.controller.endpoint,
@@ -307,7 +347,6 @@ class TaskFactory:
             self.worker_dram_cache_bytes,
             self.controller_inline_idata_bytes,
         )
-        task.set_exec_method("direct")
         task.set_tag(",".join(map(str, task_ids)))
         task.set_cores(1)
         task.set_retries(0)
@@ -334,8 +373,6 @@ class TaskFactory:
         return task
 
     def make_persistence_task(self, data_id, request, environment):
-        from ndcctools.taskvine import FunctionCall, Task
-
         input_name = f"datavine-persist-i{int(data_id)}.pkl"
         command = " ".join(
             shlex.quote(value)
@@ -373,7 +410,7 @@ class TaskFactory:
             )
         )
         if self.worker_managed_data:
-            task = FunctionCall(
+            task = DataVineCall(
                 "datavine-worker-v2",
                 "persist_datavine_idata",
                 self.controller.endpoint,
@@ -384,7 +421,6 @@ class TaskFactory:
                 bool(request.get("inject_failure_during_write")),
                 float(request.get("inject_failure_delay", 0)),
             )
-            task.set_exec_method("direct")
         else:
             task = Task(command)
         task.set_tag(f"persist-i{int(data_id)}")

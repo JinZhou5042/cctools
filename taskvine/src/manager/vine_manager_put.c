@@ -574,6 +574,10 @@ vine_result_code_t vine_manager_put_task(
 
 	if (t->needs_library) {
 		vine_manager_send(q, w, "needs_library %s\n", t->needs_library);
+		if (t->function_input_length) {
+			vine_manager_send(q, w, "function_input %zu\n", t->function_input_length);
+			link_putlstring(w->link, t->function_input, t->function_input_length, time(0) + q->short_timeout);
+		}
 	}
 
 	if (t->provides_library) {

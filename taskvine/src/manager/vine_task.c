@@ -214,6 +214,8 @@ struct vine_task *vine_task_copy(const struct vine_task *task)
 	/* Static features of task are copied. */
 	if (task->needs_library)
 		vine_task_set_library_required(new, task->needs_library);
+	if (task->function_input)
+		vine_task_set_function_input(new, task->function_input, task->function_input_length);
 	if (task->provides_library)
 		vine_task_set_library_provided(new, task->provides_library);
 	if (task->func_exec_mode)
@@ -325,6 +327,18 @@ const char *vine_task_get_library_provided(struct vine_task *t)
 void vine_task_set_function_slots(struct vine_task *t, int nslots)
 {
 	t->function_slots_requested = nslots;
+}
+
+void vine_task_set_function_input(struct vine_task *t, const char *buffer, size_t size)
+{
+	free(t->function_input);
+	t->function_input = 0;
+	t->function_input_length = 0;
+	if (buffer && size) {
+		t->function_input = xxmalloc(size);
+		memcpy(t->function_input, buffer, size);
+		t->function_input_length = size;
+	}
 }
 
 void vine_task_set_function_exec_mode(struct vine_task *t, vine_task_func_exec_mode_t exec_mode)
@@ -762,6 +776,7 @@ void vine_task_delete(struct vine_task *t)
 	free(t->category);
 
 	free(t->needs_library);
+	free(t->function_input);
 	free(t->provides_library);
 
 	free(t->monitor_output_directory);

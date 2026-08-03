@@ -36,7 +36,7 @@ from .reporting import (
     select_report_scope,
 )
 from .run_context import WorkflowRunContext
-from .task_factory import TaskFactory, ensure_worker_library
+from .task_factory import DataVineCall, TaskFactory, ensure_worker_library
 
 
 class _LogicalCompletion:
@@ -211,9 +211,7 @@ class TaskSchedulerThread:
         if self._manager is None:
             raise RuntimeError("TaskVine Manager is not initialized")
         ensure_worker_library(self._manager)
-        from ndcctools.taskvine import FunctionCall
-
-        task = FunctionCall(
+        task = DataVineCall(
             "datavine-worker-v2",
             "execute_datavine_tasks",
             self.controller.endpoint,
@@ -224,7 +222,6 @@ class TaskSchedulerThread:
                 "idata_inline_object_capacity_bytes"
             ],
         )
-        task.set_exec_method("direct")
         task_id = self._manager.submit(task)
         while True:
             self._raise_if_stopping()

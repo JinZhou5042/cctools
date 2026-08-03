@@ -71,6 +71,7 @@ struct vine_process {
 	
 	/* size of the process' stdout file */
 	int64_t output_length;
+	char *function_output;
 
 	/* state between complete disk measurements. */
 	struct path_disk_size_info *disk_measurement_state;
@@ -86,7 +87,7 @@ void  vine_process_delete( struct vine_process *p );
 
 int   vine_process_execute_and_wait( struct vine_process *p );
 
-int   vine_process_library_get_result( struct vine_process *p, uint64_t *done_task_id, int *exit_code );
+int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_id, int *exit_code, char **output, size_t *output_length);
 
 void  vine_process_compute_disk_needed( struct vine_process *p );
 int   vine_process_measure_disk(struct vine_process *p, int max_time_on_measurement);
