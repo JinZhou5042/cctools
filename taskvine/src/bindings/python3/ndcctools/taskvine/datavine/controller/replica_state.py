@@ -2,6 +2,27 @@
 
 
 class ReplicaStateMixin:
+    def replica_sources(self, data_id):
+        with self._lock:
+            descriptions = []
+            for source in self.replicas.candidates(data_id):
+                description = source.source_dict()
+                worker = self.replicas.worker(source.worker_id)
+                if worker.endpoint:
+                    kind, token = source.data_id.split(":", 1)
+                    transfer_hash = (
+                        self.get_edata(int(token)).serialized_sha256
+                        if kind == "e"
+                        else source.content_hash
+                    )
+                    description["source_url"] = (
+                        f"{worker.endpoint}/data/{kind}/{int(token)}"
+                        f"?sha256={transfer_hash}"
+                        f"&size={source.size}"
+                    )
+                descriptions.append(description)
+            return tuple(descriptions)
+
     def join_worker(self, worker_id, epoch):
         with self._lock:
             return self.replicas.join_worker(worker_id, epoch)

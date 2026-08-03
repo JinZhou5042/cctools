@@ -484,9 +484,6 @@ class TaskSchedulerThread:
             self._edata_files,
             self._idata_files,
             worker_dram_cache_bytes,
-            controller_inline_idata_bytes=controller_snapshot[
-                "idata_inline_object_capacity_bytes"
-            ],
             allow_peer_transfer=self._peer_transfers_enabled,
         )
         workflow_registration_elapsed = (
@@ -2671,22 +2668,27 @@ class TaskSchedulerThread:
                     f"durable result IDataID {data_id} is corrupt"
                 )
         else:
-            file_object = self._idata_files[data_id]
-            if not self._manager.fetch_file(file_object):
+            sources = self.controller.replica_sources(
+                f"i:{data_id}"
+            )["sources"]
+            payload = None
+            for source in sources:
+                source_url = source.get("source_url")
+                if not source_url:
+                    continue
+                try:
+                    payload = self.controller.fetch_source(
+                        source_url,
+                        status["content_hash"],
+                        status["size"],
+                    )
+                    break
+                except Exception:
+                    continue
+            if payload is None:
                 raise RuntimeError(
-                    f"IDataID {data_id} result transfer failed"
+                    f"IDataID {data_id} has no readable result replica"
                 )
-            from ndcctools.taskvine import cvine
-
-            payload = cvine.vine_file_contents_as_bytes(
-                file_object._file
-            )
-            if (
-                len(payload) != status["size"]
-                or hashlib.sha256(payload).hexdigest()
-                != status["content_hash"]
-            ):
-                raise IOError(f"result IDataID {data_id} is corrupt")
         return cloudpickle.loads(payload)
 
 

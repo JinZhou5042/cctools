@@ -71,7 +71,6 @@ def execute_datavine_task(
     attempt,
     worker_dram_cache_bytes,
     task_record,
-    controller_inline_idata_bytes,
     allow_peer_transfer,
 ):
     """Execute one logical task through the worker-owned data path."""
@@ -120,7 +119,6 @@ def execute_datavine_task(
                 outputs[0]["worker_id"],
                 outputs[0]["worker_epoch"],
                 outputs,
-                controller_inline_idata_bytes,
             )
             if len(published) != len(outputs):
                 raise RuntimeError(

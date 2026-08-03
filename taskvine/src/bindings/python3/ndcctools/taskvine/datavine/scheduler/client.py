@@ -364,9 +364,7 @@ class ControllerClient:
         worker_id,
         worker_epoch,
         outputs,
-        controller_inline_idata_bytes,
     ):
-        inline_limit = int(controller_inline_idata_bytes)
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/replicas/publish-outputs",
@@ -375,20 +373,9 @@ class ControllerClient:
                 "worker_epoch": int(worker_epoch),
                 "outputs": [
                     {
-                        **{
-                            key: value
-                            for key, value in output.items()
-                            if key != "payload"
-                        },
-                        **(
-                            {
-                                "payload": base64.b64encode(
-                                    output["payload"]
-                                ).decode("ascii")
-                            }
-                            if len(output["payload"]) <= inline_limit
-                            else {}
-                        ),
+                        key: value
+                        for key, value in output.items()
+                        if key != "payload"
                     }
                     for output in outputs
                 ],

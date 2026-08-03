@@ -216,7 +216,7 @@ class GetRouteFactory:
                         sources = (
                             owner.state.replicas.records_for(data_key)
                             if records_only
-                            else owner.state.replicas.candidates(data_key)
+                            else owner.state.replica_sources(data_key)
                         )
                     except Exception as exc:
                         self._error(400, exc)
@@ -226,7 +226,11 @@ class GetRouteFactory:
                         {
                             "data_id": data_key,
                             "records" if records_only else "sources": [
-                                source.source_dict()
+                                (
+                                    source.source_dict()
+                                    if records_only
+                                    else source
+                                )
                                 for source in sources
                             ],
                         },
