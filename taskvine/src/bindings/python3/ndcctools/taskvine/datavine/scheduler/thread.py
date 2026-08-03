@@ -65,6 +65,7 @@ class TaskSchedulerThread:
         self._ready = threading.Event()
         self._stop_requested = threading.Event()
         self._manager = None
+        self._peer_transfers_enabled = True
         self._run_context = WorkflowRunContext()
         self._edata_files = {}
         self._idata_files = {}
@@ -373,6 +374,7 @@ class TaskSchedulerThread:
             self._manager.enable_peer_transfers()
         else:
             self._manager.disable_peer_transfers()
+        self._peer_transfers_enabled = bool(peer_transfers)
         return self._manager.port
 
     def _op_register_workflow(self, workflow):
@@ -490,6 +492,7 @@ class TaskSchedulerThread:
             controller_inline_idata_bytes=controller_snapshot[
                 "idata_inline_object_capacity_bytes"
             ],
+            allow_peer_transfer=self._peer_transfers_enabled,
         )
         workflow_registration_elapsed = (
             time.monotonic() - workflow_run_started

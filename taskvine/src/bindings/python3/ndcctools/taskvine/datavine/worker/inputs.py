@@ -1,5 +1,6 @@
 """Worker-side EData/IData fetching and binding resolution."""
 
+import base64
 import cloudpickle
 import copy
 import hashlib
@@ -7,7 +8,6 @@ from pathlib import Path
 import uuid
 
 from ..models import EDataRecord
-from ..protocol import DataVineRemoteError
 from ..workflow import iter_output_refs
 
 
@@ -22,6 +22,7 @@ class InputResolver:
         emit,
         trust_taskvine_inputs=False,
         cache_values=None,
+        allow_peer_transfer=True,
     ):
         self.controller = controller
         self.token = token
@@ -32,6 +33,7 @@ class InputResolver:
         self.trust_taskvine_inputs = bool(trust_taskvine_inputs)
         self.objects = {}
         self.cache_values = cache_values or {}
+        self.allow_peer_transfer = bool(allow_peer_transfer)
 
     @staticmethod
     def _file_identity(path):
@@ -68,90 +70,92 @@ class InputResolver:
             return self._fetch_edata_locked(data_id)
 
     def _fetch_edata_locked(self, data_id):
-        cache_path = Path(f"datavine-edata-{data_id}.pkl")
-        if self.trust_taskvine_inputs and cache_path.is_file():
-            return self._local_payload("e", data_id, cache_path)
-        metadata_key = (self.controller, self.token, data_id)
-        info = self.process_cache.edata_metadata.get(metadata_key)
-        prefetched_payload = None
-        if info is None:
-            try:
-                metadata, prefetched_payload = (
-                    self.client.fetch_edata_record(data_id)
-                )
-                info = {
-                    "data_id": data_id,
-                    "content_hash": EDataRecord.digest(
-                        metadata, prefetched_payload
-                    ),
-                    "serialized_sha256": hashlib.sha256(
-                        prefetched_payload
-                    ).hexdigest(),
-                    "size": len(prefetched_payload),
-                    "metadata": metadata,
-                    "storage": "controller-memory",
-                    "origin_path": None,
-                }
-            except DataVineRemoteError as exc:
-                if exc.status != 409:
-                    raise
-                info = self.client.get_edata_metadata(data_id)
-            self.process_cache.edata_metadata[metadata_key] = info
         data_key = f"e:{data_id}"
         with self.process_cache.lock:
-            payload = self.process_cache.data.get_data(
+            payload = self.process_cache.data.get_local_data(
                 self.controller,
                 self.token,
                 data_key,
-                info["serialized_sha256"],
-                info["size"],
             )
         if payload is not None:
             self.emit(f"DATAVINE_DRAM_HIT e{data_id}")
             return payload
-
-        def fallback():
-            if info["storage"] != "bulk-origin":
-                if prefetched_payload is not None:
-                    return prefetched_payload
-                return self.client.fetch_edata_record(data_id)[1]
-            origin = Path(info["origin_path"])
-            payload = origin.read_bytes()
-            if (
-                len(payload) != info["size"]
-                or EDataRecord.digest(info["metadata"], payload)
-                != info["content_hash"]
-            ):
-                raise RuntimeError(
-                    f"EDataID {data_id} bulk origin checksum mismatch"
-                )
-            self.emit(f"DATAVINE_BULK_ORIGIN e{data_id}")
-            return payload
-
-        if cache_path.is_file():
-            payload = self._local_payload("e", data_id, cache_path)
-            if (
-                len(payload) != info["size"]
-                or EDataRecord.digest(info["metadata"], payload)
-                != info["content_hash"]
-            ):
-                self.reporter.reject_local(f"e:{data_id}")
-                return fallback()
-            self.reporter.report_local(
-                f"e:{data_id}", 1, info["content_hash"], payload
+        excluded = []
+        while True:
+            resolved = self.client.resolve_edata_source(
+                data_id,
+                self.reporter.worker_id,
+                f"taskvine:{uuid.uuid4().hex}",
+                excluded,
+                self.allow_peer_transfer,
             )
+            source_type = resolved["source_type"]
+            if source_type != "peer":
+                break
+            source = resolved["source"]
+            lease_id = resolved["lease"]["lease_id"]
+            try:
+                payload = self.client.fetch_source(
+                    source["source_url"],
+                    resolved["serialized_sha256"],
+                    resolved["size"],
+                )
+            except Exception:
+                self.client.release_replica(lease_id, False)
+                self.client.invalidate_observed_replica(
+                    source["data_id"],
+                    source["replica_id"],
+                    source["attempt"],
+                    source["content_hash"],
+                    source["size"],
+                    source["worker_id"],
+                    source["worker_epoch"],
+                )
+                excluded.append(source["worker_id"])
+                continue
+            self.client.release_replica(lease_id, True)
+            self.emit(
+                f"DATAVINE_PEER_FETCH {data_key} "
+                f"source={source['worker_id']}"
+            )
+            break
+        if source_type == "peer":
+            pass
+        elif source_type == "controller-memory":
+            payload = base64.b64decode(resolved["payload"], validate=True)
+        elif source_type == "sharedfs":
+            payload = Path(resolved["origin_path"]).read_bytes()
+            self.emit(f"DATAVINE_BULK_ORIGIN e{data_id}")
         else:
-            payload = fallback()
+            raise RuntimeError(f"invalid EData source type {source_type}")
+        if (
+            len(payload) != resolved["size"]
+            or hashlib.sha256(payload).hexdigest()
+            != resolved["serialized_sha256"]
+            or EDataRecord.digest(resolved["metadata"], payload)
+            != resolved["content_hash"]
+        ):
+            raise RuntimeError(f"EDataID {data_id} checksum mismatch")
+        self.process_cache.edata_metadata[
+            (self.controller, self.token, data_id)
+        ] = resolved
         hint = self.cache_values.get(data_key)
         with self.process_cache.lock:
             self.process_cache.data.put_data(
                 self.controller,
                 self.token,
                 data_key,
-                info["serialized_sha256"],
+                resolved["serialized_sha256"],
                 payload,
                 hint["score"] if hint is not None else None,
             )
+        self.reporter.report_local(
+            data_key,
+            1,
+            resolved["content_hash"],
+            payload,
+            tier="worker-dram",
+        )
         return payload
 
     def _fetch_peer(self, data_key, content_hash, size):
@@ -268,8 +272,12 @@ class InputResolver:
         status = self.client.idata_status(data_id)
         if not cache_path.is_file():
             self.reporter.reject_local(data_key)
-            payload = self._fetch_peer(
-                data_key, status["content_hash"], status["size"]
+            payload = (
+                self._fetch_peer(
+                    data_key, status["content_hash"], status["size"]
+                )
+                if self.allow_peer_transfer
+                else None
             )
             if payload is None:
                 if status["durability"] == "durable":

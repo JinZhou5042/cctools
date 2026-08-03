@@ -717,6 +717,33 @@ class ControllerClient:
         )
         return value
 
+    def resolve_edata_source(
+        self,
+        data_id,
+        destination_worker_id,
+        transfer_id,
+        excluded_worker_ids=(),
+        allow_peer_transfer=True,
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/edata/resolve-source",
+            {
+                "data_id": int(data_id),
+                "destination_worker_id": str(destination_worker_id),
+                "transfer_id": str(transfer_id),
+                "excluded_worker_ids": [
+                    str(worker_id) for worker_id in excluded_worker_ids
+                ],
+                "allow_peer_transfer": bool(allow_peer_transfer),
+            },
+        )
+        value = json.loads(payload)
+        value["metadata"] = decode_serialization_metadata(
+            value["metadata"]
+        )
+        return value
+
     def allocate_idata(self, producer_task_id, producer_output_index=0):
         payload, _ = self._request(
             "POST",

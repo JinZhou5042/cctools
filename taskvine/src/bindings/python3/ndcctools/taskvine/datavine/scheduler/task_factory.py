@@ -91,6 +91,7 @@ class TaskFactory:
         worker_dram_cache_bytes,
         worker_managed_data=False,
         controller_inline_idata_bytes=8 * 1024 * 1024,
+        allow_peer_transfer=True,
     ):
         self.manager = manager
         self.controller = controller
@@ -103,6 +104,7 @@ class TaskFactory:
         self.controller_inline_idata_bytes = int(
             controller_inline_idata_bytes
         )
+        self.allow_peer_transfer = bool(allow_peer_transfer)
 
     def edata_file(self, data_id):
         file_object = self.edata_files.get(data_id)
@@ -227,6 +229,7 @@ class TaskFactory:
                 self.worker_dram_cache_bytes,
                 record.to_dict(),
                 self.controller_inline_idata_bytes,
+                self.allow_peer_transfer,
             )
         else:
             task = Task(command)

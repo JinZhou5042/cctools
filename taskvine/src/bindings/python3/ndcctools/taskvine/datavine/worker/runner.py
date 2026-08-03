@@ -25,6 +25,7 @@ def execute_task(
     trust_taskvine_inputs=False,
     cache_values=None,
     timings=None,
+    allow_peer_transfer=True,
 ):
     started = time.monotonic()
     controller = str(controller)
@@ -83,6 +84,7 @@ def execute_task(
         emit,
         trust_taskvine_inputs,
         cache_values,
+        allow_peer_transfer,
     )
     setup_done = time.monotonic()
     function_key = (

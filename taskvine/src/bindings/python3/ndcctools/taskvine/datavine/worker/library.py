@@ -73,6 +73,7 @@ def execute_datavine_task(
     worker_dram_cache_bytes,
     task_record,
     controller_inline_idata_bytes,
+    allow_peer_transfer,
 ):
     """Execute one logical task through the worker-owned data path."""
     from .runner import execute_task
@@ -109,6 +110,7 @@ def execute_datavine_task(
             emit=events.append,
             capture_output=outputs.append,
             timings=timings,
+            allow_peer_transfer=allow_peer_transfer,
         )
         if result:
             raise RuntimeError(

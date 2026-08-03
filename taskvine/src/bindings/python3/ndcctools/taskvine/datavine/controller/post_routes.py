@@ -2,6 +2,7 @@
 
 import base64
 import dataclasses
+import urllib.parse
 
 from ..codec import (
     TASK_RECORD_COMPACT_FORMAT,
@@ -20,6 +21,97 @@ class PostRouteFactory:
             def do_POST(self):
                 if not self._authorized():
                     self._error(403, "forbidden")
+                    return
+                if self.path == f"{API_PREFIX}/edata/resolve-source":
+                    admitted_bytes = 0
+                    completed = False
+                    try:
+                        request = self._read_json()
+                        data_id = int(request["data_id"])
+                        record = owner.state.get_edata(data_id)
+                        common = {
+                            "data_id": data_id,
+                            "content_hash": record.content_hash,
+                            "serialized_sha256": record.serialized_sha256,
+                            "size": record.serialized_size,
+                            "metadata": record.metadata.to_dict(),
+                        }
+                        if request.get("allow_peer_transfer", True):
+                            try:
+                                resolved = owner.state.resolve_worker_source(
+                                    f"e:{data_id}",
+                                    request["destination_worker_id"],
+                                    request["transfer_id"],
+                                    request.get("excluded_worker_ids", ()),
+                                    False,
+                                )
+                            except KeyError:
+                                resolved = None
+                        else:
+                            resolved = None
+                        if resolved is not None:
+                            source = resolved["source"]
+                            parsed_url = urllib.parse.urlsplit(
+                                source["source_url"]
+                            )
+                            query = urllib.parse.parse_qs(
+                                parsed_url.query
+                            )
+                            query["sha256"] = [
+                                record.serialized_sha256
+                            ]
+                            source["source_url"] = (
+                                urllib.parse.urlunsplit(
+                                    parsed_url._replace(
+                                        query=urllib.parse.urlencode(
+                                            query, doseq=True
+                                        )
+                                    )
+                                )
+                            )
+                            response = {
+                                **common,
+                                "source_type": "peer",
+                                "source": source,
+                                "lease": dataclasses.asdict(
+                                    resolved["lease"]
+                                ),
+                            }
+                        elif record.serialized_bytes is not None:
+                            admitted_bytes = len(record.serialized_bytes)
+                            if not owner.byte_serving.acquire(
+                                admitted_bytes
+                            ):
+                                self._error(
+                                    503,
+                                    "byte serving capacity exceeded",
+                                )
+                                return
+                            if owner.serving_hook is not None:
+                                owner.serving_hook(f"e:{data_id}")
+                            owner.state.record_edata_fetch(data_id)
+                            response = {
+                                **common,
+                                "source_type": "controller-memory",
+                                "payload": base64.b64encode(
+                                    record.serialized_bytes
+                                ).decode("ascii"),
+                            }
+                        else:
+                            response = {
+                                **common,
+                                "source_type": "sharedfs",
+                                "origin_path": record.stable_path,
+                            }
+                        self._json(200, response)
+                        completed = True
+                    except Exception as exc:
+                        self._error(400, exc)
+                    finally:
+                        if admitted_bytes:
+                            owner.byte_serving.release(
+                                admitted_bytes, completed
+                            )
                     return
                 if self.path == f"{API_PREFIX}/workers/join":
                     try:
