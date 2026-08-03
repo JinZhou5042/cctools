@@ -28,6 +28,7 @@ typedef enum {
 	VINE_CACHE_FILE,               /**< A normal file provided by the manager. */
 	VINE_CACHE_TRANSFER,           /**< Obtain the file by performing a transfer. */
 	VINE_CACHE_MINI_TASK,          /**< Obtain the file by executing a mini-task. */
+	VINE_CACHE_OUTPUT,             /**< A reserved output slot for an assigned task. */
 } vine_cache_type_t;
 
 typedef enum {
@@ -49,6 +50,10 @@ void vine_cache_delete( struct vine_cache *c );
 void vine_cache_load( struct vine_cache *c );
 void vine_cache_scan( struct vine_cache *c, struct link *manager );
 void vine_cache_prune( struct vine_cache *c, vine_cache_level_t level );
+int vine_cache_set_capacity( struct vine_cache *c, int64_t capacity_items, int64_t capacity_bytes );
+void vine_cache_get_usage( struct vine_cache *c, int64_t *items, int64_t *bytes, int64_t *items_high_water, int64_t *bytes_high_water, int64_t *admission_rejections );
+int vine_cache_reserve_output( struct vine_cache *c, const char *cachename, struct link *manager );
+int vine_cache_release_output( struct vine_cache *c, const char *cachename );
 
 char *vine_cache_data_path( struct vine_cache *c, const char *cachename );
 char *vine_cache_meta_path( struct vine_cache *c, const char *cachename );
@@ -56,14 +61,15 @@ char *vine_cache_transfer_path( struct vine_cache *c, const char *cachename );
 char *vine_cache_error_path( struct vine_cache *c, const char *cachename );
 
 int vine_cache_add_file( struct vine_cache *c, const char *cachename, const char *transfer_path, vine_cache_level_t level, int mode, uint64_t size, time_t mtime, timestamp_t start_time, timestamp_t transfer_time, struct link *manager );
-int vine_cache_add_transfer( struct vine_cache *c, const char *cachename, const char *source, vine_cache_level_t level, int mode, uint64_t size, vine_cache_flags_t flags );
-int vine_cache_add_mini_task( struct vine_cache *c, const char *cachename, const char *source, struct vine_task *mini_task, vine_cache_level_t level, int mode, uint64_t size );
+int vine_cache_add_transfer( struct vine_cache *c, const char *cachename, const char *source, vine_cache_level_t level, int mode, uint64_t size, const char *expected_sha256, int inject_corruption, uint64_t pause_after_progress_usec, vine_cache_flags_t flags, struct link *manager );
+int vine_cache_add_mini_task( struct vine_cache *c, const char *cachename, const char *source, struct vine_task *mini_task, vine_cache_level_t level, int mode, uint64_t size, struct link *manager );
 
 vine_cache_status_t vine_cache_ensure( struct vine_cache *c, const char *cachename);
 int vine_cache_remove( struct vine_cache *c, const char *cachename, struct link *manager );
 int vine_cache_contains( struct vine_cache *c, const char *cachename );
 
 int vine_cache_check_xfer_files( struct vine_cache *c, struct link *manager );
+int vine_cache_transfer_count(struct vine_cache *c);
 int vine_cache_start_transfers(struct vine_cache *c);
 
 #endif

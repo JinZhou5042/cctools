@@ -10,6 +10,7 @@ LOCAL_LINKAGE = $(CCTOOLS_PYTHON3_LDFLAGS) -lz $(CCTOOLS_OPENSSL_LDFLAGS) $(CCTO
 CCTOOLS_FLAKE8_IGNORE_FILES = "cvine.py"
 
 DSPYTHONSO = ndcctools/taskvine/_cvine.$(CCTOOLS_DYNAMIC_SUFFIX)
+DATAVINE_MODULE_DIR = $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/datavine
 LIBRARIES = $(DSPYTHONSO)
 OBJECTS = vine_wrap.o
 TARGETS = $(LIBRARIES)
@@ -34,4 +35,7 @@ install: all
 	mkdir -p $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/compat
 	cp ndcctools/taskvine/*.py $(DSPYTHONSO) $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine
 	cp ndcctools/taskvine/compat/*.py $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/compat
+	rm -rf $(DATAVINE_MODULE_DIR)
+	cd ndcctools/taskvine/datavine && find . -type d -print | while read dir; do mkdir -p "$(DATAVINE_MODULE_DIR)/$$dir"; done
+	cd ndcctools/taskvine/datavine && find . -type f \( -name '*.py' -o -name '*.md' \) -print | while read file; do cp "$$file" "$(DATAVINE_MODULE_DIR)/$$file"; done
 	cp taskvine.py $(CCTOOLS_PYTHON3_PATH)/

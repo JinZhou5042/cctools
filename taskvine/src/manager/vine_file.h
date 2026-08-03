@@ -36,6 +36,9 @@ struct vine_file {
 	vine_cache_level_t cache_level; // How aggressively this file should be cached.
 	char *source;       // Name of source file, url, buffer.
 	char *cached_name;  // Name of file in the worker's cache directory.
+	char *datavine_data_id; // Controller-qualified logical identity, or null when unbound.
+	char *datavine_content_hash; // Expected SHA-256 of serialized bytes.
+	char *datavine_lease_id;
 	size_t size;        // Length of source data, if known.
 	time_t mtime;       // Modification time of source data, if known.
 	mode_t mode;        // Manual override for Unix mode bits sent to worker.  Zero if unset.
@@ -63,6 +66,7 @@ char * vine_file_make_file_url( const char * source);
 
 struct vine_file *vine_file_local( const char *source, vine_cache_level_t cache, vine_file_flags_t flags );
 struct vine_file *vine_file_url( const char *source, vine_cache_level_t cache, vine_file_flags_t flags );
+struct vine_file *vine_file_url_cached( const char *source, const char *cached_name, vine_cache_level_t cache, vine_file_flags_t flags );
 struct vine_file *vine_file_temp();
 struct vine_file *vine_file_temp_no_peers( const char *staging_dir );
 struct vine_file *vine_file_buffer( const char *buffer, size_t size, vine_cache_level_t cache, vine_file_flags_t flags );

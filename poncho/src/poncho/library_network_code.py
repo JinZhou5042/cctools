@@ -28,7 +28,6 @@ from ndcctools.taskvine.utils import load_variable_from_library
 r, w = os.pipe()
 exec_method = None
 
-
 # This class captures how results from FunctionCalls are conveyed from
 # the library to the manager.
 # For now, all communication details should use this class to generate responses.

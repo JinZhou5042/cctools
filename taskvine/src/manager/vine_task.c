@@ -573,6 +573,17 @@ int vine_task_add_output(struct vine_task *t, struct vine_file *f, const char *r
 		/* keep going */
 		break;
 	case VINE_URL:
+		/*
+		A Controller-qualified DataVine URL is both a stable
+		rematerialization source and a worker-produced cache identity.
+		Unlike an ordinary URL, it may therefore be the output of a task.
+		The Data Controller validates the logical attempt and publication;
+		TaskVine only owns the physical cache realization.
+		*/
+		if (f->datavine_data_id) {
+			break;
+		}
+		/* fall through */
 	case VINE_MINI_TASK:
 		debug(D_NOTICE | D_VINE, "%s: unsupported output file type", __func__);
 		return 0;

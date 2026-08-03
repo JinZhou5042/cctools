@@ -118,7 +118,7 @@ struct jx *vine_worker_to_jx(struct vine_worker_info *w)
 	jx_insert_string(j, "version", w->version);
 	if (w->factory_name)
 		jx_insert_string(j, "factory_name", w->factory_name);
-	if (w->factory_name)
+	if (w->workerid)
 		jx_insert_string(j, "workerid", w->workerid);
 
 	vine_resources_add_to_jx(w->resources, j);
@@ -128,6 +128,49 @@ struct jx *vine_worker_to_jx(struct vine_worker_info *w)
 	jx_insert_integer(j, "total_tasks_running", itable_size(w->current_tasks));
 	jx_insert_integer(j, "total_bytes_transferred", w->total_bytes_transferred);
 	jx_insert_integer(j, "total_transfer_time", w->total_transfer_time);
+	jx_insert_integer(
+		j,
+		"cache_items",
+		hash_table_size(w->current_files) + w->cache_prune_pending_items
+	);
+	jx_insert_integer(
+		j,
+		"cache_bytes",
+		w->inuse_cache + w->cache_prune_pending_bytes
+	);
+	jx_insert_integer(j, "cache_items_high_water", w->cache_items_high_water);
+	jx_insert_integer(j, "cache_bytes_high_water", w->cache_bytes_high_water);
+	jx_insert_integer(
+		j, "cache_admission_rejections", w->cache_admission_rejections
+	);
+	jx_insert_integer(
+		j, "cache_prune_pending_items", w->cache_prune_pending_items
+	);
+	jx_insert_integer(
+		j, "cache_prune_pending_bytes", w->cache_prune_pending_bytes
+	);
+	jx_insert_boolean(
+		j, "cache_capacity_configured", w->cache_capacity_configured
+	);
+	jx_insert_integer(j, "cache_capacity_items", w->cache_capacity_items);
+	jx_insert_integer(j, "cache_capacity_bytes", w->cache_capacity_bytes);
+	jx_insert_integer(j, "worker_cache_items", w->worker_cache_items);
+	jx_insert_integer(j, "worker_cache_bytes", w->worker_cache_bytes);
+	jx_insert_integer(
+		j,
+		"worker_cache_items_high_water",
+		w->worker_cache_items_high_water
+	);
+	jx_insert_integer(
+		j,
+		"worker_cache_bytes_high_water",
+		w->worker_cache_bytes_high_water
+	);
+	jx_insert_integer(
+		j,
+		"worker_cache_admission_rejections",
+		w->worker_cache_admission_rejections
+	);
 
 	jx_insert_integer(j, "start_time", w->start_time);
 	jx_insert_integer(j, "current_time", timestamp_get());

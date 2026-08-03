@@ -20,6 +20,7 @@ See the file COPYING for details.
 #include "hash_table.h"
 #include "link.h"
 #include "link_auth.h"
+#include "macros.h"
 #include "path_disk_size_info.h"
 #include "stringtools.h"
 #include "timestamp.h"
@@ -28,6 +29,7 @@ See the file COPYING for details.
 
 #include <dirent.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/fcntl.h>
@@ -36,15 +38,96 @@ See the file COPYING for details.
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <openssl/evp.h>
+
 struct vine_cache {
 	struct hash_table *table;
 	struct hash_table *pending_transfers;
 	struct hash_table *processing_transfers;
 	char *cache_dir;
 	int max_transfer_procs;
+	int64_t capacity_items;
+	int64_t capacity_bytes;
+	int64_t items_high_water;
+	int64_t bytes_high_water;
+	int64_t admission_rejections;
 };
 
 static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager);
+
+static int vine_cache_file_sha256(
+		const char *path, char output[65])
+{
+	int fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		return 0;
+	}
+	EVP_MD_CTX *context = EVP_MD_CTX_new();
+	unsigned char digest[EVP_MAX_MD_SIZE];
+	unsigned int digest_length = 0;
+	int ok = context
+			&& EVP_DigestInit_ex(context, EVP_sha256(), NULL) == 1;
+	char buffer[64 * 1024];
+	while (ok) {
+		ssize_t count = read(fd, buffer, sizeof(buffer));
+		if (count == 0) {
+			break;
+		}
+		if (count < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			ok = 0;
+			break;
+		}
+		ok = EVP_DigestUpdate(context, buffer, count) == 1;
+	}
+	if (ok) {
+		ok = EVP_DigestFinal_ex(
+				context, digest, &digest_length) == 1
+				&& digest_length == 32;
+	}
+	if (context) {
+		EVP_MD_CTX_free(context);
+	}
+	close(fd);
+	if (!ok) {
+		return 0;
+	}
+	for (unsigned int index = 0; index < digest_length; index++) {
+		snprintf(
+				output + index * 2,
+				3,
+				"%02x",
+				digest[index]);
+	}
+	output[64] = 0;
+	return 1;
+}
+
+static int vine_cache_inject_corruption(
+		struct vine_cache *c, const char *cachename)
+{
+	char *path = vine_cache_transfer_path(c, cachename);
+	int fd = open(path, O_RDWR);
+	unsigned char byte;
+	int ok = fd >= 0 && read(fd, &byte, 1) == 1
+			&& lseek(fd, 0, SEEK_SET) == 0;
+	if (ok) {
+		byte ^= 0x01;
+		ok = write(fd, &byte, 1) == 1 && fsync(fd) == 0;
+	}
+	if (fd >= 0) {
+		close(fd);
+	}
+	free(path);
+	return ok;
+}
+
+int vine_cache_transfer_count(struct vine_cache *c)
+{
+	return c ? hash_table_size(c->processing_transfers) : 0;
+}
 
 /*
 Create the cache manager structure for a given cache directory.
@@ -58,7 +141,144 @@ struct vine_cache *vine_cache_create(const char *cache_dir, int max_procs)
 	c->processing_transfers = hash_table_create(0, 0);
 	c->cache_dir = strdup(cache_dir);
 	c->max_transfer_procs = max_procs;
+	c->capacity_items = -1;
+	c->capacity_bytes = -1;
+	c->items_high_water = 0;
+	c->bytes_high_water = 0;
+	c->admission_rejections = 0;
 	return c;
+}
+
+static void vine_cache_usage(struct vine_cache *c, int64_t *items, int64_t *bytes)
+{
+	struct vine_cache_file *f;
+	char *cachename;
+	int iteration;
+
+	*items = hash_table_size(c->table);
+	*bytes = 0;
+	HASH_TABLE_ITERATE(c->table, iteration, cachename, f)
+	{
+		if (f->size > (uint64_t)INT64_MAX
+				|| (int64_t)f->size > INT64_MAX - *bytes) {
+			*bytes = INT64_MAX;
+			break;
+		}
+		*bytes += f->size;
+	}
+}
+
+static void vine_cache_update_high_water(struct vine_cache *c)
+{
+	int64_t items;
+	int64_t bytes;
+	vine_cache_usage(c, &items, &bytes);
+	c->items_high_water = MAX(c->items_high_water, items);
+	c->bytes_high_water = MAX(c->bytes_high_water, bytes);
+}
+
+void vine_cache_get_usage(
+		struct vine_cache *c,
+		int64_t *items,
+		int64_t *bytes,
+		int64_t *items_high_water,
+		int64_t *bytes_high_water,
+		int64_t *admission_rejections)
+{
+	vine_cache_usage(c, items, bytes);
+	*items_high_water = c->items_high_water;
+	*bytes_high_water = c->bytes_high_water;
+	*admission_rejections = c->admission_rejections;
+}
+
+int vine_cache_set_capacity(struct vine_cache *c, int64_t capacity_items, int64_t capacity_bytes)
+{
+	int64_t items;
+	int64_t bytes;
+	vine_cache_usage(c, &items, &bytes);
+	if ((capacity_items >= 0 && items > capacity_items)
+			|| (capacity_bytes >= 0 && bytes > capacity_bytes)) {
+		c->admission_rejections++;
+		return 0;
+	}
+	c->capacity_items = capacity_items;
+	c->capacity_bytes = capacity_bytes;
+	vine_cache_update_high_water(c);
+	return 1;
+}
+
+static int vine_cache_admit(
+		struct vine_cache *c, const char *cachename, uint64_t size)
+{
+	int64_t items;
+	int64_t bytes;
+	vine_cache_usage(c, &items, &bytes);
+
+	struct vine_cache_file *existing = hash_table_lookup(c->table, cachename);
+	int64_t projected_items = items + (existing ? 0 : 1);
+	int64_t projected_bytes = bytes;
+	if (existing) {
+		projected_bytes -= existing->size;
+	}
+	if (size > INT64_MAX || projected_bytes > INT64_MAX - (int64_t)size) {
+		projected_bytes = INT64_MAX;
+	} else {
+		projected_bytes += size;
+	}
+
+	if ((c->capacity_items >= 0 && projected_items > c->capacity_items)
+			|| (c->capacity_bytes >= 0 && projected_bytes > c->capacity_bytes)) {
+		c->admission_rejections++;
+		return 0;
+	}
+	return 1;
+}
+
+static void vine_cache_reject(
+		struct vine_cache *c,
+		const char *cachename,
+		uint64_t size,
+		struct link *manager)
+{
+	if (!manager) {
+		return;
+	}
+	char *message = string_format(
+			"worker cache admission rejected %s (%" PRIu64 " bytes)",
+			cachename,
+			size);
+	vine_worker_send_cache_invalid(manager, cachename, message);
+	vine_worker_send_cache_capacity_update(manager);
+	free(message);
+}
+
+int vine_cache_reserve_output(
+		struct vine_cache *c, const char *cachename, struct link *manager)
+{
+	struct vine_cache_file *existing = hash_table_lookup(
+			c->table, cachename);
+	if (existing) {
+		return 1;
+	}
+	if (!vine_cache_admit(c, cachename, 0)) {
+		vine_cache_reject(c, cachename, 0, manager);
+		return 0;
+	}
+	struct vine_cache_file *reservation = vine_cache_file_create(
+			VINE_CACHE_OUTPUT, "task-output", 0);
+	hash_table_insert(c->table, cachename, reservation);
+	vine_cache_update_high_water(c);
+	return 1;
+}
+
+int vine_cache_release_output(struct vine_cache *c, const char *cachename)
+{
+	struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
+	if (!f || f->cache_type != VINE_CACHE_OUTPUT
+			|| f->status != VINE_CACHE_STATUS_PENDING) {
+		return 0;
+	}
+	return vine_cache_remove(c, cachename, 0);
 }
 
 /*
@@ -97,6 +317,7 @@ void vine_cache_load(struct vine_cache *c)
 					debug(D_VINE, "cache: %s has cache-level %d, keeping", d->d_name, f->cache_level);
 					hash_table_insert(c->table, d->d_name, f);
 					f->status = VINE_CACHE_STATUS_READY;
+					vine_cache_update_high_water(c);
 				}
 			} else {
 				debug(D_VINE, "cache: %s has invalid metadata, deleting", d->d_name);
@@ -272,7 +493,9 @@ int vine_cache_add_file(
 
 	int result = 0;
 
-	if (rename(transfer_path, data_path) == 0) {
+	if (!vine_cache_admit(c, cachename, size)) {
+		vine_cache_reject(c, cachename, size, manager);
+	} else if (rename(transfer_path, data_path) == 0) {
 		struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
 		if (f) {
 			/* If the file object is already present, we are providing the missing data. */
@@ -292,6 +515,7 @@ int vine_cache_add_file(
 
 		/* File has data and is ready to use. */
 		f->status = VINE_CACHE_STATUS_READY;
+		vine_cache_update_high_water(c);
 
 		vine_cache_file_save_metadata(f, meta_path);
 
@@ -323,7 +547,7 @@ Queue a remote file transfer to produce a file.
 This entry will be materialized later in vine_cache_ensure.
 */
 
-int vine_cache_add_transfer(struct vine_cache *c, const char *cachename, const char *source, vine_cache_level_t level, int mode, uint64_t size, vine_cache_flags_t flags)
+int vine_cache_add_transfer(struct vine_cache *c, const char *cachename, const char *source, vine_cache_level_t level, int mode, uint64_t size, const char *expected_sha256, int inject_corruption, uint64_t pause_after_progress_usec, vine_cache_flags_t flags, struct link *manager)
 {
 	/* Has this transfer already been queued? */
 	struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
@@ -343,9 +567,19 @@ int vine_cache_add_transfer(struct vine_cache *c, const char *cachename, const c
 		}
 	}
 
+	if (!vine_cache_admit(c, cachename, size)) {
+		vine_cache_reject(c, cachename, size, manager);
+		return 0;
+	}
+
 	/* Create the object and fill in the metadata. */
 
 	f = vine_cache_file_create(VINE_CACHE_TRANSFER, source, 0);
+	if (expected_sha256 && strcmp(expected_sha256, "-")) {
+		f->expected_sha256 = xxstrdup(expected_sha256);
+	}
+	f->inject_corruption = !!inject_corruption;
+	f->pause_after_progress_usec = pause_after_progress_usec;
 
 	/*
 	XXX Note that VINE_URL may not be right b/c puturl may be used to
@@ -362,6 +596,7 @@ int vine_cache_add_transfer(struct vine_cache *c, const char *cachename, const c
 
 	hash_table_insert(c->table, cachename, f);
 	hash_table_insert(c->pending_transfers, cachename, NULL);
+	vine_cache_update_high_water(c);
 
 	/* Note metadata is not saved here but when transfer is completed. */
 
@@ -377,12 +612,17 @@ Queue a mini-task to produce a file.
 This entry will be materialized later in vine_cache_ensure.
 */
 
-int vine_cache_add_mini_task(struct vine_cache *c, const char *cachename, const char *source, struct vine_task *mini_task, vine_cache_level_t level, int mode, uint64_t size)
+int vine_cache_add_mini_task(struct vine_cache *c, const char *cachename, const char *source, struct vine_task *mini_task, vine_cache_level_t level, int mode, uint64_t size, struct link *manager)
 {
 	/* Has this minitask already been queued? */
 	struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
 	if (f) {
 		/* The minitask is already queued up. */
+		return 0;
+	}
+
+	if (!vine_cache_admit(c, cachename, size)) {
+		vine_cache_reject(c, cachename, size, manager);
 		return 0;
 	}
 
@@ -396,6 +636,7 @@ int vine_cache_add_mini_task(struct vine_cache *c, const char *cachename, const 
 
 	hash_table_insert(c->table, cachename, f);
 	hash_table_insert(c->pending_transfers, cachename, NULL);
+	vine_cache_update_high_water(c);
 
 	/* Note metadata is not saved here but when mini task is completed. */
 
@@ -485,13 +726,14 @@ static int do_internal_command(struct vine_cache *c, const char *command, char *
 Transfer a single input file from a url to the local transfer path via curl.
 -s Do not show progress bar.  (Also disables errors.)
 -S Show errors.
+-f Reject HTTP response codes 400 and above instead of caching their bodies.
 -L Follow redirects as needed.
 --stderr Send errors to /dev/stdout so that they are observed by popen.
 */
 
 static int do_curl_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *transfer_path, const char *cache_path, char **error_message)
 {
-	char *command = string_format("curl -sSL --stderr /dev/stdout -o \"%s\" \"%s\"", transfer_path, f->source);
+	char *command = string_format("curl -fsSL --stderr /dev/stdout -o \"%s\" \"%s\"", transfer_path, f->source);
 	int result = do_internal_command(c, command, error_message);
 	free(command);
 
@@ -648,9 +890,21 @@ static void vine_cache_worker_process(struct vine_cache_file *f, struct vine_cac
 		break;
 	case VINE_CACHE_TRANSFER:
 		result = do_transfer(c, f, cachename, &error_message);
+		if (result && f->inject_corruption
+				&& !vine_cache_inject_corruption(c, cachename)) {
+			result = 0;
+			if (!error_message) {
+				error_message = string_format(
+						"Could not inject deterministic transfer corruption");
+			}
+		}
 		break;
 	case VINE_CACHE_MINI_TASK:
 		result = do_mini_task(c, f, &error_message);
+		break;
+	case VINE_CACHE_OUTPUT:
+		/* Output reservations are materialized only by task stageout. */
+		result = 0;
 		break;
 	}
 
@@ -700,6 +954,11 @@ vine_cache_status_t vine_cache_ensure(struct vine_cache *c, const char *cachenam
 	if (!f) {
 		debug(D_VINE, "cache: %s is unknown, perhaps it failed to transfer earlier?", cachename);
 		return VINE_CACHE_STATUS_UNKNOWN;
+	}
+
+	if (f->cache_type == VINE_CACHE_OUTPUT && f->status == VINE_CACHE_STATUS_PENDING) {
+		debug(D_VINE, "cache: %s is an unpublished task output", cachename);
+		return VINE_CACHE_STATUS_FAILED;
 	}
 
 	switch (f->status) {
@@ -764,6 +1023,9 @@ vine_cache_status_t vine_cache_ensure(struct vine_cache *c, const char *cachenam
 	} else if (f->pid > 0) {
 		f->status = VINE_CACHE_STATUS_PROCESSING;
 		hash_table_insert(c->processing_transfers, cachename, NULL);
+		if (f->cache_type == VINE_CACHE_TRANSFER) {
+			vine_worker_send_cache_transfer_start(cachename);
+		}
 		switch (f->cache_type) {
 		case VINE_CACHE_TRANSFER:
 			debug(D_VINE, "cache: transferring %s to %s", f->source, cachename);
@@ -773,6 +1035,9 @@ vine_cache_status_t vine_cache_ensure(struct vine_cache *c, const char *cachenam
 			break;
 		case VINE_CACHE_FILE:
 			debug(D_VINE, "cache: checking if %s is present in cache", cachename);
+			break;
+		case VINE_CACHE_OUTPUT:
+			debug(D_VINE, "cache: invalid attempt to materialize unpublished output %s", cachename);
 			break;
 		}
 		return f->status;
@@ -836,7 +1101,21 @@ static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_fil
 		debug(D_VINE, "cache: measuring %s", transfer_path);
 		if (vine_cache_file_measure_metadata(transfer_path, &mode, &size, &mtime)) {
 			debug(D_VINE, "cache: created %s with size %lld in %lld usec", cachename, (long long)size, (long long)transfer_time);
-			if (vine_cache_add_file(c, cachename, transfer_path, f->cache_level, mode, size, mtime, f->start_time, transfer_time, manager)) {
+			char actual_sha256[65];
+			int valid_hash = !f->expected_sha256
+					|| (vine_cache_file_sha256(
+								transfer_path,
+								actual_sha256)
+							&& !strcmp(
+									actual_sha256,
+									f->expected_sha256));
+			if (!valid_hash) {
+				debug(D_VINE,
+						"cache: rejecting corrupt DataVine transfer %s",
+						cachename);
+				vine_worker_send_cache_transfer_corrupt(cachename);
+				f->status = VINE_CACHE_STATUS_FAILED;
+			} else if (vine_cache_add_file(c, cachename, transfer_path, f->cache_level, mode, size, mtime, f->start_time, transfer_time, manager)) {
 				f->status = VINE_CACHE_STATUS_READY;
 			} else {
 				debug(D_VINE, "cache: unable to move %s to %s: %s\n", transfer_path, cache_path, strerror(errno));
@@ -849,6 +1128,21 @@ static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_fil
 	} else {
 		debug(D_VINE, "cache: command failed to complete for %s", cachename);
 		f->status = VINE_CACHE_STATUS_FAILED;
+	}
+
+	/*
+	A failed transfer may have written a partial object. Remove it before
+	telling the manager that the transfer failed, then report whether the
+	temporary namespace is clean while the transfer ID is still active.
+	*/
+	if (f->status != VINE_CACHE_STATUS_READY) {
+		trash_file(transfer_path);
+		struct stat transfer_info;
+		vine_worker_send_cache_transfer_cleanup(
+				cachename,
+				f->transfer_bytes_observed,
+				lstat(transfer_path, &transfer_info) < 0
+						&& errno == ENOENT);
 	}
 
 	/* Finally send a cache update message one way or the other. */
@@ -876,7 +1170,7 @@ static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_fil
 		}
 	}
 
-	/* The transfer path is either moved to the cache or failed, so we can delete it safely. */
+	/* A successful transfer was renamed; failed transfers were removed above. */
 	trash_file(transfer_path);
 
 	free(cache_path);
@@ -921,6 +1215,36 @@ static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *
 {
 	int status;
 	if (f->status == VINE_CACHE_STATUS_PROCESSING) {
+		if (f->cache_type == VINE_CACHE_TRANSFER
+				&& !f->transfer_progress_reported) {
+			char *transfer_path = vine_cache_transfer_path(c, cachename);
+			struct stat info;
+			if (stat(transfer_path, &info) == 0
+					&& S_ISREG(info.st_mode)
+					&& info.st_size > 0) {
+				f->transfer_bytes_observed = info.st_size;
+				f->transfer_progress_reported = 1;
+				vine_worker_send_cache_transfer_progress(
+						cachename,
+						f->transfer_bytes_observed);
+				if (f->pause_after_progress_usec > 0) {
+					uint64_t pause_usec =
+							f->pause_after_progress_usec;
+					f->pause_after_progress_usec = 0;
+					kill(f->pid, SIGSTOP);
+					while (pause_usec > 0) {
+						uint64_t chunk =
+								pause_usec > 500000
+								? 500000
+								: pause_usec;
+						usleep(chunk);
+						pause_usec -= chunk;
+					}
+					kill(f->pid, SIGCONT);
+				}
+			}
+			free(transfer_path);
+		}
 		int result = waitpid(f->pid, &status, WNOHANG);
 		if (result == 0) {
 			// process still executing

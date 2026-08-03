@@ -530,6 +530,12 @@ class Manager(object):
     def disable_peer_transfers(self):
         return cvine.vine_disable_peer_transfers(self._taskvine)
 
+    def set_datavine_controller(self, endpoint, token):
+        """Require Controller leases for DataVine-bound peer transfers."""
+        return cvine.vine_set_datavine_controller(
+            self._taskvine, str(endpoint), str(token)
+        )
+
     ##
     # Change the project name for the given manager.
     #
@@ -994,6 +1000,116 @@ class Manager(object):
     #
     def tune(self, name, value):
         return cvine.vine_tune(self._taskvine, name, value)
+
+    def datavine_peer_transfer_fault_stats(self):
+        """Return deterministic peer-transfer start/fault counters."""
+        return {
+            "peer_transfer_starts": int(
+                cvine.vine_manager_datavine_peer_transfer_starts(
+                    self._taskvine
+                )
+            ),
+            "peer_transfer_progress_events": int(
+                cvine.vine_manager_datavine_peer_transfer_progress_events(
+                    self._taskvine
+                )
+            ),
+            "peer_transfer_progress_max_bytes": int(
+                cvine.vine_manager_datavine_peer_transfer_progress_max_bytes(
+                    self._taskvine
+                )
+            ),
+            "deferred_peer_source_loss_pending": int(
+                cvine.vine_manager_datavine_deferred_peer_source_loss_pending(
+                    self._taskvine
+                )
+            ),
+            "deferred_peer_source_loss_pauses": int(
+                cvine.vine_manager_datavine_deferred_peer_source_loss_pauses(
+                    self._taskvine
+                )
+            ),
+            "deferred_peer_source_loss_triggers": int(
+                cvine.vine_manager_datavine_deferred_peer_source_loss_triggers(
+                    self._taskvine
+                )
+            ),
+            "deferred_peer_source_loss_expirations": int(
+                cvine.vine_manager_datavine_deferred_peer_source_loss_expirations(
+                    self._taskvine
+                )
+            ),
+            "peer_transfer_cleanup_reports": int(
+                cvine.vine_manager_datavine_peer_transfer_cleanup_reports(
+                    self._taskvine
+                )
+            ),
+            "peer_transfer_cleanup_absent": int(
+                cvine.vine_manager_datavine_peer_transfer_cleanup_absent(
+                    self._taskvine
+                )
+            ),
+            "peer_transfer_cleanup_pending": int(
+                cvine.vine_manager_datavine_peer_transfer_cleanup_pending(
+                    self._taskvine
+                )
+            ),
+            "peer_source_losses_injected": int(
+                cvine.vine_manager_datavine_peer_source_losses_injected(
+                    self._taskvine
+                )
+            ),
+            "peer_corruptions_injected": int(
+                cvine.vine_manager_datavine_peer_corruptions_injected(
+                    self._taskvine
+                )
+            ),
+            "peer_corruptions_rejected": int(
+                cvine.vine_manager_datavine_peer_corruptions_rejected(
+                    self._taskvine
+                )
+            ),
+            "peer_alternate_source_fallbacks": int(
+                cvine.vine_manager_datavine_peer_alternate_source_fallbacks(
+                    self._taskvine
+                )
+            ),
+            "peer_corrupt_fallback_pending": int(
+                cvine.vine_manager_datavine_peer_corrupt_fallback_pending(
+                    self._taskvine
+                )
+            ),
+            "peer_release_failures_injected": int(
+                cvine.vine_manager_datavine_peer_release_failures_injected(
+                    self._taskvine
+                )
+            ),
+            "peer_release_retries_succeeded": int(
+                cvine.vine_manager_datavine_peer_release_retries_succeeded(
+                    self._taskvine
+                )
+            ),
+            "peer_release_pending": int(
+                cvine.vine_manager_datavine_peer_release_pending(
+                    self._taskvine
+                )
+            ),
+            "peer_release_pending_capacity": int(
+                cvine.vine_manager_datavine_peer_release_pending_capacity(
+                    self._taskvine
+                )
+            ),
+            "peer_release_pending_high_water": int(
+                cvine.vine_manager_datavine_peer_release_pending_high_water(
+                    self._taskvine
+                )
+            ),
+            "peer_release_capacity_backpressure": int(
+                cvine.vine_manager_datavine_peer_release_capacity_backpressure(
+                    self._taskvine
+                )
+            ),
+        }
 
     ##
     # Enable task result caching.
@@ -1735,7 +1851,33 @@ class Manager(object):
         cvine.vine_undeclare_file(self._taskvine, file._file)
 
     def prune_file(self, file):
-        cvine.vine_prune_file(self._taskvine, file._file)
+        return cvine.vine_prune_file(self._taskvine, file._file)
+
+    def prune_file_on_worker(self, file, worker_id):
+        """Request acknowledged deletion of one replica by WorkerID."""
+        return cvine.vine_prune_file_on_worker(
+            self._taskvine, file._file, str(worker_id)
+        )
+
+    def prune_file_status(self, file):
+        return {
+            "requested": cvine.vine_prune_file_requested(
+                self._taskvine, file._file
+            ),
+            "confirmed": cvine.vine_prune_file_confirmed(
+                self._taskvine, file._file
+            ),
+            "failed": cvine.vine_prune_file_failed(
+                self._taskvine, file._file
+            ),
+        }
+
+    def forget_prune_file_status(self, file):
+        return bool(
+            cvine.vine_prune_file_forget(
+                self._taskvine, file._file
+            )
+        )
 
     # Deprecated, for backwards compatibility.
     def remove_file(self, file):
@@ -1793,6 +1935,16 @@ class Manager(object):
             raise TypeError(f"url {url} is not a str")
 
         f = cvine.vine_declare_url(self._taskvine, url, cache_level, flags)
+        return File(f)
+
+    def declare_url_cached(self, url, cached_name, cache=False, peer_transfer=True):
+        flags = Task._determine_file_flags(peer_transfer)
+        cache_level = Task._determine_cache_level(cache)
+        if not isinstance(url, str) or not isinstance(cached_name, str):
+            raise TypeError("url and cached_name must be strings")
+        f = cvine.vine_declare_url_cached(
+            self._taskvine, url, cached_name, cache_level, flags
+        )
         return File(f)
 
     ##

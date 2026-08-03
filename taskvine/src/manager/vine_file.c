@@ -27,6 +27,33 @@ See the file COPYING for details.
 /* Internal use: when the worker uses the client library, do not recompute cached names. */
 int vine_hack_do_not_compute_cached_name = 0;
 
+int vine_file_set_datavine_data_id(struct vine_file *f, const char *data_id)
+{
+	if (!f || !data_id || !data_id[0]) {
+		return 0;
+	}
+	free(f->datavine_data_id);
+	f->datavine_data_id = xxstrdup(data_id);
+	return 1;
+}
+
+int vine_file_set_datavine_content_hash(
+		struct vine_file *f, const char *content_hash)
+{
+	if (!f || !content_hash || strlen(content_hash) != 64) {
+		return 0;
+	}
+	for (const char *cursor = content_hash; *cursor; cursor++) {
+		if (!((*cursor >= '0' && *cursor <= '9')
+					|| (*cursor >= 'a' && *cursor <= 'f'))) {
+			return 0;
+		}
+	}
+	free(f->datavine_content_hash);
+	f->datavine_content_hash = xxstrdup(content_hash);
+	return 1;
+}
+
 /* Returns file refcount. If refcount is 0, the file has been deleted. */
 int vine_file_delete(struct vine_file *f)
 {
@@ -67,6 +94,9 @@ int vine_file_delete(struct vine_file *f)
 		vine_task_delete(f->mini_task);
 		free(f->source);
 		free(f->cached_name);
+		free(f->datavine_data_id);
+		free(f->datavine_content_hash);
+		free(f->datavine_lease_id);
 		free(f->data);
 		free(f);
 	}
@@ -233,10 +263,25 @@ struct vine_file *vine_file_url(const char *source, vine_cache_level_t cache, vi
 	return vine_file_create(source, 0, 0, 0, VINE_URL, 0, cache, flags);
 }
 
+struct vine_file *vine_file_url_cached(const char *source, const char *cached_name, vine_cache_level_t cache, vine_file_flags_t flags)
+{
+	return vine_file_create(source, cached_name, 0, 0, VINE_URL, 0, cache, flags);
+}
+
 struct vine_file *vine_file_substitute_url(struct vine_file *f, const char *source, struct vine_worker_info *w)
 {
 	struct vine_file *sub = vine_file_create(source, f->cached_name, 0, f->size, VINE_URL, 0, 0, 0);
 	sub->source_worker = w;
+	if (f->datavine_data_id) {
+		vine_file_set_datavine_data_id(sub, f->datavine_data_id);
+	}
+	if (f->datavine_content_hash) {
+		vine_file_set_datavine_content_hash(
+				sub, f->datavine_content_hash);
+	}
+	if (f->datavine_lease_id) {
+		sub->datavine_lease_id = xxstrdup(f->datavine_lease_id);
+	}
 	return sub;
 }
 

@@ -7,6 +7,7 @@
 *.m4 whitespace=-indent-with-non-tab
 *.png -whitespace binary
 *.py whitespace=-indent-with-non-tab
+*.sh whitespace=-indent-with-non-tab
 *.xml whitespace=-indent-with-non-tab,cr-at-eol
 
 COPYING -whitespace

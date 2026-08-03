@@ -126,6 +126,7 @@ struct vine_manager {
 
 	struct hash_table *file_table;      /* Maps fileid -> struct vine_file.* */
 	struct hash_table *file_worker_table; /* Maps cachename -> struct set of workers with a replica of the file.* */
+	struct hash_table *file_prune_table; /* Maps cachename -> acknowledged prune counters. */
 	struct priority_queue *temp_files_to_replicate; /* Priority queue of temp files to be replicated, those with less replicas are at the top. */
 
 
@@ -178,6 +179,13 @@ struct vine_manager {
 	int peer_transfers_enabled;
 	int file_source_max_transfers;
 	int worker_source_max_transfers;
+	char *datavine_controller_endpoint;
+	char *datavine_controller_host;
+	int datavine_controller_port;
+	char *datavine_controller_token;
+	struct link *datavine_controller_link;
+	int64_t datavine_cache_capacity_items;
+	int64_t datavine_cache_capacity_bytes;
 
 	/* Hungry call optimization */
 	timestamp_t time_last_hungry;      /* Last time vine_hungry_computation was called. */
@@ -222,7 +230,6 @@ struct vine_manager {
 	int temp_replica_count;       /* Number of replicas per temp file */
 	int clean_redundant_replicas; /* If true, remove redundant replicas of temp files to save disk space. */
 	int shift_disk_load;          /* If true, shift storage burden to more available workers to minimize disk usage peaks. */
-
 	double resource_submit_multiplier; /* Factor to permit overcommitment of resources at each worker.  */
 	double bandwidth_limit;            /* Artificial limit on bandwidth of manager<->worker transfers. */
 	int disk_avail_threshold; /* Ensure this minimum amount of available disk space. (in MB) */
@@ -247,6 +254,36 @@ struct vine_manager {
 	/* Testing mode parameters */
 	timestamp_t enforce_worker_eviction_interval;   /* Enforce worker eviction interval in seconds */
 	timestamp_t time_start_worker_eviction;         /* Track the time when we start evicting workers */
+	int datavine_fault_peer_source_loss_remaining; /* One-shot failures after a leased peer request is dispatched. */
+	int datavine_fault_peer_source_loss_after_bytes_remaining;
+	uint64_t datavine_fault_peer_source_loss_after_bytes_threshold;
+	int datavine_fault_peer_source_loss_after_bytes_deferred;
+	char *datavine_deferred_peer_source_loss_transfer_id;
+	char *datavine_deferred_peer_source_loss_destination_workerid;
+	int datavine_deferred_peer_source_loss_triggering;
+	uint64_t datavine_deferred_peer_source_loss_pauses;
+	uint64_t datavine_deferred_peer_source_loss_triggers;
+	uint64_t datavine_deferred_peer_source_loss_expirations;
+	uint64_t datavine_peer_transfer_starts;
+	uint64_t datavine_peer_transfer_progress_events;
+	uint64_t datavine_peer_transfer_progress_max_bytes;
+	uint64_t datavine_peer_transfer_cleanup_reports;
+	uint64_t datavine_peer_transfer_cleanup_absent;
+	uint64_t datavine_peer_source_losses_injected;
+	struct hash_table *datavine_partial_cleanup_expectations;
+	int datavine_fault_peer_corruption_remaining;
+	uint64_t datavine_peer_corruptions_injected;
+	uint64_t datavine_peer_corruptions_rejected;
+	uint64_t datavine_peer_alternate_source_fallbacks;
+	struct hash_table *datavine_corrupt_source_expectations;
+	int datavine_fault_idata_release_failures_remaining;
+	timestamp_t datavine_transfer_release_retry_delay;
+	uint64_t datavine_transfer_release_capacity;
+	uint64_t datavine_peer_release_failures_injected;
+	uint64_t datavine_peer_release_retries_succeeded;
+	uint64_t datavine_peer_release_pending;
+	uint64_t datavine_peer_release_pending_high_water;
+	uint64_t datavine_peer_release_capacity_backpressure;
 };
 
 /*
