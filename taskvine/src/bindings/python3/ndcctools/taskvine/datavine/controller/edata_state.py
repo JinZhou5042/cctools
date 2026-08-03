@@ -178,6 +178,10 @@ class EDataStateMixin:
             except KeyError:
                 raise KeyError(f"unknown EDataID {data_id}") from None
 
+    def edata_has_shared_consumers(self, data_id):
+        with self._lock:
+            return len(self._edata_consumers.get(int(data_id), ())) > 1
+
     def record_edata_fetch(self, data_id):
         with self._lock:
             self.get_edata(data_id)

@@ -11,6 +11,18 @@ from .post_routes import PostRouteFactory
 class ControllerHandlerFactory:
     @staticmethod
     def create(owner):
+        def admitted(route):
+            def handle(self):
+                if not self.server.admit_request():
+                    self._error(503, "request concurrency exceeded")
+                    return
+                try:
+                    route(self)
+                finally:
+                    self.server.release_request()
+
+            return handle
+
         class Handler(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
             disable_nagle_algorithm = True
@@ -36,9 +48,9 @@ class ControllerHandlerFactory:
                 )
                 self._json(status, value)
 
-            do_GET = GetRouteFactory.create(owner)
+            do_GET = admitted(GetRouteFactory.create(owner))
 
-            do_POST = PostRouteFactory.create(owner)
+            do_POST = admitted(PostRouteFactory.create(owner))
 
             def _read_json(self):
                 return read_json_request(

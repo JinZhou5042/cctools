@@ -712,7 +712,7 @@ class ControllerClient:
         excluded_worker_ids=(),
         allow_peer_transfer=True,
     ):
-        payload, _ = self._request(
+        payload, headers = self._request(
             "POST",
             f"{API_PREFIX}/edata/resolve-source",
             {
@@ -725,6 +725,35 @@ class ControllerClient:
                 "allow_peer_transfer": bool(allow_peer_transfer),
             },
         )
+        if headers.get_content_type() == "application/octet-stream":
+            try:
+                value = {
+                    "data_id": int(headers["X-DataVine-Data-ID"]),
+                    "content_hash": headers[
+                        "X-DataVine-Content-SHA256"
+                    ],
+                    "serialized_sha256": headers[
+                        "X-DataVine-Serialized-SHA256"
+                    ],
+                    "size": len(payload),
+                    "metadata": decode_serialization_metadata(
+                        json.loads(
+                            base64.urlsafe_b64decode(
+                                headers["X-DataVine-Metadata"]
+                            )
+                        )
+                    ),
+                    "cache_globally": (
+                        headers["X-DataVine-Cache-Globally"] == "1"
+                    ),
+                    "source_type": "controller-memory",
+                    "payload": payload,
+                }
+            except Exception as exc:
+                raise DataVineRemoteError(
+                    f"EDataID {data_id} has invalid source metadata"
+                ) from exc
+            return value
         value = json.loads(payload)
         value["metadata"] = decode_serialization_metadata(
             value["metadata"]

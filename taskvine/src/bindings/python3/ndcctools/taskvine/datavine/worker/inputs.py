@@ -1,6 +1,5 @@
 """Worker-side EData/IData fetching and binding resolution."""
 
-import base64
 import cloudpickle
 import copy
 import hashlib
@@ -93,7 +92,7 @@ class InputResolver:
         if source_type == "peer":
             pass
         elif source_type == "controller-memory":
-            payload = base64.b64decode(resolved["payload"], validate=True)
+            payload = resolved["payload"]
         elif source_type == "sharedfs":
             payload = Path(resolved["origin_path"]).read_bytes()
             self.emit(f"DATAVINE_BULK_ORIGIN e{data_id}")
@@ -120,13 +119,14 @@ class InputResolver:
                 payload,
                 hint["score"] if hint is not None else None,
             )
-        self.reporter.report_local(
-            data_key,
-            1,
-            resolved["content_hash"],
-            payload,
-            tier="worker-dram",
-        )
+        if resolved["cache_globally"]:
+            self.reporter.report_local(
+                data_key,
+                1,
+                resolved["content_hash"],
+                payload,
+                tier="worker-dram",
+            )
         return payload
 
     def _fetch_peer(self, data_key, content_hash, size):

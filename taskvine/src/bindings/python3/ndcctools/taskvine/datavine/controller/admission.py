@@ -75,47 +75,29 @@ class BoundedThreadingHTTPServer(http.server.ThreadingHTTPServer):
         self.max_requests = int(max_requests)
         if self.max_requests < 1:
             raise ValueError("request concurrency must be positive")
-        self._request_slots = threading.BoundedSemaphore(
-            self.max_requests
-        )
+        self._request_slots = threading.BoundedSemaphore(self.max_requests)
         self._request_lock = threading.Lock()
         self._request_active = 0
         self._request_high_water = 0
         self._request_rejected = 0
         super().__init__(address, handler)
 
-    def process_request(self, request, client_address):
+    def admit_request(self):
         if not self._request_slots.acquire(blocking=False):
             with self._request_lock:
                 self._request_rejected += 1
-            try:
-                request.sendall(
-                    b"HTTP/1.1 503 Service Unavailable\r\n"
-                    b"Content-Length: 0\r\n"
-                    b"Connection: close\r\n\r\n"
-                )
-            finally:
-                self.shutdown_request(request)
-            return
+            return False
         with self._request_lock:
             self._request_active += 1
             self._request_high_water = max(
                 self._request_high_water, self._request_active
             )
-        try:
-            super().process_request(request, client_address)
-        except Exception:
-            self._release_request_slot()
-            raise
+        return True
 
-    def process_request_thread(self, request, client_address):
-        try:
-            super().process_request_thread(request, client_address)
-        finally:
-            self._release_request_slot()
-
-    def _release_request_slot(self):
+    def release_request(self):
         with self._request_lock:
+            if self._request_active < 1:
+                raise RuntimeError("no admitted Controller request")
             self._request_active -= 1
         self._request_slots.release()
 

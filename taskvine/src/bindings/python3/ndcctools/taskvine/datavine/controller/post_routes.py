@@ -35,8 +35,16 @@ class PostRouteFactory:
                             "serialized_sha256": record.serialized_sha256,
                             "size": record.serialized_size,
                             "metadata": record.metadata.to_dict(),
+                            "cache_globally": (
+                                owner.state.edata_has_shared_consumers(
+                                    data_id
+                                )
+                            ),
                         }
-                        if request.get("allow_peer_transfer", True):
+                        if (
+                            common["cache_globally"]
+                            and request.get("allow_peer_transfer", True)
+                        ):
                             try:
                                 resolved = owner.state.resolve_worker_source(
                                     f"e:{data_id}",
@@ -90,13 +98,38 @@ class PostRouteFactory:
                             if owner.serving_hook is not None:
                                 owner.serving_hook(f"e:{data_id}")
                             owner.state.record_edata_fetch(data_id)
-                            response = {
-                                **common,
-                                "source_type": "controller-memory",
-                                "payload": base64.b64encode(
-                                    record.serialized_bytes
+                            self.send_response(200)
+                            self.send_header(
+                                "Content-Type", "application/octet-stream"
+                            )
+                            self.send_header(
+                                "Content-Length", str(admitted_bytes)
+                            )
+                            self.send_header(
+                                "X-DataVine-Data-ID", str(data_id)
+                            )
+                            self.send_header(
+                                "X-DataVine-Content-SHA256",
+                                record.content_hash,
+                            )
+                            self.send_header(
+                                "X-DataVine-Serialized-SHA256",
+                                record.serialized_sha256,
+                            )
+                            self.send_header(
+                                "X-DataVine-Cache-Globally",
+                                "1" if common["cache_globally"] else "0",
+                            )
+                            self.send_header(
+                                "X-DataVine-Metadata",
+                                base64.urlsafe_b64encode(
+                                    record.metadata.identity_bytes()
                                 ).decode("ascii"),
-                            }
+                            )
+                            self.end_headers()
+                            self.wfile.write(record.serialized_bytes)
+                            completed = True
+                            return
                         else:
                             response = {
                                 **common,
