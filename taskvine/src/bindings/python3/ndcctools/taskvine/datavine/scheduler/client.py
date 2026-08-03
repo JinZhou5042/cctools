@@ -66,7 +66,9 @@ class ControllerClient:
     def thread_transient_retry_count(self):
         return int(getattr(self._retry_local, "count", 0))
 
-    def _open(self, request_factory, transient_retries=None):
+    def _open(
+        self, request_factory, transient_retries=None, timeout=None
+    ):
         retry_limit = (
             self.transient_retries
             if transient_retries is None
@@ -75,7 +77,8 @@ class ControllerClient:
         for retry in range(retry_limit + 1):
             try:
                 return urllib.request.urlopen(
-                    request_factory(), timeout=self.timeout
+                    request_factory(),
+                    timeout=self.timeout if timeout is None else timeout,
                 )
             except urllib.error.HTTPError as exc:
                 if (
@@ -185,11 +188,14 @@ class ControllerClient:
         )
         return json.loads(payload)
 
-    def claim_worker(self, worker_id):
+    def claim_worker(self, worker_id, endpoint=None):
+        request = {"worker_id": str(worker_id)}
+        if endpoint is not None:
+            request["endpoint"] = str(endpoint)
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/workers/claim",
-            {"worker_id": str(worker_id)},
+            request,
         )
         return json.loads(payload)
 
@@ -303,6 +309,44 @@ class ControllerClient:
         )
         return json.loads(payload)
 
+    def publish_outputs(
+        self,
+        worker_id,
+        worker_epoch,
+        outputs,
+        controller_inline_idata_bytes,
+    ):
+        inline_limit = int(controller_inline_idata_bytes)
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/replicas/publish-outputs",
+            {
+                "worker_id": str(worker_id),
+                "worker_epoch": int(worker_epoch),
+                "outputs": [
+                    {
+                        **{
+                            key: value
+                            for key, value in output.items()
+                            if key != "payload"
+                        },
+                        **(
+                            {
+                                "payload": base64.b64encode(
+                                    output["payload"]
+                                ).decode("ascii")
+                            }
+                            if len(output["payload"]) <= inline_limit
+                            else {}
+                        ),
+                    }
+                    for output in outputs
+                ],
+            },
+            idempotent=True,
+        )
+        return json.loads(payload)
+
     def commit_outputs(self, outputs):
         payload, _ = self._request(
             "POST",
@@ -380,6 +424,7 @@ class ControllerClient:
         destination_worker_id,
         transfer_id,
         excluded_worker_ids=(),
+        allow_local_source=False,
     ):
         payload, _ = self._request(
             "POST",
@@ -392,6 +437,7 @@ class ControllerClient:
                     str(worker_id)
                     for worker_id in excluded_worker_ids
                 ],
+                "allow_local_source": bool(allow_local_source),
             },
         )
         return json.loads(payload)
@@ -719,6 +765,51 @@ class ControllerClient:
                 f"IDataID {data_id} checksum mismatch"
             )
         return payload
+
+    def fetch_idata_stream(self, data_id):
+        request = urllib.request.Request(
+            self.endpoint + f"{API_PREFIX}/idata/{int(data_id)}",
+            headers={TOKEN_HEADER: self.token},
+            method="GET",
+        )
+        return self._open(lambda: request)
+
+    def fetch_source(self, source_url, content_hash, size):
+        request = urllib.request.Request(str(source_url), method="GET")
+        with self._open(
+            lambda: request,
+            transient_retries=0,
+            timeout=min(self.timeout, 2),
+        ) as response:
+            payload = response.read()
+        if (
+            len(payload) != int(size)
+            or hashlib.sha256(payload).hexdigest() != str(content_hash)
+        ):
+            raise DataVineRemoteError("peer source checksum mismatch")
+        return payload
+
+    def open_source(self, source_url):
+        request = urllib.request.Request(str(source_url), method="GET")
+        return self._open(
+            lambda: request,
+            transient_retries=0,
+            timeout=min(self.timeout, 2),
+        )
+
+    def prune_source(self, source_url):
+        request = urllib.request.Request(str(source_url), method="DELETE")
+        try:
+            with self._open(
+                lambda: request,
+                transient_retries=0,
+                timeout=min(self.timeout, 2),
+            ) as response:
+                return response.status == 204
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return False
+            raise
 
     def publish_idata(self, data_id, attempt, serialized_bytes):
         headers = {

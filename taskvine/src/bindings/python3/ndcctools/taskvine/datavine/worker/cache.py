@@ -33,6 +33,57 @@ class SerializedDataCache:
         self.hits += 1
         return entry[0]
 
+    def get_data(self, controller, token, data_key, content_hash, size):
+        return self.get(
+            (
+                str(controller),
+                str(token),
+                str(data_key),
+                str(content_hash),
+                int(size),
+            )
+        )
+
+    def put_data(
+        self,
+        controller,
+        token,
+        data_key,
+        content_hash,
+        payload,
+        score=None,
+    ):
+        return self.put(
+            (
+                str(controller),
+                str(token),
+                str(data_key),
+                str(content_hash),
+                len(payload),
+            ),
+            payload,
+            score,
+        )
+
+    def find_data(self, data_key, content_hash, size):
+        suffix = (str(data_key), str(content_hash), int(size))
+        for key in tuple(self._entries):
+            if key[2:] == suffix:
+                return self.get(key)
+        self.misses += 1
+        return None
+
+    def remove_data(self, data_key, content_hash, size):
+        suffix = (str(data_key), str(content_hash), int(size))
+        removed = False
+        for key in tuple(self._entries):
+            if key[2:] != suffix:
+                continue
+            entry = self._entries.pop(key)
+            self.bytes -= len(entry[0])
+            removed = True
+        return removed
+
     @staticmethod
     def _value(entry):
         _, hits, touched, score = entry
@@ -102,6 +153,7 @@ class WorkerProcessCache:
     task_records: dict = dataclasses.field(default_factory=dict)
     edata_metadata: dict = dataclasses.field(default_factory=dict)
     replica_reports: dict = dataclasses.field(default_factory=dict)
+    data_service: object | None = None
     data: SerializedDataCache = dataclasses.field(
         default_factory=SerializedDataCache
     )

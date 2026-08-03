@@ -36,7 +36,7 @@ class PostRouteFactory:
                     try:
                         request = self._read_json()
                         worker = owner.state.claim_worker(
-                            request["worker_id"]
+                            request["worker_id"], request.get("endpoint")
                         )
                     except Exception as exc:
                         self._error(400, exc)
@@ -140,6 +140,30 @@ class PostRouteFactory:
                         [replica.source_dict() for replica in replicas],
                     )
                     return
+                if self.path == f"{API_PREFIX}/replicas/publish-outputs":
+                    try:
+                        request = self._read_json()
+                        outputs = []
+                        for output in request["outputs"]:
+                            decoded = dict(output)
+                            if "payload" in decoded:
+                                decoded["payload"] = base64.b64decode(
+                                    decoded["payload"], validate=True
+                                )
+                            outputs.append(decoded)
+                        replicas = owner.state.publish_worker_outputs(
+                            request["worker_id"],
+                            request["worker_epoch"],
+                            outputs,
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200,
+                        [replica.source_dict() for replica in replicas],
+                    )
+                    return
                 if self.path == f"{API_PREFIX}/replicas/commit-outputs":
                     try:
                         request = self._read_json()
@@ -215,6 +239,7 @@ class PostRouteFactory:
                             request["destination_worker_id"],
                             request["transfer_id"],
                             request.get("excluded_worker_ids", ()),
+                            request.get("allow_local_source", False),
                         )
                     except Exception as exc:
                         self._error(400, exc)

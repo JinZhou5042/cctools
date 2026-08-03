@@ -83,6 +83,7 @@ class ExecutionState:
     batch_worker_seconds: float = 0.0
     recovery_reexecutions: int = 0
     local_idata_hits: int = 0
+    peer_idata_fetches: int = 0
     loss_injected: bool = False
     worker_controller_retries: int = 0
     worker_dram_cache: dict = dataclasses.field(default_factory=dict)

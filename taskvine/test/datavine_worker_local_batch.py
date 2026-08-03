@@ -70,6 +70,7 @@ def main():
                     for task in tasks
                 ),
                 1024 * 1024,
+                1024 * 1024,
             )
             assert result["protocol"] == "datavine-batch-v2"
             outputs = [
@@ -91,16 +92,11 @@ def main():
             worker_client = PROCESS_CACHE.clients[(endpoint, "batch-token")]
             metrics = worker_client.request_metrics()
             assert metrics["POST /v1/tasks/get-batch"]["count"] == 1
-            assert metrics["POST /v1/replicas/prepare-outputs"]["count"] == 1
+            assert metrics["POST /v1/replicas/publish-outputs"]["count"] == 1
             assert not any(
                 route.startswith("POST /v1/idata/")
                 for route in metrics
             )
-            assert all(
-                client.idata_status(data_id)["available"] is False
-                for data_id in output_ids
-            )
-            client.commit_outputs(outputs)
             assert all(
                 client.idata_status(data_id)["available"] is True
                 for data_id in output_ids

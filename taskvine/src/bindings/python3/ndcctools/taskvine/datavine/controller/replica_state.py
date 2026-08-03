@@ -6,9 +6,9 @@ class ReplicaStateMixin:
         with self._lock:
             return self.replicas.join_worker(worker_id, epoch)
 
-    def claim_worker(self, worker_id):
+    def claim_worker(self, worker_id, endpoint=None):
         with self._lock:
-            return self.replicas.claim_worker(worker_id)
+            return self.replicas.claim_worker(worker_id, endpoint)
 
     def disconnect_worker(self, worker_id, epoch):
         with self._lock:
@@ -41,6 +41,7 @@ class ReplicaStateMixin:
         destination_worker_id,
         transfer_id,
         excluded_worker_ids=(),
+        allow_local_source=False,
     ):
         with self._lock:
             source, lease = self.replicas.resolve_worker_source(
@@ -48,9 +49,18 @@ class ReplicaStateMixin:
                 destination_worker_id,
                 transfer_id,
                 excluded_worker_ids,
+                allow_local_source,
             )
+            worker = self.replicas.worker(source.worker_id)
+            source_description = source.source_dict()
+            if worker.endpoint:
+                kind, token = source.data_id.split(":", 1)
+                source_description["source_url"] = (
+                    f"{worker.endpoint}/data/{kind}/{int(token)}"
+                    f"?sha256={source.content_hash}&size={source.size}"
+                )
             return {
-                "source": source.source_dict(),
+                "source": source_description,
                 "lease": lease,
             }
 
@@ -227,6 +237,37 @@ class ReplicaStateMixin:
                 )
                 prepared.append(replica)
             return tuple(prepared)
+
+    def publish_worker_outputs(self, worker_id, worker_epoch, outputs):
+        with self._lock:
+            published = []
+            for output in outputs:
+                data_id = int(output["data_id"])
+                if "payload" in output:
+                    record = self.publish_idata(
+                        data_id,
+                        output["attempt"],
+                        output["payload"],
+                    )
+                else:
+                    record = self.publish_idata_metadata(
+                        data_id,
+                        output["attempt"],
+                        output["content_hash"],
+                        output["size"],
+                    )
+                replica = self.report_worker_replica(
+                    f"i:{data_id}",
+                    output["replica_id"],
+                    record.attempt,
+                    "worker-dram",
+                    record.content_hash,
+                    record.serialized_size,
+                    worker_id,
+                    worker_epoch,
+                )
+                published.append(replica)
+            return tuple(published)
 
     def commit_worker_outputs(self, outputs):
         with self._lock:

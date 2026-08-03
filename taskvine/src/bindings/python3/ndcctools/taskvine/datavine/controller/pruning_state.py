@@ -361,11 +361,19 @@ class PruningStateMixin:
             )
             applied_record = audit.to_dict()
             if replica.tier in ("worker-dram", "worker-disk"):
+                worker = self.replicas.worker(replica.worker_id)
                 applied_record.update(
                     {
                         "tier": replica.tier,
                         "worker_id": replica.worker_id,
                         "worker_epoch": replica.worker_epoch,
+                        "source_url": (
+                            f"{worker.endpoint}/data/i/{data_id}"
+                            f"?sha256={replica.content_hash}"
+                            f"&size={replica.size}"
+                            if worker.endpoint
+                            else None
+                        ),
                     }
                 )
             applied.append(applied_record)

@@ -45,6 +45,14 @@ def publish_task_outputs(
             os.fsync(stream.fileno())
         content_hash = hashlib.sha256(payload).hexdigest()
         if capture_output is not None:
+            with reporter.process_cache.lock:
+                reporter.process_cache.data.put_data(
+                    reporter.controller,
+                    reporter.token,
+                    f"i:{output_data_id}",
+                    content_hash,
+                    payload,
+                )
             capture_output(
                 {
                     "task_id": task.task_id,
@@ -53,6 +61,7 @@ def publish_task_outputs(
                     "attempt": args.attempt,
                     "content_hash": content_hash,
                     "size": len(payload),
+                    "payload": payload,
                     "replica_id": reporter.replica_id(
                         f"i:{output_data_id}"
                     ),

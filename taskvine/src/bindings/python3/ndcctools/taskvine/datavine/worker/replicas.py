@@ -26,7 +26,14 @@ class WorkerReplicaReporter:
     def replica_id(self, data_key):
         return f"taskvine-{self.worker_id}-{data_key.replace(':', '-')}"
 
-    def report_local(self, data_key, attempt, content_hash, payload):
+    def report_local(
+        self,
+        data_key,
+        attempt,
+        content_hash,
+        payload,
+        tier="worker-disk",
+    ):
         report_key = (
             self.controller,
             self.token,
@@ -34,6 +41,7 @@ class WorkerReplicaReporter:
             self.worker_epoch,
             data_key,
             int(attempt),
+            str(tier),
             content_hash,
             len(payload),
         )
@@ -46,7 +54,7 @@ class WorkerReplicaReporter:
                 data_key,
                 self.replica_id(data_key),
                 attempt,
-                "worker-disk",
+                tier,
                 content_hash,
                 len(payload),
                 self.worker_id,

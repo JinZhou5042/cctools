@@ -4,6 +4,7 @@ import cloudpickle
 import copy
 import hashlib
 from pathlib import Path
+import uuid
 
 from ..models import EDataRecord
 from ..workflow import iter_output_refs
@@ -68,6 +69,18 @@ class InputResolver:
         if info is None:
             info = self.client.get_edata_metadata(data_id)
             self.process_cache.edata_metadata[metadata_key] = info
+        data_key = f"e:{data_id}"
+        with self.process_cache.lock:
+            payload = self.process_cache.data.get_data(
+                self.controller,
+                self.token,
+                data_key,
+                info["serialized_sha256"],
+                info["size"],
+            )
+        if payload is not None:
+            self.emit(f"DATAVINE_DRAM_HIT e{data_id}")
+            return payload
 
         def fallback():
             if info["storage"] != "bulk-origin":
@@ -97,8 +110,71 @@ class InputResolver:
             self.reporter.report_local(
                 f"e:{data_id}", 1, info["content_hash"], payload
             )
+        else:
+            payload = fallback()
+        hint = self.cache_values.get(data_key)
+        with self.process_cache.lock:
+            self.process_cache.data.put_data(
+                self.controller,
+                self.token,
+                data_key,
+                info["serialized_sha256"],
+                payload,
+                hint["score"] if hint is not None else None,
+            )
+        return payload
+
+    def _fetch_peer(self, data_key, content_hash, size):
+        excluded = []
+        for _ in range(2):
+            transfer_id = f"taskvine:{uuid.uuid4().hex}"
+            try:
+                resolved = self.client.resolve_worker_source(
+                    data_key,
+                    self.reporter.worker_id,
+                    transfer_id,
+                    excluded,
+                )
+            except Exception:
+                return None
+            source = resolved["source"]
+            source_url = source.get("source_url")
+            if not source_url:
+                self.client.release_replica(
+                    resolved["lease"]["lease_id"], False
+                )
+                return None
+            try:
+                payload = self.client.fetch_source(
+                    source_url, content_hash, size
+                )
+            except Exception:
+                self.client.release_replica(
+                    resolved["lease"]["lease_id"], False
+                )
+                try:
+                    self.client.invalidate_observed_replica(
+                        source["data_id"],
+                        source["replica_id"],
+                        source["attempt"],
+                        source["content_hash"],
+                        source["size"],
+                        source["worker_id"],
+                        source["worker_epoch"],
+                    )
+                except Exception:
+                    pass
+                excluded.append(source["worker_id"])
+                continue
+            self.client.release_replica(
+                resolved["lease"]["lease_id"], True
+            )
+            self.emit(
+                f"DATAVINE_PEER_FETCH {data_key} "
+                f"source={source['worker_id']}"
+            )
             return payload
-        return fallback()
+        return None
 
     def resolve(self, binding):
         kind, data_id = binding
@@ -141,14 +217,66 @@ class InputResolver:
 
     def _fetch_idata(self, data_id):
         cache_path = Path(f"datavine-idata-{data_id}.pkl")
+        status = self.client.idata_status(data_id)
+        data_key = f"i:{data_id}"
+        with self.process_cache.lock:
+            payload = self.process_cache.data.get_data(
+                self.controller,
+                self.token,
+                data_key,
+                status["content_hash"],
+                status["size"],
+            )
+        if payload is not None:
+            self.emit(f"DATAVINE_DRAM_HIT i{data_id}")
+            self.emit(f"DATAVINE_LOCAL_IDATA i{data_id}")
+            return payload
         if not cache_path.is_file():
-            return self.client.fetch_idata(data_id)
+            self.reporter.reject_local(data_key)
+            payload = self._fetch_peer(
+                data_key, status["content_hash"], status["size"]
+            )
+            if payload is None:
+                if status["durability"] == "durable":
+                    payload = Path(status["durable_path"]).read_bytes()
+                    if (
+                        len(payload) != status["size"]
+                        or hashlib.sha256(payload).hexdigest()
+                        != status["content_hash"]
+                    ):
+                        raise IOError(
+                            f"durable IDataID {data_id} is corrupt"
+                        )
+                    self.emit(f"DATAVINE_SHAREDFS_FETCH i{data_id}")
+                elif status["controller_inline"]:
+                    payload = self.client.fetch_idata(data_id)
+                else:
+                    raise RuntimeError(
+                        f"IData is not available: i:{data_id}"
+                    )
+            hint = self.cache_values.get(data_key)
+            with self.process_cache.lock:
+                self.process_cache.data.put_data(
+                    self.controller,
+                    self.token,
+                    data_key,
+                    status["content_hash"],
+                    payload,
+                    hint["score"] if hint is not None else None,
+                )
+            self.reporter.report_local(
+                data_key,
+                status["attempt"],
+                status["content_hash"],
+                payload,
+                tier="worker-dram",
+            )
+            return payload
         if self.trust_taskvine_inputs:
             payload = self._local_payload("i", data_id, cache_path)
             self.emit(f"DATAVINE_LOCAL_IDATA i{data_id}")
             return payload
         payload = self._local_payload("i", data_id, cache_path)
-        status = self.client.idata_status(data_id)
         if hashlib.sha256(payload).hexdigest() != status["content_hash"]:
             self.reporter.reject_local(f"i:{data_id}")
             return self.client.fetch_idata(data_id)

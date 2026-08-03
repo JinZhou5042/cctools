@@ -9,6 +9,7 @@ from .cache import PROCESS_CACHE
 from .inputs import InputResolver
 from .publication import publish_task_outputs
 from .replicas import WorkerReplicaReporter
+from .service import WorkerDataService
 
 
 def main(
@@ -36,9 +37,15 @@ def main(
         raise RuntimeError("TaskVine worker incarnation is unavailable")
     claim_key = (args.controller, args.token, worker_id)
     with PROCESS_CACHE.lock:
+        if PROCESS_CACHE.data_service is None:
+            PROCESS_CACHE.data_service = WorkerDataService(PROCESS_CACHE)
         worker_epoch = PROCESS_CACHE.worker_claims.get(claim_key)
         if worker_epoch is None:
-            worker_epoch = int(client.claim_worker(worker_id)["epoch"])
+            worker_epoch = int(
+                client.claim_worker(
+                    worker_id, PROCESS_CACHE.data_service.endpoint
+                )["epoch"]
+            )
             PROCESS_CACHE.worker_claims[claim_key] = worker_epoch
     task_key = (args.controller, args.token, args.task_id)
     task = PROCESS_CACHE.task_records.get(task_key)

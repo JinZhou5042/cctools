@@ -45,6 +45,7 @@ class WorkerEpoch:
     worker_id: str
     epoch: int
     active: bool
+    endpoint: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -138,6 +139,10 @@ class ReplicaDirectory:
         with self._lock:
             return self._revision
 
+    def worker(self, worker_id):
+        with self._lock:
+            return self._workers[str(worker_id)]
+
     def _changed(self):
         self._revision += 1
 
@@ -145,7 +150,7 @@ class ReplicaDirectory:
         self._stale_rejections += 1
         raise ValueError(message)
 
-    def join_worker(self, worker_id, epoch):
+    def join_worker(self, worker_id, epoch, endpoint=None):
         worker_id = str(worker_id)
         epoch = int(epoch)
         if not worker_id or epoch < 1:
@@ -154,6 +159,12 @@ class ReplicaDirectory:
             old = self._workers.get(worker_id)
             if old is not None:
                 if old.epoch == epoch and old.active:
+                    if endpoint and old.endpoint != str(endpoint):
+                        old = dataclasses.replace(
+                            old, endpoint=str(endpoint)
+                        )
+                        self._workers[worker_id] = old
+                        self._changed()
                     return old
                 if epoch <= old.epoch:
                     self._reject_stale("stale worker epoch")
@@ -161,12 +172,17 @@ class ReplicaDirectory:
                 self._expire_worker_leases(old.worker_id, old.epoch)
             elif len(self._workers) >= self._max_workers:
                 raise RuntimeError("worker directory capacity exceeded")
-            record = WorkerEpoch(worker_id, epoch, True)
+            record = WorkerEpoch(
+                worker_id,
+                epoch,
+                True,
+                str(endpoint) if endpoint else None,
+            )
             self._workers[worker_id] = record
             self._changed()
             return record
 
-    def claim_worker(self, worker_id):
+    def claim_worker(self, worker_id, endpoint=None):
         """Return or allocate the Controller-owned worker incarnation."""
         worker_id = str(worker_id)
         if not worker_id:
@@ -176,10 +192,12 @@ class ReplicaDirectory:
             if old is None:
                 epoch = 1
             elif old.active:
-                return old
+                return self.join_worker(
+                    worker_id, old.epoch, endpoint
+                )
             else:
                 epoch = old.epoch + 1
-            return self.join_worker(worker_id, epoch)
+            return self.join_worker(worker_id, epoch, endpoint)
 
     def disconnect_worker(self, worker_id, epoch):
         worker_id = str(worker_id)
@@ -518,7 +536,11 @@ class ReplicaDirectory:
             )
 
     def _select_worker_source(
-        self, data_id, destination_worker_id, excluded_worker_ids=()
+        self,
+        data_id,
+        destination_worker_id,
+        excluded_worker_ids=(),
+        allow_local_source=False,
     ):
         data_id = self._normalize_data_id(data_id)
         destination_worker_id = str(destination_worker_id)
@@ -542,7 +564,10 @@ class ReplicaDirectory:
                     record.state != "available"
                     or record.attempt != latest_attempt
                     or record.tier not in WORKER_TIERS
-                    or record.worker_id == destination_worker_id
+                    or (
+                        not allow_local_source
+                        and record.worker_id == destination_worker_id
+                    )
                     or record.worker_id in excluded
                     or worker is None
                     or not worker.active
@@ -568,6 +593,7 @@ class ReplicaDirectory:
         destination_worker_id,
         transfer_id,
         excluded_worker_ids=(),
+        allow_local_source=False,
     ):
         transfer_id = str(transfer_id)
         if (
@@ -595,6 +621,7 @@ class ReplicaDirectory:
                 data_id,
                 destination_worker_id,
                 excluded_worker_ids,
+                allow_local_source,
             )
             destination = self._workers[str(destination_worker_id)]
             lease = self._acquire_record(

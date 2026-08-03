@@ -12,12 +12,14 @@ def ensure_worker_library(manager):
     from ..worker.library import (
         execute_datavine_task,
         execute_datavine_tasks,
+        persist_datavine_idata,
     )
 
     library = manager.create_library_from_functions(
         "datavine-worker-v2",
         execute_datavine_task,
         execute_datavine_tasks,
+        persist_datavine_idata,
         add_env=False,
         exec_mode="direct",
     )
@@ -36,6 +38,8 @@ class TaskFactory:
         edata_files,
         idata_files,
         worker_dram_cache_bytes,
+        worker_managed_data=False,
+        controller_inline_idata_bytes=8 * 1024 * 1024,
     ):
         self.manager = manager
         self.controller = controller
@@ -44,6 +48,10 @@ class TaskFactory:
         self.edata_files = edata_files
         self.idata_files = idata_files
         self.worker_dram_cache_bytes = int(worker_dram_cache_bytes)
+        self.worker_managed_data = bool(worker_managed_data)
+        self.controller_inline_idata_bytes = int(
+            controller_inline_idata_bytes
+        )
 
     def edata_file(self, data_id):
         file_object = self.edata_files.get(data_id)
@@ -166,8 +174,10 @@ class TaskFactory:
                 self.controller.token,
                 task_id,
                 attempt,
-                output_names,
+                (),
                 self.worker_dram_cache_bytes,
+                record.to_dict(),
+                self.controller_inline_idata_bytes,
             )
             task.set_exec_method("direct")
         else:
@@ -175,8 +185,17 @@ class TaskFactory:
         task.set_tag(str(task_id))
         task.set_cores(1)
         task.set_retries(
-            0 if kill_worker_after_output_index is not None else 5
+            0
+            if (
+                use_worker_library
+                or kill_worker_after_output_index is not None
+            )
+            else 5
         )
+        if use_worker_library:
+            if environment is not None:
+                task.add_environment(environment)
+            return task
         edata_ids = {record.function_data_id}
         edata_ids.update(
             data_id
@@ -286,11 +305,12 @@ class TaskFactory:
             self.controller.token,
             calls,
             self.worker_dram_cache_bytes,
+            self.controller_inline_idata_bytes,
         )
         task.set_exec_method("direct")
         task.set_tag(",".join(map(str, task_ids)))
         task.set_cores(1)
-        task.set_retries(5)
+        task.set_retries(0)
         for data_id in sorted(edata_ids):
             task.add_input(
                 self.edata_file(data_id),
@@ -314,7 +334,7 @@ class TaskFactory:
         return task
 
     def make_persistence_task(self, data_id, request, environment):
-        from ndcctools.taskvine import Task
+        from ndcctools.taskvine import FunctionCall, Task
 
         input_name = f"datavine-persist-i{int(data_id)}.pkl"
         command = " ".join(
@@ -331,8 +351,11 @@ class TaskFactory:
                 str(int(data_id)),
                 "--request-id",
                 request["request_id"],
-                "--input-file",
-                input_name,
+                *(
+                    ()
+                    if self.worker_managed_data
+                    else ("--input-file", input_name)
+                ),
                 *(
                     ("--delay-before-complete", "3")
                     if request.get("inject_cancel_delay")
@@ -349,12 +372,27 @@ class TaskFactory:
                 ),
             )
         )
-        task = Task(command)
+        if self.worker_managed_data:
+            task = FunctionCall(
+                "datavine-worker-v2",
+                "persist_datavine_idata",
+                self.controller.endpoint,
+                self.controller.token,
+                int(data_id),
+                request["request_id"],
+                bool(request.get("inject_cancel_delay")),
+                bool(request.get("inject_failure_during_write")),
+                float(request.get("inject_failure_delay", 0)),
+            )
+            task.set_exec_method("direct")
+        else:
+            task = Task(command)
         task.set_tag(f"persist-i{int(data_id)}")
         task.set_cores(0)
         task.set_priority(-500)
         task.set_retries(0)
-        task.add_input(self.idata_files[int(data_id)], input_name)
+        if not self.worker_managed_data:
+            task.add_input(self.idata_files[int(data_id)], input_name)
         if environment is not None:
             task.add_environment(environment)
         return task

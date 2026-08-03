@@ -5,8 +5,52 @@ import hashlib
 import os
 from pathlib import Path
 import time
+import uuid
 
 from ..scheduler.client import ControllerClient
+
+
+def _open_source(client, args):
+    if args.input_file:
+        return Path(args.input_file).open("rb"), None
+    status = client.idata_status(args.data_id)
+    if status["controller_inline"]:
+        return client.fetch_idata_stream(args.data_id), None
+    worker_id = os.environ.get("VINE_WORKER_ID")
+    if not worker_id:
+        raise RuntimeError("worker identity is required for peer persistence")
+    client.claim_worker(worker_id)
+    resolved = client.resolve_worker_source(
+        f"i:{args.data_id}",
+        worker_id,
+        f"taskvine:{uuid.uuid4().hex}",
+        allow_local_source=True,
+    )
+    source_url = resolved["source"].get("source_url")
+    if not source_url:
+        client.release_replica(resolved["lease"]["lease_id"], False)
+        raise RuntimeError("selected persistence source has no data endpoint")
+    try:
+        return (
+            client.open_source(source_url),
+            resolved["lease"]["lease_id"],
+        )
+    except Exception:
+        client.release_replica(resolved["lease"]["lease_id"], False)
+        source = resolved["source"]
+        try:
+            client.invalidate_observed_replica(
+                source["data_id"],
+                source["replica_id"],
+                source["attempt"],
+                source["content_hash"],
+                source["size"],
+                source["worker_id"],
+                source["worker_epoch"],
+            )
+        except Exception:
+            pass
+        raise
 
 
 def main(argv=None):
@@ -15,7 +59,7 @@ def main(argv=None):
     parser.add_argument("--token", required=True)
     parser.add_argument("--data-id", required=True, type=int)
     parser.add_argument("--request-id", required=True)
-    parser.add_argument("--input-file", required=True)
+    parser.add_argument("--input-file")
     parser.add_argument("--delay-before-complete", type=float, default=0)
     parser.add_argument(
         "--inject-failure-during-write", action="store_true"
@@ -36,16 +80,17 @@ def main(argv=None):
             f"{args.request_id} idempotent"
         )
         return 0
-    source = Path(args.input_file)
     target = Path(request["target_path"])
     temporary = target.parent / (
         f".{args.request_id}.{os.getpid()}.tmp"
     )
+    lease_id = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
         size = 0
-        with source.open("rb") as reader, temporary.open("wb") as writer:
+        source, lease_id = _open_source(client, args)
+        with source as reader, temporary.open("wb") as writer:
             while True:
                 chunk = reader.read(1024 * 1024)
                 if not chunk:
@@ -63,7 +108,8 @@ def main(argv=None):
                         flush=True,
                     )
                     raise OSError(
-                        "injected temporary SharedFS unavailability"
+                        "DATAVINE_PERSISTENCE_INJECTED_FAILURE: "
+                        "temporary SharedFS unavailability"
                     )
             writer.flush()
             os.fsync(writer.fileno())
@@ -78,6 +124,9 @@ def main(argv=None):
                 f"expected_hash={request['content_hash']} "
                 f"actual_hash={digest.hexdigest()}"
             )
+        if lease_id is not None:
+            client.release_replica(lease_id, True)
+            lease_id = None
         temporary.replace(target)
         directory_fd = os.open(target.parent, os.O_RDONLY)
         try:
@@ -97,6 +146,8 @@ def main(argv=None):
         )
         print(f"{event} i:{args.data_id} {args.request_id}")
     except Exception as exc:
+        if lease_id is not None:
+            client.release_replica(lease_id, False)
         temporary.unlink(missing_ok=True)
         client.fail_external_persistence(
             args.data_id, args.request_id, exc
