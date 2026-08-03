@@ -10,7 +10,12 @@ import urllib.request
 
 import hashlib
 
-from ..codec import decode_serialization_metadata, decode_task_record
+from ..codec import (
+    TASK_RECORD_COMPACT_FORMAT,
+    decode_serialization_metadata,
+    decode_task_record,
+    encode_compact_task_record,
+)
 from ..models import EDataRecord, TaskRecord
 from ..protocol import (
     API_PREFIX,
@@ -29,6 +34,7 @@ class ControllerClient:
         idempotent_transient_retries=8,
         retry_base_seconds=0.01,
         retry_max_seconds=0.25,
+        compact_task_records=True,
     ):
         self.endpoint = endpoint.rstrip("/")
         self.token = token
@@ -39,6 +45,7 @@ class ControllerClient:
         )
         self.retry_base_seconds = float(retry_base_seconds)
         self.retry_max_seconds = float(retry_max_seconds)
+        self.compact_task_records = bool(compact_task_records)
         if (
             self.transient_retries < 0
             or self.idempotent_transient_retries < 0
@@ -101,9 +108,10 @@ class ControllerClient:
     def _request(self, method, path, value=None, idempotent=None):
         started = time.monotonic()
         data = None
+        response_bytes = 0
         headers = {TOKEN_HEADER: self.token}
         if value is not None:
-            data = json.dumps(value).encode("utf-8")
+            data = json.dumps(value, separators=(",", ":")).encode("utf-8")
             headers["Content-Type"] = "application/json"
         try:
             if idempotent is None:
@@ -126,6 +134,7 @@ class ControllerClient:
                 transient_retries=retry_limit,
             ) as response:
                 result = response.read(), response.headers
+                response_bytes = len(result[0])
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")
             raise DataVineRemoteError.from_http(exc.code, body) from exc
@@ -135,10 +144,18 @@ class ControllerClient:
             key = f"{method} {route}"
             with self._metrics_lock:
                 record = self._request_metrics.setdefault(
-                    key, {"count": 0, "seconds": 0.0}
+                    key,
+                    {
+                        "count": 0,
+                        "seconds": 0.0,
+                        "request_bytes": 0,
+                        "response_bytes": 0,
+                    },
                 )
                 record["count"] += 1
                 record["seconds"] += elapsed
+                record["request_bytes"] += len(data or b"")
+                record["response_bytes"] += response_bytes
         return result
 
     def request_metrics(self):
@@ -147,6 +164,8 @@ class ControllerClient:
                 key: {
                     "count": value["count"],
                     "seconds": round(value["seconds"], 6),
+                    "request_bytes": value["request_bytes"],
+                    "response_bytes": value["response_bytes"],
                 }
                 for key, value in sorted(self._request_metrics.items())
             }
@@ -617,13 +636,20 @@ class ControllerClient:
         tasks = tuple(tasks)
         if any(not isinstance(task, TaskRecord) for task in tasks):
             raise TypeError("tasks must contain TaskRecord values")
+        request = {
+            "tasks": (
+                [encode_compact_task_record(task) for task in tasks]
+                if self.compact_task_records
+                else [task.to_dict() for task in tasks]
+            ),
+            "bounded_acknowledgement": True,
+        }
+        if self.compact_task_records:
+            request["task_record_format"] = TASK_RECORD_COMPACT_FORMAT
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/tasks/register-batch",
-            {
-                "tasks": [task.to_dict() for task in tasks],
-                "bounded_acknowledgement": True,
-            },
+            request,
         )
         acknowledgement = json.loads(payload)
         if acknowledgement.get("registered") != len(tasks):

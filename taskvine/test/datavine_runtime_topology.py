@@ -8,6 +8,7 @@ import pickle
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import cloudpickle
@@ -48,7 +49,27 @@ def wait_for_json(path, timeout=15):
     raise TimeoutError(f"Controller did not create {path}")
 
 
+def stop_cancellation_contract():
+    started = threading.Event()
+
+    def _op_wait_for_stop(scheduler):
+        started.set()
+        while not scheduler._stop_requested.wait(0.01):
+            pass
+        scheduler._raise_if_stopping()
+
+    scheduler = TaskSchedulerThread(object()).start()
+    scheduler._op_wait_for_stop = _op_wait_for_stop.__get__(scheduler)
+    operation = scheduler.submit("wait_for_stop")
+    assert started.wait(timeout=5)
+    stop_started = time.monotonic()
+    scheduler.stop()
+    assert time.monotonic() - stop_started < 5
+    assert operation.cancelled() or operation.exception() is not None
+
+
 def main():
+    stop_cancellation_contract()
     with tempfile.TemporaryDirectory(
         prefix="datavine-runtime-topology-"
     ) as temp_dir:

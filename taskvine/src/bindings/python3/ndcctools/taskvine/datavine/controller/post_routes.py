@@ -3,8 +3,13 @@
 import base64
 import dataclasses
 
-from ..codec import decode_serialization_metadata, decode_task_record
-from ..protocol import API_PREFIX
+from ..codec import (
+    TASK_RECORD_COMPACT_FORMAT,
+    decode_compact_task_record,
+    decode_serialization_metadata,
+    decode_task_record,
+)
+from ..protocol import API_PREFIX, DataVineSchemaError
 
 
 class PostRouteFactory:
@@ -379,8 +384,21 @@ class PostRouteFactory:
                 if self.path == f"{API_PREFIX}/tasks/register-batch":
                     try:
                         request = self._read_json()
+                        task_record_format = request.get(
+                            "task_record_format"
+                        )
+                        if task_record_format is None:
+                            decoder = decode_task_record
+                        elif task_record_format == TASK_RECORD_COMPACT_FORMAT:
+                            decoder = decode_compact_task_record
+                        else:
+                            raise DataVineSchemaError(
+                                "unsupported task record format "
+                                f"{task_record_format!r}",
+                                path="task_record_format",
+                            )
                         records = owner.state.register_tasks(
-                            decode_task_record(value, f"tasks[{index}]")
+                            decoder(value, f"tasks[{index}]")
                             for index, value in enumerate(request["tasks"])
                         )
                     except Exception as exc:

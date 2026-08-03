@@ -82,6 +82,7 @@ class TaskSchedulerThread:
         self._owner_ident = None
         self._started = False
         self._ready = threading.Event()
+        self._stop_requested = threading.Event()
         self._manager = None
         self._run_context = WorkflowRunContext()
         self._edata_files = {}
@@ -122,11 +123,24 @@ class TaskSchedulerThread:
     def stop(self):
         if not self._started:
             return
-        self.call("_stop")
+        self._stop_requested.set()
+        future = self.submit("_stop")
+        try:
+            future.result(timeout=30)
+        except concurrent.futures.TimeoutError as exc:
+            raise RuntimeError(
+                "Task Scheduler operation did not stop within 30 seconds"
+            ) from exc
         self._thread.join(timeout=10)
         if self._thread.is_alive():
             raise RuntimeError("Task Scheduler thread did not stop")
         self._started = False
+
+    def _raise_if_stopping(self):
+        if self._stop_requested.is_set():
+            raise concurrent.futures.CancelledError(
+                "Task Scheduler stop requested"
+            )
 
     def _run(self):
         self._owner_ident = threading.get_ident()
@@ -213,6 +227,7 @@ class TaskSchedulerThread:
         task.set_exec_method("fork")
         task_id = self._manager.submit(task)
         while True:
+            self._raise_if_stopping()
             completed = self._manager.wait(1)
             if completed is None or completed.id != task_id:
                 continue
@@ -330,6 +345,7 @@ class TaskSchedulerThread:
                 acknowledgement_timeout
             )
             while True:
+                self._raise_if_stopping()
                 self._manager.wait(1)
                 self._sync_worker_epochs()
                 status = self._manager.prune_file_status(file_object)
@@ -925,6 +941,7 @@ class TaskSchedulerThread:
             or persistence.has_work()
             or pruning.has_work()
         ):
+            self._raise_if_stopping()
             for data_id, not_before in tuple(
                 persistence.controller_pending.items()
             ):
@@ -2597,6 +2614,7 @@ class TaskSchedulerThread:
                 worker_disk_cache_bytes, worker_disk_cache_items
             )
         ):
+            self._raise_if_stopping()
             self._manager.wait(1)
             self._sync_worker_epochs()
             self._cache_admission.poll(self._manager)
@@ -2616,8 +2634,10 @@ class TaskSchedulerThread:
             for output_data_id in sorted(persistence.required):
                 self._wait_durable(output_data_id)
         if hard_delete_pruned_sharedfs and pruning.events:
-            if frontier_pruning_grace_seconds:
-                time.sleep(frontier_pruning_grace_seconds)
+            if frontier_pruning_grace_seconds and self._stop_requested.wait(
+                frontier_pruning_grace_seconds
+            ):
+                self._raise_if_stopping()
             for delete_retry in range(3):
                 plan = self.controller.pruning_plan()
                 try:
@@ -2650,6 +2670,7 @@ class TaskSchedulerThread:
             + max(30.0, peer_release_retry_seconds + 30.0)
         )
         while True:
+            self._raise_if_stopping()
             peer_faults = (
                 self._manager.datavine_peer_transfer_fault_stats()
             )
@@ -2977,6 +2998,7 @@ class TaskSchedulerThread:
     def _wait_durable(self, data_id, timeout=60, retries=1):
         deadline = time.monotonic() + timeout
         while True:
+            self._raise_if_stopping()
             status = self.controller.idata_status(data_id)
             if status["durability"] == "durable":
                 return status

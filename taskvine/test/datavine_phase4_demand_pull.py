@@ -141,6 +141,7 @@ def run_case(
     frontier_pruning_grace_seconds=30,
     hard_delete_pruned_sharedfs=False,
     library_batch_size=4096,
+    compact_task_records=True,
     detailed_report=True,
 ):
     with tempfile.TemporaryDirectory(prefix=f"datavine-{name}-") as root:
@@ -228,7 +229,9 @@ def run_case(
         try:
             ready = wait_json(ready_path)
             client = ControllerClient(
-                f"http://{controller_host}:{ready['port']}", token
+                f"http://{controller_host}:{ready['port']}",
+                token,
+                compact_task_records=compact_task_records,
             )
             if controller_client_wrapper is not None:
                 client = controller_client_wrapper(client)
