@@ -34,7 +34,6 @@ class ControllerClient:
         idempotent_transient_retries=8,
         retry_base_seconds=0.01,
         retry_max_seconds=0.25,
-        compact_task_records=True,
     ):
         self.endpoint = endpoint.rstrip("/")
         self.token = token
@@ -45,7 +44,6 @@ class ControllerClient:
         )
         self.retry_base_seconds = float(retry_base_seconds)
         self.retry_max_seconds = float(retry_max_seconds)
-        self.compact_task_records = bool(compact_task_records)
         if (
             self.transient_retries < 0
             or self.idempotent_transient_retries < 0
@@ -637,15 +635,10 @@ class ControllerClient:
         if any(not isinstance(task, TaskRecord) for task in tasks):
             raise TypeError("tasks must contain TaskRecord values")
         request = {
-            "tasks": (
-                [encode_compact_task_record(task) for task in tasks]
-                if self.compact_task_records
-                else [task.to_dict() for task in tasks]
-            ),
+            "task_record_format": TASK_RECORD_COMPACT_FORMAT,
+            "tasks": [encode_compact_task_record(task) for task in tasks],
             "bounded_acknowledgement": True,
         }
-        if self.compact_task_records:
-            request["task_record_format"] = TASK_RECORD_COMPACT_FORMAT
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/tasks/register-batch",

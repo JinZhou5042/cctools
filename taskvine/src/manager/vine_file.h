@@ -36,7 +36,7 @@ struct vine_file {
 	vine_cache_level_t cache_level; // How aggressively this file should be cached.
 	char *source;       // Name of source file, url, buffer.
 	char *cached_name;  // Name of file in the worker's cache directory.
-	char *datavine_data_id; // Controller-qualified logical identity, or null for legacy files.
+	char *datavine_data_id; // Controller-qualified logical identity, or null when unbound.
 	char *datavine_content_hash; // Expected SHA-256 of serialized bytes.
 	size_t size;        // Length of source data, if known.
 	time_t mtime;       // Modification time of source data, if known.

@@ -2686,9 +2686,6 @@ class TaskSchedulerThread:
                 execution.unavailable_input_recoveries
             ),
             "recovery_waves": execution.recovery_waves,
-            "legacy_recovery_tasks": int(
-                self._manager.stats.tasks_recovery
-            ),
             "loss_injected": execution.loss_injected,
             "local_idata_hits": execution.local_idata_hits,
             "worker_controller_retries": execution.worker_controller_retries,

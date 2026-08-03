@@ -1,9 +1,8 @@
 # DataVine Runtime Architecture
 
-`ndcctools.taskvine.datavine` is the DataVine implementation. The existing
-`vine_graph` package is frozen reference code; the new runtime does not import
-it or place new semantic state there. DataVine uses TaskVine's public physical
-task/file interfaces directly.
+`ndcctools.taskvine.datavine` owns workflow scheduling, data identity,
+placement, transfer, persistence, and recovery semantics. TaskVine supplies
+the physical task and file execution substrate.
 
 ## Runtime ownership
 
@@ -23,9 +22,6 @@ task/file interfaces directly.
 - `recovery/`: global-loss decisions and compute invalidation requests.
 - `placement/`: source selection, peer transfer, and deterministic bounded
   prefetch policy.
-- `legacy/`: reserved boundary for narrow, explicitly removable adapters; it
-  currently owns no runtime behavior.
-
 Scheduler and Controller never share Python objects or mutable globals.  They
 communicate through the versioned protocol in `protocol.py`.  Data-plane bytes
 are transferred separately from JSON control records and are verified against

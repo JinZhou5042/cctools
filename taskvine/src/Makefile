@@ -1,21 +1,17 @@
 include ../../config.mk
 include ../../rules.mk
 
-TARGETS=manager worker tools bindings examples vine_graph
+TARGETS=manager worker tools bindings examples
 
 all: $(TARGETS)
 
 worker: manager
-vine_graph: manager
-bindings: manager vine_graph
+bindings: manager
 tools: manager
 examples: manager worker tools bindings
 
-# Backward-compatible alias for callers that still use `make graph`.
-graph: vine_graph
-
 $(TARGETS): %:
-	$(MAKE) -C $@ $(if $(filter $(TARGETS) graph,$(MAKECMDGOALS)),,$(MAKECMDGOALS))
+	$(MAKE) -C $@ $(MAKECMDGOALS)
 
 install:
 	for d in $(TARGETS); do $(MAKE) -C $$d install; done
@@ -27,4 +23,4 @@ lint: $(TARGETS)
 
 format: $(TARGETS)
 
-.PHONY: all clean install test lint format graph $(TARGETS)
+.PHONY: all clean install test lint format $(TARGETS)

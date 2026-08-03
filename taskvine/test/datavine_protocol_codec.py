@@ -40,7 +40,7 @@ def main():
         )
         for task_id in range(1, 1001)
     ]
-    legacy_bytes = len(
+    object_record_bytes = len(
         json.dumps(
             {"tasks": [item.to_dict() for item in records]},
             separators=(",", ":"),
@@ -57,9 +57,9 @@ def main():
             separators=(",", ":"),
         )
     )
-    assert compact_bytes < legacy_bytes * 0.45, (
+    assert compact_bytes < object_record_bytes * 0.45, (
         compact_bytes,
-        legacy_bytes,
+        object_record_bytes,
     )
 
     invalid = (
@@ -132,15 +132,12 @@ def main():
             raise AssertionError("Controller accepted invalid task schema")
 
         compact_client = ControllerClient(endpoint, "codec-token")
-        legacy_client = ControllerClient(
-            endpoint, "codec-token", compact_task_records=False
-        )
         function_metadata, function_payload = serialize(abs)
         function_data_id = compact_client.register_edata(
             function_metadata, function_payload
         )["data_id"]
         output_ids = compact_client.allocate_idata_batch(
-            (task_id, 0) for task_id in range(1, 201)
+            (task_id, 0) for task_id in range(1, 101)
         )
         compact_records = tuple(
             TaskRecord(
@@ -153,30 +150,9 @@ def main():
             )
             for task_id in range(1, 101)
         )
-        legacy_records = tuple(
-            TaskRecord(
-                task_id,
-                function_data_id,
-                (("v", "gAVLAS4="),),
-                (),
-                (output_ids[task_id - 1],),
-                (),
-            )
-            for task_id in range(101, 201)
-        )
         assert compact_client.register_tasks(compact_records) == compact_records
-        assert legacy_client.register_tasks(legacy_records) == legacy_records
         route = "POST /v1/tasks/register-batch"
-        compact_request_bytes = compact_client.request_metrics()[route][
-            "request_bytes"
-        ]
-        legacy_request_bytes = legacy_client.request_metrics()[route][
-            "request_bytes"
-        ]
-        assert compact_request_bytes < legacy_request_bytes * 0.5, (
-            compact_request_bytes,
-            legacy_request_bytes,
-        )
+        assert compact_client.request_metrics()[route]["count"] == 1
     finally:
         service.stop()
 

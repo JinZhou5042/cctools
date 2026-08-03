@@ -387,18 +387,16 @@ class PostRouteFactory:
                         task_record_format = request.get(
                             "task_record_format"
                         )
-                        if task_record_format is None:
-                            decoder = decode_task_record
-                        elif task_record_format == TASK_RECORD_COMPACT_FORMAT:
-                            decoder = decode_compact_task_record
-                        else:
+                        if task_record_format != TASK_RECORD_COMPACT_FORMAT:
                             raise DataVineSchemaError(
                                 "unsupported task record format "
                                 f"{task_record_format!r}",
                                 path="task_record_format",
                             )
                         records = owner.state.register_tasks(
-                            decoder(value, f"tasks[{index}]")
+                            decode_compact_task_record(
+                                value, f"tasks[{index}]"
+                            )
                             for index, value in enumerate(request["tasks"])
                         )
                     except Exception as exc:

@@ -63,7 +63,6 @@ def validate_snapshot(snapshot, producer, consumer, failure_mode=None):
     assert report["logical_output_slots"][str(consumer.task_id)] == [3]
     assert snapshot["idata"] == 3
     assert snapshot["available_idata"] == 3
-    assert report["legacy_recovery_tasks"] == 0
     assert report["attempts_by_task"][str(producer.task_id)] == (
         expected_attempts
     )

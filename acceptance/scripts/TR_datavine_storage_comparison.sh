@@ -44,7 +44,6 @@ for report in (enabled, disabled):
     scheduler = report["scheduler_report"]
     assert scheduler["persistence_worker_bytes"] > 0, scheduler
     assert scheduler["persistence_controller_bytes"] == 0, scheduler
-    assert scheduler["legacy_recovery_tasks"] == 0, scheduler
     assert [
         wave["rollback_depth"] for wave in scheduler["recovery_waves"]
     ] == [3, 2, 1], scheduler

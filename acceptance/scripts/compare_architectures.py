@@ -173,7 +173,6 @@ def run_datavine(
     compute_steps,
     library_batch_size,
     process_sample_interval,
-    compact_task_records=True,
 ):
     sampler = ProcessTreeSampler(
         interval_seconds=process_sample_interval
@@ -198,7 +197,6 @@ def run_datavine(
             prefetch=False,
             use_worker_library=True,
             library_batch_size=library_batch_size,
-            compact_task_records=compact_task_records,
             workflow_timeout=max(180, tasks * 2),
             detailed_report=False,
         )
@@ -229,9 +227,7 @@ def run_datavine(
     )
     return {
         "mode": "datavine",
-        "task_record_wire_format": (
-            "task-record-row-v1" if compact_task_records else "legacy-object"
-        ),
+        "task_record_wire_format": "task-record-row-v1",
         "logical_tasks": tasks,
         "physical_tasks": report["physical_compute_submissions"],
         "workflow_build_seconds": build_seconds,
@@ -299,11 +295,6 @@ def main():
         ),
     )
     parser.add_argument("--minimum-datavine-ratio", type=float, default=1.0)
-    parser.add_argument(
-        "--legacy-datavine-task-records",
-        action="store_true",
-        help="use the rollback-compatible legacy TaskRecord JSON objects",
-    )
     args = parser.parse_args()
     if min(
         args.tasks,
@@ -341,7 +332,6 @@ def main():
                     args.compute_steps,
                     args.library_batch_size,
                     args.process_sample_interval,
-                    not args.legacy_datavine_task_records,
                 )
             else:
                 sample = run_taskvine(
@@ -386,11 +376,7 @@ def main():
             "payload_bytes": args.payload_bytes,
             "compute_steps": args.compute_steps,
             "library_batch_size": args.library_batch_size,
-            "datavine_task_record_format": (
-                "legacy-object"
-                if args.legacy_datavine_task_records
-                else "task-record-row-v1"
-            ),
+            "datavine_task_record_format": "task-record-row-v1",
             "modes": list(args.modes),
         },
         "samples": samples,

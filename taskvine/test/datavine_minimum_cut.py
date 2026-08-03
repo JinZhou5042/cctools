@@ -118,7 +118,6 @@ def main():
         in event["target_replica_worker_ids"]
         for event in report["worker_loss_events"]
     ), report["worker_loss_events"]
-    assert report["legacy_recovery_tasks"] == 0
     assert report["recovery_reexecutions"] == 7, report
     assert report["physical_attempts"] == 16, report
     assert report["persistence_required_data_ids"] == [

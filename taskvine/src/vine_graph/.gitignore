@@ -1,6 +1,0 @@
-*.o
-*.py[cod]
-*.so
-__pycache__/
-vine_graph_capi.py
-vine_graph_wrap.c

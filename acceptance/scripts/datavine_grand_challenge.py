@@ -214,8 +214,7 @@ def main():
             "no-prefetch",
             "peer-off",
             "pruning-off",
-            "persistence-legacy",
-            "legacy",
+            "persistence",
         ),
         default="full",
     )
@@ -283,9 +282,6 @@ def main():
             "worker cache byte admission must fit the largest generated "
             f"output ({minimum_output_admission} bytes including margin)"
         )
-    if args.mode == "legacy":
-        print(json.dumps({"status": "UNAVAILABLE", "mode": "legacy"}))
-        return 2
     failure_mode = (
         args.worker_loss
         or args.mode == "failures"
@@ -296,7 +292,7 @@ def main():
     peer_transfers = args.mode != "peer-off"
     prefetch = args.mode != "no-prefetch"
     persistence = (
-        args.mode == "persistence-legacy" or args.frontier_recovery
+        args.mode == "persistence" or args.frontier_recovery
     )
     workflow, target, expected, chain_task_ids = build_workflow(
         args.tasks,
@@ -470,8 +466,6 @@ def main():
             raise AssertionError(
                 "repeated worker loss did not trigger ordinary recomputation"
             )
-        if scheduler_report["legacy_recovery_tasks"]:
-            raise AssertionError("legacy recovery tasks were created")
         if scheduler_report["peer_transfer_faults"][
             "peer_release_pending"
         ]:

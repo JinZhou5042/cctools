@@ -111,7 +111,6 @@ def main():
     assert snapshot["taskvine_worker_disconnections"] >= 1, snapshot
     assert report["attempts_by_task"][str(source.task_id)] >= 2, report
     assert report["recovery_reexecutions"] >= 1, report
-    assert report["legacy_recovery_tasks"] == 0, report
     assert report["runtime_pruned_data_ids"] == [
         source.task_id
     ], report
