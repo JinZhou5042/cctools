@@ -19,6 +19,7 @@ class InputResolver:
         process_cache,
         emit,
         trust_taskvine_inputs=False,
+        cache_values=None,
     ):
         self.controller = controller
         self.token = token
@@ -28,12 +29,40 @@ class InputResolver:
         self.emit = emit
         self.trust_taskvine_inputs = bool(trust_taskvine_inputs)
         self.objects = {}
+        self.cache_values = cache_values or {}
+
+    @staticmethod
+    def _file_identity(path):
+        stat = path.stat()
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+    def _local_payload(self, kind, data_id, path):
+        if not path.is_file():
+            return None
+        key = (
+            self.controller,
+            self.token,
+            kind,
+            int(data_id),
+            self._file_identity(path),
+        )
+        with self.process_cache.lock:
+            payload = self.process_cache.data.get(key)
+        if payload is not None:
+            self.emit(f"DATAVINE_DRAM_HIT {kind}{int(data_id)}")
+            return payload
+        payload = path.read_bytes()
+        hint = self.cache_values.get(f"{kind}:{int(data_id)}")
+        if hint is not None:
+            with self.process_cache.lock:
+                self.process_cache.data.put(key, payload, hint["score"])
+        return payload
 
     def fetch_edata(self, data_id):
         data_id = int(data_id)
         cache_path = Path(f"datavine-edata-{data_id}.pkl")
         if self.trust_taskvine_inputs and cache_path.is_file():
-            return cache_path.read_bytes()
+            return self._local_payload("e", data_id, cache_path)
         metadata_key = (self.controller, self.token, data_id)
         info = self.process_cache.edata_metadata.get(metadata_key)
         if info is None:
@@ -57,7 +86,7 @@ class InputResolver:
             return payload
 
         if cache_path.is_file():
-            payload = cache_path.read_bytes()
+            payload = self._local_payload("e", data_id, cache_path)
             if (
                 len(payload) != info["size"]
                 or EDataRecord.digest(info["metadata"], payload)
@@ -114,7 +143,11 @@ class InputResolver:
         cache_path = Path(f"datavine-idata-{data_id}.pkl")
         if not cache_path.is_file():
             return self.client.fetch_idata(data_id)
-        payload = cache_path.read_bytes()
+        if self.trust_taskvine_inputs:
+            payload = self._local_payload("i", data_id, cache_path)
+            self.emit(f"DATAVINE_LOCAL_IDATA i{data_id}")
+            return payload
+        payload = self._local_payload("i", data_id, cache_path)
         status = self.client.idata_status(data_id)
         if hashlib.sha256(payload).hexdigest() != status["content_hash"]:
             self.reporter.reject_local(f"i:{data_id}")

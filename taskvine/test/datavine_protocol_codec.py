@@ -155,6 +155,12 @@ def main():
             for task_id in range(1, 101)
         )
         assert compact_client.register_tasks(compact_records) == compact_records
+        fetched, cache_values = compact_client.get_execution_bundle((1, 2))
+        assert fetched == compact_records[:2]
+        function_value = cache_values[f"e:{function_data_id}"]
+        assert function_value["fanout"] == 100
+        assert function_value["remaining_uses"] == 100
+        assert function_value["score"] > 0
         route = "POST /v1/tasks/register-batch"
         assert compact_client.request_metrics()[route]["count"] == 1
     finally:

@@ -3,6 +3,7 @@
 import hashlib
 
 from ..models import IDataRecord, TaskRecord
+from ..value import data_value_score
 
 
 class IDataTaskStateMixin:
@@ -100,8 +101,98 @@ class IDataTaskStateMixin:
                 )
                 for task in new_tasks.values()
             )
+            for task in new_tasks.values():
+                self._task_depths[task.task_id] = 1 + max(
+                    (
+                        self._task_depths[
+                            self._idata[data_id].producer_task_id
+                        ]
+                        for data_id in task.input_data_ids
+                    ),
+                    default=-1,
+                )
+                edata_ids = {task.function_data_id}
+                edata_ids.update(
+                    data_id
+                    for kind, data_id in task.positional
+                    if kind in ("e", "c")
+                )
+                edata_ids.update(
+                    data_id
+                    for _, (kind, data_id) in task.keyword
+                    if kind in ("e", "c")
+                )
+                for data_id in edata_ids:
+                    self._edata_consumers.setdefault(data_id, set()).add(
+                        task.task_id
+                    )
             self._tasks.update(new_tasks)
             return tuple(results)
+
+    def execution_bundle(self, task_ids):
+        with self._lock:
+            tasks = self.get_tasks(task_ids)
+            data_keys = {
+                f"i:{data_id}"
+                for task in tasks
+                for data_id in task.input_data_ids
+            }
+            for task in tasks:
+                data_keys.add(f"e:{task.function_data_id}")
+                data_keys.update(
+                    f"e:{data_id}"
+                    for kind, data_id in task.positional
+                    if kind in ("e", "c")
+                )
+                data_keys.update(
+                    f"e:{data_id}"
+                    for _, (kind, data_id) in task.keyword
+                    if kind in ("e", "c")
+                )
+            values = {}
+            for data_key in data_keys:
+                kind, token = data_key.split(":", 1)
+                data_id = int(token)
+                if kind == "e":
+                    consumers = self._edata_consumers.get(data_id, ())
+                else:
+                    consumers = self.pruning.pruner.graph.consumers_by_data[
+                        data_id
+                    ]
+                remaining = sum(
+                    self.pruning.pruner.task_states[task_id]
+                    in ("pending", "running")
+                    for task_id in consumers
+                )
+                if remaining < 2:
+                    continue
+                if kind == "e":
+                    record = self._edata[data_id]
+                    durable = True
+                    depth = 0
+                else:
+                    record = self._idata[data_id]
+                    durable = record.durability == "durable"
+                    depth = self._task_depths[record.producer_task_id]
+                replicas = len(self.replicas.candidates(data_key))
+                size = record.serialized_size
+                values[data_key] = {
+                    "size": size,
+                    "remaining_uses": remaining,
+                    "fanout": len(consumers),
+                    "recompute_depth": depth,
+                    "replicas": replicas,
+                    "durable": durable,
+                    "score": data_value_score(
+                        size,
+                        remaining_uses=remaining,
+                        fanout=len(consumers),
+                        recompute_depth=depth,
+                        replicas=replicas,
+                        durable=durable,
+                    ),
+                }
+            return tasks, values
 
     def _validate_binding(self, kind, data_id):
         if kind in ("e", "c") and data_id in self._edata:

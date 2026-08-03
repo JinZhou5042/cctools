@@ -69,6 +69,7 @@ def main():
                     )
                     for task in tasks
                 ),
+                1024 * 1024,
             )
             assert result["protocol"] == "datavine-batch-v2"
             outputs = [

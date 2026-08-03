@@ -219,8 +219,9 @@ class TaskSchedulerThread:
             self.controller.endpoint,
             self.controller.token,
             (),
+            0,
         )
-        task.set_exec_method("fork")
+        task.set_exec_method("direct")
         task_id = self._manager.submit(task)
         while True:
             self._raise_if_stopping()
@@ -450,6 +451,7 @@ class TaskSchedulerThread:
         prefetch_item_budget=16,
         inject_prefetch_failure=False,
         worker_disk_cache_bytes=None,
+        worker_dram_cache_bytes=256 * 1024 * 1024,
         worker_disk_cache_items=None,
         worker_disk_cache_admission_items=None,
         worker_disk_cache_admission_bytes=None,
@@ -483,6 +485,9 @@ class TaskSchedulerThread:
         detailed_report=False,
     ):
         self._assert_owner()
+        worker_dram_cache_bytes = int(worker_dram_cache_bytes)
+        if worker_dram_cache_bytes < 0:
+            raise ValueError("worker DRAM cache capacity is negative")
         workflow_run_started = time.monotonic()
         if self._manager is None:
             raise RuntimeError("create_manager must be called first")
@@ -533,6 +538,7 @@ class TaskSchedulerThread:
             self._task_record,
             self._edata_files,
             self._idata_files,
+            worker_dram_cache_bytes,
         )
         workflow_registration_elapsed = (
             time.monotonic() - workflow_run_started
@@ -594,6 +600,17 @@ class TaskSchedulerThread:
         }
         task_by_id = {task.task_id: task for task in workflow.tasks}
         execution = ExecutionState(pending=set(task_by_id))
+
+        def record_worker_dram_cache(lines):
+            for line in lines:
+                if not line.startswith("DATAVINE_DRAM_CACHE "):
+                    continue
+                value = json.loads(line.split(" ", 1)[1])
+                worker_id = value.pop("worker_id")
+                if not worker_id:
+                    raise RuntimeError("DRAM cache report lacks WorkerID")
+                execution.worker_dram_cache[worker_id] = value
+
         publication = PublicationState()
         explicit_persistence_frontiers = (
             persistence_attempts_by_task is not None
@@ -2156,6 +2173,7 @@ class TaskSchedulerThread:
                             "DATAVINE_CONTROLLER_RETRIES "
                         )
                     )
+                    record_worker_dram_cache(batch_events)
                     for logical_id in logical_ids:
                         for output in outputs_by_task[logical_id]:
                             self._cache_admission.observe(output)
@@ -2221,6 +2239,7 @@ class TaskSchedulerThread:
                 for line in completed_output.splitlines()
                 if line.startswith("DATAVINE_CONTROLLER_RETRIES ")
             )
+            record_worker_dram_cache(completed_output.splitlines())
             if not completed.successful():
                 # A worker can disappear after its replica was selected but
                 # before a dependent task starts. Reconcile first, then turn
@@ -2718,6 +2737,24 @@ class TaskSchedulerThread:
             "loss_injected": execution.loss_injected,
             "local_idata_hits": execution.local_idata_hits,
             "worker_controller_retries": execution.worker_controller_retries,
+            "worker_dram_cache": {
+                "workers": execution.worker_dram_cache,
+                **{
+                    key: sum(
+                        int(value[key])
+                        for value in execution.worker_dram_cache.values()
+                    )
+                    for key in (
+                        "bytes",
+                        "items",
+                        "hits",
+                        "misses",
+                        "admissions",
+                        "evictions",
+                    )
+                },
+                "capacity_bytes_per_worker": worker_dram_cache_bytes,
+            },
             "worker_loss_injected": bool(execution.worker_loss_injections),
             "worker_loss_injections": execution.worker_loss_injections,
             "worker_loss_schedule": list(worker_loss_schedule),

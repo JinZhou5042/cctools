@@ -84,6 +84,8 @@ class ControllerState(
         self._idata_bytes_high_water = 0
         self._idata_metadata_publications = 0
         self._tasks = DenseIdStore()
+        self._task_depths = {}
+        self._edata_consumers = {}
         self._publications = 0
         self._persistence = None
         self._persistence_failures = {}

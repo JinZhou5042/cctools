@@ -16,6 +16,7 @@ def main(
     emit=print,
     capture_output=None,
     trust_taskvine_inputs=False,
+    cache_values=None,
 ):
     args = parse_worker_arguments(argv)
 
@@ -61,6 +62,7 @@ def main(
         PROCESS_CACHE,
         emit,
         trust_taskvine_inputs,
+        cache_values,
     )
     function = cloudpickle.loads(
         resolver.fetch_edata(task.function_data_id)

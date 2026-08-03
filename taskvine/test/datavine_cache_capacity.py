@@ -188,6 +188,7 @@ def prefetch_recovery_case(factory_manager=None):
         inject_worker_loss_after=1,
         worker_loss_process_shutdown=True,
         replacement_worker_delay=None if factory_manager else 1,
+        replacement_worker_delays=() if factory_manager else (10,),
         worker_disk_cache_bytes=400000,
         worker_disk_cache_items=12,
         worker_disk_cache_admission_items=12,

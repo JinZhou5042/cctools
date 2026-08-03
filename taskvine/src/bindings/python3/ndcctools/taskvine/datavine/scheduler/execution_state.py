@@ -85,6 +85,7 @@ class ExecutionState:
     local_idata_hits: int = 0
     loss_injected: bool = False
     worker_controller_retries: int = 0
+    worker_dram_cache: dict = dataclasses.field(default_factory=dict)
     worker_loss_injections: int = 0
 
     def has_work(self):

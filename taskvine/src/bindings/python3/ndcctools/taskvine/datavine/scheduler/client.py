@@ -682,11 +682,20 @@ class ControllerClient:
         return decode_task_record(json.loads(payload))
 
     def get_tasks(self, task_ids):
+        return self._get_tasks(task_ids, False)[0]
+
+    def get_execution_bundle(self, task_ids):
+        return self._get_tasks(task_ids, True)
+
+    def _get_tasks(self, task_ids, include_cache_values):
         task_ids = tuple(int(task_id) for task_id in task_ids)
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/tasks/get-batch",
-            {"task_ids": task_ids},
+            {
+                "task_ids": task_ids,
+                "include_cache_values": bool(include_cache_values),
+            },
             idempotent=True,
         )
         response = json.loads(payload)
@@ -698,7 +707,7 @@ class ControllerClient:
         )
         if tuple(record.task_id for record in records) != task_ids:
             raise DataVineRemoteError("mismatched task record batch")
-        return records
+        return records, response.get("cache_values", {})
 
     def fetch_idata(self, data_id):
         payload, headers = self._request(

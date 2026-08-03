@@ -77,6 +77,7 @@ def main():
         lambda task_id: None,
         edata_files,
         idata_files,
+        1024,
     )
 
     bulk = factory.edata_file(1)

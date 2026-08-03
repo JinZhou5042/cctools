@@ -19,7 +19,7 @@ def ensure_worker_library(manager):
         execute_datavine_task,
         execute_datavine_tasks,
         add_env=False,
-        exec_mode="fork",
+        exec_mode="direct",
     )
     manager.install_library(library)
 
@@ -35,6 +35,7 @@ class TaskFactory:
         task_record,
         edata_files,
         idata_files,
+        worker_dram_cache_bytes,
     ):
         self.manager = manager
         self.controller = controller
@@ -42,6 +43,7 @@ class TaskFactory:
         self.task_record = task_record
         self.edata_files = edata_files
         self.idata_files = idata_files
+        self.worker_dram_cache_bytes = int(worker_dram_cache_bytes)
 
     def edata_file(self, data_id):
         file_object = self.edata_files.get(data_id)
@@ -165,8 +167,9 @@ class TaskFactory:
                 task_id,
                 attempt,
                 output_names,
+                self.worker_dram_cache_bytes,
             )
-            task.set_exec_method("fork")
+            task.set_exec_method("direct")
         else:
             task = Task(command)
         task.set_tag(str(task_id))
@@ -282,8 +285,9 @@ class TaskFactory:
             self.controller.endpoint,
             self.controller.token,
             calls,
+            self.worker_dram_cache_bytes,
         )
-        task.set_exec_method("fork")
+        task.set_exec_method("direct")
         task.set_tag(",".join(map(str, task_ids)))
         task.set_cores(1)
         task.set_retries(5)

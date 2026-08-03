@@ -449,9 +449,17 @@ class PostRouteFactory:
                 if self.path == f"{API_PREFIX}/tasks/get-batch":
                     try:
                         request = self._read_json()
-                        records = owner.state.get_tasks(
-                            request["task_ids"]
-                        )
+                        if request.get("include_cache_values"):
+                            records, cache_values = (
+                                owner.state.execution_bundle(
+                                    request["task_ids"]
+                                )
+                            )
+                        else:
+                            records = owner.state.get_tasks(
+                                request["task_ids"]
+                            )
+                            cache_values = None
                     except Exception as exc:
                         self._error(400, exc)
                         return
@@ -463,6 +471,11 @@ class PostRouteFactory:
                                 encode_compact_task_record(record)
                                 for record in records
                             ],
+                            **(
+                                {"cache_values": cache_values}
+                                if cache_values is not None
+                                else {}
+                            ),
                         },
                     )
                     return

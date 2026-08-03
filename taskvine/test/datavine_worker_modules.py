@@ -70,6 +70,17 @@ def main():
     assert not first.clients
     assert not first.task_records
 
+    cache = first.data
+    cache.configure(6)
+    assert cache.put("hot", b"abc")
+    assert cache.get("hot") == b"abc"
+    assert cache.put("cold", b"def")
+    assert not cache.put("large-cold", b"123456")
+    assert cache.get("hot") == b"abc"
+    assert cache.snapshot()["bytes"] <= 6
+    cache.configure(2)
+    assert cache.snapshot()["bytes"] <= 2
+
     print("DataVine worker module contracts PASS")
 
 

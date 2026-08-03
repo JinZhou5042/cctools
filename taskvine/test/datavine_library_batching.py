@@ -33,6 +33,9 @@ def main():
     assert report["logical_tasks_per_physical_submission"] > 1
     assert report["batch_worker_seconds"] >= 0
     assert report["physical_batch_metrics"]
+    cache = report["worker_dram_cache"]
+    assert cache["hits"] > 0
+    assert cache["bytes"] <= cache["capacity_bytes_per_worker"]
     print("DataVine worker-library batching E2E PASS")
 
 
