@@ -23,7 +23,6 @@ from .execution_state import (
     ExecutionState,
     PersistenceState,
     PruningState,
-    PublicationState,
 )
 from .persistence import PersistencePolicy
 from .readiness import ReadyQueue, build_cache_plan
@@ -420,7 +419,6 @@ class TaskSchedulerThread:
         inject_worker_loss_data_by_task=None,
         prune_after_persistence_by_task=None,
         worker_loss_process_shutdown=False,
-        inject_partial_publication_after=None,
         frontier_pruning_ack_delay=0,
         inject_peer_source_losses=0,
         inject_peer_source_loss_after_bytes=0,
@@ -430,7 +428,6 @@ class TaskSchedulerThread:
         inject_idata_release_failures=0,
         peer_release_retry_seconds=0.1,
         peer_release_capacity=1024,
-        use_worker_library=False,
         frontier_pruning_grace_seconds=30,
         hard_delete_pruned_sharedfs=False,
         detailed_report=False,
@@ -442,8 +439,7 @@ class TaskSchedulerThread:
         workflow_run_started = time.monotonic()
         if self._manager is None:
             raise RuntimeError("create_manager must be called first")
-        if use_worker_library:
-            ensure_worker_library(self._manager)
+        ensure_worker_library(self._manager)
         reconciliation_deferrals_before = (
             self._worker_reconciliation_deferrals
         )
@@ -488,7 +484,6 @@ class TaskSchedulerThread:
             self._edata_files,
             self._idata_files,
             worker_dram_cache_bytes,
-            worker_managed_data=use_worker_library,
             controller_inline_idata_bytes=controller_snapshot[
                 "idata_inline_object_capacity_bytes"
             ],
@@ -519,25 +514,6 @@ class TaskSchedulerThread:
             for task_id, data_ids in self._run_context.logical_output_slots.items()
             for data_id in data_ids
         }
-        inject_partial_publication_after = {
-            int(task_id): int(output_index)
-            for task_id, output_index in (
-                inject_partial_publication_after or {}
-            ).items()
-        }
-        for task_id, output_index in (
-            inject_partial_publication_after.items()
-        ):
-            if task_id not in self._run_context.logical_output_slots:
-                raise KeyError(
-                    f"unknown partial-publication TaskID {task_id}"
-                )
-            output_count = len(self._run_context.logical_output_slots[task_id])
-            if output_index < 0 or output_index >= output_count - 1:
-                raise ValueError(
-                    "partial-publication fault must follow a "
-                    "non-final output slot"
-                )
         if result_task_ids is None:
             result_task_ids = tuple(output_ids)
         else:
@@ -566,7 +542,6 @@ class TaskSchedulerThread:
                     raise RuntimeError("DRAM cache report lacks WorkerID")
                 execution.worker_dram_cache[worker_id] = value
 
-        publication = PublicationState()
         explicit_persistence_frontiers = (
             persistence_attempts_by_task is not None
         )
@@ -746,92 +721,23 @@ class TaskSchedulerThread:
                         "duplicate physical frontier-prune request "
                         f"for i:{data_id}"
                     )
-                if task_factory.worker_managed_data:
-                    for record in data_records:
-                        source_url = record.get("source_url")
-                        if source_url:
-                            self.controller.prune_source(source_url)
-                        self.controller.confirm_replica_pruned(
-                            f"i:{data_id}",
-                            record["replica_id"],
-                            record["generation"],
-                        )
-                    active["reconciled_worker_prunes"].append(
-                        {
-                            "data_id": data_id,
-                            "requested": len(data_records),
-                            "confirmed": len(data_records),
-                            "failed": 0,
-                            "reconciled": 0,
-                            "tracker_released": True,
-                        }
-                    )
-                    continue
-                file_object = self._idata_files[data_id]
-                self._sync_worker_epochs(force=True)
-                active_records = [
-                    record
-                    for record in data_records
-                    if record.get("worker_id") in self._active_worker_ids
-                ]
-                inactive_records = [
-                    record
-                    for record in data_records
-                    if record not in active_records
-                ]
-                for record in inactive_records:
+                for record in data_records:
+                    source_url = record.get("source_url")
+                    if source_url:
+                        self.controller.prune_source(source_url)
                     self.controller.confirm_replica_pruned(
                         f"i:{data_id}",
                         record["replica_id"],
                         record["generation"],
                     )
-                reconciled = len(inactive_records)
-                before = self._manager.prune_file_status(
-                    file_object
-                )
-                pending_records = []
-                missing_records = []
-                for record in active_records:
-                    requested = self._manager.prune_file_on_worker(
-                        file_object, record["worker_id"]
-                    )
-                    if requested == 1:
-                        pending_records.append(record)
-                    elif requested == 0:
-                        self.controller.confirm_replica_pruned(
-                            f"i:{data_id}",
-                            record["replica_id"],
-                            record["generation"],
-                        )
-                        missing_records.append(record)
-                    else:
-                        raise RuntimeError(
-                            "worker-specific prune returned invalid count "
-                            f"{requested} for i:{data_id} on "
-                            f"{record['worker_id']}"
-                        )
-                reconciled += len(missing_records)
-                requested = len(pending_records)
-                if not requested:
-                    active["reconciled_worker_prunes"].append(
-                        {
-                            "data_id": data_id,
-                            "requested": 0,
-                            "confirmed": 0,
-                            "failed": 0,
-                            "reconciled": reconciled,
-                            "tracker_released": True,
-                        }
-                    )
-                    continue
-                active["worker_entries"].append(
+                active["reconciled_worker_prunes"].append(
                     {
                         "data_id": data_id,
-                        "records": pending_records,
-                        "file": file_object,
-                        "before": before,
-                        "requested": requested,
-                        "reconciled": reconciled,
+                        "requested": len(data_records),
+                        "confirmed": len(data_records),
+                        "failed": 0,
+                        "reconciled": 0,
+                        "tracker_released": True,
                     }
                 )
         persistence_policy = PersistencePolicy.from_options(
@@ -1594,18 +1500,11 @@ class TaskSchedulerThread:
             for task_id in ready:
                 attempt = self._run_context.attempts.get(task_id, 0) + 1
                 self._run_context.attempts[task_id] = attempt
-                partial_output_index = (
-                    inject_partial_publication_after.get(task_id)
-                    if attempt == 1
-                    else None
-                )
                 task_build_started = time.monotonic()
                 physical = task_factory.make_physical_task(
                     task_id,
                     environment,
                     attempt,
-                    partial_output_index,
-                    use_worker_library,
                 )
                 execution.physical_task_build_seconds += (
                     time.monotonic() - task_build_started
@@ -1841,65 +1740,6 @@ class TaskSchedulerThread:
                         )
                     peer_transfer_pruning_probe_triggered = True
             if completed is None:
-                for physical_id, logical_id in tuple(execution.running.items()):
-                    output_index = inject_partial_publication_after.get(
-                        logical_id
-                    )
-                    if (
-                        output_index is None
-                        or logical_id in publication.triggered_tasks
-                        or self._run_context.attempts[logical_id] != 1
-                    ):
-                        continue
-                    expected_data_ids = self._run_context.logical_output_slots[
-                        logical_id
-                    ]
-                    published_data_id = expected_data_ids[output_index]
-                    prepared = [
-                        record
-                        for record in self.controller.replica_records(
-                            f"i:{published_data_id}"
-                        )["records"]
-                        if (
-                            record["state"] == "preparing"
-                            and record["attempt"] == 1
-                            and record.get("worker_id")
-                        )
-                    ]
-                    if not prepared:
-                        continue
-                    if len(prepared) != 1:
-                        raise RuntimeError(
-                            "partial publication has ambiguous worker "
-                            "ownership"
-                        )
-                    worker_id = prepared[0]["worker_id"]
-                    if not self._manager.cancel_by_task_id(physical_id):
-                        raise RuntimeError(
-                            "could not cancel partial publication task"
-                        )
-                    from ndcctools.taskvine import cvine
-                    if not cvine.vine_manager_shut_down_worker_by_id(
-                        self._manager._taskvine, worker_id
-                    ):
-                        raise RuntimeError(
-                            "could not shut down partial publication "
-                            f"worker {worker_id}"
-                        )
-                    for output_data_id in expected_data_ids:
-                        self.controller.invalidate_idata(output_data_id)
-                    publication.triggered_tasks.add(logical_id)
-                    publication.cancelled_physical_tasks[physical_id] = {
-                        "task_id": logical_id,
-                        "attempt": 1,
-                        "published_data_ids": [published_data_id],
-                        "expected_data_ids": list(expected_data_ids),
-                        "worker_id": worker_id,
-                        "physical_task_id": physical_id,
-                    }
-                    break
-                if publication.cancelled_physical_tasks:
-                    continue
                 if (
                     inject_global_loss_during_persistence
                     and persistence.global_losses == 0
@@ -2325,17 +2165,6 @@ class TaskSchedulerThread:
                 # a globally lost input into ordinary logical recomputation
                 # instead of making the failed consumer terminal.
                 self._sync_worker_epochs(force=True)
-                partial_failure = publication.cancelled_physical_tasks.pop(
-                    completed.id, None
-                )
-                if partial_failure is not None:
-                    publication.failures.append(
-                        partial_failure
-                    )
-                    record_pending_task_state(logical_id)
-                    execution.pending.add(logical_id)
-                    ready_queue.mark_pending(logical_id)
-                    continue
                 expected_output_ids = self._run_context.logical_output_slots[
                     logical_id
                 ]
@@ -2364,16 +2193,6 @@ class TaskSchedulerThread:
                         self._manager.prune_file(
                             self._idata_files[output_data_id]
                         )
-                    publication.failures.append(
-                        {
-                            "task_id": logical_id,
-                            "attempt": self._run_context.attempts[logical_id],
-                            "published_data_ids": published_output_ids,
-                            "expected_data_ids": list(
-                                expected_output_ids
-                            ),
-                        }
-                    )
                     record_pending_task_state(logical_id)
                     execution.pending.add(logical_id)
                     ready_queue.mark_pending(logical_id)
@@ -2636,9 +2455,7 @@ class TaskSchedulerThread:
         }
         self._last_run_report = {
             "logical_tasks": len(output_ids),
-            "execution_boundary": (
-                "persistent-library" if use_worker_library else "process"
-            ),
+            "execution_boundary": "persistent-library",
             **format_logical_outputs(
                 self._run_context.logical_output_slots,
                 self._run_context.attempts,
@@ -2646,9 +2463,6 @@ class TaskSchedulerThread:
                 report_task_ids,
                 report_data_ids,
                 detailed_report,
-            ),
-            "partial_publication_failures": (
-                publication.failures
             ),
             "physical_attempts": sum(self._run_context.attempts.values()),
             "physical_compute_submissions": execution.physical_submissions,

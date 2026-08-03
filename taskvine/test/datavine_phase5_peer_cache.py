@@ -54,7 +54,6 @@ def main():
         worker_cores=1,
         factory_manager=args.factory_manager,
         prefetch=False,
-        use_worker_library=True,
     )
     sizes = snapshot["edata_sizes_by_id"]
     shared_id = max(sizes, key=sizes.get)
@@ -82,7 +81,6 @@ def main():
         peer_transfers=False,
         factory_manager=args.factory_manager,
         prefetch=False,
-        use_worker_library=True,
     )
     assert rollback["available_idata"] == len(workflow.tasks)
     assert (

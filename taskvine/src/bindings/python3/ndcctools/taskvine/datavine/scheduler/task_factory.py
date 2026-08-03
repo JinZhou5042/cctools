@@ -2,7 +2,6 @@
 
 import base64
 import cloudpickle
-import shlex
 import urllib.parse
 
 from ndcctools.taskvine import Task
@@ -89,7 +88,6 @@ class TaskFactory:
         edata_files,
         idata_files,
         worker_dram_cache_bytes,
-        worker_managed_data=False,
         controller_inline_idata_bytes=8 * 1024 * 1024,
         allow_peer_transfer=True,
     ):
@@ -100,7 +98,6 @@ class TaskFactory:
         self.edata_files = edata_files
         self.idata_files = idata_files
         self.worker_dram_cache_bytes = int(worker_dram_cache_bytes)
-        self.worker_managed_data = bool(worker_managed_data)
         self.controller_inline_idata_bytes = int(
             controller_inline_idata_bytes
         )
@@ -177,178 +174,43 @@ class TaskFactory:
         task_id,
         environment,
         attempt,
-        kill_worker_after_output_index=None,
-        use_worker_library=False,
     ):
         record = self.task_record(task_id)
-        output_names = tuple(
-            f"datavine-idata-{data_id}.pkl"
-            for data_id in record.output_data_ids
+        task = DataVineCall(
+            "datavine-worker-v2",
+            "execute_datavine_task",
+            self.controller.endpoint,
+            self.controller.token,
+            task_id,
+            attempt,
+            self.worker_dram_cache_bytes,
+            record.to_dict(),
+            self.controller_inline_idata_bytes,
+            self.allow_peer_transfer,
         )
-        command = " ".join(
-            shlex.quote(value)
-            for value in (
-                "python",
-                "-m",
-                "ndcctools.taskvine.datavine.worker.runner",
-                "--controller",
-                self.controller.endpoint,
-                "--token",
-                self.controller.token,
-                "--task-id",
-                str(task_id),
-                "--attempt",
-                str(attempt),
-                *(
-                    value
-                    for output_name in output_names
-                    for value in ("--output-file", output_name)
-                ),
-                *(
-                    (
-                        "--pause-after-output-index",
-                        str(kill_worker_after_output_index),
-                    )
-                    if kill_worker_after_output_index is not None
-                    else ()
-                ),
-            )
-        )
-        if (
-            use_worker_library
-            and kill_worker_after_output_index is None
-        ):
-            task = DataVineCall(
-                "datavine-worker-v2",
-                "execute_datavine_task",
-                self.controller.endpoint,
-                self.controller.token,
-                task_id,
-                attempt,
-                (),
-                self.worker_dram_cache_bytes,
-                record.to_dict(),
-                self.controller_inline_idata_bytes,
-                self.allow_peer_transfer,
-            )
-        else:
-            task = Task(command)
         task.set_tag(str(task_id))
         task.set_cores(1)
-        task.set_retries(
-            0
-            if (
-                use_worker_library
-                or kill_worker_after_output_index is not None
-            )
-            else 5
-        )
-        if use_worker_library:
-            if environment is not None:
-                task.add_environment(environment)
-            return task
-        edata_ids = {record.function_data_id}
-        edata_ids.update(
-            data_id
-            for kind, data_id in record.positional
-            if kind in ("e", "c")
-        )
-        edata_ids.update(
-            data_id
-            for _, (kind, data_id) in record.keyword
-            if kind in ("e", "c")
-        )
-        for data_id in sorted(edata_ids):
-            task.add_input(
-                self.edata_file(data_id),
-                f"datavine-edata-{data_id}.pkl",
-            )
-        idata_ids = {
-            data_id
-            for kind, data_id in record.positional
-            if kind == "i"
-        }
-        idata_ids.update(
-            data_id
-            for _, (kind, data_id) in record.keyword
-            if kind == "i"
-        )
-        idata_ids.update(
-            self.context.nested_idata_by_task.get(task_id, ())
-        )
-        for data_id in sorted(idata_ids):
-            task.add_input(
-                self.idata_files[data_id],
-                f"datavine-idata-{data_id}.pkl",
-            )
-        for output_data_id, output_name in zip(
-            record.output_data_ids, output_names
-        ):
-            task.add_output(
-                self.idata_output_file(output_data_id, attempt),
-                output_name,
-            )
+        task.set_retries(0)
         if environment is not None:
             task.add_environment(environment)
         return task
 
     def make_persistence_task(self, data_id, request, environment):
-        input_name = f"datavine-persist-i{int(data_id)}.pkl"
-        command = " ".join(
-            shlex.quote(value)
-            for value in (
-                "python",
-                "-m",
-                "ndcctools.taskvine.datavine.worker.persist",
-                "--controller",
-                self.controller.endpoint,
-                "--token",
-                self.controller.token,
-                "--data-id",
-                str(int(data_id)),
-                "--request-id",
-                request["request_id"],
-                *(
-                    ()
-                    if self.worker_managed_data
-                    else ("--input-file", input_name)
-                ),
-                *(
-                    ("--delay-before-complete", "3")
-                    if request.get("inject_cancel_delay")
-                    else ()
-                ),
-                *(
-                    (
-                        "--inject-failure-during-write",
-                        "--delay-before-failure",
-                        str(request.get("inject_failure_delay", 0)),
-                    )
-                    if request.get("inject_failure_during_write")
-                    else ()
-                ),
-            )
+        task = DataVineCall(
+            "datavine-worker-v2",
+            "persist_datavine_idata",
+            self.controller.endpoint,
+            self.controller.token,
+            int(data_id),
+            request["request_id"],
+            bool(request.get("inject_cancel_delay")),
+            bool(request.get("inject_failure_during_write")),
+            float(request.get("inject_failure_delay", 0)),
         )
-        if self.worker_managed_data:
-            task = DataVineCall(
-                "datavine-worker-v2",
-                "persist_datavine_idata",
-                self.controller.endpoint,
-                self.controller.token,
-                int(data_id),
-                request["request_id"],
-                bool(request.get("inject_cancel_delay")),
-                bool(request.get("inject_failure_during_write")),
-                float(request.get("inject_failure_delay", 0)),
-            )
-        else:
-            task = Task(command)
         task.set_tag(f"persist-i{int(data_id)}")
         task.set_cores(0)
         task.set_priority(-500)
         task.set_retries(0)
-        if not self.worker_managed_data:
-            task.add_input(self.idata_files[int(data_id)], input_name)
         if environment is not None:
             task.add_environment(environment)
         return task

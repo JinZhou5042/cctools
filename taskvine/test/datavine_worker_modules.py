@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 
 from ndcctools.taskvine.datavine.models import TaskRecord
-from ndcctools.taskvine.datavine.worker.arguments import (
-    parse_worker_arguments,
-)
 from ndcctools.taskvine.datavine.worker.cache import WorkerProcessCache
 from ndcctools.taskvine.datavine.worker.outputs import (
     normalize_output_values,
@@ -11,43 +8,6 @@ from ndcctools.taskvine.datavine.worker.outputs import (
 
 
 def main():
-    args = parse_worker_arguments(
-        [
-            "--controller",
-            "http://controller",
-            "--token",
-            "secret",
-            "--task-id",
-            "7",
-            "--attempt",
-            "2",
-            "--output-file",
-            "one.pkl",
-            "--output-file",
-            "two.pkl",
-        ]
-    )
-    assert args.task_id == 7
-    assert args.attempt == 2
-    assert args.output_file == ["one.pkl", "two.pkl"]
-    for extra, text in ((["--attempt", "0"], "attempt"),):
-        try:
-            parse_worker_arguments(
-                [
-                    "--controller",
-                    "http://controller",
-                    "--token",
-                    "secret",
-                    "--task-id",
-                    "7",
-                    *extra,
-                ]
-            )
-        except ValueError as exc:
-            assert text.lower() in str(exc).lower()
-        else:
-            raise AssertionError(f"accepted invalid arguments {extra}")
-
     single = TaskRecord(1, 2, (), (), (3,), ())
     multiple = TaskRecord(2, 2, (), (), (4, 5), ())
     assert normalize_output_values(single, [1, 2]) == ([1, 2],)

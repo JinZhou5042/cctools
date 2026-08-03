@@ -4,7 +4,6 @@ from ndcctools.taskvine.datavine.scheduler.execution_state import (
     ExecutionState,
     PersistenceState,
     PruningState,
-    PublicationState,
 )
 
 
@@ -51,21 +50,10 @@ def main():
     execution.pending.clear()
     assert not execution.has_work()
     execution.running[10] = (1, 2)
-    execution.completion_queue.append(1)
     execution.recovery_waves.append([1])
     assert execution.has_work()
     assert not other_execution.running
-    assert not other_execution.completion_queue
     assert not other_execution.recovery_waves
-
-    publication = PublicationState()
-    other_publication = PublicationState()
-    publication.triggered_tasks.add(1)
-    publication.cancelled_physical_tasks[10] = {"task_id": 1}
-    publication.failures.append({"task_id": 1})
-    assert not other_publication.triggered_tasks
-    assert not other_publication.cancelled_physical_tasks
-    assert not other_publication.failures
 
     print("DataVine Scheduler execution state contract PASS")
 

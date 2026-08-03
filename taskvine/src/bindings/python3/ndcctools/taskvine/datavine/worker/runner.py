@@ -5,7 +5,6 @@ import os
 import time
 
 from ..scheduler.client import ControllerClient
-from .arguments import parse_worker_arguments
 from .cache import PROCESS_CACHE
 from .inputs import InputResolver
 from .publication import publish_task_outputs
@@ -18,11 +17,8 @@ def execute_task(
     token,
     task_id,
     attempt=1,
-    output_files=(),
-    pause_after_output_index=-1,
     emit=print,
     capture_output=None,
-    trust_taskvine_inputs=False,
     cache_values=None,
     timings=None,
     allow_peer_transfer=True,
@@ -82,7 +78,6 @@ def execute_task(
         reporter,
         PROCESS_CACHE,
         emit,
-        trust_taskvine_inputs,
         cache_values,
         allow_peer_transfer,
     )
@@ -112,9 +107,6 @@ def execute_task(
         task,
         result,
         attempt,
-        output_files,
-        pause_after_output_index,
-        client,
         reporter,
         worker_id,
         worker_epoch,
@@ -138,19 +130,3 @@ def execute_task(
         f"{client.thread_transient_retry_count - retry_count_before}"
     )
     return 0
-
-
-def main(argv=None):
-    args = parse_worker_arguments(argv)
-    return execute_task(
-        args.controller,
-        args.token,
-        args.task_id,
-        args.attempt,
-        args.output_file,
-        args.pause_after_output_index,
-    )
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

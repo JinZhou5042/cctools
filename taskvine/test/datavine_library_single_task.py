@@ -25,7 +25,6 @@ def main():
         worker_count=1,
         worker_cores=4,
         prefetch=False,
-        use_worker_library=True,
         detailed_report=False,
     )
     report = snapshot["scheduler_report"]

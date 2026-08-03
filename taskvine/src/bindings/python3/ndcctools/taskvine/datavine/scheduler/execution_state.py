@@ -87,12 +87,3 @@ class ExecutionState:
 
     def has_work(self):
         return bool(self.pending or self.running)
-
-
-@dataclasses.dataclass
-class PublicationState:
-    """Mutable state for atomic multi-output publication faults."""
-
-    failures: list = dataclasses.field(default_factory=list)
-    triggered_tasks: set = dataclasses.field(default_factory=set)
-    cancelled_physical_tasks: dict = dataclasses.field(default_factory=dict)

@@ -127,7 +127,6 @@ def run_case(
     replacement_worker_delays=(),
     prune_after_persistence_by_task=None,
     worker_loss_process_shutdown=False,
-    inject_partial_publication_after=None,
     frontier_pruning_ack_delay=0,
     runtime_controller_hook=None,
     controller_client_wrapper=None,
@@ -140,7 +139,6 @@ def run_case(
     peer_release_retry_seconds=0.1,
     peer_release_capacity=1024,
     expected_additional_controller_tasks=0,
-    use_worker_library=False,
     scheduler_wait_timeout=1,
     workflow_timeout=None,
     frontier_pruning_grace_seconds=30,
@@ -269,8 +267,7 @@ def run_case(
                         f"expected {worker_count} TaskVine workers"
                     )
                 time.sleep(1)
-            if use_worker_library:
-                scheduler.call("warm_worker_library")
+            scheduler.call("warm_worker_library")
             workflow_started = time.monotonic()
             future = scheduler.submit(
                 "run_workflow",
@@ -329,9 +326,6 @@ def run_case(
                     prune_after_persistence_by_task
                 ),
                 worker_loss_process_shutdown=worker_loss_process_shutdown,
-                inject_partial_publication_after=(
-                    inject_partial_publication_after
-                ),
                 frontier_pruning_ack_delay=frontier_pruning_ack_delay,
                 inject_peer_source_losses=inject_peer_source_losses,
                 inject_peer_source_loss_after_bytes=(
@@ -349,7 +343,6 @@ def run_case(
                 ),
                 peer_release_retry_seconds=peer_release_retry_seconds,
                 peer_release_capacity=peer_release_capacity,
-                use_worker_library=use_worker_library,
                 frontier_pruning_grace_seconds=(
                     frontier_pruning_grace_seconds
                 ),

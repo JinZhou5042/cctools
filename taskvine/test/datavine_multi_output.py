@@ -56,9 +56,6 @@ def validate_snapshot(snapshot, producer, consumer, failure_mode=None):
         "expected_attempts": expected_attempts,
         "output_attempts": actual_attempts,
         "attempts_by_task": report["attempts_by_task"],
-        "partial_publication_failures": report[
-            "partial_publication_failures"
-        ],
     }
     assert report["logical_output_slots"][str(consumer.task_id)] == [3]
     assert snapshot["idata"] == 3
@@ -83,28 +80,6 @@ def validate_snapshot(snapshot, producer, consumer, failure_mode=None):
                 ],
             }
         ]
-        assert report["partial_publication_failures"] == []
-    elif failure_mode == "partial-publication":
-        assert report["recovery_waves"] == []
-        assert len(report["partial_publication_failures"]) == 1
-        failure = report["partial_publication_failures"][0]
-        assert {
-            key: failure[key]
-            for key in (
-                "task_id",
-                "attempt",
-                "published_data_ids",
-                "expected_data_ids",
-            )
-        } == {
-            "task_id": producer.task_id,
-            "attempt": 1,
-            "published_data_ids": [output_slots[0]],
-            "expected_data_ids": output_slots,
-        }
-        assert failure["worker_id"]
-        assert failure["physical_task_id"] > 0
-        assert snapshot["taskvine_worker_disconnections"] >= 1
     return output_slots
 
 
@@ -136,7 +111,9 @@ def main():
         42,
         factory_manager=args.factory_manager,
         prefetch=False,
-        inject_global_loss_after=recovery_producer.task_id,
+        inject_worker_loss_after=recovery_producer.task_id,
+        worker_loss_process_shutdown=True,
+        replacement_worker_delay=(None if args.factory_manager else 1),
     )
     recovery_slots = validate_snapshot(
         recovered,
@@ -146,38 +123,11 @@ def main():
     )
     assert normal_slots == recovery_slots
 
-    partial_workflow, partial_producer, partial_consumer = (
-        build_workflow()
-    )
-    partial = run_case(
-        "multi-output-partial-publication",
-        partial_workflow,
-        partial_consumer.task_id,
-        42,
-        factory_manager=args.factory_manager,
-        prefetch=False,
-        replacement_worker_delay=(
-            None if args.factory_manager else 1
-        ),
-        inject_partial_publication_after={
-            partial_producer.task_id: 0
-        },
-    )
-    partial_slots = validate_snapshot(
-        partial,
-        partial_producer,
-        partial_consumer,
-        "partial-publication",
-    )
-    assert normal_slots == partial_slots
     print(
         json.dumps(
             {
                 "alias_identity_preserved": True,
                 "normal_output_slots": normal_slots,
-                "partial_demand_output_index": 0,
-                "partial_publication_rejected": True,
-                "partial_publication_output_slots": partial_slots,
                 "recovery_output_slots": recovery_slots,
                 "stable_across_retry": True,
                 "status": "PASS",
