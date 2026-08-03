@@ -232,7 +232,6 @@ def main():
     parser.add_argument(
         "--worker-disk-cache-admission-items", type=int, default=512
     )
-    parser.add_argument("--process-runner", action="store_true")
     parser.add_argument("--pruning-grace-seconds", type=float, default=30)
     parser.add_argument(
         "--hard-delete-pruned-sharedfs", action="store_true"
@@ -421,7 +420,6 @@ def main():
             else prune_after_persistence
         ),
         max_inline_idata_bytes=args.controller_inline_idata_bytes,
-        use_worker_library=not args.process_runner,
         scheduler_wait_timeout=1,
         workflow_timeout=args.workflow_timeout,
         inject_worker_loss_schedule=loss_schedule,
@@ -555,7 +553,7 @@ def main():
         },
         "mode": args.mode,
         "execution_boundary": (
-            "process" if args.process_runner else "persistent-library"
+            "persistent-library"
         ),
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "workflow_timeout_seconds": args.workflow_timeout,

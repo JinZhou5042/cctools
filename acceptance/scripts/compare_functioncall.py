@@ -93,7 +93,6 @@ def run_datavine(tasks, workers, cores):
         worker_count=workers,
         worker_cores=cores,
         prefetch=False,
-        use_worker_library=True,
         workflow_timeout=max(180, tasks * 2),
         detailed_report=False,
     )
