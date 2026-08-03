@@ -6,7 +6,7 @@ import hashlib
 import json
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class SerializationMetadata:
     serializer: str
     serializer_version: str
@@ -36,7 +36,7 @@ class SerializationMetadata:
         return cls(**values)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class EDataRecord:
     data_id: int
     content_hash: str
@@ -69,7 +69,7 @@ class EDataRecord:
         ).hexdigest()
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class IDataRecord:
     data_id: int
     producer_task_id: int
@@ -82,7 +82,7 @@ class IDataRecord:
     serialized_size: int | None = None
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class TaskRecord:
     task_id: int
     function_data_id: int

@@ -3,13 +3,13 @@
 import dataclasses
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class OutputRef:
     producer_task_id: int
     output_index: int = 0
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(slots=True)
 class WorkflowTask:
     task_id: int
     function: object

@@ -569,7 +569,21 @@ def run_case(
                     worker.terminate()
                     worker.wait(timeout=10)
             controller.terminate()
-            _, stderr = controller.communicate(timeout=10)
+            controller_shutdown_timeout = max(
+                10.0,
+                min(60.0, len(workflow.tasks) / 25_000),
+            )
+            try:
+                _, stderr = controller.communicate(
+                    timeout=controller_shutdown_timeout
+                )
+            except subprocess.TimeoutExpired as error:
+                controller.kill()
+                _, stderr = controller.communicate(timeout=10)
+                raise AssertionError(
+                    "Controller did not stop within "
+                    f"{controller_shutdown_timeout:.1f}s\n{stderr}"
+                ) from error
             if external_bulk_root is not None:
                 shutil.rmtree(external_bulk_root, ignore_errors=True)
             if external_persistence_root is not None:

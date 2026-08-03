@@ -10,7 +10,8 @@ import urllib.request
 
 import hashlib
 
-from ..models import EDataRecord, SerializationMetadata, TaskRecord
+from ..codec import decode_serialization_metadata, decode_task_record
+from ..models import EDataRecord, TaskRecord
 from ..protocol import (
     API_PREFIX,
     DataVineRemoteError,
@@ -127,9 +128,7 @@ class ControllerClient:
                 result = response.read(), response.headers
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")
-            raise DataVineRemoteError(
-                f"Controller HTTP {exc.code}: {body}"
-            ) from exc
+            raise DataVineRemoteError.from_http(exc.code, body) from exc
         finally:
             elapsed = time.monotonic() - started
             route = re.sub(r"/\d+(?=/|$)", "/{id}", path)
@@ -560,7 +559,7 @@ class ControllerClient:
                     headers["X-DataVine-Metadata"]
                 ).decode("utf-8")
             )
-            metadata = SerializationMetadata.from_dict(metadata)
+            metadata = decode_serialization_metadata(metadata)
         except Exception as exc:
             raise DataVineRemoteError(
                 f"EDataID {data_id} has invalid metadata"
@@ -577,7 +576,7 @@ class ControllerClient:
             "GET", f"{API_PREFIX}/edata/{int(data_id)}/metadata"
         )
         value = json.loads(payload)
-        value["metadata"] = SerializationMetadata.from_dict(
+        value["metadata"] = decode_serialization_metadata(
             value["metadata"]
         )
         return value
@@ -612,7 +611,7 @@ class ControllerClient:
         payload, _ = self._request(
             "POST", f"{API_PREFIX}/tasks/register", task.to_dict()
         )
-        return TaskRecord.from_dict(json.loads(payload))
+        return decode_task_record(json.loads(payload))
 
     def register_tasks(self, tasks):
         tasks = tuple(tasks)
@@ -638,7 +637,7 @@ class ControllerClient:
         payload, _ = self._request(
             "GET", f"{API_PREFIX}/tasks/{int(task_id)}"
         )
-        return TaskRecord.from_dict(json.loads(payload))
+        return decode_task_record(json.loads(payload))
 
     def fetch_idata(self, data_id):
         payload, headers = self._request(
@@ -670,9 +669,7 @@ class ControllerClient:
                 return json.loads(response.read())
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")
-            raise DataVineRemoteError(
-                f"Controller HTTP {exc.code}: {body}"
-            ) from exc
+            raise DataVineRemoteError.from_http(exc.code, body) from exc
 
     def publish_idata_batch(self, publications):
         payload, _ = self._request(

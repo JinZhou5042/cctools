@@ -4,25 +4,40 @@ import collections
 import concurrent.futures
 import base64
 import cloudpickle
-import dataclasses
 import hashlib
 import json
 import os
 from pathlib import Path
 import queue
-import shlex
 import threading
 import time
 import urllib.error
-import urllib.parse
 import uuid
 
-from ..models import EDataRecord, TaskRecord
 from ..cache import WorkerCacheAdmission
+from ..diagnostics import rank_bottlenecks
 from ..placement.policy import PrefetchCandidate, select_prefetch
-from ..serialization import serialize
-from ..workflow import OutputRef, iter_output_refs
+from ..workflow import iter_output_refs
 from ..protocol import DataVineRemoteError
+from .configuration import configure_runtime
+from .execution_state import (
+    ExecutionState,
+    PersistenceState,
+    PruningState,
+    PublicationState,
+)
+from .persistence import PersistencePolicy
+from .readiness import plan_ready_batches, select_ready_tasks
+from .recovery import select_recovery_audit_data_ids
+from .registration import WorkflowRegistrar
+from .reporting import (
+    format_logical_outputs,
+    format_manager_metrics,
+    format_worker_caches,
+    select_report_scope,
+)
+from .run_context import WorkflowRunContext
+from .task_factory import TaskFactory, ensure_worker_library
 
 
 class _LogicalCompletion:
@@ -52,16 +67,12 @@ class TaskSchedulerThread:
         bulk_threshold=8 * 1024 * 1024,
     ):
         self.controller = controller_client
-        self._bulk_origin_dir = (
-            Path(bulk_origin_dir).resolve()
-            if bulk_origin_dir is not None
-            else None
+        self._registrar = WorkflowRegistrar(
+            controller_client,
+            bulk_origin_dir=bulk_origin_dir,
+            bulk_threshold=bulk_threshold,
+            task_batch_size=self._registration_batch_size,
         )
-        self._bulk_threshold = int(bulk_threshold)
-        if self._bulk_threshold < 1:
-            raise ValueError("bulk threshold must be positive")
-        if self._bulk_origin_dir is not None:
-            self._bulk_origin_dir.mkdir(parents=True, exist_ok=True)
         self._commands = queue.Queue()
         self._thread = threading.Thread(
             target=self._run,
@@ -72,22 +83,10 @@ class TaskSchedulerThread:
         self._started = False
         self._ready = threading.Event()
         self._manager = None
-        self._logical_outputs = {}
-        self._logical_output_slots = {}
-        self._task_records = {}
+        self._run_context = WorkflowRunContext()
         self._edata_files = {}
-        self._edata_info = {}
-        self._edata_payloads = {}
-        self._inline_value_payloads = {}
-        self._inline_task_values = 0
         self._idata_files = {}
-        self._attempts = {}
         self._last_run_report = {}
-        self._nested_idata_by_task = {}
-        self._edata_by_object = {}
-        self._serialization_count = 0
-        self._bulk_serialization_count = 0
-        self._registration_timing = {}
         self._worker_reconciliation_deferrals = 0
         self._active_worker_ids = frozenset()
         self._worker_reconciliations = 0
@@ -198,7 +197,7 @@ class TaskSchedulerThread:
         self._assert_owner()
         if self._manager is None:
             raise RuntimeError("TaskVine Manager is not initialized")
-        self._ensure_worker_library()
+        ensure_worker_library(self._manager)
         from ndcctools.taskvine import FunctionCall
 
         task = FunctionCall(
@@ -410,237 +409,18 @@ class TaskSchedulerThread:
             self._manager.disable_peer_transfers()
         return self._manager.port
 
-    def _register_value(self, value, domain="value"):
-        cache_key = (str(domain), id(value))
-        cached = self._edata_by_object.get(cache_key)
-        if cached is not None and cached[0] is value:
-            return cached[1]
-        metadata, payload = serialize(value)
-        metadata = dataclasses.replace(metadata, domain=str(domain))
-        self._serialization_count += 1
-        if (
-            self._bulk_origin_dir is not None
-            and len(payload) >= self._bulk_threshold
-        ):
-            self._bulk_serialization_count += 1
-            digest = EDataRecord.digest(metadata, payload)
-            path = self._bulk_origin_dir / f"edata-{digest}.pkl"
-            if not path.exists():
-                temporary = self._bulk_origin_dir / (
-                    f".edata-{digest}-{uuid.uuid4().hex}.tmp"
-                )
-                try:
-                    with temporary.open("xb") as stream:
-                        stream.write(payload)
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                    os.replace(temporary, path)
-                    os.chmod(path, 0o444)
-                    directory = os.open(
-                        self._bulk_origin_dir, os.O_RDONLY
-                    )
-                    try:
-                        os.fsync(directory)
-                    finally:
-                        os.close(directory)
-                finally:
-                    temporary.unlink(missing_ok=True)
-            os.chmod(path, 0o444)
-            result = self.controller.register_edata_origin(
-                metadata, path, digest, len(payload)
-            )
-        else:
-            result = self.controller.register_edata(metadata, payload)
-        data_id = int(result["data_id"])
-        self._edata_info[data_id] = result
-        if (
-            result.get("storage") == "controller-memory"
-            and len(payload) <= 64 * 1024
-        ):
-            self._edata_payloads[data_id] = payload
-        self._edata_by_object[cache_key] = (value, data_id)
-        return data_id
-
-    def _register_workflow_values(self, tasks):
-        candidates = []
-        seen = set()
-        for task in tasks:
-            values = ((task.function, "function"),)
-            values += tuple(
-                (
-                    value,
-                    "container" if tuple(iter_output_refs(value)) else "value",
-                )
-                for value in (*task.args, *task.kwargs.values())
-                if not isinstance(value, OutputRef)
-            )
-            for value, domain in values:
-                cache_key = (domain, id(value))
-                if cache_key in seen:
-                    continue
-                seen.add(cache_key)
-                cached = self._edata_by_object.get(cache_key)
-                if cached is not None and cached[0] is value:
-                    continue
-                metadata, payload = serialize(value)
-                metadata = dataclasses.replace(
-                    metadata, domain=str(domain)
-                )
-                if domain == "value" and len(payload) <= 1024:
-                    self._serialization_count += 1
-                    self._inline_value_payloads[cache_key] = (
-                        value,
-                        base64.b64encode(payload).decode("ascii"),
-                    )
-                    continue
-                if (
-                    self._bulk_origin_dir is not None
-                    and len(payload) >= self._bulk_threshold
-                ):
-                    self._register_value(value, domain)
-                    continue
-                self._serialization_count += 1
-                candidates.append(
-                    (cache_key, value, metadata, payload)
-                )
-        if not candidates:
-            return
-        results = self.controller.register_edata_batch(
-            (metadata, payload)
-            for _, _, metadata, payload in candidates
-        )
-        for (cache_key, value, _, payload), result in zip(
-            candidates, results
-        ):
-            data_id = int(result["data_id"])
-            self._edata_by_object[cache_key] = (value, data_id)
-            self._edata_info[data_id] = result
-            if len(payload) <= 64 * 1024:
-                self._edata_payloads[data_id] = payload
-
     def _op_register_workflow(self, workflow):
         self._assert_owner()
-        registration_started = time.monotonic()
         workflow.validate()
-        self._logical_outputs = {}
-        self._logical_output_slots = {}
-        self._task_records = {}
-        self._edata_by_object = {}
-        self._edata_info = {}
-        self._edata_payloads = {}
-        self._inline_value_payloads = {}
-        self._inline_task_values = 0
-        self._serialization_count = 0
-        self._bulk_serialization_count = 0
-        self._nested_idata_by_task = {}
-        self._attempts = {}
-        tasks = workflow.tasks
-        producer_slots = tuple(
-            (task.task_id, output_index)
-            for task in tasks
-            for output_index in range(task.output_count)
-        )
-        allocated = iter(self.controller.allocate_idata_batch(producer_slots))
-        idata_allocated = time.monotonic()
-        for task in tasks:
-            output_data_ids = tuple(
-                next(allocated) for _ in range(task.output_count)
-            )
-            self._logical_output_slots[task.task_id] = output_data_ids
-            self._logical_outputs[task.task_id] = output_data_ids[0]
-        self._register_workflow_values(tasks)
-        values_registered = time.monotonic()
-        records = []
-        record_build_seconds = 0.0
-        task_registration_seconds = 0.0
-        build_started = time.monotonic()
-        for task in tasks:
-            self._nested_idata_by_task[task.task_id] = set()
-            positional = tuple(
-                self._binding(task.task_id, value) for value in task.args
-            )
-            keyword = tuple(
-                (name, self._binding(task.task_id, value))
-                for name, value in sorted(task.kwargs.items())
-            )
-            record = TaskRecord(
-                task.task_id,
-                self._register_value(task.function, "function"),
-                positional,
-                keyword,
-                self._logical_output_slots[task.task_id],
-                tuple(
-                    sorted(
-                        {
-                            self._logical_output_slots[
-                                reference.producer_task_id
-                            ][reference.output_index]
-                            for value in (
-                                *task.args,
-                                *task.kwargs.values(),
-                            )
-                            for reference in iter_output_refs(value)
-                        }
-                    )
-                ),
-            )
-            self._task_records[task.task_id] = record
-            records.append(record)
-            if len(records) == self._registration_batch_size:
-                register_started = time.monotonic()
-                record_build_seconds += register_started - build_started
-                self.controller.register_tasks(records)
-                registered = time.monotonic()
-                task_registration_seconds += registered - register_started
-                records.clear()
-                build_started = registered
-        register_started = time.monotonic()
-        record_build_seconds += register_started - build_started
-        if records:
-            self.controller.register_tasks(records)
-        tasks_registered = time.monotonic()
-        task_registration_seconds += tasks_registered - register_started
-        self._registration_timing = {
-            "idata_allocation": idata_allocated - registration_started,
-            "edata": values_registered - idata_allocated,
-            "task_record_build": record_build_seconds,
-            "task_registration": task_registration_seconds,
-        }
-        result = dict(self._logical_outputs)
-        self._edata_by_object.clear()
-        self._inline_value_payloads.clear()
-        return result
+        self._run_context = WorkflowRunContext()
+        return self._registrar.register(workflow, self._run_context)
 
     def _task_record(self, task_id):
-        record = self._task_records.get(int(task_id))
+        record = self._run_context.task_records.get(int(task_id))
         if record is None:
             record = self.controller.get_task(task_id)
-            self._task_records[int(task_id)] = record
+            self._run_context.task_records[int(task_id)] = record
         return record
-
-    def _binding(self, task_id, value):
-        if isinstance(value, OutputRef):
-            return (
-                "i",
-                self._logical_output_slots[value.producer_task_id][
-                    value.output_index
-                ],
-            )
-        references = tuple(iter_output_refs(value))
-        if references:
-            self._nested_idata_by_task[task_id].update(
-                self._logical_output_slots[
-                    reference.producer_task_id
-                ][reference.output_index]
-                for reference in references
-            )
-            return ("c", self._register_value(value, "container"))
-        cache_key = ("value", id(value))
-        cached = self._inline_value_payloads.get(cache_key)
-        if cached is not None and cached[0] is value:
-            self._inline_task_values += 1
-            return ("v", cached[1])
-        return ("e", self._register_value(value))
 
     def _op_run_workflow(
         self,
@@ -692,137 +472,58 @@ class TaskSchedulerThread:
         if self._manager is None:
             raise RuntimeError("create_manager must be called first")
         if use_worker_library:
-            self._ensure_worker_library()
-        library_batch_size = int(library_batch_size)
-        if library_batch_size < 1:
-            raise ValueError("library batch size must be positive")
+            ensure_worker_library(self._manager)
         reconciliation_deferrals_before = (
             self._worker_reconciliation_deferrals
         )
-        admission_items = (
-            -1
-            if worker_disk_cache_admission_items is None
-            else int(worker_disk_cache_admission_items)
+        tuning = configure_runtime(
+            self._manager,
+            library_batch_size=library_batch_size,
+            worker_disk_cache_admission_items=(
+                worker_disk_cache_admission_items
+            ),
+            worker_disk_cache_admission_bytes=(
+                worker_disk_cache_admission_bytes
+            ),
+            peer_source_losses=inject_peer_source_losses,
+            peer_source_loss_after_bytes=(
+                inject_peer_source_loss_after_bytes
+            ),
+            defer_peer_source_loss_after_bytes=(
+                defer_peer_source_loss_after_bytes
+            ),
+            peer_corruptions=inject_peer_corruptions,
+            idata_release_failures=inject_idata_release_failures,
+            peer_release_retry_seconds=peer_release_retry_seconds,
+            peer_release_capacity=peer_release_capacity,
         )
-        if admission_items < -1:
-            raise ValueError(
-                "worker disk cache admission item capacity is negative"
-            )
-        if self._manager.tune(
-            "datavine-cache-capacity-items", admission_items
-        ) != 0:
-            raise RuntimeError(
-                "TaskVine Manager rejected cache admission capacity"
-            )
-        admission_bytes = (
-            -1
-            if worker_disk_cache_admission_bytes is None
-            else int(worker_disk_cache_admission_bytes)
+        library_batch_size = tuning.library_batch_size
+        peer_source_losses = tuning.peer_source_losses
+        peer_source_loss_after_bytes = (
+            tuning.peer_source_loss_after_bytes
         )
-        if admission_bytes < -1:
-            raise ValueError(
-                "worker disk cache admission byte capacity is negative"
-            )
-        if self._manager.tune(
-            "datavine-cache-capacity-bytes", admission_bytes
-        ) != 0:
-            raise RuntimeError(
-                "TaskVine Manager rejected cache byte admission capacity"
-            )
-        peer_source_losses = int(inject_peer_source_losses)
-        if peer_source_losses < 0:
-            raise ValueError(
-                "peer source-loss injection count is negative"
-            )
-        if self._manager.tune(
-            "datavine-fault-peer-source-loss", peer_source_losses
-        ) != 0:
-            raise RuntimeError(
-                "TaskVine Manager rejected peer source-loss injection"
-            )
-        peer_source_loss_after_bytes = int(
-            inject_peer_source_loss_after_bytes
+        defer_peer_source_loss_after_bytes = (
+            tuning.defer_peer_source_loss_after_bytes
         )
-        if peer_source_loss_after_bytes < 0:
-            raise ValueError(
-                "peer source-loss byte threshold is negative"
-            )
-        if self._manager.tune(
-            "datavine-fault-peer-source-loss-after-bytes",
-            peer_source_loss_after_bytes,
-        ) != 0:
-            raise RuntimeError(
-                "TaskVine Manager rejected byte-counted "
-                "peer source-loss injection"
-            )
-        defer_peer_source_loss_after_bytes = bool(
-            defer_peer_source_loss_after_bytes
-        )
-        if (
-            defer_peer_source_loss_after_bytes
-            and peer_source_loss_after_bytes <= 0
-        ):
-            raise ValueError(
-                "deferred peer source loss requires a positive "
-                "byte threshold"
-            )
-        if self._manager.tune(
-            "datavine-fault-peer-source-loss-after-bytes-deferred",
-            int(defer_peer_source_loss_after_bytes),
-        ) != 0:
-            raise RuntimeError(
-                "TaskVine Manager rejected deferred peer source loss"
-            )
-        peer_corruptions = int(inject_peer_corruptions)
-        if peer_corruptions < 0:
-            raise ValueError("peer corruption count is negative")
-        if self._manager.tune(
-            "datavine-fault-peer-corruption", peer_corruptions
-        ) != 0:
-            raise RuntimeError(
-                "TaskVine Manager rejected peer corruption injection"
-            )
-        idata_release_failures = int(inject_idata_release_failures)
-        if idata_release_failures < 0:
-            raise ValueError("IData release failure count is negative")
-        if self._manager.tune(
-            "datavine-fault-idata-release-failure",
-            idata_release_failures,
-        ) != 0:
-            raise RuntimeError(
-                "TaskVine Manager rejected IData release failure injection"
-            )
-        peer_release_retry_seconds = float(
-            peer_release_retry_seconds
-        )
-        if peer_release_retry_seconds < 0:
-            raise ValueError("peer release retry delay is negative")
-        if self._manager.tune(
-            "datavine-transfer-release-retry-seconds",
-            peer_release_retry_seconds,
-        ) != 0:
-            raise RuntimeError(
-                "TaskVine Manager rejected peer release retry delay"
-            )
-        peer_release_capacity = int(peer_release_capacity)
-        if peer_release_capacity < 1:
-            raise ValueError("peer release capacity is below one")
-        if self._manager.tune(
-            "datavine-transfer-release-capacity",
-            peer_release_capacity,
-        ) != 0:
-            raise RuntimeError(
-                "TaskVine Manager rejected peer release capacity"
-            )
+        peer_corruptions = tuning.peer_corruptions
+        idata_release_failures = tuning.idata_release_failures
+        peer_release_retry_seconds = tuning.peer_release_retry_seconds
+        peer_release_capacity = tuning.peer_release_capacity
         controller_snapshot = self.controller.snapshot()
         idata_inline_threshold = int(
             controller_snapshot[
                 "idata_inline_object_capacity_bytes"
             ]
         )
-        running = {}
-        physical_compute_submissions = 0
         output_ids = self._op_register_workflow(workflow)
+        task_factory = TaskFactory(
+            self._manager,
+            self.controller,
+            self._run_context,
+            self._task_record,
+            self._edata_files,
+            self._idata_files,
+        )
         workflow_registration_elapsed = (
             time.monotonic() - workflow_run_started
         )
@@ -845,7 +546,7 @@ class TaskSchedulerThread:
             )
         producer_by_data_id = {
             data_id: task_id
-            for task_id, data_ids in self._logical_output_slots.items()
+            for task_id, data_ids in self._run_context.logical_output_slots.items()
             for data_id in data_ids
         }
         inject_partial_publication_after = {
@@ -857,11 +558,11 @@ class TaskSchedulerThread:
         for task_id, output_index in (
             inject_partial_publication_after.items()
         ):
-            if task_id not in self._logical_output_slots:
+            if task_id not in self._run_context.logical_output_slots:
                 raise KeyError(
                     f"unknown partial-publication TaskID {task_id}"
                 )
-            output_count = len(self._logical_output_slots[task_id])
+            output_count = len(self._run_context.logical_output_slots[task_id])
             if output_index < 0 or output_index >= output_count - 1:
                 raise ValueError(
                     "partial-publication fault must follow a "
@@ -877,6 +578,8 @@ class TaskSchedulerThread:
                     f"unknown result TaskIDs {sorted(unknown_results)}"
                 )
         task_by_id = {task.task_id: task for task in workflow.tasks}
+        execution = ExecutionState(pending=set(task_by_id))
+        publication = PublicationState()
         explicit_persistence_frontiers = (
             persistence_attempts_by_task is not None
         )
@@ -998,7 +701,7 @@ class TaskSchedulerThread:
             )
             keys.update(
                 f"i:{data_id}"
-                for data_id in self._nested_idata_by_task.get(task_id, ())
+                for data_id in self._run_context.nested_idata_by_task.get(task_id, ())
             )
             task_cache_inputs[task_id] = keys
             for data_key in keys:
@@ -1007,7 +710,7 @@ class TaskSchedulerThread:
                 )
         max_task_cache_items = max(
             (
-                len(keys) + len(self._logical_output_slots[task_id])
+                len(keys) + len(self._run_context.logical_output_slots[task_id])
                 for task_id, keys in task_cache_inputs.items()
             ),
             default=0,
@@ -1026,12 +729,12 @@ class TaskSchedulerThread:
         for data_key in remaining_cache_uses:
             kind, token = data_key.split(":", 1)
             if kind == "e":
-                metadata = self._edata_info.get(int(token))
+                metadata = self._run_context.edata_info.get(int(token))
                 if metadata is None:
                     metadata = self.controller.get_edata_metadata(
                         int(token)
                     )
-                    self._edata_info[int(token)] = metadata
+                    self._run_context.edata_info[int(token)] = metadata
                 cache_known_sizes[data_key] = int(
                     metadata["size"] or 0
                 )
@@ -1086,12 +789,6 @@ class TaskSchedulerThread:
                 > admission_byte_headroom
             ):
                 effective_retention_bytes = admission_byte_headroom
-        pending = set(task_by_id)
-        logical_completion_queue = collections.deque()
-        deferred_completed_states = []
-        unbatchable_tasks = set()
-        batch_worker_seconds = 0.0
-        physical_batch_metrics = []
         effective_library_batch_size = (
             library_batch_size
             if (
@@ -1107,17 +804,8 @@ class TaskSchedulerThread:
             )
             else 1
         )
-        persistence_pending = []
-        persistence_running = {}
-        controller_persistence_pending = {}
-        persistence_tasks_completed = 0
-        persistence_controller_tasks_completed = 0
-        persistence_required = set()
-        persistence_requested = set()
-        frontier_pruning = []
-        frontier_pruning_applied = set()
-        frontier_pruning_pending = {}
-        frontier_pruning_active = None
+        persistence = PersistenceState()
+        pruning = PruningState()
         frontier_pruning_ack_delay = float(
             frontier_pruning_ack_delay
         )
@@ -1135,11 +823,6 @@ class TaskSchedulerThread:
         hard_delete_pruned_sharedfs = bool(
             hard_delete_pruned_sharedfs
         )
-        sharedfs_hard_delete = None
-        compute_completions_while_frontier_pruning = 0
-        persistence_worker_bytes = 0
-        persistence_controller_bytes = 0
-        persistence_cancellations = 0
 
         def start_frontier_worker_prunes(active, records):
             pending_by_data = {}
@@ -1183,42 +866,13 @@ class TaskSchedulerThread:
                         "requested": requested,
                     }
                 )
-        persistence_failures = 0
-        persistence_injected_failures_observed = 0
-        persistence_retries = 0
-        persistence_retry_delay_seconds = 0.0
-        compute_completions_while_persistence_active = 0
-        persistence_global_losses = 0
-        persistence_loss_pruning_plans = []
-        suspended_persistence_recovery = {}
-        injected_external_persistence_failures = 0
-        inject_external_persistence_failures = int(
-            inject_external_persistence_failures
+        persistence_policy = PersistencePolicy.from_options(
+            inject_external_persistence_failures,
+            external_persistence_max_retries,
+            external_persistence_retry_base_seconds,
+            external_persistence_retry_max_seconds,
+            external_persistence_failure_delay,
         )
-        external_persistence_max_retries = int(
-            external_persistence_max_retries
-        )
-        external_persistence_retry_base_seconds = float(
-            external_persistence_retry_base_seconds
-        )
-        external_persistence_retry_max_seconds = float(
-            external_persistence_retry_max_seconds
-        )
-        external_persistence_failure_delay = float(
-            external_persistence_failure_delay
-        )
-        if (
-            inject_external_persistence_failures < 0
-            or external_persistence_max_retries < 0
-            or external_persistence_retry_base_seconds < 0
-            or external_persistence_retry_max_seconds < 0
-            or external_persistence_failure_delay < 0
-        ):
-            raise ValueError(
-                "external persistence failure/retry values "
-                "cannot be negative"
-            )
-        persistence_retry_counts = collections.defaultdict(int)
         persistence_capacity = int(
             (
                 controller_snapshot.get("persistence_executor")
@@ -1227,6 +881,7 @@ class TaskSchedulerThread:
         )
         prefetch_running = set()
         prefetch_selected = self._submit_prefetches(
+            task_factory,
             prefetch,
             prefetch_byte_budget,
             prefetch_item_budget,
@@ -1238,39 +893,25 @@ class TaskSchedulerThread:
         prefetch_completed = 0
         prefetch_failed = 0
         prefetch_overlapped = False
-        done = set()
-        completed_once = set()
-        recovery_reexecutions = 0
-        recovery_waves = []
-        unavailable_input_recoveries = []
-        loss_injected = False
-        worker_loss_injections = 0
-        worker_loss_events = []
-        local_idata_hits = 0
-        worker_controller_retries = 0
-        partial_publication_failures = []
-        partial_publication_triggered = set()
-        partial_publication_cancelled = {}
         peer_transfer_pruning_probes = []
         peer_transfer_pruning_probe_triggered = False
-        recovery_audit_data_ids = set()
 
         def queue_frontier_pruning_if_ready(frontier_task_id):
             if (
                 frontier_task_id not in prune_after_persistence_by_task
-                or frontier_task_id in frontier_pruning_applied
-                or frontier_task_id in frontier_pruning_pending
+                or frontier_task_id in pruning.applied
+                or frontier_task_id in pruning.pending
             ):
                 return
             if any(
                 self.controller.idata_status(data_id)["durability"]
                 != "durable"
-                for data_id in self._logical_output_slots[
+                for data_id in self._run_context.logical_output_slots[
                     frontier_task_id
                 ]
             ):
                 return
-            frontier_pruning_pending[frontier_task_id] = [
+            pruning.pending[frontier_task_id] = [
                 output_ids[task_id]
                 for task_id in prune_after_persistence_by_task[
                     frontier_task_id
@@ -1279,18 +920,13 @@ class TaskSchedulerThread:
 
         workflow_execution_started = time.monotonic()
         while (
-            pending
-            or running
+            execution.has_work()
             or prefetch_running
-            or persistence_pending
-            or persistence_running
-            or controller_persistence_pending
-            or suspended_persistence_recovery
-            or frontier_pruning_pending
-            or frontier_pruning_active
+            or persistence.has_work()
+            or pruning.has_work()
         ):
             for data_id, not_before in tuple(
-                controller_persistence_pending.items()
+                persistence.controller_pending.items()
             ):
                 if not_before > time.monotonic():
                     continue
@@ -1298,25 +934,18 @@ class TaskSchedulerThread:
                 if status["durability"] in ("queued", "writing"):
                     continue
                 if status["durability"] == "failed":
-                    persistence_failures += 1
+                    persistence.failures += 1
                     retry_key = (data_id, int(status["attempt"]))
-                    retries = persistence_retry_counts[retry_key]
-                    if retries >= external_persistence_max_retries:
+                    retries = persistence.retry_counts[retry_key]
+                    if retries >= persistence_policy.maximum_retries:
                         raise RuntimeError(
                             f"IDataID {data_id} Controller persistence "
                             f"exhausted {retries} retries: status={status}"
                         )
-                    delay = (
-                        external_persistence_retry_base_seconds
-                        * (2 ** min(retries, 30))
-                    )
-                    delay = min(
-                        delay,
-                        external_persistence_retry_max_seconds,
-                    )
-                    persistence_retry_counts[retry_key] += 1
-                    persistence_retries += 1
-                    persistence_retry_delay_seconds += delay
+                    delay = persistence_policy.retry_delay(retries)
+                    persistence.retry_counts[retry_key] += 1
+                    persistence.retries += 1
+                    persistence.retry_delay_seconds += delay
                     retry_status = self.controller.persist_idata(data_id)
                     retry_request = retry_status.get(
                         "persistence_request", {}
@@ -1326,7 +955,7 @@ class TaskSchedulerThread:
                             f"IDataID {data_id} Controller persistence "
                             "retry changed execution mode"
                         )
-                    controller_persistence_pending[data_id] = (
+                    persistence.controller_pending[data_id] = (
                         time.monotonic() + delay
                     )
                     continue
@@ -1335,17 +964,17 @@ class TaskSchedulerThread:
                         f"IDataID {data_id} Controller persistence "
                         f"failed: status={status}"
                     )
-                self._idata_files[data_id] = self._durable_idata_file(
+                self._idata_files[data_id] = task_factory.durable_idata_file(
                     data_id, status
                 )
-                controller_persistence_pending.pop(data_id)
-                persistence_controller_tasks_completed += 1
-                persistence_controller_bytes += int(status["size"])
+                persistence.controller_pending.pop(data_id)
+                persistence.controller_tasks_completed += 1
+                persistence.controller_bytes += int(status["size"])
                 queue_frontier_pruning_if_ready(
                     producer_by_data_id[data_id]
                 )
             for data_id, recovery in tuple(
-                suspended_persistence_recovery.items()
+                persistence.suspended_recovery.items()
             ):
                 if not recovery["persistence_drained"]:
                     continue
@@ -1375,14 +1004,13 @@ class TaskSchedulerThread:
                     raise RuntimeError(
                         f"could not release prune barrier for i:{data_id}"
                     )
-                pending.add(recovery["logical_id"])
-                suspended_persistence_recovery.pop(data_id)
+                execution.pending.add(recovery["logical_id"])
+                persistence.suspended_recovery.pop(data_id)
             recovery_wave = []
 
             def require_available(data_id):
-                nonlocal recovery_reexecutions
                 task_id = producer_by_data_id[data_id]
-                if task_id not in done:
+                if task_id not in execution.done:
                     return
                 output_status = self.controller.idata_status(
                     data_id
@@ -1393,56 +1021,28 @@ class TaskSchedulerThread:
                     self._idata_files[data_id]
                 )
                 self.controller.set_task_state(task_id, "pending")
-                done.remove(task_id)
-                pending.add(task_id)
-                recovery_reexecutions += 1
+                execution.done.remove(task_id)
+                execution.pending.add(task_id)
+                execution.recovery_reexecutions += 1
                 recovery_wave.append(task_id)
                 producer_record = self._task_record(task_id)
                 for input_data_id in producer_record.input_data_ids:
                     require_available(input_data_id)
 
-            if recovery_audit_data_ids:
-                affected_by_task = {}
-                for data_id in recovery_audit_data_ids:
-                    affected_by_task.setdefault(
-                        producer_by_data_id[data_id], []
-                    ).append(data_id)
-                affected_tasks = set(affected_by_task)
-                ancestor_closure = set(affected_tasks)
-                stack = list(affected_tasks)
-                while stack:
-                    ancestor = stack.pop()
-                    for parent_id in dependencies[ancestor]:
-                        if parent_id in ancestor_closure:
-                            continue
-                        ancestor_closure.add(parent_id)
-                        stack.append(parent_id)
-                has_affected_descendant = {}
-                for task in reversed(workflow.tasks):
-                    task_id = task.task_id
-                    if task_id not in ancestor_closure:
-                        continue
-                    has_affected_descendant[task_id] = any(
-                        child_id in affected_tasks
-                        or has_affected_descendant.get(child_id, False)
-                        for child_id in dependents[task_id]
-                        if child_id in ancestor_closure
-                    )
-                covered_ancestors = {
-                    task_id
-                    for task_id in affected_tasks
-                    if has_affected_descendant[task_id]
-                }
-                audit_data_ids = sorted(
-                    min(affected_by_task[task_id])
-                    for task_id in affected_tasks - covered_ancestors
+            if execution.recovery_audit_data_ids:
+                audit_data_ids = select_recovery_audit_data_ids(
+                    execution.recovery_audit_data_ids,
+                    producer_by_data_id,
+                    dependencies,
+                    dependents,
+                    (task.task_id for task in workflow.tasks),
                 )
-                recovery_audit_data_ids.clear()
+                execution.recovery_audit_data_ids.clear()
                 for data_id in audit_data_ids:
                     require_available(data_id)
             if recovery_wave:
                 plan = self.controller.pruning_plan()
-                recovery_waves.append(
+                execution.recovery_waves.append(
                     {
                         "tasks": recovery_wave,
                         "rollback_depth": len(recovery_wave),
@@ -1451,17 +1051,17 @@ class TaskSchedulerThread:
                 )
 
             if (
-                frontier_pruning_active is not None
+                pruning.active is not None
                 and time.monotonic()
-                >= frontier_pruning_active["poll_after"]
+                >= pruning.active["poll_after"]
             ):
-                if frontier_pruning_active["deferred_data_ids"]:
-                    operation_id = frontier_pruning_active[
+                if pruning.active["deferred_data_ids"]:
+                    operation_id = pruning.active[
                         "continuation_operation_id"
                     ]
                     if operation_id is None:
                         operation_id = f"pruning:{uuid.uuid4().hex}"
-                        frontier_pruning_active[
+                        pruning.active[
                             "continuation_operation_id"
                         ] = operation_id
                     try:
@@ -1469,7 +1069,7 @@ class TaskSchedulerThread:
                             self.controller.continue_deferred_pruning(
                                 operation_id,
                                 sorted(
-                                    frontier_pruning_active[
+                                    pruning.active[
                                         "deferred_data_ids"
                                     ]
                                 )
@@ -1480,7 +1080,7 @@ class TaskSchedulerThread:
                         TimeoutError,
                         OSError,
                     ) as exc:
-                        frontier_pruning_active[
+                        pruning.active[
                             "controller_continuation_retries"
                         ].append(
                             {
@@ -1488,15 +1088,15 @@ class TaskSchedulerThread:
                                 "error": type(exc).__name__,
                             }
                         )
-                        frontier_pruning_active["poll_after"] = (
+                        pruning.active["poll_after"] = (
                             time.monotonic() + 0.1
                         )
                         continuation = None
                     if continuation is not None:
-                        frontier_pruning_active[
+                        pruning.active[
                             "continuation_operation_id"
                         ] = None
-                        frontier_pruning_active[
+                        pruning.active[
                             "controller_continuations"
                         ].append(continuation)
                         still_deferred = {
@@ -1504,7 +1104,7 @@ class TaskSchedulerThread:
                             for item in continuation["deferred"]
                         }
                         resolved = (
-                            frontier_pruning_active[
+                            pruning.active[
                                 "deferred_data_ids"
                             ]
                             - still_deferred
@@ -1514,21 +1114,21 @@ class TaskSchedulerThread:
                             for item in continuation["cancelled"]
                         }
                         if cancelled:
-                            frontier_pruning_active[
+                            pruning.active[
                                 "cancelled_data_ids"
                             ].update(cancelled)
                         start_frontier_worker_prunes(
-                            frontier_pruning_active,
+                            pruning.active,
                             continuation["applied"],
                         )
-                        frontier_pruning_active[
+                        pruning.active[
                             "deferred_data_ids"
                         ] -= resolved
-                all_complete = not frontier_pruning_active[
+                all_complete = not pruning.active[
                     "deferred_data_ids"
                 ]
                 worker_prunes = []
-                for entry in frontier_pruning_active["worker_entries"]:
+                for entry in pruning.active["worker_entries"]:
                     status = self._manager.prune_file_status(
                         entry["file"]
                     )
@@ -1558,14 +1158,14 @@ class TaskSchedulerThread:
                 if (
                     not all_complete
                     and time.monotonic()
-                    >= frontier_pruning_active["deadline"]
+                    >= pruning.active["deadline"]
                 ):
                     raise TimeoutError(
                         "asynchronous frontier pruning acknowledgement "
                         "timed out"
                     )
                 if all_complete:
-                    for entry in frontier_pruning_active[
+                    for entry in pruning.active[
                         "worker_entries"
                     ]:
                         for record in entry["records"]:
@@ -1595,63 +1195,63 @@ class TaskSchedulerThread:
                             for item in worker_prunes
                             if item["data_id"] == entry["data_id"]
                         )["tracker_released"] = True
-                    frontier_task_id = frontier_pruning_active[
+                    frontier_task_id = pruning.active[
                         "frontier_task_id"
                     ]
-                    frontier_pruning.append(
+                    pruning.events.append(
                         {
                             "frontier_task_id": frontier_task_id,
-                            "data_ids": frontier_pruning_active[
+                            "data_ids": pruning.active[
                                 "data_ids"
                             ],
                             "result": {
-                                "controller": frontier_pruning_active[
+                                "controller": pruning.active[
                                     "controller_result"
                                 ],
                                 "controller_continuations": (
-                                    frontier_pruning_active[
+                                    pruning.active[
                                         "controller_continuations"
                                     ]
                                 ),
                                 "controller_continuation_retries": (
-                                    frontier_pruning_active[
+                                    pruning.active[
                                         "controller_continuation_retries"
                                     ]
                                 ),
                                 "worker_prunes": worker_prunes,
                             },
                             "cancelled_data_ids": sorted(
-                                frontier_pruning_active[
+                                pruning.active[
                                     "cancelled_data_ids"
                                 ]
                             ),
                         }
                     )
-                    persistence_required.difference_update(
+                    persistence.required.difference_update(
                         set(
-                            frontier_pruning_active["data_ids"]
+                            pruning.active["data_ids"]
                         )
-                        - frontier_pruning_active[
+                        - pruning.active[
                             "cancelled_data_ids"
                         ]
                     )
-                    frontier_pruning_applied.add(frontier_task_id)
-                    frontier_pruning_active = None
+                    pruning.applied.add(frontier_task_id)
+                    pruning.active = None
 
             if (
-                frontier_pruning_active is None
-                and frontier_pruning_pending
+                pruning.active is None
+                and pruning.pending
             ):
                 active_inputs = {
                     data_key
-                    for logical_ids in running.values()
+                    for logical_ids in execution.running.values()
                     for running_logical_id in logical_ids
                     for data_key in task_cache_inputs[running_logical_id]
                 }
                 safe_frontiers = [
                     frontier_task_id
                     for frontier_task_id, data_ids
-                    in frontier_pruning_pending.items()
+                    in pruning.pending.items()
                     if not (
                         {f"i:{data_id}" for data_id in data_ids}
                         & active_inputs
@@ -1660,13 +1260,13 @@ class TaskSchedulerThread:
                         set(data_ids)
                         & {
                             data_id
-                            for data_id, _ in persistence_running.values()
+                            for data_id, _ in persistence.running.values()
                         }
                     )
                 ]
                 if safe_frontiers:
                     frontier_task_id = min(safe_frontiers)
-                    prune_data_ids = frontier_pruning_pending.pop(
+                    prune_data_ids = pruning.pending.pop(
                         frontier_task_id
                     )
                     # Worker reconciliation and recovery can advance the
@@ -1692,7 +1292,7 @@ class TaskSchedulerThread:
                             ):
                                 raise
                     now_value = time.monotonic()
-                    frontier_pruning_active = {
+                    pruning.active = {
                         "frontier_task_id": frontier_task_id,
                         "data_ids": prune_data_ids,
                         "controller_result": result,
@@ -1711,12 +1311,12 @@ class TaskSchedulerThread:
                         "deadline": now_value + 30,
                     }
                     start_frontier_worker_prunes(
-                        frontier_pruning_active,
+                        pruning.active,
                         [
                             record
                             for record in result["applied"]
                             if record["data_id"]
-                            not in frontier_pruning_active[
+                            not in pruning.active[
                                 "deferred_data_ids"
                             ]
                         ],
@@ -1736,7 +1336,7 @@ class TaskSchedulerThread:
                     )
                     if (
                         threshold is None
-                        or self._attempts.get(parent_task_id, 0)
+                        or self._run_context.attempts.get(parent_task_id, 0)
                         < threshold
                     ):
                         continue
@@ -1744,86 +1344,44 @@ class TaskSchedulerThread:
                         parent_task_id
                         in prune_after_persistence_by_task
                         and parent_task_id
-                        not in frontier_pruning_applied
+                        not in pruning.applied
                     ):
                         return False
                     if any(
                         self.controller.idata_status(data_id)[
                             "durability"
                         ] != "durable"
-                        for data_id in self._logical_output_slots[
+                        for data_id in self._run_context.logical_output_slots[
                             parent_task_id
                         ]
                     ):
                         return False
                 return True
 
-            ready = sorted(
-                task_id
-                for task_id in pending
-                if dependencies[task_id] <= done
-                and persistence_frontier_ready(task_id)
-                and not (
-                    task_cache_inputs[task_id]
-                    & self._cache_admission.prune_by_data
-                )
+            ready = select_ready_tasks(
+                execution.pending,
+                dependencies,
+                execution.done,
+                task_cache_inputs,
+                self._cache_admission.prune_by_data,
+                persistence_frontier_ready,
             )
-            ready_batches = []
-            batch = []
-            batch_data_keys = set()
-            batch_input_bytes = 0
-            batch_input_byte_limit = 16 * 1024 * 1024
             connected_library_slots = max(
                 1, len(self._active_worker_ids) * 4
             )
-            ready_batch_size = min(
+            ready_batches = plan_ready_batches(
+                ready,
+                execution.unbatchable,
+                task_cache_inputs,
+                cache_known_sizes,
                 effective_library_batch_size,
-                max(
-                    1,
-                    (len(ready) + connected_library_slots - 1)
-                    // connected_library_slots,
-                ),
+                connected_library_slots,
             )
-            for ready_task_id in ready:
-                if ready_task_id in unbatchable_tasks:
-                    if batch:
-                        ready_batches.append(batch)
-                        batch = []
-                        batch_data_keys = set()
-                        batch_input_bytes = 0
-                    ready_batches.append([ready_task_id])
-                    continue
-                new_keys = (
-                    task_cache_inputs[ready_task_id] - batch_data_keys
-                )
-                new_bytes = sum(
-                    cache_known_sizes[data_key]
-                    for data_key in new_keys
-                )
-                if batch and (
-                    len(batch) == ready_batch_size
-                    or batch_input_bytes + new_bytes
-                    > batch_input_byte_limit
-                ):
-                    ready_batches.append(batch)
-                    batch = []
-                    batch_data_keys = set()
-                    batch_input_bytes = 0
-                    new_keys = set(task_cache_inputs[ready_task_id])
-                    new_bytes = sum(
-                        cache_known_sizes[data_key]
-                        for data_key in new_keys
-                    )
-                batch.append(ready_task_id)
-                batch_data_keys.update(new_keys)
-                batch_input_bytes += new_bytes
-            if batch:
-                ready_batches.append(batch)
             for task_ids in ready_batches:
                 attempts = []
                 for task_id in task_ids:
-                    attempt = self._attempts.get(task_id, 0) + 1
-                    self._attempts[task_id] = attempt
+                    attempt = self._run_context.attempts.get(task_id, 0) + 1
+                    self._run_context.attempts[task_id] = attempt
                     attempts.append(attempt)
                 partial_output_index = (
                     inject_partial_publication_after.get(task_ids[0])
@@ -1831,7 +1389,7 @@ class TaskSchedulerThread:
                     else None
                 )
                 if partial_output_index is not None:
-                    physical = self._make_physical_task(
+                    physical = task_factory.make_physical_task(
                         task_ids[0],
                         environment,
                         attempts[0],
@@ -1840,7 +1398,7 @@ class TaskSchedulerThread:
                         use_worker_library,
                     )
                 else:
-                    physical = self._make_physical_batch_task(
+                    physical = task_factory.make_physical_batch_task(
                         task_ids,
                         environment,
                         attempts,
@@ -1848,34 +1406,34 @@ class TaskSchedulerThread:
                         use_worker_library,
                     )
                 physical_id = self._manager.submit(physical)
-                physical_compute_submissions += 1
-                running[physical_id] = tuple(task_ids)
+                execution.physical_submissions += 1
+                execution.running[physical_id] = tuple(task_ids)
                 self.controller.set_task_states(task_ids, "running")
                 for task_id in task_ids:
-                    pending.remove(task_id)
+                    execution.pending.remove(task_id)
             while (
-                persistence_pending
-                and len(persistence_running) < persistence_capacity
+                persistence.pending
+                and len(persistence.running) < persistence_capacity
             ):
-                persistence_pending.sort(key=lambda entry: entry[0])
-                not_before, data_id, request = persistence_pending[0]
+                persistence.pending.sort(key=lambda entry: entry[0])
+                not_before, data_id, request = persistence.pending[0]
                 if not_before > time.monotonic():
                     break
-                persistence_pending.pop(0)
-                physical = self._make_persistence_task(
+                persistence.pending.pop(0)
+                physical = task_factory.make_persistence_task(
                     data_id, request, environment
                 )
                 physical_id = self._manager.submit(physical)
-                persistence_running[physical_id] = (data_id, request)
+                persistence.running[physical_id] = (data_id, request)
             if (
-                not running
+                not execution.running
                 and not prefetch_running
-                and not persistence_running
+                and not persistence.running
             ):
-                if persistence_pending:
+                if persistence.pending:
                     delay = max(
                         0,
-                        persistence_pending[0][0] - time.monotonic(),
+                        persistence.pending[0][0] - time.monotonic(),
                     )
                     time.sleep(min(float(wait_timeout), delay))
                     continue
@@ -1884,14 +1442,14 @@ class TaskSchedulerThread:
                     self._sync_worker_epochs()
                     self._cache_admission.poll(self._manager)
                     continue
-                if suspended_persistence_recovery:
+                if persistence.suspended_recovery:
                     self._manager.wait(wait_timeout)
                     self._sync_worker_epochs()
                     continue
-                if controller_persistence_pending:
+                if persistence.controller_pending:
                     delay = max(
                         0,
-                        min(controller_persistence_pending.values())
+                        min(persistence.controller_pending.values())
                         - time.monotonic(),
                     )
                     time.sleep(
@@ -1899,22 +1457,20 @@ class TaskSchedulerThread:
                     )
                     continue
                 if not (
-                    pending
-                    or running
+                    execution.has_work()
                     or prefetch_running
-                    or persistence_pending
-                    or persistence_running
-                    or suspended_persistence_recovery
-                    or frontier_pruning_pending
-                    or frontier_pruning_active
+                    or persistence.pending
+                    or persistence.running
+                    or persistence.suspended_recovery
+                    or pruning.has_work()
                 ):
                     break
-                if frontier_pruning_active is not None:
+                if pruning.active is not None:
                     self._manager.wait(wait_timeout)
                     self._sync_worker_epochs()
                     continue
                 blocked = {}
-                for task_id in sorted(pending):
+                for task_id in sorted(execution.pending):
                     unavailable_inputs = []
                     persistence_frontiers = {}
                     for input_data_id in self._task_record(
@@ -1930,7 +1486,7 @@ class TaskSchedulerThread:
                         & persistence_frontier_tasks
                     ):
                         persistence_frontiers[parent_task_id] = {
-                            "attempt": self._attempts.get(
+                            "attempt": self._run_context.attempts.get(
                                 parent_task_id, 0
                             ),
                             "threshold": (
@@ -1940,20 +1496,20 @@ class TaskSchedulerThread:
                             ),
                             "pruning_applied": (
                                 parent_task_id
-                                in frontier_pruning_applied
+                                in pruning.applied
                             ),
                             "durability": [
                                 self.controller.idata_status(data_id)[
                                     "durability"
                                 ]
-                                for data_id in self._logical_output_slots[
+                                for data_id in self._run_context.logical_output_slots[
                                     parent_task_id
                                 ]
                             ],
                         }
                     blocked[task_id] = {
                         "unfinished_dependencies": sorted(
-                            dependencies[task_id] - done
+                            dependencies[task_id] - execution.done
                         ),
                         "unavailable_inputs": unavailable_inputs,
                         "persistence_frontiers": persistence_frontiers,
@@ -1964,14 +1520,14 @@ class TaskSchedulerThread:
                     }
                 raise RuntimeError(
                     "workflow cannot make progress: "
-                    f"pending={blocked} done={sorted(done)} "
+                    f"pending={blocked} done={sorted(execution.done)} "
                     f"frontier_pruning_pending="
-                    f"{sorted(frontier_pruning_pending)}"
+                    f"{sorted(pruning.pending)}"
                 )
             queued_logical_id = None
-            if logical_completion_queue:
+            if execution.completion_queue:
                 queued_logical_id, completed = (
-                    logical_completion_queue.popleft()
+                    execution.completion_queue.popleft()
                 )
             else:
                 completed = self._manager.wait(wait_timeout)
@@ -1984,7 +1540,7 @@ class TaskSchedulerThread:
                 active_workers = workers_before_sync
                 workers_lost = frozenset()
             if workers_lost:
-                recovery_audit_data_ids.update(
+                execution.recovery_audit_data_ids.update(
                     int(data_key.split(":", 1)[1])
                     for data_key in self._reconciled_affected_data_ids
                     if str(data_key).startswith("i:")
@@ -1995,7 +1551,7 @@ class TaskSchedulerThread:
             # that the logical task can be recovered from stable lineage
             # instead of looping on a stale attempt indefinitely.
             if workers_lost:
-                for physical_id, logical_ids in tuple(running.items()):
+                for physical_id, logical_ids in tuple(execution.running.items()):
                     missing_inputs = []
                     for logical_id in logical_ids:
                         for input_data_id in self._task_record(
@@ -2013,24 +1569,24 @@ class TaskSchedulerThread:
                     # Manager event instead of treating backpressure as loss.
                     if not self._manager.cancel_by_task_id(physical_id):
                         continue
-                    running.pop(physical_id)
+                    execution.running.pop(physical_id)
                     for logical_id in logical_ids:
-                        pending.add(logical_id)
+                        execution.pending.add(logical_id)
                         self.controller.set_task_state(
                             logical_id, "pending"
                         )
-                        for output_data_id in self._logical_output_slots[
+                        for output_data_id in self._run_context.logical_output_slots[
                             logical_id
                         ]:
                             self.controller.invalidate_idata(output_data_id)
-                    recovery_reexecutions += len(logical_ids)
-                    unavailable_input_recoveries.append(
+                    execution.recovery_reexecutions += len(logical_ids)
+                    execution.unavailable_input_recoveries.append(
                         {
                             "task_ids": list(logical_ids),
                             "physical_task_id": physical_id,
                             "missing_inputs": missing_inputs,
                             "attempts": [
-                                self._attempts[logical_id]
+                                self._run_context.attempts[logical_id]
                                 for logical_id in logical_ids
                             ],
                         }
@@ -2054,7 +1610,7 @@ class TaskSchedulerThread:
                     for task_id in (
                         peer_transfer_pruning_probe_task_ids
                     ):
-                        for data_id in self._logical_output_slots[
+                        for data_id in self._run_context.logical_output_slots[
                             task_id
                         ]:
                             selected.append(records[int(data_id)])
@@ -2086,7 +1642,7 @@ class TaskSchedulerThread:
                         )
                     peer_transfer_pruning_probe_triggered = True
             if completed is None:
-                for physical_id, logical_ids in tuple(running.items()):
+                for physical_id, logical_ids in tuple(execution.running.items()):
                     if len(logical_ids) != 1:
                         continue
                     logical_id = logical_ids[0]
@@ -2095,11 +1651,11 @@ class TaskSchedulerThread:
                     )
                     if (
                         output_index is None
-                        or logical_id in partial_publication_triggered
-                        or self._attempts[logical_id] != 1
+                        or logical_id in publication.triggered_tasks
+                        or self._run_context.attempts[logical_id] != 1
                     ):
                         continue
-                    expected_data_ids = self._logical_output_slots[
+                    expected_data_ids = self._run_context.logical_output_slots[
                         logical_id
                     ]
                     published_data_id = expected_data_ids[output_index]
@@ -2136,8 +1692,8 @@ class TaskSchedulerThread:
                         )
                     for output_data_id in expected_data_ids:
                         self.controller.invalidate_idata(output_data_id)
-                    partial_publication_triggered.add(logical_id)
-                    partial_publication_cancelled[physical_id] = {
+                    publication.triggered_tasks.add(logical_id)
+                    publication.cancelled_physical_tasks[physical_id] = {
                         "task_id": logical_id,
                         "attempt": 1,
                         "published_data_ids": [published_data_id],
@@ -2146,14 +1702,14 @@ class TaskSchedulerThread:
                         "physical_task_id": physical_id,
                     }
                     break
-                if partial_publication_cancelled:
+                if publication.cancelled_physical_tasks:
                     continue
                 if (
                     inject_global_loss_during_persistence
-                    and persistence_global_losses == 0
+                    and persistence.global_losses == 0
                 ):
                     for data_id, active_request in (
-                        persistence_running.values()
+                        persistence.running.values()
                     ):
                         status = self.controller.idata_status(data_id)
                         if status["durability"] != "writing":
@@ -2190,7 +1746,7 @@ class TaskSchedulerThread:
                                 "from pruning"
                             )
                         logical_id = producer_by_data_id[data_id]
-                        if logical_id not in done:
+                        if logical_id not in execution.done:
                             raise RuntimeError(
                                 "persistence loss target was not "
                                 "logically completed"
@@ -2205,8 +1761,8 @@ class TaskSchedulerThread:
                         self.controller.set_task_state(
                             logical_id, "pending"
                         )
-                        done.remove(logical_id)
-                        suspended_persistence_recovery[data_id] = {
+                        execution.done.remove(logical_id)
+                        persistence.suspended_recovery[data_id] = {
                             "logical_id": logical_id,
                             "file": file_object,
                             "before": prune_before,
@@ -2214,9 +1770,9 @@ class TaskSchedulerThread:
                             "request_id": active_request["request_id"],
                             "persistence_drained": False,
                         }
-                        recovery_reexecutions += 1
-                        persistence_global_losses += 1
-                        persistence_loss_pruning_plans.append(
+                        execution.recovery_reexecutions += 1
+                        persistence.global_losses += 1
+                        persistence.loss_pruning_plans.append(
                             {
                                 "data_id": data_id,
                                 "before": record_before,
@@ -2226,9 +1782,9 @@ class TaskSchedulerThread:
                         break
                 if (
                     inject_external_persistence_cancel
-                    and persistence_cancellations == 0
+                    and persistence.cancellations == 0
                 ):
-                    for data_id, _ in persistence_running.values():
+                    for data_id, _ in persistence.running.values():
                         status = self.controller.idata_status(data_id)
                         if status["durability"] == "writing":
                             response = (
@@ -2242,7 +1798,7 @@ class TaskSchedulerThread:
                                     "active persistence cancellation "
                                     "did not enter cancelling"
                                 )
-                            persistence_cancellations += 1
+                            persistence.cancellations += 1
                             break
                 self._cache_admission.enforce(
                     self._manager,
@@ -2252,7 +1808,7 @@ class TaskSchedulerThread:
                     remaining_cache_uses,
                 {
                     data_key
-                    for logical_ids in running.values()
+                    for logical_ids in execution.running.values()
                     for logical_id in logical_ids
                     for data_key in task_cache_inputs[logical_id]
                     },
@@ -2264,12 +1820,12 @@ class TaskSchedulerThread:
                     prefetch_completed += 1
                 else:
                     prefetch_failed += 1
-                if not done:
+                if not execution.done:
                     prefetch_overlapped = True
                 continue
-            if completed.id in persistence_running:
-                data_id, request = persistence_running.pop(completed.id)
-                suspended = suspended_persistence_recovery.get(data_id)
+            if completed.id in persistence.running:
+                data_id, request = persistence.running.pop(completed.id)
+                suspended = persistence.suspended_recovery.get(data_id)
                 if (
                     suspended is not None
                     and suspended["request_id"]
@@ -2281,7 +1837,7 @@ class TaskSchedulerThread:
                         "DATAVINE_PERSISTENCE_INJECTED_FAILURE"
                         in completed.output
                     ):
-                        persistence_injected_failures_observed += 1
+                        persistence.injected_failures_observed += 1
                     status = self.controller.idata_status(data_id)
                     if status["durability"] not in (
                         "failed",
@@ -2306,7 +1862,7 @@ class TaskSchedulerThread:
                         retry_status = self.controller.persist_idata(
                             data_id
                         )
-                        persistence_pending.append(
+                        persistence.pending.append(
                             (
                                 time.monotonic(),
                                 data_id,
@@ -2315,29 +1871,22 @@ class TaskSchedulerThread:
                         )
                         continue
                     elif status["durability"] == "failed":
-                        persistence_failures += 1
+                        persistence.failures += 1
                         retry_key = (
                             data_id,
                             int(request["attempt"]),
                         )
-                        retries = persistence_retry_counts[retry_key]
-                        if retries >= external_persistence_max_retries:
+                        retries = persistence.retry_counts[retry_key]
+                        if retries >= persistence_policy.maximum_retries:
                             raise RuntimeError(
                                 f"IDataID {data_id} persistence exhausted "
                                 f"{retries} retries: "
                                 f"stdout={completed.output}"
                             )
-                        delay = (
-                            external_persistence_retry_base_seconds
-                            * (2 ** min(retries, 30))
-                        )
-                        delay = min(
-                            delay,
-                            external_persistence_retry_max_seconds,
-                        )
-                        persistence_retry_counts[retry_key] += 1
-                        persistence_retries += 1
-                        persistence_retry_delay_seconds += delay
+                        delay = persistence_policy.retry_delay(retries)
+                        persistence.retry_counts[retry_key] += 1
+                        persistence.retries += 1
+                        persistence.retry_delay_seconds += delay
                         retry_status = self.controller.persist_idata(
                             data_id
                         )
@@ -2345,18 +1894,18 @@ class TaskSchedulerThread:
                             "persistence_request"
                         ]
                         if (
-                            injected_external_persistence_failures
-                            < inject_external_persistence_failures
+                            persistence.injected_external_failures
+                            < persistence_policy.injected_failures
                         ):
                             retry_request = {
                                 **retry_request,
                                 "inject_failure_during_write": True,
                                 "inject_failure_delay": (
-                                    external_persistence_failure_delay
+                                    persistence_policy.failure_delay_seconds
                                 ),
                             }
-                            injected_external_persistence_failures += 1
-                        persistence_pending.append(
+                            persistence.injected_external_failures += 1
+                        persistence.pending.append(
                             (
                                 time.monotonic() + delay,
                                 data_id,
@@ -2394,7 +1943,7 @@ class TaskSchedulerThread:
                     retry_status = self.controller.persist_idata(
                         data_id
                     )
-                    persistence_pending.append(
+                    persistence.pending.append(
                         (
                             time.monotonic(),
                             data_id,
@@ -2406,24 +1955,24 @@ class TaskSchedulerThread:
                     raise RuntimeError(
                         f"IDataID {data_id} persistence did not publish"
                     )
-                self._idata_files[data_id] = self._durable_idata_file(
+                self._idata_files[data_id] = task_factory.durable_idata_file(
                     data_id, status
                 )
-                persistence_tasks_completed += 1
-                persistence_worker_bytes += int(status["size"])
+                persistence.tasks_completed += 1
+                persistence.worker_bytes += int(status["size"])
                 queue_frontier_pruning_if_ready(
                     producer_by_data_id[data_id]
                 )
                 continue
             # A physical attempt that DataVine cancelled while reclaiming an
             # unavailable input may still be returned by Manager.wait.  Its
-            # logical task has already been moved back to pending; late
+            # logical task has already been moved back to execution.pending; late
             # completion must be ignored rather than treated as a duplicate.
             if queued_logical_id is None:
-                if completed.id not in running:
+                if completed.id not in execution.running:
                     continue
-                logical_ids = running.pop(completed.id)
-                physical_batch_metrics.append(
+                logical_ids = execution.running.pop(completed.id)
+                execution.physical_batch_metrics.append(
                     {
                         "physical_task_id": int(completed.id),
                         "logical_tasks": len(logical_ids),
@@ -2452,7 +2001,7 @@ class TaskSchedulerThread:
                     else None
                 )
                 if structured_batch is not None:
-                    batch_worker_seconds += float(
+                    execution.batch_worker_seconds += float(
                         structured_batch["worker_seconds"]
                     )
                     returned_task_ids = tuple(
@@ -2492,7 +2041,7 @@ class TaskSchedulerThread:
                     batch_events = completed.output.splitlines()
                     for line in completed.output.splitlines():
                         if line.startswith("DATAVINE_BATCH_TIMING "):
-                            batch_worker_seconds += float(
+                            execution.batch_worker_seconds += float(
                                 line.rsplit("seconds=", 1)[1]
                             )
                             continue
@@ -2526,7 +2075,7 @@ class TaskSchedulerThread:
                     )
                     and len(inline_values)
                     == sum(
-                        len(self._logical_output_slots[task_id])
+                        len(self._run_context.logical_output_slots[task_id])
                         for task_id in logical_ids
                     )
                 )
@@ -2550,11 +2099,11 @@ class TaskSchedulerThread:
                                     line[len("DATAVINE_REPLICA_OBSERVED "):]
                                 )
                             )
-                    local_idata_hits += sum(
+                    execution.local_idata_hits += sum(
                         line.count("DATAVINE_LOCAL_IDATA")
                         for line in batch_events
                     )
-                    worker_controller_retries += sum(
+                    execution.worker_controller_retries += sum(
                         int(line.split(" ", 1)[1])
                         for line in batch_events
                         if line.startswith(
@@ -2562,7 +2111,7 @@ class TaskSchedulerThread:
                         )
                     )
                     for logical_id in logical_ids:
-                        expected_output_ids = self._logical_output_slots[
+                        expected_output_ids = self._run_context.logical_output_slots[
                             logical_id
                         ]
                         values = values_by_task[logical_id]
@@ -2580,7 +2129,7 @@ class TaskSchedulerThread:
                             if (
                                 int(value["data_id"]) != output_data_id
                                 or int(value["attempt"])
-                                != self._attempts[logical_id]
+                                != self._run_context.attempts[logical_id]
                             ):
                                 raise RuntimeError(
                                     f"TaskID {logical_id} returned "
@@ -2593,15 +2142,15 @@ class TaskSchedulerThread:
                                         payload, validate=True
                                     )
                                 self._idata_files[output_data_id] = (
-                                    self._inline_idata_file(
+                                    task_factory.inline_idata_file(
                                         output_data_id,
                                         hashlib.sha256(payload).hexdigest(),
                                     )
                                 )
-                        deferred_completed_states.append(logical_id)
-                        done.add(logical_id)
-                        if logical_id not in completed_once:
-                            completed_once.add(logical_id)
+                        execution.deferred_completed_states.append(logical_id)
+                        execution.done.add(logical_id)
+                        if logical_id not in execution.completed_once:
+                            execution.completed_once.add(logical_id)
                             for data_key in task_cache_inputs[logical_id]:
                                 remaining_cache_uses[data_key] -= 1
                     continue
@@ -2609,7 +2158,7 @@ class TaskSchedulerThread:
                     completed.output, logical_ids
                 )
                 for batch_logical_id in logical_ids:
-                    logical_completion_queue.append(
+                    execution.completion_queue.append(
                         (
                             batch_logical_id,
                             _LogicalCompletion(
@@ -2618,56 +2167,56 @@ class TaskSchedulerThread:
                             ),
                         )
                     )
-                logical_id, completed = logical_completion_queue.popleft()
-                if logical_completion_queue:
-                    running[completed.id] = ()
+                logical_id, completed = execution.completion_queue.popleft()
+                if execution.completion_queue:
+                    execution.running[completed.id] = ()
             else:
                 logical_id = queued_logical_id
-                if not logical_completion_queue:
-                    running.pop(completed.id, None)
-            if frontier_pruning_active is not None:
-                compute_completions_while_frontier_pruning += 1
-            if persistence_running or persistence_pending:
-                compute_completions_while_persistence_active += 1
+                if not execution.completion_queue:
+                    execution.running.pop(completed.id, None)
+            if pruning.active is not None:
+                pruning.completions_while_active += 1
+            if persistence.running or persistence.pending:
+                persistence.compute_completions_while_active += 1
             completed_output = (
                 completed.output
                 if isinstance(completed.output, str)
                 else ""
             )
-            local_idata_hits += completed_output.count(
+            execution.local_idata_hits += completed_output.count(
                 "DATAVINE_LOCAL_IDATA"
             )
-            worker_controller_retries += sum(
+            execution.worker_controller_retries += sum(
                 int(line.split(" ", 1)[1])
                 for line in completed_output.splitlines()
                 if line.startswith("DATAVINE_CONTROLLER_RETRIES ")
             )
             if not completed.successful():
                 if "DATAVINE_INLINE_TOO_LARGE" in completed_output:
-                    unbatchable_tasks.add(logical_id)
+                    execution.unbatchable.add(logical_id)
                     self.controller.set_task_state(
                         logical_id, "pending"
                     )
-                    pending.add(logical_id)
+                    execution.pending.add(logical_id)
                     continue
                 # A worker can disappear after its replica was selected but
                 # before a dependent task starts. Reconcile first, then turn
                 # a globally lost input into ordinary logical recomputation
                 # instead of making the failed consumer terminal.
                 self._sync_worker_epochs(force=True)
-                partial_failure = partial_publication_cancelled.pop(
+                partial_failure = publication.cancelled_physical_tasks.pop(
                     completed.id, None
                 )
                 if partial_failure is not None:
-                    partial_publication_failures.append(
+                    publication.failures.append(
                         partial_failure
                     )
                     self.controller.set_task_state(
                         logical_id, "pending"
                     )
-                    pending.add(logical_id)
+                    execution.pending.add(logical_id)
                     continue
-                expected_output_ids = self._logical_output_slots[
+                expected_output_ids = self._run_context.logical_output_slots[
                     logical_id
                 ]
                 published_output_ids = [
@@ -2676,7 +2225,7 @@ class TaskSchedulerThread:
                     if (
                         self.controller.idata_status(data_id)[
                             "attempt"
-                        ] == self._attempts[logical_id]
+                        ] == self._run_context.attempts[logical_id]
                         and self.controller.idata_status(data_id)[
                             "content_hash"
                         ]
@@ -2695,10 +2244,10 @@ class TaskSchedulerThread:
                         self._manager.prune_file(
                             self._idata_files[output_data_id]
                         )
-                    partial_publication_failures.append(
+                    publication.failures.append(
                         {
                             "task_id": logical_id,
-                            "attempt": self._attempts[logical_id],
+                            "attempt": self._run_context.attempts[logical_id],
                             "published_data_ids": published_output_ids,
                             "expected_data_ids": list(
                                 expected_output_ids
@@ -2708,7 +2257,7 @@ class TaskSchedulerThread:
                     self.controller.set_task_state(
                         logical_id, "pending"
                     )
-                    pending.add(logical_id)
+                    execution.pending.add(logical_id)
                     continue
                 lost_inputs = []
                 for data_key in task_cache_inputs[logical_id]:
@@ -2723,7 +2272,7 @@ class TaskSchedulerThread:
                     self.controller.set_task_state(
                         logical_id, "pending"
                     )
-                    pending.add(logical_id)
+                    execution.pending.add(logical_id)
                     continue
                 self.controller.set_task_state(logical_id, "pending")
                 raise RuntimeError(
@@ -2748,7 +2297,7 @@ class TaskSchedulerThread:
                 for line in completed.output.splitlines()
                 if line.startswith("DATAVINE_REPLICA_PREPARED ")
             ]
-            expected_output_ids = self._logical_output_slots[logical_id]
+            expected_output_ids = self._run_context.logical_output_slots[logical_id]
             inline_results = [
                 json.loads(line.split(" ", 1)[1])
                 for line in completed.output.splitlines()
@@ -2789,7 +2338,7 @@ class TaskSchedulerThread:
                 if (
                     preparation["data_id"] != f"i:{output_data_id}"
                     or preparation["attempt"]
-                    != self._attempts[logical_id]
+                    != self._run_context.attempts[logical_id]
                 ):
                     raise RuntimeError(
                         f"TaskID {logical_id} returned mismatched replica"
@@ -2813,7 +2362,7 @@ class TaskSchedulerThread:
                     if (
                         not output_status["available"]
                         or output_status["attempt"]
-                        != self._attempts[logical_id]
+                        != self._run_context.attempts[logical_id]
                         or output_status["content_hash"]
                         != preparation["content_hash"]
                         or output_status["size"] != preparation["size"]
@@ -2827,7 +2376,7 @@ class TaskSchedulerThread:
                 else:
                     if dependents[logical_id]:
                         self._idata_files[output_data_id] = (
-                            self._inline_idata_file(
+                            task_factory.inline_idata_file(
                                 output_data_id,
                                 preparation["content_hash"],
                             )
@@ -2835,15 +2384,15 @@ class TaskSchedulerThread:
             if (
                 persist_outputs
                 and logical_id in persistence_attempts_by_task
-                and self._attempts[logical_id]
+                and self._run_context.attempts[logical_id]
                 >= persistence_attempts_by_task[logical_id]
             ):
                 for output_data_id in expected_output_ids:
                     persistence_status = self.controller.persist_idata(
                         output_data_id
                     )
-                    persistence_required.add(output_data_id)
-                    persistence_requested.add(output_data_id)
+                    persistence.required.add(output_data_id)
+                    persistence.requested.add(output_data_id)
                     request = persistence_status.get(
                         "persistence_request", {}
                     )
@@ -2857,18 +2406,18 @@ class TaskSchedulerThread:
                                 "inject_cancel_delay": True,
                             }
                         if (
-                            injected_external_persistence_failures
-                            < inject_external_persistence_failures
+                            persistence.injected_external_failures
+                            < persistence_policy.injected_failures
                         ):
                             request = {
                                 **request,
                                 "inject_failure_during_write": True,
                                 "inject_failure_delay": (
-                                    external_persistence_failure_delay
+                                    persistence_policy.failure_delay_seconds
                                 ),
                             }
-                            injected_external_persistence_failures += 1
-                        persistence_pending.append(
+                            persistence.injected_external_failures += 1
+                        persistence.pending.append(
                             (
                                 time.monotonic(),
                                 output_data_id,
@@ -2876,30 +2425,30 @@ class TaskSchedulerThread:
                             )
                         )
                     else:
-                        controller_persistence_pending[
+                        persistence.controller_pending[
                             output_data_id
                         ] = time.monotonic()
             if effective_library_batch_size > 1:
-                deferred_completed_states.append(logical_id)
+                execution.deferred_completed_states.append(logical_id)
             else:
                 self.controller.set_task_state(logical_id, "completed")
-            done.add(logical_id)
-            if logical_id not in completed_once:
-                completed_once.add(logical_id)
+            execution.done.add(logical_id)
+            if logical_id not in execution.completed_once:
+                execution.completed_once.add(logical_id)
                 for data_key in task_cache_inputs[logical_id]:
                     remaining_cache_uses[data_key] -= 1
             if (
                 inject_global_loss_after == logical_id
-                and not loss_injected
+                and not execution.loss_injected
             ):
                 self.controller.invalidate_idata(
                     output_ids[logical_id]
                 )
-                recovery_audit_data_ids.add(output_ids[logical_id])
-                loss_injected = True
+                execution.recovery_audit_data_ids.add(output_ids[logical_id])
+                execution.loss_injected = True
             if (
-                worker_loss_injections < len(worker_loss_schedule)
-                and worker_loss_schedule[worker_loss_injections]
+                execution.worker_loss_injections < len(worker_loss_schedule)
+                and worker_loss_schedule[execution.worker_loss_injections]
                 == logical_id
             ):
                 from ndcctools.taskvine import cvine
@@ -2979,15 +2528,15 @@ class TaskSchedulerThread:
                     self._manager.prune_file(
                         self._idata_files[output_ids[lost_task_id]]
                     )
-                recovery_audit_data_ids.update(
+                execution.recovery_audit_data_ids.update(
                     output_ids[task_id] for task_id in lost_task_ids
                 )
                 removed_persistence = [
                     entry
-                    for entry in persistence_pending
+                    for entry in persistence.pending
                     if entry[1] == output_ids[logical_id]
                 ]
-                injected_external_persistence_failures -= sum(
+                persistence.injected_external_failures -= sum(
                     bool(
                         entry[2].get(
                             "inject_failure_during_write"
@@ -2995,12 +2544,12 @@ class TaskSchedulerThread:
                     )
                     for entry in removed_persistence
                 )
-                persistence_pending = [
+                persistence.pending = [
                     entry
-                    for entry in persistence_pending
+                    for entry in persistence.pending
                     if entry[1] != output_ids[logical_id]
                 ]
-                worker_loss_events.append(
+                execution.worker_loss_events.append(
                     {
                         "trigger_task_id": logical_id,
                         "released_worker_id": released_worker_id,
@@ -3015,10 +2564,10 @@ class TaskSchedulerThread:
                         ),
                     }
                 )
-                worker_loss_injections += 1
+                execution.worker_loss_injections += 1
                 # Prevent a downstream dispatch until the next scheduler
                 # turn computes the target-driven recovery closure.
-            if not logical_completion_queue:
+            if not execution.completion_queue:
                 self._cache_admission.enforce(
                     self._manager,
                     self._file_for_data_key,
@@ -3027,7 +2576,7 @@ class TaskSchedulerThread:
                     remaining_cache_uses,
                     {
                         data_key
-                        for logical_ids in running.values()
+                        for logical_ids in execution.running.values()
                         for running_logical_id in logical_ids
                         for data_key in task_cache_inputs[
                             running_logical_id
@@ -3037,9 +2586,9 @@ class TaskSchedulerThread:
         workflow_execution_elapsed = (
             time.monotonic() - workflow_execution_started
         )
-        if deferred_completed_states:
+        if execution.deferred_completed_states:
             self.controller.set_task_states(
-                deferred_completed_states, "completed"
+                execution.deferred_completed_states, "completed"
             )
         cache_deadline = time.monotonic() + 30
         while (
@@ -3064,15 +2613,15 @@ class TaskSchedulerThread:
                     "worker cache eviction acknowledgements timed out"
                 )
         if persist_outputs:
-            for output_data_id in sorted(persistence_required):
+            for output_data_id in sorted(persistence.required):
                 self._wait_durable(output_data_id)
-        if hard_delete_pruned_sharedfs and frontier_pruning:
+        if hard_delete_pruned_sharedfs and pruning.events:
             if frontier_pruning_grace_seconds:
                 time.sleep(frontier_pruning_grace_seconds)
             for delete_retry in range(3):
                 plan = self.controller.pruning_plan()
                 try:
-                    sharedfs_hard_delete = (
+                    pruning.sharedfs_delete = (
                         self.controller.hard_delete_quarantined(
                             plan["records"][0]["graph_revision"],
                             plan["records"][0]["state_revision"],
@@ -3120,19 +2669,12 @@ class TaskSchedulerThread:
         physical_cache_workers = self._manager.status("workers")
         self._manager._refresh_stats()
         manager_stats = self._manager.stats
-        report_data_ids = (
-            sorted(producer_by_data_id)
-            if detailed_report
-            else sorted(
-                data_id
-                for task_id in result_task_ids
-                for data_id in self._logical_output_slots[task_id]
-            )
-        )
-        report_task_ids = (
-            sorted(task_by_id)
-            if detailed_report
-            else sorted(set(result_task_ids))
+        report_task_ids, report_data_ids = select_report_scope(
+            task_by_id,
+            producer_by_data_id,
+            result_task_ids,
+            self._run_context.logical_output_slots,
+            detailed_report,
         )
         final_output_status = {
             int(status["data_id"]): status
@@ -3140,80 +2682,72 @@ class TaskSchedulerThread:
                 report_data_ids
             )
         }
+        controller_request_metrics = (
+            self.controller.request_metrics()
+            if hasattr(self.controller, "request_metrics")
+            else None
+        )
+        registration_timing = dict(
+            self._run_context.registration_timing
+        )
+        workflow_timing = {
+            "registration": workflow_registration_elapsed,
+            "execution_loop": workflow_execution_elapsed,
+            "reporting_and_cleanup": (
+                time.monotonic()
+                - workflow_run_started
+                - workflow_registration_elapsed
+                - workflow_execution_elapsed
+            ),
+        }
         self._last_run_report = {
             "logical_tasks": len(output_ids),
             "execution_boundary": (
                 "persistent-library" if use_worker_library else "process"
             ),
-            "logical_output_slots": {
-                str(task_id): list(data_ids)
-                for task_id in report_task_ids
-                for data_ids in (self._logical_output_slots[task_id],)
-            },
-            "logical_output_slots_complete": bool(detailed_report),
-            "logical_output_status": {
-                str(data_id): {
-                    key: status[key]
-                    for key in (
-                        "producer_task_id",
-                        "producer_output_index",
-                        "attempt",
-                        "content_hash",
-                        "size",
-                        "available",
-                        "durability",
-                    )
-                }
-                for data_id in report_data_ids
-                for status in (final_output_status[data_id],)
-            },
-            "logical_output_status_complete": bool(detailed_report),
-            "attempts_by_task": {
-                str(task_id): self._attempts[task_id]
-                for task_id in report_task_ids
-            },
-            "attempts_by_task_complete": bool(detailed_report),
-            "partial_publication_failures": (
-                partial_publication_failures
+            **format_logical_outputs(
+                self._run_context.logical_output_slots,
+                self._run_context.attempts,
+                final_output_status,
+                report_task_ids,
+                report_data_ids,
+                detailed_report,
             ),
-            "physical_attempts": sum(self._attempts.values()),
-            "physical_compute_submissions": physical_compute_submissions,
+            "partial_publication_failures": (
+                publication.failures
+            ),
+            "physical_attempts": sum(self._run_context.attempts.values()),
+            "physical_compute_submissions": execution.physical_submissions,
             "library_batch_size": effective_library_batch_size,
             "logical_tasks_per_physical_submission": (
-                sum(self._attempts.values()) / physical_compute_submissions
-                if physical_compute_submissions
+                sum(self._run_context.attempts.values()) / execution.physical_submissions
+                if execution.physical_submissions
                 else 0
             ),
-            "batch_worker_seconds": batch_worker_seconds,
-            "physical_batch_metrics": physical_batch_metrics,
-            "workflow_timing_seconds": {
-                "registration": workflow_registration_elapsed,
-                "execution_loop": workflow_execution_elapsed,
-                "reporting_and_cleanup": (
-                    time.monotonic()
-                    - workflow_run_started
-                    - workflow_registration_elapsed
-                    - workflow_execution_elapsed
-                ),
-            },
-            "registration_timing_seconds": dict(
-                self._registration_timing
+            "batch_worker_seconds": execution.batch_worker_seconds,
+            "physical_batch_metrics": execution.physical_batch_metrics,
+            "workflow_timing_seconds": workflow_timing,
+            "registration_timing_seconds": registration_timing,
+            "performance_bottlenecks": rank_bottlenecks(
+                workflow_timing,
+                registration_timing,
+                controller_request_metrics,
             ),
-            "recovery_reexecutions": recovery_reexecutions,
+            "recovery_reexecutions": execution.recovery_reexecutions,
             "unavailable_input_recoveries": (
-                unavailable_input_recoveries
+                execution.unavailable_input_recoveries
             ),
-            "recovery_waves": recovery_waves,
+            "recovery_waves": execution.recovery_waves,
             "legacy_recovery_tasks": int(
                 self._manager.stats.tasks_recovery
             ),
-            "loss_injected": loss_injected,
-            "local_idata_hits": local_idata_hits,
-            "worker_controller_retries": worker_controller_retries,
-            "worker_loss_injected": bool(worker_loss_injections),
-            "worker_loss_injections": worker_loss_injections,
+            "loss_injected": execution.loss_injected,
+            "local_idata_hits": execution.local_idata_hits,
+            "worker_controller_retries": execution.worker_controller_retries,
+            "worker_loss_injected": bool(execution.worker_loss_injections),
+            "worker_loss_injections": execution.worker_loss_injections,
             "worker_loss_schedule": list(worker_loss_schedule),
-            "worker_loss_events": worker_loss_events,
+            "worker_loss_events": execution.worker_loss_events,
             "worker_loss_process_shutdown": bool(
                 worker_loss_process_shutdown
             ),
@@ -3249,53 +2783,53 @@ class TaskSchedulerThread:
                 in inject_worker_loss_data_by_task.items()
             },
             "persistence_required_data_ids": sorted(
-                persistence_requested
+                persistence.requested
             ),
             "persistence_outstanding_data_ids": sorted(
-                persistence_required
+                persistence.required
             ),
-            "frontier_pruning": frontier_pruning,
+            "frontier_pruning": pruning.events,
             "frontier_pruning_grace_seconds": (
                 frontier_pruning_grace_seconds
             ),
-            "sharedfs_hard_delete": sharedfs_hard_delete,
+            "sharedfs_hard_delete": pruning.sharedfs_delete,
             "compute_completions_while_frontier_pruning": (
-                compute_completions_while_frontier_pruning
+                pruning.completions_while_active
             ),
             "runtime_pruned_data_ids": sorted(
                 {
                     data_id
-                    for event in frontier_pruning
+                    for event in pruning.events
                     for data_id in event["data_ids"]
                     if data_id
                     not in event["cancelled_data_ids"]
                 }
             ),
             "persistence_tasks_completed": (
-                persistence_tasks_completed
+                persistence.tasks_completed
             ),
             "persistence_controller_tasks_completed": (
-                persistence_controller_tasks_completed
+                persistence.controller_tasks_completed
             ),
-            "persistence_worker_bytes": persistence_worker_bytes,
+            "persistence_worker_bytes": persistence.worker_bytes,
             "persistence_controller_bytes": (
-                persistence_controller_bytes
+                persistence.controller_bytes
             ),
-            "persistence_cancellations": persistence_cancellations,
-            "persistence_failures": persistence_failures,
+            "persistence_cancellations": persistence.cancellations,
+            "persistence_failures": persistence.failures,
             "persistence_injected_failures_observed": (
-                persistence_injected_failures_observed
+                persistence.injected_failures_observed
             ),
-            "persistence_retries": persistence_retries,
+            "persistence_retries": persistence.retries,
             "persistence_retry_delay_seconds": (
-                persistence_retry_delay_seconds
+                persistence.retry_delay_seconds
             ),
             "compute_completions_while_persistence_active": (
-                compute_completions_while_persistence_active
+                persistence.compute_completions_while_active
             ),
-            "persistence_global_losses": persistence_global_losses,
+            "persistence_global_losses": persistence.global_losses,
             "persistence_loss_pruning_plans": (
-                persistence_loss_pruning_plans
+                persistence.loss_pruning_plans
             ),
             "prefetch_selected": len(prefetch_selected),
             "prefetch_completed": prefetch_completed,
@@ -3308,37 +2842,17 @@ class TaskSchedulerThread:
                 value["physical_task_id"]
                 for value in prefetch_selected
             ],
-            "edata_serializations": self._serialization_count,
-            "inline_task_values": self._inline_task_values,
-            "bulk_edata_serializations": self._bulk_serialization_count,
+            "edata_serializations": self._run_context.serialization_count,
+            "inline_task_values": self._run_context.inline_task_values,
+            "bulk_edata_serializations": self._run_context.bulk_serialization_count,
             "worker_reconciliation_deferrals": (
                 self._worker_reconciliation_deferrals
                 - reconciliation_deferrals_before
             ),
             "worker_reconciliations": self._worker_reconciliations,
             "worker_status_polls": self._worker_status_polls,
-            "manager_timing_us": {
-                name: int(getattr(manager_stats, name))
-                for name in (
-                    "time_send",
-                    "time_receive",
-                    "time_status_msgs",
-                    "time_internal",
-                    "time_polling",
-                    "time_application",
-                    "time_scheduling",
-                    "time_workers_execute",
-                )
-            },
-            "manager_bytes": {
-                "sent": int(manager_stats.bytes_sent),
-                "received": int(manager_stats.bytes_received),
-            },
-            "scheduler_controller_requests": (
-                self.controller.request_metrics()
-                if hasattr(self.controller, "request_metrics")
-                else None
-            ),
+            **format_manager_metrics(manager_stats),
+            "scheduler_controller_requests": controller_request_metrics,
             "scheduler_controller_retries": (
                 self.controller.transient_retry_count
                 if hasattr(self.controller, "transient_retry_count")
@@ -3360,30 +2874,9 @@ class TaskSchedulerThread:
             "worker_disk_cache_effective_retention_items": (
                 effective_retention_items
             ),
-            "worker_physical_cache": [
-                {
-                    key: worker.get(key)
-                    for key in (
-                        "workerid",
-                        "cache_items",
-                        "cache_bytes",
-                        "cache_items_high_water",
-                        "cache_bytes_high_water",
-                        "cache_prune_pending_items",
-                        "cache_prune_pending_bytes",
-                        "cache_admission_rejections",
-                        "cache_capacity_configured",
-                        "cache_capacity_items",
-                        "cache_capacity_bytes",
-                        "worker_cache_items",
-                        "worker_cache_bytes",
-                        "worker_cache_items_high_water",
-                        "worker_cache_bytes_high_water",
-                        "worker_cache_admission_rejections",
-                    )
-                }
-                for worker in physical_cache_workers
-            ],
+            "worker_physical_cache": format_worker_caches(
+                physical_cache_workers
+            ),
             **self._cache_admission.report(
                 worker_disk_cache_bytes,
                 worker_disk_cache_items,
@@ -3399,7 +2892,7 @@ class TaskSchedulerThread:
                 )
             )
             for task_id, output_ids_for_task
-            in self._logical_output_slots.items()
+            in self._run_context.logical_output_slots.items()
             if task_id in result_task_ids
         }
 
@@ -3424,88 +2917,10 @@ class TaskSchedulerThread:
             )
         return cloudpickle.loads(payload)
 
-    def _edata_file(self, data_id):
-        file_object = self._edata_files.get(data_id)
-        if file_object is None:
-            info = self._edata_info.get(data_id)
-            if info is None or (
-                info.get("storage") == "bulk-origin"
-                and not info.get("origin_path")
-            ):
-                info = self.controller.get_edata_metadata(data_id)
-                self._edata_info[data_id] = info
-            if info["storage"] == "bulk-origin":
-                file_object = self._manager.declare_file(
-                    info["origin_path"],
-                    cache="worker",
-                    peer_transfer=True,
-                )
-            else:
-                url = (
-                    self.controller.endpoint
-                    + f"/v1/edata/{data_id}?"
-                    + urllib.parse.urlencode(
-                        {"token": self.controller.token}
-                    )
-                )
-                file_object = self._manager.declare_url(
-                    url, cache="worker", peer_transfer=True
-                )
-            self._edata_files[data_id] = file_object
-            if not file_object.set_datavine_data_id(f"e:{data_id}"):
-                raise RuntimeError(
-                    f"could not bind TaskVine file to EDataID e:{data_id}"
-                )
-            if not file_object.set_datavine_content_hash(
-                info["serialized_sha256"]
-            ):
-                raise RuntimeError(
-                    f"could not bind EDataID e:{data_id} content hash"
-                )
-        return file_object
-
-    def _inline_idata_file(self, data_id, content_hash):
-        url = (
-            self.controller.endpoint
-            + f"/v1/idata/{int(data_id)}?"
-            + urllib.parse.urlencode({"token": self.controller.token})
-        )
-        file_object = self._manager.declare_url(
-            url, cache="worker", peer_transfer=True
-        )
-        if not file_object.set_datavine_data_id(f"i:{int(data_id)}"):
-            raise RuntimeError(
-                f"could not bind TaskVine file to IDataID i{int(data_id)}"
-            )
-        if not file_object.set_datavine_content_hash(str(content_hash)):
-            raise RuntimeError(
-                f"could not bind IDataID i{int(data_id)} content hash"
-            )
-        return file_object
-
-    def _idata_output_file(self, data_id, attempt):
-        url = (
-            self.controller.endpoint
-            + f"/v1/idata/{int(data_id)}?"
-            + urllib.parse.urlencode(
-                {
-                    "token": self.controller.token,
-                    "attempt": int(attempt),
-                }
-            )
-        )
-        file_object = self._manager.declare_url(
-            url, cache="worker", peer_transfer=True
-        )
-        if not file_object.set_datavine_data_id(f"i:{int(data_id)}"):
-            raise RuntimeError(
-                f"could not bind TaskVine file to IDataID i:{data_id}"
-            )
-        self._idata_files[int(data_id)] = file_object
-        return file_object
 
     def _submit_prefetches(
         self,
+        task_factory,
         enabled,
         byte_budget,
         item_budget,
@@ -3516,7 +2931,7 @@ class TaskSchedulerThread:
         from ndcctools.taskvine import Task
 
         fanout = {}
-        for task_id in sorted(self._logical_outputs):
+        for task_id in sorted(self._run_context.logical_outputs):
             record = self._task_record(task_id)
             data_ids = [record.function_data_id]
             data_ids.extend(
@@ -3547,7 +2962,7 @@ class TaskSchedulerThread:
             task.set_cores(0)
             task.set_priority(-1000)
             task.add_input(
-                self._edata_file(candidate.data_id),
+                task_factory.edata_file(candidate.data_id),
                 f"datavine-prefetch-e{candidate.data_id}.pkl",
             )
             submitted.append(
@@ -3579,290 +2994,3 @@ class TaskSchedulerThread:
                     f"IDataID {data_id} persistence did not complete"
                 )
             time.sleep(0.05)
-
-    def _make_physical_task(
-        self,
-        task_id,
-        environment,
-        attempt,
-        idata_inline_threshold,
-        kill_worker_after_output_index=None,
-        use_worker_library=False,
-    ):
-        from ndcctools.taskvine import FunctionCall, Task
-
-        record = self._task_record(task_id)
-        output_names = tuple(
-            f"datavine-idata-{data_id}.pkl"
-            for data_id in record.output_data_ids
-        )
-        command = " ".join(
-            shlex.quote(value)
-            for value in (
-                "python",
-                "-m",
-                "ndcctools.taskvine.datavine.worker.runner",
-                "--controller",
-                self.controller.endpoint,
-                "--token",
-                self.controller.token,
-                "--task-id",
-                str(task_id),
-                "--attempt",
-                str(attempt),
-                *(
-                    value
-                    for output_name in output_names
-                    for value in ("--output-file", output_name)
-                ),
-                "--idata-inline-threshold",
-                str(idata_inline_threshold),
-                *(
-                    (
-                        "--pause-after-output-index",
-                        str(kill_worker_after_output_index),
-                    )
-                    if kill_worker_after_output_index is not None
-                    else ()
-                ),
-            )
-        )
-        if use_worker_library and kill_worker_after_output_index is None:
-            task = FunctionCall(
-                "datavine-worker-v2",
-                "execute_datavine_task",
-                self.controller.endpoint,
-                self.controller.token,
-                task_id,
-                attempt,
-                output_names,
-                idata_inline_threshold,
-            )
-            task.set_exec_method("fork")
-        else:
-            task = Task(command)
-        task.set_tag(str(task_id))
-        task.set_cores(1)
-        task.set_retries(
-            0 if kill_worker_after_output_index is not None else 5
-        )
-        edata_ids = {record.function_data_id}
-        edata_ids.update(
-            data_id
-            for kind, data_id in record.positional
-            if kind in ("e", "c")
-        )
-        edata_ids.update(
-            data_id
-            for _, (kind, data_id) in record.keyword
-            if kind in ("e", "c")
-        )
-        for data_id in sorted(edata_ids):
-            file_object = self._edata_file(data_id)
-            task.add_input(
-                file_object, f"datavine-edata-{data_id}.pkl"
-            )
-        idata_ids = {
-            data_id
-            for kind, data_id in record.positional
-            if kind == "i"
-        }
-        idata_ids.update(
-            data_id
-            for _, (kind, data_id) in record.keyword
-            if kind == "i"
-        )
-        idata_ids.update(self._nested_idata_by_task.get(task_id, ()))
-        for data_id in sorted(idata_ids):
-            task.add_input(
-                self._idata_files[data_id],
-                f"datavine-idata-{data_id}.pkl",
-            )
-        for output_data_id, output_name in zip(
-            record.output_data_ids, output_names
-        ):
-            output_file = self._idata_output_file(
-                output_data_id, attempt
-            )
-            task.add_output(output_file, output_name)
-        if environment is not None:
-            task.add_environment(environment)
-        return task
-
-    def _make_physical_batch_task(
-        self,
-        task_ids,
-        environment,
-        attempts,
-        idata_inline_threshold,
-        use_worker_library,
-    ):
-        task_ids = tuple(task_ids)
-        attempts = tuple(attempts)
-        if len(task_ids) == 1:
-            return self._make_physical_task(
-                task_ids[0],
-                environment,
-                attempts[0],
-                idata_inline_threshold,
-                None,
-                use_worker_library,
-            )
-        if not use_worker_library:
-            raise RuntimeError("process tasks cannot be physically batched")
-
-        from ndcctools.taskvine import FunctionCall
-
-        calls = []
-        edata_ids = set()
-        idata_ids = set()
-        for task_id, attempt in zip(task_ids, attempts):
-            record = self._task_record(task_id)
-            output_names = tuple(
-                f"datavine-idata-{data_id}.pkl"
-                for data_id in record.output_data_ids
-            )
-            calls.append((task_id, attempt, output_names))
-            edata_ids.add(record.function_data_id)
-            edata_ids.update(
-                data_id
-                for kind, data_id in record.positional
-                if kind in ("e", "c")
-            )
-            edata_ids.update(
-                data_id
-                for _, (kind, data_id) in record.keyword
-                if kind in ("e", "c")
-            )
-            idata_ids.update(
-                data_id
-                for kind, data_id in record.positional
-                if kind == "i"
-            )
-            idata_ids.update(
-                data_id
-                for _, (kind, data_id) in record.keyword
-                if kind == "i"
-            )
-            idata_ids.update(self._nested_idata_by_task.get(task_id, ()))
-
-        task = FunctionCall(
-            "datavine-worker-v2",
-            "execute_datavine_tasks",
-            self.controller.endpoint,
-            self.controller.token,
-            calls,
-            {
-                data_id: self._edata_payloads[data_id]
-                for data_id in edata_ids
-                if data_id in self._edata_payloads
-            },
-            {
-                task_id: self._task_record(task_id).to_dict()
-                for task_id in task_ids
-            },
-            idata_inline_threshold,
-        )
-        task.set_exec_method("fork")
-        task.set_tag(",".join(map(str, task_ids)))
-        task.set_cores(1)
-        task.set_retries(5)
-        for data_id in sorted(edata_ids):
-            if data_id in self._edata_payloads:
-                continue
-            task.add_input(
-                self._edata_file(data_id),
-                f"datavine-edata-{data_id}.pkl",
-            )
-        for data_id in sorted(idata_ids):
-            task.add_input(
-                self._idata_files[data_id],
-                f"datavine-idata-{data_id}.pkl",
-            )
-        if environment is not None:
-            task.add_environment(environment)
-        return task
-
-    def _ensure_worker_library(self):
-        if self._manager.check_library_exists("datavine-worker-v2"):
-            return
-        from ..worker.library import (
-            execute_datavine_task,
-            execute_datavine_tasks,
-        )
-
-        library = self._manager.create_library_from_functions(
-            "datavine-worker-v2",
-            execute_datavine_task,
-            execute_datavine_tasks,
-            add_env=False,
-            exec_mode="fork",
-        )
-        self._manager.install_library(library)
-
-    def _make_persistence_task(self, data_id, request, environment):
-        from ndcctools.taskvine import Task
-
-        input_name = f"datavine-persist-i{int(data_id)}.pkl"
-        command = " ".join(
-            shlex.quote(value)
-            for value in (
-                "python",
-                "-m",
-                "ndcctools.taskvine.datavine.worker.persist",
-                "--controller",
-                self.controller.endpoint,
-                "--token",
-                self.controller.token,
-                "--data-id",
-                str(int(data_id)),
-                "--request-id",
-                request["request_id"],
-                "--input-file",
-                input_name,
-                *(
-                    ("--delay-before-complete", "3")
-                    if request.get("inject_cancel_delay")
-                    else ()
-                ),
-                *(
-                    (
-                        "--inject-failure-during-write",
-                        "--delay-before-failure",
-                        str(request.get("inject_failure_delay", 0)),
-                    )
-                    if request.get("inject_failure_during_write")
-                    else ()
-                ),
-            )
-        )
-        task = Task(command)
-        task.set_tag(f"persist-i{int(data_id)}")
-        task.set_cores(0)
-        task.set_priority(-500)
-        task.set_retries(0)
-        task.add_input(self._idata_files[int(data_id)], input_name)
-        if environment is not None:
-            task.add_environment(environment)
-        return task
-
-    def _durable_idata_file(self, data_id, status):
-        file_object = self._manager.declare_file(
-            status["durable_path"],
-            cache="worker",
-            peer_transfer=True,
-        )
-        if not file_object.set_datavine_data_id(
-            f"i:{int(data_id)}"
-        ):
-            raise RuntimeError(
-                f"could not bind durable IDataID i:{data_id}"
-            )
-        if not file_object.set_datavine_content_hash(
-            status["content_hash"]
-        ):
-            raise RuntimeError(
-                f"could not bind durable IDataID i:{data_id} "
-                "content hash"
-            )
-        return file_object
