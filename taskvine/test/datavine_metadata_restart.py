@@ -38,19 +38,43 @@ def wait_durable(state, data_id):
     raise TimeoutError("IData did not become durable")
 
 
-def populate_crash(root, ready):
-    state, _, native = start(root)
+def register_function(state, native):
     metadata, payload = serialize(bytes)
-    function = state.register_edata(metadata, payload)
+    record = state.register_edata(metadata, payload)
     native.register_edata((
         (
-            function.data_id,
-            function.content_hash,
-            function.serialized_sha256,
+            record.data_id,
+            record.content_hash,
+            record.serialized_sha256,
             metadata.to_dict(),
             payload,
         ),
     ))
+    return record, payload
+
+
+def crash_fixture(arguments, ready):
+    process = subprocess.Popen(
+        (sys.executable, __file__, *arguments),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and not ready.exists():
+        if process.poll() is not None:
+            raise RuntimeError("metadata crash fixture exited")
+        time.sleep(0.01)
+    if not ready.exists():
+        process.kill()
+        process.wait()
+        raise TimeoutError("metadata crash fixture was not ready")
+    os.kill(process.pid, signal.SIGKILL)
+    process.wait()
+
+
+def populate_crash(root, ready):
+    state, _, native = start(root)
+    function, _ = register_function(state, native)
     first = state.allocate_idata(10)
     second = state.allocate_idata(2)
     state.register_tasks((
@@ -76,17 +100,7 @@ def populate_crash(root, ready):
 
 def populate_quarantine(root, ready, committed):
     state, _, native = start(root)
-    metadata, payload = serialize(bytes)
-    function = state.register_edata(metadata, payload)
-    native.register_edata((
-        (
-            function.data_id,
-            function.content_hash,
-            function.serialized_sha256,
-            metadata.to_dict(),
-            payload,
-        ),
-    ))
+    function, _ = register_function(state, native)
     output = state.allocate_idata(9)
     state.register_task(
         TaskRecord(9, function.data_id, (), (), output.data_id, ())
@@ -125,22 +139,7 @@ def crash_recovery():
         prefix="datavine-metadata-crash-"
     ) as root:
         ready = Path(root) / "ready"
-        process = subprocess.Popen(
-            (sys.executable, __file__, "--populate", root, str(ready)),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline and not ready.exists():
-            if process.poll() is not None:
-                raise RuntimeError("metadata crash fixture exited")
-            time.sleep(0.01)
-        if not ready.exists():
-            process.kill()
-            process.wait()
-            raise TimeoutError("metadata crash fixture was not ready")
-        os.kill(process.pid, signal.SIGKILL)
-        process.wait()
+        crash_fixture(("--populate", root, str(ready)), ready)
         state, service, _ = start(root)
         try:
             assert state.get_task(10).output_data_id == 1
@@ -161,29 +160,15 @@ def quarantine_crash_recovery():
             prefix="datavine-quarantine-crash-"
         ) as root:
             ready = Path(root) / "ready"
-            process = subprocess.Popen(
+            crash_fixture(
                 (
-                    sys.executable,
-                    __file__,
                     "--quarantine",
                     root,
                     str(ready),
                     "1" if committed else "0",
                 ),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                ready,
             )
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline and not ready.exists():
-                if process.poll() is not None:
-                    raise RuntimeError("quarantine crash fixture exited")
-                time.sleep(0.01)
-            if not ready.exists():
-                process.kill()
-                process.wait()
-                raise TimeoutError("quarantine crash fixture was not ready")
-            os.kill(process.pid, signal.SIGKILL)
-            process.wait()
             state, service, _ = start(root)
             try:
                 record = state.get_idata(1)
@@ -201,17 +186,7 @@ def corrupt_metadata_rejected():
         prefix="datavine-metadata-corrupt-"
     ) as root:
         state, service, native = start(root)
-        metadata, payload = serialize(bytes)
-        record = state.register_edata(metadata, payload)
-        native.register_edata((
-            (
-                record.data_id,
-                record.content_hash,
-                record.serialized_sha256,
-                metadata.to_dict(),
-                payload,
-            ),
-        ))
+        register_function(state, native)
         service.stop()
         path = Path(root) / "controller-metadata.sqlite3"
         with path.open("r+b") as stream:
@@ -232,17 +207,7 @@ def main():
         prefix="datavine-metadata-restart-"
     ) as root:
         state, service, native = start(root)
-        metadata, payload = serialize(bytes)
-        function = state.register_edata(metadata, payload)
-        native.register_edata((
-            (
-                function.data_id,
-                function.content_hash,
-                function.serialized_sha256,
-                metadata.to_dict(),
-                payload,
-            ),
-        ))
+        function, payload = register_function(state, native)
         first = state.allocate_idata(1)
         second = state.allocate_idata(2)
         state.register_tasks((

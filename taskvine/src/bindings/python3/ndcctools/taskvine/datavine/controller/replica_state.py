@@ -2,6 +2,32 @@
 
 
 class ReplicaStateMixin:
+    def _publish_replica(
+        self,
+        data_key,
+        replica_id,
+        attempt,
+        tier,
+        content_hash,
+        size,
+    ):
+        replica = self.replicas.prepare_replica(
+            data_key,
+            replica_id,
+            attempt,
+            tier,
+            content_hash,
+            size,
+        )
+        return self.replicas.commit_replica(
+            data_key,
+            replica_id,
+            replica.generation,
+            attempt,
+            content_hash,
+            size,
+        )
+
     def replica_sources(self, data_id):
         with self._lock:
             descriptions = []
