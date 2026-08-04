@@ -48,6 +48,9 @@ struct vine_datavine_directory_metrics {
 	uint64_t active_leases;
 	uint64_t source_selections;
 	uint64_t source_misses;
+	uint64_t releases;
+	uint64_t release_failures;
+	uint64_t idempotent_releases;
 	uint64_t stale_rejections;
 };
 
@@ -65,7 +68,7 @@ int vine_datavine_directory_disconnect_worker(struct vine_datavine_directory *di
 int vine_datavine_directory_publish_replica(struct vine_datavine_directory *directory,
 		char kind, int64_t data_id, const char *replica_id, int32_t attempt,
 		int32_t tier, const char *content_hash, int64_t size,
-		const char *worker_id, uint64_t worker_epoch,
+		const char *worker_id, uint64_t worker_epoch, const char *endpoint,
 		struct vine_datavine_replica_record *result);
 int vine_datavine_directory_resolve_source(struct vine_datavine_directory *directory,
 		char kind, int64_t data_id, const char *destination_worker_id,

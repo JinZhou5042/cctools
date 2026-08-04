@@ -23,6 +23,7 @@ class PersistenceState:
     controller_bytes: int = 0
     cancellations: int = 0
     failures: int = 0
+    failure_records: list = dataclasses.field(default_factory=list)
     injected_failures_observed: int = 0
     retries: int = 0
     retry_delay_seconds: float = 0.0
@@ -68,6 +69,7 @@ class ExecutionState:
     unavailable_input_recoveries: list = dataclasses.field(
         default_factory=list
     )
+    transient_input_failures: list = dataclasses.field(default_factory=list)
     worker_loss_events: list = dataclasses.field(default_factory=list)
     recovery_audit_data_ids: set = dataclasses.field(default_factory=set)
     physical_submissions: int = 0

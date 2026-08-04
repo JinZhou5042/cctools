@@ -11,6 +11,7 @@
 %{
 	#include "int_sizes.h"
 	#include "taskvine.h"
+	#include "vine_datavine_rpc.h"
 %}
 
 /* We compile with -D__LARGE64_FILES, thus off_t is at least 64bit.
@@ -31,6 +32,10 @@ long long int is guaranteed to be at least 64bit. */
 %ignore vine_cancel_all_tasks;
 %ignore input_files;
 %ignore output_files;
+%ignore vine_datavine_rpc_get_u32;
+%ignore vine_datavine_rpc_get_u64;
+%ignore vine_datavine_rpc_put_u32;
+%ignore vine_datavine_rpc_put_u64;
 
 /* When we enounter buffer_length in the prototype of vine_task_get_output_buffer,
 treat it as an output parameter to be filled in. */
@@ -61,9 +66,25 @@ into a swig function f(data) */
 
 /* Convert a C array of binary data to Python bytes. */
 %inline %{
-    PyObject *vine_file_contents_as_bytes(struct vine_file *f) {
-        return PyBytes_FromStringAndSize(vine_file_contents(f), vine_file_size(f));
-    }
+	PyObject *vine_file_contents_as_bytes(struct vine_file *f) {
+		return PyBytes_FromStringAndSize(vine_file_contents(f), vine_file_size(f));
+	}
+
+	PyObject *vine_datavine_rpc_server_metrics_as_dict(struct vine_datavine_rpc_server *server) {
+		struct vine_datavine_directory_metrics metrics = {0};
+		vine_datavine_rpc_server_get_metrics(server, &metrics);
+		return Py_BuildValue(
+				"{s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K}",
+				"workers", metrics.workers,
+				"replicas", metrics.replicas,
+				"active_leases", metrics.active_leases,
+				"source_selections", metrics.source_selections,
+				"source_misses", metrics.source_misses,
+				"releases", metrics.releases,
+				"release_failures", metrics.release_failures,
+				"idempotent_releases", metrics.idempotent_releases,
+				"stale_rejections", metrics.stale_rejections);
+	}
 %}
 
 %include "stdint.i"
@@ -80,3 +101,4 @@ into a swig function f(data) */
 }
 
 %include "taskvine.h"
+%include "vine_datavine_rpc.h"

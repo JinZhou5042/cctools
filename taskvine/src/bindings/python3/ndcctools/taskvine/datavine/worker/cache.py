@@ -1,6 +1,10 @@
 """Process-local state owned by a persistent DataVine worker library."""
 
 import dataclasses
+import hashlib
+import os
+from pathlib import Path
+import tempfile
 import threading
 
 
@@ -154,6 +158,96 @@ class SerializedDataCache:
         self._entries.clear()
 
 
+class WorkerDiskStore:
+    def __init__(self):
+        self.root = None
+
+    def configure(self, worker_id):
+        worker = hashlib.sha256(str(worker_id).encode()).hexdigest()[:16]
+        worker_temp = os.environ.get("WORKER_TMPDIR")
+        self.root = Path(worker_temp or tempfile.gettempdir()) / (
+            f"datavine-worker-{os.getuid()}-{worker}"
+        )
+        self.root.mkdir(mode=0o700, exist_ok=True)
+
+    @staticmethod
+    def scope(controller, token):
+        return hashlib.sha256(
+            f"{controller}\0{token}".encode()
+        ).hexdigest()[:16]
+
+    def _path(self, scope, data_key, content_hash, size):
+        kind, token_id = str(data_key).split(":", 1)
+        name = (
+            f"{scope}-{kind}-{int(token_id)}-"
+            f"{content_hash}-{int(size)}"
+        )
+        return self.root / name
+
+    @staticmethod
+    def _read(path, content_hash=None, size=None):
+        try:
+            payload = path.read_bytes()
+        except FileNotFoundError:
+            return None
+        if size is not None and len(payload) != int(size):
+            return None
+        if content_hash is not None and hashlib.sha256(payload).hexdigest() != content_hash:
+            return None
+        return payload
+
+    def put_data(self, controller, token, data_key, content_hash, payload):
+        path = self._path(
+            self.scope(controller, token), data_key, content_hash, len(payload)
+        )
+        temporary = path.with_name(
+            f".{path.name}.{os.getpid()}.{threading.get_ident()}"
+        )
+        temporary.write_bytes(payload)
+        os.replace(temporary, path)
+
+    def get_data(self, controller, token, data_key, content_hash, size):
+        return self.find_data(
+            self.scope(controller, token), data_key, content_hash, size
+        )
+
+    def find_data(self, scope, data_key, content_hash, size):
+        return self._read(
+            self._path(scope, data_key, content_hash, size),
+            content_hash,
+            size,
+        )
+
+    def get_local_data(self, controller, token, data_key):
+        kind, token_id = str(data_key).split(":", 1)
+        prefix = (
+            f"{self.scope(controller, token)}-{kind}-{int(token_id)}-"
+        )
+        for path in self.root.glob(f"{prefix}*"):
+            fields = path.name.rsplit("-", 2)
+            if len(fields) != 3:
+                continue
+            try:
+                size = int(fields[2])
+            except ValueError:
+                continue
+            payload = self._read(path, fields[1], size)
+            if payload is not None:
+                return payload
+        return None
+
+    def remove_data(self, scope, data_key, content_hash, size):
+        kind, token_id = str(data_key).split(":", 1)
+        path = self._path(
+            scope, f"{kind}:{int(token_id)}", content_hash, size
+        )
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
+
 @dataclasses.dataclass
 class WorkerProcessCache:
     clients: dict = dataclasses.field(default_factory=dict)
@@ -168,6 +262,7 @@ class WorkerProcessCache:
     data: SerializedDataCache = dataclasses.field(
         default_factory=SerializedDataCache
     )
+    disk: WorkerDiskStore = dataclasses.field(default_factory=WorkerDiskStore)
     lock: threading.RLock = dataclasses.field(
         default_factory=threading.RLock
     )

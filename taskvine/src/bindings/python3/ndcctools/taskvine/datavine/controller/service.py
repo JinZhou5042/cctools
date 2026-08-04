@@ -2,6 +2,8 @@
 
 import threading
 
+from ndcctools.taskvine import cvine
+
 from .admission import ByteServingAdmission, BoundedThreadingHTTPServer
 from .handler import ControllerHandlerFactory
 from .state import ControllerState
@@ -32,9 +34,36 @@ class ControllerService:
         self.serving_hook = serving_hook
         self._server = None
         self._thread = None
+        self._native_server = None
+        self.native_address = None
 
     def snapshot(self):
         value = self.state.snapshot()
+        if self._native_server is not None:
+            native = cvine.vine_datavine_rpc_server_metrics_as_dict(
+                self._native_server
+            )
+            directory = value["replica_directory"]
+            additions = {
+                "active_leases": native["active_leases"],
+                "peer_transfer_acquires": (
+                    native["source_selections"]
+                    - native["source_misses"]
+                ),
+                "peer_transfer_failures": native["release_failures"],
+                "peer_transfer_idempotent": native[
+                    "idempotent_releases"
+                ],
+                "peer_transfer_releases": native["releases"],
+                "source_selection_misses": native["source_misses"],
+                "source_selection_requests": native[
+                    "source_selections"
+                ],
+                "stale_rejections": native["stale_rejections"],
+            }
+            for key, count in additions.items():
+                directory[key] += count
+            directory["native"] = native
         value["byte_serving"] = self.byte_serving.snapshot()
         value["request_admission"] = (
             self._server.admission_snapshot()
@@ -44,6 +73,19 @@ class ControllerService:
         return value
 
     def start(self):
+        self._native_server = cvine.vine_datavine_rpc_server_create(
+            self.host,
+            0,
+            self.token,
+            8,
+            self.state.max_replicas,
+        )
+        if self._native_server is None:
+            raise RuntimeError("could not start native Data Controller")
+        self.native_address = (
+            self.host,
+            cvine.vine_datavine_rpc_server_port(self._native_server),
+        )
         Handler = ControllerHandlerFactory.create(self)
 
         self._server = BoundedThreadingHTTPServer(
@@ -72,5 +114,9 @@ class ControllerService:
             if self._thread.is_alive():
                 raise RuntimeError("Controller thread did not stop")
         self.state.stop()
+        if self._native_server is not None:
+            cvine.vine_datavine_rpc_server_delete(self._native_server)
+            self._native_server = None
+        self.native_address = None
         self._server = None
         self._thread = None

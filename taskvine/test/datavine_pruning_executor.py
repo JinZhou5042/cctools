@@ -150,8 +150,12 @@ def main():
                 ] == "queued"
             )
 
-            client.join_worker("source", 1)
-            client.join_worker("destination", 1)
+            client.claim_worker(
+                "source", "http://127.0.0.1:1/source"
+            )
+            client.claim_worker(
+                "destination", "http://127.0.0.1:1/destination"
+            )
             digest = hashlib.sha256(payloads[outputs[0]]).hexdigest()
             worker_replica = client.report_replica(
                 f"i:{outputs[0]}",

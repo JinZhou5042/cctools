@@ -100,6 +100,7 @@ def main(argv=None):
         "controller_thread": service.thread_ident,
         "host": args.advertise_host or args.host,
         "port": port,
+        "native_port": service.native_address[1],
         "token": token,
         "protocol_version": 1,
     }

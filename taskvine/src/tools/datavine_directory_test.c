@@ -34,7 +34,7 @@ static void *stress(void *arg)
 		snprintf(transfer_id, sizeof(transfer_id), "taskvine:t-%lld", (long long)data_id);
 		struct vine_datavine_replica_record replica;
 		struct vine_datavine_source_record source;
-		if (!vine_datavine_directory_publish_replica(worker->directory, 'i', data_id, replica_id, 1, VINE_DATAVINE_WORKER_DRAM, "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881", 1, worker_id, 1, &replica) || !vine_datavine_directory_resolve_source(worker->directory, 'i', data_id, "destination", 1, transfer_id, 0, &source) || strcmp(source.replica.worker_id, worker_id) || !vine_datavine_directory_release_source(worker->directory, transfer_id, 1)) {
+		if (!vine_datavine_directory_publish_replica(worker->directory, 'i', data_id, replica_id, 1, VINE_DATAVINE_WORKER_DRAM, "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881", 1, worker_id, 1, "http://127.0.0.1:1", &replica) || !vine_datavine_directory_resolve_source(worker->directory, 'i', data_id, "destination", 1, transfer_id, 0, &source) || strcmp(source.replica.worker_id, worker_id) || !vine_datavine_directory_release_source(worker->directory, transfer_id, 1)) {
 			worker->failed = 1;
 			break;
 		}
@@ -52,7 +52,7 @@ static int publish(struct vine_datavine_directory *directory, const char *worker
 		uint64_t epoch, const char *replica, int attempt, int tier,
 		struct vine_datavine_replica_record *record)
 {
-	return vine_datavine_directory_publish_replica(directory, 'i', 1, replica, attempt, tier, "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881", 1, worker, epoch, record);
+	return vine_datavine_directory_publish_replica(directory, 'i', 1, replica, attempt, tier, "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881", 1, worker, epoch, "http://127.0.0.1:1", record);
 }
 
 int main(void)

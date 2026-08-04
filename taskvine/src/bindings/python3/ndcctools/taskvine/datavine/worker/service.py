@@ -17,15 +17,18 @@ class WorkerDataService:
         class Handler(BaseHTTPRequestHandler):
             def _request_data(self):
                 parsed = urllib.parse.urlparse(self.path)
-                prefix = f"/{service.capability}/data/"
+                prefix = f"/{service.capability}/"
                 if not parsed.path.startswith(prefix):
                     return None
                 pieces = parsed.path[len(prefix):].split("/")
                 query = urllib.parse.parse_qs(parsed.query)
                 if (
-                    len(pieces) != 2
-                    or pieces[0] not in ("e", "i")
-                    or not pieces[1].isdigit()
+                    len(pieces) != 4
+                    or len(pieces[0]) != 16
+                    or any(c not in "0123456789abcdef" for c in pieces[0])
+                    or pieces[1] != "data"
+                    or pieces[2] not in ("e", "i")
+                    or not pieces[3].isdigit()
                     or len(query.get("sha256", ())) != 1
                     or len(query.get("size", ())) != 1
                 ):
@@ -35,7 +38,8 @@ class WorkerDataService:
                 except ValueError:
                     return None
                 return (
-                    f"{pieces[0]}:{int(pieces[1])}",
+                    pieces[0],
+                    f"{pieces[2]}:{int(pieces[3])}",
                     query["sha256"][0],
                     size,
                 )
@@ -45,11 +49,15 @@ class WorkerDataService:
                 if request is None:
                     self.send_error(404)
                     return
-                data_key, content_hash, size = request
+                scope, data_key, content_hash, size = request
                 with service.cache.lock:
                     payload = service.cache.data.find_data(
                         data_key, content_hash, size
                     )
+                    if payload is None:
+                        payload = service.cache.disk.find_data(
+                            scope, data_key, content_hash, size
+                        )
                 if (
                     payload is None
                     or len(payload) != size
@@ -70,7 +78,11 @@ class WorkerDataService:
                     self.send_error(404)
                     return
                 with service.cache.lock:
-                    service.cache.data.remove_data(*request)
+                    _, data_key, content_hash, size = request
+                    service.cache.data.remove_data(
+                        data_key, content_hash, size
+                    )
+                    service.cache.disk.remove_data(*request)
                 self.send_response(204)
                 self.end_headers()
 
@@ -79,7 +91,7 @@ class WorkerDataService:
 
         self.server = ThreadingHTTPServer(("0.0.0.0", 0), Handler)
         host = socket.getfqdn()
-        self.endpoint = (
+        self.base_endpoint = (
             f"http://{host}:{self.server.server_port}/{self.capability}"
         )
         self.thread = threading.Thread(
@@ -88,3 +100,7 @@ class WorkerDataService:
             daemon=True,
         )
         self.thread.start()
+
+    def endpoint(self, controller, token):
+        scope = self.cache.disk.scope(controller, token)
+        return f"{self.base_endpoint}/{scope}"

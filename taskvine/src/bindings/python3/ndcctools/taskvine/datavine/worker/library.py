@@ -67,6 +67,7 @@ def _cache_event(process_cache):
 def execute_datavine_task(
     controller,
     token,
+    native_controller,
     task_id,
     attempt,
     worker_dram_cache_bytes,
@@ -75,18 +76,21 @@ def execute_datavine_task(
 ):
     """Execute one logical task through the worker-owned data path."""
     from .runner import execute_task
-    from .batching import OutputPublisher
+    from .control import OutputPublisher
     from .cache import PROCESS_CACHE
     from ..models import TaskRecord
     from ..scheduler.client import ControllerClient
 
-    controller_key = (controller, token)
+    controller_key = (controller, token, native_controller)
     with PROCESS_CACHE.lock:
         PROCESS_CACHE.data.configure(worker_dram_cache_bytes)
         client = PROCESS_CACHE.clients.get(controller_key)
         if client is None:
             client = ControllerClient(
-                controller, token, transient_retries=8
+                controller,
+                token,
+                transient_retries=8,
+                native_endpoint=native_controller,
             )
             PROCESS_CACHE.clients[controller_key] = client
     with PROCESS_CACHE.lock:
@@ -103,6 +107,7 @@ def execute_datavine_task(
         result = execute_task(
             controller,
             token,
+            native_controller,
             task_id,
             attempt,
             emit=events.append,
@@ -158,4 +163,5 @@ def execute_datavine_task(
         "worker_seconds": time.monotonic() - started,
         "timing_seconds": timings,
         "outputs_committed": error is None,
+        "native_committed": error is None and client.native is not None,
     }

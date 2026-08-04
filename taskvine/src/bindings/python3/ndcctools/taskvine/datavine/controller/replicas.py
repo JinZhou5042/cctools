@@ -60,6 +60,7 @@ class ReplicaRecord:
     state: str
     worker_id: str | None = None
     worker_epoch: int | None = None
+    source_endpoint: str | None = None
     active_leases: int = 0
     quarantine_until: float | None = None
 
@@ -349,6 +350,7 @@ class ReplicaDirectory:
         size,
         worker_id=None,
         worker_epoch=None,
+        source_endpoint=None,
     ):
         data_id = self._normalize_data_id(data_id)
         replica_id = str(replica_id)
@@ -365,6 +367,13 @@ class ReplicaDirectory:
                 if worker_id is None or worker_epoch is None:
                     raise ValueError("worker replica requires worker epoch")
                 self._validate_worker(worker_id, worker_epoch)
+                source_endpoint = (
+                    str(source_endpoint)
+                    if source_endpoint is not None
+                    else self._workers[str(worker_id)].endpoint
+                )
+                if not source_endpoint:
+                    raise ValueError("worker replica requires data endpoint")
             elif worker_id is not None or worker_epoch is not None:
                 raise ValueError("non-worker replica has worker identity")
             self.advance_attempt(data_id, attempt)
@@ -377,6 +386,7 @@ class ReplicaDirectory:
                 size,
                 worker_id,
                 worker_epoch,
+                source_endpoint,
             )
             if old is not None and old.state in (
                 "preparing", "available"
@@ -388,6 +398,7 @@ class ReplicaDirectory:
                     old.size,
                     old.worker_id,
                     old.worker_epoch,
+                    old.source_endpoint,
                 )
                 if old_identity == identity:
                     return old
@@ -412,6 +423,7 @@ class ReplicaDirectory:
                     if worker_epoch is not None
                     else None
                 ),
+                source_endpoint=source_endpoint,
             )
             self._replicas[key] = record
             self._replica_keys_by_data.setdefault(data_id, set()).add(key)

@@ -32,6 +32,13 @@ def publish_task_outputs(
                 content_hash,
                 payload,
             )
+            reporter.process_cache.disk.put_data(
+                reporter.controller,
+                reporter.token,
+                f"i:{output_data_id}",
+                content_hash,
+                payload,
+            )
         capture_output(
             {
                 "task_id": task.task_id,

@@ -79,13 +79,12 @@ def main():
         worker_count=2,
         worker_cores=1,
         peer_transfers=False,
+        persistence=True,
         factory_manager=args.factory_manager,
         prefetch=False,
     )
     assert rollback["available_idata"] == len(workflow.tasks)
-    assert (
-        rollback["replica_directory"]["peer_transfer_acquires"] == 0
-    ), rollback
+    assert rollback["scheduler_report"]["peer_idata_fetches"] == 0, rollback
     print(json.dumps({"peer_on": snapshot, "peer_off": rollback}, sort_keys=True))
     print(
         f"DataVine Phase 5 peer cache E2E PASS shared=e{shared_id} "

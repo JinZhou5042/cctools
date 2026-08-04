@@ -20,25 +20,29 @@ def _open_source(client, args):
     if not worker_id:
         raise RuntimeError("worker identity is required for peer persistence")
     client.claim_worker(worker_id)
-    resolved = client.resolve_worker_source(
-        f"i:{args.data_id}",
-        worker_id,
-        f"taskvine:{uuid.uuid4().hex}",
-        allow_local_source=True,
-    )
-    source_url = resolved["source"].get("source_url")
-    if not source_url:
-        client.release_replica(resolved["lease"]["lease_id"], False)
-        raise RuntimeError("selected persistence source has no data endpoint")
-    try:
-        return (
-            client.open_source(source_url),
-            resolved["lease"]["lease_id"],
+    failed = set()
+    while True:
+        resolved = client.resolve_worker_source(
+            f"i:{args.data_id}",
+            worker_id,
+            f"taskvine:{uuid.uuid4().hex}",
+            allow_local_source=True,
         )
-    except Exception:
-        client.release_replica(resolved["lease"]["lease_id"], False)
         source = resolved["source"]
+        lease_id = resolved["lease"]["lease_id"]
+        if source["replica_id"] in failed:
+            client.release_replica(lease_id, False)
+            raise RuntimeError("Controller repeated a failed persistence source")
         try:
+            source_url = source.get("source_url")
+            if not source_url:
+                raise RuntimeError(
+                    "selected persistence source has no data endpoint"
+                )
+            return client.open_source(source_url), lease_id
+        except Exception:
+            failed.add(source["replica_id"])
+            client.release_replica(lease_id, False)
             client.invalidate_observed_replica(
                 source["data_id"],
                 source["replica_id"],
@@ -48,9 +52,6 @@ def _open_source(client, args):
                 source["worker_id"],
                 source["worker_epoch"],
             )
-        except Exception:
-            pass
-        raise
 
 
 def main(argv=None):

@@ -1,6 +1,7 @@
 """Scheduler-side client for the standalone Data Controller."""
 
 import base64
+import collections
 import http.client
 import json
 import re
@@ -21,6 +22,7 @@ from ..codec import (
     encode_compact_task_record,
 )
 from ..models import EDataRecord, TaskRecord
+from ..native import NativeControllerClient, NativeControllerError
 from ..protocol import (
     API_PREFIX,
     DataVineRemoteError,
@@ -38,6 +40,7 @@ class ControllerClient:
         idempotent_transient_retries=8,
         retry_base_seconds=0.01,
         retry_max_seconds=0.25,
+        native_endpoint=None,
     ):
         self.endpoint = endpoint.rstrip("/")
         self.token = token
@@ -48,6 +51,16 @@ class ControllerClient:
         )
         self.retry_base_seconds = float(retry_base_seconds)
         self.retry_max_seconds = float(retry_max_seconds)
+        self.native_endpoint = native_endpoint
+        self.native = (
+            NativeControllerClient(native_endpoint, token, timeout)
+            if native_endpoint
+            else None
+        )
+        self._native_leases = collections.OrderedDict()
+        self._native_leases_lock = threading.Lock()
+        self._native_edata_metadata = {}
+        self._native_edata_pending = {}
         if (
             self.transient_retries < 0
             or self.idempotent_transient_retries < 0
@@ -243,12 +256,20 @@ class ControllerClient:
         request = {"worker_id": str(worker_id)}
         if endpoint is not None:
             request["endpoint"] = str(endpoint)
+        native_epoch = (
+            self.native.claim_worker(worker_id, endpoint)
+            if self.native is not None and endpoint is not None
+            else None
+        )
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/workers/claim",
             request,
         )
-        return json.loads(payload)
+        worker = json.loads(payload)
+        if native_epoch is not None and native_epoch != int(worker["epoch"]):
+            raise RuntimeError("Controller worker epochs diverged")
+        return worker
 
     def disconnect_worker(self, worker_id, epoch=1):
         payload, _ = self._request(
@@ -256,7 +277,10 @@ class ControllerClient:
             f"{API_PREFIX}/workers/disconnect",
             {"worker_id": str(worker_id), "epoch": int(epoch)},
         )
-        return json.loads(payload)
+        worker = json.loads(payload)
+        if self.native is not None:
+            self.native.disconnect_worker(worker_id, epoch)
+        return worker
 
     def reconcile_workers(self, active_worker_ids):
         payload, _ = self._request(
@@ -268,7 +292,13 @@ class ControllerClient:
                 )
             },
         )
-        return json.loads(payload)
+        result = json.loads(payload)
+        if self.native is not None:
+            for worker in result["disconnected"]:
+                self.native.disconnect_worker(
+                    worker["worker_id"], worker["epoch"]
+                )
+        return result
 
     def report_replica(
         self,
@@ -281,6 +311,38 @@ class ControllerClient:
         worker_id,
         worker_epoch=1,
     ):
+        native_generation = None
+        if self.native is not None:
+            try:
+                native_generation = self.native.report_replica(
+                    data_id,
+                    replica_id,
+                    attempt,
+                    tier,
+                    content_hash,
+                    size,
+                    worker_id,
+                    worker_epoch,
+                )
+            except NativeControllerError as exc:
+                if exc.status != 3:
+                    raise
+                worker_epoch = int(
+                    self.claim_worker(
+                        worker_id,
+                        self.native.worker_endpoint(worker_id),
+                    )["epoch"]
+                )
+                native_generation = self.native.report_replica(
+                    data_id,
+                    replica_id,
+                    attempt,
+                    tier,
+                    content_hash,
+                    size,
+                    worker_id,
+                    worker_epoch,
+                )
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/replicas/report",
@@ -293,9 +355,20 @@ class ControllerClient:
                 "size": int(size),
                 "worker_id": str(worker_id),
                 "worker_epoch": int(worker_epoch),
+                "source_endpoint": (
+                    self.native.worker_endpoint(worker_id)
+                    if self.native is not None
+                    else None
+                ),
             },
         )
-        return json.loads(payload)
+        replica = json.loads(payload)
+        if (
+            native_generation is not None
+            and native_generation != int(replica["generation"])
+        ):
+            raise RuntimeError("Controller replica generations diverged")
+        return replica
 
     def prepare_replica(
         self,
@@ -366,6 +439,28 @@ class ControllerClient:
         worker_epoch,
         outputs,
     ):
+        if self.native is not None:
+            try:
+                return self.native.publish_outputs(
+                    worker_id, worker_epoch, outputs
+                )
+            except NativeControllerError as exc:
+                if exc.status != 3:
+                    raise
+                worker_epoch = int(
+                    self.claim_worker(
+                        worker_id,
+                        self.native.worker_endpoint(worker_id),
+                    )["epoch"]
+                )
+                for output in outputs:
+                    output["worker_epoch"] = worker_epoch
+                return self.native.publish_outputs(
+                    worker_id, worker_epoch, outputs
+                )
+        return self.project_outputs(worker_id, worker_epoch, outputs)
+
+    def project_outputs(self, worker_id, worker_epoch, outputs):
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/replicas/publish-outputs",
@@ -374,7 +469,11 @@ class ControllerClient:
                 "worker_epoch": int(worker_epoch),
                 "outputs": [
                     {
-                        key: value
+                        key: (
+                            int(str(value).split(":", 1)[-1])
+                            if key == "data_id"
+                            else value
+                        )
                         for key, value in output.items()
                         if key != "payload"
                     }
@@ -463,7 +562,41 @@ class ControllerClient:
         transfer_id,
         excluded_worker_ids=(),
         allow_local_source=False,
+        destination_worker_epoch=1,
     ):
+        if self.native is not None and not allow_local_source:
+            try:
+                resolved = self.native.resolve_source(
+                    data_id,
+                    destination_worker_id,
+                    destination_worker_epoch,
+                    transfer_id,
+                    next(iter(excluded_worker_ids), None),
+                )
+            except NativeControllerError as exc:
+                if exc.status != 3:
+                    raise
+                destination_worker_epoch = int(
+                    self.claim_worker(
+                        destination_worker_id,
+                        self.native.worker_endpoint(
+                            destination_worker_id
+                        ),
+                    )["epoch"]
+                )
+                resolved = self.native.resolve_source(
+                    data_id,
+                    destination_worker_id,
+                    destination_worker_epoch,
+                    transfer_id,
+                    next(iter(excluded_worker_ids), None),
+                )
+            with self._native_leases_lock:
+                self._native_leases[str(transfer_id)] = None
+                self._native_leases.move_to_end(str(transfer_id))
+                while len(self._native_leases) > 65536:
+                    self._native_leases.popitem(last=False)
+            return resolved
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/replicas/resolve-source",
@@ -504,6 +637,17 @@ class ControllerClient:
         return json.loads(payload)
 
     def release_replica(self, lease_id, success):
+        if self.native is not None:
+            with self._native_leases_lock:
+                native = str(lease_id) in self._native_leases
+                self._native_leases.pop(str(lease_id), None)
+            if native:
+                self.native.release_source(lease_id, success)
+                return {
+                    "lease_id": str(lease_id),
+                    "active": False,
+                    "success": bool(success),
+                }
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/replicas/release",
@@ -626,9 +770,19 @@ class ControllerClient:
                 ).decode("ascii"),
             },
         )
-        return json.loads(payload)
+        result = json.loads(payload)
+        if self.native is not None:
+            self._native_edata_pending[int(result["data_id"])] = (
+                result["data_id"],
+                result["content_hash"],
+                result["serialized_sha256"],
+                metadata.to_dict(),
+                serialized_bytes,
+            )
+        return result
 
     def register_edata_batch(self, values):
+        values = tuple(values)
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/edata/register-batch",
@@ -644,7 +798,28 @@ class ControllerClient:
                 ]
             },
         )
-        return json.loads(payload)
+        results = json.loads(payload)
+        if self.native is not None:
+            for result, (metadata, value) in zip(results, values):
+                self._native_edata_pending[int(result["data_id"])] = (
+                    result["data_id"],
+                    result["content_hash"],
+                    result["serialized_sha256"],
+                    metadata.to_dict(),
+                    value,
+                )
+        return results
+
+    def finalize_native_edata(self, shared_data_ids=()):
+        if self.native is None:
+            return
+        shared = {int(data_id) for data_id in shared_data_ids}
+        self.native.register_edata(
+            record
+            for data_id, record in self._native_edata_pending.items()
+            if data_id not in shared
+        )
+        self._native_edata_pending.clear()
 
     def register_edata_origin(
         self, metadata, origin_path, content_hash, size
@@ -762,6 +937,117 @@ class ControllerClient:
         return value
 
     def resolve_edata_sources(self, requests):
+        requests = tuple(requests)
+        if self.native is None:
+            return self._resolve_edata_sources_http(requests)
+        results = [None] * len(requests)
+        misses = []
+        for index, request in enumerate(requests):
+            try:
+                edata = self.native.get_edata(request["data_id"])
+            except NativeControllerError as exc:
+                if exc.status != 5:
+                    raise
+            else:
+                results[index] = {
+                    "data_id": int(request["data_id"]),
+                    "content_hash": edata["content_hash"],
+                    "serialized_sha256": edata["serialized_sha256"],
+                    "size": len(edata["payload"]),
+                    "metadata": decode_serialization_metadata(
+                        edata["metadata"]
+                    ),
+                    "cache_globally": False,
+                    "source_type": "controller-memory",
+                    "payload": edata["payload"],
+                }
+                continue
+            if not request.get("allow_peer_transfer", True):
+                misses.append((index, request))
+                continue
+            try:
+                resolved = self.native.resolve_source(
+                    f"e:{int(request['data_id'])}",
+                    request["destination_worker_id"],
+                    request["destination_worker_epoch"],
+                    request["transfer_id"],
+                    next(iter(request.get("excluded_worker_ids", ())), None),
+                )
+            except NativeControllerError as exc:
+                if exc.status == 5:
+                    misses.append((index, request))
+                    continue
+                if exc.status != 3:
+                    raise
+                epoch = int(
+                    self.claim_worker(
+                        request["destination_worker_id"],
+                        self.native.worker_endpoint(
+                            request["destination_worker_id"]
+                        ),
+                    )["epoch"]
+                )
+                try:
+                    resolved = self.native.resolve_source(
+                        f"e:{int(request['data_id'])}",
+                        request["destination_worker_id"],
+                        epoch,
+                        request["transfer_id"],
+                        next(
+                            iter(request.get("excluded_worker_ids", ())),
+                            None,
+                        ),
+                    )
+                except NativeControllerError as retry:
+                    if retry.status == 5:
+                        misses.append((index, request))
+                        continue
+                    if retry.status != 3:
+                        raise
+                    misses.append((index, request))
+                    continue
+            data_id = int(request["data_id"])
+            with self._metrics_lock:
+                info = self._native_edata_metadata.get(data_id)
+            if info is None:
+                info = self.get_edata_metadata(data_id)
+                with self._metrics_lock:
+                    self._native_edata_metadata[data_id] = info
+            source = resolved["source"]
+            parsed = urllib.parse.urlsplit(source["source_url"])
+            query = urllib.parse.parse_qs(parsed.query)
+            query["sha256"] = [info["serialized_sha256"]]
+            source["source_url"] = urllib.parse.urlunsplit(
+                parsed._replace(
+                    query=urllib.parse.urlencode(query, doseq=True)
+                )
+            )
+            with self._native_leases_lock:
+                lease_id = resolved["lease"]["lease_id"]
+                self._native_leases[lease_id] = None
+                self._native_leases.move_to_end(lease_id)
+                while len(self._native_leases) > 65536:
+                    self._native_leases.popitem(last=False)
+            results[index] = {
+                "data_id": data_id,
+                "content_hash": info["content_hash"],
+                "serialized_sha256": info["serialized_sha256"],
+                "size": info["size"],
+                "metadata": info["metadata"],
+                "cache_globally": True,
+                "source_type": "peer",
+                **resolved,
+            }
+        if misses:
+            fallback = self._resolve_edata_sources_http(
+                request for _, request in misses
+            )
+            for (index, _), value in zip(misses, fallback):
+                results[index] = value
+        return results
+
+    def _resolve_edata_sources_http(self, requests):
+        requests = tuple(requests)
         payload, headers = self._request(
             "POST",
             f"{API_PREFIX}/edata/resolve-sources",
@@ -803,9 +1089,15 @@ class ControllerClient:
                 "producer_output_index": int(producer_output_index),
             },
         )
-        return json.loads(payload)["data_id"]
+        data_id = json.loads(payload)["data_id"]
+        if self.native is not None:
+            self.native.allocate_idata(
+                ((data_id, producer_task_id, producer_output_index),)
+            )
+        return data_id
 
     def allocate_idata_batch(self, producer_slots):
+        producer_slots = tuple(producer_slots)
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/idata/allocate-batch",
@@ -816,7 +1108,17 @@ class ControllerClient:
                 ]
             },
         )
-        return tuple(json.loads(payload)["data_ids"])
+        data_ids = tuple(json.loads(payload)["data_ids"])
+        if self.native is not None:
+            self.native.allocate_idata(
+                (
+                    (data_id, task_id, output_index)
+                    for data_id, (task_id, output_index) in zip(
+                        data_ids, producer_slots
+                    )
+                )
+            )
+        return data_ids
 
     def register_task(self, task):
         if not isinstance(task, TaskRecord):

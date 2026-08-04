@@ -16,6 +16,12 @@ See the file COPYING for details.
 struct vine_datavine_slot {
 	int allocated;
 	struct vine_datavine_data data;
+	unsigned char *edata_metadata;
+	size_t edata_metadata_size;
+	unsigned char *edata_payload;
+	size_t edata_payload_size;
+	char edata_content_hash[65];
+	char edata_serialized_hash[65];
 };
 
 struct vine_datavine_segment {
@@ -121,6 +127,13 @@ void vine_datavine_index_delete(struct vine_datavine_index *index)
 		return;
 	}
 	for (size_t i = 0; i < index->segment_count; i++) {
+		struct vine_datavine_segment *segment = index->segments[i];
+		if (segment) {
+			for (size_t j = 0; j < DATAVINE_INDEX_SEGMENT_SIZE; j++) {
+				free(segment->slots[j].edata_metadata);
+				free(segment->slots[j].edata_payload);
+			}
+		}
 		free(index->segments[i]);
 	}
 	for (int i = 0; i < index->shard_count; i++) {
@@ -218,6 +231,100 @@ int vine_datavine_index_get(struct vine_datavine_index *index, int64_t data_id, 
 	}
 	pthread_mutex_unlock(shard);
 	return found;
+}
+
+int vine_datavine_index_put_edata(struct vine_datavine_index *index,
+		int64_t data_id, const char *content_hash,
+		const char *serialized_hash, const unsigned char *metadata,
+		size_t metadata_size, const unsigned char *payload,
+		size_t payload_size)
+{
+	if (!valid_hash(content_hash) || !valid_hash(serialized_hash)
+			|| (!metadata && metadata_size) || (!payload && payload_size)) {
+		return 0;
+	}
+	struct vine_datavine_slot *slot = get_slot(index, data_id, 1);
+	if (!slot) {
+		return 0;
+	}
+	pthread_mutex_t *shard = get_shard(index, data_id);
+	pthread_mutex_lock(shard);
+	if (slot->edata_content_hash[0]) {
+		int matches = slot->edata_metadata_size == metadata_size
+			&& slot->edata_payload_size == payload_size
+			&& !strcmp(slot->edata_content_hash, content_hash)
+			&& !strcmp(slot->edata_serialized_hash, serialized_hash)
+			&& (!metadata_size || !memcmp(slot->edata_metadata, metadata, metadata_size))
+			&& (!payload_size || !memcmp(slot->edata_payload, payload, payload_size));
+		pthread_mutex_unlock(shard);
+		return matches;
+	}
+	unsigned char *metadata_copy = metadata_size ? malloc(metadata_size) : 0;
+	unsigned char *payload_copy = payload_size ? malloc(payload_size) : 0;
+	if ((metadata_size && !metadata_copy) || (payload_size && !payload_copy)) {
+		free(metadata_copy);
+		free(payload_copy);
+		pthread_mutex_unlock(shard);
+		return 0;
+	}
+	if (metadata_size) {
+		memcpy(metadata_copy, metadata, metadata_size);
+	}
+	if (payload_size) {
+		memcpy(payload_copy, payload, payload_size);
+	}
+	slot->edata_metadata = metadata_copy;
+	slot->edata_metadata_size = metadata_size;
+	slot->edata_payload = payload_copy;
+	slot->edata_payload_size = payload_size;
+	memcpy(slot->edata_content_hash, content_hash, 65);
+	memcpy(slot->edata_serialized_hash, serialized_hash, 65);
+	pthread_mutex_unlock(shard);
+	return 1;
+}
+
+int vine_datavine_index_get_edata(struct vine_datavine_index *index,
+		int64_t data_id, char content_hash[65],
+		char serialized_hash[65], unsigned char **metadata,
+		size_t *metadata_size, unsigned char **payload,
+		size_t *payload_size)
+{
+	if (!content_hash || !serialized_hash || !metadata || !metadata_size
+			|| !payload || !payload_size) {
+		return 0;
+	}
+	struct vine_datavine_slot *slot = get_slot(index, data_id, 0);
+	if (!slot) {
+		return 0;
+	}
+	pthread_mutex_t *shard = get_shard(index, data_id);
+	pthread_mutex_lock(shard);
+	if (!slot->edata_content_hash[0]) {
+		pthread_mutex_unlock(shard);
+		return 0;
+	}
+	unsigned char *metadata_copy = slot->edata_metadata_size ? malloc(slot->edata_metadata_size) : 0;
+	unsigned char *payload_copy = slot->edata_payload_size ? malloc(slot->edata_payload_size) : 0;
+	if ((slot->edata_metadata_size && !metadata_copy) || (slot->edata_payload_size && !payload_copy)) {
+		free(metadata_copy);
+		free(payload_copy);
+		pthread_mutex_unlock(shard);
+		return 0;
+	}
+	if (slot->edata_metadata_size) {
+		memcpy(metadata_copy, slot->edata_metadata, slot->edata_metadata_size);
+	}
+	if (slot->edata_payload_size) {
+		memcpy(payload_copy, slot->edata_payload, slot->edata_payload_size);
+	}
+	memcpy(content_hash, slot->edata_content_hash, 65);
+	memcpy(serialized_hash, slot->edata_serialized_hash, 65);
+	*metadata = metadata_copy;
+	*metadata_size = slot->edata_metadata_size;
+	*payload = payload_copy;
+	*payload_size = slot->edata_payload_size;
+	pthread_mutex_unlock(shard);
+	return 1;
 }
 
 void vine_datavine_index_get_metrics(struct vine_datavine_index *index,

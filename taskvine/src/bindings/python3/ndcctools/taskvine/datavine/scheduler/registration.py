@@ -1,6 +1,7 @@
 """Workflow value and task registration."""
 
 import dataclasses
+from collections import Counter
 import os
 from pathlib import Path
 import time
@@ -112,6 +113,20 @@ class WorkflowRegistrar:
             self.controller.register_tasks(records)
         tasks_registered = time.monotonic()
         task_registration_seconds += tasks_registered - register_started
+        consumers = Counter()
+        for record in context.task_records.values():
+            consumers[record.function_data_id] += 1
+            consumers.update(
+                data_id
+                for kind, data_id in (
+                    *record.positional,
+                    *(binding for _, binding in record.keyword),
+                )
+                if kind in ("e", "c")
+            )
+        self.controller.finalize_native_edata(
+            data_id for data_id, count in consumers.items() if count > 1
+        )
         context.registration_timing = {
             "idata_allocation": idata_allocated - registration_started,
             "edata": values_registered - idata_allocated,

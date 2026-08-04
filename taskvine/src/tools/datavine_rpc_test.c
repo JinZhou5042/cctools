@@ -134,9 +134,11 @@ static int source_protocol(int port, const char *source_worker)
 		return 0;
 	}
 	const char *replica_id = "edata-replica";
+	const char *endpoint = "http://127.0.0.1:1";
 	uint16_t worker_length = (uint16_t)strlen(source_worker);
 	uint16_t replica_length = (uint16_t)strlen(replica_id);
-	unsigned char report[104 + 64];
+	uint16_t endpoint_length = (uint16_t)strlen(endpoint);
+	unsigned char report[104 + 128];
 	memset(report, 0, sizeof(report));
 	report[0] = 'e';
 	report[1] = VINE_DATAVINE_WORKER_DRAM;
@@ -144,6 +146,8 @@ static int source_protocol(int port, const char *source_worker)
 	report[3] = (unsigned char)worker_length;
 	report[4] = (unsigned char)(replica_length >> 8);
 	report[5] = (unsigned char)replica_length;
+	report[6] = (unsigned char)(endpoint_length >> 8);
+	report[7] = (unsigned char)endpoint_length;
 	vine_datavine_rpc_put_u64(report + 8, 1);
 	vine_datavine_rpc_put_u64(report + 16, 42);
 	vine_datavine_rpc_put_u32(report + 24, 1);
@@ -153,7 +157,8 @@ static int source_protocol(int port, const char *source_worker)
 			64);
 	memcpy(report + 104, source_worker, worker_length);
 	memcpy(report + 104 + worker_length, replica_id, replica_length);
-	if (!request(&client, VINE_DATAVINE_RPC_REPORT_REPLICA, report, 104 + worker_length + replica_length)) {
+	memcpy(report + 104 + worker_length + replica_length, endpoint, endpoint_length);
+	if (!request(&client, VINE_DATAVINE_RPC_REPORT_REPLICA, report, 104 + worker_length + replica_length + endpoint_length)) {
 		close(client.fd);
 		return 0;
 	}
@@ -190,6 +195,48 @@ static int source_protocol(int port, const char *source_worker)
 	release[5] = (unsigned char)transfer_length;
 	memcpy(release + 8, transfer, transfer_length);
 	valid &= request(&client, VINE_DATAVINE_RPC_RELEASE_SOURCE, release, 8 + transfer_length);
+	close(client.fd);
+	return valid;
+}
+
+static int edata_protocol(int port)
+{
+	struct client client = {.fd = -1};
+	if (!client_open(&client, port)) {
+		return 0;
+	}
+	const char *content = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881";
+	const char *serialized = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+	const unsigned char metadata[] = "{}";
+	const unsigned char data[] = "hello";
+	unsigned char record[4 + 148 + 2 + 5];
+	vine_datavine_rpc_put_u32(record, 1);
+	vine_datavine_rpc_put_u64(record + 4, 1);
+	vine_datavine_rpc_put_u32(record + 12, 2);
+	vine_datavine_rpc_put_u64(record + 16, 5);
+	memcpy(record + 24, content, 64);
+	memcpy(record + 88, serialized, 64);
+	memcpy(record + 152, metadata, 2);
+	memcpy(record + 154, data, 5);
+	if (!request(&client, VINE_DATAVINE_RPC_REGISTER_EDATA,
+			record, sizeof(record))) {
+		close(client.fd);
+		return 0;
+	}
+	unsigned char request_data[8];
+	vine_datavine_rpc_put_u64(request_data, 1);
+	unsigned char *body = 0;
+	uint32_t body_size = 0;
+	int valid = request_response(&client, VINE_DATAVINE_RPC_GET_EDATA,
+			request_data, sizeof(request_data), &body, &body_size)
+		&& body_size == 147
+		&& vine_datavine_rpc_get_u32(body) == 2
+		&& vine_datavine_rpc_get_u64(body + 4) == 5
+		&& !memcmp(body + 12, content, 64)
+		&& !memcmp(body + 76, serialized, 64)
+		&& !memcmp(body + 140, metadata, 2)
+		&& !memcmp(body + 142, data, 5);
+	free(body);
 	close(client.fd);
 	return valid;
 }
@@ -235,7 +282,9 @@ static void *publish_records(void *arg)
 	char worker_id[32];
 	snprintf(worker_id, sizeof(worker_id), "worker-%lld", (long long)worker->first);
 	uint16_t worker_length = (uint16_t)strlen(worker_id);
-	unsigned char payload[16 + 32 + BATCH * PUBLICATION_SIZE];
+	const char *endpoint = "http://127.0.0.1:1";
+	uint16_t endpoint_length = (uint16_t)strlen(endpoint);
+	unsigned char payload[16 + 64 + BATCH * PUBLICATION_SIZE];
 	int64_t end = worker->first + worker->count;
 	for (int64_t first = worker->first; first < end; first += BATCH) {
 		uint32_t count = (uint32_t)(end - first);
@@ -244,20 +293,21 @@ static void *publish_records(void *arg)
 		}
 		payload[0] = (unsigned char)(worker_length >> 8);
 		payload[1] = (unsigned char)worker_length;
-		payload[2] = 0;
-		payload[3] = 0;
+		payload[2] = (unsigned char)(endpoint_length >> 8);
+		payload[3] = (unsigned char)endpoint_length;
 		vine_datavine_rpc_put_u64(payload + 4, 1);
 		vine_datavine_rpc_put_u32(payload + 12, count);
 		memcpy(payload + 16, worker_id, worker_length);
+		memcpy(payload + 16 + worker_length, endpoint, endpoint_length);
 		for (uint32_t i = 0; i < count; i++) {
-			unsigned char *record = payload + 16 + worker_length + i * PUBLICATION_SIZE;
+			unsigned char *record = payload + 16 + worker_length + endpoint_length + i * PUBLICATION_SIZE;
 			vine_datavine_rpc_put_u64(record, (uint64_t)first + i);
 			vine_datavine_rpc_put_u32(record + 8, 1);
-			vine_datavine_rpc_put_u32(record + 12, 0);
+			vine_datavine_rpc_put_u32(record + 12, VINE_DATAVINE_WORKER_DISK);
 			vine_datavine_rpc_put_u64(record + 16, 1);
 			memcpy(record + 24, hash, 64);
 		}
-		if (!request(&client, VINE_DATAVINE_RPC_PUBLISH_OUTPUTS, payload, 16 + worker_length + count * PUBLICATION_SIZE)) {
+		if (!request(&client, VINE_DATAVINE_RPC_PUBLISH_OUTPUTS, payload, 16 + worker_length + endpoint_length + count * PUBLICATION_SIZE)) {
 			worker->failed = 1;
 			break;
 		}
@@ -292,6 +342,9 @@ int main(int argc, char **argv)
 		assigned += count;
 	}
 	if (!source_protocol(vine_datavine_rpc_server_port(server), "worker-1")) {
+		return 2;
+	}
+	if (!edata_protocol(vine_datavine_rpc_server_port(server))) {
 		return 2;
 	}
 	assigned = 0;

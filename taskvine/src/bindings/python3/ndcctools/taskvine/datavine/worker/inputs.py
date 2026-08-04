@@ -4,6 +4,7 @@ import cloudpickle
 import copy
 import hashlib
 from pathlib import Path
+import time
 import uuid
 
 from ..models import EDataRecord
@@ -49,8 +50,12 @@ class InputResolver:
                 self.token,
                 data_key,
             )
+            if payload is None:
+                payload = self.process_cache.disk.get_local_data(
+                    self.controller, self.token, data_key
+                )
         if payload is not None:
-            self.emit(f"DATAVINE_DRAM_HIT e{data_id}")
+            self.emit(f"DATAVINE_LOCAL_HIT e{data_id}")
             return payload
         excluded = []
         while True:
@@ -58,6 +63,7 @@ class InputResolver:
                 {
                     "data_id": data_id,
                     "destination_worker_id": self.reporter.worker_id,
+                    "destination_worker_epoch": self.reporter.worker_epoch,
                     "transfer_id": f"taskvine:{uuid.uuid4().hex}",
                     "excluded_worker_ids": list(excluded),
                     "allow_peer_transfer": self.allow_peer_transfer,
@@ -123,13 +129,20 @@ class InputResolver:
                 payload,
                 hint["score"] if hint is not None else None,
             )
+            self.process_cache.disk.put_data(
+                self.controller,
+                self.token,
+                data_key,
+                resolved["serialized_sha256"],
+                payload,
+            )
         if resolved["cache_globally"]:
             self.reporter.report_local(
                 data_key,
                 1,
                 resolved["content_hash"],
                 payload,
-                tier="worker-dram",
+                tier="worker-disk",
             )
         return payload
 
@@ -239,8 +252,12 @@ class InputResolver:
                 self.token,
                 data_key,
             )
+            if payload is None:
+                payload = self.process_cache.disk.get_local_data(
+                    self.controller, self.token, data_key
+                )
         if payload is not None:
-            self.emit(f"DATAVINE_DRAM_HIT i{data_id}")
+            self.emit(f"DATAVINE_LOCAL_HIT i{data_id}")
             self.emit(f"DATAVINE_LOCAL_IDATA i{data_id}")
             return payload
         status = self.client.idata_status(data_id)
@@ -251,6 +268,25 @@ class InputResolver:
             if self.allow_peer_transfer
             else None
         )
+        if (
+            payload is None
+            and not self.allow_peer_transfer
+            and status["durability"] != "durable"
+            and not status["controller_inline"]
+            and status.get("persistence_request")
+        ):
+            deadline = time.monotonic() + 30
+            delay = 0.01
+            while time.monotonic() < deadline:
+                time.sleep(delay)
+                status = self.client.idata_status(data_id)
+                if (
+                    status["durability"] == "durable"
+                    or status["controller_inline"]
+                    or not status.get("persistence_request")
+                ):
+                    break
+                delay = min(delay * 2, 0.25)
         if payload is None:
             if status["durability"] == "durable":
                 payload = Path(status["durable_path"]).read_bytes()
@@ -275,11 +311,18 @@ class InputResolver:
                 payload,
                 hint["score"] if hint is not None else None,
             )
+            self.process_cache.disk.put_data(
+                self.controller,
+                self.token,
+                data_key,
+                status["content_hash"],
+                payload,
+            )
         self.reporter.report_local(
             data_key,
             status["attempt"],
             status["content_hash"],
             payload,
-            tier="worker-dram",
+            tier="worker-disk",
         )
         return payload

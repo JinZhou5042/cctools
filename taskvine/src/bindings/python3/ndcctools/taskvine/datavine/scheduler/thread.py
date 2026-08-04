@@ -1883,6 +1883,17 @@ class TaskSchedulerThread:
                 ):
                     suspended["persistence_drained"] = True
                 if not completed.successful() or persistence_error:
+                    persistence.failure_records.append(
+                        {
+                            "data_id": data_id,
+                            "request_id": request["request_id"],
+                            "result": completed.result,
+                            "exit_code": completed.exit_code,
+                            "error": str(
+                                persistence_error or completed.output
+                            )[:2048],
+                        }
+                    )
                     if (
                         "DATAVINE_PERSISTENCE_INJECTED_FAILURE"
                         in str(persistence_error or completed.output)
@@ -2066,18 +2077,38 @@ class TaskSchedulerThread:
                     execution.worker_timing_seconds[name] += float(seconds)
                 error = structured_task["error"]
                 if error is not None:
-                    lost_inputs = [
+                    reported_missing = set()
+                    marker = "IData is not available: i:"
+                    for line in str(error).splitlines():
+                        if marker not in line:
+                            continue
+                        token = line.rsplit(marker, 1)[1].strip()
+                        if token.isdigit():
+                            reported_missing.add(int(token))
+                    for data_id in reported_missing:
+                        self.controller.invalidate_idata(data_id)
+                    lost_inputs = sorted(reported_missing | {
                         int(data_key.split(":", 1)[1])
                         for data_key in task_cache_inputs[logical_id]
                         if data_key.startswith("i:")
                         and not self.controller.idata_status(
                             int(data_key.split(":", 1)[1])
                         )["available"]
-                    ]
+                    })
                     if not lost_inputs and "IData is not available" not in error:
                         raise RuntimeError(
                             f"TaskID {logical_id} failed: {error}"
                         )
+                    if len(execution.transient_input_failures) < 8:
+                        failure = {
+                            "task_id": logical_id,
+                            "attempt": self._run_context.attempts[
+                                logical_id
+                            ],
+                            "lost_inputs": lost_inputs,
+                            "error": str(error)[:2048],
+                        }
+                        execution.transient_input_failures.append(failure)
                     execution.recovery_audit_data_ids.update(lost_inputs)
                     record_pending_task_state(logical_id)
                     execution.pending.add(logical_id)
@@ -2105,7 +2136,17 @@ class TaskSchedulerThread:
                         raise RuntimeError(
                             f"TaskID {logical_id} returned mismatched output"
                         )
-                if not structured_task["outputs_committed"]:
+                if structured_task.get("native_committed"):
+                    committed = self.controller.project_outputs(
+                        outputs[0]["worker_id"],
+                        outputs[0]["worker_epoch"],
+                        outputs,
+                    )
+                    if len(committed) != len(outputs):
+                        raise RuntimeError(
+                            "Controller returned incomplete output projections"
+                        )
+                elif not structured_task["outputs_committed"]:
                     committed = self.controller.commit_outputs(outputs)
                     if len(committed) != len(outputs):
                         raise RuntimeError(
@@ -2498,6 +2539,9 @@ class TaskSchedulerThread:
             "unavailable_input_recoveries": (
                 execution.unavailable_input_recoveries
             ),
+            "transient_input_failures": (
+                execution.transient_input_failures
+            ),
             "recovery_waves": execution.recovery_waves,
             "loss_injected": execution.loss_injected,
             "local_idata_hits": execution.local_idata_hits,
@@ -2594,6 +2638,9 @@ class TaskSchedulerThread:
             ),
             "persistence_cancellations": persistence.cancellations,
             "persistence_failures": persistence.failures,
+            "persistence_failure_records": list(
+                persistence.failure_records
+            ),
             "persistence_injected_failures_observed": (
                 persistence.injected_failures_observed
             ),

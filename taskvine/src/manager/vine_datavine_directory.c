@@ -22,6 +22,7 @@ struct worker {
 
 struct replica {
 	struct vine_datavine_replica_record record;
+	const char *endpoint;
 	int available;
 	struct replica *next;
 };
@@ -51,6 +52,7 @@ struct vine_datavine_directory {
 	pthread_mutex_t workers_lock;
 	int workers_lock_initialized;
 	struct hash_table *workers;
+	struct hash_table *endpoints;
 	pthread_mutex_t leases_lock;
 	int leases_lock_initialized;
 	struct hash_table *leases;
@@ -105,17 +107,19 @@ static struct worker *active_worker(struct vine_datavine_directory *directory,
 	return worker && atomic_load(&worker->active) && atomic_load(&worker->epoch) == epoch ? worker : 0;
 }
 
-static int worker_endpoint(struct vine_datavine_directory *directory,
-		const char *worker_id, uint64_t epoch, char *result)
+static const char *intern_endpoint(struct vine_datavine_directory *directory, const char *endpoint)
 {
 	pthread_mutex_lock(&directory->workers_lock);
-	struct worker *worker = hash_table_lookup(directory->workers, worker_id);
-	int valid = worker && atomic_load(&worker->active) && atomic_load(&worker->epoch) == epoch;
-	if (valid) {
-		strcpy(result, worker->record.endpoint);
+	char *stored = hash_table_lookup(directory->endpoints, endpoint);
+	if (!stored) {
+		stored = strdup(endpoint);
+		if (!stored || !hash_table_insert(directory->endpoints, endpoint, stored)) {
+			free(stored);
+			stored = 0;
+		}
 	}
 	pthread_mutex_unlock(&directory->workers_lock);
-	return valid;
+	return stored;
 }
 
 static void replica_list_delete(struct replica *replica)
@@ -138,7 +142,11 @@ static int complete_lease_locked(struct vine_datavine_directory *directory,
 		struct lease *lease, int success)
 {
 	if (lease->completed) {
-		return lease->success == !!success;
+		int matches = lease->success == !!success;
+		if (matches) {
+			__sync_fetch_and_add(&directory->metrics.idempotent_releases, 1);
+		}
+		return matches;
 	}
 	uint64_t key = data_key(lease->replica->record.kind, lease->replica->record.data_id);
 	struct directory_shard *shard = get_shard(directory, key);
@@ -151,6 +159,10 @@ static int complete_lease_locked(struct vine_datavine_directory *directory,
 	pthread_mutex_unlock(&shard->lock);
 	lease->completed = 1;
 	lease->success = !!success;
+	__sync_fetch_and_add(&directory->metrics.releases, 1);
+	if (!success) {
+		__sync_fetch_and_add(&directory->metrics.release_failures, 1);
+	}
 	__sync_fetch_and_sub(&directory->metrics.active_leases, 1);
 	lease->completed_previous = directory->completed_tail;
 	if (directory->completed_tail) {
@@ -202,6 +214,7 @@ struct vine_datavine_directory *vine_datavine_directory_create(
 	}
 	directory->leases_lock_initialized = 1;
 	directory->workers = hash_table_create(0, 0);
+	directory->endpoints = hash_table_create(0, 0);
 	directory->leases = hash_table_create(0, 0);
 	directory->shards = calloc((size_t)shards, sizeof(*directory->shards));
 	directory->shard_count = shards;
@@ -209,7 +222,7 @@ struct vine_datavine_directory *vine_datavine_directory_create(
 	directory->maximum_replicas = maximum_replicas;
 	directory->maximum_active_leases = maximum_active_leases;
 	directory->maximum_completed_leases = maximum_completed_leases;
-	if (!directory->workers || !directory->leases || !directory->shards) {
+	if (!directory->workers || !directory->endpoints || !directory->leases || !directory->shards) {
 		vine_datavine_directory_delete(directory);
 		return 0;
 	}
@@ -241,6 +254,10 @@ void vine_datavine_directory_delete(struct vine_datavine_directory *directory)
 			free(value);
 		}
 		hash_table_delete(directory->workers);
+	}
+	if (directory->endpoints) {
+		hash_table_clear(directory->endpoints, free);
+		hash_table_delete(directory->endpoints);
 	}
 	if (directory->leases) {
 		void *value;
@@ -291,9 +308,6 @@ int vine_datavine_directory_claim_worker(struct vine_datavine_directory *directo
 	} else if (!atomic_load(&worker->active)) {
 		worker->record.epoch++;
 		atomic_store(&worker->epoch, worker->record.epoch);
-	} else if (strcmp(worker->record.endpoint, endpoint)) {
-		pthread_mutex_unlock(&directory->workers_lock);
-		return 0;
 	}
 	worker->record.active = 1;
 	atomic_store(&worker->active, 1);
@@ -347,14 +361,18 @@ int vine_datavine_directory_disconnect_worker(struct vine_datavine_directory *di
 int vine_datavine_directory_publish_replica(struct vine_datavine_directory *directory,
 		char kind, int64_t data_id, const char *replica_id, int32_t attempt,
 		int32_t tier, const char *content_hash, int64_t size,
-		const char *worker_id, uint64_t worker_epoch,
+		const char *worker_id, uint64_t worker_epoch, const char *endpoint,
 		struct vine_datavine_replica_record *result)
 {
-	if (!directory || !result || (kind != 'e' && kind != 'i') || data_id < 1 || !valid_text(replica_id, VINE_DATAVINE_REPLICA_ID_MAX) || attempt < 1 || (tier != VINE_DATAVINE_WORKER_DRAM && tier != VINE_DATAVINE_WORKER_DISK) || !valid_hash(content_hash) || size < 0 || !valid_text(worker_id, VINE_DATAVINE_WORKER_ID_MAX) || !worker_epoch) {
+	if (!directory || !result || (kind != 'e' && kind != 'i') || data_id < 1 || !valid_text(replica_id, VINE_DATAVINE_REPLICA_ID_MAX) || attempt < 1 || (tier != VINE_DATAVINE_WORKER_DRAM && tier != VINE_DATAVINE_WORKER_DISK) || !valid_hash(content_hash) || size < 0 || !valid_text(worker_id, VINE_DATAVINE_WORKER_ID_MAX) || !worker_epoch || !valid_text(endpoint, VINE_DATAVINE_ENDPOINT_MAX)) {
 		return 0;
 	}
 	if (!active_worker(directory, worker_id, worker_epoch)) {
 		__sync_fetch_and_add(&directory->metrics.stale_rejections, 1);
+		return 0;
+	}
+	const char *stored_endpoint = intern_endpoint(directory, endpoint);
+	if (!stored_endpoint) {
 		return 0;
 	}
 	uint64_t key = data_key(kind, data_id);
@@ -399,7 +417,7 @@ int vine_datavine_directory_publish_replica(struct vine_datavine_directory *dire
 		}
 	}
 	if (replica && replica->available) {
-		int matches = replica->record.attempt == attempt && replica->record.tier == tier && replica->record.size == size && !strcmp(replica->record.content_hash, content_hash) && !strcmp(replica->record.worker_id, worker_id) && replica->record.worker_epoch == worker_epoch;
+		int matches = replica->record.attempt == attempt && replica->record.tier == tier && replica->record.size == size && !strcmp(replica->record.content_hash, content_hash) && !strcmp(replica->record.worker_id, worker_id) && replica->record.worker_epoch == worker_epoch && !strcmp(replica->endpoint, endpoint);
 		if (!matches) {
 			pthread_mutex_unlock(&shard->lock);
 			return 0;
@@ -433,6 +451,7 @@ int vine_datavine_directory_publish_replica(struct vine_datavine_directory *dire
 	strcpy(replica->record.content_hash, content_hash);
 	strcpy(replica->record.replica_id, replica_id);
 	strcpy(replica->record.worker_id, worker_id);
+	replica->endpoint = stored_endpoint;
 	replica->record.worker_epoch = worker_epoch;
 	*result = replica->record;
 	pthread_mutex_unlock(&shard->lock);
@@ -445,11 +464,11 @@ int vine_datavine_directory_resolve_source(struct vine_datavine_directory *direc
 		const char *excluded_worker_id, struct vine_datavine_source_record *result)
 {
 	if (!directory || !result || (kind != 'e' && kind != 'i') || data_id < 1 || !valid_text(destination_worker_id, VINE_DATAVINE_WORKER_ID_MAX) || !destination_worker_epoch || !valid_text(transfer_id, VINE_DATAVINE_TRANSFER_ID_MAX) || (excluded_worker_id && strlen(excluded_worker_id) > VINE_DATAVINE_WORKER_ID_MAX)) {
-		return 0;
+		return -1;
 	}
 	if (!active_worker(directory, destination_worker_id, destination_worker_epoch)) {
 		__sync_fetch_and_add(&directory->metrics.stale_rejections, 1);
-		return 0;
+		return -1;
 	}
 	pthread_mutex_lock(&directory->leases_lock);
 	struct lease *lease = hash_table_lookup(directory->leases, transfer_id);
@@ -457,20 +476,21 @@ int vine_datavine_directory_resolve_source(struct vine_datavine_directory *direc
 		int matches = !lease->completed && lease->replica->record.kind == kind && lease->replica->record.data_id == data_id && !strcmp(lease->destination_worker_id, destination_worker_id) && lease->destination_worker_epoch == destination_worker_epoch;
 		if (!matches) {
 			pthread_mutex_unlock(&directory->leases_lock);
-			return 0;
+			return -1;
 		}
-		if (!worker_endpoint(directory, lease->replica->record.worker_id, lease->replica->record.worker_epoch, result->endpoint)) {
+		if (!active_worker(directory, lease->replica->record.worker_id, lease->replica->record.worker_epoch)) {
 			pthread_mutex_unlock(&directory->leases_lock);
-			return 0;
+			return -1;
 		}
 		result->replica = lease->replica->record;
+		strcpy(result->endpoint, lease->replica->endpoint);
 		strcpy(result->transfer_id, transfer_id);
 		pthread_mutex_unlock(&directory->leases_lock);
 		return 1;
 	}
 	if (__sync_fetch_and_add(&directory->metrics.active_leases, 0) >= directory->maximum_active_leases) {
 		pthread_mutex_unlock(&directory->leases_lock);
-		return 0;
+		return -1;
 	}
 	uint64_t key = data_key(kind, data_id);
 	struct directory_shard *shard = get_shard(directory, key);
@@ -480,7 +500,7 @@ int vine_datavine_directory_resolve_source(struct vine_datavine_directory *direc
 	if (entry) {
 		for (struct replica *item = entry->replicas; item; item = item->next) {
 			struct worker *source = active_worker(directory, item->record.worker_id, item->record.worker_epoch);
-			if (!item->available || item->record.attempt != entry->latest_attempt || !source || !strcmp(item->record.worker_id, destination_worker_id) || (excluded_worker_id && !strcmp(item->record.worker_id, excluded_worker_id))) {
+			if (!item->available || item->record.attempt != entry->latest_attempt || !source || (excluded_worker_id && !strcmp(item->record.worker_id, excluded_worker_id))) {
 				continue;
 			}
 			if (!best || item->record.active_leases < best->record.active_leases || (item->record.active_leases == best->record.active_leases && item->record.tier < best->record.tier) || (item->record.active_leases == best->record.active_leases && item->record.tier == best->record.tier && strcmp(item->record.replica_id, best->record.replica_id) < 0)) {
@@ -500,7 +520,7 @@ int vine_datavine_directory_resolve_source(struct vine_datavine_directory *direc
 		free(lease);
 		pthread_mutex_unlock(&shard->lock);
 		pthread_mutex_unlock(&directory->leases_lock);
-		return 0;
+		return -1;
 	}
 	lease->replica = best;
 	strcpy(lease->transfer_id, transfer_id);
@@ -509,15 +529,7 @@ int vine_datavine_directory_resolve_source(struct vine_datavine_directory *direc
 	best->record.active_leases++;
 	__sync_fetch_and_add(&directory->metrics.active_leases, 1);
 	result->replica = best->record;
-	if (!worker_endpoint(directory, best->record.worker_id, best->record.worker_epoch, result->endpoint)) {
-		best->record.active_leases--;
-		__sync_fetch_and_sub(&directory->metrics.active_leases, 1);
-		hash_table_remove(directory->leases, transfer_id);
-		free(lease);
-		pthread_mutex_unlock(&shard->lock);
-		pthread_mutex_unlock(&directory->leases_lock);
-		return 0;
-	}
+	strcpy(result->endpoint, best->endpoint);
 	strcpy(result->transfer_id, transfer_id);
 	pthread_mutex_unlock(&shard->lock);
 	pthread_mutex_unlock(&directory->leases_lock);
@@ -536,11 +548,6 @@ int vine_datavine_directory_release_source(struct vine_datavine_directory *direc
 		pthread_mutex_unlock(&directory->leases_lock);
 		return 0;
 	}
-	if (lease->completed) {
-		int matches = lease->success == !!success;
-		pthread_mutex_unlock(&directory->leases_lock);
-		return matches;
-	}
 	int result = complete_lease_locked(directory, lease, success);
 	evict_completed_leases_locked(directory);
 	pthread_mutex_unlock(&directory->leases_lock);
@@ -558,5 +565,8 @@ void vine_datavine_directory_get_metrics(struct vine_datavine_directory *directo
 	result->active_leases = __sync_fetch_and_add(&directory->metrics.active_leases, 0);
 	result->source_selections = __sync_fetch_and_add(&directory->metrics.source_selections, 0);
 	result->source_misses = __sync_fetch_and_add(&directory->metrics.source_misses, 0);
+	result->releases = __sync_fetch_and_add(&directory->metrics.releases, 0);
+	result->release_failures = __sync_fetch_and_add(&directory->metrics.release_failures, 0);
+	result->idempotent_releases = __sync_fetch_and_add(&directory->metrics.idempotent_releases, 0);
 	result->stale_rejections = __sync_fetch_and_add(&directory->metrics.stale_rejections, 0);
 }

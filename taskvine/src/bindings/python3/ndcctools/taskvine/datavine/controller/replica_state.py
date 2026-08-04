@@ -12,7 +12,10 @@ class ReplicaStateMixin:
                     if source.worker_id is not None
                     else None
                 )
-                if worker is not None and worker.endpoint:
+                endpoint = source.source_endpoint or (
+                    worker.endpoint if worker is not None else None
+                )
+                if endpoint:
                     kind, token = source.data_id.split(":", 1)
                     transfer_hash = (
                         self.get_edata(int(token)).serialized_sha256
@@ -20,7 +23,7 @@ class ReplicaStateMixin:
                         else source.content_hash
                     )
                     description["source_url"] = (
-                        f"{worker.endpoint}/data/{kind}/{int(token)}"
+                        f"{endpoint}/data/{kind}/{int(token)}"
                         f"?sha256={transfer_hash}"
                         f"&size={source.size}"
                     )
@@ -78,10 +81,11 @@ class ReplicaStateMixin:
             )
             worker = self.replicas.worker(source.worker_id)
             source_description = source.source_dict()
-            if worker.endpoint:
+            endpoint = source.source_endpoint or worker.endpoint
+            if endpoint:
                 kind, token = source.data_id.split(":", 1)
                 source_description["source_url"] = (
-                    f"{worker.endpoint}/data/{kind}/{int(token)}"
+                    f"{endpoint}/data/{kind}/{int(token)}"
                     f"?sha256={source.content_hash}&size={source.size}"
                 )
             return {
@@ -191,6 +195,7 @@ class ReplicaStateMixin:
         size,
         worker_id,
         worker_epoch,
+        source_endpoint=None,
     ):
         with self._lock:
             self._validate_replica_identity(
@@ -207,6 +212,7 @@ class ReplicaStateMixin:
                 size,
                 worker_id,
                 worker_epoch,
+                source_endpoint,
             )
 
     def commit_worker_replica(
@@ -259,6 +265,7 @@ class ReplicaStateMixin:
                     record.serialized_size,
                     worker_id,
                     worker_epoch,
+                    output.get("source_endpoint"),
                 )
                 prepared.append(replica)
             return tuple(prepared)
@@ -290,6 +297,7 @@ class ReplicaStateMixin:
                     record.serialized_size,
                     worker_id,
                     worker_epoch,
+                    output.get("source_endpoint"),
                 )
                 published.append(replica)
             return tuple(published)
@@ -318,6 +326,7 @@ class ReplicaStateMixin:
         size,
         worker_id,
         worker_epoch,
+        source_endpoint=None,
     ):
         replica = self.prepare_worker_replica(
             data_key,
@@ -328,6 +337,7 @@ class ReplicaStateMixin:
             size,
             worker_id,
             worker_epoch,
+            source_endpoint,
         )
         return self.commit_worker_replica(
             data_key,

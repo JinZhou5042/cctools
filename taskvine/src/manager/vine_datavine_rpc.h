@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "vine_datavine_directory.h"
+
 #define VINE_DATAVINE_RPC_MAGIC UINT32_C(0x44564331)
 #define VINE_DATAVINE_RPC_VERSION 1
 #define VINE_DATAVINE_RPC_REQUEST_HEADER 20
@@ -20,6 +22,8 @@ enum vine_datavine_rpc_opcode {
 	VINE_DATAVINE_RPC_REPORT_REPLICA = 8,
 	VINE_DATAVINE_RPC_RESOLVE_SOURCE = 9,
 	VINE_DATAVINE_RPC_RELEASE_SOURCE = 10,
+	VINE_DATAVINE_RPC_REGISTER_EDATA = 11,
+	VINE_DATAVINE_RPC_GET_EDATA = 12,
 };
 
 enum vine_datavine_rpc_status {
@@ -28,6 +32,7 @@ enum vine_datavine_rpc_status {
 	VINE_DATAVINE_RPC_UNAUTHORIZED = 2,
 	VINE_DATAVINE_RPC_REJECTED = 3,
 	VINE_DATAVINE_RPC_INTERNAL = 4,
+	VINE_DATAVINE_RPC_NOT_FOUND = 5,
 };
 
 struct vine_datavine_rpc_server;
@@ -37,6 +42,9 @@ struct vine_datavine_rpc_server *vine_datavine_rpc_server_create(
 		int64_t maximum_data_id);
 void vine_datavine_rpc_server_delete(struct vine_datavine_rpc_server *server);
 int vine_datavine_rpc_server_port(const struct vine_datavine_rpc_server *server);
+void vine_datavine_rpc_server_get_metrics(
+		struct vine_datavine_rpc_server *server,
+		struct vine_datavine_directory_metrics *result);
 
 uint32_t vine_datavine_rpc_get_u32(const unsigned char *buffer);
 uint64_t vine_datavine_rpc_get_u64(const unsigned char *buffer);

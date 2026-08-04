@@ -226,6 +226,9 @@ def run_case(
             client = ControllerClient(
                 f"http://{controller_host}:{ready['port']}",
                 token,
+                native_endpoint=(
+                    f"tcp://{controller_host}:{ready['native_port']}"
+                ),
             )
             if controller_client_wrapper is not None:
                 client = controller_client_wrapper(client)

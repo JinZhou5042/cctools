@@ -44,6 +44,7 @@ class FakeManager:
 
 class FakeController:
     endpoint = "http://127.0.0.1:1234"
+    native_endpoint = "tcp://127.0.0.1:1235"
     token = "secret token"
 
     def __init__(self):

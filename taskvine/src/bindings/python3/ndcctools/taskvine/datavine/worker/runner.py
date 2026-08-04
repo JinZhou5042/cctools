@@ -5,7 +5,7 @@ import os
 import time
 
 from ..scheduler.client import ControllerClient
-from .batching import SourceResolver
+from .control import SourceResolver
 from .cache import PROCESS_CACHE
 from .inputs import InputResolver
 from .publication import publish_task_outputs
@@ -16,6 +16,7 @@ from .service import WorkerDataService
 def execute_task(
     controller,
     token,
+    native_controller,
     task_id,
     attempt=1,
     emit=print,
@@ -32,7 +33,7 @@ def execute_task(
     if attempt < 1:
         raise ValueError("attempt must be positive")
 
-    controller_key = (controller, token)
+    controller_key = (controller, token, native_controller)
     with PROCESS_CACHE.lock:
         client = PROCESS_CACHE.clients.get(controller_key)
         if client is None:
@@ -40,22 +41,25 @@ def execute_task(
                 controller,
                 token,
                 transient_retries=8,
+                native_endpoint=native_controller,
             )
             PROCESS_CACHE.clients[controller_key] = client
     retry_count_before = client.thread_transient_retry_count
     worker_id = os.environ.get("VINE_WORKER_ID")
     if not worker_id:
         raise RuntimeError("TaskVine worker incarnation is unavailable")
+    PROCESS_CACHE.disk.configure(worker_id)
     claim_key = (controller, token, worker_id)
     with PROCESS_CACHE.lock:
         if PROCESS_CACHE.data_service is None:
             PROCESS_CACHE.data_service = WorkerDataService(PROCESS_CACHE)
+        source_endpoint = PROCESS_CACHE.data_service.endpoint(
+            controller, token
+        )
         worker_epoch = PROCESS_CACHE.worker_claims.get(claim_key)
         if worker_epoch is None:
             worker_epoch = int(
-                client.claim_worker(
-                    worker_id, PROCESS_CACHE.data_service.endpoint
-                )["epoch"]
+                client.claim_worker(worker_id, source_endpoint)["epoch"]
             )
             PROCESS_CACHE.worker_claims[claim_key] = worker_epoch
     task_key = (controller, token, task_id)
@@ -69,6 +73,7 @@ def execute_task(
         token,
         worker_id,
         worker_epoch,
+        source_endpoint,
         emit,
         PROCESS_CACHE,
     )

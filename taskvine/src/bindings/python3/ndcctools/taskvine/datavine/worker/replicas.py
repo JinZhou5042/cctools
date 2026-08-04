@@ -1,5 +1,6 @@
 """Worker replica observation and invalidation."""
 
+import hashlib
 import json
 import time
 
@@ -12,6 +13,7 @@ class WorkerReplicaReporter:
         token,
         worker_id,
         worker_epoch,
+        endpoint,
         emit,
         process_cache,
     ):
@@ -20,11 +22,17 @@ class WorkerReplicaReporter:
         self.token = token
         self.worker_id = worker_id
         self.worker_epoch = int(worker_epoch)
+        self.source_id = hashlib.blake2b(
+            str(endpoint).encode("utf-8"), digest_size=8
+        ).hexdigest()
         self.emit = emit
         self.process_cache = process_cache
 
     def replica_id(self, data_key):
-        return f"taskvine-{self.worker_id}-{data_key.replace(':', '-')}"
+        return (
+            f"taskvine-{self.worker_id}-{self.source_id}-"
+            f"{data_key.replace(':', '-')}"
+        )
 
     def report_local(
         self,
@@ -60,6 +68,7 @@ class WorkerReplicaReporter:
                 self.worker_id,
                 self.worker_epoch,
             )
+            self.worker_epoch = int(replica["worker_epoch"])
             self.process_cache.replica_reports[report_key] = (
                 time.monotonic(),
                 replica,

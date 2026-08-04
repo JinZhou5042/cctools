@@ -52,8 +52,8 @@ def main():
     host, port = service.start()
     client = ControllerClient(f"http://{host}:{port}", "replica-token")
     try:
-        client.join_worker("w1", 1)
-        client.join_worker("w2", 1)
+        client.claim_worker("w1", "http://127.0.0.1:1/w1")
+        client.claim_worker("w2", "http://127.0.0.1:1/w2")
         edata_hash = edata.content_hash
         first = client.report_replica(
             f"e:{edata.data_id}",
@@ -203,9 +203,12 @@ def main():
             output_hash,
             len(idata_payload),
         )
-        claimed = client.claim_worker("w1")
+        claimed = client.claim_worker("w1", "http://127.0.0.1:1/w1")
         assert claimed["epoch"] == 2
-        assert client.claim_worker("w1") == claimed
+        assert (
+            client.claim_worker("w1", "http://127.0.0.1:1/w1")
+            == claimed
+        )
         expect_remote_error(
             "stale worker epoch",
             client.report_replica,
@@ -349,8 +352,8 @@ def main():
             )["sources"]
         )
 
-        client.join_worker("w3", 1)
-        client.join_worker("w4", 1)
+        client.claim_worker("w3", "http://127.0.0.1:1/w3")
+        client.claim_worker("w4", "http://127.0.0.1:1/w4")
         source = client.report_replica(
             f"i:{same_bytes.data_id}",
             "worker-loss-source",

@@ -276,6 +276,7 @@ class PostRouteFactory:
                             request["size"],
                             request["worker_id"],
                             request["worker_epoch"],
+                            request.get("source_endpoint"),
                         )
                         if self.path.endswith("/prepare"):
                             replica = owner.state.prepare_worker_replica(

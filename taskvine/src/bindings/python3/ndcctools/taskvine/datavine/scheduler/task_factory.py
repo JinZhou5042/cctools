@@ -177,6 +177,7 @@ class TaskFactory:
             "execute_datavine_task",
             self.controller.endpoint,
             self.controller.token,
+            self.controller.native_endpoint,
             task_id,
             attempt,
             self.worker_dram_cache_bytes,

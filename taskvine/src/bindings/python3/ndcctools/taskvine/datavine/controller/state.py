@@ -62,6 +62,7 @@ class ControllerState(
         self.max_edata_bytes = int(max_edata_bytes)
         self.max_idata_bytes = int(max_idata_bytes)
         self.max_inline_idata_bytes = int(max_inline_idata_bytes)
+        self.max_replicas = int(max_replicas)
         self.bulk_origin_root = (
             Path(bulk_origin_root).resolve()
             if bulk_origin_root is not None
@@ -98,7 +99,7 @@ class ControllerState(
         self._persistence_stale_completions = 0
         self._persistence_cleanup_failures = 0
         self.replicas = replica_directory or ReplicaDirectory(
-            max_replicas=int(max_replicas),
+            max_replicas=self.max_replicas,
             max_completed_leases=int(completed_lease_capacity)
         )
         self.pruning = PruningAuthority(pruning_audit_capacity)

@@ -17,6 +17,7 @@ class FakeController:
     def __init__(self):
         self.next_edata_id = 1
         self.task_batches = []
+        self.shared_edata = None
 
     def allocate_idata_batch(self, producer_slots):
         return tuple(
@@ -42,6 +43,9 @@ class FakeController:
 
     def register_tasks(self, records):
         self.task_batches.append(tuple(records))
+
+    def finalize_native_edata(self, shared_data_ids):
+        self.shared_edata = set(shared_data_ids)
 
 
 def main():
