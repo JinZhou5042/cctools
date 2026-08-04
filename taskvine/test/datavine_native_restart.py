@@ -137,6 +137,9 @@ def main():
         payload = b"persistent-edata"
         digest = hashlib.sha256(payload).hexdigest()
         first.register_edata(((1, digest, digest, {}, payload),))
+        journal = service.snapshot()["native_journal"]
+        assert journal["waits"] >= 1
+        assert journal["durable_sequence"] == journal["commits"]
         first.allocate_idata(((1, 1, 0),))
         assert first.claim_worker("source", "http://source") == 1
         assert first.claim_worker("destination", "http://destination") == 1

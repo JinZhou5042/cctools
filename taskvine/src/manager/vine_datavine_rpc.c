@@ -608,6 +608,11 @@ static int persistent_opcode(uint16_t opcode)
 	return opcode == VINE_DATAVINE_RPC_ALLOCATE_BATCH || opcode == VINE_DATAVINE_RPC_PUBLISH_BATCH || opcode == VINE_DATAVINE_RPC_CLAIM_WORKER || opcode == VINE_DATAVINE_RPC_PUBLISH_OUTPUTS || opcode == VINE_DATAVINE_RPC_DISCONNECT_WORKER || opcode == VINE_DATAVINE_RPC_REPORT_REPLICA || opcode == VINE_DATAVINE_RPC_REGISTER_EDATA || opcode == VINE_DATAVINE_RPC_INVALIDATE_REPLICA;
 }
 
+static int durable_opcode(uint16_t opcode)
+{
+	return opcode == VINE_DATAVINE_RPC_REGISTER_EDATA;
+}
+
 static int replay_request(void *context, uint16_t opcode,
 		const unsigned char *payload, size_t payload_size)
 {
@@ -644,7 +649,15 @@ static int process_request(struct vine_datavine_rpc_server *server, struct rpc_c
 			pthread_mutex_lock(&server->mutation_lock);
 		}
 		status = dispatch_request(server, opcode, connection->payload, connection->payload_size, result, &dynamic_result, &result_size);
-		if (status == VINE_DATAVINE_RPC_OK && persistent && !vine_datavine_journal_append(server->journal, opcode, connection->payload, connection->payload_size)) {
+		int journaled = 1;
+		if (status == VINE_DATAVINE_RPC_OK && persistent) {
+			if (durable_opcode(opcode)) {
+				journaled = vine_datavine_journal_commit(server->journal, opcode, connection->payload, connection->payload_size);
+			} else {
+				journaled = vine_datavine_journal_append(server->journal, opcode, connection->payload, connection->payload_size);
+			}
+		}
+		if (status == VINE_DATAVINE_RPC_OK && !journaled) {
 			status = VINE_DATAVINE_RPC_INTERNAL;
 			result_size = 0;
 		}
