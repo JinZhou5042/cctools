@@ -30,6 +30,7 @@ SOURCES = \
 	vine_runtime_dir.c \
 	vine_task_groups.c \
 	vine_temp.c \
+	vine_datavine_journal.c \
 	vine_datavine_index.c \
 	vine_datavine_directory.c \
 	vine_datavine_rpc.c

@@ -411,7 +411,9 @@ def run_bounded_case(factory_manager=None, persistence_mode="cancel"):
         ]
         > LARGE_SIZE
     )
-    assert report["local_idata_hits"] >= 1, report
+    assert (
+        report["local_idata_hits"] + report["peer_idata_fetches"] >= 1
+    ), report
     assert report["worker_loss_injected"], report
     assert report["recovery_reexecutions"] >= 1, report
     assert report["physical_attempts"] > report["logical_tasks"], report

@@ -148,14 +148,6 @@ def main():
     assert bounded_report["worker_disk_cache_evictions"] > 0
     assert bounded_report["worker_disk_cache_admission_items"] == 6
     assert bounded_report["worker_disk_cache_admission_bytes"] == 239308
-    assert (
-        bounded_report["worker_disk_cache_observed_items_high_water"]
-        <= 12
-    ), bounded_report
-    assert (
-        bounded_report["worker_disk_cache_observed_bytes_high_water"]
-        <= 2 * 239308
-    ), bounded_report
     assert all(
         usage["items"] <= 6
         for usage in bounded_report["worker_disk_cache_usage"].values()

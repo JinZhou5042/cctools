@@ -66,6 +66,11 @@ class ControllerService:
             for key, count in additions.items():
                 directory[key] += count
             directory["native"] = native
+            value["native_journal"] = (
+                cvine.vine_datavine_rpc_server_journal_metrics_as_dict(
+                    self._native_server
+                )
+            )
         value["byte_serving"] = self.byte_serving.snapshot()
         value["transfer_faults"] = self.transfer_faults.snapshot()
         value["request_admission"] = (
@@ -102,6 +107,7 @@ class ControllerService:
             self.token,
             8,
             self.state.max_replicas,
+            self.state.native_journal_path,
         )
         if self._native_server is None:
             raise RuntimeError("could not start native Data Controller")

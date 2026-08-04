@@ -3,6 +3,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
@@ -202,8 +203,7 @@ static int source_protocol(int port, const char *source_worker)
 	invalidate[3] = (unsigned char)replica_length;
 	vine_datavine_rpc_put_u64(invalidate + 8, 42);
 	memcpy(invalidate + 16, replica_id, replica_length);
-	valid &= request(&client, VINE_DATAVINE_RPC_INVALIDATE_REPLICA,
-			invalidate, 16 + replica_length);
+	valid &= request(&client, VINE_DATAVINE_RPC_INVALIDATE_REPLICA, invalidate, 16 + replica_length);
 	close(client.fd);
 	return valid;
 }
@@ -227,8 +227,7 @@ static int edata_protocol(int port)
 	memcpy(record + 88, serialized, 64);
 	memcpy(record + 152, metadata, 2);
 	memcpy(record + 154, data, 5);
-	if (!request(&client, VINE_DATAVINE_RPC_REGISTER_EDATA,
-			record, sizeof(record))) {
+	if (!request(&client, VINE_DATAVINE_RPC_REGISTER_EDATA, record, sizeof(record))) {
 		close(client.fd);
 		return 0;
 	}
@@ -236,17 +235,53 @@ static int edata_protocol(int port)
 	vine_datavine_rpc_put_u64(request_data, 1);
 	unsigned char *body = 0;
 	uint32_t body_size = 0;
-	int valid = request_response(&client, VINE_DATAVINE_RPC_GET_EDATA,
-			request_data, sizeof(request_data), &body, &body_size)
-		&& body_size == 147
-		&& vine_datavine_rpc_get_u32(body) == 2
-		&& vine_datavine_rpc_get_u64(body + 4) == 5
-		&& !memcmp(body + 12, content, 64)
-		&& !memcmp(body + 76, serialized, 64)
-		&& !memcmp(body + 140, metadata, 2)
-		&& !memcmp(body + 142, data, 5);
+	int valid = request_response(&client, VINE_DATAVINE_RPC_GET_EDATA, request_data, sizeof(request_data), &body, &body_size) && body_size == 147 && vine_datavine_rpc_get_u32(body) == 2 && vine_datavine_rpc_get_u64(body + 4) == 5 && !memcmp(body + 12, content, 64) && !memcmp(body + 76, serialized, 64) && !memcmp(body + 140, metadata, 2) && !memcmp(body + 142, data, 5);
 	free(body);
 	close(client.fd);
+	return valid;
+}
+
+static int edata_available(int port)
+{
+	struct client client = {.fd = -1};
+	if (!client_open(&client, port)) {
+		return 0;
+	}
+	unsigned char request_data[8];
+	vine_datavine_rpc_put_u64(request_data, 1);
+	unsigned char *body = 0;
+	uint32_t body_size = 0;
+	int valid = request_response(&client, VINE_DATAVINE_RPC_GET_EDATA, request_data, sizeof(request_data), &body, &body_size) && body_size == 147 && !memcmp(body + 142, "hello", 5);
+	free(body);
+	close(client.fd);
+	return valid;
+}
+
+static int journal_recovery_protocol(int threads)
+{
+	char path[] = "/tmp/datavine-native-journal-XXXXXX";
+	int fd = mkstemp(path);
+	if (fd < 0) {
+		return 0;
+	}
+	close(fd);
+	struct vine_datavine_rpc_server *server = vine_datavine_rpc_server_create(
+			"127.0.0.1", 0, "test-token", threads, 128, path);
+	int valid = server && edata_protocol(vine_datavine_rpc_server_port(server)) && claim_worker(vine_datavine_rpc_server_port(server), "recovered");
+	vine_datavine_rpc_server_delete(server);
+	fd = open(path, O_WRONLY | O_APPEND);
+	valid &= fd >= 0 && write(fd, "end", 3) == 3;
+	if (fd >= 0) {
+		close(fd);
+	}
+	server = 0;
+	if (valid) {
+		server = vine_datavine_rpc_server_create(
+				"127.0.0.1", 0, "test-token", threads, 128, path);
+	}
+	valid &= server && edata_available(vine_datavine_rpc_server_port(server)) && claim_worker(vine_datavine_rpc_server_port(server), "recovered");
+	vine_datavine_rpc_server_delete(server);
+	unlink(path);
 	return valid;
 }
 
@@ -333,8 +368,11 @@ int main(int argc, char **argv)
 	if (server_threads < 1 || clients < 1 || records < clients) {
 		return 2;
 	}
+	if (!journal_recovery_protocol(server_threads)) {
+		return 2;
+	}
 	struct vine_datavine_rpc_server *server = vine_datavine_rpc_server_create(
-			"127.0.0.1", 0, "test-token", server_threads, records);
+			"127.0.0.1", 0, "test-token", server_threads, records, 0);
 	if (!server || !allocate_records(vine_datavine_rpc_server_port(server), records)) {
 		return 2;
 	}

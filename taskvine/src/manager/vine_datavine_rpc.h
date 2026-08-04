@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "vine_datavine_directory.h"
+#include "vine_datavine_journal.h"
 
 #define VINE_DATAVINE_RPC_MAGIC UINT32_C(0x44564331)
 #define VINE_DATAVINE_RPC_VERSION 1
@@ -40,7 +41,7 @@ struct vine_datavine_rpc_server;
 
 struct vine_datavine_rpc_server *vine_datavine_rpc_server_create(
 		const char *host, int port, const char *token, int threads,
-		int64_t maximum_data_id);
+		int64_t maximum_data_id, const char *journal_path);
 void vine_datavine_rpc_server_delete(struct vine_datavine_rpc_server *server);
 int vine_datavine_rpc_server_port(const struct vine_datavine_rpc_server *server);
 void vine_datavine_rpc_server_get_metrics(
@@ -49,6 +50,9 @@ void vine_datavine_rpc_server_get_metrics(
 int64_t vine_datavine_rpc_server_replica_active_leases(
 		struct vine_datavine_rpc_server *server, char kind, int64_t data_id,
 		const char *replica_id);
+void vine_datavine_rpc_server_get_journal_metrics(
+		struct vine_datavine_rpc_server *server,
+		struct vine_datavine_journal_metrics *result);
 
 uint32_t vine_datavine_rpc_get_u32(const unsigned char *buffer);
 uint64_t vine_datavine_rpc_get_u64(const unsigned char *buffer);

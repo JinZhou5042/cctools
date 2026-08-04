@@ -239,8 +239,7 @@ int vine_datavine_index_put_edata(struct vine_datavine_index *index,
 		size_t metadata_size, const unsigned char *payload,
 		size_t payload_size)
 {
-	if (!valid_hash(content_hash) || !valid_hash(serialized_hash)
-			|| (!metadata && metadata_size) || (!payload && payload_size)) {
+	if (!valid_hash(content_hash) || !valid_hash(serialized_hash) || (!metadata && metadata_size) || (!payload && payload_size)) {
 		return 0;
 	}
 	struct vine_datavine_slot *slot = get_slot(index, data_id, 1);
@@ -250,12 +249,7 @@ int vine_datavine_index_put_edata(struct vine_datavine_index *index,
 	pthread_mutex_t *shard = get_shard(index, data_id);
 	pthread_mutex_lock(shard);
 	if (slot->edata_content_hash[0]) {
-		int matches = slot->edata_metadata_size == metadata_size
-			&& slot->edata_payload_size == payload_size
-			&& !strcmp(slot->edata_content_hash, content_hash)
-			&& !strcmp(slot->edata_serialized_hash, serialized_hash)
-			&& (!metadata_size || !memcmp(slot->edata_metadata, metadata, metadata_size))
-			&& (!payload_size || !memcmp(slot->edata_payload, payload, payload_size));
+		int matches = slot->edata_metadata_size == metadata_size && slot->edata_payload_size == payload_size && !strcmp(slot->edata_content_hash, content_hash) && !strcmp(slot->edata_serialized_hash, serialized_hash) && (!metadata_size || !memcmp(slot->edata_metadata, metadata, metadata_size)) && (!payload_size || !memcmp(slot->edata_payload, payload, payload_size));
 		pthread_mutex_unlock(shard);
 		return matches;
 	}
@@ -289,8 +283,7 @@ int vine_datavine_index_get_edata(struct vine_datavine_index *index,
 		size_t *metadata_size, unsigned char **payload,
 		size_t *payload_size)
 {
-	if (!content_hash || !serialized_hash || !metadata || !metadata_size
-			|| !payload || !payload_size) {
+	if (!content_hash || !serialized_hash || !metadata || !metadata_size || !payload || !payload_size) {
 		return 0;
 	}
 	struct vine_datavine_slot *slot = get_slot(index, data_id, 0);

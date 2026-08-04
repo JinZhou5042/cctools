@@ -89,6 +89,7 @@ class ControllerState(
         self._edata_consumers = {}
         self._publications = 0
         self._persistence = None
+        self.native_journal_path = None
         self._persistence_failures = {}
         self._persistence_active = 0
         self._persistence_max_active = 0
@@ -144,6 +145,9 @@ class ControllerState(
                 queue_capacity,
                 terminal_capacity,
                 transition_hook,
+            )
+            self.native_journal_path = str(
+                self._persistence.root / "controller-native.wal"
             )
             self.pruning.configure_filesystem(root)
 

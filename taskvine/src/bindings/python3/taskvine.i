@@ -86,6 +86,22 @@ into a swig function f(data) */
 				"invalidations", metrics.invalidations,
 				"stale_rejections", metrics.stale_rejections);
 	}
+
+	PyObject *vine_datavine_rpc_server_journal_metrics_as_dict(struct vine_datavine_rpc_server *server) {
+		struct vine_datavine_journal_metrics metrics = {0};
+		vine_datavine_rpc_server_get_journal_metrics(server, &metrics);
+		return Py_BuildValue(
+				"{s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K}",
+				"commits", metrics.commits,
+				"bytes", metrics.bytes,
+				"syncs", metrics.syncs,
+				"sync_nanoseconds", metrics.sync_nanoseconds,
+				"maximum_group", metrics.maximum_group,
+				"waits", metrics.waits,
+				"replayed", metrics.replayed,
+				"truncated_tails", metrics.truncated_tails,
+				"durable_sequence", metrics.durable_sequence);
+	}
 %}
 
 %include "stdint.i"

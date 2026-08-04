@@ -14,6 +14,25 @@ struct stress_args {
 	int failed;
 };
 
+static void *hot_source_stress(void *arg)
+{
+	struct stress_args *worker = arg;
+	char destination[32];
+	snprintf(destination, sizeof(destination), "destination-%d", worker->thread);
+	for (int i = 0; i < STRESS_RECORDS_PER_THREAD; i++) {
+		char transfer_id[64];
+		snprintf(transfer_id, sizeof(transfer_id), "taskvine:hot-%d-%d", worker->thread, i);
+		struct vine_datavine_source_record source;
+		int resolved = vine_datavine_directory_resolve_source(worker->directory, 'i', 1, destination, 1, transfer_id, 0, &source);
+		if (!resolved || strcmp(source.replica.worker_id, "hot-source") ||
+				!vine_datavine_directory_release_source(worker->directory, transfer_id, 1)) {
+			worker->failed = 1;
+			break;
+		}
+	}
+	return 0;
+}
+
 static double monotonic_seconds(void)
 {
 	struct timespec value;
@@ -73,7 +92,7 @@ int main(void)
 	failed |= !vine_datavine_directory_resolve_source(directory, 'i', 1, "w3", 1, "taskvine:t1", 0, &source1);
 	failed |= strcmp(source1.replica.worker_id, "w2");
 	failed |= vine_datavine_directory_replica_active_leases(
-			directory, 'i', 1, "r2") != 1;
+				  directory, 'i', 1, "r2") != 1;
 	struct vine_datavine_source_record duplicate;
 	failed |= !vine_datavine_directory_resolve_source(directory, 'i', 1, "w3", 1, "taskvine:t1", 0, &duplicate);
 	failed |= strcmp(duplicate.replica.replica_id, source1.replica.replica_id);
@@ -81,12 +100,12 @@ int main(void)
 	failed |= strcmp(source2.replica.worker_id, "w1");
 	failed |= !vine_datavine_directory_release_source(directory, "taskvine:t2", 1);
 	failed |= vine_datavine_directory_replica_active_leases(
-			directory, 'i', 1, "r1") != 0;
+				  directory, 'i', 1, "r1") != 0;
 	failed |= !vine_datavine_directory_release_source(directory, "taskvine:t2", 1);
 	failed |= vine_datavine_directory_release_source(directory, "taskvine:t2", 0);
 	failed |= !vine_datavine_directory_disconnect_worker(directory, "w2", 1);
 	failed |= vine_datavine_directory_replica_active_leases(
-			directory, 'i', 1, "r2") != 0;
+				  directory, 'i', 1, "r2") != 0;
 	failed |= !vine_datavine_directory_release_source(directory, "taskvine:t1", 0);
 	failed |= !claim(directory, "w2", 2);
 	struct vine_datavine_replica_record replacement;
@@ -140,6 +159,34 @@ int main(void)
 	uint64_t operations = STRESS_THREADS * STRESS_RECORDS_PER_THREAD;
 	failed |= metrics.replicas != operations || metrics.active_leases != 0;
 	printf("concurrent_records=%llu seconds=%.6f records_per_second=%.0f\n",
+			(unsigned long long)operations,
+			elapsed,
+			operations / elapsed);
+	vine_datavine_directory_delete(directory);
+	directory = vine_datavine_directory_create(
+			STRESS_THREADS + 1, 1, STRESS_THREADS * 2, 1024, 256);
+	failed |= !directory;
+	failed |= !claim(directory, "hot-source", 1);
+	struct vine_datavine_replica_record hot_replica;
+	failed |= !publish(directory, "hot-source", 1, "hot-replica", 1, VINE_DATAVINE_WORKER_DRAM, &hot_replica);
+	for (int i = 0; i < STRESS_THREADS; i++) {
+		char destination[32];
+		snprintf(destination, sizeof(destination), "destination-%d", i);
+		failed |= !claim(directory, destination, 1);
+		arguments[i] = (struct stress_args){directory, i, 0};
+	}
+	started = monotonic_seconds();
+	for (int i = 0; i < STRESS_THREADS; i++) {
+		pthread_create(&threads[i], 0, hot_source_stress, &arguments[i]);
+	}
+	for (int i = 0; i < STRESS_THREADS; i++) {
+		pthread_join(threads[i], 0);
+		failed |= arguments[i].failed;
+	}
+	elapsed = monotonic_seconds() - started;
+	vine_datavine_directory_get_metrics(directory, &metrics);
+	failed |= metrics.active_leases != 0;
+	printf("hot_source_records=%llu seconds=%.6f records_per_second=%.0f\n",
 			(unsigned long long)operations,
 			elapsed,
 			operations / elapsed);

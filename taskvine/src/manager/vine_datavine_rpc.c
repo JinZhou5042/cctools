@@ -7,6 +7,7 @@ See the file COPYING for details.
 #include "vine_datavine_rpc.h"
 #include "vine_datavine_directory.h"
 #include "vine_datavine_index.h"
+#include "vine_datavine_journal.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -59,6 +60,9 @@ struct vine_datavine_rpc_server {
 	struct rpc_thread *threads;
 	struct vine_datavine_index *index;
 	struct vine_datavine_directory *directory;
+	struct vine_datavine_journal *journal;
+	pthread_mutex_t mutation_lock;
+	int mutation_lock_initialized;
 	atomic_int stopping;
 };
 
@@ -75,8 +79,18 @@ int64_t vine_datavine_rpc_server_replica_active_leases(
 		struct vine_datavine_rpc_server *server, char kind, int64_t data_id,
 		const char *replica_id)
 {
-	return server ? vine_datavine_directory_replica_active_leases(
-			server->directory, kind, data_id, replica_id) : -1;
+	if (!server) {
+		return -1;
+	}
+	return vine_datavine_directory_replica_active_leases(
+			server->directory, kind, data_id, replica_id);
+}
+
+void vine_datavine_rpc_server_get_journal_metrics(
+		struct vine_datavine_rpc_server *server,
+		struct vine_datavine_journal_metrics *result)
+{
+	vine_datavine_journal_get_metrics(server ? server->journal : 0, result);
 }
 
 uint32_t vine_datavine_rpc_get_u32(const unsigned char *buffer)
@@ -236,8 +250,7 @@ static uint32_t register_edata(struct vine_datavine_rpc_server *server,
 		int64_t data_id = (int64_t)vine_datavine_rpc_get_u64(payload + offset);
 		uint32_t metadata_size = vine_datavine_rpc_get_u32(payload + offset + 8);
 		uint64_t data_size = vine_datavine_rpc_get_u64(payload + offset + 12);
-		if (data_size > SIZE_MAX || metadata_size > size - offset - 148
-				|| data_size > size - offset - 148 - metadata_size) {
+		if (data_size > SIZE_MAX || metadata_size > size - offset - 148 || data_size > size - offset - 148 - metadata_size) {
 			return VINE_DATAVINE_RPC_INVALID;
 		}
 		const unsigned char *content_hash = payload + offset + 20;
@@ -250,9 +263,7 @@ static uint32_t register_edata(struct vine_datavine_rpc_server *server,
 		serialized[64] = 0;
 		const unsigned char *metadata = payload + offset + 148;
 		const unsigned char *data = metadata + metadata_size;
-		if (!vine_datavine_index_put_edata(server->index, data_id,
-				content, serialized, metadata, metadata_size,
-				data, (size_t)data_size)) {
+		if (!vine_datavine_index_put_edata(server->index, data_id, content, serialized, metadata, metadata_size, data, (size_t)data_size)) {
 			vine_datavine_rpc_put_u32(result, i);
 			return VINE_DATAVINE_RPC_REJECTED;
 		}
@@ -278,14 +289,13 @@ static uint32_t get_edata(struct vine_datavine_rpc_server *server,
 	unsigned char *payload = 0;
 	size_t metadata_size = 0;
 	size_t payload_size = 0;
-	if (!vine_datavine_index_get_edata(server->index,
-			(int64_t)vine_datavine_rpc_get_u64(request),
-			content_hash, serialized_hash, &metadata, &metadata_size,
-			&payload, &payload_size)) {
+	int64_t data_id = (int64_t)vine_datavine_rpc_get_u64(request);
+	int found = vine_datavine_index_get_edata(
+			server->index, data_id, content_hash, serialized_hash, &metadata, &metadata_size, &payload, &payload_size);
+	if (!found) {
 		return VINE_DATAVINE_RPC_NOT_FOUND;
 	}
-	if (metadata_size > UINT32_MAX
-			|| payload_size > DATAVINE_RPC_MAX_PAYLOAD - 140 - metadata_size) {
+	if (metadata_size > UINT32_MAX || payload_size > DATAVINE_RPC_MAX_PAYLOAD - 140 - metadata_size) {
 		free(metadata);
 		free(payload);
 		return VINE_DATAVINE_RPC_INTERNAL;
@@ -538,8 +548,7 @@ static uint32_t invalidate_replica(struct vine_datavine_rpc_server *server,
 	char kind = (char)payload[0];
 	uint16_t replica_length = get_u16(payload + 2);
 	int64_t data_id = (int64_t)vine_datavine_rpc_get_u64(payload + 8);
-	if (!replica_length || replica_length > VINE_DATAVINE_REPLICA_ID_MAX
-			|| size != 16 + (size_t)replica_length) {
+	if (!replica_length || replica_length > VINE_DATAVINE_REPLICA_ID_MAX || size != 16 + (size_t)replica_length) {
 		return VINE_DATAVINE_RPC_INVALID;
 	}
 	char replica[VINE_DATAVINE_REPLICA_ID_MAX + 1];
@@ -553,12 +562,72 @@ static uint32_t invalidate_replica(struct vine_datavine_rpc_server *server,
 	return invalidated ? VINE_DATAVINE_RPC_OK : VINE_DATAVINE_RPC_NOT_FOUND;
 }
 
+static uint32_t dispatch_request(struct vine_datavine_rpc_server *server,
+		uint16_t opcode, const unsigned char *payload, size_t payload_size,
+		unsigned char result[8], unsigned char **dynamic_result,
+		size_t *result_size)
+{
+	uint32_t status = VINE_DATAVINE_RPC_OK;
+	if (opcode == VINE_DATAVINE_RPC_PING) {
+		status = payload_size ? VINE_DATAVINE_RPC_INVALID : VINE_DATAVINE_RPC_OK;
+	} else if (opcode == VINE_DATAVINE_RPC_ALLOCATE_BATCH) {
+		status = allocate_batch(server, payload, payload_size, result);
+		*result_size = 4;
+	} else if (opcode == VINE_DATAVINE_RPC_PUBLISH_BATCH) {
+		status = publish_batch(server, payload, payload_size, result);
+		*result_size = 4;
+	} else if (opcode == VINE_DATAVINE_RPC_CLAIM_WORKER) {
+		status = claim_worker(server, payload, payload_size, result);
+		*result_size = status == VINE_DATAVINE_RPC_OK ? 8 : 0;
+	} else if (opcode == VINE_DATAVINE_RPC_PUBLISH_OUTPUTS) {
+		status = publish_outputs(server, payload, payload_size, dynamic_result, result_size);
+	} else if (opcode == VINE_DATAVINE_RPC_DISCONNECT_WORKER) {
+		status = disconnect_worker(server, payload, payload_size);
+	} else if (opcode == VINE_DATAVINE_RPC_REPORT_REPLICA) {
+		status = report_replica(server, payload, payload_size, result);
+		*result_size = status == VINE_DATAVINE_RPC_OK ? 8 : 0;
+	} else if (opcode == VINE_DATAVINE_RPC_RESOLVE_SOURCE) {
+		status = resolve_source(server, payload, payload_size, dynamic_result, result_size);
+	} else if (opcode == VINE_DATAVINE_RPC_RELEASE_SOURCE) {
+		status = release_source(server, payload, payload_size);
+	} else if (opcode == VINE_DATAVINE_RPC_REGISTER_EDATA) {
+		status = register_edata(server, payload, payload_size, result);
+		*result_size = 4;
+	} else if (opcode == VINE_DATAVINE_RPC_GET_EDATA) {
+		status = get_edata(server, payload, payload_size, dynamic_result, result_size);
+	} else if (opcode == VINE_DATAVINE_RPC_INVALIDATE_REPLICA) {
+		status = invalidate_replica(server, payload, payload_size);
+	} else {
+		status = VINE_DATAVINE_RPC_INVALID;
+	}
+	return status;
+}
+
+static int persistent_opcode(uint16_t opcode)
+{
+	return opcode == VINE_DATAVINE_RPC_ALLOCATE_BATCH || opcode == VINE_DATAVINE_RPC_PUBLISH_BATCH || opcode == VINE_DATAVINE_RPC_CLAIM_WORKER || opcode == VINE_DATAVINE_RPC_PUBLISH_OUTPUTS || opcode == VINE_DATAVINE_RPC_DISCONNECT_WORKER || opcode == VINE_DATAVINE_RPC_REPORT_REPLICA || opcode == VINE_DATAVINE_RPC_REGISTER_EDATA || opcode == VINE_DATAVINE_RPC_INVALIDATE_REPLICA;
+}
+
+static int replay_request(void *context, uint16_t opcode,
+		const unsigned char *payload, size_t payload_size)
+{
+	struct vine_datavine_rpc_server *server = context;
+	unsigned char result[8];
+	unsigned char *dynamic_result = 0;
+	size_t result_size = 0;
+	uint32_t status = persistent_opcode(opcode)
+					  ? dispatch_request(server, opcode, payload, payload_size, result, &dynamic_result, &result_size)
+					  : VINE_DATAVINE_RPC_INVALID;
+	free(dynamic_result);
+	return status == VINE_DATAVINE_RPC_OK;
+}
+
 static int process_request(struct vine_datavine_rpc_server *server, struct rpc_connection *connection)
 {
 	const unsigned char *header = connection->header;
 	uint16_t opcode = (uint16_t)((header[6] << 8) | header[7]);
 	uint64_t request_id = vine_datavine_rpc_get_u64(header + 12);
-	uint32_t status = VINE_DATAVINE_RPC_OK;
+	uint32_t status;
 	unsigned char result[8];
 	unsigned char *dynamic_result = 0;
 	size_t result_size = 0;
@@ -567,41 +636,21 @@ static int process_request(struct vine_datavine_rpc_server *server, struct rpc_c
 			status = VINE_DATAVINE_RPC_UNAUTHORIZED;
 		} else {
 			connection->authorized = 1;
+			status = VINE_DATAVINE_RPC_OK;
 		}
-	} else if (opcode == VINE_DATAVINE_RPC_PING) {
-		status = connection->payload_size ? VINE_DATAVINE_RPC_INVALID : VINE_DATAVINE_RPC_OK;
-	} else if (opcode == VINE_DATAVINE_RPC_ALLOCATE_BATCH) {
-		status = allocate_batch(server, connection->payload, connection->payload_size, result);
-		result_size = 4;
-	} else if (opcode == VINE_DATAVINE_RPC_PUBLISH_BATCH) {
-		status = publish_batch(server, connection->payload, connection->payload_size, result);
-		result_size = 4;
-	} else if (opcode == VINE_DATAVINE_RPC_CLAIM_WORKER) {
-		status = claim_worker(server, connection->payload, connection->payload_size, result);
-		result_size = status == VINE_DATAVINE_RPC_OK ? 8 : 0;
-	} else if (opcode == VINE_DATAVINE_RPC_PUBLISH_OUTPUTS) {
-		status = publish_outputs(server, connection->payload, connection->payload_size, &dynamic_result, &result_size);
-	} else if (opcode == VINE_DATAVINE_RPC_DISCONNECT_WORKER) {
-		status = disconnect_worker(server, connection->payload, connection->payload_size);
-	} else if (opcode == VINE_DATAVINE_RPC_REPORT_REPLICA) {
-		status = report_replica(server, connection->payload, connection->payload_size, result);
-		result_size = status == VINE_DATAVINE_RPC_OK ? 8 : 0;
-	} else if (opcode == VINE_DATAVINE_RPC_RESOLVE_SOURCE) {
-		status = resolve_source(server, connection->payload, connection->payload_size, &dynamic_result, &result_size);
-	} else if (opcode == VINE_DATAVINE_RPC_RELEASE_SOURCE) {
-		status = release_source(server, connection->payload, connection->payload_size);
-	} else if (opcode == VINE_DATAVINE_RPC_REGISTER_EDATA) {
-		status = register_edata(server, connection->payload,
-				connection->payload_size, result);
-		result_size = 4;
-	} else if (opcode == VINE_DATAVINE_RPC_GET_EDATA) {
-		status = get_edata(server, connection->payload,
-				connection->payload_size, &dynamic_result, &result_size);
-	} else if (opcode == VINE_DATAVINE_RPC_INVALIDATE_REPLICA) {
-		status = invalidate_replica(server, connection->payload,
-				connection->payload_size);
 	} else {
-		status = VINE_DATAVINE_RPC_INVALID;
+		int persistent = server->journal && persistent_opcode(opcode);
+		if (persistent) {
+			pthread_mutex_lock(&server->mutation_lock);
+		}
+		status = dispatch_request(server, opcode, connection->payload, connection->payload_size, result, &dynamic_result, &result_size);
+		if (status == VINE_DATAVINE_RPC_OK && persistent && !vine_datavine_journal_append(server->journal, opcode, connection->payload, connection->payload_size)) {
+			status = VINE_DATAVINE_RPC_INTERNAL;
+			result_size = 0;
+		}
+		if (persistent) {
+			pthread_mutex_unlock(&server->mutation_lock);
+		}
 	}
 	int created = response_create(connection, opcode, status, request_id, dynamic_result ? dynamic_result : result, result_size);
 	free(dynamic_result);
@@ -760,7 +809,8 @@ static int listen_socket(const char *host, int port, int *bound_port)
 }
 
 struct vine_datavine_rpc_server *vine_datavine_rpc_server_create(
-		const char *host, int port, const char *token, int threads, int64_t maximum_data_id)
+		const char *host, int port, const char *token, int threads,
+		int64_t maximum_data_id, const char *journal_path)
 {
 	if (!token || !token[0] || threads < 1 || maximum_data_id < 1 || (uint64_t)maximum_data_id > UINT64_MAX / 4) {
 		return 0;
@@ -770,6 +820,11 @@ struct vine_datavine_rpc_server *vine_datavine_rpc_server_create(
 		return 0;
 	}
 	server->listen_fd = -1;
+	if (pthread_mutex_init(&server->mutation_lock, 0)) {
+		free(server);
+		return 0;
+	}
+	server->mutation_lock_initialized = 1;
 	server->token = strdup(token);
 	server->token_length = strlen(token);
 	server->thread_count = 0;
@@ -777,8 +832,11 @@ struct vine_datavine_rpc_server *vine_datavine_rpc_server_create(
 	server->index = vine_datavine_index_create(maximum_data_id, 256);
 	server->directory = vine_datavine_directory_create(
 			1000000, (uint64_t)maximum_data_id * 4, 1000000, 65536, 256);
+	server->journal = journal_path && journal_path[0]
+					  ? vine_datavine_journal_open(journal_path)
+					  : 0;
 	server->listen_fd = listen_socket(host, port, &server->port);
-	if (!server->token || !server->threads || !server->index || !server->directory || server->listen_fd < 0) {
+	if (!server->token || !server->threads || !server->index || !server->directory || (journal_path && journal_path[0] && !server->journal) || (server->journal && !vine_datavine_journal_replay(server->journal, replay_request, server)) || server->listen_fd < 0) {
 		vine_datavine_rpc_server_delete(server);
 		return 0;
 	}
@@ -819,6 +877,10 @@ void vine_datavine_rpc_server_delete(struct vine_datavine_rpc_server *server)
 	}
 	vine_datavine_index_delete(server->index);
 	vine_datavine_directory_delete(server->directory);
+	vine_datavine_journal_close(server->journal);
+	if (server->mutation_lock_initialized) {
+		pthread_mutex_destroy(&server->mutation_lock);
+	}
 	free(server->threads);
 	free(server->token);
 	free(server);
