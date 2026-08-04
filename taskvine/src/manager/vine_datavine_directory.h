@@ -1,6 +1,7 @@
 #ifndef VINE_DATAVINE_DIRECTORY_H
 #define VINE_DATAVINE_DIRECTORY_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define VINE_DATAVINE_WORKER_ID_MAX 255
@@ -42,6 +43,12 @@ struct vine_datavine_source_record {
 	char transfer_id[VINE_DATAVINE_TRANSFER_ID_MAX + 1];
 };
 
+struct vine_datavine_replica_snapshot {
+	struct vine_datavine_replica_record replica;
+	int state;
+	char endpoint[VINE_DATAVINE_ENDPOINT_MAX + 1];
+};
+
 struct vine_datavine_directory_metrics {
 	uint64_t workers;
 	uint64_t replicas;
@@ -52,6 +59,8 @@ struct vine_datavine_directory_metrics {
 	uint64_t release_failures;
 	uint64_t idempotent_releases;
 	uint64_t invalidations;
+	uint64_t restorations;
+	uint64_t prunes;
 	uint64_t stale_rejections;
 };
 
@@ -80,9 +89,18 @@ int vine_datavine_directory_release_source(struct vine_datavine_directory *direc
 int vine_datavine_directory_invalidate_replica(
 		struct vine_datavine_directory *directory, char kind, int64_t data_id,
 		const char *replica_id);
+int vine_datavine_directory_restore_replica(
+		struct vine_datavine_directory *directory, char kind, int64_t data_id,
+		const char *replica_id);
+int vine_datavine_directory_confirm_replica_pruned(
+		struct vine_datavine_directory *directory, char kind, int64_t data_id,
+		const char *replica_id);
 int64_t vine_datavine_directory_replica_active_leases(
 		struct vine_datavine_directory *directory, char kind, int64_t data_id,
 		const char *replica_id);
+int vine_datavine_directory_snapshot_replicas(
+		struct vine_datavine_directory *directory, char kind, int64_t data_id,
+		struct vine_datavine_replica_snapshot **result, size_t *count);
 void vine_datavine_directory_get_metrics(struct vine_datavine_directory *directory,
 		struct vine_datavine_directory_metrics *result);
 

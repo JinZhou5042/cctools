@@ -27,6 +27,7 @@ struct replica {
 	struct worker *worker;
 	atomic_uint_fast64_t active_leases;
 	int available;
+	int pruned;
 	struct replica *next;
 };
 
@@ -185,7 +186,7 @@ static int complete_lease_locked(struct vine_datavine_directory *directory,
 		if (matches) {
 			__sync_fetch_and_add(&directory->metrics.idempotent_releases, 1);
 		}
-		return matches;
+		return matches ? 1 : -1;
 	}
 	uint_fast64_t active = atomic_load(&lease->replica->active_leases);
 	while (active && !atomic_compare_exchange_weak(
@@ -513,6 +514,7 @@ int vine_datavine_directory_publish_replica(struct vine_datavine_directory *dire
 		entry->replicas = replica;
 	}
 	replica->available = 1;
+	replica->pruned = 0;
 	replica->record.kind = kind;
 	replica->record.data_id = data_id;
 	replica->record.generation = generation + 1;
@@ -651,6 +653,7 @@ int vine_datavine_directory_invalidate_replica(
 	for (struct replica *item = entry ? entry->replicas : 0; item; item = item->next) {
 		if (item->available && !strcmp(item->record.replica_id, replica_id)) {
 			item->available = 0;
+			item->pruned = 0;
 			__sync_fetch_and_add(&directory->metrics.invalidations, 1);
 			pthread_rwlock_unlock(&shard->lock);
 			return 1;
@@ -658,6 +661,80 @@ int vine_datavine_directory_invalidate_replica(
 	}
 	pthread_rwlock_unlock(&shard->lock);
 	return 0;
+}
+
+int vine_datavine_directory_restore_replica(
+		struct vine_datavine_directory *directory, char kind, int64_t data_id,
+		const char *replica_id)
+{
+	if (!directory || (kind != 'e' && kind != 'i') || data_id < 1 || !valid_text(replica_id, VINE_DATAVINE_REPLICA_ID_MAX)) {
+		return -1;
+	}
+	uint64_t key = data_key(kind, data_id);
+	struct directory_shard *shard = get_shard(directory, key);
+	pthread_rwlock_wrlock(&shard->lock);
+	struct data_entry *entry = itable_lookup(shard->data, key);
+	struct replica *latest = 0;
+	for (struct replica *item = entry ? entry->replicas : 0; item; item = item->next) {
+		if (!strcmp(item->record.replica_id, replica_id) &&
+				(!latest || item->record.generation > latest->record.generation)) {
+			latest = item;
+		}
+	}
+	if (!latest) {
+		pthread_rwlock_unlock(&shard->lock);
+		return 0;
+	}
+	if (latest->available) {
+		pthread_rwlock_unlock(&shard->lock);
+		return 1;
+	}
+	if (latest->pruned || latest->record.attempt != entry->latest_attempt ||
+			!atomic_load(&latest->worker->active) ||
+			atomic_load(&latest->worker->epoch) != latest->record.worker_epoch) {
+		pthread_rwlock_unlock(&shard->lock);
+		return -1;
+	}
+	latest->available = 1;
+	__sync_fetch_and_add(&directory->metrics.restorations, 1);
+	pthread_rwlock_unlock(&shard->lock);
+	return 1;
+}
+
+int vine_datavine_directory_confirm_replica_pruned(
+		struct vine_datavine_directory *directory, char kind, int64_t data_id,
+		const char *replica_id)
+{
+	if (!directory || (kind != 'e' && kind != 'i') || data_id < 1 || !valid_text(replica_id, VINE_DATAVINE_REPLICA_ID_MAX)) {
+		return -1;
+	}
+	uint64_t key = data_key(kind, data_id);
+	struct directory_shard *shard = get_shard(directory, key);
+	pthread_rwlock_wrlock(&shard->lock);
+	struct data_entry *entry = itable_lookup(shard->data, key);
+	struct replica *latest = 0;
+	for (struct replica *item = entry ? entry->replicas : 0; item; item = item->next) {
+		if (!strcmp(item->record.replica_id, replica_id) &&
+				(!latest || item->record.generation > latest->record.generation)) {
+			latest = item;
+		}
+	}
+	if (!latest) {
+		pthread_rwlock_unlock(&shard->lock);
+		return 0;
+	}
+	if (latest->pruned) {
+		pthread_rwlock_unlock(&shard->lock);
+		return 1;
+	}
+	if (latest->available || atomic_load(&latest->active_leases)) {
+		pthread_rwlock_unlock(&shard->lock);
+		return -1;
+	}
+	latest->pruned = 1;
+	__sync_fetch_and_add(&directory->metrics.prunes, 1);
+	pthread_rwlock_unlock(&shard->lock);
+	return 1;
 }
 
 int64_t vine_datavine_directory_replica_active_leases(
@@ -682,6 +759,42 @@ int64_t vine_datavine_directory_replica_active_leases(
 	return -1;
 }
 
+int vine_datavine_directory_snapshot_replicas(
+		struct vine_datavine_directory *directory, char kind, int64_t data_id,
+		struct vine_datavine_replica_snapshot **result, size_t *count)
+{
+	if (!directory || (kind != 'e' && kind != 'i') || data_id < 1 || !result || !count) {
+		return 0;
+	}
+	*result = 0;
+	*count = 0;
+	uint64_t key = data_key(kind, data_id);
+	struct directory_shard *shard = get_shard(directory, key);
+	pthread_rwlock_rdlock(&shard->lock);
+	struct data_entry *entry = itable_lookup(shard->data, key);
+	size_t length = 0;
+	for (struct replica *item = entry ? entry->replicas : 0; item; item = item->next) {
+		length++;
+	}
+	struct vine_datavine_replica_snapshot *records = length ? calloc(length, sizeof(*records)) : 0;
+	if (length && !records) {
+		pthread_rwlock_unlock(&shard->lock);
+		return 0;
+	}
+	size_t index = 0;
+	for (struct replica *item = entry ? entry->replicas : 0; item; item = item->next) {
+		records[index].replica = item->record;
+		records[index].replica.active_leases = atomic_load(&item->active_leases);
+		records[index].state = item->pruned ? 2 : item->available && atomic_load(&item->worker->active) && atomic_load(&item->worker->epoch) == item->record.worker_epoch;
+		strcpy(records[index].endpoint, item->endpoint);
+		index++;
+	}
+	pthread_rwlock_unlock(&shard->lock);
+	*result = records;
+	*count = length;
+	return 1;
+}
+
 void vine_datavine_directory_get_metrics(struct vine_datavine_directory *directory,
 		struct vine_datavine_directory_metrics *result)
 {
@@ -697,5 +810,7 @@ void vine_datavine_directory_get_metrics(struct vine_datavine_directory *directo
 	result->release_failures = __sync_fetch_and_add(&directory->metrics.release_failures, 0);
 	result->idempotent_releases = __sync_fetch_and_add(&directory->metrics.idempotent_releases, 0);
 	result->invalidations = __sync_fetch_and_add(&directory->metrics.invalidations, 0);
+	result->restorations = __sync_fetch_and_add(&directory->metrics.restorations, 0);
+	result->prunes = __sync_fetch_and_add(&directory->metrics.prunes, 0);
 	result->stale_rejections = __sync_fetch_and_add(&directory->metrics.stale_rejections, 0);
 }

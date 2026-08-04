@@ -129,7 +129,6 @@ class InputResolver:
             and self.transfer_faults
             and self.client.claim_release_failure()
         ):
-            self.client.defer_native_release(lease_id)
             self.emit(
                 "DATAVINE_PEER_RELEASE_PENDING "
                 + json.dumps(

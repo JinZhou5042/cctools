@@ -74,7 +74,7 @@ into a swig function f(data) */
 		struct vine_datavine_directory_metrics metrics = {0};
 		vine_datavine_rpc_server_get_metrics(server, &metrics);
 		return Py_BuildValue(
-				"{s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K}",
+				"{s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K}",
 				"workers", metrics.workers,
 				"replicas", metrics.replicas,
 				"active_leases", metrics.active_leases,
@@ -84,6 +84,8 @@ into a swig function f(data) */
 				"release_failures", metrics.release_failures,
 				"idempotent_releases", metrics.idempotent_releases,
 				"invalidations", metrics.invalidations,
+				"restorations", metrics.restorations,
+				"prunes", metrics.prunes,
 				"stale_rejections", metrics.stale_rejections);
 	}
 
@@ -101,6 +103,51 @@ into a swig function f(data) */
 				"replayed", metrics.replayed,
 				"truncated_tails", metrics.truncated_tails,
 				"durable_sequence", metrics.durable_sequence);
+	}
+
+	PyObject *vine_datavine_rpc_server_replicas_as_list(
+			struct vine_datavine_rpc_server *server, char kind, int64_t data_id) {
+		struct vine_datavine_replica_snapshot *records = 0;
+		size_t count = 0;
+		if (!vine_datavine_rpc_server_snapshot_replicas(
+				server, kind, data_id, &records, &count)) {
+			PyErr_SetString(PyExc_RuntimeError, "could not snapshot native replicas");
+			return 0;
+		}
+		PyObject *result = PyList_New((Py_ssize_t)count);
+		if (!result) {
+			free(records);
+			return 0;
+		}
+		for (size_t i = 0; i < count; i++) {
+			struct vine_datavine_replica_record *record = &records[i].replica;
+			char qualified[64];
+			snprintf(qualified, sizeof(qualified), "%c:%lld", record->kind, (long long)record->data_id);
+			const char *tier = record->tier == VINE_DATAVINE_WORKER_DRAM ? "worker-dram" : "worker-disk";
+			const char *state = records[i].state == 2 ? "pruned" : records[i].state ? "available" : record->active_leases ? "retiring" : "invalid";
+			PyObject *item = Py_BuildValue(
+					"{s:s,s:s,s:K,s:i,s:s,s:s,s:L,s:s,s:I,s:s,s:K,s:s}",
+					"data_id", qualified,
+					"replica_id", record->replica_id,
+					"generation", record->generation,
+					"attempt", record->attempt,
+					"tier", tier,
+					"content_hash", record->content_hash,
+					"size", (long long)record->size,
+					"state", state,
+					"load", record->active_leases,
+					"worker_id", record->worker_id,
+					"worker_epoch", record->worker_epoch,
+					"source_endpoint", records[i].endpoint);
+			if (!item) {
+				free(records);
+				Py_DECREF(result);
+				return 0;
+			}
+			PyList_SET_ITEM(result, (Py_ssize_t)i, item);
+		}
+		free(records);
+		return result;
 	}
 %}
 

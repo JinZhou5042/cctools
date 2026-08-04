@@ -4,6 +4,7 @@ import threading
 
 from ndcctools.taskvine import cvine
 
+from ..native import NativeControllerClient, NativeControllerError
 from .admission import ByteServingAdmission, BoundedThreadingHTTPServer
 from .handler import ControllerHandlerFactory
 from .faults import TransferFaults
@@ -37,6 +38,7 @@ class ControllerService:
         self._server = None
         self._thread = None
         self._native_server = None
+        self._native_client = None
         self.native_address = None
 
     def snapshot(self):
@@ -62,9 +64,11 @@ class ControllerService:
                     "source_selections"
                 ],
                 "stale_rejections": native["stale_rejections"],
+                "restorations": native["restorations"],
+                "prunes": native["prunes"],
             }
             for key, count in additions.items():
-                directory[key] += count
+                directory[key] = directory.get(key, 0) + count
             directory["native"] = native
             value["native_journal"] = (
                 cvine.vine_datavine_rpc_server_journal_metrics_as_dict(
@@ -84,21 +88,97 @@ class ControllerService:
         if self._native_server is None:
             return
         for data_id in data_ids:
+            native = {
+                record["replica_id"]: record
+                for record in self.worker_replicas(f"i:{int(data_id)}")
+            }
             for replica in self.state.replicas.records_for(
                 f"i:{int(data_id)}"
             ):
                 if replica.tier not in ("worker-dram", "worker-disk"):
                     continue
-                count = cvine.vine_datavine_rpc_server_replica_active_leases(
-                    self._native_server,
-                    "i",
-                    int(data_id),
-                    replica.replica_id,
+                current = native.get(replica.replica_id)
+                count = int(
+                    current["load"]
+                    if current is not None
+                    and current["generation"] == replica.generation
+                    else 0
                 )
-                if count >= 0:
-                    self.state.replicas.synchronize_active_leases(
-                        f"i:{int(data_id)}", replica.replica_id, count
-                    )
+                self.state.replicas.synchronize_active_leases(
+                    f"i:{int(data_id)}", replica.replica_id, count
+                )
+
+    def worker_replicas(self, data_id):
+        if self._native_server is None:
+            return []
+        kind, token = str(data_id).split(":", 1)
+        return cvine.vine_datavine_rpc_server_replicas_as_list(
+            self._native_server, kind, int(token)
+        )
+
+    def replica_records(self, data_id):
+        records = self.worker_replicas(data_id)
+        native_ids = {record["replica_id"] for record in records}
+        records.extend(
+            replica.source_dict()
+            for replica in self.state.replicas.records_for(data_id)
+            if replica.replica_id not in native_ids
+        )
+        return records
+
+    def replica_sources(self, data_id):
+        kind, token = str(data_id).split(":", 1)
+        native_records = self.worker_replicas(data_id)
+        records = [
+            record
+            for record in native_records
+            if record["state"] == "available"
+        ]
+        native_ids = {record["replica_id"] for record in native_records}
+        for record in records:
+            digest = (
+                self.state.get_edata(int(token)).serialized_sha256
+                if kind == "e"
+                else record["content_hash"]
+            )
+            record["source_url"] = (
+                f"{record['source_endpoint']}/data/{kind}/{int(token)}"
+                f"?sha256={digest}&size={record['size']}"
+            )
+        records.extend(
+            source
+            for source in self.state.replica_sources(data_id)
+            if source["replica_id"] not in native_ids
+        )
+        return records
+
+    def apply_native_pruning(self, result):
+        if self._native_client is None:
+            return
+        for record in (*result.get("applied", ()), *result.get("deferred", ())):
+            if record.get("action") not in (
+                "invalidate-worker-pending-delete",
+                "retiring-active-read",
+            ):
+                continue
+            try:
+                self._native_client.invalidate_replica(
+                    f"i:{int(record['data_id'])}", record["replica_id"]
+                )
+            except NativeControllerError as exc:
+                if exc.status != 5:
+                    raise
+        for record in result.get("cancelled", ()):
+            replica_id = record.get("replica_id")
+            if replica_id is None:
+                continue
+            try:
+                self._native_client.restore_replica(
+                    f"i:{int(record['data_id'])}", replica_id
+                )
+            except NativeControllerError as exc:
+                if exc.status != 5:
+                    raise
 
     def start(self):
         self._native_server = cvine.vine_datavine_rpc_server_create(
@@ -114,6 +194,10 @@ class ControllerService:
         self.native_address = (
             self.host,
             cvine.vine_datavine_rpc_server_port(self._native_server),
+        )
+        self._native_client = NativeControllerClient(
+            f"tcp://{self.native_address[0]}:{self.native_address[1]}",
+            self.token,
         )
         Handler = ControllerHandlerFactory.create(self)
 
@@ -143,6 +227,7 @@ class ControllerService:
             if self._thread.is_alive():
                 raise RuntimeError("Controller thread did not stop")
         self.state.stop()
+        self._native_client = None
         if self._native_server is not None:
             cvine.vine_datavine_rpc_server_delete(self._native_server)
             self._native_server = None

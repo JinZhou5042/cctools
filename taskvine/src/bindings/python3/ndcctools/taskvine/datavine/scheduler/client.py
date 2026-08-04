@@ -1,7 +1,6 @@
 """Scheduler-side client for the standalone Data Controller."""
 
 import base64
-import collections
 import http.client
 import json
 import re
@@ -11,6 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 import hashlib
 
@@ -57,8 +57,6 @@ class ControllerClient:
             if native_endpoint
             else None
         )
-        self._native_leases = collections.OrderedDict()
-        self._native_leases_lock = threading.Lock()
         self._native_edata_metadata = {}
         self._native_edata_pending = {}
         if (
@@ -682,11 +680,6 @@ class ControllerClient:
                     transfer_id,
                     next(iter(excluded_worker_ids), None),
                 )
-            with self._native_leases_lock:
-                self._native_leases[str(transfer_id)] = None
-                self._native_leases.move_to_end(str(transfer_id))
-                while len(self._native_leases) > 65536:
-                    self._native_leases.popitem(last=False)
             return resolved
         payload, _ = self._request(
             "POST",
@@ -712,6 +705,24 @@ class ControllerClient:
         destination_worker_id,
         destination_worker_epoch=1,
     ):
+        if self.native is not None:
+            transfer_id = f"taskvine:acquire-{uuid.uuid4().hex}"
+            resolved = self.native.resolve_source(
+                data_id,
+                destination_worker_id,
+                destination_worker_epoch,
+                transfer_id,
+            )
+            source = resolved["source"]
+            if (
+                source["replica_id"] != str(replica_id)
+                or source["generation"] != int(generation)
+            ):
+                self.native.release_source(transfer_id, False)
+                raise DataVineRemoteError(
+                    "native Controller selected a different source"
+                )
+            return resolved["lease"]
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/replicas/acquire",
@@ -729,16 +740,16 @@ class ControllerClient:
 
     def release_replica(self, lease_id, success):
         if self.native is not None:
-            with self._native_leases_lock:
-                native = str(lease_id) in self._native_leases
-                self._native_leases.pop(str(lease_id), None)
-            if native:
+            try:
                 self.native.release_source(lease_id, success)
                 return {
                     "lease_id": str(lease_id),
                     "active": False,
                     "success": bool(success),
                 }
+            except NativeControllerError as exc:
+                if exc.status != 5:
+                    raise
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/replicas/release",
@@ -756,7 +767,7 @@ class ControllerClient:
     ):
         if self.native is not None:
             try:
-                self.native.invalidate_replica(data_id, replica_id)
+                self.native.confirm_replica_pruned(data_id, replica_id)
             except NativeControllerError as exc:
                 if exc.status != 5:
                     raise
@@ -1124,12 +1135,6 @@ class ControllerClient:
                     query=urllib.parse.urlencode(query, doseq=True)
                 )
             )
-            with self._native_leases_lock:
-                lease_id = resolved["lease"]["lease_id"]
-                self._native_leases[lease_id] = None
-                self._native_leases.move_to_end(lease_id)
-                while len(self._native_leases) > 65536:
-                    self._native_leases.popitem(last=False)
             results[index] = {
                 "data_id": data_id,
                 "content_hash": info["content_hash"],
@@ -1359,9 +1364,6 @@ class ControllerClient:
             if response.status != 204:
                 raise DataVineRemoteError("worker source kill was rejected")
         time.sleep(0.05)
-
-    def defer_native_release(self, lease_id):
-        self._native_leases.pop(str(lease_id), None)
 
     def publish_idata(self, data_id, attempt, serialized_bytes):
         headers = {

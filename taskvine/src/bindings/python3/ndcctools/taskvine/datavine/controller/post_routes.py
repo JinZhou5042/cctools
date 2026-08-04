@@ -595,6 +595,7 @@ class PostRouteFactory:
                             request.get("data_ids"),
                             request.get("now"),
                         )
+                        owner.apply_native_pruning(result)
                     except Exception as exc:
                         self._error(400, exc)
                         return
@@ -613,6 +614,7 @@ class PostRouteFactory:
                             request["operation_id"],
                             request.get("data_ids")
                         )
+                        owner.apply_native_pruning(result)
                     except Exception as exc:
                         self._error(400, exc)
                         return

@@ -2,6 +2,7 @@
 
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -91,6 +92,20 @@ int main(void)
 	struct vine_datavine_source_record source2;
 	failed |= !vine_datavine_directory_resolve_source(directory, 'i', 1, "w3", 1, "taskvine:t1", 0, &source1);
 	failed |= strcmp(source1.replica.worker_id, "w2");
+	struct vine_datavine_replica_snapshot *snapshot = 0;
+	size_t snapshot_count = 0;
+	failed |= !vine_datavine_directory_snapshot_replicas(
+			directory, 'i', 1, &snapshot, &snapshot_count);
+	failed |= snapshot_count != 2;
+	int snapshot_lease_found = 0;
+	for (size_t i = 0; i < snapshot_count; i++) {
+		if (!strcmp(snapshot[i].replica.replica_id, "r2") &&
+				snapshot[i].replica.active_leases == 1 && snapshot[i].state == 1) {
+			snapshot_lease_found = 1;
+		}
+	}
+	failed |= !snapshot_lease_found;
+	free(snapshot);
 	failed |= vine_datavine_directory_replica_active_leases(
 				  directory, 'i', 1, "r2") != 1;
 	struct vine_datavine_source_record duplicate;
@@ -102,7 +117,7 @@ int main(void)
 	failed |= vine_datavine_directory_replica_active_leases(
 				  directory, 'i', 1, "r1") != 0;
 	failed |= !vine_datavine_directory_release_source(directory, "taskvine:t2", 1);
-	failed |= vine_datavine_directory_release_source(directory, "taskvine:t2", 0);
+	failed |= vine_datavine_directory_release_source(directory, "taskvine:t2", 0) != -1;
 	failed |= !vine_datavine_directory_disconnect_worker(directory, "w2", 1);
 	failed |= vine_datavine_directory_replica_active_leases(
 				  directory, 'i', 1, "r2") != 0;
@@ -114,6 +129,10 @@ int main(void)
 	failed |= replacement.generation != 2;
 	failed |= vine_datavine_directory_invalidate_replica(directory, 'i', 1, "r2") != 1;
 	failed |= vine_datavine_directory_invalidate_replica(directory, 'i', 1, "r2") != 0;
+	failed |= vine_datavine_directory_restore_replica(directory, 'i', 1, "r2") != 1;
+	failed |= vine_datavine_directory_invalidate_replica(directory, 'i', 1, "r2") != 1;
+	failed |= vine_datavine_directory_confirm_replica_pruned(directory, 'i', 1, "r2") != 1;
+	failed |= vine_datavine_directory_restore_replica(directory, 'i', 1, "r2") != -1;
 	failed |= !vine_datavine_directory_resolve_source(directory, 'i', 1, "w3", 1, "taskvine:t3", 0, &source2);
 	failed |= strcmp(source2.replica.worker_id, "w1");
 	failed |= !vine_datavine_directory_release_source(directory, "taskvine:t3", 1);
@@ -121,7 +140,7 @@ int main(void)
 	vine_datavine_directory_get_metrics(directory, &metrics);
 	failed |= metrics.workers != 3 || metrics.replicas != 3 || metrics.active_leases != 0;
 	failed |= metrics.source_selections != 3 || metrics.source_misses != 0;
-	failed |= metrics.invalidations != 1;
+	failed |= metrics.invalidations != 2 || metrics.restorations != 1 || metrics.prunes != 1;
 	failed |= metrics.stale_rejections < 1;
 	printf("workers=%llu replicas=%llu leases=%llu selections=%llu stale=%llu\n",
 			(unsigned long long)metrics.workers,

@@ -154,6 +154,14 @@ def main():
             },),
         )
         assert published[0]["generation"] == 1
+        replicas = service.worker_replicas("i:1")
+        assert len(replicas) == 1
+        assert replicas[0]["replica_id"] == published[0]["replica_id"]
+        assert replicas[0]["state"] == "available"
+        first.invalidate_replica("i:1", published[0]["replica_id"])
+        assert service.worker_replicas("i:1")[0]["state"] == "invalid"
+        first.restore_replica("i:1", published[0]["replica_id"])
+        assert service.worker_replicas("i:1")[0]["state"] == "available"
         service.stop()
 
         service = start(root)
@@ -166,6 +174,16 @@ def main():
         )
         assert source["source"]["worker_id"] == "source"
         recovered.release_source("restart-read", True)
+        recovered.invalidate_replica("i:1", published[0]["replica_id"])
+        recovered.confirm_replica_pruned(
+            "i:1", published[0]["replica_id"]
+        )
+        assert service.worker_replicas("i:1")[0]["state"] == "pruned"
+        service.stop()
+
+        service = start(root)
+        recovered = client(service)
+        assert service.worker_replicas("i:1")[0]["state"] == "pruned"
         recovered.disconnect_worker("source", 1)
         assert recovered.claim_worker("source", "http://source") == 2
         try:

@@ -75,15 +75,12 @@ void vine_datavine_rpc_server_get_metrics(
 	}
 }
 
-int64_t vine_datavine_rpc_server_replica_active_leases(
+int vine_datavine_rpc_server_snapshot_replicas(
 		struct vine_datavine_rpc_server *server, char kind, int64_t data_id,
-		const char *replica_id)
+		struct vine_datavine_replica_snapshot **result, size_t *count)
 {
-	if (!server) {
-		return -1;
-	}
-	return vine_datavine_directory_replica_active_leases(
-			server->directory, kind, data_id, replica_id);
+	return server && vine_datavine_directory_snapshot_replicas(
+					 server->directory, kind, data_id, result, count);
 }
 
 void vine_datavine_rpc_server_get_journal_metrics(
@@ -533,14 +530,19 @@ static uint32_t release_source(struct vine_datavine_rpc_server *server,
 	char transfer[VINE_DATAVINE_TRANSFER_ID_MAX + 1];
 	memcpy(transfer, payload + 8, transfer_length);
 	transfer[transfer_length] = 0;
-	if (!vine_datavine_directory_release_source(server->directory, transfer, success)) {
+	int released = vine_datavine_directory_release_source(
+			server->directory, transfer, success);
+	if (released < 0) {
 		return VINE_DATAVINE_RPC_REJECTED;
+	}
+	if (!released) {
+		return VINE_DATAVINE_RPC_NOT_FOUND;
 	}
 	return VINE_DATAVINE_RPC_OK;
 }
 
-static uint32_t invalidate_replica(struct vine_datavine_rpc_server *server,
-		const unsigned char *payload, size_t size)
+static uint32_t change_replica(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size, int operation)
 {
 	if (size < 16) {
 		return VINE_DATAVINE_RPC_INVALID;
@@ -554,12 +556,21 @@ static uint32_t invalidate_replica(struct vine_datavine_rpc_server *server,
 	char replica[VINE_DATAVINE_REPLICA_ID_MAX + 1];
 	memcpy(replica, payload + 16, replica_length);
 	replica[replica_length] = 0;
-	int invalidated = vine_datavine_directory_invalidate_replica(
-			server->directory, kind, data_id, replica);
-	if (invalidated < 0) {
+	int changed;
+	if (operation == 1) {
+		changed = vine_datavine_directory_restore_replica(
+				server->directory, kind, data_id, replica);
+	} else if (operation == 2) {
+		changed = vine_datavine_directory_confirm_replica_pruned(
+				server->directory, kind, data_id, replica);
+	} else {
+		changed = vine_datavine_directory_invalidate_replica(
+				server->directory, kind, data_id, replica);
+	}
+	if (changed < 0) {
 		return VINE_DATAVINE_RPC_INVALID;
 	}
-	return invalidated ? VINE_DATAVINE_RPC_OK : VINE_DATAVINE_RPC_NOT_FOUND;
+	return changed ? VINE_DATAVINE_RPC_OK : VINE_DATAVINE_RPC_NOT_FOUND;
 }
 
 static uint32_t dispatch_request(struct vine_datavine_rpc_server *server,
@@ -596,7 +607,11 @@ static uint32_t dispatch_request(struct vine_datavine_rpc_server *server,
 	} else if (opcode == VINE_DATAVINE_RPC_GET_EDATA) {
 		status = get_edata(server, payload, payload_size, dynamic_result, result_size);
 	} else if (opcode == VINE_DATAVINE_RPC_INVALIDATE_REPLICA) {
-		status = invalidate_replica(server, payload, payload_size);
+		status = change_replica(server, payload, payload_size, 0);
+	} else if (opcode == VINE_DATAVINE_RPC_RESTORE_REPLICA) {
+		status = change_replica(server, payload, payload_size, 1);
+	} else if (opcode == VINE_DATAVINE_RPC_CONFIRM_REPLICA_PRUNED) {
+		status = change_replica(server, payload, payload_size, 2);
 	} else {
 		status = VINE_DATAVINE_RPC_INVALID;
 	}
@@ -605,7 +620,7 @@ static uint32_t dispatch_request(struct vine_datavine_rpc_server *server,
 
 static int persistent_opcode(uint16_t opcode)
 {
-	return opcode == VINE_DATAVINE_RPC_ALLOCATE_BATCH || opcode == VINE_DATAVINE_RPC_PUBLISH_BATCH || opcode == VINE_DATAVINE_RPC_CLAIM_WORKER || opcode == VINE_DATAVINE_RPC_PUBLISH_OUTPUTS || opcode == VINE_DATAVINE_RPC_DISCONNECT_WORKER || opcode == VINE_DATAVINE_RPC_REPORT_REPLICA || opcode == VINE_DATAVINE_RPC_REGISTER_EDATA || opcode == VINE_DATAVINE_RPC_INVALIDATE_REPLICA;
+	return opcode == VINE_DATAVINE_RPC_ALLOCATE_BATCH || opcode == VINE_DATAVINE_RPC_PUBLISH_BATCH || opcode == VINE_DATAVINE_RPC_CLAIM_WORKER || opcode == VINE_DATAVINE_RPC_PUBLISH_OUTPUTS || opcode == VINE_DATAVINE_RPC_DISCONNECT_WORKER || opcode == VINE_DATAVINE_RPC_REPORT_REPLICA || opcode == VINE_DATAVINE_RPC_REGISTER_EDATA || opcode == VINE_DATAVINE_RPC_INVALIDATE_REPLICA || opcode == VINE_DATAVINE_RPC_RESTORE_REPLICA || opcode == VINE_DATAVINE_RPC_CONFIRM_REPLICA_PRUNED;
 }
 
 static int durable_opcode(uint16_t opcode)

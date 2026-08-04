@@ -21,6 +21,8 @@ _RELEASE_SOURCE = 10
 _REGISTER_EDATA = 11
 _GET_EDATA = 12
 _INVALIDATE_REPLICA = 13
+_RESTORE_REPLICA = 14
+_CONFIRM_REPLICA_PRUNED = 15
 _OK = 0
 _REJECTED = 3
 _MAX_BODY = 16 * 1024 * 1024
@@ -412,10 +414,21 @@ class NativeControllerClient:
         )
 
     def invalidate_replica(self, data_id, replica_id):
+        self._change_replica(_INVALIDATE_REPLICA, data_id, replica_id)
+
+    def restore_replica(self, data_id, replica_id):
+        self._change_replica(_RESTORE_REPLICA, data_id, replica_id)
+
+    def confirm_replica_pruned(self, data_id, replica_id):
+        self._change_replica(
+            _CONFIRM_REPLICA_PRUNED, data_id, replica_id
+        )
+
+    def _change_replica(self, opcode, data_id, replica_id):
         kind, token = str(data_id).split(":", 1)
         replica = str(replica_id).encode("utf-8")
         self.request(
-            _INVALIDATE_REPLICA,
+            opcode,
             struct.pack("!cxH4xq", kind.encode("ascii"), len(replica), int(token))
             + replica,
         )

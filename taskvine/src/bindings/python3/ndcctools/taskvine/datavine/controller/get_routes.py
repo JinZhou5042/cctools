@@ -217,9 +217,9 @@ class GetRouteFactory:
                     data_key = f"{pieces[0]}:{int(pieces[1])}"
                     try:
                         sources = (
-                            owner.state.replicas.records_for(data_key)
+                            owner.replica_records(data_key)
                             if records_only
-                            else owner.state.replica_sources(data_key)
+                            else owner.replica_sources(data_key)
                         )
                     except Exception as exc:
                         self._error(400, exc)
@@ -229,11 +229,7 @@ class GetRouteFactory:
                         {
                             "data_id": data_key,
                             "records" if records_only else "sources": [
-                                (
-                                    source.source_dict()
-                                    if records_only
-                                    else source
-                                )
+                                source
                                 for source in sources
                             ],
                         },
