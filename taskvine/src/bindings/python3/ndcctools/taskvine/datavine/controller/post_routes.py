@@ -77,6 +77,78 @@ class PostRouteFactory:
                 if not self._authorized():
                     self._error(403, "forbidden")
                     return
+                if self.path == f"{API_PREFIX}/faults/configure":
+                    try:
+                        request = self._read_json()
+                        owner.transfer_faults.configure(**request)
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, owner.transfer_faults.snapshot())
+                    return
+                if self.path == f"{API_PREFIX}/faults/claim-transfer":
+                    request = self._read_json()
+                    self._json(
+                        200,
+                        owner.transfer_faults.claim_transfer(
+                            request["transfer_id"], request["size"]
+                        ),
+                    )
+                    return
+                if self.path == f"{API_PREFIX}/faults/progress":
+                    request = self._read_json()
+                    owner.transfer_faults.progress(
+                        request["transfer_id"],
+                        request["bytes"],
+                        request.get("deferred", False),
+                    )
+                    self._json(200, {"recorded": True})
+                    return
+                if self.path == f"{API_PREFIX}/faults/trigger":
+                    self._read_json()
+                    self._json(
+                        200,
+                        {"triggered": owner.transfer_faults.trigger_deferred()},
+                    )
+                    return
+                if self.path == f"{API_PREFIX}/faults/wait-trigger":
+                    request = self._read_json()
+                    self._json(
+                        200,
+                        {
+                            "triggered": owner.transfer_faults.wait_trigger(
+                                request["transfer_id"],
+                                request.get("timeout", 30),
+                            )
+                        },
+                    )
+                    return
+                if self.path == f"{API_PREFIX}/faults/event":
+                    request = self._read_json()
+                    owner.transfer_faults.event(request["name"])
+                    self._json(200, {"recorded": True})
+                    return
+                if self.path == f"{API_PREFIX}/faults/claim-release":
+                    self._read_json()
+                    self._json(
+                        200,
+                        {
+                            "inject": (
+                                owner.transfer_faults
+                                .claim_release_failure()
+                            )
+                        },
+                    )
+                    return
+                if self.path == f"{API_PREFIX}/faults/complete-release":
+                    self._read_json()
+                    try:
+                        owner.transfer_faults.complete_release_retry()
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(200, {"completed": True})
+                    return
                 if self.path in (
                     f"{API_PREFIX}/edata/resolve-source",
                     f"{API_PREFIX}/edata/resolve-sources",
@@ -510,6 +582,12 @@ class PostRouteFactory:
                 if self.path == f"{API_PREFIX}/pruning/apply":
                     try:
                         request = self._read_json()
+                        data_ids = request.get("data_ids")
+                        owner.sync_native_leases(
+                            data_ids
+                            if data_ids is not None
+                            else owner.state.pruning_plan()["prunable"]
+                        )
                         result = owner.state.apply_pruning(
                             request["graph_revision"],
                             request["state_revision"],
@@ -525,6 +603,12 @@ class PostRouteFactory:
                 if self.path == f"{API_PREFIX}/pruning/continue":
                     try:
                         request = self._read_json()
+                        data_ids = request.get("data_ids")
+                        owner.sync_native_leases(
+                            data_ids
+                            if data_ids is not None
+                            else owner.state.deferred_pruning_ids()
+                        )
                         result = owner.state.continue_deferred_pruning(
                             request["operation_id"],
                             request.get("data_ids")

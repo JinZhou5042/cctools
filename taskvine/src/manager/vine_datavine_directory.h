@@ -80,6 +80,9 @@ int vine_datavine_directory_release_source(struct vine_datavine_directory *direc
 int vine_datavine_directory_invalidate_replica(
 		struct vine_datavine_directory *directory, char kind, int64_t data_id,
 		const char *replica_id);
+int64_t vine_datavine_directory_replica_active_leases(
+		struct vine_datavine_directory *directory, char kind, int64_t data_id,
+		const char *replica_id);
 void vine_datavine_directory_get_metrics(struct vine_datavine_directory *directory,
 		struct vine_datavine_directory_metrics *result);
 

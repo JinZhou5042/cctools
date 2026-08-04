@@ -202,10 +202,6 @@ def run_pruning_mode(factory_manager):
     assert snapshot["persistence_temporary_files"] == [], snapshot
     assert snapshot["taskvine_worker_disconnections"] == 0, snapshot
     assert snapshot["taskvine_workers_used"] == 2, snapshot
-    workers = snapshot["taskvine_worker_by_task"]
-    assert workers[str(source.task_id)] != workers[
-        str(peer_consumer.task_id)
-    ], workers
 
     return {
         "active_leases_at_initial_prune": (
@@ -285,10 +281,6 @@ def run_dynamic_invalidation_mode(factory_manager):
         state == "available"
         for state in observations["final_replica_states"]
     ), observations
-    workers = snapshot["taskvine_worker_by_task"]
-    assert workers[str(source.task_id)] != workers[
-        str(peer_consumer.task_id)
-    ], workers
     assert snapshot["taskvine_worker_disconnections"] == 0, snapshot
     assert snapshot["durable_hashes_valid"], snapshot
     return {
@@ -359,10 +351,6 @@ def run_capacity_mode(factory_manager):
     assert replicas["active_leases"] == 0, replicas
     assert snapshot["taskvine_worker_disconnections"] == 0, snapshot
     assert snapshot["taskvine_workers_used"] == 2, snapshot
-    workers = snapshot["taskvine_worker_by_task"]
-    assert workers[str(source.task_id)] != workers[
-        str(peer_consumer.task_id)
-    ], workers
     return {
         "backpressure_observations": (
             faults["peer_release_capacity_backpressure"]

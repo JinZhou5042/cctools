@@ -6,6 +6,7 @@ from ndcctools.taskvine import cvine
 
 from .admission import ByteServingAdmission, BoundedThreadingHTTPServer
 from .handler import ControllerHandlerFactory
+from .faults import TransferFaults
 from .state import ControllerState
 
 
@@ -32,6 +33,7 @@ class ControllerService:
             max_serving_concurrency, max_serving_bytes
         )
         self.serving_hook = serving_hook
+        self.transfer_faults = TransferFaults()
         self._server = None
         self._thread = None
         self._native_server = None
@@ -65,12 +67,33 @@ class ControllerService:
                 directory[key] += count
             directory["native"] = native
         value["byte_serving"] = self.byte_serving.snapshot()
+        value["transfer_faults"] = self.transfer_faults.snapshot()
         value["request_admission"] = (
             self._server.admission_snapshot()
             if self._server is not None
             else None
         )
         return value
+
+    def sync_native_leases(self, data_ids):
+        if self._native_server is None:
+            return
+        for data_id in data_ids:
+            for replica in self.state.replicas.records_for(
+                f"i:{int(data_id)}"
+            ):
+                if replica.tier not in ("worker-dram", "worker-disk"):
+                    continue
+                count = cvine.vine_datavine_rpc_server_replica_active_leases(
+                    self._native_server,
+                    "i",
+                    int(data_id),
+                    replica.replica_id,
+                )
+                if count >= 0:
+                    self.state.replicas.synchronize_active_leases(
+                        f"i:{int(data_id)}", replica.replica_id, count
+                    )
 
     def start(self):
         self._native_server = cvine.vine_datavine_rpc_server_create(

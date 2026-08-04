@@ -620,6 +620,29 @@ int vine_datavine_directory_invalidate_replica(
 	return 0;
 }
 
+int64_t vine_datavine_directory_replica_active_leases(
+		struct vine_datavine_directory *directory, char kind, int64_t data_id,
+		const char *replica_id)
+{
+	if (!directory || (kind != 'e' && kind != 'i') || data_id < 1
+			|| !valid_text(replica_id, VINE_DATAVINE_REPLICA_ID_MAX)) {
+		return -1;
+	}
+	uint64_t key = data_key(kind, data_id);
+	struct directory_shard *shard = get_shard(directory, key);
+	pthread_mutex_lock(&shard->lock);
+	struct data_entry *entry = itable_lookup(shard->data, key);
+	for (struct replica *item = entry ? entry->replicas : 0; item; item = item->next) {
+		if (!strcmp(item->record.replica_id, replica_id)) {
+			int64_t result = item->record.active_leases;
+			pthread_mutex_unlock(&shard->lock);
+			return result;
+		}
+	}
+	pthread_mutex_unlock(&shard->lock);
+	return -1;
+}
+
 void vine_datavine_directory_get_metrics(struct vine_datavine_directory *directory,
 		struct vine_datavine_directory_metrics *result)
 {

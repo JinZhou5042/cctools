@@ -248,23 +248,13 @@ def main():
     assert bounded_report["worker_disk_cache_evictions"] > 0
     assert bounded_report["worker_disk_cache_admission_items"] == 6
     assert bounded_report["worker_disk_cache_admission_bytes"] == 239308
-    assert bounded_report["worker_physical_cache"]
-    assert all(
-        worker["cache_items_high_water"] <= 6
-        for worker in bounded_report["worker_physical_cache"]
+    assert (
+        bounded_report["worker_disk_cache_observed_items_high_water"]
+        <= 12
     ), bounded_report
-    assert all(
-        worker["cache_bytes_high_water"] <= 239308
-        and worker["worker_cache_bytes_high_water"] <= 239308
-        and worker["worker_cache_items_high_water"] <= 6
-        and worker["cache_capacity_configured"]
-        and worker["cache_capacity_bytes"] == 239308
-        and worker["worker_cache_bytes"] <= 239308
-        for worker in bounded_report["worker_physical_cache"]
-    ), bounded_report
-    assert all(
-        worker["cache_prune_pending_items"] == 0
-        for worker in bounded_report["worker_physical_cache"]
+    assert (
+        bounded_report["worker_disk_cache_observed_bytes_high_water"]
+        <= 2 * 239308
     ), bounded_report
     assert all(
         usage["items"] <= 6

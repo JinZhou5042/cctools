@@ -72,15 +72,21 @@ int main(void)
 	struct vine_datavine_source_record source2;
 	failed |= !vine_datavine_directory_resolve_source(directory, 'i', 1, "w3", 1, "taskvine:t1", 0, &source1);
 	failed |= strcmp(source1.replica.worker_id, "w2");
+	failed |= vine_datavine_directory_replica_active_leases(
+			directory, 'i', 1, "r2") != 1;
 	struct vine_datavine_source_record duplicate;
 	failed |= !vine_datavine_directory_resolve_source(directory, 'i', 1, "w3", 1, "taskvine:t1", 0, &duplicate);
 	failed |= strcmp(duplicate.replica.replica_id, source1.replica.replica_id);
 	failed |= !vine_datavine_directory_resolve_source(directory, 'i', 1, "w3", 1, "taskvine:t2", 0, &source2);
 	failed |= strcmp(source2.replica.worker_id, "w1");
 	failed |= !vine_datavine_directory_release_source(directory, "taskvine:t2", 1);
+	failed |= vine_datavine_directory_replica_active_leases(
+			directory, 'i', 1, "r1") != 0;
 	failed |= !vine_datavine_directory_release_source(directory, "taskvine:t2", 1);
 	failed |= vine_datavine_directory_release_source(directory, "taskvine:t2", 0);
 	failed |= !vine_datavine_directory_disconnect_worker(directory, "w2", 1);
+	failed |= vine_datavine_directory_replica_active_leases(
+			directory, 'i', 1, "r2") != 0;
 	failed |= !vine_datavine_directory_release_source(directory, "taskvine:t1", 0);
 	failed |= !claim(directory, "w2", 2);
 	struct vine_datavine_replica_record replacement;

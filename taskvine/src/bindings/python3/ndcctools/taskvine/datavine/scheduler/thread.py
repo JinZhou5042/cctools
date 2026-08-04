@@ -404,7 +404,6 @@ class TaskSchedulerThread:
             self._worker_reconciliation_deferrals
         )
         tuning = configure_runtime(
-            self._manager,
             worker_disk_cache_admission_items=(
                 worker_disk_cache_admission_items
             ),
@@ -434,6 +433,20 @@ class TaskSchedulerThread:
         idata_release_failures = tuning.idata_release_failures
         peer_release_retry_seconds = tuning.peer_release_retry_seconds
         peer_release_capacity = tuning.peer_release_capacity
+        transfer_faults_enabled = bool(
+            peer_source_losses
+            or peer_source_loss_after_bytes
+            or peer_corruptions
+            or idata_release_failures
+        )
+        self.controller.configure_transfer_faults(
+            source_losses=peer_source_losses,
+            source_loss_after_bytes=peer_source_loss_after_bytes,
+            defer_source_loss=defer_peer_source_loss_after_bytes,
+            corruptions=peer_corruptions,
+            release_failures=idata_release_failures,
+            release_capacity=peer_release_capacity,
+        )
         controller_snapshot = self.controller.snapshot()
         output_ids = self._op_register_workflow(workflow)
         task_factory = TaskFactory(
@@ -445,6 +458,7 @@ class TaskSchedulerThread:
             self._idata_files,
             worker_dram_cache_bytes,
             allow_peer_transfer=self._peer_transfers_enabled,
+            transfer_faults=transfer_faults_enabled,
         )
         workflow_registration_elapsed = (
             time.monotonic() - workflow_run_started
@@ -666,18 +680,9 @@ class TaskSchedulerThread:
                     pending_by_data.setdefault(
                         record["data_id"], []
                     ).append(record)
-            existing = {
-                entry["data_id"]
-                for entry in active["worker_entries"]
-            }
             for data_id, data_records in sorted(
                 pending_by_data.items()
             ):
-                if data_id in existing:
-                    raise RuntimeError(
-                        "duplicate physical frontier-prune request "
-                        f"for i:{data_id}"
-                    )
                 for record in data_records:
                     source_url = record.get("source_url")
                     if source_url:
@@ -730,6 +735,18 @@ class TaskSchedulerThread:
         output_projections = {}
         projection_count = 0
         replica_projections = []
+        peer_release_pending = []
+
+        def drain_peer_releases():
+            now = time.monotonic()
+            for release in tuple(peer_release_pending):
+                if release["not_before"] > now:
+                    continue
+                self.controller.release_native_source(
+                    release["lease_id"], True
+                )
+                self.controller.complete_release_retry()
+                peer_release_pending.remove(release)
 
         def flush_output_projections():
             nonlocal projection_count
@@ -974,6 +991,7 @@ class TaskSchedulerThread:
             or pruning.has_work()
         ):
             self._raise_if_stopping()
+            drain_peer_releases()
             for data_id, not_before in tuple(
                 persistence.controller_pending.items()
             ):
@@ -1180,34 +1198,6 @@ class TaskSchedulerThread:
                 worker_prunes = list(
                     pruning.active["reconciled_worker_prunes"]
                 )
-                for entry in pruning.active["worker_entries"]:
-                    status = self._manager.prune_file_status(
-                        entry["file"]
-                    )
-                    confirmed = (
-                        status["confirmed"]
-                        - entry["before"]["confirmed"]
-                    )
-                    failed = (
-                        status["failed"] - entry["before"]["failed"]
-                    )
-                    if failed:
-                        raise RuntimeError(
-                            f"{failed} asynchronous worker prune "
-                            f"operations failed for i:{entry['data_id']}"
-                        )
-                    if confirmed < entry["requested"]:
-                        all_complete = False
-                        continue
-                    worker_prunes.append(
-                        {
-                            "data_id": entry["data_id"],
-                            "requested": entry["requested"],
-                            "confirmed": confirmed,
-                            "failed": failed,
-                            "reconciled": entry["reconciled"],
-                        }
-                    )
                 if (
                     not all_complete
                     and time.monotonic()
@@ -1218,36 +1208,6 @@ class TaskSchedulerThread:
                         "timed out"
                     )
                 if all_complete:
-                    for entry in pruning.active[
-                        "worker_entries"
-                    ]:
-                        for record in entry["records"]:
-                            self.controller.confirm_replica_pruned(
-                                f"i:{entry['data_id']}",
-                                record["replica_id"],
-                                record["generation"],
-                            )
-                        if not self._manager.forget_prune_file_status(
-                            entry["file"]
-                        ):
-                            raise RuntimeError(
-                                "could not release asynchronous prune "
-                                f"tracker for i:{entry['data_id']}"
-                            )
-                        if any(
-                            self._manager.prune_file_status(
-                                entry["file"]
-                            ).values()
-                        ):
-                            raise RuntimeError(
-                                "asynchronous prune tracker leaked for "
-                                f"i:{entry['data_id']}"
-                            )
-                        next(
-                            item
-                            for item in worker_prunes
-                            if item["data_id"] == entry["data_id"]
-                        )["tracker_released"] = True
                     frontier_task_id = pruning.active[
                         "frontier_task_id"
                     ]
@@ -1396,7 +1356,6 @@ class TaskSchedulerThread:
                             for item in result["deferred"]
                         },
                         "cancelled_data_ids": set(),
-                        "worker_entries": [],
                         "reconciled_worker_prunes": [],
                         "poll_after": (
                             now_value + frontier_pruning_ack_delay
@@ -1647,9 +1606,7 @@ class TaskSchedulerThread:
                 defer_peer_source_loss_after_bytes
                 and not peer_transfer_pruning_probe_triggered
             ):
-                peer_faults = (
-                    self._manager.datavine_peer_transfer_fault_stats()
-                )
+                peer_faults = self.controller.transfer_fault_stats()
                 if peer_faults[
                     "deferred_peer_source_loss_pending"
                 ]:
@@ -1684,10 +1641,7 @@ class TaskSchedulerThread:
                             ),
                         }
                     )
-                    if self._manager.tune(
-                        "datavine-trigger-deferred-peer-source-loss",
-                        1,
-                    ) != 0:
+                    if not self.controller.trigger_deferred_source_loss():
                         raise RuntimeError(
                             "deferred peer source loss disappeared "
                             "before explicit Scheduler trigger"
@@ -2097,6 +2051,21 @@ class TaskSchedulerThread:
                         )
                         self._cache_admission.observe(observation)
                         record_replica_projection(observation)
+                    elif line.startswith(
+                        "DATAVINE_PEER_RELEASE_PENDING "
+                    ):
+                        release = json.loads(
+                            line[len("DATAVINE_PEER_RELEASE_PENDING "):]
+                        )
+                        peer_release_pending.append(
+                            {
+                                "lease_id": release["lease_id"],
+                                "not_before": (
+                                    time.monotonic()
+                                    + peer_release_retry_seconds
+                                ),
+                            }
+                        )
                 execution.local_idata_hits += sum(
                     line.count("DATAVINE_LOCAL_IDATA") for line in events
                 )
@@ -2360,7 +2329,7 @@ class TaskSchedulerThread:
             raise RuntimeError(
                 "deferred peer source loss never reached its "
                 "positive-byte pruning probe: "
-                f"{self._manager.datavine_peer_transfer_fault_stats()}"
+                f"{self.controller.transfer_fault_stats()}"
             )
         peer_release_drain_started = time.monotonic()
         peer_release_drain_iterations = 0
@@ -2370,9 +2339,8 @@ class TaskSchedulerThread:
         )
         while True:
             self._raise_if_stopping()
-            peer_faults = (
-                self._manager.datavine_peer_transfer_fault_stats()
-            )
+            drain_peer_releases()
+            peer_faults = self.controller.transfer_fault_stats()
             if peer_faults["peer_release_pending"] == 0:
                 break
             if time.monotonic() >= peer_release_drain_deadline:
@@ -2517,7 +2485,7 @@ class TaskSchedulerThread:
             ),
             "peer_release_drain_seconds": peer_release_drain_seconds,
             "peer_transfer_faults": (
-                self._manager.datavine_peer_transfer_fault_stats()
+                self.controller.transfer_fault_stats()
             ),
             "worker_loss_data_by_task": {
                 str(task_id): list(data_task_ids)

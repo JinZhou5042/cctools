@@ -3,12 +3,18 @@
 import cloudpickle
 import copy
 import hashlib
+import json
 from pathlib import Path
 import time
+import urllib.parse
 import uuid
 
 from ..models import EDataRecord
 from ..workflow import iter_output_refs
+
+
+class _InjectedCorruption(IOError):
+    pass
 
 
 class InputResolver:
@@ -23,6 +29,7 @@ class InputResolver:
         source_resolver,
         cache_values=None,
         allow_peer_transfer=True,
+        transfer_faults=False,
     ):
         self.controller = controller
         self.token = token
@@ -34,6 +41,104 @@ class InputResolver:
         self.objects = {}
         self.cache_values = cache_values or {}
         self.allow_peer_transfer = bool(allow_peer_transfer)
+        self.transfer_faults = bool(transfer_faults)
+        self._corrupt_fallback_pending = False
+
+    def _fetch_source(self, source_url, content_hash, size, transfer_id):
+        fault = (
+            self.client.claim_transfer_fault(transfer_id, size)
+            if self.transfer_faults
+            else {"action": "none"}
+        )
+        action = fault["action"]
+        try:
+            if action == "source-loss":
+                self.client.kill_source(source_url)
+                raise IOError("injected worker-direct source loss")
+            if action == "source-loss-after-bytes":
+                threshold = int(fault["bytes"])
+                received = 0
+                with self.client.open_source(source_url) as response:
+                    while received < threshold:
+                        chunk = response.read(threshold - received)
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                    if received < threshold or received >= int(size):
+                        raise IOError(
+                            "source cannot reach partial-loss threshold"
+                        )
+                    self.client.record_transfer_progress(
+                        transfer_id,
+                        received,
+                        fault.get("deferred", False),
+                    )
+                    if fault.get("deferred") and not (
+                        self.client.wait_deferred_source_loss(transfer_id)
+                    ):
+                        raise TimeoutError(
+                            "deferred worker source loss was not triggered"
+                        )
+                    self.client.kill_source(source_url)
+                raise IOError("injected partial worker-direct source loss")
+            if action == "corrupt":
+                parsed = urllib.parse.urlsplit(str(source_url))
+                query = urllib.parse.parse_qs(parsed.query)
+                query["fault"] = ["corrupt"]
+                source_url = urllib.parse.urlunsplit(
+                    parsed._replace(
+                        query=urllib.parse.urlencode(query, doseq=True)
+                    )
+                )
+            payload = self.client.fetch_source(
+                source_url, content_hash, size
+            )
+        except Exception as exc:
+            if self.transfer_faults and action == "corrupt":
+                self.client.record_transfer_fault_event(
+                    "corruption-rejected"
+                )
+                self._corrupt_fallback_pending = True
+                raise _InjectedCorruption(
+                    "injected worker-direct transfer corruption"
+                ) from exc
+            if (
+                self.transfer_faults
+                and action == "source-loss-after-bytes"
+            ):
+                self.client.record_transfer_fault_event("partial-cleanup")
+            raise
+        if self._corrupt_fallback_pending:
+            self.client.record_transfer_fault_event(
+                "alternate-source-fallback"
+            )
+            self._corrupt_fallback_pending = False
+        return payload
+
+    def _record_fallback(self):
+        if not self._corrupt_fallback_pending:
+            return
+        self.client.record_transfer_fault_event(
+            "alternate-source-fallback"
+        )
+        self._corrupt_fallback_pending = False
+
+    def _release(self, lease_id, success):
+        if (
+            success
+            and self.transfer_faults
+            and self.client.claim_release_failure()
+        ):
+            self.client.defer_native_release(lease_id)
+            self.emit(
+                "DATAVINE_PEER_RELEASE_PENDING "
+                + json.dumps(
+                    {"lease_id": str(lease_id)},
+                    separators=(",", ":"),
+                )
+            )
+            return
+        self.client.release_replica(lease_id, success)
 
     def fetch_edata(self, data_id):
         data_id = int(data_id)
@@ -75,25 +180,30 @@ class InputResolver:
             source = resolved["source"]
             lease_id = resolved["lease"]["lease_id"]
             try:
-                payload = self.client.fetch_source(
+                payload = self._fetch_source(
                     source["source_url"],
                     resolved["serialized_sha256"],
                     resolved["size"],
+                    lease_id,
                 )
-            except Exception:
-                self.client.release_replica(lease_id, False)
-                self.client.invalidate_observed_replica(
-                    source["data_id"],
-                    source["replica_id"],
-                    source["attempt"],
-                    source["content_hash"],
-                    source["size"],
-                    source["worker_id"],
-                    source["worker_epoch"],
-                )
+            except Exception as exc:
+                self._release(lease_id, False)
+                if not isinstance(exc, _InjectedCorruption):
+                    try:
+                        self.client.invalidate_observed_replica(
+                            source["data_id"],
+                            source["replica_id"],
+                            source["attempt"],
+                            source["content_hash"],
+                            source["size"],
+                            source["worker_id"],
+                            source["worker_epoch"],
+                        )
+                    except Exception:
+                        pass
                 excluded.append(source["worker_id"])
                 continue
-            self.client.release_replica(lease_id, True)
+            self._release(lease_id, True)
             self.emit(
                 f"DATAVINE_PEER_FETCH {data_key} "
                 f"source={source['worker_id']}"
@@ -108,6 +218,7 @@ class InputResolver:
             self.emit(f"DATAVINE_BULK_ORIGIN e{data_id}")
         else:
             raise RuntimeError(f"invalid EData source type {source_type}")
+        self._record_fallback()
         if (
             len(payload) != resolved["size"]
             or hashlib.sha256(payload).hexdigest()
@@ -171,10 +282,11 @@ class InputResolver:
                 )
                 return None, None
             try:
-                payload = self.client.fetch_source(
+                payload = self._fetch_source(
                     source_url,
                     source["content_hash"],
                     source["size"],
+                    transfer_id,
                 )
             except Exception as exc:
                 self.emit(
@@ -182,26 +294,23 @@ class InputResolver:
                     f"source={source.get('worker_id')} "
                     f"{type(exc).__name__}: {exc}"
                 )
-                self.client.release_replica(
-                    resolved["lease"]["lease_id"], False
-                )
-                try:
-                    self.client.invalidate_observed_replica(
-                        source["data_id"],
-                        source["replica_id"],
-                        source["attempt"],
-                        source["content_hash"],
-                        source["size"],
-                        source["worker_id"],
-                        source["worker_epoch"],
-                    )
-                except Exception:
-                    pass
+                self._release(resolved["lease"]["lease_id"], False)
+                if not isinstance(exc, _InjectedCorruption):
+                    try:
+                        self.client.invalidate_observed_replica(
+                            source["data_id"],
+                            source["replica_id"],
+                            source["attempt"],
+                            source["content_hash"],
+                            source["size"],
+                            source["worker_id"],
+                            source["worker_epoch"],
+                        )
+                    except Exception:
+                        pass
                 excluded.append(source["worker_id"])
                 continue
-            self.client.release_replica(
-                resolved["lease"]["lease_id"], True
-            )
+            self._release(resolved["lease"]["lease_id"], True)
             self.emit(
                 f"DATAVINE_PEER_FETCH {data_key} "
                 f"source={source['worker_id']}"
@@ -310,6 +419,7 @@ class InputResolver:
                 payload = self.client.fetch_idata(data_id)
             else:
                 raise RuntimeError(f"IData is not available: i:{data_id}")
+        self._record_fallback()
         hint = self.cache_values.get(data_key)
         with self.process_cache.lock:
             self.process_cache.data.put_data(

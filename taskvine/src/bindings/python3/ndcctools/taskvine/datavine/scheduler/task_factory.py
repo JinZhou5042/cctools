@@ -89,6 +89,7 @@ class TaskFactory:
         idata_files,
         worker_dram_cache_bytes,
         allow_peer_transfer=True,
+        transfer_faults=False,
     ):
         self.manager = manager
         self.controller = controller
@@ -98,6 +99,7 @@ class TaskFactory:
         self.idata_files = idata_files
         self.worker_dram_cache_bytes = int(worker_dram_cache_bytes)
         self.allow_peer_transfer = bool(allow_peer_transfer)
+        self.transfer_faults = bool(transfer_faults)
 
     def edata_file(self, data_id):
         file_object = self.edata_files.get(data_id)
@@ -183,6 +185,7 @@ class TaskFactory:
             self.worker_dram_cache_bytes,
             record.to_dict(),
             self.allow_peer_transfer,
+            self.transfer_faults,
         )
         task.set_tag(str(task_id))
         task.set_cores(1)

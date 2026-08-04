@@ -13,6 +13,10 @@ PRUNING_OPERATION_ID_PATTERN = re.compile(
 
 
 class PruningStateMixin:
+    def deferred_pruning_ids(self):
+        with self._lock:
+            return tuple(self._deferred_pruning)
+
     def pruning_plan(self):
         with self._lock:
             return self.pruning.plan().to_dict()

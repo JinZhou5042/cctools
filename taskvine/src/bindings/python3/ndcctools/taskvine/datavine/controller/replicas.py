@@ -115,6 +115,7 @@ class ReplicaDirectory:
         self._replicas = {}
         self._replica_keys_by_data = {}
         self._active_leases = {}
+        self._native_lease_counts = {}
         self._completed_leases = collections.OrderedDict()
         self._max_replicas = capacities["max_replicas"]
         self._max_workers = capacities["max_workers"]
@@ -546,6 +547,38 @@ class ReplicaDirectory:
                     ),
                 )
             )
+
+    def synchronize_active_leases(self, data_id, replica_id, count):
+        key = (self._normalize_data_id(data_id), str(replica_id))
+        count = int(count)
+        if count < 0:
+            raise ValueError("active lease count is negative")
+        with self._lock:
+            record = self._replicas.get(key)
+            if record is None or record.tier not in WORKER_TIERS:
+                return None
+            native_generation, previous = self._native_lease_counts.get(
+                key, (record.generation, 0)
+            )
+            if native_generation != record.generation:
+                previous = 0
+            total = record.active_leases - previous + count
+            if total < 0:
+                raise RuntimeError("inconsistent native lease projection")
+            self._native_lease_counts[key] = (record.generation, count)
+            state = (
+                "invalid"
+                if record.state == "retiring" and total == 0
+                else record.state
+            )
+            if record.active_leases == total and record.state == state:
+                return record
+            record = dataclasses.replace(
+                record, active_leases=total, state=state
+            )
+            self._replicas[key] = record
+            self._changed()
+            return record
 
     def _select_worker_source(
         self,

@@ -24,6 +24,7 @@ def execute_task(
     cache_values=None,
     timings=None,
     allow_peer_transfer=True,
+    transfer_faults=False,
 ):
     started = time.monotonic()
     controller = str(controller)
@@ -93,6 +94,7 @@ def execute_task(
         source_resolver,
         cache_values,
         allow_peer_transfer,
+        transfer_faults=transfer_faults,
     )
     setup_done = time.monotonic()
     function_key = (

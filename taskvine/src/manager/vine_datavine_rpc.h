@@ -46,6 +46,9 @@ int vine_datavine_rpc_server_port(const struct vine_datavine_rpc_server *server)
 void vine_datavine_rpc_server_get_metrics(
 		struct vine_datavine_rpc_server *server,
 		struct vine_datavine_directory_metrics *result);
+int64_t vine_datavine_rpc_server_replica_active_leases(
+		struct vine_datavine_rpc_server *server, char kind, int64_t data_id,
+		const char *replica_id);
 
 uint32_t vine_datavine_rpc_get_u32(const unsigned char *buffer);
 uint64_t vine_datavine_rpc_get_u64(const unsigned char *buffer);

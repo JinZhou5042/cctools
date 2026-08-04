@@ -271,6 +271,71 @@ class ControllerClient:
             raise RuntimeError("Controller worker epochs diverged")
         return worker
 
+    def configure_transfer_faults(self, **configuration):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/faults/configure",
+            configuration,
+        )
+        return json.loads(payload)
+
+    def transfer_fault_stats(self):
+        payload, _ = self._request("GET", f"{API_PREFIX}/faults")
+        return json.loads(payload)
+
+    def claim_transfer_fault(self, transfer_id, size):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/faults/claim-transfer",
+            {"transfer_id": str(transfer_id), "size": int(size)},
+        )
+        return json.loads(payload)
+
+    def record_transfer_progress(
+        self, transfer_id, byte_count, deferred=False
+    ):
+        self._request(
+            "POST",
+            f"{API_PREFIX}/faults/progress",
+            {
+                "transfer_id": str(transfer_id),
+                "bytes": int(byte_count),
+                "deferred": bool(deferred),
+            },
+        )
+
+    def trigger_deferred_source_loss(self):
+        payload, _ = self._request(
+            "POST", f"{API_PREFIX}/faults/trigger", {}
+        )
+        return json.loads(payload)["triggered"]
+
+    def wait_deferred_source_loss(self, transfer_id, timeout=30):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/faults/wait-trigger",
+            {"transfer_id": str(transfer_id), "timeout": float(timeout)},
+        )
+        return json.loads(payload)["triggered"]
+
+    def record_transfer_fault_event(self, name):
+        self._request(
+            "POST",
+            f"{API_PREFIX}/faults/event",
+            {"name": str(name)},
+        )
+
+    def claim_release_failure(self):
+        payload, _ = self._request(
+            "POST", f"{API_PREFIX}/faults/claim-release", {}
+        )
+        return json.loads(payload)["inject"]
+
+    def complete_release_retry(self):
+        self._request(
+            "POST", f"{API_PREFIX}/faults/complete-release", {}
+        )
+
     def disconnect_worker(self, worker_id, epoch=1):
         payload, _ = self._request(
             "POST",
@@ -680,6 +745,11 @@ class ControllerClient:
             {"lease_id": str(lease_id), "success": bool(success)},
         )
         return json.loads(payload)
+
+    def release_native_source(self, lease_id, success):
+        if self.native is None:
+            raise RuntimeError("native Controller is required")
+        self.native.release_source(lease_id, success)
 
     def confirm_replica_pruned(
         self, data_id, replica_id, generation
@@ -1271,6 +1341,27 @@ class ControllerClient:
             if exc.code == 404:
                 return False
             raise
+
+    def kill_source(self, source_url):
+        parsed = urllib.parse.urlsplit(str(source_url))
+        prefix, separator, _ = parsed.path.rpartition("/data/")
+        if not separator:
+            raise ValueError("worker source URL lacks a data path")
+        target = urllib.parse.urlunsplit(
+            parsed._replace(path=f"{prefix}/kill", query="")
+        )
+        request = urllib.request.Request(target, method="DELETE")
+        with self._open(
+            lambda: request,
+            transient_retries=0,
+            timeout=min(self.timeout, 2),
+        ) as response:
+            if response.status != 204:
+                raise DataVineRemoteError("worker source kill was rejected")
+        time.sleep(0.05)
+
+    def defer_native_release(self, lease_id):
+        self._native_leases.pop(str(lease_id), None)
 
     def publish_idata(self, data_id, attempt, serialized_bytes):
         headers = {

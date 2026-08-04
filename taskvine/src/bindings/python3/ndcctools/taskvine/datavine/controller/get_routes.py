@@ -29,6 +29,9 @@ class GetRouteFactory:
                 if parsed.path == f"{API_PREFIX}/snapshot":
                     self._json(200, owner.snapshot())
                     return
+                if parsed.path == f"{API_PREFIX}/faults":
+                    self._json(200, owner.transfer_faults.snapshot())
+                    return
                 if parsed.path == f"{API_PREFIX}/pruning/plan":
                     try:
                         plan = owner.state.pruning_plan()

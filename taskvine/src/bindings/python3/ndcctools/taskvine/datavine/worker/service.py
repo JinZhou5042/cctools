@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
 import secrets
+import signal
 import socket
 import subprocess
 import sys
@@ -26,10 +27,11 @@ def _alive(pid):
 
 def _worker_pid():
     pid = os.getppid()
+    worker = 0
     while pid > 1:
         try:
             if Path(f"/proc/{pid}/comm").read_text().strip() == "vine_worker":
-                return pid
+                worker = pid
             for line in Path(f"/proc/{pid}/status").read_text().splitlines():
                 if line.startswith("PPid:"):
                     pid = int(line.split()[1])
@@ -37,8 +39,8 @@ def _worker_pid():
             else:
                 return 0
         except (FileNotFoundError, PermissionError, ValueError):
-            return 0
-    return 0
+            break
+    return worker
 
 
 def _metadata(path):
@@ -117,6 +119,21 @@ def _serve(root, owner_pid):
     capability = secrets.token_urlsafe(24)
 
     class Handler(BaseHTTPRequestHandler):
+        def _kill_request(self):
+            parsed = urllib.parse.urlparse(self.path)
+            prefix = f"/{capability}/"
+            pieces = (
+                parsed.path[len(prefix):].split("/")
+                if parsed.path.startswith(prefix)
+                else ()
+            )
+            return (
+                len(pieces) == 2
+                and len(pieces[0]) == 16
+                and all(c in "0123456789abcdef" for c in pieces[0])
+                and pieces[1] == "kill"
+            )
+
         def _request_data(self):
             parsed = urllib.parse.urlparse(self.path)
             prefix = f"/{capability}/"
@@ -152,6 +169,11 @@ def _serve(root, owner_pid):
             if payload is None:
                 self.send_error(404)
                 return
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query
+            )
+            if query.get("fault") == ["corrupt"] and payload:
+                payload = bytes((payload[0] ^ 1,)) + payload[1:]
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(len(payload)))
@@ -160,6 +182,18 @@ def _serve(root, owner_pid):
             self.wfile.write(payload)
 
         def do_DELETE(self):
+            if self._kill_request():
+                self.send_response(204)
+                self.end_headers()
+                self.wfile.flush()
+
+                def terminate():
+                    time.sleep(0.02)
+                    os.killpg(os.getpgid(int(owner_pid)), signal.SIGKILL)
+                    os._exit(0)
+
+                threading.Thread(target=terminate, daemon=True).start()
+                return
             request = self._request_data()
             if request is None:
                 self.send_error(404)

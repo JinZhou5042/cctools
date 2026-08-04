@@ -71,6 +71,14 @@ void vine_datavine_rpc_server_get_metrics(
 	}
 }
 
+int64_t vine_datavine_rpc_server_replica_active_leases(
+		struct vine_datavine_rpc_server *server, char kind, int64_t data_id,
+		const char *replica_id)
+{
+	return server ? vine_datavine_directory_replica_active_leases(
+			server->directory, kind, data_id, replica_id) : -1;
+}
+
 uint32_t vine_datavine_rpc_get_u32(const unsigned char *buffer)
 {
 	uint32_t value;
