@@ -36,7 +36,7 @@ class PruningStateMixin:
         now=None,
     ):
         """Compare a proof revision and quarantine/invalidate proven data."""
-        with self._lock:
+        with self._lock, self._metadata_batch():
             plan = self.pruning.validate_revision(
                 graph_revision, state_revision
             )
@@ -94,6 +94,7 @@ class PruningStateMixin:
                 )
                 applied.extend(result["applied"])
                 deferred.extend(result["deferred"])
+            self._mark_idata_metadata(selected)
             return {
                 "cancelled_persistence": cancelled,
                 "applied": applied,
@@ -112,7 +113,7 @@ class PruningStateMixin:
             if data_ids is None
             else tuple(sorted({int(data_id) for data_id in data_ids}))
         )
-        with self._lock:
+        with self._lock, self._metadata_batch():
             completed = self._completed_pruning_operations.get(
                 operation_id
             )
@@ -263,6 +264,7 @@ class PruningStateMixin:
                 self._completed_pruning_operation_bytes_high_water,
                 self._completed_pruning_operation_bytes,
             )
+            self._mark_idata_metadata(selected)
             return result
 
     def _prune_idata_locked(
@@ -397,7 +399,7 @@ class PruningStateMixin:
         return {"applied": applied, "deferred": deferred}
 
     def restore_quarantined(self, data_id):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             old = self.get_idata(data_id)
             restored = []
             for replica in self.replicas.records_for(f"i:{data_id}"):
@@ -462,12 +464,13 @@ class PruningStateMixin:
                 restored.append(audit.to_dict())
             if not restored:
                 raise ValueError("IDataID has no quarantined replica")
+            self._mark_idata_metadata((data_id,))
             return restored
 
     def hard_delete_quarantined(
         self, graph_revision, state_revision, now=None
     ):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             plan = self.pruning.validate_revision(
                 graph_revision, state_revision
             )

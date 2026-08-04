@@ -10,7 +10,7 @@ from ..persistence.manager import PersistenceRequest
 
 class PersistenceStateMixin:
     def request_persistence(self, data_id):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             if self._persistence is None:
                 raise RuntimeError("persistence is disabled")
             old = self.get_idata(data_id)
@@ -62,6 +62,7 @@ class PersistenceStateMixin:
                 self.pruning.set_data_state(
                     old.data_id, persistence="queued"
                 )
+                self._mark_idata_metadata((old.data_id,))
                 return record
             request = PersistenceRequest(
                 request_id=(
@@ -93,10 +94,11 @@ class PersistenceStateMixin:
             self.pruning.set_data_state(
                 old.data_id, persistence="queued"
             )
+            self._mark_idata_metadata((old.data_id,))
             return record
 
     def begin_external_persistence(self, data_id, request_id):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             old = self.get_idata(data_id)
             job = self._persistence_jobs.get(old.data_id)
             if (
@@ -135,11 +137,12 @@ class PersistenceStateMixin:
             self.pruning.set_data_state(
                 old.data_id, persistence="writing"
             )
+            self._mark_idata_metadata((old.data_id,))
             return dict(job)
 
     def complete_external_persistence(self, data_id, request_id):
         cancelled_target = None
-        with self._lock:
+        with self._lock, self._metadata_batch():
             old = self.get_idata(data_id)
             job = self._persistence_jobs.get(old.data_id)
             if (
@@ -169,6 +172,7 @@ class PersistenceStateMixin:
                 self.pruning.set_data_state(
                     old.data_id, persistence="none"
                 )
+                self._mark_idata_metadata((old.data_id,))
             else:
                 record = None
             if record is None:
@@ -218,7 +222,7 @@ class PersistenceStateMixin:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
-        with self._lock:
+        with self._lock, self._metadata_batch():
             old = self.get_idata(data_id)
             job = self._persistence_jobs.get(old.data_id)
             if (
@@ -238,6 +242,7 @@ class PersistenceStateMixin:
                 self.pruning.set_data_state(
                     old.data_id, persistence="none"
                 )
+                self._mark_idata_metadata((old.data_id,))
                 cancelled_after_validation = True
             else:
                 cancelled_after_validation = False
@@ -285,12 +290,13 @@ class PersistenceStateMixin:
                 durable=True,
                 persistence="none",
             )
+            self._mark_idata_metadata((old.data_id,))
             return record
 
     def fail_external_persistence(
         self, data_id, request_id, error
     ):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             old = self.get_idata(data_id)
             job = self._persistence_jobs.get(old.data_id)
             if (
@@ -319,10 +325,11 @@ class PersistenceStateMixin:
             self.pruning.set_data_state(
                 old.data_id, persistence="none"
             )
+            self._mark_idata_metadata((old.data_id,))
             return "cancelled" if cancelled else "failed"
 
     def cancel_persistence(self, data_id, reason="obsolete"):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             return self._cancel_persistence_locked(data_id, reason)
 
     def _cancel_persistence_locked(self, data_id, reason):
@@ -349,10 +356,11 @@ class PersistenceStateMixin:
             self.pruning.set_data_state(
                 data_id, persistence="none"
             )
+            self._mark_idata_metadata((data_id,))
         return result
 
     def _persistence_writing(self, request):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             job = self._persistence_jobs.get(request.data_id)
             current_idata = self._idata.get(request.data_id)
             if (
@@ -388,9 +396,10 @@ class PersistenceStateMixin:
             self.pruning.set_data_state(
                 request.data_id, persistence="writing"
             )
+            self._mark_idata_metadata((request.data_id,))
 
     def _persistence_complete(self, request, path, error):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             self._release_persistence_slot(request.request_id)
             job = self._persistence_jobs.get(request.data_id)
             old = self._idata.get(request.data_id)
@@ -414,6 +423,7 @@ class PersistenceStateMixin:
                 self.pruning.set_data_state(
                     request.data_id, persistence="none"
                 )
+                self._mark_idata_metadata((request.data_id,))
                 return
             if error is not None:
                 job["state"] = "failed"
@@ -424,6 +434,7 @@ class PersistenceStateMixin:
                     request.data_id, persistence="none"
                 )
                 self._persistence_failures[request.data_id] = error
+                self._mark_idata_metadata((request.data_id,))
                 return
             try:
                 self._publish_replica(
@@ -447,6 +458,7 @@ class PersistenceStateMixin:
                     request.data_id, persistence="none"
                 )
                 self._persistence_failures[request.data_id] = str(exc)
+                self._mark_idata_metadata((request.data_id,))
                 return
             job["state"] = "durable"
             self._idata[request.data_id] = dataclasses.replace(
@@ -459,6 +471,7 @@ class PersistenceStateMixin:
                 persistence="none",
             )
             self._persistence_failures.pop(request.data_id, None)
+            self._mark_idata_metadata((request.data_id,))
 
     def _discard_persistence_path(self, path):
         try:

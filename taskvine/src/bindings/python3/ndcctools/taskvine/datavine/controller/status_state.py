@@ -43,7 +43,7 @@ class StatusStateMixin:
             return tuple(self.idata_status(data_id) for data_id in data_ids)
 
     def invalidate_volatile_idata(self, data_id):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             old = self.get_idata(data_id)
             if old.durability == "durable" and old.durable_path:
                 digest = hashlib.sha256()
@@ -74,6 +74,7 @@ class StatusStateMixin:
                 self.pruning.set_data_state(
                     old.data_id, available=True, durable=True
                 )
+                self._mark_idata_metadata((data_id,))
                 return "validated-durable"
             self._cancel_persistence_locked(old.data_id, "global-loss")
             for replica in self.replicas.records_for(
@@ -107,28 +108,35 @@ class StatusStateMixin:
                 durable=False,
                 persistence="none",
             )
+            self._mark_idata_metadata((data_id,))
             return "globally-lost"
 
     def set_task_state(self, task_id, state):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             self.get_task(task_id)
-            return self.pruning.set_task_state(task_id, state).to_dict()
+            result = self.pruning.set_task_state(task_id, state).to_dict()
+            self._mark_metadata("task-state", (task_id,))
+            return result
 
     def set_task_states(self, task_ids, state):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             task_ids = tuple(int(task_id) for task_id in task_ids)
             for task_id in task_ids:
                 self.get_task(task_id)
-            return tuple(
+            result = tuple(
                 mutation.to_dict()
                 for mutation in self.pruning.set_task_states(
                     task_ids, state
                 )
             )
+            self._mark_metadata("task-state", task_ids)
+            return result
 
     def set_required_output(self, data_id, required=True):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             self.get_idata(data_id)
-            return self.pruning.set_data_state(
+            result = self.pruning.set_data_state(
                 data_id, required_output=bool(required)
             ).to_dict()
+            self._mark_metadata("data-state", (data_id,))
+            return result

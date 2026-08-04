@@ -8,7 +8,7 @@ from ..value import data_value_score
 
 class IDataTaskStateMixin:
     def allocate_idata(self, producer_task_id, producer_output_index=0):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             data_id = self._next_idata_id
             self._next_idata_id += 1
             record = IDataRecord(
@@ -17,10 +17,11 @@ class IDataTaskStateMixin:
                 int(producer_output_index),
             )
             self._idata[data_id] = record
+            self._mark_metadata("idata", (data_id,))
             return record
 
     def allocate_idata_batch(self, producer_slots):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             return tuple(
                 self.allocate_idata(task_id, output_index)
                 for task_id, output_index in producer_slots
@@ -74,7 +75,7 @@ class IDataTaskStateMixin:
         return self.register_tasks((task,))[0]
 
     def register_tasks(self, tasks):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             results = []
             new_tasks = {}
             for task in tasks:
@@ -102,6 +103,10 @@ class IDataTaskStateMixin:
                 for task in new_tasks.values()
             )
             for task in new_tasks.values():
+                self._task_registration_order[task.task_id] = (
+                    self._next_task_registration_sequence
+                )
+                self._next_task_registration_sequence += 1
                 self._task_depths[task.task_id] = 1 + max(
                     (
                         self._task_depths[
@@ -127,6 +132,17 @@ class IDataTaskStateMixin:
                         task.task_id
                     )
             self._tasks.update(new_tasks)
+            task_ids = tuple(new_tasks)
+            self._mark_metadata("task", task_ids)
+            self._mark_metadata("task-state", task_ids)
+            self._mark_metadata(
+                "data-state",
+                (
+                    data_id
+                    for task in new_tasks.values()
+                    for data_id in task.output_data_ids
+                ),
+            )
             return tuple(results)
 
     def execution_bundle(self, task_ids):
@@ -222,7 +238,7 @@ class IDataTaskStateMixin:
     def publish_idata(self, data_id, attempt, serialized_bytes):
         if not isinstance(serialized_bytes, bytes):
             raise TypeError("serialized_bytes must be bytes")
-        with self._lock:
+        with self._lock, self._metadata_batch():
             record, changed = self._publish_idata_locked(
                 data_id, attempt, serialized_bytes
             )
@@ -233,6 +249,7 @@ class IDataTaskStateMixin:
                     durable=False,
                     persistence="none",
                 )
+                self._mark_idata_metadata((data_id,))
             return record
 
     def _publish_idata_locked(self, data_id, attempt, serialized_bytes):
@@ -298,7 +315,7 @@ class IDataTaskStateMixin:
         return record, True
 
     def publish_idata_batch(self, publications):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             records = []
             changed_data_ids = []
             for data_id, attempt, payload in publications:
@@ -323,12 +340,13 @@ class IDataTaskStateMixin:
                     for data_id in changed_data_ids
                 )
             )
+            self._mark_idata_metadata(changed_data_ids)
             return tuple(records)
 
     def publish_idata_metadata(
         self, data_id, attempt, content_hash, serialized_size
     ):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             old = self.get_idata(data_id)
             attempt = int(attempt)
             serialized_size = int(serialized_size)
@@ -387,4 +405,5 @@ class IDataTaskStateMixin:
                 durable=False,
                 persistence="none",
             )
+            self._mark_idata_metadata((data_id,))
             return record

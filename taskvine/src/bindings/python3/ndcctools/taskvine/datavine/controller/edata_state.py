@@ -14,7 +14,7 @@ class EDataStateMixin:
             raise TypeError("serialized_bytes must be bytes")
         digest = EDataRecord.digest(metadata, serialized_bytes)
         bucket_key = (metadata, digest)
-        with self._lock:
+        with self._lock, self._metadata_batch():
             self._registrations += 1
             for data_id in self._buckets.get(bucket_key, ()):
                 record = self._edata[data_id]
@@ -43,10 +43,11 @@ class EDataStateMixin:
             self._edata[data_id] = record
             self._buckets.setdefault(bucket_key, []).append(data_id)
             self._edata_bytes += len(serialized_bytes)
+            self._mark_metadata("edata", (data_id,))
             return record
 
     def register_edata_batch(self, values):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             return tuple(
                 self.register_edata(metadata, payload)
                 for metadata, payload in values
@@ -132,7 +133,7 @@ class EDataStateMixin:
         if digest.hexdigest() != str(content_hash):
             raise ValueError("bulk origin content hash mismatch")
         bucket_key = (metadata, str(content_hash))
-        with self._lock:
+        with self._lock, self._metadata_batch():
             self._registrations += 1
             for data_id in self._buckets.get(bucket_key, ()):
                 record = self._edata[data_id]
@@ -169,6 +170,7 @@ class EDataStateMixin:
             self._edata[data_id] = record
             self._buckets.setdefault(bucket_key, []).append(data_id)
             self._edata_bulk_bytes += serialized_size
+            self._mark_metadata("edata", (data_id,))
             return record
 
     def get_edata(self, data_id):

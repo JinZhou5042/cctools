@@ -224,7 +224,7 @@ class ReplicaStateMixin:
         content_hash,
         size,
     ):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             self._validate_replica_identity(
                 data_key, attempt, content_hash, size
             )
@@ -243,10 +243,11 @@ class ReplicaStateMixin:
                     available=True,
                     durable=value.durability == "durable",
                 )
+                self._mark_metadata("data-state", (value.data_id,))
             return replica
 
     def prepare_worker_outputs(self, worker_id, worker_epoch, outputs):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             prepared = []
             for output in outputs:
                 data_id = int(output["data_id"])
@@ -271,7 +272,7 @@ class ReplicaStateMixin:
             return tuple(prepared)
 
     def publish_worker_outputs(self, worker_id, worker_epoch, outputs):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             published = []
             for output in outputs:
                 data_id = int(output["data_id"])
@@ -303,7 +304,7 @@ class ReplicaStateMixin:
             return tuple(published)
 
     def commit_worker_outputs(self, outputs):
-        with self._lock:
+        with self._lock, self._metadata_batch():
             return tuple(
                 self.commit_worker_replica(
                     output["data_id"],
@@ -328,22 +329,23 @@ class ReplicaStateMixin:
         worker_epoch,
         source_endpoint=None,
     ):
-        replica = self.prepare_worker_replica(
-            data_key,
-            replica_id,
-            attempt,
-            tier,
-            content_hash,
-            size,
-            worker_id,
-            worker_epoch,
-            source_endpoint,
-        )
-        return self.commit_worker_replica(
-            data_key,
-            replica_id,
-            replica.generation,
-            attempt,
-            content_hash,
-            size,
-        )
+        with self._lock, self._metadata_batch():
+            replica = self.prepare_worker_replica(
+                data_key,
+                replica_id,
+                attempt,
+                tier,
+                content_hash,
+                size,
+                worker_id,
+                worker_epoch,
+                source_endpoint,
+            )
+            return self.commit_worker_replica(
+                data_key,
+                replica_id,
+                replica.generation,
+                attempt,
+                content_hash,
+                size,
+            )

@@ -199,6 +199,9 @@ class ControllerService:
             f"tcp://{self.native_address[0]}:{self.native_address[1]}",
             self.token,
         )
+        self.state.restore_metadata(
+            self._native_client.get_edata, self.worker_replicas
+        )
         Handler = ControllerHandlerFactory.create(self)
 
         self._server = BoundedThreadingHTTPServer(

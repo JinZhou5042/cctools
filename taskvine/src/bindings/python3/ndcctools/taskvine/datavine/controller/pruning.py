@@ -5,6 +5,7 @@ import dataclasses
 import hashlib
 import os
 from pathlib import Path
+import re
 
 from ..recovery import IncrementalPruner, LineageGraph
 
@@ -56,6 +57,23 @@ class PruningAuthority:
         quarantine.mkdir(parents=True, exist_ok=True)
         self._persistence_root = root
         self._quarantine_root = quarantine
+        self._recover_quarantine()
+
+    def _recover_quarantine(self):
+        pattern = re.compile(r"^i-[0-9]+-g-[0-9]+-(.+)$")
+        restored = False
+        for quarantined in self._quarantine_root.iterdir():
+            match = pattern.fullmatch(quarantined.name)
+            if match is None or not quarantined.is_file():
+                raise RuntimeError("invalid pruning quarantine entry")
+            target = self._persistence_root / match.group(1)
+            if target.exists():
+                raise RuntimeError("ambiguous pruning quarantine recovery")
+            os.replace(quarantined, target)
+            restored = True
+        if restored:
+            self._fsync_directory(self._quarantine_root)
+            self._fsync_directory(self._persistence_root)
 
     def register_task(self, task_id, inputs, outputs):
         return self.pruner.add_task(task_id, inputs, outputs)
