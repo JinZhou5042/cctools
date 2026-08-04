@@ -146,7 +146,7 @@ class InputResolver:
             )
         return payload
 
-    def _fetch_peer(self, data_key, content_hash, size):
+    def _fetch_peer(self, data_key):
         excluded = []
         for _ in range(2):
             transfer_id = f"taskvine:{uuid.uuid4().hex}"
@@ -157,20 +157,31 @@ class InputResolver:
                     transfer_id,
                     excluded,
                 )
-            except Exception:
-                return None
+            except Exception as exc:
+                self.emit(
+                    f"DATAVINE_PEER_RESOLVE_FAILED {data_key} "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                return None, None
             source = resolved["source"]
             source_url = source.get("source_url")
             if not source_url:
                 self.client.release_replica(
                     resolved["lease"]["lease_id"], False
                 )
-                return None
+                return None, None
             try:
                 payload = self.client.fetch_source(
-                    source_url, content_hash, size
+                    source_url,
+                    source["content_hash"],
+                    source["size"],
                 )
-            except Exception:
+            except Exception as exc:
+                self.emit(
+                    f"DATAVINE_PEER_FETCH_FAILED {data_key} "
+                    f"source={source.get('worker_id')} "
+                    f"{type(exc).__name__}: {exc}"
+                )
                 self.client.release_replica(
                     resolved["lease"]["lease_id"], False
                 )
@@ -195,8 +206,8 @@ class InputResolver:
                 f"DATAVINE_PEER_FETCH {data_key} "
                 f"source={source['worker_id']}"
             )
-            return payload
-        return None
+            return payload, source
+        return None, None
 
     def resolve(self, binding):
         kind, data_id = binding
@@ -260,14 +271,12 @@ class InputResolver:
             self.emit(f"DATAVINE_LOCAL_HIT i{data_id}")
             self.emit(f"DATAVINE_LOCAL_IDATA i{data_id}")
             return payload
-        status = self.client.idata_status(data_id)
-        payload = (
-            self._fetch_peer(
-                data_key, status["content_hash"], status["size"]
-            )
-            if self.allow_peer_transfer
-            else None
-        )
+        status = None
+        payload = None
+        if self.allow_peer_transfer:
+            payload, status = self._fetch_peer(data_key)
+        if status is None:
+            status = self.client.idata_status(data_id)
         if (
             payload is None
             and not self.allow_peer_transfer

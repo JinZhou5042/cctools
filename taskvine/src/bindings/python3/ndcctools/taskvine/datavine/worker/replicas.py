@@ -25,6 +25,7 @@ class WorkerReplicaReporter:
         self.source_id = hashlib.blake2b(
             str(endpoint).encode("utf-8"), digest_size=8
         ).hexdigest()
+        self.endpoint = str(endpoint)
         self.emit = emit
         self.process_cache = process_cache
 
@@ -87,6 +88,8 @@ class WorkerReplicaReporter:
                     "size": replica["size"],
                     "worker_id": self.worker_id,
                     "worker_epoch": self.worker_epoch,
+                    "tier": tier,
+                    "source_endpoint": self.endpoint,
                 },
                 sort_keys=True,
                 separators=(",", ":"),

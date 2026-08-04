@@ -343,6 +343,20 @@ class ControllerClient:
                     worker_id,
                     worker_epoch,
                 )
+            return {
+                "data_id": str(data_id),
+                "replica_id": str(replica_id),
+                "generation": native_generation,
+                "attempt": int(attempt),
+                "tier": str(tier),
+                "content_hash": str(content_hash),
+                "size": int(size),
+                "state": "available",
+                "load": 0,
+                "worker_id": str(worker_id),
+                "worker_epoch": int(worker_epoch),
+                "source_endpoint": self.native.worker_endpoint(worker_id),
+            }
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/replicas/report",
@@ -363,11 +377,6 @@ class ControllerClient:
             },
         )
         replica = json.loads(payload)
-        if (
-            native_generation is not None
-            and native_generation != int(replica["generation"])
-        ):
-            raise RuntimeError("Controller replica generations diverged")
         return replica
 
     def prepare_replica(
@@ -461,24 +470,35 @@ class ControllerClient:
         return self.project_outputs(worker_id, worker_epoch, outputs)
 
     def project_outputs(self, worker_id, worker_epoch, outputs):
+        return self.project_data_events(
+            ((worker_id, worker_epoch, outputs),)
+        )
+
+    def project_data_events(self, output_batches, replicas=()):
         payload, _ = self._request(
             "POST",
-            f"{API_PREFIX}/replicas/publish-outputs",
+            f"{API_PREFIX}/replicas/project-events",
             {
-                "worker_id": str(worker_id),
-                "worker_epoch": int(worker_epoch),
-                "outputs": [
+                "batches": [
                     {
-                        key: (
-                            int(str(value).split(":", 1)[-1])
-                            if key == "data_id"
-                            else value
-                        )
-                        for key, value in output.items()
-                        if key != "payload"
+                        "worker_id": str(worker_id),
+                        "worker_epoch": int(worker_epoch),
+                        "outputs": [
+                            {
+                                key: (
+                                    int(str(value).split(":", 1)[-1])
+                                    if key == "data_id"
+                                    else value
+                                )
+                                for key, value in output.items()
+                                if key != "payload"
+                            }
+                            for output in outputs
+                        ],
                     }
-                    for output in outputs
+                    for worker_id, worker_epoch, outputs in output_batches
                 ],
+                "replicas": list(replicas),
             },
             idempotent=True,
         )
@@ -524,6 +544,12 @@ class ControllerClient:
         worker_id,
         worker_epoch=1,
     ):
+        if self.native is not None:
+            try:
+                self.native.invalidate_replica(data_id, replica_id)
+            except NativeControllerError as exc:
+                if exc.status != 5:
+                    raise
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/replicas/invalidate-observed",
@@ -658,6 +684,12 @@ class ControllerClient:
     def confirm_replica_pruned(
         self, data_id, replica_id, generation
     ):
+        if self.native is not None:
+            try:
+                self.native.invalidate_replica(data_id, replica_id)
+            except NativeControllerError as exc:
+                if exc.status != 5:
+                    raise
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/replicas/pruned",

@@ -521,6 +521,30 @@ static uint32_t release_source(struct vine_datavine_rpc_server *server,
 	return VINE_DATAVINE_RPC_OK;
 }
 
+static uint32_t invalidate_replica(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size)
+{
+	if (size < 16) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	char kind = (char)payload[0];
+	uint16_t replica_length = get_u16(payload + 2);
+	int64_t data_id = (int64_t)vine_datavine_rpc_get_u64(payload + 8);
+	if (!replica_length || replica_length > VINE_DATAVINE_REPLICA_ID_MAX
+			|| size != 16 + (size_t)replica_length) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	char replica[VINE_DATAVINE_REPLICA_ID_MAX + 1];
+	memcpy(replica, payload + 16, replica_length);
+	replica[replica_length] = 0;
+	int invalidated = vine_datavine_directory_invalidate_replica(
+			server->directory, kind, data_id, replica);
+	if (invalidated < 0) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	return invalidated ? VINE_DATAVINE_RPC_OK : VINE_DATAVINE_RPC_NOT_FOUND;
+}
+
 static int process_request(struct vine_datavine_rpc_server *server, struct rpc_connection *connection)
 {
 	const unsigned char *header = connection->header;
@@ -565,6 +589,9 @@ static int process_request(struct vine_datavine_rpc_server *server, struct rpc_c
 	} else if (opcode == VINE_DATAVINE_RPC_GET_EDATA) {
 		status = get_edata(server, connection->payload,
 				connection->payload_size, &dynamic_result, &result_size);
+	} else if (opcode == VINE_DATAVINE_RPC_INVALIDATE_REPLICA) {
+		status = invalidate_replica(server, connection->payload,
+				connection->payload_size);
 	} else {
 		status = VINE_DATAVINE_RPC_INVALID;
 	}

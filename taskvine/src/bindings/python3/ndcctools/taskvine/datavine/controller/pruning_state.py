@@ -368,10 +368,11 @@ class PruningStateMixin:
                         "worker_id": replica.worker_id,
                         "worker_epoch": replica.worker_epoch,
                         "source_url": (
-                            f"{worker.endpoint}/data/i/{data_id}"
+                            f"{replica.source_endpoint or worker.endpoint}"
+                            f"/data/i/{data_id}"
                             f"?sha256={replica.content_hash}"
                             f"&size={replica.size}"
-                            if worker.endpoint
+                            if replica.source_endpoint or worker.endpoint
                             else None
                         ),
                     }

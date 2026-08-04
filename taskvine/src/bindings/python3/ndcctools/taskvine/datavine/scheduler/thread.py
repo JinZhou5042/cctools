@@ -37,6 +37,7 @@ from .reporting import (
 from .run_context import WorkflowRunContext
 from .task_factory import DataVineCall, TaskFactory, ensure_worker_library
 
+
 class TaskSchedulerThread:
     _registration_batch_size = 4096
 
@@ -232,15 +233,6 @@ class TaskSchedulerThread:
         self._worker_reconciliations += 1
         return worker_ids
 
-    def _file_for_data_key(self, data_key):
-        kind, token = str(data_key).split(":", 1)
-        data_id = int(token)
-        if kind == "e":
-            return self._edata_files.get(data_id)
-        if kind == "i":
-            return self._idata_files.get(data_id)
-        raise ValueError(f"unknown qualified DataID {data_key!r}")
-
     def _op_last_run_report(self):
         self._assert_owner()
         return dict(self._last_run_report)
@@ -250,7 +242,6 @@ class TaskSchedulerThread:
         grace_seconds=60,
         data_ids=None,
         now=None,
-        acknowledgement_timeout=30,
     ):
         self._assert_owner()
         if self._manager is None:
@@ -284,68 +275,29 @@ class TaskSchedulerThread:
             )
         worker_prunes = []
         for data_id, records in sorted(pending_by_data.items()):
-            file_object = self._idata_files.get(data_id)
-            if file_object is None:
-                raise RuntimeError(
-                    f"no TaskVine file for local prune i:{data_id}"
-                )
-            before = self._manager.prune_file_status(file_object)
-            requested = self._manager.prune_file(file_object)
-            if requested != len(records):
-                raise RuntimeError(
-                    f"replica authority mismatch for i:{data_id}: "
-                    f"Controller={len(records)} TaskVine={requested}"
-                )
-            deadline = time.monotonic() + float(
-                acknowledgement_timeout
-            )
-            while True:
-                self._raise_if_stopping()
-                self._manager.wait(1)
-                self._sync_worker_epochs()
-                status = self._manager.prune_file_status(file_object)
-                confirmed = (
-                    status["confirmed"] - before["confirmed"]
-                )
-                failed = status["failed"] - before["failed"]
-                if confirmed + failed >= requested:
-                    break
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"worker prune acknowledgement timed out "
-                        f"for i:{data_id}"
-                    )
-            if failed:
-                raise RuntimeError(
-                    f"{failed} worker prune operations failed "
-                    f"for i:{data_id}"
-                )
+            confirmed = 0
             for record in records:
+                source_url = record.get("source_url")
+                if not source_url:
+                    raise RuntimeError(
+                        f"worker prune i:{data_id} lacks data endpoint"
+                    )
+                self.controller.prune_source(source_url)
                 self.controller.confirm_replica_pruned(
                     f"i:{data_id}",
                     record["replica_id"],
                     record["generation"],
                 )
+                confirmed += 1
             worker_prunes.append(
                 {
                     "data_id": data_id,
-                    "requested": requested,
+                    "requested": len(records),
                     "confirmed": confirmed,
-                    "failed": failed,
+                    "failed": 0,
+                    "tracker_released": True,
                 }
             )
-            if not self._manager.forget_prune_file_status(file_object):
-                raise RuntimeError(
-                    f"could not release completed prune state "
-                    f"for i:{data_id}"
-                )
-            if any(
-                self._manager.prune_file_status(file_object).values()
-            ):
-                raise RuntimeError(
-                    f"completed prune state leaked for i:{data_id}"
-                )
-            worker_prunes[-1]["tracker_released"] = True
         return {
             "controller": result,
             "worker_prunes": worker_prunes,
@@ -654,6 +606,7 @@ class TaskSchedulerThread:
         ready_queue = ReadyQueue(
             dependencies, dependents, execution.pending, execution.done
         )
+
         def cache_size(data_key):
             kind, token = data_key.split(":", 1)
             if kind == "e":
@@ -679,7 +632,6 @@ class TaskSchedulerThread:
         )
         task_cache_inputs = cache_plan.task_inputs
         remaining_cache_uses = cache_plan.remaining_uses
-        cache_known_sizes = cache_plan.known_sizes
         max_task_cache_items = cache_plan.max_task_items
         max_task_known_cache_bytes = cache_plan.max_known_input_bytes
         effective_retention_items = cache_plan.retention_items
@@ -775,6 +727,47 @@ class TaskSchedulerThread:
         peer_transfer_pruning_probes = []
         peer_transfer_pruning_probe_triggered = False
         completed_task_states = []
+        output_projections = {}
+        projection_count = 0
+        replica_projections = []
+
+        def flush_output_projections():
+            nonlocal projection_count
+            if not projection_count:
+                return
+            batches = [
+                (worker_id, worker_epoch, outputs)
+                for (worker_id, worker_epoch), outputs
+                in output_projections.items()
+            ]
+            committed = self.controller.project_data_events(
+                batches, replica_projections
+            )
+            if len(committed) != projection_count:
+                raise RuntimeError(
+                    "Controller returned incomplete output projections"
+                )
+            output_projections.clear()
+            replica_projections.clear()
+            projection_count = 0
+
+        def record_output_projection(outputs):
+            nonlocal projection_count
+            key = (
+                outputs[0]["worker_id"],
+                int(outputs[0]["worker_epoch"]),
+            )
+            output_projections.setdefault(key, []).extend(outputs)
+            projection_count += len(outputs)
+            if projection_count >= 256:
+                flush_output_projections()
+
+        def record_replica_projection(replica):
+            nonlocal projection_count
+            replica_projections.append(replica)
+            projection_count += 1
+            if projection_count >= 256:
+                flush_output_projections()
 
         def flush_completed_task_states():
             if completed_task_states:
@@ -789,6 +782,7 @@ class TaskSchedulerThread:
                 flush_completed_task_states()
 
         def record_pending_task_state(task_id):
+            flush_output_projections()
             flush_completed_task_states()
             self.controller.set_task_state(task_id, "pending")
 
@@ -823,6 +817,7 @@ class TaskSchedulerThread:
                 or not persist_outputs
             ):
                 return
+            flush_output_projections()
             for output_data_id in output_data_ids:
                 status = self.controller.persist_idata(output_data_id)
                 persistence.required.add(output_data_id)
@@ -864,6 +859,7 @@ class TaskSchedulerThread:
                 != logical_id
             ):
                 return False
+            flush_output_projections()
             from ndcctools.taskvine import cvine
 
             workers_before = sorted(self._sync_worker_epochs(force=True))
@@ -937,9 +933,6 @@ class TaskSchedulerThread:
             for lost_task_id in lost_task_ids:
                 lost_data_id = output_ids[lost_task_id]
                 self.controller.invalidate_idata(lost_data_id)
-                file_object = self._idata_files.get(lost_data_id)
-                if file_object is not None:
-                    self._manager.prune_file(file_object)
             execution.recovery_audit_data_ids.update(
                 output_ids[task_id] for task_id in lost_task_ids
             )
@@ -1038,32 +1031,6 @@ class TaskSchedulerThread:
             ):
                 if not recovery["persistence_drained"]:
                     continue
-                status = self._manager.prune_file_status(
-                    recovery["file"]
-                )
-                confirmed = (
-                    status["confirmed"]
-                    - recovery["before"]["confirmed"]
-                )
-                failed = (
-                    status["failed"] - recovery["before"]["failed"]
-                )
-                if failed:
-                    raise RuntimeError(
-                        f"physical prune failed before recovery "
-                        f"of i:{data_id}"
-                    )
-                if confirmed < recovery["requested"]:
-                    continue
-                if (
-                    recovery["requested"]
-                    and not self._manager.forget_prune_file_status(
-                        recovery["file"]
-                    )
-                ):
-                    raise RuntimeError(
-                        f"could not release prune barrier for i:{data_id}"
-                    )
                 execution.pending.add(recovery["logical_id"])
                 persistence.suspended_recovery.pop(data_id)
                 ready_queue.rebuild(execution.pending, execution.done)
@@ -1078,9 +1045,6 @@ class TaskSchedulerThread:
                 )
                 if output_status["available"]:
                     return
-                file_object = self._idata_files.get(data_id)
-                if file_object is not None:
-                    self._manager.prune_file(file_object)
                 record_pending_task_state(task_id)
                 execution.done.remove(task_id)
                 execution.pending.add(task_id)
@@ -1352,10 +1316,6 @@ class TaskSchedulerThread:
                         & active_inputs
                     )
                     and not (
-                        {f"i:{data_id}" for data_id in data_ids}
-                        & self._cache_admission.prune_by_data
-                    )
-                    and not (
                         set(data_ids)
                         & {
                             data_id
@@ -1493,13 +1453,7 @@ class TaskSchedulerThread:
 
             ready = ready_queue.take(
                 execution.pending,
-                lambda task_id: (
-                    persistence_frontier_ready(task_id)
-                    and not (
-                        task_cache_inputs[task_id]
-                        & self._cache_admission.prune_by_data
-                    )
-                ),
+                persistence_frontier_ready,
             )
             submitted_task_ids = []
             for task_id in ready:
@@ -1552,11 +1506,6 @@ class TaskSchedulerThread:
                         persistence.pending[0][0] - time.monotonic(),
                     )
                     time.sleep(min(float(wait_timeout), delay))
-                    continue
-                if self._cache_admission.evictions:
-                    self._manager.wait(wait_timeout)
-                    self._sync_worker_epochs()
-                    self._cache_admission.poll(self._manager)
                     continue
                 if persistence.suspended_recovery:
                     self._manager.wait(wait_timeout)
@@ -1629,10 +1578,6 @@ class TaskSchedulerThread:
                         ),
                         "unavailable_inputs": unavailable_inputs,
                         "persistence_frontiers": persistence_frontiers,
-                        "pruning_inputs": sorted(
-                            task_cache_inputs[task_id]
-                            & self._cache_admission.prune_by_data
-                        ),
                     }
                 raise RuntimeError(
                     "workflow cannot make progress: "
@@ -1645,9 +1590,13 @@ class TaskSchedulerThread:
             else:
                 completed = self._manager.wait(wait_timeout)
             workers_before_sync = self._active_worker_ids
+            if (
+                time.monotonic() - self._last_worker_status_poll
+                >= self._worker_status_poll_interval
+            ):
+                flush_output_projections()
             active_workers = frozenset(self._sync_worker_epochs())
             workers_lost = workers_before_sync - active_workers
-            self._cache_admission.poll(self._manager)
             if workers_lost:
                 execution.recovery_audit_data_ids.update(
                     int(data_key.split(":", 1)[1])
@@ -1792,20 +1741,10 @@ class TaskSchedulerThread:
                                 "persistence loss target was not "
                                 "logically completed"
                             )
-                        file_object = self._idata_files[data_id]
-                        prune_before = (
-                            self._manager.prune_file_status(file_object)
-                        )
-                        prune_requested = self._manager.prune_file(
-                            file_object
-                        )
                         record_pending_task_state(logical_id)
                         execution.done.remove(logical_id)
                         persistence.suspended_recovery[data_id] = {
                             "logical_id": logical_id,
-                            "file": file_object,
-                            "before": prune_before,
-                            "requested": prune_requested,
                             "request_id": active_request["request_id"],
                             "persistence_drained": False,
                         }
@@ -1839,16 +1778,15 @@ class TaskSchedulerThread:
                                 )
                             persistence.cancellations += 1
                             break
+                flush_output_projections()
                 self._cache_admission.enforce(
-                    self._manager,
-                    self._file_for_data_key,
                     effective_retention_bytes,
                     effective_retention_items,
                     remaining_cache_uses,
-                {
-                    data_key
-                    for logical_id in execution.running.values()
-                    for data_key in task_cache_inputs[logical_id]
+                    {
+                        data_key
+                        for logical_id in execution.running.values()
+                        for data_key in task_cache_inputs[logical_id]
                     },
                 )
                 continue
@@ -2107,6 +2045,13 @@ class TaskSchedulerThread:
                             ],
                             "lost_inputs": lost_inputs,
                             "error": str(error)[:2048],
+                            "data_events": [
+                                line
+                                for line in structured_task["events"]
+                                if line.startswith(
+                                    "DATAVINE_PEER_"
+                                )
+                            ][:8],
                         }
                         execution.transient_input_failures.append(failure)
                     execution.recovery_audit_data_ids.update(lost_inputs)
@@ -2137,15 +2082,7 @@ class TaskSchedulerThread:
                             f"TaskID {logical_id} returned mismatched output"
                         )
                 if structured_task.get("native_committed"):
-                    committed = self.controller.project_outputs(
-                        outputs[0]["worker_id"],
-                        outputs[0]["worker_epoch"],
-                        outputs,
-                    )
-                    if len(committed) != len(outputs):
-                        raise RuntimeError(
-                            "Controller returned incomplete output projections"
-                        )
+                    record_output_projection(outputs)
                 elif not structured_task["outputs_committed"]:
                     committed = self.controller.commit_outputs(outputs)
                     if len(committed) != len(outputs):
@@ -2155,11 +2092,11 @@ class TaskSchedulerThread:
                 events = structured_task["events"]
                 for line in events:
                     if line.startswith("DATAVINE_REPLICA_OBSERVED "):
-                        self._cache_admission.observe(
-                            json.loads(
-                                line[len("DATAVINE_REPLICA_OBSERVED "):]
-                            )
+                        observation = json.loads(
+                            line[len("DATAVINE_REPLICA_OBSERVED "):]
                         )
+                        self._cache_admission.observe(observation)
+                        record_replica_projection(observation)
                 execution.local_idata_hits += sum(
                     line.count("DATAVINE_LOCAL_IDATA") for line in events
                 )
@@ -2235,9 +2172,6 @@ class TaskSchedulerThread:
                     for output_data_id in expected_output_ids:
                         self.controller.invalidate_idata(
                             output_data_id
-                        )
-                        self._manager.prune_file(
-                            self._idata_files[output_data_id]
                         )
                     record_pending_task_state(logical_id)
                     execution.pending.add(logical_id)
@@ -2352,9 +2286,8 @@ class TaskSchedulerThread:
                 execution.recovery_audit_data_ids.add(output_ids[logical_id])
                 execution.loss_injected = True
             maybe_inject_worker_loss(logical_id)
+            flush_output_projections()
             self._cache_admission.enforce(
-                self._manager,
-                self._file_for_data_key,
                 effective_retention_bytes,
                 effective_retention_items,
                 remaining_cache_uses,
@@ -2368,10 +2301,11 @@ class TaskSchedulerThread:
                     for data_id in required_result_data_ids
                 },
             )
+        flush_output_projections()
+        flush_completed_task_states()
         workflow_execution_elapsed = (
             time.monotonic() - workflow_execution_started
         )
-        flush_completed_task_states()
         result_values = {
             task_id: (
                 self._load_result(output_data_ids[0])
@@ -2385,29 +2319,16 @@ class TaskSchedulerThread:
             in self._run_context.logical_output_slots.items()
             if task_id in result_task_ids
         }
-        cache_deadline = time.monotonic() + 30
-        while (
-            self._cache_admission.evictions
-            or not self._cache_admission.within_capacity(
-                worker_disk_cache_bytes, worker_disk_cache_items
-            )
+        self._cache_admission.enforce(
+            effective_retention_bytes,
+            effective_retention_items,
+            remaining_cache_uses,
+            (),
+        )
+        if not self._cache_admission.within_capacity(
+            worker_disk_cache_bytes, worker_disk_cache_items
         ):
-            self._raise_if_stopping()
-            self._manager.wait(1)
-            self._sync_worker_epochs()
-            self._cache_admission.poll(self._manager)
-            self._cache_admission.enforce(
-                self._manager,
-                self._file_for_data_key,
-                effective_retention_bytes,
-                effective_retention_items,
-                remaining_cache_uses,
-                (),
-            )
-            if time.monotonic() >= cache_deadline:
-                raise TimeoutError(
-                    "worker cache eviction acknowledgements timed out"
-                )
+            raise RuntimeError("worker cache cannot satisfy its capacity")
         if persist_outputs:
             for output_data_id in sorted(persistence.required):
                 self._wait_durable(output_data_id)
@@ -2727,6 +2648,7 @@ class TaskSchedulerThread:
                 f"i:{data_id}"
             )["sources"]
             payload = None
+            failures = []
             for source in sources:
                 source_url = source.get("source_url")
                 if not source_url:
@@ -2738,14 +2660,17 @@ class TaskSchedulerThread:
                         status["size"],
                     )
                     break
-                except Exception:
-                    continue
+                except Exception as exc:
+                    failures.append(
+                        f"{source.get('worker_id')}:"
+                        f"{type(exc).__name__}:{exc}"
+                    )
             if payload is None:
                 raise RuntimeError(
-                    f"IDataID {data_id} has no readable result replica"
+                    f"IDataID {data_id} has no readable result replica: "
+                    + "; ".join(failures[:8])
                 )
         return cloudpickle.loads(payload)
-
 
     def _submit_prefetches(
         self,

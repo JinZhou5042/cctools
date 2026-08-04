@@ -195,6 +195,15 @@ static int source_protocol(int port, const char *source_worker)
 	release[5] = (unsigned char)transfer_length;
 	memcpy(release + 8, transfer, transfer_length);
 	valid &= request(&client, VINE_DATAVINE_RPC_RELEASE_SOURCE, release, 8 + transfer_length);
+	unsigned char invalidate[16 + VINE_DATAVINE_REPLICA_ID_MAX];
+	memset(invalidate, 0, sizeof(invalidate));
+	invalidate[0] = 'e';
+	invalidate[2] = (unsigned char)(replica_length >> 8);
+	invalidate[3] = (unsigned char)replica_length;
+	vine_datavine_rpc_put_u64(invalidate + 8, 42);
+	memcpy(invalidate + 16, replica_id, replica_length);
+	valid &= request(&client, VINE_DATAVINE_RPC_INVALIDATE_REPLICA,
+			invalidate, 16 + replica_length);
 	close(client.fd);
 	return valid;
 }

@@ -24,6 +24,7 @@ enum vine_datavine_rpc_opcode {
 	VINE_DATAVINE_RPC_RELEASE_SOURCE = 10,
 	VINE_DATAVINE_RPC_REGISTER_EDATA = 11,
 	VINE_DATAVINE_RPC_GET_EDATA = 12,
+	VINE_DATAVINE_RPC_INVALIDATE_REPLICA = 13,
 };
 
 enum vine_datavine_rpc_status {

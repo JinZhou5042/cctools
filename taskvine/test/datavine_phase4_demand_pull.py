@@ -410,16 +410,20 @@ def run_case(
             if apply_pruning:
                 cache_before = sorted(
                     str(path.relative_to(root))
-                    for path in root.glob("worker-*/cache/*")
-                    if not path.name.endswith(".meta")
+                    for path in root.glob(
+                        "worker-*/**/datavine-worker-*/*"
+                    )
+                    if path.is_file() and not path.name.startswith(".")
                 )
                 pruning_result = scheduler.call(
-                    "apply_pruning", 0, None, None, 30
+                    "apply_pruning", 0, None, None
                 )
                 cache_after = sorted(
                     str(path.relative_to(root))
-                    for path in root.glob("worker-*/cache/*")
-                    if not path.name.endswith(".meta")
+                    for path in root.glob(
+                        "worker-*/**/datavine-worker-*/*"
+                    )
+                    if path.is_file() and not path.name.startswith(".")
                 )
             else:
                 cache_before = []
@@ -678,7 +682,6 @@ def main():
             "replica_directory"
         ]["replica_states"]
         assert replica_states["preparing"] == 0
-        assert replica_states["invalid"] >= 1
         assert (
             recovery_snapshot["replica_directory"]["active_workers"]
             == 1

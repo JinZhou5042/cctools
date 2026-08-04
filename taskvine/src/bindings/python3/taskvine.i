@@ -74,7 +74,7 @@ into a swig function f(data) */
 		struct vine_datavine_directory_metrics metrics = {0};
 		vine_datavine_rpc_server_get_metrics(server, &metrics);
 		return Py_BuildValue(
-				"{s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K}",
+				"{s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K}",
 				"workers", metrics.workers,
 				"replicas", metrics.replicas,
 				"active_leases", metrics.active_leases,
@@ -83,6 +83,7 @@ into a swig function f(data) */
 				"releases", metrics.releases,
 				"release_failures", metrics.release_failures,
 				"idempotent_releases", metrics.idempotent_releases,
+				"invalidations", metrics.invalidations,
 				"stale_rejections", metrics.stale_rejections);
 	}
 %}

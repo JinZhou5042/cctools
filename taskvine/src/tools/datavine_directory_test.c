@@ -87,10 +87,16 @@ int main(void)
 	failed |= publish(directory, "w2", 1, "r2", 1, VINE_DATAVINE_WORKER_DRAM, &replacement);
 	failed |= !publish(directory, "w2", 2, "r2", 1, VINE_DATAVINE_WORKER_DRAM, &replacement);
 	failed |= replacement.generation != 2;
+	failed |= vine_datavine_directory_invalidate_replica(directory, 'i', 1, "r2") != 1;
+	failed |= vine_datavine_directory_invalidate_replica(directory, 'i', 1, "r2") != 0;
+	failed |= !vine_datavine_directory_resolve_source(directory, 'i', 1, "w3", 1, "taskvine:t3", 0, &source2);
+	failed |= strcmp(source2.replica.worker_id, "w1");
+	failed |= !vine_datavine_directory_release_source(directory, "taskvine:t3", 1);
 	struct vine_datavine_directory_metrics metrics;
 	vine_datavine_directory_get_metrics(directory, &metrics);
 	failed |= metrics.workers != 3 || metrics.replicas != 3 || metrics.active_leases != 0;
-	failed |= metrics.source_selections != 2 || metrics.source_misses != 0;
+	failed |= metrics.source_selections != 3 || metrics.source_misses != 0;
+	failed |= metrics.invalidations != 1;
 	failed |= metrics.stale_rejections < 1;
 	printf("workers=%llu replicas=%llu leases=%llu selections=%llu stale=%llu\n",
 			(unsigned long long)metrics.workers,

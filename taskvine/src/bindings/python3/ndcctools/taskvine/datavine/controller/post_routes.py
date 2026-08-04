@@ -323,22 +323,34 @@ class PostRouteFactory:
                         [replica.source_dict() for replica in replicas],
                     )
                     return
-                if self.path == f"{API_PREFIX}/replicas/publish-outputs":
+                if self.path == (
+                    f"{API_PREFIX}/replicas/project-events"
+                ):
                     try:
                         request = self._read_json()
-                        outputs = []
-                        for output in request["outputs"]:
-                            decoded = dict(output)
-                            if "payload" in decoded:
-                                decoded["payload"] = base64.b64decode(
-                                    decoded["payload"], validate=True
+                        replicas = []
+                        for batch in request["batches"]:
+                            replicas.extend(
+                                owner.state.publish_worker_outputs(
+                                    batch["worker_id"],
+                                    batch["worker_epoch"],
+                                    batch["outputs"],
                                 )
-                            outputs.append(decoded)
-                        replicas = owner.state.publish_worker_outputs(
-                            request["worker_id"],
-                            request["worker_epoch"],
-                            outputs,
-                        )
+                            )
+                        for replica in request.get("replicas", ()):
+                            replicas.append(
+                                owner.state.report_worker_replica(
+                                    replica["data_id"],
+                                    replica["replica_id"],
+                                    replica["attempt"],
+                                    replica["tier"],
+                                    replica["content_hash"],
+                                    replica["size"],
+                                    replica["worker_id"],
+                                    replica["worker_epoch"],
+                                    replica.get("source_endpoint"),
+                                )
+                            )
                     except Exception as exc:
                         self._error(400, exc)
                         return

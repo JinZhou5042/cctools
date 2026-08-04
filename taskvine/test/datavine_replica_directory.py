@@ -30,8 +30,8 @@ def main():
         == 65536
     )
     directory = ReplicaDirectory(max_completed_leases=2)
-    directory.join_worker("w1", 1)
-    directory.join_worker("w2", 1)
+    directory.join_worker("w1", 1, "http://w1")
+    directory.join_worker("w2", 1, "http://w2")
     payload = b"replica-data"
     content_hash = digest(payload)
 
@@ -93,7 +93,7 @@ def main():
     )
 
     # A new worker epoch invalidates old replicas and rejects stale reports.
-    directory.join_worker("w1", 2)
+    directory.join_worker("w1", 2, "http://w1")
     expect_error(
         "stale worker epoch",
         directory.join_worker,
@@ -154,7 +154,7 @@ def main():
     directory.disconnect_worker("w2", 1)
     assert directory.globally_available("i:4")
     assert not directory.disconnect_worker("w2", 1).active
-    directory.join_worker("w2", 2)
+    directory.join_worker("w2", 2, "http://w2")
     expect_error(
         "stale worker disconnect",
         directory.disconnect_worker,
@@ -246,8 +246,8 @@ def main():
     # Concurrent readers hold independent leases; invalidation retires the
     # source until both readers release it.
     concurrent = ReplicaDirectory(max_active_leases=2)
-    concurrent.join_worker("d1", 1)
-    concurrent.join_worker("d2", 1)
+    concurrent.join_worker("d1", 1, "http://d1")
+    concurrent.join_worker("d2", 1, "http://d2")
     source = concurrent.report_bytes(
         "e:1", "controller-hot", 1, "controller-memory", payload
     )
@@ -292,7 +292,7 @@ def main():
     # A newer attempt may publish while an old-generation read is active.
     # Attempt-specific replica identities keep the old lease releasable.
     generations = ReplicaDirectory()
-    generations.join_worker("reader", 1)
+    generations.join_worker("reader", 1, "http://reader")
     old_source = generations.report_bytes(
         "i:1",
         "controller-i1-attempt-1",
@@ -333,7 +333,7 @@ def main():
         max_active_leases=1,
         max_completed_leases=1,
     )
-    bounded.join_worker("only", 1)
+    bounded.join_worker("only", 1, "http://only")
     expect_error(
         "worker directory capacity",
         bounded.join_worker,

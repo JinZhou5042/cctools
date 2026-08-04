@@ -20,6 +20,7 @@ _RESOLVE_SOURCE = 9
 _RELEASE_SOURCE = 10
 _REGISTER_EDATA = 11
 _GET_EDATA = 12
+_INVALIDATE_REPLICA = 13
 _OK = 0
 _REJECTED = 3
 _MAX_BODY = 16 * 1024 * 1024
@@ -408,4 +409,13 @@ class NativeControllerClient:
         self.request(
             _RELEASE_SOURCE,
             struct.pack("!B3xH2x", bool(success), len(transfer)) + transfer,
+        )
+
+    def invalidate_replica(self, data_id, replica_id):
+        kind, token = str(data_id).split(":", 1)
+        replica = str(replica_id).encode("utf-8")
+        self.request(
+            _INVALIDATE_REPLICA,
+            struct.pack("!cxH4xq", kind.encode("ascii"), len(replica), int(token))
+            + replica,
         )

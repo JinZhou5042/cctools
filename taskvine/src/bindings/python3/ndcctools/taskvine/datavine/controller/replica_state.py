@@ -12,9 +12,9 @@ class ReplicaStateMixin:
                     if source.worker_id is not None
                     else None
                 )
-                endpoint = source.source_endpoint or (
+                endpoint = (
                     worker.endpoint if worker is not None else None
-                )
+                ) or source.source_endpoint
                 if endpoint:
                     kind, token = source.data_id.split(":", 1)
                     transfer_hash = (
@@ -81,7 +81,7 @@ class ReplicaStateMixin:
             )
             worker = self.replicas.worker(source.worker_id)
             source_description = source.source_dict()
-            endpoint = source.source_endpoint or worker.endpoint
+            endpoint = worker.endpoint or source.source_endpoint
             if endpoint:
                 kind, token = source.data_id.split(":", 1)
                 source_description["source_url"] = (
@@ -292,7 +292,7 @@ class ReplicaStateMixin:
                     f"i:{data_id}",
                     output["replica_id"],
                     record.attempt,
-                    "worker-dram",
+                    output.get("tier", "worker-disk"),
                     record.content_hash,
                     record.serialized_size,
                     worker_id,

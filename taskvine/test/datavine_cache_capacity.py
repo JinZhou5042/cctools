@@ -32,15 +32,7 @@ def cache_accounting_scale():
     assert sum(item["items"] for item in usage.values()) == 10000
     assert sum(item["bytes"] for item in usage.values()) == 640000
 
-    resolver_calls = 0
-
-    def unexpected_resolver(_):
-        nonlocal resolver_calls
-        resolver_calls += 1
-        raise AssertionError("under-capacity enforcement scanned candidates")
-
-    policy.enforce(object(), unexpected_resolver, 20000, 200, {})
-    assert resolver_calls == 0
+    policy.enforce(20000, 200, {})
     policy.observe(
         {"worker_id": "worker-0", "data_id": "e:0", "size": 128}
     )
@@ -51,7 +43,7 @@ def cache_accounting_scale():
         "records": len(policy.records),
         "workers": len(usage_after_update),
         "observe_seconds": observe_seconds,
-        "under_capacity_resolver_calls": resolver_calls,
+        "under_capacity_evictions": policy.eviction_count,
     }
 
 

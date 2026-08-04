@@ -94,7 +94,9 @@ def external_persistence_idempotency_contract():
                 hashlib.sha256(payload).hexdigest(),
                 len(payload),
             )
-            state.join_worker("persistence-source", 1)
+            state.claim_worker(
+                "persistence-source", "http://persistence-source"
+            )
             state.report_worker_replica(
                 f"i:{record.data_id}",
                 "persistence-source-replica",
@@ -159,7 +161,7 @@ def external_persistence_cancel_retry_contract():
             state.publish_idata_metadata(
                 record.data_id, 1, content_hash, len(payload)
             )
-            state.join_worker("cancel-source", 1)
+            state.claim_worker("cancel-source", "http://cancel-source")
             state.report_worker_replica(
                 f"i:{record.data_id}",
                 "cancel-source-replica",
