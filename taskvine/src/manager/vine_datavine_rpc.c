@@ -5,6 +5,7 @@ See the file COPYING for details.
 */
 
 #include "vine_datavine_rpc.h"
+#include "vine_datavine_directory.h"
 #include "vine_datavine_index.h"
 
 #include <arpa/inet.h>
@@ -14,6 +15,7 @@ See the file COPYING for details.
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -56,6 +58,7 @@ struct vine_datavine_rpc_server {
 	int thread_count;
 	struct rpc_thread *threads;
 	struct vine_datavine_index *index;
+	struct vine_datavine_directory *directory;
 	atomic_int stopping;
 };
 
@@ -87,6 +90,17 @@ static int set_nonblocking(int fd)
 {
 	int flags = fcntl(fd, F_GETFL, 0);
 	return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+static uint16_t get_u16(const unsigned char *buffer)
+{
+	return (uint16_t)((buffer[0] << 8) | buffer[1]);
+}
+
+static void put_u16(unsigned char *buffer, uint16_t value)
+{
+	buffer[0] = (unsigned char)(value >> 8);
+	buffer[1] = (unsigned char)value;
 }
 
 static void connection_delete(struct rpc_thread *thread, struct rpc_connection *connection)
@@ -190,13 +204,217 @@ static uint32_t publish_batch(struct vine_datavine_rpc_server *server,
 	return VINE_DATAVINE_RPC_OK;
 }
 
+static uint32_t claim_worker(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size, unsigned char result[8])
+{
+	if (size < 4) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	uint16_t worker_length = get_u16(payload);
+	uint16_t endpoint_length = get_u16(payload + 2);
+	if (!worker_length || worker_length > VINE_DATAVINE_WORKER_ID_MAX || !endpoint_length || endpoint_length > VINE_DATAVINE_ENDPOINT_MAX || size != 4 + (size_t)worker_length + endpoint_length) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	char worker_id[VINE_DATAVINE_WORKER_ID_MAX + 1];
+	char endpoint[VINE_DATAVINE_ENDPOINT_MAX + 1];
+	memcpy(worker_id, payload + 4, worker_length);
+	worker_id[worker_length] = 0;
+	memcpy(endpoint, payload + 4 + worker_length, endpoint_length);
+	endpoint[endpoint_length] = 0;
+	struct vine_datavine_worker_record worker;
+	if (!vine_datavine_directory_claim_worker(server->directory, worker_id, endpoint, &worker)) {
+		return VINE_DATAVINE_RPC_REJECTED;
+	}
+	vine_datavine_rpc_put_u64(result, worker.epoch);
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t publish_outputs(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size, unsigned char **result, size_t *result_size)
+{
+	if (size < 16) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	uint16_t worker_length = get_u16(payload);
+	uint64_t worker_epoch = vine_datavine_rpc_get_u64(payload + 4);
+	uint32_t count = vine_datavine_rpc_get_u32(payload + 12);
+	if (!worker_length || worker_length > VINE_DATAVINE_WORKER_ID_MAX || !worker_epoch || count > (DATAVINE_RPC_MAX_PAYLOAD - 16 - worker_length) / DATAVINE_RPC_PUBLICATION_SIZE || size != 16 + (size_t)worker_length + (size_t)count * DATAVINE_RPC_PUBLICATION_SIZE) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	char worker_id[VINE_DATAVINE_WORKER_ID_MAX + 1];
+	memcpy(worker_id, payload + 16, worker_length);
+	worker_id[worker_length] = 0;
+	*result_size = 4 + (size_t)count * 8;
+	*result = malloc(*result_size);
+	if (!*result) {
+		*result_size = 0;
+		return VINE_DATAVINE_RPC_INTERNAL;
+	}
+	vine_datavine_rpc_put_u32(*result, count);
+	for (uint32_t i = 0; i < count; i++) {
+		const unsigned char *record = payload + 16 + worker_length + (size_t)i * DATAVINE_RPC_PUBLICATION_SIZE;
+		int64_t data_id = (int64_t)vine_datavine_rpc_get_u64(record);
+		int32_t attempt = (int32_t)vine_datavine_rpc_get_u32(record + 8);
+		int64_t bytes = (int64_t)vine_datavine_rpc_get_u64(record + 16);
+		char hash[65];
+		memcpy(hash, record + 24, 64);
+		hash[64] = 0;
+		char replica_id[VINE_DATAVINE_REPLICA_ID_MAX + 1];
+		int length = snprintf(replica_id, sizeof(replica_id), "taskvine-%s-i-%lld", worker_id, (long long)data_id);
+		struct vine_datavine_replica_record replica;
+		if (length < 1 || length > VINE_DATAVINE_REPLICA_ID_MAX || !vine_datavine_index_put(server->index, data_id, attempt, hash, bytes) || !vine_datavine_directory_publish_replica(server->directory, 'i', data_id, replica_id, attempt, VINE_DATAVINE_WORKER_DRAM, hash, bytes, worker_id, worker_epoch, &replica)) {
+			vine_datavine_rpc_put_u32(*result, i);
+			*result_size = 4;
+			return VINE_DATAVINE_RPC_REJECTED;
+		}
+		vine_datavine_rpc_put_u64(*result + 4 + (size_t)i * 8, replica.generation);
+	}
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t disconnect_worker(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size)
+{
+	if (size < 12) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	uint16_t worker_length = get_u16(payload);
+	uint64_t epoch = vine_datavine_rpc_get_u64(payload + 4);
+	if (!worker_length || worker_length > VINE_DATAVINE_WORKER_ID_MAX || !epoch || size != 12 + (size_t)worker_length) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	char worker_id[VINE_DATAVINE_WORKER_ID_MAX + 1];
+	memcpy(worker_id, payload + 12, worker_length);
+	worker_id[worker_length] = 0;
+	if (!vine_datavine_directory_disconnect_worker(server->directory, worker_id, epoch)) {
+		return VINE_DATAVINE_RPC_REJECTED;
+	}
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t report_replica(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size, unsigned char result[8])
+{
+	if (size < 104) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	char kind = (char)payload[0];
+	int32_t tier = payload[1];
+	uint16_t worker_length = get_u16(payload + 2);
+	uint16_t replica_length = get_u16(payload + 4);
+	uint64_t worker_epoch = vine_datavine_rpc_get_u64(payload + 8);
+	int64_t data_id = (int64_t)vine_datavine_rpc_get_u64(payload + 16);
+	int32_t attempt = (int32_t)vine_datavine_rpc_get_u32(payload + 24);
+	int64_t bytes = (int64_t)vine_datavine_rpc_get_u64(payload + 32);
+	if ((kind != 'e' && kind != 'i') || (tier != VINE_DATAVINE_WORKER_DRAM && tier != VINE_DATAVINE_WORKER_DISK) || !worker_length || worker_length > VINE_DATAVINE_WORKER_ID_MAX || !replica_length || replica_length > VINE_DATAVINE_REPLICA_ID_MAX || size != 104 + (size_t)worker_length + replica_length) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	char hash[65];
+	char worker_id[VINE_DATAVINE_WORKER_ID_MAX + 1];
+	char replica_id[VINE_DATAVINE_REPLICA_ID_MAX + 1];
+	memcpy(hash, payload + 40, 64);
+	hash[64] = 0;
+	memcpy(worker_id, payload + 104, worker_length);
+	worker_id[worker_length] = 0;
+	memcpy(replica_id, payload + 104 + worker_length, replica_length);
+	replica_id[replica_length] = 0;
+	struct vine_datavine_replica_record replica;
+	if (!vine_datavine_directory_publish_replica(server->directory, kind, data_id, replica_id, attempt, tier, hash, bytes, worker_id, worker_epoch, &replica)) {
+		return VINE_DATAVINE_RPC_REJECTED;
+	}
+	vine_datavine_rpc_put_u64(result, replica.generation);
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t resolve_source(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size, unsigned char **result, size_t *result_size)
+{
+	if (size < 24) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	char kind = (char)payload[0];
+	uint16_t destination_length = get_u16(payload + 2);
+	uint16_t transfer_length = get_u16(payload + 4);
+	uint16_t excluded_length = get_u16(payload + 6);
+	uint64_t destination_epoch = vine_datavine_rpc_get_u64(payload + 8);
+	int64_t data_id = (int64_t)vine_datavine_rpc_get_u64(payload + 16);
+	if ((kind != 'e' && kind != 'i') || !destination_length || destination_length > VINE_DATAVINE_WORKER_ID_MAX || !transfer_length || transfer_length > VINE_DATAVINE_TRANSFER_ID_MAX || excluded_length > VINE_DATAVINE_WORKER_ID_MAX || size != 24 + (size_t)destination_length + transfer_length + excluded_length) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	const unsigned char *strings = payload + 24;
+	char destination[VINE_DATAVINE_WORKER_ID_MAX + 1];
+	char transfer[VINE_DATAVINE_TRANSFER_ID_MAX + 1];
+	char excluded[VINE_DATAVINE_WORKER_ID_MAX + 1];
+	memcpy(destination, strings, destination_length);
+	destination[destination_length] = 0;
+	memcpy(transfer, strings + destination_length, transfer_length);
+	transfer[transfer_length] = 0;
+	memcpy(excluded, strings + destination_length + transfer_length, excluded_length);
+	excluded[excluded_length] = 0;
+	struct vine_datavine_source_record source;
+	if (!vine_datavine_directory_resolve_source(server->directory, kind, data_id, destination, destination_epoch, transfer, excluded_length ? excluded : 0, &source)) {
+		return VINE_DATAVINE_RPC_REJECTED;
+	}
+	uint16_t worker_length = (uint16_t)strlen(source.replica.worker_id);
+	uint16_t replica_length = (uint16_t)strlen(source.replica.replica_id);
+	uint16_t endpoint_length = (uint16_t)strlen(source.endpoint);
+	uint16_t response_transfer_length = (uint16_t)strlen(source.transfer_id);
+	*result_size = 112 + (size_t)worker_length + replica_length + endpoint_length + response_transfer_length;
+	*result = calloc(1, *result_size);
+	if (!*result) {
+		*result_size = 0;
+		vine_datavine_directory_release_source(server->directory, transfer, 0);
+		return VINE_DATAVINE_RPC_INTERNAL;
+	}
+	vine_datavine_rpc_put_u64(*result, source.replica.generation);
+	vine_datavine_rpc_put_u32(*result + 8, (uint32_t)source.replica.attempt);
+	vine_datavine_rpc_put_u32(*result + 12, (uint32_t)source.replica.tier);
+	vine_datavine_rpc_put_u64(*result + 16, (uint64_t)source.replica.size);
+	vine_datavine_rpc_put_u32(*result + 24, source.replica.active_leases);
+	vine_datavine_rpc_put_u64(*result + 32, source.replica.worker_epoch);
+	put_u16(*result + 40, worker_length);
+	put_u16(*result + 42, replica_length);
+	put_u16(*result + 44, endpoint_length);
+	put_u16(*result + 46, response_transfer_length);
+	memcpy(*result + 48, source.replica.content_hash, 64);
+	unsigned char *output = *result + 112;
+	memcpy(output, source.replica.worker_id, worker_length);
+	memcpy(output + worker_length, source.replica.replica_id, replica_length);
+	memcpy(output + worker_length + replica_length, source.endpoint, endpoint_length);
+	memcpy(output + worker_length + replica_length + endpoint_length,
+			source.transfer_id,
+			response_transfer_length);
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t release_source(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size)
+{
+	if (size < 8) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	int success = payload[0] != 0;
+	uint16_t transfer_length = get_u16(payload + 4);
+	if (!transfer_length || transfer_length > VINE_DATAVINE_TRANSFER_ID_MAX || size != 8 + (size_t)transfer_length) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	char transfer[VINE_DATAVINE_TRANSFER_ID_MAX + 1];
+	memcpy(transfer, payload + 8, transfer_length);
+	transfer[transfer_length] = 0;
+	if (!vine_datavine_directory_release_source(server->directory, transfer, success)) {
+		return VINE_DATAVINE_RPC_REJECTED;
+	}
+	return VINE_DATAVINE_RPC_OK;
+}
+
 static int process_request(struct vine_datavine_rpc_server *server, struct rpc_connection *connection)
 {
 	const unsigned char *header = connection->header;
 	uint16_t opcode = (uint16_t)((header[6] << 8) | header[7]);
 	uint64_t request_id = vine_datavine_rpc_get_u64(header + 12);
 	uint32_t status = VINE_DATAVINE_RPC_OK;
-	unsigned char result[4];
+	unsigned char result[8];
+	unsigned char *dynamic_result = 0;
 	size_t result_size = 0;
 	if (!connection->authorized) {
 		if (opcode != VINE_DATAVINE_RPC_AUTH || connection->payload_size != server->token_length || memcmp(connection->payload, server->token, server->token_length)) {
@@ -212,10 +430,26 @@ static int process_request(struct vine_datavine_rpc_server *server, struct rpc_c
 	} else if (opcode == VINE_DATAVINE_RPC_PUBLISH_BATCH) {
 		status = publish_batch(server, connection->payload, connection->payload_size, result);
 		result_size = 4;
+	} else if (opcode == VINE_DATAVINE_RPC_CLAIM_WORKER) {
+		status = claim_worker(server, connection->payload, connection->payload_size, result);
+		result_size = status == VINE_DATAVINE_RPC_OK ? 8 : 0;
+	} else if (opcode == VINE_DATAVINE_RPC_PUBLISH_OUTPUTS) {
+		status = publish_outputs(server, connection->payload, connection->payload_size, &dynamic_result, &result_size);
+	} else if (opcode == VINE_DATAVINE_RPC_DISCONNECT_WORKER) {
+		status = disconnect_worker(server, connection->payload, connection->payload_size);
+	} else if (opcode == VINE_DATAVINE_RPC_REPORT_REPLICA) {
+		status = report_replica(server, connection->payload, connection->payload_size, result);
+		result_size = status == VINE_DATAVINE_RPC_OK ? 8 : 0;
+	} else if (opcode == VINE_DATAVINE_RPC_RESOLVE_SOURCE) {
+		status = resolve_source(server, connection->payload, connection->payload_size, &dynamic_result, &result_size);
+	} else if (opcode == VINE_DATAVINE_RPC_RELEASE_SOURCE) {
+		status = release_source(server, connection->payload, connection->payload_size);
 	} else {
 		status = VINE_DATAVINE_RPC_INVALID;
 	}
-	return response_create(connection, opcode, status, request_id, result, result_size);
+	int created = response_create(connection, opcode, status, request_id, dynamic_result ? dynamic_result : result, result_size);
+	free(dynamic_result);
+	return created;
 }
 
 static int connection_read(struct rpc_thread *thread, struct rpc_connection *connection)
@@ -372,7 +606,7 @@ static int listen_socket(const char *host, int port, int *bound_port)
 struct vine_datavine_rpc_server *vine_datavine_rpc_server_create(
 		const char *host, int port, const char *token, int threads, int64_t maximum_data_id)
 {
-	if (!token || !token[0] || threads < 1) {
+	if (!token || !token[0] || threads < 1 || maximum_data_id < 1 || (uint64_t)maximum_data_id > UINT64_MAX / 4) {
 		return 0;
 	}
 	struct vine_datavine_rpc_server *server = calloc(1, sizeof(*server));
@@ -385,8 +619,10 @@ struct vine_datavine_rpc_server *vine_datavine_rpc_server_create(
 	server->thread_count = 0;
 	server->threads = calloc((size_t)threads, sizeof(*server->threads));
 	server->index = vine_datavine_index_create(maximum_data_id, 256);
+	server->directory = vine_datavine_directory_create(
+			1000000, (uint64_t)maximum_data_id * 4, 1000000, 65536, 256);
 	server->listen_fd = listen_socket(host, port, &server->port);
-	if (!server->token || !server->threads || !server->index || server->listen_fd < 0) {
+	if (!server->token || !server->threads || !server->index || !server->directory || server->listen_fd < 0) {
 		vine_datavine_rpc_server_delete(server);
 		return 0;
 	}
@@ -426,6 +662,7 @@ void vine_datavine_rpc_server_delete(struct vine_datavine_rpc_server *server)
 		}
 	}
 	vine_datavine_index_delete(server->index);
+	vine_datavine_directory_delete(server->directory);
 	free(server->threads);
 	free(server->token);
 	free(server);
