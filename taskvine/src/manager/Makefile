@@ -32,6 +32,7 @@ SOURCES = \
 	vine_temp.c \
 	vine_datavine.c \
 	vine_datavine_index.c \
+	vine_datavine_directory.c \
 	vine_datavine_rpc.c
 
 PUBLIC_HEADERS = taskvine.h

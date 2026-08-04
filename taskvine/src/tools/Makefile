@@ -6,7 +6,7 @@ LOCAL_CCFLAGS+=-I ${CCTOOLS_HOME}/taskvine/src/manager
 
 PROGRAMS = vine_status vine_benchmark
 SCRIPTS = vine_plot_performance vine_plot_taskgraph vine_plot_workers vine_plot_txn_log vine_submit_workers vine_plot_compose vine_plot_run datavine_controller
-TEST_PROGRAMS = vine_test datavine_index_test datavine_rpc_test
+TEST_PROGRAMS = vine_test datavine_index_test datavine_directory_test datavine_rpc_test
 TARGETS = $(PROGRAMS) $(TEST_PROGRAMS)
 
 # These are useful development tools but not meant for end user consumption.
