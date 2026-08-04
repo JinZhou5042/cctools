@@ -42,7 +42,6 @@ def main():
         62,
         factory_manager=args.factory_manager,
         worker_count=2,
-        prefetch=False,
         apply_pruning=True,
     )
     result = snapshot["pruning_result"]

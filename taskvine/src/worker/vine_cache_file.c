@@ -43,7 +43,6 @@ void vine_cache_file_delete(struct vine_cache_file *f)
 		vine_process_delete(f->process);
 	}
 	free(f->source);
-	free(f->expected_sha256);
 	free(f);
 }
 

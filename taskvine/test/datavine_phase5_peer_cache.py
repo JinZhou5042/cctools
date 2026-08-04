@@ -53,7 +53,6 @@ def main():
         worker_count=2,
         worker_cores=1,
         factory_manager=args.factory_manager,
-        prefetch=False,
     )
     sizes = snapshot["edata_sizes_by_id"]
     shared_id = max(sizes, key=sizes.get)
@@ -81,7 +80,6 @@ def main():
         peer_transfers=False,
         persistence=True,
         factory_manager=args.factory_manager,
-        prefetch=False,
     )
     assert rollback["available_idata"] == len(workflow.tasks)
     assert rollback["scheduler_report"]["peer_idata_fetches"] == 0, rollback

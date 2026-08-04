@@ -81,7 +81,6 @@ def main():
         factory_manager=args.factory_manager,
         worker_count=3,
         worker_cores=1,
-        prefetch=False,
         persistence=True,
         persistence_parent=(
             "/groups/dthain/users/jzhou24/factory-scratch"

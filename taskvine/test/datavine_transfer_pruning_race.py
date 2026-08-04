@@ -133,7 +133,6 @@ def run_pruning_mode(factory_manager):
         factory_manager=factory_manager,
         worker_count=2,
         worker_cores=1,
-        prefetch=False,
         persistence=True,
         persistence_parent=(
             "/groups/dthain/users/jzhou24/factory-scratch"
@@ -240,7 +239,6 @@ def run_dynamic_invalidation_mode(factory_manager):
         factory_manager=factory_manager,
         worker_count=2,
         worker_cores=1,
-        prefetch=False,
         persistence=True,
         persistence_parent=(
             "/groups/dthain/users/jzhou24/factory-scratch"
@@ -325,7 +323,6 @@ def run_capacity_mode(factory_manager):
         factory_manager=factory_manager,
         worker_count=2,
         worker_cores=1,
-        prefetch=False,
         max_inline_idata_bytes=1024,
         inject_idata_release_failures=1,
         peer_release_retry_seconds=(

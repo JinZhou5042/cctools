@@ -1,8 +1,7 @@
-"""TaskVine file declarations and physical task construction."""
+"""Native DataVine physical task construction."""
 
 import base64
 import cloudpickle
-import urllib.parse
 
 from ndcctools.taskvine import Task
 from ndcctools.taskvine import cvine
@@ -85,8 +84,6 @@ class TaskFactory:
         controller,
         context,
         task_record,
-        edata_files,
-        idata_files,
         worker_dram_cache_bytes,
         allow_peer_transfer=True,
         transfer_faults=False,
@@ -95,77 +92,9 @@ class TaskFactory:
         self.controller = controller
         self.context = context
         self.task_record = task_record
-        self.edata_files = edata_files
-        self.idata_files = idata_files
         self.worker_dram_cache_bytes = int(worker_dram_cache_bytes)
         self.allow_peer_transfer = bool(allow_peer_transfer)
         self.transfer_faults = bool(transfer_faults)
-
-    def edata_file(self, data_id):
-        file_object = self.edata_files.get(data_id)
-        if file_object is not None:
-            return file_object
-        info = self.context.edata_info.get(data_id)
-        if info is None or (
-            info.get("storage") == "bulk-origin"
-            and not info.get("origin_path")
-        ):
-            info = self.controller.get_edata_metadata(data_id)
-            self.context.edata_info[data_id] = info
-        if info["storage"] == "bulk-origin":
-            file_object = self.manager.declare_file(
-                info["origin_path"], cache="worker", peer_transfer=True
-            )
-        else:
-            url = (
-                self.controller.endpoint
-                + f"/v1/edata/{data_id}?"
-                + urllib.parse.urlencode(
-                    {"token": self.controller.token}
-                )
-            )
-            file_object = self.manager.declare_url_cached(
-                url,
-                f"datavine-e-{data_id}-{info['serialized_sha256']}",
-                cache="worker",
-                peer_transfer=True,
-            )
-        self.edata_files[data_id] = file_object
-        if not file_object.set_datavine_data_id(f"e:{data_id}"):
-            raise RuntimeError(
-                f"could not bind TaskVine file to EDataID e:{data_id}"
-            )
-        if not file_object.set_datavine_content_hash(
-            info["serialized_sha256"]
-        ):
-            raise RuntimeError(
-                f"could not bind EDataID e:{data_id} content hash"
-            )
-        return file_object
-
-    def idata_output_file(self, data_id, attempt):
-        url = (
-            self.controller.endpoint
-            + f"/v1/idata/{int(data_id)}?"
-            + urllib.parse.urlencode(
-                {
-                    "token": self.controller.token,
-                    "attempt": int(attempt),
-                }
-            )
-        )
-        file_object = self.manager.declare_url_cached(
-            url,
-            f"datavine-i-{int(data_id)}-attempt-{int(attempt)}",
-            cache="worker",
-            peer_transfer=True,
-        )
-        if not file_object.set_datavine_data_id(f"i:{int(data_id)}"):
-            raise RuntimeError(
-                f"could not bind TaskVine file to IDataID i:{data_id}"
-            )
-        self.idata_files[int(data_id)] = file_object
-        return file_object
 
     def make_physical_task(
         self,
@@ -213,19 +142,3 @@ class TaskFactory:
         if environment is not None:
             task.add_environment(environment)
         return task
-
-    def durable_idata_file(self, data_id, status):
-        file_object = self.manager.declare_file(
-            status["durable_path"], cache="worker", peer_transfer=True
-        )
-        if not file_object.set_datavine_data_id(f"i:{int(data_id)}"):
-            raise RuntimeError(
-                f"could not bind durable IDataID i:{data_id}"
-            )
-        if not file_object.set_datavine_content_hash(
-            status["content_hash"]
-        ):
-            raise RuntimeError(
-                f"could not bind durable IDataID i:{data_id} content hash"
-            )
-        return file_object

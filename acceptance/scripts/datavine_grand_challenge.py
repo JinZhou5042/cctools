@@ -211,7 +211,6 @@ def main():
         choices=(
             "full",
             "failures",
-            "no-prefetch",
             "peer-off",
             "pruning-off",
             "persistence",
@@ -289,7 +288,6 @@ def main():
     if args.frontier_recovery and not failure_mode:
         parser.error("--frontier-recovery requires a failure mode")
     peer_transfers = args.mode != "peer-off"
-    prefetch = args.mode != "no-prefetch"
     persistence = (
         args.mode == "persistence" or args.frontier_recovery
     )
@@ -400,7 +398,6 @@ def main():
         worker_count=args.workers,
         worker_cores=args.worker_cores,
         peer_transfers=peer_transfers,
-        prefetch=prefetch,
         worker_disk_cache_bytes=args.worker_disk_cache_bytes,
         worker_disk_cache_items=args.worker_disk_cache_items,
         worker_disk_cache_admission_bytes=(

@@ -52,7 +52,6 @@ def main():
         worker_count=3,
         worker_cores=1,
         factory_manager=args.factory_manager,
-        prefetch=False,
         inject_peer_corruptions=1,
     )
     report = snapshot["scheduler_report"]

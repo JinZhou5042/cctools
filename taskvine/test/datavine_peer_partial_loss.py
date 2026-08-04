@@ -56,7 +56,6 @@ def main():
         worker_count=2,
         worker_cores=1,
         factory_manager=args.factory_manager,
-        prefetch=False,
         inject_peer_source_loss_after_bytes=TRANSFER_CUT_BYTES,
     )
     replicas = snapshot["replica_directory"]

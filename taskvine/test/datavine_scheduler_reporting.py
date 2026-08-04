@@ -4,10 +4,8 @@ from types import SimpleNamespace
 
 from ndcctools.taskvine.datavine.scheduler.reporting import (
     MANAGER_TIMING_FIELDS,
-    WORKER_CACHE_FIELDS,
     format_logical_outputs,
     format_manager_metrics,
-    format_worker_caches,
     select_report_scope,
 )
 
@@ -51,13 +49,6 @@ def main():
     manager = format_manager_metrics(stats)
     assert manager["manager_bytes"] == {"sent": 101, "received": 202}
     assert set(manager["manager_timing_us"]) == set(MANAGER_TIMING_FIELDS)
-
-    worker = {"workerid": "worker-1", "cache_items": 3, "extra": 9}
-    caches = format_worker_caches([worker])
-    assert set(caches[0]) == set(WORKER_CACHE_FIELDS)
-    assert caches[0]["workerid"] == "worker-1"
-    assert caches[0]["cache_items"] == 3
-    assert "extra" not in caches[0]
 
     print("DataVine Scheduler reporting contract PASS")
 

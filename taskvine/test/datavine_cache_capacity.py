@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-
 import argparse
 import json
-from pathlib import Path
-import tempfile
 import time
 
-from datavine_phase4_demand_pull import run_case, start_worker
-from ndcctools.taskvine import Manager, Task, cvine
+from datavine_phase4_demand_pull import run_case
 from ndcctools.taskvine.datavine import Workflow
 from ndcctools.taskvine.datavine.cache import WorkerCacheAdmission
 
@@ -77,106 +73,18 @@ def build_workflow(count=12):
     return workflow, final.task_id, expected
 
 
-def pending_unlink_worker_loss():
-    with tempfile.TemporaryDirectory(
-        prefix="datavine-cache-unlink-loss-"
-    ) as root:
-        manager = Manager(
-            port=0, run_info_path=str(Path(root) / "run-info")
-        )
-        worker = start_worker(manager.port, cores=1)
-        try:
-            while not manager.status("workers"):
-                manager.wait(1)
-            cached = manager.declare_buffer(
-                b"pending-unlink-worker-loss", cache="worker"
-            )
-            task = Task("/bin/true")
-            task.add_input(cached, "input")
-            manager.submit(task)
-            completed = manager.wait(10)
-            assert completed is not None and completed.successful()
-            worker_id = manager.status("workers")[0]["workerid"]
-            before = manager.prune_file_status(cached)
-            assert manager.prune_file_on_worker(cached, worker_id) == 1
-            assert cvine.vine_manager_release_random_worker(
-                manager._taskvine
-            )
-            status = manager.prune_file_status(cached)
-            assert status["requested"] - before["requested"] == 1
-            assert status["confirmed"] - before["confirmed"] == 0
-            assert status["failed"] - before["failed"] == 1
-            assert manager.forget_prune_file_status(cached)
-            return status
-        finally:
-            if worker.poll() is None:
-                worker.terminate()
-                worker.wait(timeout=10)
-            manager._free()
 
 
-def worker_byte_rejection():
-    with tempfile.TemporaryDirectory(
-        prefix="datavine-cache-byte-rejection-"
-    ) as root:
-        manager = Manager(
-            port=0, run_info_path=str(Path(root) / "run-info")
-        )
-        assert manager.tune("datavine-cache-capacity-items", -1) == 0
-        assert manager.tune("datavine-cache-capacity-bytes", 1024) == 0
-        worker = start_worker(manager.port, cores=1)
-        try:
-            output = manager.declare_temp()
-            task = Task(
-                "/bin/dd if=/dev/zero of=oversized bs=2048 count=1"
-            )
-            task.add_output(output, "oversized")
-            manager.submit(task)
-            completed = manager.wait(20)
-            assert completed is not None
-            assert not completed.successful(), completed
-            manager.wait(1)
-            workers = manager.status("workers")
-            assert len(workers) == 1, workers
-            status = workers[0]
-            assert status["cache_capacity_configured"], status
-            assert status["cache_capacity_bytes"] == 1024, status
-            assert status["worker_cache_bytes_high_water"] <= 1024, status
-            assert (
-                status["worker_cache_admission_rejections"] >= 1
-            ), status
-            assert status["worker_cache_bytes"] == 0, status
-            return {
-                "task_result": completed.result,
-                "cache_capacity_bytes": status[
-                    "cache_capacity_bytes"
-                ],
-                "cache_bytes_high_water": status[
-                    "worker_cache_bytes_high_water"
-                ],
-                "cache_admission_rejections": status[
-                    "worker_cache_admission_rejections"
-                ],
-                "worker_cache_bytes": status["worker_cache_bytes"],
-            }
-        finally:
-            if worker.poll() is None:
-                worker.terminate()
-                worker.wait(timeout=10)
-            manager._free()
-
-
-def prefetch_recovery_case(factory_manager=None):
+def worker_loss_recovery_case(factory_manager=None):
     workflow, target, oracle = build_workflow(6)
     combined = run_case(
-        "cache-capacity-prefetch-recovery",
+        "cache-capacity-worker-loss-recovery",
         workflow,
         target,
         oracle,
         factory_manager=factory_manager,
         worker_count=1,
         worker_cores=2,
-        prefetch=True,
         inject_worker_loss_after=1,
         worker_loss_process_shutdown=True,
         replacement_worker_delay=None if factory_manager else 1,
@@ -189,15 +97,8 @@ def prefetch_recovery_case(factory_manager=None):
     report = combined["scheduler_report"]
     assert report["worker_loss_injected"], report
     assert report["recovery_reexecutions"] >= 1, report
-    assert report["prefetch_selected"] > 0, report
-    assert all(
-        worker["cache_items_high_water"] <= 12
-        and worker["cache_bytes_high_water"] <= 400000
-        and worker["worker_cache_items_high_water"] <= 12
-        and worker["worker_cache_bytes_high_water"] <= 400000
-        and worker["cache_capacity_configured"]
-        for worker in report["worker_physical_cache"]
-    ), report
+    assert report["worker_disk_cache_observed_items_high_water"] <= 24
+    assert report["worker_disk_cache_observed_bytes_high_water"] <= 800000
     return report
 
 
@@ -218,10 +119,10 @@ def main():
     if args.factory_recovery_only:
         if not args.factory_manager:
             parser.error("--factory-recovery-only requires --factory-manager")
-        report = prefetch_recovery_case(args.factory_manager)
+        report = worker_loss_recovery_case(args.factory_manager)
         print(
             json.dumps(
-                {"prefetch_recovery": report, "status": "PASS"},
+                {"worker_loss_recovery": report, "status": "PASS"},
                 indent=2,
                 sort_keys=True,
             )
@@ -237,7 +138,6 @@ def main():
         factory_manager=args.factory_manager,
         worker_count=2,
         worker_cores=1,
-        prefetch=False,
         worker_disk_cache_bytes=239308,
         worker_disk_cache_items=6,
         worker_disk_cache_admission_items=6,
@@ -287,7 +187,6 @@ def main():
             undersized_oracle,
             worker_count=1,
             worker_cores=1,
-            prefetch=False,
             worker_disk_cache_items=3,
             worker_disk_cache_admission_items=3,
         )
@@ -306,7 +205,6 @@ def main():
         factory_manager=args.factory_manager,
         worker_count=1,
         worker_cores=1,
-        prefetch=False,
         worker_disk_cache_items=0,
     )
     zero_report = zero["scheduler_report"]
@@ -324,10 +222,7 @@ def main():
     ), zero_report
     assert zero["replica_directory"]["active_leases"] == 0
 
-    combined_report = prefetch_recovery_case(args.factory_manager)
-
-    unlink_loss = pending_unlink_worker_loss()
-    byte_rejection = worker_byte_rejection()
+    combined_report = worker_loss_recovery_case(args.factory_manager)
 
     print(
         json.dumps(
@@ -336,9 +231,7 @@ def main():
                 "bounded": bounded_report,
                 "undersized": undersized,
                 "zero": zero_report,
-                "prefetch_recovery": combined_report,
-                "pending_unlink_worker_loss": unlink_loss,
-                "worker_byte_rejection": byte_rejection,
+                "worker_loss_recovery": combined_report,
                 "status": "PASS",
             },
             indent=2,

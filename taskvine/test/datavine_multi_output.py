@@ -95,7 +95,6 @@ def main():
         normal_consumer.task_id,
         42,
         factory_manager=args.factory_manager,
-        prefetch=False,
     )
     normal_slots = validate_snapshot(
         normal, normal_producer, normal_consumer
@@ -110,7 +109,6 @@ def main():
         recovery_consumer.task_id,
         42,
         factory_manager=args.factory_manager,
-        prefetch=False,
         inject_worker_loss_after=recovery_producer.task_id,
         worker_loss_process_shutdown=True,
         replacement_worker_delay=(None if args.factory_manager else 1),

@@ -66,7 +66,6 @@ def main():
         factory_manager=args.factory_manager,
         worker_count=3,
         worker_cores=1,
-        prefetch=False,
         persistence=True,
         validate_durable_recovery=True,
         max_idata_bytes=128 * 1024,

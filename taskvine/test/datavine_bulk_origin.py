@@ -186,7 +186,6 @@ def main():
         ),
         max_edata_bytes=1024 * 1024,
         max_serving_bytes=1024 * 1024,
-        prefetch=False,
     )
     result = validate(snapshot)
     result["origin_contract"] = origin_contract()

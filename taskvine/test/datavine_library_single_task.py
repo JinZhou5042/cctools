@@ -24,7 +24,6 @@ def main():
         sum(range(64)),
         worker_count=1,
         worker_cores=4,
-        prefetch=False,
         detailed_report=False,
     )
     report = snapshot["scheduler_report"]

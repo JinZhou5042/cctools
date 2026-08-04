@@ -3,6 +3,7 @@
 *.dSYM
 *.gz
 *.json
+*.md
 !devel/umbrella/example/openmalaria/meta.json
 !doc/manuals/chirp/*.json
 !makeflow/example/example.json

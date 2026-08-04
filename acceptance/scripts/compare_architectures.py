@@ -193,7 +193,6 @@ def run_datavine(
             oracle,
             worker_count=workers,
             worker_cores=cores,
-            prefetch=False,
             workflow_timeout=max(180, tasks * 2),
             detailed_report=False,
         )
@@ -218,10 +217,6 @@ def run_datavine(
         for task in report["physical_task_metrics"]
     ]
     request_metrics = report["scheduler_controller_requests"]
-    worker_cache_rejections = sum(
-        worker["worker_cache_admission_rejections"]
-        for worker in report["worker_physical_cache"]
-    )
     return {
         "mode": "datavine",
         "task_record_wire_format": "task-record-row-v1",
@@ -256,7 +251,6 @@ def run_datavine(
             "worker_cache_evictions": report[
                 "worker_disk_cache_evictions"
             ],
-            "worker_cache_admission_rejections": worker_cache_rejections,
         },
         "peer_transfer_faults": report["peer_transfer_faults"],
         "performance_bottlenecks": report["performance_bottlenecks"],

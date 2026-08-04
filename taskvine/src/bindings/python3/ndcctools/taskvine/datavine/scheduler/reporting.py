@@ -12,25 +12,6 @@ MANAGER_TIMING_FIELDS = (
     "time_workers_execute",
 )
 
-WORKER_CACHE_FIELDS = (
-    "workerid",
-    "cache_items",
-    "cache_bytes",
-    "cache_items_high_water",
-    "cache_bytes_high_water",
-    "cache_prune_pending_items",
-    "cache_prune_pending_bytes",
-    "cache_admission_rejections",
-    "cache_capacity_configured",
-    "cache_capacity_items",
-    "cache_capacity_bytes",
-    "worker_cache_items",
-    "worker_cache_bytes",
-    "worker_cache_items_high_water",
-    "worker_cache_bytes_high_water",
-    "worker_cache_admission_rejections",
-)
-
 
 def select_report_scope(
     all_task_ids,
@@ -92,7 +73,6 @@ def format_logical_outputs(
         "attempts_by_task_complete": bool(detailed),
     }
 
-
 def format_manager_metrics(stats):
     """Copy the stable Manager timing and byte counters."""
 
@@ -106,12 +86,3 @@ def format_manager_metrics(stats):
             "received": int(stats.bytes_received),
         },
     }
-
-
-def format_worker_caches(workers):
-    """Return the bounded physical worker-cache view used in reports."""
-
-    return [
-        {key: worker.get(key) for key in WORKER_CACHE_FIELDS}
-        for worker in workers
-    ]

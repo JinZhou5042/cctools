@@ -15,7 +15,6 @@ import uuid
 
 from ..cache import WorkerCacheAdmission
 from ..diagnostics import rank_bottlenecks
-from ..placement.policy import PrefetchCandidate, select_prefetch
 from ..workflow import iter_output_refs
 from ..protocol import DataVineRemoteError
 from .configuration import configure_runtime
@@ -31,7 +30,6 @@ from .registration import WorkflowRegistrar
 from .reporting import (
     format_logical_outputs,
     format_manager_metrics,
-    format_worker_caches,
     select_report_scope,
 )
 from .run_context import WorkflowRunContext
@@ -67,8 +65,6 @@ class TaskSchedulerThread:
         self._manager = None
         self._peer_transfers_enabled = True
         self._run_context = WorkflowRunContext()
-        self._edata_files = {}
-        self._idata_files = {}
         self._last_run_report = {}
         self._worker_reconciliation_deferrals = 0
         self._active_worker_ids = frozenset()
@@ -323,12 +319,6 @@ class TaskSchedulerThread:
                 raise RuntimeError(
                     "TaskVine Manager rejected library log collection"
                 )
-        if not self._manager.set_datavine_controller(
-            self.controller.endpoint, self.controller.token
-        ):
-            raise RuntimeError(
-                "TaskVine Manager rejected Data Controller configuration"
-            )
         if peer_transfers:
             self._manager.enable_peer_transfers()
         else:
@@ -357,10 +347,6 @@ class TaskSchedulerThread:
         persist_outputs=False,
         inject_global_loss_after=None,
         inject_worker_loss_after=None,
-        prefetch=True,
-        prefetch_byte_budget=64 * 1024 * 1024,
-        prefetch_item_budget=16,
-        inject_prefetch_failure=False,
         worker_disk_cache_bytes=None,
         worker_dram_cache_bytes=256 * 1024 * 1024,
         worker_disk_cache_items=None,
@@ -454,8 +440,6 @@ class TaskSchedulerThread:
             self.controller,
             self._run_context,
             self._task_record,
-            self._edata_files,
-            self._idata_files,
             worker_dram_cache_bytes,
             allow_peer_transfer=self._peer_transfers_enabled,
             transfer_faults=transfer_faults_enabled,
@@ -715,20 +699,6 @@ class TaskSchedulerThread:
                 or {}
             ).get("workers", 1)
         )
-        prefetch_running = set()
-        prefetch_selected = self._submit_prefetches(
-            task_factory,
-            prefetch,
-            prefetch_byte_budget,
-            prefetch_item_budget,
-            inject_prefetch_failure,
-        )
-        prefetch_running.update(
-            value["physical_task_id"] for value in prefetch_selected
-        )
-        prefetch_completed = 0
-        prefetch_failed = 0
-        prefetch_overlapped = False
         peer_transfer_pruning_probes = []
         peer_transfer_pruning_probe_triggered = False
         completed_task_states = []
@@ -986,7 +956,6 @@ class TaskSchedulerThread:
         workflow_execution_started = time.monotonic()
         while (
             execution.has_work()
-            or prefetch_running
             or persistence.has_work()
             or pruning.has_work()
         ):
@@ -1035,9 +1004,6 @@ class TaskSchedulerThread:
                         f"IDataID {data_id} Controller persistence "
                         f"failed: status={status}"
                     )
-                self._idata_files[data_id] = task_factory.durable_idata_file(
-                    data_id, status
-                )
                 persistence.controller_pending.pop(data_id)
                 persistence.controller_tasks_completed += 1
                 persistence.controller_bytes += int(status["size"])
@@ -1456,7 +1422,6 @@ class TaskSchedulerThread:
                 persistence.running[physical_id] = (data_id, request)
             if (
                 not execution.running
-                and not prefetch_running
                 and not persistence.running
             ):
                 if persistence.pending:
@@ -1482,7 +1447,6 @@ class TaskSchedulerThread:
                     continue
                 if not (
                     execution.has_work()
-                    or prefetch_running
                     or persistence.pending
                     or persistence.running
                     or persistence.suspended_recovery
@@ -1744,15 +1708,6 @@ class TaskSchedulerThread:
                     },
                 )
                 continue
-            if completed.id in prefetch_running:
-                prefetch_running.remove(completed.id)
-                if completed.successful():
-                    prefetch_completed += 1
-                else:
-                    prefetch_failed += 1
-                if not execution.done:
-                    prefetch_overlapped = True
-                continue
             if completed.id in persistence.running:
                 data_id, request = persistence.running.pop(completed.id)
                 persistence_result = (
@@ -1911,9 +1866,6 @@ class TaskSchedulerThread:
                     raise RuntimeError(
                         f"IDataID {data_id} persistence did not publish"
                     )
-                self._idata_files[data_id] = task_factory.durable_idata_file(
-                    data_id, status
-                )
                 persistence.tasks_completed += 1
                 persistence.worker_bytes += int(status["size"])
                 queue_frontier_pruning_if_ready(
@@ -2354,7 +2306,6 @@ class TaskSchedulerThread:
         peer_release_drain_seconds = (
             time.monotonic() - peer_release_drain_started
         )
-        physical_cache_workers = self._manager.status("workers")
         self._manager._refresh_stats()
         manager_stats = self._manager.stats
         report_task_ids, report_data_ids = select_report_scope(
@@ -2544,17 +2495,6 @@ class TaskSchedulerThread:
             "persistence_loss_pruning_plans": (
                 persistence.loss_pruning_plans
             ),
-            "prefetch_selected": len(prefetch_selected),
-            "prefetch_completed": prefetch_completed,
-            "prefetch_failed": prefetch_failed,
-            "prefetch_overlapped": prefetch_overlapped,
-            "prefetch_bytes": sum(
-                value["size"] for value in prefetch_selected
-            ),
-            "prefetch_task_ids": [
-                value["physical_task_id"]
-                for value in prefetch_selected
-            ],
             "edata_serializations": self._run_context.serialization_count,
             "bulk_edata_serializations": self._run_context.bulk_serialization_count,
             "worker_reconciliation_deferrals": (
@@ -2585,9 +2525,6 @@ class TaskSchedulerThread:
             ),
             "worker_disk_cache_effective_retention_items": (
                 effective_retention_items
-            ),
-            "worker_physical_cache": format_worker_caches(
-                physical_cache_workers
             ),
             **self._cache_admission.report(
                 worker_disk_cache_bytes,
@@ -2639,62 +2576,6 @@ class TaskSchedulerThread:
                     + "; ".join(failures[:8])
                 )
         return cloudpickle.loads(payload)
-
-    def _submit_prefetches(
-        self,
-        task_factory,
-        enabled,
-        byte_budget,
-        item_budget,
-        inject_failure,
-    ):
-        if not enabled:
-            return ()
-        from ndcctools.taskvine import Task
-
-        fanout = {}
-        for task_id in sorted(self._run_context.logical_outputs):
-            record = self._task_record(task_id)
-            data_ids = [record.function_data_id]
-            data_ids.extend(
-                data_id
-                for kind, data_id in record.positional
-                if kind in ("e", "c")
-            )
-            data_ids.extend(
-                data_id
-                for _, (kind, data_id) in record.keyword
-                if kind in ("e", "c")
-            )
-            for data_id in data_ids:
-                fanout[data_id] = fanout.get(data_id, 0) + 1
-        candidates = []
-        for data_id, uses in fanout.items():
-            info = self.controller.get_edata_metadata(data_id)
-            candidates.append(
-                PrefetchCandidate(data_id, info["size"], uses)
-            )
-        selected = select_prefetch(
-            candidates, int(byte_budget), int(item_budget)
-        )
-        submitted = []
-        for candidate in selected:
-            task = Task("/bin/false" if inject_failure else "/bin/true")
-            task.set_tag(f"prefetch-e{candidate.data_id}")
-            task.set_cores(0)
-            task.set_priority(-1000)
-            task.add_input(
-                task_factory.edata_file(candidate.data_id),
-                f"datavine-prefetch-e{candidate.data_id}.pkl",
-            )
-            submitted.append(
-                {
-                    "physical_task_id": self._manager.submit(task),
-                    "data_id": candidate.data_id,
-                    "size": candidate.size,
-                }
-            )
-        return tuple(submitted)
 
     def _wait_durable(self, data_id, timeout=60, retries=1):
         deadline = time.monotonic() + timeout
