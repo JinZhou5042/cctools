@@ -7,8 +7,12 @@ class ReplicaStateMixin:
             descriptions = []
             for source in self.replicas.candidates(data_id):
                 description = source.source_dict()
-                worker = self.replicas.worker(source.worker_id)
-                if worker.endpoint:
+                worker = (
+                    self.replicas.worker(source.worker_id)
+                    if source.worker_id is not None
+                    else None
+                )
+                if worker is not None and worker.endpoint:
                     kind, token = source.data_id.split(":", 1)
                     transfer_hash = (
                         self.get_edata(int(token)).serialized_sha256
