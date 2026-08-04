@@ -1067,9 +1067,7 @@ class ControllerClient:
                     "content_hash": edata["content_hash"],
                     "serialized_sha256": edata["serialized_sha256"],
                     "size": len(edata["payload"]),
-                    "metadata": decode_serialization_metadata(
-                        edata["metadata"]
-                    ),
+                    "metadata": None,
                     "cache_globally": False,
                     "source_type": "controller-memory",
                     "payload": edata["payload"],

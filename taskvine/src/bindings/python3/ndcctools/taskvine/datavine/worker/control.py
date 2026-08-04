@@ -15,16 +15,9 @@ class OutputPublisher:
             self.worker_epoch = int(committed[0]["worker_epoch"])
         return committed
 
-    def close(self):
-        pass
-
-
 class SourceResolver:
     def __init__(self, client):
         self.client = client
 
     def resolve(self, request):
         return self.client.resolve_edata_sources((request,))[0]
-
-    def close(self):
-        pass

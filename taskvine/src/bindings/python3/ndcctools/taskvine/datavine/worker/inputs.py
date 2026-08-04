@@ -30,6 +30,7 @@ class InputResolver:
         cache_values=None,
         allow_peer_transfer=True,
         transfer_faults=False,
+        timings=None,
     ):
         self.controller = controller
         self.token = token
@@ -42,7 +43,14 @@ class InputResolver:
         self.cache_values = cache_values or {}
         self.allow_peer_transfer = bool(allow_peer_transfer)
         self.transfer_faults = bool(transfer_faults)
+        self.timings = timings
         self._corrupt_fallback_pending = False
+
+    def _record_timing(self, name, started):
+        if self.timings is not None:
+            self.timings[name] = self.timings.get(name, 0.0) + (
+                time.monotonic() - started
+            )
 
     def _fetch_source(self, source_url, content_hash, size, transfer_id):
         fault = (
@@ -148,6 +156,7 @@ class InputResolver:
 
     def _fetch_edata_locked(self, data_id):
         data_key = f"e:{data_id}"
+        started = time.monotonic()
         with self.process_cache.lock:
             payload = self.process_cache.data.get_local_data(
                 self.controller,
@@ -158,10 +167,12 @@ class InputResolver:
                 payload = self.process_cache.disk.get_local_data(
                     self.controller, self.token, data_key
                 )
+        self._record_timing("edata_local_lookup", started)
         if payload is not None:
             self.emit(f"DATAVINE_LOCAL_HIT e{data_id}")
             return payload
         excluded = []
+        started = time.monotonic()
         while True:
             resolved = self.source_resolver.resolve(
                 {
@@ -208,6 +219,7 @@ class InputResolver:
                 f"source={source['worker_id']}"
             )
             break
+        self._record_timing("edata_source_resolution", started)
         if source_type == "peer":
             pass
         elif source_type == "controller-memory":
@@ -218,20 +230,23 @@ class InputResolver:
         else:
             raise RuntimeError(f"invalid EData source type {source_type}")
         self._record_fallback()
+        started = time.monotonic()
         if (
             len(payload) != resolved["size"]
             or hashlib.sha256(payload).hexdigest()
             != resolved["serialized_sha256"]
-            or EDataRecord.digest(resolved["metadata"], payload)
-            != resolved["content_hash"]
+            or (
+                resolved["metadata"] is not None
+                and EDataRecord.digest(resolved["metadata"], payload)
+                != resolved["content_hash"]
+            )
         ):
             raise RuntimeError(f"EDataID {data_id} checksum mismatch")
-        self.process_cache.edata_metadata[
-            (self.controller, self.token, data_id)
-        ] = resolved
+        self._record_timing("edata_validation", started)
         hint = self.cache_values.get(data_key)
         with self.process_cache.lock:
-            self.process_cache.data.put_data(
+            started = time.monotonic()
+            admitted = self.process_cache.data.put_data(
                 self.controller,
                 self.token,
                 data_key,
@@ -239,6 +254,9 @@ class InputResolver:
                 payload,
                 hint["score"] if hint is not None else None,
             )
+            self._record_timing("edata_dram_store", started)
+        if not admitted or resolved["cache_globally"]:
+            started = time.monotonic()
             self.process_cache.disk.put_data(
                 self.controller,
                 self.token,
@@ -246,6 +264,7 @@ class InputResolver:
                 resolved["serialized_sha256"],
                 payload,
             )
+            self._record_timing("edata_disk_store", started)
         if resolved["cache_globally"]:
             self.reporter.report_local(
                 data_key,

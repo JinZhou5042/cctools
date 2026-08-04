@@ -171,6 +171,9 @@ class TaskSchedulerThread:
                 DataVineCall(
                     "datavine-worker-v2",
                     "warm_datavine_worker",
+                    self.controller.endpoint,
+                    self.controller.token,
+                    self.controller.native_endpoint,
                 )
             )
             for _ in range(
@@ -487,15 +490,22 @@ class TaskSchedulerThread:
         execution = ExecutionState(pending=set(task_by_id))
         physical_completion_queue = collections.deque()
 
-        def record_worker_dram_cache(lines):
+        def record_worker_dram_cache(value):
+            worker_id = value.get("worker_id")
+            if not worker_id:
+                raise RuntimeError("DRAM cache report lacks WorkerID")
+            execution.worker_dram_cache[worker_id] = {
+                key: item
+                for key, item in value.items()
+                if key != "worker_id"
+            }
+
+        def record_worker_dram_cache_events(lines):
             for line in lines:
                 if not line.startswith("DATAVINE_DRAM_CACHE "):
                     continue
                 value = json.loads(line.split(" ", 1)[1])
-                worker_id = value.pop("worker_id")
-                if not worker_id:
-                    raise RuntimeError("DRAM cache report lacks WorkerID")
-                execution.worker_dram_cache[worker_id] = value
+                record_worker_dram_cache(value)
 
         explicit_persistence_frontiers = (
             persistence_attempts_by_task is not None
@@ -2025,12 +2035,10 @@ class TaskSchedulerThread:
                     line.startswith("DATAVINE_PEER_FETCH i:")
                     for line in events
                 )
-                execution.worker_controller_retries += sum(
-                    int(line.split(" ", 1)[1])
-                    for line in events
-                    if line.startswith("DATAVINE_CONTROLLER_RETRIES ")
+                execution.worker_controller_retries += int(
+                    structured_task["controller_retries"]
                 )
-                record_worker_dram_cache(events)
+                record_worker_dram_cache(structured_task["cache"])
                 for output in outputs:
                     if output.get("worker_id") and str(
                         output.get("tier", "")
@@ -2062,7 +2070,7 @@ class TaskSchedulerThread:
                 for line in completed_output.splitlines()
                 if line.startswith("DATAVINE_CONTROLLER_RETRIES ")
             )
-            record_worker_dram_cache(completed_output.splitlines())
+            record_worker_dram_cache_events(completed_output.splitlines())
             if not completed.successful():
                 # A worker can disappear after its replica was selected but
                 # before a dependent task starts. Reconcile first, then turn

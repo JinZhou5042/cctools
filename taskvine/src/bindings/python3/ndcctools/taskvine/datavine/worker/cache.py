@@ -18,6 +18,7 @@ class SerializedDataCache:
         self.evictions = 0
         self._clock = 0
         self._entries = {}
+        self._data_keys = {}
 
     def configure(self, capacity):
         capacity = int(capacity)
@@ -37,17 +38,6 @@ class SerializedDataCache:
         self.hits += 1
         return entry[0]
 
-    def get_data(self, controller, token, data_key, content_hash, size):
-        return self.get(
-            (
-                str(controller),
-                str(token),
-                str(data_key),
-                str(content_hash),
-                int(size),
-            )
-        )
-
     def put_data(
         self,
         controller,
@@ -59,42 +49,39 @@ class SerializedDataCache:
     ):
         prefix = (str(controller), str(token), str(data_key))
         key = prefix + (str(content_hash), len(payload))
-        for existing in tuple(self._entries):
-            if existing[:3] == prefix and existing != key:
-                entry = self._entries.pop(existing)
-                self.bytes -= len(entry[0])
-        return self.put(
+        existing = self._data_keys.pop(prefix, None)
+        if existing is not None and existing != key:
+            self._remove(existing)
+        admitted = self.put(
             key,
             payload,
             score,
         )
+        if admitted:
+            self._data_keys[prefix] = key
+        return admitted
 
     def get_local_data(self, controller, token, data_key):
         prefix = (str(controller), str(token), str(data_key))
-        for key in tuple(self._entries):
-            if key[:3] == prefix:
-                return self.get(key)
+        key = self._data_keys.get(prefix)
+        return self.get(key) if key is not None else self._miss()
+
+    def _miss(self):
         self.misses += 1
         return None
 
-    def find_data(self, data_key, content_hash, size):
-        suffix = (str(data_key), str(content_hash), int(size))
-        for key in tuple(self._entries):
-            if key[2:] == suffix:
-                return self.get(key)
-        self.misses += 1
-        return None
-
-    def remove_data(self, data_key, content_hash, size):
-        suffix = (str(data_key), str(content_hash), int(size))
-        removed = False
-        for key in tuple(self._entries):
-            if key[2:] != suffix:
-                continue
-            entry = self._entries.pop(key)
-            self.bytes -= len(entry[0])
-            removed = True
-        return removed
+    def _remove(self, key):
+        entry = self._entries.pop(key, None)
+        if entry is None:
+            return None
+        self.bytes -= len(entry[0])
+        if (
+            isinstance(key, tuple)
+            and len(key) >= 3
+            and self._data_keys.get(key[:3]) == key
+        ):
+            self._data_keys.pop(key[:3], None)
+        return entry
 
     @staticmethod
     def _value(entry):
@@ -106,9 +93,9 @@ class SerializedDataCache:
             raise TypeError("worker cache payload must be bytes")
         if not self.capacity or len(payload) > self.capacity:
             return False
-        old = self._entries.pop(key, None)
-        if old is not None:
-            self.bytes -= len(old[0])
+        old = self._remove(key)
+        if old is not None and isinstance(key, tuple) and len(key) >= 3:
+            self._data_keys[key[:3]] = key
         self._clock += 1
         candidate = [
             payload,
@@ -125,8 +112,7 @@ class SerializedDataCache:
                     self._entries[key] = old
                     self.bytes += len(old[0])
                 return False
-            self._entries.pop(victim_key)
-            self.bytes -= len(victim[0])
+            self._remove(victim_key)
             self.evictions += 1
         self._entries[key] = candidate
         self.bytes += len(payload)
@@ -138,8 +124,7 @@ class SerializedDataCache:
             key, entry = min(
                 self._entries.items(), key=lambda item: self._value(item[1])
             )
-            self._entries.pop(key)
-            self.bytes -= len(entry[0])
+            self._remove(key)
             self.evictions += 1
 
     def snapshot(self):
@@ -156,19 +141,38 @@ class SerializedDataCache:
     def clear(self):
         self.bytes = 0
         self._entries.clear()
+        self._data_keys.clear()
 
 
 class WorkerDiskStore:
     def __init__(self):
         self.root = None
+        self._data_paths = {}
 
     def configure(self, worker_id):
         worker = hashlib.sha256(str(worker_id).encode()).hexdigest()[:16]
         worker_temp = os.environ.get("WORKER_TMPDIR")
-        self.root = Path(worker_temp or tempfile.gettempdir()) / (
+        root = Path(worker_temp or tempfile.gettempdir()) / (
             f"datavine-worker-{os.getuid()}-{worker}"
         )
-        self.root.mkdir(mode=0o700, exist_ok=True)
+        if root == self.root:
+            return
+        root.mkdir(mode=0o700, exist_ok=True)
+        self.root = root
+        self._data_paths.clear()
+        for path in root.iterdir():
+            fields = path.name.rsplit("-", 2)
+            if len(fields) != 3 or len(fields[1]) != 64:
+                continue
+            prefix = fields[0].split("-", 2)
+            if len(prefix) != 3 or prefix[1] not in ("e", "i"):
+                continue
+            try:
+                data_key = f"{prefix[1]}:{int(prefix[2])}"
+                int(fields[2])
+            except ValueError:
+                continue
+            self._data_paths[(prefix[0], data_key)] = path
 
     @staticmethod
     def scope(controller, token):
@@ -197,19 +201,22 @@ class WorkerDiskStore:
         return payload
 
     def put_data(self, controller, token, data_key, content_hash, payload):
+        scope = self.scope(controller, token)
         path = self._path(
-            self.scope(controller, token), data_key, content_hash, len(payload)
+            scope, data_key, content_hash, len(payload)
         )
         temporary = path.with_name(
             f".{path.name}.{os.getpid()}.{threading.get_ident()}"
         )
         temporary.write_bytes(payload)
         os.replace(temporary, path)
-
-    def get_data(self, controller, token, data_key, content_hash, size):
-        return self.find_data(
-            self.scope(controller, token), data_key, content_hash, size
-        )
+        old = self._data_paths.get((scope, str(data_key)))
+        self._data_paths[(scope, str(data_key))] = path
+        if old is not None and old != path:
+            try:
+                old.unlink()
+            except FileNotFoundError:
+                pass
 
     def find_data(self, scope, data_key, content_hash, size):
         return self._read(
@@ -219,22 +226,15 @@ class WorkerDiskStore:
         )
 
     def get_local_data(self, controller, token, data_key):
-        kind, token_id = str(data_key).split(":", 1)
-        prefix = (
-            f"{self.scope(controller, token)}-{kind}-{int(token_id)}-"
-        )
-        for path in self.root.glob(f"{prefix}*"):
-            fields = path.name.rsplit("-", 2)
-            if len(fields) != 3:
-                continue
-            try:
-                size = int(fields[2])
-            except ValueError:
-                continue
-            payload = self._read(path, fields[1], size)
-            if payload is not None:
-                return payload
-        return None
+        key = (self.scope(controller, token), str(data_key))
+        path = self._data_paths.get(key)
+        if path is None:
+            return None
+        fields = path.name.rsplit("-", 2)
+        payload = self._read(path, fields[1], int(fields[2]))
+        if payload is None:
+            self._data_paths.pop(key, None)
+        return payload
 
     def remove_data(self, scope, data_key, content_hash, size):
         kind, token_id = str(data_key).split(":", 1)
@@ -245,18 +245,19 @@ class WorkerDiskStore:
             path.unlink()
         except FileNotFoundError:
             return False
+        key = (str(scope), f"{kind}:{int(token_id)}")
+        if self._data_paths.get(key) == path:
+            self._data_paths.pop(key, None)
         return True
 
 
 @dataclasses.dataclass
 class WorkerProcessCache:
     clients: dict = dataclasses.field(default_factory=dict)
+    runtimes: dict = dataclasses.field(default_factory=dict)
     output_publishers: dict = dataclasses.field(default_factory=dict)
-    source_resolvers: dict = dataclasses.field(default_factory=dict)
-    worker_claims: dict = dataclasses.field(default_factory=dict)
     task_records: dict = dataclasses.field(default_factory=dict)
     functions: dict = dataclasses.field(default_factory=dict)
-    edata_metadata: dict = dataclasses.field(default_factory=dict)
     replica_reports: dict = dataclasses.field(default_factory=dict)
     data_service: object | None = None
     data: SerializedDataCache = dataclasses.field(
@@ -264,6 +265,9 @@ class WorkerProcessCache:
     )
     disk: WorkerDiskStore = dataclasses.field(default_factory=WorkerDiskStore)
     lock: threading.RLock = dataclasses.field(
+        default_factory=threading.RLock
+    )
+    context_lock: threading.RLock = dataclasses.field(
         default_factory=threading.RLock
     )
     fetch_locks: tuple = dataclasses.field(
@@ -276,20 +280,15 @@ class WorkerProcessCache:
         return self.fetch_locks[hash(key) % len(self.fetch_locks)]
 
     def clear(self):
-        with self.lock:
-            publishers = tuple(self.output_publishers.values())
-            publishers += tuple(self.source_resolvers.values())
+        with self.context_lock:
             self.output_publishers.clear()
-            self.source_resolvers.clear()
+            self.runtimes.clear()
             self.clients.clear()
-            self.worker_claims.clear()
             self.task_records.clear()
             self.functions.clear()
-            self.edata_metadata.clear()
             self.replica_reports.clear()
+        with self.lock:
             self.data.clear()
-        for publisher in publishers:
-            publisher.close()
 
 
 PROCESS_CACHE = WorkerProcessCache()

@@ -1,6 +1,7 @@
 """Resolve DataIDs on a worker, execute a task, and publish its output."""
 
 import cloudpickle
+import dataclasses
 import os
 import time
 
@@ -11,6 +12,56 @@ from .inputs import InputResolver
 from .publication import publish_task_outputs
 from .replicas import WorkerReplicaReporter
 from .service import WorkerDataService
+
+
+@dataclasses.dataclass(frozen=True)
+class WorkerRuntime:
+    client: ControllerClient
+    worker_id: str
+    worker_epoch: int
+    source_endpoint: str
+    source_resolver: SourceResolver
+
+
+def initialize_worker(controller, token, native_controller):
+    controller = str(controller)
+    token = str(token)
+    worker_id = os.environ.get("VINE_WORKER_ID")
+    if not worker_id:
+        raise RuntimeError("TaskVine worker incarnation is unavailable")
+    controller_key = (controller, token, native_controller)
+    runtime_key = controller_key + (worker_id,)
+    with PROCESS_CACHE.context_lock:
+        runtime = PROCESS_CACHE.runtimes.get(runtime_key)
+        if runtime is not None:
+            return runtime
+        client = PROCESS_CACHE.clients.get(controller_key)
+        if client is None:
+            client = ControllerClient(
+                controller,
+                token,
+                transient_retries=8,
+                native_endpoint=native_controller,
+            )
+            PROCESS_CACHE.clients[controller_key] = client
+        PROCESS_CACHE.disk.configure(worker_id)
+        if PROCESS_CACHE.data_service is None:
+            PROCESS_CACHE.data_service = WorkerDataService(PROCESS_CACHE)
+        source_endpoint = PROCESS_CACHE.data_service.endpoint(
+            controller, token
+        )
+        worker_epoch = int(
+            client.claim_worker(worker_id, source_endpoint)["epoch"]
+        )
+        runtime = WorkerRuntime(
+            client,
+            worker_id,
+            worker_epoch,
+            source_endpoint,
+            SourceResolver(client),
+        )
+        PROCESS_CACHE.runtimes[runtime_key] = runtime
+        return runtime
 
 
 def execute_task(
@@ -34,35 +85,9 @@ def execute_task(
     if attempt < 1:
         raise ValueError("attempt must be positive")
 
-    controller_key = (controller, token, native_controller)
-    with PROCESS_CACHE.lock:
-        client = PROCESS_CACHE.clients.get(controller_key)
-        if client is None:
-            client = ControllerClient(
-                controller,
-                token,
-                transient_retries=8,
-                native_endpoint=native_controller,
-            )
-            PROCESS_CACHE.clients[controller_key] = client
-    retry_count_before = client.thread_transient_retry_count
-    worker_id = os.environ.get("VINE_WORKER_ID")
-    if not worker_id:
-        raise RuntimeError("TaskVine worker incarnation is unavailable")
-    PROCESS_CACHE.disk.configure(worker_id)
-    claim_key = (controller, token, worker_id)
-    with PROCESS_CACHE.lock:
-        if PROCESS_CACHE.data_service is None:
-            PROCESS_CACHE.data_service = WorkerDataService(PROCESS_CACHE)
-        source_endpoint = PROCESS_CACHE.data_service.endpoint(
-            controller, token
-        )
-        worker_epoch = PROCESS_CACHE.worker_claims.get(claim_key)
-        if worker_epoch is None:
-            worker_epoch = int(
-                client.claim_worker(worker_id, source_endpoint)["epoch"]
-            )
-            PROCESS_CACHE.worker_claims[claim_key] = worker_epoch
+    runtime = initialize_worker(controller, token, native_controller)
+    client = runtime.client
+    runtime_ready = time.monotonic()
     task_key = (controller, token, task_id)
     task = PROCESS_CACHE.task_records.get(task_key)
     if task is None:
@@ -72,18 +97,12 @@ def execute_task(
         client,
         controller,
         token,
-        worker_id,
-        worker_epoch,
-        source_endpoint,
+        runtime.worker_id,
+        runtime.worker_epoch,
+        runtime.source_endpoint,
         emit,
         PROCESS_CACHE,
     )
-    resolver_key = controller_key + (worker_id, worker_epoch)
-    with PROCESS_CACHE.lock:
-        source_resolver = PROCESS_CACHE.source_resolvers.get(resolver_key)
-        if source_resolver is None:
-            source_resolver = SourceResolver(client)
-            PROCESS_CACHE.source_resolvers[resolver_key] = source_resolver
     resolver = InputResolver(
         controller,
         token,
@@ -91,10 +110,11 @@ def execute_task(
         reporter,
         PROCESS_CACHE,
         emit,
-        source_resolver,
+        runtime.source_resolver,
         cache_values,
         allow_peer_transfer,
         transfer_faults=transfer_faults,
+        timings=timings,
     )
     setup_done = time.monotonic()
     function_key = (
@@ -123,10 +143,10 @@ def execute_task(
         result,
         attempt,
         reporter,
-        worker_id,
-        worker_epoch,
-        emit,
+        runtime.worker_id,
+        runtime.worker_epoch,
         capture_output,
+        timings,
     )
     publication_done = time.monotonic()
 
@@ -134,14 +154,12 @@ def execute_task(
         timings.update(
             {
                 "setup": setup_done - started,
+                "setup_runtime": runtime_ready - started,
+                "setup_task": setup_done - runtime_ready,
                 "input_resolution": inputs_done - setup_done,
                 "compute": compute_done - inputs_done,
                 "local_publication": publication_done - compute_done,
             }
         )
 
-    emit(
-        "DATAVINE_CONTROLLER_RETRIES "
-        f"{client.thread_transient_retry_count - retry_count_before}"
-    )
     return 0

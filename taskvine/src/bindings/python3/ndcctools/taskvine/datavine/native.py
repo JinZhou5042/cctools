@@ -185,9 +185,6 @@ class NativeControllerClient:
         return {
             "content_hash": body[12:76].decode("ascii"),
             "serialized_sha256": body[76:140].decode("ascii"),
-            "metadata": json.loads(
-                body[140:140 + metadata_size].decode("ascii")
-            ),
             "payload": body[140 + metadata_size:],
         }
 

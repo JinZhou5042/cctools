@@ -1,14 +1,71 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
+import os
+from pathlib import Path
+import tempfile
 import time
 
 from datavine_phase4_demand_pull import run_case
 from ndcctools.taskvine.datavine import Workflow
 from ndcctools.taskvine.datavine.cache import WorkerCacheAdmission
+from ndcctools.taskvine.datavine.worker.cache import (
+    SerializedDataCache,
+    WorkerDiskStore,
+)
 
 
 HOT = b"datavine-hot-cache-value\n" * 4096
+
+
+def worker_index_contract():
+    cache = SerializedDataCache()
+    cache.configure(1024 * 1024)
+    started = time.monotonic()
+    for index in range(10000):
+        data_key = f"e:{index}"
+        payload = index.to_bytes(8, "big")
+        assert cache.put_data("controller", "token", data_key, index, payload)
+        assert cache.get_local_data(
+            "controller", "token", data_key
+        ) == payload
+    dram_seconds = time.monotonic() - started
+    assert dram_seconds < 2, dram_seconds
+    assert cache.put_data("controller", "token", "e:1", "new", b"new")
+    assert cache.get_local_data("controller", "token", "e:1") == b"new"
+
+    with tempfile.TemporaryDirectory(
+        prefix="datavine-worker-index-"
+    ) as root:
+        previous = os.environ.get("WORKER_TMPDIR")
+        os.environ["WORKER_TMPDIR"] = root
+        try:
+            disk = WorkerDiskStore()
+            disk.configure("worker")
+            first_hash = hashlib.sha256(b"one").hexdigest()
+            second_hash = hashlib.sha256(b"two").hexdigest()
+            disk.put_data(
+                "controller", "token", "e:1", first_hash, b"one"
+            )
+            recovered = WorkerDiskStore()
+            recovered.configure("worker")
+            assert recovered.get_local_data(
+                "controller", "token", "e:1"
+            ) == b"one"
+            recovered.put_data(
+                "controller", "token", "e:1", second_hash, b"two"
+            )
+            assert recovered.get_local_data(
+                "controller", "token", "e:1"
+            ) == b"two"
+            assert len(tuple(Path(recovered.root).glob("*-e-1-*"))) == 1
+        finally:
+            if previous is None:
+                os.environ.pop("WORKER_TMPDIR", None)
+            else:
+                os.environ["WORKER_TMPDIR"] = previous
+    return {"dram_records": 10000, "dram_seconds": dram_seconds}
 
 
 def cache_accounting_scale():
@@ -114,6 +171,7 @@ def main():
         ),
     )
     args = parser.parse_args()
+    worker_index = worker_index_contract()
     accounting_scale = cache_accounting_scale()
 
     if args.factory_recovery_only:
@@ -220,6 +278,7 @@ def main():
         json.dumps(
             {
                 "accounting_scale": accounting_scale,
+                "worker_index": worker_index,
                 "bounded": bounded_report,
                 "undersized": undersized,
                 "zero": zero_report,

@@ -1,12 +1,14 @@
 """Persistent TaskVine library entry points for DataVine execution."""
 
-import json
 import os
 import time
 import traceback
 
 
-def warm_datavine_worker():
+def warm_datavine_worker(controller, token, native_controller):
+    from .runner import initialize_worker
+
+    initialize_worker(controller, token, native_controller)
     return True
 
 
@@ -55,13 +57,11 @@ def persist_datavine_idata(
         }
 
 
-def _cache_event(process_cache):
+def _cache_snapshot(process_cache):
     with process_cache.lock:
         snapshot = process_cache.data.snapshot()
     snapshot["worker_id"] = os.environ.get("VINE_WORKER_ID", "")
-    return "DATAVINE_DRAM_CACHE " + json.dumps(
-        snapshot, sort_keys=True, separators=(",", ":")
-    )
+    return snapshot
 
 
 def execute_datavine_task(
@@ -85,6 +85,7 @@ def execute_datavine_task(
     controller_key = (controller, token, native_controller)
     with PROCESS_CACHE.lock:
         PROCESS_CACHE.data.configure(worker_dram_cache_bytes)
+    with PROCESS_CACHE.context_lock:
         client = PROCESS_CACHE.clients.get(controller_key)
         if client is None:
             client = ControllerClient(
@@ -103,6 +104,7 @@ def execute_datavine_task(
     outputs = []
     timings = {}
     started = time.monotonic()
+    retries_before = client.thread_transient_retry_count
     error = None
     try:
         result = execute_task(
@@ -127,7 +129,7 @@ def execute_datavine_task(
                 outputs[0]["worker_id"],
                 outputs[0]["worker_epoch"],
             )
-            with PROCESS_CACHE.lock:
+            with PROCESS_CACHE.context_lock:
                 publisher = PROCESS_CACHE.output_publishers.get(
                     publisher_key
                 )
@@ -155,11 +157,14 @@ def execute_datavine_task(
     finally:
         for output in outputs:
             output.pop("payload", None)
-    events.append(_cache_event(PROCESS_CACHE))
     return {
         "protocol": "datavine-task-v1",
         "task_id": int(task_id),
         "events": events,
+        "cache": _cache_snapshot(PROCESS_CACHE),
+        "controller_retries": (
+            client.thread_transient_retry_count - retries_before
+        ),
         "outputs": outputs,
         "error": error,
         "worker_seconds": time.monotonic() - started,
