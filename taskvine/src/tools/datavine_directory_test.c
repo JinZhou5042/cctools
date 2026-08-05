@@ -119,10 +119,12 @@ int main(void)
 	failed |= !vine_datavine_directory_release_source(directory, "taskvine:t2", 1);
 	failed |= vine_datavine_directory_release_source(directory, "taskvine:t2", 0) != -1;
 	failed |= !vine_datavine_directory_disconnect_worker(directory, "w2", 1);
+	failed |= !vine_datavine_directory_disconnect_worker(directory, "w2", 1);
 	failed |= vine_datavine_directory_replica_active_leases(
 				  directory, 'i', 1, "r2") != 0;
 	failed |= !vine_datavine_directory_release_source(directory, "taskvine:t1", 0);
 	failed |= !claim(directory, "w2", 2);
+	failed |= vine_datavine_directory_disconnect_worker(directory, "w2", 1);
 	struct vine_datavine_replica_record replacement;
 	failed |= publish(directory, "w2", 1, "r2", 1, VINE_DATAVINE_WORKER_DRAM, &replacement);
 	failed |= !publish(directory, "w2", 2, "r2", 1, VINE_DATAVINE_WORKER_DRAM, &replacement);

@@ -387,7 +387,7 @@ def run_bounded_case(factory_manager=None, persistence_mode="cancel"):
         assert report["persistence_retries"] == 0
     elif persistence_mode == "failure":
         assert report["persistence_cancellations"] == 0
-        assert report["persistence_failures"] == 2
+        assert report["persistence_failures"] == 2, report
         assert report["persistence_injected_failures_observed"] == 2
         assert report["persistence_retries"] == 2
         assert report["persistence_retry_delay_seconds"] == 0.5

@@ -199,6 +199,8 @@ class ReplicaDirectory:
                 )
             else:
                 epoch = old.epoch + 1
+                if endpoint is None:
+                    endpoint = old.endpoint
             return self.join_worker(worker_id, epoch, endpoint)
 
     def disconnect_worker(self, worker_id, epoch):

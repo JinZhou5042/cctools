@@ -253,19 +253,16 @@ class ControllerClient:
         request = {"worker_id": str(worker_id)}
         if endpoint is not None:
             request["endpoint"] = str(endpoint)
-        native_epoch = (
-            self.native.claim_worker(worker_id, endpoint)
-            if self.native is not None and endpoint is not None
-            else None
-        )
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/workers/claim",
             request,
         )
         worker = json.loads(payload)
-        if native_epoch is not None and native_epoch != int(worker["epoch"]):
-            raise RuntimeError("Controller worker epochs diverged")
+        if self.native is not None and worker.get("endpoint"):
+            self.native.remember_worker(
+                worker_id, worker["endpoint"], worker["epoch"]
+            )
         return worker
 
     def configure_transfer_faults(self, **configuration):
@@ -352,13 +349,7 @@ class ControllerClient:
                 )
             },
         )
-        result = json.loads(payload)
-        if self.native is not None:
-            for worker in result["disconnected"]:
-                self.native.disconnect_worker(
-                    worker["worker_id"], worker["epoch"]
-                )
-        return result
+        return json.loads(payload)
 
     def report_replica(
         self,

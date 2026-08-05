@@ -396,7 +396,11 @@ int vine_datavine_directory_disconnect_worker(struct vine_datavine_directory *di
 	struct worker_shard *shard = get_worker_shard(directory, worker_id);
 	pthread_mutex_lock(&shard->lock);
 	struct worker *worker = hash_table_lookup(shard->workers, worker_id);
-	if (worker && (!atomic_load(&worker->active) || atomic_load(&worker->epoch) != epoch)) {
+	if (worker && !atomic_load(&worker->active)) {
+		pthread_mutex_unlock(&shard->lock);
+		return 1;
+	}
+	if (worker && atomic_load(&worker->epoch) != epoch) {
 		worker = 0;
 	}
 	if (!worker) {

@@ -39,6 +39,7 @@ from .task_factory import DataVineCall, TaskFactory, ensure_worker_library
 class WorkflowDriver:
     _registration_batch_size = 4096
     _compute_attempt_limit = 3
+    _compute_submission_window = 4096
 
     def __init__(
         self,
@@ -1391,6 +1392,11 @@ class WorkflowDriver:
             ready = ready_queue.take(
                 execution.pending,
                 persistence_frontier_ready,
+                max(
+                    0,
+                    self._compute_submission_window
+                    - len(execution.running),
+                ),
             )
             submitted_task_ids = []
             for task_id in ready:
@@ -1741,6 +1747,7 @@ class WorkflowDriver:
                     == request["request_id"]
                 ):
                     suspended["persistence_drained"] = True
+                    continue
                 if not completed.successful() or persistence_error:
                     persistence.failure_records.append(
                         {

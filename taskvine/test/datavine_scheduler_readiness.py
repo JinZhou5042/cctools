@@ -84,6 +84,9 @@ def main():
             dependents[parent_id].add(task_id)
     pending = {2, 3, 4, 5}
     ready_queue = ReadyQueue(dependencies, dependents, pending, {1})
+    assert ready_queue.take(pending, lambda _: True, 1) == (2,)
+    assert ready_queue.take(pending, lambda _: True, 0) == ()
+    ready_queue.mark_pending(2)
     ready = ready_queue.take(
         pending,
         lambda task_id: (

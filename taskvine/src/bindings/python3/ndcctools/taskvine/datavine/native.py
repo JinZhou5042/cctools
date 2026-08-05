@@ -264,6 +264,13 @@ class NativeControllerClient:
         with self._request_id_lock:
             return self._worker_epochs.get(str(worker_id))
 
+    def remember_worker(self, worker_id, endpoint, epoch):
+        with self._request_id_lock:
+            self._worker_endpoints[str(worker_id)] = str(endpoint).encode(
+                "utf-8"
+            )
+            self._worker_epochs[str(worker_id)] = int(epoch)
+
     def disconnect_worker(self, worker_id, epoch):
         worker = str(worker_id).encode("utf-8")
         self.request(

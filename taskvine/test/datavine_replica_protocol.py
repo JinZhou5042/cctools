@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import threading
 
 from ndcctools.taskvine.datavine.controller.service import ControllerService
 from ndcctools.taskvine.datavine.controller.state import ControllerState
@@ -83,6 +84,49 @@ def main():
         return replica
 
     try:
+        endpoint = "http://127.0.0.1:1/epoch-sync"
+        assert client.claim_worker("epoch-sync", endpoint)["epoch"] == 1
+        client.reconcile_workers(())
+        assert client.claim_worker("epoch-sync")["epoch"] == 2
+        client.reconcile_workers(())
+        client.native.disconnect_worker("epoch-sync", 2)
+        client.native.disconnect_worker("epoch-sync", 1)
+
+        failures = []
+
+        def churn_claims():
+            try:
+                for _ in range(250):
+                    client.claim_worker("churn", endpoint)
+            except Exception as exc:
+                failures.append(exc)
+
+        def churn_reconciliation():
+            try:
+                for _ in range(250):
+                    client.reconcile_workers(())
+            except Exception as exc:
+                failures.append(exc)
+
+        threads = [
+            threading.Thread(target=target)
+            for target in (churn_claims, churn_reconciliation) * 4
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert not failures, failures
+        client.reconcile_workers(())
+
+        first_endpoint = "http://127.0.0.1:1/rollover-a"
+        second_endpoint = "http://127.0.0.1:1/rollover-b"
+        assert client.claim_worker("rollover", first_endpoint)["epoch"] == 1
+        replacement = client.claim_worker("rollover", second_endpoint)
+        assert replacement["epoch"] == 2
+        assert replacement["endpoint"] == second_endpoint
+        client.reconcile_workers(())
+
         client.claim_worker("w1", "http://127.0.0.1:1/w1")
         client.claim_worker("w2", "http://127.0.0.1:1/w2")
         edata_hash = edata.content_hash

@@ -148,12 +148,14 @@ class ReadyQueue:
             if remaining == 0 and child_id in pending:
                 self.mark_pending(child_id)
 
-    def take(self, pending, eligible):
+    def take(self, pending, eligible, limit=None):
         """Take currently eligible tasks while retaining temporary blocks."""
 
+        if limit is not None and int(limit) < 0:
+            raise ValueError("ready-task limit cannot be negative")
         ready = []
         blocked = []
-        while self._heap:
+        while self._heap and (limit is None or len(ready) < int(limit)):
             task_id = heapq.heappop(self._heap)
             self._queued.discard(task_id)
             if task_id not in pending or self._remaining[task_id]:

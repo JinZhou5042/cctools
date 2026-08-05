@@ -298,7 +298,7 @@ class PostRouteFactory:
                 if self.path == f"{API_PREFIX}/workers/claim":
                     try:
                         request = self._read_json()
-                        worker = owner.state.claim_worker(
+                        worker = owner.claim_worker(
                             request["worker_id"], request.get("endpoint")
                         )
                     except Exception as exc:
@@ -309,13 +309,9 @@ class PostRouteFactory:
                 if self.path == f"{API_PREFIX}/workers/disconnect":
                     try:
                         request = self._read_json()
-                        owner.disconnect_native_worker(
+                        worker = owner.disconnect_worker(
                             request["worker_id"], request["epoch"]
                         )
-                        worker = owner.state.disconnect_worker(
-                            request["worker_id"], request["epoch"]
-                        )
-                        owner.sync_all_native_leases()
                     except Exception as exc:
                         self._error(400, exc)
                         return
@@ -327,7 +323,7 @@ class PostRouteFactory:
                         (
                             disconnected,
                             affected_data_ids,
-                        ) = owner.state.reconcile_workers(
+                        ) = owner.reconcile_workers(
                             request["active_worker_ids"]
                         )
                     except Exception as exc:

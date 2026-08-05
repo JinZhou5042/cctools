@@ -117,6 +117,7 @@ class TaskFactory:
             self.transfer_faults,
         )
         task.set_tag(str(task_id))
+        task.set_category("datavine-compute")
         task.set_cores(1)
         task.set_retries(0)
         if environment is not None:
@@ -136,6 +137,7 @@ class TaskFactory:
             float(request.get("inject_failure_delay", 0)),
         )
         task.set_tag(f"persist-i{int(data_id)}")
+        task.set_category("datavine-persistence")
         task.set_cores(0)
         task.set_priority(-500)
         task.set_retries(0)

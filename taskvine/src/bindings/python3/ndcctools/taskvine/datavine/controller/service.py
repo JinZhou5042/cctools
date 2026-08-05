@@ -36,6 +36,7 @@ class ControllerService:
         self.transfer_faults = TransferFaults()
         self._server = None
         self._thread = None
+        self._worker_state_lock = threading.Lock()
         self.native = native
         self.native_address = None
 
@@ -109,6 +110,60 @@ class ControllerService:
     def disconnect_native_worker(self, worker_id, epoch):
         if self.native is not None and self.native.running:
             self.native.client.disconnect_worker(worker_id, epoch)
+
+    def claim_worker(self, worker_id, endpoint=None):
+        with self._worker_state_lock:
+            try:
+                previous = self.state.replicas.worker(worker_id)
+            except KeyError:
+                previous = None
+            if (
+                previous is not None
+                and previous.active
+                and previous.endpoint
+                and endpoint
+                and previous.endpoint != str(endpoint)
+            ):
+                self.disconnect_native_worker(
+                    previous.worker_id, previous.epoch
+                )
+                self.state.disconnect_worker(
+                    previous.worker_id, previous.epoch
+                )
+            worker = self.state.claim_worker(worker_id, endpoint)
+            if (
+                self.native is not None
+                and self.native.running
+                and worker.endpoint
+            ):
+                native_epoch = self.native.client.claim_worker(
+                    worker.worker_id, worker.endpoint
+                )
+                if native_epoch != worker.epoch:
+                    raise RuntimeError("Controller worker epochs diverged")
+            return worker
+
+    def disconnect_worker(self, worker_id, epoch):
+        with self._worker_state_lock:
+            self.disconnect_native_worker(worker_id, epoch)
+            worker = self.state.disconnect_worker(worker_id, epoch)
+            self.sync_all_native_leases()
+            return worker
+
+    def reconcile_workers(self, active_worker_ids):
+        with self._worker_state_lock:
+            disconnected, affected = self.state.reconcile_workers(
+                active_worker_ids
+            )
+            for worker in disconnected:
+                try:
+                    self.disconnect_native_worker(
+                        worker.worker_id, worker.epoch
+                    )
+                except NativeControllerError as exc:
+                    if exc.status != 3:
+                        raise
+            return disconnected, affected
 
     def worker_replicas(self, data_id):
         if self.native is None or not self.native.running:
