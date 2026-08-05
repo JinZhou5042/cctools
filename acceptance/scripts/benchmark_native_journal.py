@@ -40,6 +40,7 @@ def run_case(records, clients, journal):
                 ({
                     "data_id": data_id,
                     "attempt": 1,
+                    "tier": "worker-dram",
                     "content_hash": digest,
                     "size": 1,
                 },),

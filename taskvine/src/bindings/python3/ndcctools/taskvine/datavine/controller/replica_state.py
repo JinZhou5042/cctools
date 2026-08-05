@@ -329,6 +329,33 @@ class ReplicaStateMixin:
                 published.append(replica)
             return tuple(published)
 
+    def project_data_events(self, batches, replicas=()):
+        with self._lock, self._metadata_batch():
+            published = []
+            for batch in batches:
+                published.extend(
+                    self.publish_worker_outputs(
+                        batch["worker_id"],
+                        batch["worker_epoch"],
+                        batch["outputs"],
+                    )
+                )
+            for replica in replicas:
+                published.append(
+                    self.report_worker_replica(
+                        replica["data_id"],
+                        replica["replica_id"],
+                        replica["attempt"],
+                        replica["tier"],
+                        replica["content_hash"],
+                        replica["size"],
+                        replica["worker_id"],
+                        replica["worker_epoch"],
+                        replica.get("source_endpoint"),
+                    )
+                )
+            return tuple(published)
+
     def commit_worker_outputs(self, outputs):
         with self._lock, self._metadata_batch():
             return tuple(

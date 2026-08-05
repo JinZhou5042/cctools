@@ -311,28 +311,7 @@ class NativeControllerClient:
         count = struct.unpack_from("!I", body)[0]
         if count != len(outputs):
             raise RuntimeError("native Controller returned incomplete publications")
-        result = []
-        for index, output in enumerate(outputs):
-            data_id = self._data_id(output["data_id"])
-            result.append(
-                {
-                    "data_id": f"i:{data_id}",
-                    "replica_id": f"taskvine-{worker_id}-i-{data_id}",
-                    "generation": struct.unpack_from(
-                        "!Q", body, 4 + 8 * index
-                    )[0],
-                    "attempt": int(output["attempt"]),
-                    "tier": str(output["tier"]),
-                    "content_hash": str(output["content_hash"]),
-                    "size": int(output["size"]),
-                    "state": "available",
-                    "load": 0,
-                    "worker_id": str(worker_id),
-                    "worker_epoch": int(worker_epoch),
-                    "source_endpoint": endpoint.decode("utf-8"),
-                }
-            )
-        return result
+        return count
 
     def report_replica(
         self,

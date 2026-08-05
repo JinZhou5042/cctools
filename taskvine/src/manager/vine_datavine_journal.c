@@ -24,20 +24,34 @@ See the file COPYING for details.
 #define JOURNAL_MAX_PAYLOAD (64U * 1024U * 1024U)
 #define JOURNAL_GROUP_COMMIT_NS 1000000L
 
+struct journal_record {
+	unsigned char header[JOURNAL_HEADER_SIZE];
+	unsigned char *payload;
+	size_t payload_size;
+	uint64_t sequence;
+	struct journal_record *next;
+};
+
 struct vine_datavine_journal {
 	int fd;
 	pthread_mutex_t lock;
 	pthread_cond_t committed;
 	pthread_cond_t changed;
-	pthread_t thread;
+	pthread_t writer;
+	pthread_t synchronizer;
 	uint64_t sequence;
+	uint64_t written_sequence;
 	uint64_t durable_sequence;
+	struct journal_record *head;
+	struct journal_record *tail;
+	int writing;
 	int syncing;
 	int stopping;
 	int failed;
 	struct vine_datavine_journal_metrics metrics;
 };
 
+static void *write_records(void *argument);
 static void *synchronize(void *argument);
 
 static uint16_t get_u16(const unsigned char *buffer)
@@ -122,7 +136,20 @@ struct vine_datavine_journal *vine_datavine_journal_open(const char *path)
 		free(journal);
 		return 0;
 	}
-	if (pthread_create(&journal->thread, 0, synchronize, journal)) {
+	if (pthread_create(&journal->writer, 0, write_records, journal)) {
+		pthread_cond_destroy(&journal->changed);
+		pthread_cond_destroy(&journal->committed);
+		pthread_mutex_destroy(&journal->lock);
+		close(journal->fd);
+		free(journal);
+		return 0;
+	}
+	if (pthread_create(&journal->synchronizer, 0, synchronize, journal)) {
+		pthread_mutex_lock(&journal->lock);
+		journal->stopping = 1;
+		pthread_cond_signal(&journal->changed);
+		pthread_mutex_unlock(&journal->lock);
+		pthread_join(journal->writer, 0);
 		pthread_cond_destroy(&journal->changed);
 		pthread_cond_destroy(&journal->committed);
 		pthread_mutex_destroy(&journal->lock);
@@ -187,6 +214,7 @@ int vine_datavine_journal_replay(struct vine_datavine_journal *journal,
 		}
 		free(payload);
 		journal->sequence = sequence;
+		journal->written_sequence = sequence;
 		journal->durable_sequence = sequence;
 		journal->metrics.replayed++;
 		offset += JOURNAL_HEADER_SIZE + payload_size;
@@ -194,23 +222,73 @@ int vine_datavine_journal_replay(struct vine_datavine_journal *journal,
 	return lseek(journal->fd, 0, SEEK_END) >= 0;
 }
 
+static void *write_records(void *argument)
+{
+	struct vine_datavine_journal *journal = argument;
+	pthread_mutex_lock(&journal->lock);
+	for (;;) {
+		while (!journal->failed && !journal->stopping && !journal->head) {
+			pthread_cond_wait(&journal->changed, &journal->lock);
+		}
+		if (journal->failed || (journal->stopping && !journal->head)) {
+			break;
+		}
+		struct journal_record *records = journal->head;
+		journal->head = 0;
+		journal->tail = 0;
+		journal->writing = 1;
+		pthread_mutex_unlock(&journal->lock);
+		int failed = 0;
+		uint64_t target = 0;
+		for (struct journal_record *record = records; record; record = record->next) {
+			if (full_write(journal->fd, record->header, sizeof(record->header)) != sizeof(record->header) || (record->payload_size && full_write(journal->fd, record->payload, record->payload_size) != (ssize_t)record->payload_size)) {
+				failed = 1;
+				break;
+			}
+			target = record->sequence;
+		}
+		pthread_mutex_lock(&journal->lock);
+		if (failed) {
+			journal->failed = 1;
+		} else {
+			journal->written_sequence = target;
+		}
+		journal->writing = 0;
+		pthread_cond_broadcast(&journal->committed);
+		pthread_mutex_unlock(&journal->lock);
+		while (records) {
+			struct journal_record *next = records->next;
+			free(records->payload);
+			free(records);
+			records = next;
+		}
+		pthread_mutex_lock(&journal->lock);
+	}
+	pthread_cond_broadcast(&journal->committed);
+	pthread_mutex_unlock(&journal->lock);
+	return 0;
+}
+
 static void *synchronize(void *argument)
 {
 	struct vine_datavine_journal *journal = argument;
 	pthread_mutex_lock(&journal->lock);
 	for (;;) {
-		while (!journal->failed && !journal->stopping && journal->sequence == journal->durable_sequence) {
-			pthread_cond_wait(&journal->changed, &journal->lock);
+		while (!journal->failed && journal->written_sequence == journal->durable_sequence && !(journal->stopping && !journal->head && !journal->writing)) {
+			pthread_cond_wait(&journal->committed, &journal->lock);
 		}
-		if (journal->failed || (journal->stopping && journal->sequence == journal->durable_sequence)) {
+		if (journal->failed || (journal->stopping && !journal->head && !journal->writing && journal->written_sequence == journal->durable_sequence)) {
 			break;
+		}
+		if (journal->written_sequence == journal->durable_sequence) {
+			continue;
 		}
 		journal->syncing = 1;
 		pthread_mutex_unlock(&journal->lock);
 		struct timespec pause = {.tv_nsec = JOURNAL_GROUP_COMMIT_NS};
 		nanosleep(&pause, 0);
 		pthread_mutex_lock(&journal->lock);
-		uint64_t target = journal->sequence;
+		uint64_t target = journal->written_sequence;
 		uint64_t group = target - journal->durable_sequence;
 		pthread_mutex_unlock(&journal->lock);
 		struct timespec started;
@@ -245,30 +323,49 @@ static int append(struct vine_datavine_journal *journal, uint16_t opcode,
 	if (!journal || payload_size > JOURNAL_MAX_PAYLOAD || (payload_size && !payload)) {
 		return 0;
 	}
+	struct journal_record *record = calloc(1, sizeof(*record));
+	if (!record) {
+		return 0;
+	}
+	if (payload_size) {
+		record->payload = malloc(payload_size);
+		if (!record->payload) {
+			free(record);
+			return 0;
+		}
+		memcpy(record->payload, payload, payload_size);
+	}
+	record->payload_size = payload_size;
 	pthread_mutex_lock(&journal->lock);
 	if (journal->failed) {
 		pthread_mutex_unlock(&journal->lock);
+		free(record->payload);
+		free(record);
 		return 0;
 	}
 	uint64_t sequence = ++journal->sequence;
-	unsigned char header[JOURNAL_HEADER_SIZE] = {0};
-	put_u32(header, JOURNAL_MAGIC);
-	put_u16(header + 4, JOURNAL_VERSION);
-	put_u16(header + 6, opcode);
-	put_u32(header + 8, (uint32_t)payload_size);
-	put_u32(header + 12, checksum(opcode, payload, payload_size));
-	put_u64(header + 16, sequence);
-	if (full_write(journal->fd, header, sizeof(header)) != sizeof(header) || (payload_size && full_write(journal->fd, payload, payload_size) != (ssize_t)payload_size)) {
-		journal->failed = 1;
-		pthread_cond_broadcast(&journal->committed);
-		pthread_mutex_unlock(&journal->lock);
-		return 0;
+	record->sequence = sequence;
+	put_u32(record->header, JOURNAL_MAGIC);
+	put_u16(record->header + 4, JOURNAL_VERSION);
+	put_u16(record->header + 6, opcode);
+	put_u32(record->header + 8, (uint32_t)payload_size);
+	put_u32(record->header + 12, checksum(opcode, payload, payload_size));
+	put_u64(record->header + 16, sequence);
+	if (journal->tail) {
+		journal->tail->next = record;
+	} else {
+		journal->head = record;
 	}
+	journal->tail = record;
 	journal->metrics.commits++;
-	journal->metrics.bytes += sizeof(header) + payload_size;
+	journal->metrics.bytes += JOURNAL_HEADER_SIZE + payload_size;
 	pthread_cond_signal(&journal->changed);
-	while (durable && !journal->failed && journal->durable_sequence < sequence) {
+	if (durable) {
 		journal->metrics.waits++;
+	}
+	while (!journal->failed && (durable
+				? journal->durable_sequence
+				: journal->written_sequence) < sequence) {
 		pthread_cond_wait(&journal->committed, &journal->lock);
 	}
 	int result = !journal->failed;
@@ -313,8 +410,19 @@ void vine_datavine_journal_close(struct vine_datavine_journal *journal)
 	pthread_mutex_lock(&journal->lock);
 	journal->stopping = 1;
 	pthread_cond_signal(&journal->changed);
+	pthread_cond_signal(&journal->committed);
 	pthread_mutex_unlock(&journal->lock);
-	pthread_join(journal->thread, 0);
+	pthread_join(journal->writer, 0);
+	pthread_mutex_lock(&journal->lock);
+	pthread_cond_signal(&journal->committed);
+	pthread_mutex_unlock(&journal->lock);
+	pthread_join(journal->synchronizer, 0);
+	while (journal->head) {
+		struct journal_record *next = journal->head->next;
+		free(journal->head->payload);
+		free(journal->head);
+		journal->head = next;
+	}
 	close(journal->fd);
 	pthread_cond_destroy(&journal->changed);
 	pthread_cond_destroy(&journal->committed);

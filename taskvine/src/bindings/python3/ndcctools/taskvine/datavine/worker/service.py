@@ -134,8 +134,7 @@ class WorkerDataService:
             f"http://{socket.getfqdn()}:{port}/{capability}"
         )
         self._socket_address = _socket_address(capability)
-        self._socket = None
-        self._connection_lock = threading.Lock()
+        self._connections = threading.local()
         self._snapshot = dict.fromkeys(_SNAPSHOT_FIELDS, 0)
         self.disk = cache.disk
 
@@ -153,30 +152,29 @@ class WorkerDataService:
     def _exchange(
         self, request, payload=b"", response_size=1, size_prefixed=False
     ):
-        with self._connection_lock:
-            for attempt in range(2):
-                if self._socket is None:
-                    self._socket = socket.socket(
-                        socket.AF_UNIX, socket.SOCK_STREAM
-                    )
-                    self._socket.settimeout(2)
-                    self._socket.connect(self._socket_address)
-                try:
-                    self._socket.sendall(request + payload)
-                    response = _recv_exact(self._socket, response_size)
-                    if not size_prefixed:
-                        return response
-                    size = struct.unpack_from("!Q", response)[0]
-                    return response, (
-                        None if size == _MISSING else _recv_exact(
-                            self._socket, size
-                        )
-                    )
-                except (EOFError, OSError):
-                    self._socket.close()
-                    self._socket = None
-                    if attempt:
-                        raise
+        for attempt in range(2):
+            connection = getattr(self._connections, "socket", None)
+            if connection is None:
+                connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                connection.settimeout(2)
+                connection.connect(self._socket_address)
+                self._connections.socket = connection
+            try:
+                connection.sendall(request + payload)
+                response = _recv_exact(connection, response_size)
+                if not size_prefixed:
+                    return response
+                size = struct.unpack_from("!Q", response)[0]
+                return response, (
+                    None
+                    if size == _MISSING
+                    else _recv_exact(connection, size)
+                )
+            except (EOFError, OSError):
+                connection.close()
+                self._connections.socket = None
+                if attempt:
+                    raise
 
     def put_data(
         self,

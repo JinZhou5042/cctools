@@ -160,23 +160,34 @@ def _execute_datavine_task(
                     PROCESS_CACHE.output_publishers[
                         publisher_key
                     ] = publisher
-            published = publisher.publish(outputs)
-            if len(published) != len(outputs):
+            if publisher.publish(outputs) != len(outputs):
                 raise RuntimeError(
                     "Controller returned incomplete publications"
                 )
-            for output, replica in zip(outputs, published):
-                output.update(replica)
         timings["controller_publication"] = (
             time.monotonic() - publish_started
         )
     except Exception:
         error = traceback.format_exc()
     finally:
-        for output in outputs:
-            output.pop("payload", None)
+        outputs = tuple(
+            (
+                output["output_index"],
+                output["content_hash"],
+                output["size"],
+                output["worker_id"],
+                output["worker_epoch"],
+                output["tier"],
+            )
+            + (
+                (output["source_endpoint"],)
+                if output["tier"] == "worker-disk"
+                else ()
+            )
+            for output in outputs
+        )
     return (
-        "datavine-task-v2",
+        "datavine-task-v3",
         int(task_id),
         events,
         _cache_snapshot(PROCESS_CACHE),
@@ -215,7 +226,7 @@ def execute_datavine_task(
         )
     except Exception:
         return (
-            "datavine-task-v2",
+            "datavine-task-v3",
             int(task_id),
             [],
             ("", int(worker_dram_cache_bytes), 0, 0, 0, 0, 0, 0),

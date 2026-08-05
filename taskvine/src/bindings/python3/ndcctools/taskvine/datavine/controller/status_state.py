@@ -132,6 +132,16 @@ class StatusStateMixin:
             self._mark_metadata("task-state", task_ids)
             return result
 
+    def project_scheduler_events(
+        self, batches, replicas, completed_task_ids
+    ):
+        with self._lock, self._metadata_batch():
+            projected = self.project_data_events(batches, replicas)
+            completed = self.set_task_states(
+                completed_task_ids, "completed"
+            )
+            return len(projected), len(completed)
+
     def set_required_output(self, data_id, required=True):
         with self._lock, self._metadata_batch():
             self.get_idata(data_id)

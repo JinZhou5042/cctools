@@ -508,7 +508,7 @@ class ControllerClient:
     ):
         if self.native is not None:
             try:
-                return self.native.publish_outputs(
+                count = self.native.publish_outputs(
                     worker_id, worker_epoch, outputs
                 )
             except NativeControllerError as exc:
@@ -522,10 +522,13 @@ class ControllerClient:
                 )
                 for output in outputs:
                     output["worker_epoch"] = worker_epoch
-                return self.native.publish_outputs(
+                count = self.native.publish_outputs(
                     worker_id, worker_epoch, outputs
                 )
-        return self.project_outputs(worker_id, worker_epoch, outputs)
+            return count, worker_epoch
+        return len(
+            self.project_outputs(worker_id, worker_epoch, outputs)
+        ), worker_epoch
 
     def project_outputs(self, worker_id, worker_epoch, outputs):
         return self.project_data_events(
@@ -557,6 +560,42 @@ class ControllerClient:
                     for worker_id, worker_epoch, outputs in output_batches
                 ],
                 "replicas": list(replicas),
+            },
+            idempotent=True,
+        )
+        return json.loads(payload)
+
+    def project_scheduler_events(
+        self, output_batches, replicas, completed_task_ids
+    ):
+        payload, _ = self._request(
+            "POST",
+            f"{API_PREFIX}/events/project",
+            {
+                "batches": [
+                    {
+                        "worker_id": str(worker_id),
+                        "worker_epoch": int(worker_epoch),
+                        "outputs": [
+                            {
+                                key: (
+                                    int(str(value).split(":", 1)[-1])
+                                    if key == "data_id"
+                                    else value
+                                )
+                                for key, value in output.items()
+                                if key != "payload"
+                            }
+                            for output in outputs
+                        ],
+                    }
+                    for worker_id, worker_epoch, outputs
+                    in output_batches
+                ],
+                "replicas": list(replicas),
+                "completed_task_ids": [
+                    int(task_id) for task_id in completed_task_ids
+                ],
             },
             idempotent=True,
         )

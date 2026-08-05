@@ -63,7 +63,7 @@ def publish_task_outputs(
             {
                 "task_id": task.task_id,
                 "output_index": output_index,
-                "data_id": output_data_id,
+                "data_id": f"i:{output_data_id}",
                 "attempt": attempt,
                 "content_hash": content_hash,
                 "size": len(payload),
@@ -72,6 +72,7 @@ def publish_task_outputs(
                 "worker_id": worker_id,
                 "worker_epoch": worker_epoch,
                 "tier": tier,
+                "source_endpoint": reporter.endpoint,
             }
         )
     return total_bytes

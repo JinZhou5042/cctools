@@ -160,14 +160,15 @@ def main():
                 "tier": "worker-dram",
             },),
         )
-        assert published[0]["generation"] == 1
+        assert published == 1
         replicas = service.worker_replicas("i:1")
         assert len(replicas) == 1
-        assert replicas[0]["replica_id"] == published[0]["replica_id"]
+        assert replicas[0]["generation"] == 1
+        replica_id = replicas[0]["replica_id"]
         assert replicas[0]["state"] == "available"
-        first.invalidate_replica("i:1", published[0]["replica_id"])
+        first.invalidate_replica("i:1", replica_id)
         assert service.worker_replicas("i:1")[0]["state"] == "invalid"
-        first.restore_replica("i:1", published[0]["replica_id"])
+        first.restore_replica("i:1", replica_id)
         assert service.worker_replicas("i:1")[0]["state"] == "available"
         service.stop()
 
@@ -181,10 +182,8 @@ def main():
         )
         assert source["source"]["worker_id"] == "source"
         recovered.release_source("restart-read", True)
-        recovered.invalidate_replica("i:1", published[0]["replica_id"])
-        recovered.confirm_replica_pruned(
-            "i:1", published[0]["replica_id"]
-        )
+        recovered.invalidate_replica("i:1", replica_id)
+        recovered.confirm_replica_pruned("i:1", replica_id)
         assert service.worker_replicas("i:1")[0]["state"] == "pruned"
         service.stop()
 

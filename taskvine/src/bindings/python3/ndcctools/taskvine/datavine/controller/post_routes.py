@@ -409,35 +409,37 @@ class PostRouteFactory:
                 ):
                     try:
                         request = self._read_json()
-                        replicas = []
-                        for batch in request["batches"]:
-                            replicas.extend(
-                                owner.state.publish_worker_outputs(
-                                    batch["worker_id"],
-                                    batch["worker_epoch"],
-                                    batch["outputs"],
-                                )
-                            )
-                        for replica in request.get("replicas", ()):
-                            replicas.append(
-                                owner.state.report_worker_replica(
-                                    replica["data_id"],
-                                    replica["replica_id"],
-                                    replica["attempt"],
-                                    replica["tier"],
-                                    replica["content_hash"],
-                                    replica["size"],
-                                    replica["worker_id"],
-                                    replica["worker_epoch"],
-                                    replica.get("source_endpoint"),
-                                )
-                            )
+                        replicas = owner.state.project_data_events(
+                            request["batches"],
+                            request.get("replicas", ()),
+                        )
                     except Exception as exc:
                         self._error(400, exc)
                         return
                     self._json(
                         200,
                         [replica.source_dict() for replica in replicas],
+                    )
+                    return
+                if self.path == f"{API_PREFIX}/events/project":
+                    try:
+                        request = self._read_json()
+                        replicas, completed = (
+                            owner.state.project_scheduler_events(
+                                request["batches"],
+                                request.get("replicas", ()),
+                                request["completed_task_ids"],
+                            )
+                        )
+                    except Exception as exc:
+                        self._error(400, exc)
+                        return
+                    self._json(
+                        200,
+                        {
+                            "projected": replicas,
+                            "completed": completed,
+                        },
                     )
                     return
                 if self.path == f"{API_PREFIX}/replicas/commit-outputs":

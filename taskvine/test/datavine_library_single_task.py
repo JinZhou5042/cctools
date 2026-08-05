@@ -24,7 +24,7 @@ def main():
         sum(range(64)),
         worker_count=1,
         worker_cores=4,
-        detailed_report=False,
+        detailed_report=True,
     )
     report = snapshot["scheduler_report"]
     assert report["logical_tasks"] == 65

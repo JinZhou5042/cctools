@@ -26,6 +26,7 @@ See the file COPYING for details.
 #define DATAVINE_RPC_EVENTS 128
 #define DATAVINE_RPC_ALLOCATE_SIZE 24U
 #define DATAVINE_RPC_PUBLICATION_SIZE 88U
+#define DATAVINE_RPC_MUTATION_SHARDS 256
 
 struct vine_datavine_rpc_server;
 
@@ -60,8 +61,10 @@ struct vine_datavine_rpc_server {
 	struct vine_datavine_index *index;
 	struct vine_datavine_directory *directory;
 	struct vine_datavine_journal *journal;
-	pthread_mutex_t mutation_lock;
-	int mutation_lock_initialized;
+	pthread_rwlock_t topology_lock;
+	int topology_lock_initialized;
+	pthread_mutex_t publication_locks[DATAVINE_RPC_MUTATION_SHARDS];
+	int publication_locks_initialized;
 	atomic_int stopping;
 };
 
@@ -699,6 +702,25 @@ static int replay_request(void *context, uint16_t opcode,
 	return status == VINE_DATAVINE_RPC_OK;
 }
 
+static pthread_mutex_t *publication_lock(
+		struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size)
+{
+	uint64_t data_id = 0;
+	if (size >= 16) {
+		uint16_t worker_length = get_u16(payload);
+		uint16_t endpoint_length = get_u16(payload + 2);
+		uint32_t count = vine_datavine_rpc_get_u32(payload + 12);
+		size_t offset = 16 + (size_t)worker_length + endpoint_length;
+		if (count && offset <= size && size - offset >= DATAVINE_RPC_PUBLICATION_SIZE) {
+			data_id = vine_datavine_rpc_get_u64(payload + offset);
+		}
+	}
+	data_id *= UINT64_C(11400714819323198485);
+	return &server->publication_locks[
+		data_id % DATAVINE_RPC_MUTATION_SHARDS];
+}
+
 static int process_request(struct vine_datavine_rpc_server *server, struct rpc_connection *connection)
 {
 	const unsigned char *header = connection->header;
@@ -717,8 +739,16 @@ static int process_request(struct vine_datavine_rpc_server *server, struct rpc_c
 		}
 	} else {
 		int persistent = server->journal && persistent_opcode(opcode);
-		if (persistent) {
-			pthread_mutex_lock(&server->mutation_lock);
+		int publishing = persistent
+				&& opcode == VINE_DATAVINE_RPC_PUBLISH_OUTPUTS;
+		pthread_mutex_t *shard = 0;
+		if (publishing) {
+			pthread_rwlock_rdlock(&server->topology_lock);
+			shard = publication_lock(
+				server, connection->payload, connection->payload_size);
+			pthread_mutex_lock(shard);
+		} else if (persistent) {
+			pthread_rwlock_wrlock(&server->topology_lock);
 		}
 		status = dispatch_request(server, opcode, connection->payload, connection->payload_size, result, &dynamic_result, &result_size);
 		int journaled = 1;
@@ -733,8 +763,11 @@ static int process_request(struct vine_datavine_rpc_server *server, struct rpc_c
 			status = VINE_DATAVINE_RPC_INTERNAL;
 			result_size = 0;
 		}
-		if (persistent) {
-			pthread_mutex_unlock(&server->mutation_lock);
+		if (publishing) {
+			pthread_mutex_unlock(shard);
+			pthread_rwlock_unlock(&server->topology_lock);
+		} else if (persistent) {
+			pthread_rwlock_unlock(&server->topology_lock);
 		}
 	}
 	int created = response_create(connection, opcode, status, request_id, dynamic_result ? dynamic_result : result, result_size);
@@ -906,11 +939,18 @@ struct vine_datavine_rpc_server *vine_datavine_rpc_server_create(
 		return 0;
 	}
 	server->listen_fd = -1;
-	if (pthread_mutex_init(&server->mutation_lock, 0)) {
+	if (pthread_rwlock_init(&server->topology_lock, 0)) {
 		free(server);
 		return 0;
 	}
-	server->mutation_lock_initialized = 1;
+	server->topology_lock_initialized = 1;
+	for (int i = 0; i < DATAVINE_RPC_MUTATION_SHARDS; i++) {
+		if (pthread_mutex_init(&server->publication_locks[i], 0)) {
+			vine_datavine_rpc_server_delete(server);
+			return 0;
+		}
+		server->publication_locks_initialized++;
+	}
 	server->token = strdup(token);
 	server->token_length = strlen(token);
 	server->thread_count = 0;
@@ -964,8 +1004,11 @@ void vine_datavine_rpc_server_delete(struct vine_datavine_rpc_server *server)
 	vine_datavine_index_delete(server->index);
 	vine_datavine_directory_delete(server->directory);
 	vine_datavine_journal_close(server->journal);
-	if (server->mutation_lock_initialized) {
-		pthread_mutex_destroy(&server->mutation_lock);
+	for (int i = 0; i < server->publication_locks_initialized; i++) {
+		pthread_mutex_destroy(&server->publication_locks[i]);
+	}
+	if (server->topology_lock_initialized) {
+		pthread_rwlock_destroy(&server->topology_lock);
 	}
 	free(server->threads);
 	free(server->token);

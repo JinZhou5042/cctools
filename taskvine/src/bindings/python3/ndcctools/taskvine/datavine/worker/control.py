@@ -8,12 +8,11 @@ class OutputPublisher:
         self.worker_epoch = int(worker_epoch)
 
     def publish(self, outputs):
-        committed = self.client.publish_outputs(
+        count, worker_epoch = self.client.publish_outputs(
             self.worker_id, self.worker_epoch, outputs
         )
-        if committed:
-            self.worker_epoch = int(committed[0]["worker_epoch"])
-        return committed
+        self.worker_epoch = int(worker_epoch)
+        return count
 
 
 class SourceResolver:

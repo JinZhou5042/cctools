@@ -76,6 +76,10 @@ class WorkflowDriver:
         self._worker_status_poll_interval = 1.0
         self._reconciled_affected_data_ids = ()
         self._cache_admission = WorkerCacheAdmission(controller_client)
+        self._control_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="datavine-control-events",
+        )
 
     @property
     def thread_ident(self):
@@ -128,6 +132,7 @@ class WorkflowDriver:
         while True:
             operation, args, kwargs, future = self._commands.get()
             if operation == "_stop":
+                self._control_executor.shutdown(wait=True)
                 if self._manager is not None:
                     self._manager._free()
                     self._manager = None
@@ -718,6 +723,15 @@ class WorkflowDriver:
         output_projections = {}
         projection_count = 0
         replica_projections = []
+        control_futures = collections.deque()
+        control_pipeline = {
+            "batches": 0,
+            "completed_tasks": 0,
+            "output_events": 0,
+            "replica_events": 0,
+            "inflight_high_water": 0,
+            "backpressure_seconds": 0.0,
+        }
         peer_release_pending = []
 
         def drain_peer_releases():
@@ -731,25 +745,70 @@ class WorkflowDriver:
                 self.controller.complete_release_retry()
                 peer_release_pending.remove(release)
 
-        def flush_output_projections():
+        def apply_control_events(
+            batches, replicas, completed_task_ids
+        ):
+            result = self.controller.project_scheduler_events(
+                batches, replicas, completed_task_ids
+            )
+            expected = sum(
+                len(outputs) for _, _, outputs in batches
+            ) + len(replicas)
+            if result != {
+                "projected": expected,
+                "completed": len(completed_task_ids),
+            }:
+                raise RuntimeError(
+                    "Controller returned incomplete scheduler events"
+                )
+
+        def submit_control_events():
             nonlocal projection_count
-            if not projection_count:
+            if not projection_count and not completed_task_states:
                 return
-            batches = [
+            batches = tuple(
                 (worker_id, worker_epoch, outputs)
                 for (worker_id, worker_epoch), outputs
                 in output_projections.items()
-            ]
-            committed = self.controller.project_data_events(
-                batches, replica_projections
             )
-            if len(committed) != projection_count:
-                raise RuntimeError(
-                    "Controller returned incomplete output projections"
-                )
+            replicas = tuple(replica_projections)
+            completed = tuple(completed_task_states)
             output_projections.clear()
             replica_projections.clear()
+            completed_task_states.clear()
             projection_count = 0
+            control_pipeline["batches"] += 1
+            control_pipeline["completed_tasks"] += len(completed)
+            control_pipeline["output_events"] += sum(
+                len(outputs) for _, _, outputs in batches
+            )
+            control_pipeline["replica_events"] += len(replicas)
+            control_futures.append(
+                self._control_executor.submit(
+                    apply_control_events,
+                    batches,
+                    replicas,
+                    completed,
+                )
+            )
+            control_pipeline["inflight_high_water"] = max(
+                control_pipeline["inflight_high_water"],
+                len(control_futures),
+            )
+            while len(control_futures) >= 8:
+                started = time.monotonic()
+                control_futures.popleft().result()
+                control_pipeline["backpressure_seconds"] += (
+                    time.monotonic() - started
+                )
+
+        def flush_control_events():
+            submit_control_events()
+            while control_futures:
+                control_futures.popleft().result()
+
+        def flush_output_projections():
+            flush_control_events()
 
         def record_output_projection(outputs):
             nonlocal projection_count
@@ -759,27 +818,23 @@ class WorkflowDriver:
             )
             output_projections.setdefault(key, []).extend(outputs)
             projection_count += len(outputs)
-            if projection_count >= 256:
-                flush_output_projections()
+            if projection_count >= 4096:
+                submit_control_events()
 
         def record_replica_projection(replica):
             nonlocal projection_count
             replica_projections.append(replica)
             projection_count += 1
-            if projection_count >= 256:
-                flush_output_projections()
+            if projection_count >= 4096:
+                submit_control_events()
 
         def flush_completed_task_states():
-            if completed_task_states:
-                self.controller.set_task_states(
-                    completed_task_states, "completed"
-                )
-                completed_task_states.clear()
+            flush_control_events()
 
         def record_completed_task_state(task_id):
             completed_task_states.append(task_id)
             if len(completed_task_states) >= 256:
-                flush_completed_task_states()
+                submit_control_events()
 
         def record_pending_task_state(task_id):
             flush_output_projections()
@@ -1398,7 +1453,6 @@ class WorkflowDriver:
                     - len(execution.running),
                 ),
             )
-            submitted_task_ids = []
             for task_id in ready:
                 attempt = self._run_context.attempts.get(task_id, 0) + 1
                 self._run_context.attempts[task_id] = attempt
@@ -1418,12 +1472,7 @@ class WorkflowDriver:
                 )
                 execution.physical_submissions += 1
                 execution.running[physical_id] = task_id
-                submitted_task_ids.append(task_id)
                 execution.pending.remove(task_id)
-            if submitted_task_ids:
-                self.controller.set_task_states(
-                    submitted_task_ids, "running"
-                )
             while (
                 persistence.pending
                 and len(persistence.running) < persistence_capacity
@@ -1910,23 +1959,24 @@ class WorkflowDriver:
             if completed.id not in execution.running:
                 continue
             logical_id = execution.running.pop(completed.id)
-            execution.physical_task_metrics.append(
-                {
-                    "physical_task_id": int(completed.id),
-                    **{
-                        name: int(completed.get_metric(name))
-                        for name in (
-                            "time_when_submitted",
-                            "time_when_done",
-                            "time_workers_execute_last",
-                            "time_workers_execute_last_start",
-                            "time_workers_execute_last_end",
-                            "bytes_sent",
-                            "bytes_received",
-                        )
-                    },
-                }
-            )
+            if detailed_report:
+                execution.physical_task_metrics.append(
+                    {
+                        "physical_task_id": int(completed.id),
+                        **{
+                            name: int(completed.get_metric(name))
+                            for name in (
+                                "time_when_submitted",
+                                "time_when_done",
+                                "time_workers_execute_last",
+                                "time_workers_execute_last_start",
+                                "time_workers_execute_last_end",
+                                "bytes_sent",
+                                "bytes_received",
+                            )
+                        },
+                    }
+                )
             if pruning.active is not None:
                 pruning.completions_while_active += 1
             if persistence.running or persistence.pending:
@@ -1937,7 +1987,7 @@ class WorkflowDriver:
                 if (
                     isinstance(task_output, tuple)
                     and len(task_output) == 11
-                    and task_output[0] == "datavine-task-v2"
+                    and task_output[0] == "datavine-task-v3"
                 )
                 else None
             )
@@ -2013,21 +2063,41 @@ class WorkflowDriver:
                 if len(outputs) != len(expected_output_ids):
                     raise RuntimeError(
                         f"TaskID {logical_id} returned an invalid output count"
-                    )
+                )
+                decoded_outputs = []
                 for output_index, output_data_id in enumerate(
                     expected_output_ids
                 ):
                     output = outputs[output_index]
                     if (
-                        int(output["task_id"]) != logical_id
-                        or int(output["output_index"]) != output_index
-                        or output["data_id"] != f"i:{output_data_id}"
-                        or int(output["attempt"])
-                        != self._run_context.attempts[logical_id]
+                        len(output) not in (6, 7)
+                        or int(output[0]) != output_index
                     ):
                         raise RuntimeError(
                             f"TaskID {logical_id} returned mismatched output"
                         )
+                    decoded_outputs.append(
+                        {
+                            "task_id": logical_id,
+                            "output_index": output_index,
+                            "data_id": f"i:{output_data_id}",
+                            "attempt": self._run_context.attempts[logical_id],
+                            "content_hash": str(output[1]),
+                            "size": int(output[2]),
+                            "worker_id": str(output[3]),
+                            "worker_epoch": int(output[4]),
+                            "tier": str(output[5]),
+                            "replica_id": (
+                                f"taskvine-{output[3]}-i-{output_data_id}"
+                            ),
+                            **(
+                                {"source_endpoint": str(output[6])}
+                                if len(output) == 7
+                                else {}
+                            ),
+                        }
+                    )
+                outputs = decoded_outputs
                 if native_committed:
                     record_output_projection(outputs)
                 elif not outputs_committed:
@@ -2337,6 +2407,7 @@ class WorkflowDriver:
             "local_idata_hits": execution.local_idata_hits,
             "peer_idata_fetches": execution.peer_idata_fetches,
             "worker_controller_retries": execution.worker_controller_retries,
+            "control_event_pipeline": control_pipeline,
             "worker_dram_cache": {
                 "workers": execution.worker_dram_cache,
                 **{
