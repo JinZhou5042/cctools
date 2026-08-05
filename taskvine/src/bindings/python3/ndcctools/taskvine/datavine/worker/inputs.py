@@ -158,12 +158,20 @@ class InputResolver:
         data_key = f"e:{data_id}"
         started = time.monotonic()
         with self.process_cache.lock:
-            payload = self.process_cache.data.get_local_data(
+            cacheable = (
                 self.controller,
                 self.token,
                 data_key,
+            ) in self.process_cache.cacheable_edata
+        payload = (
+            self.process_cache.data_service.get_local_data(
+                self.controller, self.token, data_key
             )
-            if payload is None:
+            if cacheable
+            else None
+        )
+        if payload is None and cacheable:
+            with self.process_cache.lock:
                 payload = self.process_cache.disk.get_local_data(
                     self.controller, self.token, data_key
                 )
@@ -244,18 +252,23 @@ class InputResolver:
             raise RuntimeError(f"EDataID {data_id} checksum mismatch")
         self._record_timing("edata_validation", started)
         hint = self.cache_values.get(data_key)
-        with self.process_cache.lock:
-            started = time.monotonic()
-            admitted = self.process_cache.data.put_data(
+        started = time.monotonic()
+        admitted = (
+            self.process_cache.data_service.put_data(
                 self.controller,
                 self.token,
                 data_key,
                 resolved["serialized_sha256"],
                 payload,
-                hint["score"] if hint is not None else None,
+                self.process_cache.dram_capacity,
+                score=hint["score"] if hint is not None else None,
+                protected=resolved["cache_globally"],
             )
-            self._record_timing("edata_dram_store", started)
-        if not admitted or resolved["cache_globally"]:
+            if resolved["cache_globally"] or hint is not None
+            else False
+        )
+        self._record_timing("edata_dram_store", started)
+        if not admitted and resolved["cache_globally"]:
             started = time.monotonic()
             self.process_cache.disk.put_data(
                 self.controller,
@@ -265,13 +278,18 @@ class InputResolver:
                 payload,
             )
             self._record_timing("edata_disk_store", started)
+        if admitted or resolved["cache_globally"]:
+            with self.process_cache.lock:
+                self.process_cache.cacheable_edata.add(
+                    (self.controller, self.token, data_key)
+                )
         if resolved["cache_globally"]:
             self.reporter.report_local(
                 data_key,
                 1,
                 resolved["content_hash"],
                 payload,
-                tier="worker-disk",
+                tier="worker-dram" if admitted else "worker-disk",
             )
         return payload
 
@@ -384,13 +402,11 @@ class InputResolver:
 
     def _fetch_idata_locked(self, data_id):
         data_key = f"i:{data_id}"
-        with self.process_cache.lock:
-            payload = self.process_cache.data.get_local_data(
-                self.controller,
-                self.token,
-                data_key,
-            )
-            if payload is None:
+        payload = self.process_cache.data_service.get_local_data(
+            self.controller, self.token, data_key
+        )
+        if payload is None:
+            with self.process_cache.lock:
                 payload = self.process_cache.disk.get_local_data(
                     self.controller, self.token, data_key
                 )
@@ -438,16 +454,16 @@ class InputResolver:
             else:
                 raise RuntimeError(f"IData is not available: i:{data_id}")
         self._record_fallback()
-        hint = self.cache_values.get(data_key)
-        with self.process_cache.lock:
-            self.process_cache.data.put_data(
-                self.controller,
-                self.token,
-                data_key,
-                status["content_hash"],
-                payload,
-                hint["score"] if hint is not None else None,
-            )
+        admitted = self.process_cache.data_service.put_data(
+            self.controller,
+            self.token,
+            data_key,
+            status["content_hash"],
+            payload,
+            self.process_cache.dram_capacity,
+            protected=True,
+        )
+        if not admitted:
             self.process_cache.disk.put_data(
                 self.controller,
                 self.token,
@@ -460,6 +476,6 @@ class InputResolver:
             status["attempt"],
             status["content_hash"],
             payload,
-            tier="worker-disk",
+            tier="worker-dram" if admitted else "worker-disk",
         )
         return payload

@@ -1,4 +1,4 @@
-"""Process-local state owned by a persistent DataVine worker library."""
+"""Worker-local data stores and persistent-library state."""
 
 import dataclasses
 import hashlib
@@ -8,7 +8,7 @@ import tempfile
 import threading
 
 
-class SerializedDataCache:
+class WorkerMemoryStore:
     def __init__(self):
         self.capacity = 0
         self.bytes = 0
@@ -19,15 +19,92 @@ class SerializedDataCache:
         self._clock = 0
         self._entries = {}
         self._data_keys = {}
+        self._lock = threading.Lock()
 
-    def configure(self, capacity):
-        capacity = int(capacity)
-        if capacity < 0:
-            raise ValueError("worker DRAM cache capacity is negative")
-        self.capacity = capacity
-        self._evict_to_capacity()
+    @staticmethod
+    def _value(entry):
+        return (entry[3] * (entry[1] + 1), entry[2])
 
-    def get(self, key):
+    def _summary(self):
+        return (
+            self.capacity,
+            self.bytes,
+            len(self._entries),
+            self.hits,
+            self.misses,
+            self.admissions,
+            self.evictions,
+        )
+
+    def put(
+        self,
+        scope,
+        data_key,
+        content_hash,
+        payload,
+        capacity,
+        score,
+        protected,
+    ):
+        if not isinstance(payload, bytes):
+            raise TypeError("worker cache payload must be bytes")
+        prefix = (str(scope), str(data_key))
+        key = prefix + (str(content_hash), len(payload))
+        with self._lock:
+            self.capacity = max(0, int(capacity))
+            self._clock += 1
+            current = self._entries.get(key)
+            if current is not None:
+                current[2] = self._clock
+                current[4] = current[4] or bool(protected)
+                return True, *self._summary()
+            old_key = self._data_keys.get(prefix)
+            old = self._entries.get(old_key)
+            old_size = len(old[0]) if old is not None else 0
+            candidate = [
+                payload,
+                0,
+                self._clock,
+                int(score),
+                bool(protected),
+            ]
+            required = self.bytes - old_size + len(payload)
+            selected = []
+            if required > self.capacity:
+                victims = sorted(
+                    (
+                        (victim_key, entry)
+                        for victim_key, entry in self._entries.items()
+                        if victim_key != old_key and not entry[4]
+                    ),
+                    key=lambda item: self._value(item[1]),
+                )
+                while required > self.capacity and victims:
+                    victim_key, victim = victims.pop(0)
+                    if not protected and self._value(
+                        candidate
+                    ) <= self._value(victim):
+                        break
+                    selected.append(victim_key)
+                    required -= len(victim[0])
+            if len(payload) > self.capacity or required > self.capacity:
+                return False, *self._summary()
+            if old is not None:
+                self._entries.pop(old_key, None)
+                self.bytes -= old_size
+            for victim_key in selected:
+                victim = self._entries.pop(victim_key)
+                self.bytes -= len(victim[0])
+                if self._data_keys.get(victim_key[:2]) == victim_key:
+                    self._data_keys.pop(victim_key[:2], None)
+                self.evictions += 1
+            self._entries[key] = candidate
+            self._data_keys[prefix] = key
+            self.bytes += len(payload)
+            self.admissions += 1
+            return True, *self._summary()
+
+    def _hit(self, key):
         entry = self._entries.get(key)
         if entry is None:
             self.misses += 1
@@ -38,110 +115,38 @@ class SerializedDataCache:
         self.hits += 1
         return entry[0]
 
-    def put_data(
-        self,
-        controller,
-        token,
-        data_key,
-        content_hash,
-        payload,
-        score=None,
-    ):
-        prefix = (str(controller), str(token), str(data_key))
-        key = prefix + (str(content_hash), len(payload))
-        existing = self._data_keys.pop(prefix, None)
-        if existing is not None and existing != key:
-            self._remove(existing)
-        admitted = self.put(
-            key,
-            payload,
-            score,
-        )
-        if admitted:
-            self._data_keys[prefix] = key
-        return admitted
+    def find(self, scope, data_key, content_hash, size):
+        key = (str(scope), str(data_key), str(content_hash), int(size))
+        with self._lock:
+            return self._hit(key)
 
-    def get_local_data(self, controller, token, data_key):
-        prefix = (str(controller), str(token), str(data_key))
-        key = self._data_keys.get(prefix)
-        return self.get(key) if key is not None else self._miss()
+    def local(self, scope, data_key):
+        prefix = (str(scope), str(data_key))
+        with self._lock:
+            return self._hit(self._data_keys.get(prefix))
 
-    def _miss(self):
-        self.misses += 1
-        return None
-
-    def _remove(self, key):
-        entry = self._entries.pop(key, None)
-        if entry is None:
-            return None
-        self.bytes -= len(entry[0])
-        if (
-            isinstance(key, tuple)
-            and len(key) >= 3
-            and self._data_keys.get(key[:3]) == key
-        ):
-            self._data_keys.pop(key[:3], None)
-        return entry
-
-    @staticmethod
-    def _value(entry):
-        _, hits, touched, score = entry
-        return (int(score) * (hits + 1), touched)
-
-    def put(self, key, payload, score=None):
-        if not isinstance(payload, bytes):
-            raise TypeError("worker cache payload must be bytes")
-        if not self.capacity or len(payload) > self.capacity:
-            return False
-        old = self._remove(key)
-        if old is not None and isinstance(key, tuple) and len(key) >= 3:
-            self._data_keys[key[:3]] = key
-        self._clock += 1
-        candidate = [
-            payload,
-            0,
-            self._clock,
-            int(score) if score is not None else 1_000_000 // max(1, len(payload)),
-        ]
-        while self._entries and self.bytes + len(payload) > self.capacity:
-            victim_key, victim = min(
-                self._entries.items(), key=lambda item: self._value(item[1])
-            )
-            if self._value(candidate) <= self._value(victim):
-                if old is not None:
-                    self._entries[key] = old
-                    self.bytes += len(old[0])
+    def remove(self, scope, data_key, content_hash, size):
+        key = (str(scope), str(data_key), str(content_hash), int(size))
+        with self._lock:
+            entry = self._entries.pop(key, None)
+            if entry is None:
                 return False
-            self._remove(victim_key)
-            self.evictions += 1
-        self._entries[key] = candidate
-        self.bytes += len(payload)
-        self.admissions += 1
-        return True
-
-    def _evict_to_capacity(self):
-        while self._entries and self.bytes > self.capacity:
-            key, entry = min(
-                self._entries.items(), key=lambda item: self._value(item[1])
-            )
-            self._remove(key)
-            self.evictions += 1
+            self.bytes -= len(entry[0])
+            if self._data_keys.get(key[:2]) == key:
+                self._data_keys.pop(key[:2], None)
+            return True
 
     def snapshot(self):
-        return {
-            "capacity_bytes": self.capacity,
-            "bytes": self.bytes,
-            "items": len(self._entries),
-            "hits": self.hits,
-            "misses": self.misses,
-            "admissions": self.admissions,
-            "evictions": self.evictions,
-        }
-
-    def clear(self):
-        self.bytes = 0
-        self._entries.clear()
-        self._data_keys.clear()
+        with self._lock:
+            return {
+                "capacity_bytes": self.capacity,
+                "bytes": self.bytes,
+                "items": len(self._entries),
+                "hits": self.hits,
+                "misses": self.misses,
+                "admissions": self.admissions,
+                "evictions": self.evictions,
+            }
 
 
 class WorkerDiskStore:
@@ -259,11 +264,10 @@ class WorkerProcessCache:
     output_publishers: dict = dataclasses.field(default_factory=dict)
     task_records: dict = dataclasses.field(default_factory=dict)
     functions: dict = dataclasses.field(default_factory=dict)
+    cacheable_edata: set = dataclasses.field(default_factory=set)
     replica_reports: dict = dataclasses.field(default_factory=dict)
     data_service: object | None = None
-    data: SerializedDataCache = dataclasses.field(
-        default_factory=SerializedDataCache
-    )
+    dram_capacity: int = 0
     disk: WorkerDiskStore = dataclasses.field(default_factory=WorkerDiskStore)
     lock: threading.RLock = dataclasses.field(
         default_factory=threading.RLock
@@ -287,9 +291,8 @@ class WorkerProcessCache:
             self.clients.clear()
             self.task_records.clear()
             self.functions.clear()
+            self.cacheable_edata.clear()
             self.replica_reports.clear()
-        with self.lock:
-            self.data.clear()
 
 
 PROCESS_CACHE = WorkerProcessCache()

@@ -287,12 +287,13 @@ class NativeControllerClient:
             endpoint,
         ]
         for output in outputs:
+            tier = str(output["tier"])
             payload.append(
                 struct.pack(
                     "!qiIq64s",
                     self._data_id(output["data_id"]),
                     int(output["attempt"]),
-                    2,
+                    {"worker-dram": 1, "worker-disk": 2}[tier],
                     int(output["size"]),
                     str(output["content_hash"]).encode("ascii"),
                 )
@@ -314,7 +315,7 @@ class NativeControllerClient:
                         "!Q", body, 4 + 8 * index
                     )[0],
                     "attempt": int(output["attempt"]),
-                    "tier": "worker-disk",
+                    "tier": str(output["tier"]),
                     "content_hash": str(output["content_hash"]),
                     "size": int(output["size"]),
                     "state": "available",

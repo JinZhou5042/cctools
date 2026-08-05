@@ -353,7 +353,8 @@ static void *publish_records(void *arg)
 			unsigned char *record = payload + 16 + worker_length + endpoint_length + i * PUBLICATION_SIZE;
 			vine_datavine_rpc_put_u64(record, (uint64_t)first + i);
 			vine_datavine_rpc_put_u32(record + 8, 1);
-			vine_datavine_rpc_put_u32(record + 12, VINE_DATAVINE_WORKER_DISK);
+			vine_datavine_rpc_put_u32(record + 12,
+					((first + i) & 1) ? VINE_DATAVINE_WORKER_DRAM : VINE_DATAVINE_WORKER_DISK);
 			vine_datavine_rpc_put_u64(record + 16, 1);
 			memcpy(record + 24, hash, 64);
 		}

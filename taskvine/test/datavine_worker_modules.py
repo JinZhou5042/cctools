@@ -5,6 +5,7 @@ from ndcctools.taskvine.datavine.worker.cache import WorkerProcessCache
 from ndcctools.taskvine.datavine.worker.outputs import (
     normalize_output_values,
 )
+from ndcctools.taskvine.datavine.worker.cache import WorkerMemoryStore
 
 
 def main():
@@ -30,16 +31,20 @@ def main():
     assert not first.clients
     assert not first.task_records
 
-    cache = first.data
-    cache.configure(6)
-    assert cache.put("hot", b"abc")
-    assert cache.get("hot") == b"abc"
-    assert cache.put("cold", b"def")
-    assert not cache.put("large-cold", b"123456")
-    assert cache.get("hot") == b"abc"
-    assert cache.snapshot()["bytes"] <= 6
-    cache.configure(2)
-    assert cache.snapshot()["bytes"] <= 2
+    shared = WorkerMemoryStore()
+    digest = "0" * 64
+    assert shared.put("scope", "i:1", digest, b"abc", 6, 1, True)[0]
+    assert shared.find("scope", "i:1", digest, 3) == b"abc"
+    assert shared.local("scope", "i:1") == b"abc"
+    assert not shared.put(
+        "scope", "i:2", digest, b"defg", 6, 1, True
+    )[0]
+    assert shared.put(
+        "scope", "i:1", "1" * 64, b"xy", 6, 1, True
+    )[0]
+    assert shared.find("scope", "i:1", digest, 3) is None
+    assert shared.remove("scope", "i:1", "1" * 64, 2)
+    assert shared.bytes == 0
 
     print("DataVine worker module contracts PASS")
 

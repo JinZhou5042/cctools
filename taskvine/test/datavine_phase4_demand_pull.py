@@ -103,6 +103,7 @@ def run_case(
     max_serving_bytes=64 * 1024 * 1024,
     max_replicas=10_000_000,
     worker_cores=2,
+    worker_dram_cache_bytes=256 * 1024 * 1024,
     worker_disk_cache_bytes=None,
     worker_disk_cache_items=None,
     worker_disk_cache_admission_items=None,
@@ -277,6 +278,7 @@ def run_case(
                 inject_global_loss_after=inject_global_loss_after,
                 inject_worker_loss_after=inject_worker_loss_after,
                 worker_disk_cache_bytes=worker_disk_cache_bytes,
+                worker_dram_cache_bytes=worker_dram_cache_bytes,
                 worker_disk_cache_items=worker_disk_cache_items,
                 worker_disk_cache_admission_items=(
                     worker_disk_cache_admission_items
@@ -399,28 +401,11 @@ def run_case(
                         payload
                     ).hexdigest(),
                 }
-            if apply_pruning:
-                cache_before = sorted(
-                    str(path.relative_to(root))
-                    for path in root.glob(
-                        "worker-*/**/datavine-worker-*/*"
-                    )
-                    if path.is_file() and not path.name.startswith(".")
-                )
-                pruning_result = scheduler.call(
-                    "apply_pruning", 0, None, None
-                )
-                cache_after = sorted(
-                    str(path.relative_to(root))
-                    for path in root.glob(
-                        "worker-*/**/datavine-worker-*/*"
-                    )
-                    if path.is_file() and not path.name.startswith(".")
-                )
-            else:
-                cache_before = []
-                cache_after = []
-                pruning_result = None
+            pruning_result = (
+                scheduler.call("apply_pruning", 0, None, None)
+                if apply_pruning
+                else None
+            )
             snapshot = client.snapshot()
             snapshot["workflow_elapsed_seconds"] = workflow_elapsed
             snapshot["scheduler_report"] = scheduler.call(
@@ -475,8 +460,6 @@ def run_case(
             else:
                 snapshot["taskvine_worker_process_groups_alive"] = []
             snapshot["pruning_result"] = pruning_result
-            snapshot["worker_cache_before_pruning"] = cache_before
-            snapshot["worker_cache_after_pruning"] = cache_after
             snapshot["bulk_origin_files"] = (
                 sorted(
                     path.name

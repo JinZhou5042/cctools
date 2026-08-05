@@ -30,30 +30,34 @@ def publish_task_outputs(
             timings["output_serialize"] = timings.get(
                 "output_serialize", 0.0
             ) + (time.monotonic() - started)
-        with reporter.process_cache.lock:
-            started = time.monotonic()
-            reporter.process_cache.data.put_data(
+        started = time.monotonic()
+        data_key = f"i:{output_data_id}"
+        admitted = reporter.process_cache.data_service.put_data(
+            reporter.controller,
+            reporter.token,
+            data_key,
+            content_hash,
+            payload,
+            reporter.process_cache.dram_capacity,
+            protected=True,
+        )
+        tier = "worker-dram" if admitted else "worker-disk"
+        if not admitted:
+            reporter.process_cache.disk.put_data(
                 reporter.controller,
                 reporter.token,
-                f"i:{output_data_id}",
+                data_key,
                 content_hash,
                 payload,
             )
-            if timings is not None:
-                timings["output_dram_store"] = timings.get(
-                    "output_dram_store", 0.0
-                ) + (time.monotonic() - started)
-        started = time.monotonic()
-        reporter.process_cache.disk.put_data(
-            reporter.controller,
-            reporter.token,
-            f"i:{output_data_id}",
-            content_hash,
-            payload,
-        )
         if timings is not None:
-            timings["output_disk_store"] = timings.get(
-                "output_disk_store", 0.0
+            name = (
+                "output_shared_dram_store"
+                if admitted
+                else "output_disk_store"
+            )
+            timings[name] = timings.get(
+                name, 0.0
             ) + (time.monotonic() - started)
         capture_output(
             {
@@ -67,6 +71,7 @@ def publish_task_outputs(
                 "replica_id": reporter.replica_id(f"i:{output_data_id}"),
                 "worker_id": worker_id,
                 "worker_epoch": worker_epoch,
+                "tier": tier,
             }
         )
     return total_bytes

@@ -58,8 +58,19 @@ def persist_datavine_idata(
 
 
 def _cache_snapshot(process_cache):
-    with process_cache.lock:
-        snapshot = process_cache.data.snapshot()
+    snapshot = (
+        process_cache.data_service.snapshot()
+        if process_cache.data_service is not None
+        else {
+            "capacity_bytes": process_cache.dram_capacity,
+            "bytes": 0,
+            "items": 0,
+            "hits": 0,
+            "misses": 0,
+            "admissions": 0,
+            "evictions": 0,
+        }
+    )
     return (
         os.environ.get("VINE_WORKER_ID", ""),
         snapshot["capacity_bytes"],
@@ -72,7 +83,7 @@ def _cache_snapshot(process_cache):
     )
 
 
-def execute_datavine_task(
+def _execute_datavine_task(
     controller,
     token,
     native_controller,
@@ -91,8 +102,7 @@ def execute_datavine_task(
     from ..client import ControllerClient
 
     controller_key = (controller, token, native_controller)
-    with PROCESS_CACHE.lock:
-        PROCESS_CACHE.data.configure(worker_dram_cache_bytes)
+    PROCESS_CACHE.dram_capacity = int(worker_dram_cache_bytes)
     with PROCESS_CACHE.context_lock:
         client = PROCESS_CACHE.clients.get(controller_key)
         if client is None:
@@ -178,3 +188,42 @@ def execute_datavine_task(
         error is None,
         error is None and client.native is not None,
     )
+
+
+def execute_datavine_task(
+    controller,
+    token,
+    native_controller,
+    task_id,
+    attempt,
+    worker_dram_cache_bytes,
+    task_record,
+    allow_peer_transfer,
+    transfer_faults,
+):
+    try:
+        return _execute_datavine_task(
+            controller,
+            token,
+            native_controller,
+            task_id,
+            attempt,
+            worker_dram_cache_bytes,
+            task_record,
+            allow_peer_transfer,
+            transfer_faults,
+        )
+    except Exception:
+        return (
+            "datavine-task-v2",
+            int(task_id),
+            [],
+            ("", int(worker_dram_cache_bytes), 0, 0, 0, 0, 0, 0),
+            0,
+            [],
+            traceback.format_exc(),
+            0.0,
+            (),
+            False,
+            False,
+        )

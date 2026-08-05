@@ -38,6 +38,7 @@ from .task_factory import DataVineCall, TaskFactory, ensure_worker_library
 
 class WorkflowDriver:
     _registration_batch_size = 4096
+    _compute_attempt_limit = 3
 
     def __init__(
         self,
@@ -1923,12 +1924,13 @@ class WorkflowDriver:
                 pruning.completions_while_active += 1
             if persistence.running or persistence.pending:
                 persistence.compute_completions_while_active += 1
+            task_output = completed.output if completed.successful() else None
             structured_task = (
-                completed.output
+                task_output
                 if (
-                    isinstance(completed.output, tuple)
-                    and len(completed.output) == 11
-                    and completed.output[0] == "datavine-task-v2"
+                    isinstance(task_output, tuple)
+                    and len(task_output) == 11
+                    and task_output[0] == "datavine-task-v2"
                 )
                 else None
             )
@@ -2032,7 +2034,8 @@ class WorkflowDriver:
                         observation = json.loads(
                             line[len("DATAVINE_REPLICA_OBSERVED "):]
                         )
-                        self._cache_admission.observe(observation)
+                        if observation.get("tier") == "worker-disk":
+                            self._cache_admission.observe(observation)
                         record_replica_projection(observation)
                     elif line.startswith(
                         "DATAVINE_PEER_RELEASE_PENDING "
@@ -2061,9 +2064,10 @@ class WorkflowDriver:
                 )
                 record_worker_dram_cache(cache_snapshot)
                 for output in outputs:
-                    if output.get("worker_id") and str(
-                        output.get("tier", "")
-                    ).startswith("worker-"):
+                    if (
+                        output.get("worker_id")
+                        and output.get("tier") == "worker-disk"
+                    ):
                         self._cache_admission.observe(output)
                 queue_task_persistence(logical_id, expected_output_ids)
                 record_completed_task_state(logical_id)
@@ -2110,6 +2114,18 @@ class WorkflowDriver:
                     execution.pending.add(logical_id)
                     ready_queue.mark_pending(logical_id)
                     continue
+                if len(published_output_ids) == len(expected_output_ids):
+                    queue_task_persistence(
+                        logical_id, expected_output_ids
+                    )
+                    record_completed_task_state(logical_id)
+                    execution.done.add(logical_id)
+                    ready_queue.mark_done(logical_id, execution.pending)
+                    if logical_id not in execution.completed_once:
+                        execution.completed_once.add(logical_id)
+                        for data_key in task_cache_inputs[logical_id]:
+                            remaining_cache_uses[data_key] -= 1
+                    continue
                 lost_inputs = []
                 for data_key in task_cache_inputs[logical_id]:
                     if not data_key.startswith("i:"):
@@ -2125,15 +2141,24 @@ class WorkflowDriver:
                     execution.pending.add(logical_id)
                     ready_queue.mark_pending(logical_id)
                     continue
+                if (
+                    self._run_context.attempts[logical_id]
+                    < self._compute_attempt_limit
+                ):
+                    record_pending_task_state(logical_id)
+                    execution.pending.add(logical_id)
+                    ready_queue.mark_pending(logical_id)
+                    execution.recovery_reexecutions += 1
+                    continue
                 record_pending_task_state(logical_id)
                 raise RuntimeError(
                     f"TaskID {logical_id} failed: result={completed.result} "
                     f"exit={completed.exit_code} "
-                    f"stdout={completed.output!r}"
+                    f"stdout={completed.std_output!r}"
                 )
             raise RuntimeError(
                 f"TaskID {logical_id} returned an invalid DataVine result "
-                f"{completed.output!r}"
+                f"{completed.std_output!r}"
             )
         flush_output_projections()
         flush_completed_task_states()

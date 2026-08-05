@@ -58,13 +58,6 @@ def main():
     total_requests = sum(
         item["requested"] for item in worker_prunes
     )
-    if args.factory_manager is None:
-        assert (
-            len(snapshot["worker_cache_before_pruning"])
-            - len(snapshot["worker_cache_after_pruning"])
-            == total_requests
-        )
-
     audit = snapshot["pruning"]["audits"]
     invalidations = [
         item for item in audit
@@ -85,15 +78,6 @@ def main():
                 "workflow_tasks": len(workflow.tasks),
                 "physical_prune_requests": total_requests,
                 "worker_prunes": worker_prunes,
-                "cache_entries_before": len(
-                    snapshot["worker_cache_before_pruning"]
-                ),
-                "cache_entries_after": len(
-                    snapshot["worker_cache_after_pruning"]
-                ),
-                "cache_filesystem_observed": (
-                    args.factory_manager is None
-                ),
                 "controller_pruned_replicas": (
                     replica_states["pruned"]
                 ),

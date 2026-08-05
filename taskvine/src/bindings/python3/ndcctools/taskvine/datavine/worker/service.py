@@ -8,13 +8,41 @@ from pathlib import Path
 import secrets
 import signal
 import socket
+import socketserver
+import struct
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
 
-from .cache import WorkerDiskStore
+from .cache import WorkerDiskStore, WorkerMemoryStore
+
+
+_PUT = struct.Struct("!16scQ64sQQqB")
+_GET = struct.Struct("!16scQ")
+_PUT_RESPONSE = struct.Struct("!BQQQQQQQ")
+_GET_RESPONSE = struct.Struct("!QQQQQQQQ")
+_MISSING = (1 << 64) - 1
+_SNAPSHOT_FIELDS = (
+    "capacity_bytes", "bytes", "items", "hits", "misses",
+    "admissions", "evictions",
+)
+
+
+def _recv_exact(stream, size):
+    chunks = []
+    while size:
+        chunk = stream.recv(size)
+        if not chunk:
+            raise EOFError("worker data service connection closed")
+        chunks.append(chunk)
+        size -= len(chunk)
+    return b"".join(chunks)
+
+
+def _socket_address(capability):
+    return "\0datavine-" + str(capability)
 
 
 def _alive(pid):
@@ -105,10 +133,108 @@ class WorkerDataService:
         self.base_endpoint = (
             f"http://{socket.getfqdn()}:{port}/{capability}"
         )
+        self._socket_address = _socket_address(capability)
+        self._socket = None
+        self._connection_lock = threading.Lock()
+        self._snapshot = dict.fromkeys(_SNAPSHOT_FIELDS, 0)
         self.disk = cache.disk
 
     def endpoint(self, controller, token):
         return f"{self.base_endpoint}/{self.disk.scope(controller, token)}"
+
+    def _identity(self, controller, token, data_key):
+        kind, data_id = str(data_key).split(":", 1)
+        return (
+            self.disk.scope(controller, token).encode("ascii"),
+            kind.encode("ascii"),
+            int(data_id),
+        )
+
+    def _exchange(
+        self, request, payload=b"", response_size=1, size_prefixed=False
+    ):
+        with self._connection_lock:
+            for attempt in range(2):
+                if self._socket is None:
+                    self._socket = socket.socket(
+                        socket.AF_UNIX, socket.SOCK_STREAM
+                    )
+                    self._socket.settimeout(2)
+                    self._socket.connect(self._socket_address)
+                try:
+                    self._socket.sendall(request + payload)
+                    response = _recv_exact(self._socket, response_size)
+                    if not size_prefixed:
+                        return response
+                    size = struct.unpack_from("!Q", response)[0]
+                    return response, (
+                        None if size == _MISSING else _recv_exact(
+                            self._socket, size
+                        )
+                    )
+                except (EOFError, OSError):
+                    self._socket.close()
+                    self._socket = None
+                    if attempt:
+                        raise
+
+    def put_data(
+        self,
+        controller,
+        token,
+        data_key,
+        content_hash,
+        payload,
+        capacity,
+        score=None,
+        protected=False,
+    ):
+        scope, kind, data_id = self._identity(
+            controller, token, data_key
+        )
+        response = self._exchange(
+            b"P"
+            + _PUT.pack(
+                scope,
+                kind,
+                data_id,
+                str(content_hash).encode("ascii"),
+                len(payload),
+                int(capacity),
+                int(
+                    score
+                    if score is not None
+                    else 1_000_000 // max(1, len(payload))
+                ),
+                int(bool(protected)),
+            ),
+            payload,
+            _PUT_RESPONSE.size,
+        )
+        values = _PUT_RESPONSE.unpack(response)
+        admitted, snapshot = values[0], values[1:]
+        self._snapshot.update(
+            dict(zip(_SNAPSHOT_FIELDS, snapshot))
+        )
+        return bool(admitted)
+
+    def get_local_data(self, controller, token, data_key):
+        scope, kind, data_id = self._identity(
+            controller, token, data_key
+        )
+        response, payload = self._exchange(
+            b"G" + _GET.pack(scope, kind, data_id),
+            b"",
+            _GET_RESPONSE.size,
+            size_prefixed=True,
+        )
+        values = _GET_RESPONSE.unpack(response)
+        _, snapshot = values[0], values[1:]
+        self._snapshot.update(dict(zip(_SNAPSHOT_FIELDS, snapshot)))
+        return payload
+
+    def snapshot(self):
+        return dict(self._snapshot)
 
 
 def _serve(root, owner_pid):
@@ -116,9 +242,67 @@ def _serve(root, owner_pid):
     metadata_path = root / ".data-service"
     disk = WorkerDiskStore()
     disk.root = root
+    memory = WorkerMemoryStore()
     capability = secrets.token_urlsafe(24)
 
+    class LocalHandler(socketserver.BaseRequestHandler):
+        def handle(self):
+            while True:
+                operation = self.request.recv(1)
+                if not operation:
+                    return
+                if operation == b"P":
+                    (
+                        scope,
+                        kind,
+                        data_id,
+                        digest,
+                        size,
+                        capacity,
+                        score,
+                        protected,
+                    ) = (
+                        _PUT.unpack(_recv_exact(self.request, _PUT.size))
+                    )
+                    payload = _recv_exact(self.request, size)
+                    result = memory.put(
+                        scope.decode("ascii"),
+                        f"{kind.decode('ascii')}:{data_id}",
+                        digest.decode("ascii"),
+                        payload,
+                        capacity,
+                        score,
+                        protected,
+                    )
+                    self.request.sendall(_PUT_RESPONSE.pack(*result))
+                elif operation == b"G":
+                    scope, kind, data_id = _GET.unpack(
+                        _recv_exact(self.request, _GET.size)
+                    )
+                    payload = memory.local(
+                        scope.decode("ascii"),
+                        f"{kind.decode('ascii')}:{data_id}",
+                    )
+                    snapshot = memory.snapshot()
+                    self.request.sendall(
+                        _GET_RESPONSE.pack(
+                            _MISSING if payload is None else len(payload),
+                            *(snapshot[field] for field in _SNAPSHOT_FIELDS),
+                        )
+                    )
+                    if payload is not None:
+                        self.request.sendall(payload)
+                else:
+                    return
+
     class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _empty(self, status):
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         def _kill_request(self):
             parsed = urllib.parse.urlparse(self.path)
             prefix = f"/{capability}/"
@@ -148,7 +332,10 @@ def _serve(root, owner_pid):
                 or pieces[1] != "data"
                 or pieces[2] not in ("e", "i")
                 or not pieces[3].isdigit()
-                or len(query.get("sha256", ())) != 1
+            ):
+                return None
+            if (
+                len(query.get("sha256", ())) != 1
                 or len(query.get("size", ())) != 1
             ):
                 return None
@@ -165,7 +352,12 @@ def _serve(root, owner_pid):
 
         def do_GET(self):
             request = self._request_data()
-            payload = disk.find_data(*request) if request else None
+            if request is None:
+                payload = None
+            else:
+                payload = memory.find(*request)
+                if payload is None:
+                    payload = disk.find_data(*request)
             if payload is None:
                 self.send_error(404)
                 return
@@ -183,8 +375,7 @@ def _serve(root, owner_pid):
 
         def do_DELETE(self):
             if self._kill_request():
-                self.send_response(204)
-                self.end_headers()
+                self._empty(204)
                 self.wfile.flush()
 
                 def terminate():
@@ -198,13 +389,20 @@ def _serve(root, owner_pid):
             if request is None:
                 self.send_error(404)
                 return
+            memory.remove(*request)
             disk.remove_data(*request)
-            self.send_response(204)
-            self.end_headers()
+            self._empty(204)
 
         def log_message(self, format, *args):
             return
 
+    local_server = socketserver.ThreadingUnixStreamServer(
+        _socket_address(capability), LocalHandler
+    )
+    local_server.daemon_threads = True
+    threading.Thread(
+        target=local_server.serve_forever, daemon=True
+    ).start()
     server = ThreadingHTTPServer(("0.0.0.0", 0), Handler)
     server.daemon_threads = True
     temporary = metadata_path.with_suffix(f".{os.getpid()}.tmp")
@@ -217,12 +415,14 @@ def _serve(root, owner_pid):
         while _alive(owner_pid):
             time.sleep(0.25)
         server.shutdown()
+        local_server.shutdown()
 
     threading.Thread(target=watch_owner, daemon=True).start()
     try:
         server.serve_forever()
     finally:
         server.server_close()
+        local_server.server_close()
         try:
             if int(metadata_path.read_text().split()[0]) == os.getpid():
                 metadata_path.unlink()

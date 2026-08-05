@@ -428,7 +428,7 @@ static uint32_t publish_outputs(struct vine_datavine_rpc_server *server,
 		char replica_id[VINE_DATAVINE_REPLICA_ID_MAX + 1];
 		int length = snprintf(replica_id, sizeof(replica_id), "taskvine-%s-i-%lld", worker_id, (long long)data_id);
 		struct vine_datavine_replica_record replica;
-		if (length < 1 || length > VINE_DATAVINE_REPLICA_ID_MAX || tier != VINE_DATAVINE_WORKER_DISK || !vine_datavine_index_put(server->index, data_id, attempt, hash, bytes) || !vine_datavine_directory_publish_replica(server->directory, 'i', data_id, replica_id, attempt, tier, hash, bytes, worker_id, worker_epoch, endpoint, &replica)) {
+		if (length < 1 || length > VINE_DATAVINE_REPLICA_ID_MAX || (tier != VINE_DATAVINE_WORKER_DRAM && tier != VINE_DATAVINE_WORKER_DISK) || !vine_datavine_index_put(server->index, data_id, attempt, hash, bytes) || !vine_datavine_directory_publish_replica(server->directory, 'i', data_id, replica_id, attempt, tier, hash, bytes, worker_id, worker_epoch, endpoint, &replica)) {
 			vine_datavine_rpc_put_u32(*result, i);
 			*result_size = 4;
 			return VINE_DATAVINE_RPC_REJECTED;

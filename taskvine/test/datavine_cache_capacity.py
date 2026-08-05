@@ -10,30 +10,29 @@ import time
 from datavine_phase4_demand_pull import run_case
 from ndcctools.taskvine.datavine import Workflow
 from ndcctools.taskvine.datavine.cache import WorkerCacheAdmission
-from ndcctools.taskvine.datavine.worker.cache import (
-    SerializedDataCache,
-    WorkerDiskStore,
-)
+from ndcctools.taskvine.datavine.worker.cache import WorkerDiskStore
+from ndcctools.taskvine.datavine.worker.cache import WorkerMemoryStore
 
 
 HOT = b"datavine-hot-cache-value\n" * 4096
 
 
 def worker_index_contract():
-    cache = SerializedDataCache()
-    cache.configure(1024 * 1024)
+    cache = WorkerMemoryStore()
     started = time.monotonic()
     for index in range(10000):
         data_key = f"e:{index}"
         payload = index.to_bytes(8, "big")
-        assert cache.put_data("controller", "token", data_key, index, payload)
-        assert cache.get_local_data(
-            "controller", "token", data_key
-        ) == payload
+        assert cache.put(
+            "scope", data_key, str(index), payload, 1024 * 1024, 1, False
+        )[0]
+        assert cache.local("scope", data_key) == payload
     dram_seconds = time.monotonic() - started
     assert dram_seconds < 2, dram_seconds
-    assert cache.put_data("controller", "token", "e:1", "new", b"new")
-    assert cache.get_local_data("controller", "token", "e:1") == b"new"
+    assert cache.put(
+        "scope", "e:1", "new", b"new", 1024 * 1024, 1, False
+    )[0]
+    assert cache.local("scope", "e:1") == b"new"
 
     with tempfile.TemporaryDirectory(
         prefix="datavine-worker-index-"
@@ -130,8 +129,6 @@ def build_workflow(count=12):
     return workflow, final.task_id, expected
 
 
-
-
 def worker_loss_recovery_case(factory_manager=None):
     workflow, target, oracle = build_workflow(6)
     combined = run_case(
@@ -142,6 +139,7 @@ def worker_loss_recovery_case(factory_manager=None):
         factory_manager=factory_manager,
         worker_count=1,
         worker_cores=2,
+        worker_dram_cache_bytes=1,
         inject_worker_loss_after=1,
         worker_loss_process_shutdown=True,
         replacement_worker_delay=None if factory_manager else 1,
@@ -196,6 +194,7 @@ def main():
         factory_manager=args.factory_manager,
         worker_count=2,
         worker_cores=1,
+        worker_dram_cache_bytes=1,
         worker_disk_cache_bytes=239308,
         worker_disk_cache_items=6,
         worker_disk_cache_admission_items=6,
@@ -255,10 +254,13 @@ def main():
         factory_manager=args.factory_manager,
         worker_count=1,
         worker_cores=1,
+        worker_dram_cache_bytes=1,
         worker_disk_cache_items=0,
     )
     zero_report = zero["scheduler_report"]
     assert zero_report["worker_disk_cache_evictions"] > 0
+    assert zero_report["worker_timing_seconds"]["output_disk_store"] > 0
+    assert zero_report["worker_dram_cache"]["bytes"] <= 1
     assert not any(
         record["data_id"].startswith("i:")
         and record["remaining_uses"] > 0

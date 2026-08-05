@@ -157,6 +157,7 @@ def main():
                 "attempt": 1,
                 "content_hash": digest,
                 "size": len(payload),
+                "tier": "worker-dram",
             },),
         )
         assert published[0]["generation"] == 1
