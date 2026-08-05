@@ -62,6 +62,14 @@ def _resolve_edata(owner, request):
             **common,
             "source_type": "controller-memory",
         }, record.serialized_bytes
+    if record.native:
+        native = owner._native_client.get_edata(
+            data_id, allow_shared=True
+        )
+        return {
+            **common,
+            "source_type": "controller-memory",
+        }, native["payload"]
     return {
         **common,
         "source_type": "sharedfs",
@@ -300,9 +308,13 @@ class PostRouteFactory:
                 if self.path == f"{API_PREFIX}/workers/disconnect":
                     try:
                         request = self._read_json()
+                        owner.disconnect_native_worker(
+                            request["worker_id"], request["epoch"]
+                        )
                         worker = owner.state.disconnect_worker(
                             request["worker_id"], request["epoch"]
                         )
+                        owner.sync_all_native_leases()
                     except Exception as exc:
                         self._error(400, exc)
                         return
@@ -448,6 +460,10 @@ class PostRouteFactory:
                 if self.path == f"{API_PREFIX}/replicas/invalidate":
                     try:
                         request = self._read_json()
+                        kind, data_id = str(request["data_id"]).split(
+                            ":", 1
+                        )
+                        owner.sync_native_leases((data_id,), kind)
                         replica = owner.state.invalidate_worker_replica(
                             request["data_id"],
                             request["replica_id"],
@@ -886,6 +902,7 @@ class PostRouteFactory:
                         len(f"{API_PREFIX}/idata/"):-len("/invalidate")
                     ]
                     try:
+                        owner.invalidate_native_data(f"i:{int(token)}")
                         action = owner.state.invalidate_volatile_idata(
                             int(token)
                         )
@@ -971,6 +988,8 @@ class PostRouteFactory:
                             request["origin_path"],
                             request["content_hash"],
                             request["size"],
+                            request["data_id"],
+                            request["serialized_sha256"],
                         )
                     except Exception as exc:
                         self._error(400, exc)
@@ -992,19 +1011,24 @@ class PostRouteFactory:
                         },
                     )
                     return
-                if self.path == f"{API_PREFIX}/edata/register-batch":
+                if self.path == f"{API_PREFIX}/edata/project-batch":
                     try:
                         request = self._read_json()
-                        records = owner.state.register_edata_batch(
+                        metadata = tuple(
+                            decode_serialization_metadata(
+                                value, f"metadata[{index}]"
+                            )
+                            for index, value in enumerate(
+                                request["metadata"]
+                            )
+                        )
+                        records = owner.state.register_native_edata_batch(
                             (
-                                decode_serialization_metadata(
-                                    value["metadata"],
-                                    f"values[{index}].metadata",
-                                ),
-                                base64.b64decode(
-                                    value["serialized_bytes"],
-                                    validate=True,
-                                ),
+                                value["data_id"],
+                                metadata[int(value["metadata"])],
+                                value["content_hash"],
+                                value["serialized_sha256"],
+                                value["size"],
                             )
                             for index, value in enumerate(request["values"])
                         )
@@ -1016,51 +1040,9 @@ class PostRouteFactory:
                         return
                     self._json(
                         200,
-                        [
-                            {
-                                "data_id": record.data_id,
-                                "content_hash": record.content_hash,
-                                "serialized_sha256": (
-                                    record.serialized_sha256
-                                ),
-                                "size": record.serialized_size,
-                                "storage": "controller-memory",
-                            }
-                            for record in records
-                        ],
+                        {"registered": len(records)},
                     )
                     return
-                if self.path != f"{API_PREFIX}/edata/register":
-                    self._error(404, "not found")
-                    return
-                try:
-                    request = self._read_json()
-                    metadata = decode_serialization_metadata(
-                        request["metadata"], "metadata"
-                    )
-                    payload = base64.b64decode(
-                        request["serialized_bytes"], validate=True
-                    )
-                    record = owner.state.register_edata(metadata, payload)
-                except MemoryError as exc:
-                    self._error(507, exc)
-                    return
-                except Exception as exc:
-                    self._error(400, exc)
-                    return
-                self._json(
-                    200,
-                    {
-                        "data_id": record.data_id,
-                        "content_hash": record.content_hash,
-                        "serialized_sha256": record.serialized_sha256,
-                        "size": record.serialized_size,
-                        "storage": (
-                            "controller-memory"
-                            if record.serialized_bytes is not None
-                            else "bulk-origin"
-                        ),
-                    },
-                )
+                self._error(404, "not found")
 
         return Routes.do_POST

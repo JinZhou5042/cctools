@@ -1039,6 +1039,10 @@ class ReplicaDirectory:
                 )
             )
 
+    def data_ids(self):
+        with self._lock:
+            return tuple(self._replica_keys_by_data)
+
     def forget_data(self, data_id, expected_revision):
         """Forget terminal physical history after logical pruning."""
         data_id = self._normalize_data_id(data_id)

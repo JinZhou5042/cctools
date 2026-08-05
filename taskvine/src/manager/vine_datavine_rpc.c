@@ -24,7 +24,7 @@ See the file COPYING for details.
 #include <unistd.h>
 
 #define DATAVINE_RPC_EVENTS 128
-#define DATAVINE_RPC_MAX_PAYLOAD (16U * 1024U * 1024U)
+#define DATAVINE_RPC_MAX_PAYLOAD (64U * 1024U * 1024U)
 #define DATAVINE_RPC_ALLOCATE_SIZE 24U
 #define DATAVINE_RPC_PUBLICATION_SIZE 88U
 
@@ -233,43 +233,67 @@ static uint32_t publish_batch(struct vine_datavine_rpc_server *server,
 }
 
 static uint32_t register_edata(struct vine_datavine_rpc_server *server,
-		const unsigned char *payload, size_t size, unsigned char result[4])
+		const unsigned char *payload, size_t size,
+		unsigned char **result, size_t *result_size)
 {
 	if (size < 4) {
 		return VINE_DATAVINE_RPC_INVALID;
 	}
 	uint32_t count = vine_datavine_rpc_get_u32(payload);
+	if (count > (DATAVINE_RPC_MAX_PAYLOAD - 4) / 8) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	*result_size = 4 + (size_t)count * 8;
+	*result = malloc(*result_size);
+	if (!*result) {
+		*result_size = 0;
+		return VINE_DATAVINE_RPC_INTERNAL;
+	}
+	vine_datavine_rpc_put_u32(*result, count);
 	size_t offset = 4;
 	for (uint32_t i = 0; i < count; i++) {
-		if (size - offset < 148) {
+		if (size - offset < 144) {
+			free(*result);
+			*result = 0;
+			*result_size = 0;
 			return VINE_DATAVINE_RPC_INVALID;
 		}
-		int64_t data_id = (int64_t)vine_datavine_rpc_get_u64(payload + offset);
-		uint32_t metadata_size = vine_datavine_rpc_get_u32(payload + offset + 8);
-		uint64_t data_size = vine_datavine_rpc_get_u64(payload + offset + 12);
-		if (data_size > SIZE_MAX || metadata_size > size - offset - 148 || data_size > size - offset - 148 - metadata_size) {
+		uint32_t flags = vine_datavine_rpc_get_u32(payload + offset);
+		uint32_t metadata_size = vine_datavine_rpc_get_u32(payload + offset + 4);
+		uint64_t data_size = vine_datavine_rpc_get_u64(payload + offset + 8);
+		size_t inline_size = flags == 1 ? (size_t)data_size : 0;
+		if (flags > 1 || data_size > SIZE_MAX || metadata_size > size - offset - 144 || inline_size > size - offset - 144 - metadata_size) {
+			free(*result);
+			*result = 0;
+			*result_size = 0;
 			return VINE_DATAVINE_RPC_INVALID;
 		}
-		const unsigned char *content_hash = payload + offset + 20;
-		const unsigned char *serialized_hash = payload + offset + 84;
+		const unsigned char *content_hash = payload + offset + 16;
+		const unsigned char *serialized_hash = payload + offset + 80;
 		char content[65];
 		char serialized[65];
 		memcpy(content, content_hash, 64);
 		memcpy(serialized, serialized_hash, 64);
 		content[64] = 0;
 		serialized[64] = 0;
-		const unsigned char *metadata = payload + offset + 148;
+		const unsigned char *metadata = payload + offset + 144;
 		const unsigned char *data = metadata + metadata_size;
-		if (!vine_datavine_index_put_edata(server->index, data_id, content, serialized, metadata, metadata_size, data, (size_t)data_size)) {
-			vine_datavine_rpc_put_u32(result, i);
+		int64_t data_id = 0;
+		if (!vine_datavine_index_register_edata(server->index, content, serialized, metadata, metadata_size, flags ? data : 0, inline_size, data_size, flags, &data_id)) {
+			free(*result);
+			*result = 0;
+			*result_size = 0;
 			return VINE_DATAVINE_RPC_REJECTED;
 		}
-		offset += 148 + metadata_size + (size_t)data_size;
+		vine_datavine_rpc_put_u64(*result + 4 + (size_t)i * 8, (uint64_t)data_id);
+		offset += 144 + metadata_size + inline_size;
 	}
 	if (offset != size) {
+		free(*result);
+		*result = 0;
+		*result_size = 0;
 		return VINE_DATAVINE_RPC_INVALID;
 	}
-	vine_datavine_rpc_put_u32(result, count);
 	return VINE_DATAVINE_RPC_OK;
 }
 
@@ -277,46 +301,70 @@ static uint32_t get_edata(struct vine_datavine_rpc_server *server,
 		const unsigned char *request, size_t size,
 		unsigned char **result, size_t *result_size)
 {
-	if (size != 8) {
+	if (size != 8 && size != 12) {
 		return VINE_DATAVINE_RPC_INVALID;
 	}
+	uint32_t options = size == 12 ? vine_datavine_rpc_get_u32(request + 8) : 0;
+	if (options > 3) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	int allow_shared = options & 1;
+	int include_payload = !(options & 2);
 	char content_hash[65];
 	char serialized_hash[65];
-	unsigned char *metadata = 0;
 	unsigned char *payload = 0;
-	size_t metadata_size = 0;
 	size_t payload_size = 0;
+	uint64_t serialized_size = 0;
+	int cache_globally = 0;
 	int64_t data_id = (int64_t)vine_datavine_rpc_get_u64(request);
 	int found = vine_datavine_index_get_edata(
-			server->index, data_id, content_hash, serialized_hash, &metadata, &metadata_size, &payload, &payload_size);
+			server->index, data_id, content_hash, serialized_hash, &payload,
+			&payload_size, &serialized_size, &cache_globally,
+			allow_shared, include_payload);
 	if (!found) {
 		return VINE_DATAVINE_RPC_NOT_FOUND;
 	}
-	if (metadata_size > UINT32_MAX || payload_size > DATAVINE_RPC_MAX_PAYLOAD - 140 - metadata_size) {
-		free(metadata);
+	if (payload_size > DATAVINE_RPC_MAX_PAYLOAD - 148) {
 		free(payload);
 		return VINE_DATAVINE_RPC_INTERNAL;
 	}
-	*result_size = 140 + metadata_size + payload_size;
+	*result_size = 148 + payload_size;
 	*result = malloc(*result_size);
 	if (!*result) {
-		free(metadata);
 		free(payload);
 		*result_size = 0;
 		return VINE_DATAVINE_RPC_INTERNAL;
 	}
-	vine_datavine_rpc_put_u32(*result, (uint32_t)metadata_size);
-	vine_datavine_rpc_put_u64(*result + 4, payload_size);
-	memcpy(*result + 12, content_hash, 64);
-	memcpy(*result + 76, serialized_hash, 64);
-	if (metadata_size) {
-		memcpy(*result + 140, metadata, metadata_size);
-	}
+	vine_datavine_rpc_put_u64(*result, serialized_size);
+	vine_datavine_rpc_put_u64(*result + 8, payload_size);
+	vine_datavine_rpc_put_u32(*result + 16, cache_globally);
+	memcpy(*result + 20, content_hash, 64);
+	memcpy(*result + 84, serialized_hash, 64);
 	if (payload_size) {
-		memcpy(*result + 140 + metadata_size, payload, payload_size);
+		memcpy(*result + 148, payload, payload_size);
 	}
-	free(metadata);
 	free(payload);
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t mark_edata_shared(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size, unsigned char result[4])
+{
+	if (size < 4) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	uint32_t count = vine_datavine_rpc_get_u32(payload);
+	if (count > (DATAVINE_RPC_MAX_PAYLOAD - 4) / 8 || size != 4 + (size_t)count * 8) {
+		return VINE_DATAVINE_RPC_INVALID;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		int64_t data_id = (int64_t)vine_datavine_rpc_get_u64(payload + 4 + (size_t)i * 8);
+		if (!vine_datavine_index_mark_edata_shared(server->index, data_id)) {
+			vine_datavine_rpc_put_u32(result, i);
+			return VINE_DATAVINE_RPC_REJECTED;
+		}
+	}
+	vine_datavine_rpc_put_u32(result, count);
 	return VINE_DATAVINE_RPC_OK;
 }
 
@@ -443,6 +491,18 @@ static uint32_t report_replica(struct vine_datavine_rpc_server *server,
 	replica_id[replica_length] = 0;
 	memcpy(endpoint, payload + 104 + worker_length + replica_length, endpoint_length);
 	endpoint[endpoint_length] = 0;
+	if (kind == 'e') {
+		if (!vine_datavine_index_validate_edata(server->index, data_id, hash, bytes)) {
+			return VINE_DATAVINE_RPC_REJECTED;
+		}
+	} else {
+		struct vine_datavine_data logical;
+		if (!vine_datavine_index_get(server->index, data_id, &logical)
+				|| logical.attempt != attempt || logical.size != bytes
+				|| strcmp(logical.content_hash, hash)) {
+			return VINE_DATAVINE_RPC_REJECTED;
+		}
+	}
 	struct vine_datavine_replica_record replica;
 	if (!vine_datavine_directory_publish_replica(server->directory, kind, data_id, replica_id, attempt, tier, hash, bytes, worker_id, worker_epoch, endpoint, &replica)) {
 		return VINE_DATAVINE_RPC_REJECTED;
@@ -602,8 +662,7 @@ static uint32_t dispatch_request(struct vine_datavine_rpc_server *server,
 	} else if (opcode == VINE_DATAVINE_RPC_RELEASE_SOURCE) {
 		status = release_source(server, payload, payload_size);
 	} else if (opcode == VINE_DATAVINE_RPC_REGISTER_EDATA) {
-		status = register_edata(server, payload, payload_size, result);
-		*result_size = 4;
+		status = register_edata(server, payload, payload_size, dynamic_result, result_size);
 	} else if (opcode == VINE_DATAVINE_RPC_GET_EDATA) {
 		status = get_edata(server, payload, payload_size, dynamic_result, result_size);
 	} else if (opcode == VINE_DATAVINE_RPC_INVALIDATE_REPLICA) {
@@ -612,6 +671,9 @@ static uint32_t dispatch_request(struct vine_datavine_rpc_server *server,
 		status = change_replica(server, payload, payload_size, 1);
 	} else if (opcode == VINE_DATAVINE_RPC_CONFIRM_REPLICA_PRUNED) {
 		status = change_replica(server, payload, payload_size, 2);
+	} else if (opcode == VINE_DATAVINE_RPC_MARK_EDATA_SHARED) {
+		status = mark_edata_shared(server, payload, payload_size, result);
+		*result_size = 4;
 	} else {
 		status = VINE_DATAVINE_RPC_INVALID;
 	}
@@ -620,7 +682,7 @@ static uint32_t dispatch_request(struct vine_datavine_rpc_server *server,
 
 static int persistent_opcode(uint16_t opcode)
 {
-	return opcode == VINE_DATAVINE_RPC_ALLOCATE_BATCH || opcode == VINE_DATAVINE_RPC_PUBLISH_BATCH || opcode == VINE_DATAVINE_RPC_CLAIM_WORKER || opcode == VINE_DATAVINE_RPC_PUBLISH_OUTPUTS || opcode == VINE_DATAVINE_RPC_DISCONNECT_WORKER || opcode == VINE_DATAVINE_RPC_REPORT_REPLICA || opcode == VINE_DATAVINE_RPC_REGISTER_EDATA || opcode == VINE_DATAVINE_RPC_INVALIDATE_REPLICA || opcode == VINE_DATAVINE_RPC_RESTORE_REPLICA || opcode == VINE_DATAVINE_RPC_CONFIRM_REPLICA_PRUNED;
+	return opcode == VINE_DATAVINE_RPC_ALLOCATE_BATCH || opcode == VINE_DATAVINE_RPC_PUBLISH_BATCH || opcode == VINE_DATAVINE_RPC_CLAIM_WORKER || opcode == VINE_DATAVINE_RPC_PUBLISH_OUTPUTS || opcode == VINE_DATAVINE_RPC_DISCONNECT_WORKER || opcode == VINE_DATAVINE_RPC_REPORT_REPLICA || opcode == VINE_DATAVINE_RPC_REGISTER_EDATA || opcode == VINE_DATAVINE_RPC_INVALIDATE_REPLICA || opcode == VINE_DATAVINE_RPC_RESTORE_REPLICA || opcode == VINE_DATAVINE_RPC_CONFIRM_REPLICA_PRUNED || opcode == VINE_DATAVINE_RPC_MARK_EDATA_SHARED;
 }
 
 static int durable_opcode(uint16_t opcode)
@@ -838,7 +900,8 @@ static int listen_socket(const char *host, int port, int *bound_port)
 
 struct vine_datavine_rpc_server *vine_datavine_rpc_server_create(
 		const char *host, int port, const char *token, int threads,
-		int64_t maximum_data_id, const char *journal_path)
+		int64_t maximum_data_id, uint64_t maximum_edata_bytes,
+		const char *journal_path)
 {
 	if (!token || !token[0] || threads < 1 || maximum_data_id < 1 || (uint64_t)maximum_data_id > UINT64_MAX / 4) {
 		return 0;
@@ -857,7 +920,7 @@ struct vine_datavine_rpc_server *vine_datavine_rpc_server_create(
 	server->token_length = strlen(token);
 	server->thread_count = 0;
 	server->threads = calloc((size_t)threads, sizeof(*server->threads));
-	server->index = vine_datavine_index_create(maximum_data_id, 256);
+	server->index = vine_datavine_index_create(maximum_data_id, maximum_edata_bytes, 256);
 	server->directory = vine_datavine_directory_create(
 			1000000, (uint64_t)maximum_data_id * 4, 1000000, 65536, 256);
 	server->journal = journal_path && journal_path[0]

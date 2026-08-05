@@ -102,7 +102,13 @@ def main():
             assert ready["pid"] != os.getpid()
             assert ready["controller_thread"]
             endpoint = f"http://127.0.0.1:{ready['port']}"
-            client = ControllerClient(endpoint, token)
+            client = ControllerClient(
+                endpoint,
+                token,
+                native_endpoint=(
+                    f"tcp://127.0.0.1:{ready['native_port']}"
+                ),
+            )
             health = client.health()
             assert health["status"] == "ready"
             assert health["controller_thread"] == ready["controller_thread"]

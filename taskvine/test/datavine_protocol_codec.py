@@ -131,7 +131,13 @@ def main():
         else:
             raise AssertionError("Controller accepted invalid task schema")
 
-        compact_client = ControllerClient(endpoint, "codec-token")
+        compact_client = ControllerClient(
+            endpoint,
+            "codec-token",
+            native_endpoint=(
+                f"tcp://127.0.0.1:{service.native_address[1]}"
+            ),
+        )
         function_metadata, function_payload = serialize(abs)
         function_data_id = compact_client.register_edata(
             function_metadata, function_payload

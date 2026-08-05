@@ -580,7 +580,7 @@ int vine_datavine_directory_resolve_source(struct vine_datavine_directory *direc
 	struct replica *best = 0;
 	if (entry) {
 		for (struct replica *item = entry->replicas; item; item = item->next) {
-			if (!item->available || item->record.attempt != entry->latest_attempt || !atomic_load(&item->worker->active) || atomic_load(&item->worker->epoch) != item->record.worker_epoch || (excluded_worker_id && !strcmp(item->record.worker_id, excluded_worker_id))) {
+			if (!item->available || item->record.attempt != entry->latest_attempt || !atomic_load(&item->worker->active) || atomic_load(&item->worker->epoch) != item->record.worker_epoch || !strcmp(item->record.worker_id, destination_worker_id) || (excluded_worker_id && !strcmp(item->record.worker_id, excluded_worker_id))) {
 				continue;
 			}
 			uint64_t item_leases = atomic_load(&item->active_leases);

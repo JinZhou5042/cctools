@@ -84,12 +84,15 @@ def lease_hook(data_id, invalidate_proof, observations):
             time.sleep(0.02)
         if source is None:
             raise TimeoutError("worker source did not become available")
+        client.native.claim_worker(
+            "lease-probe", "http://127.0.0.1:1/lease-probe"
+        )
         lease = client.acquire_replica(
             f"i:{data_id}",
             source["replica_id"],
             source["generation"],
-            source["worker_id"],
-            source["worker_epoch"],
+            "lease-probe",
+            1,
         )
         observations["lease_id"] = lease["lease_id"]
 

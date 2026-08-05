@@ -198,7 +198,7 @@ class ControllerState(
                 "edata_bytes": self._edata_bytes,
                 "edata_capacity_bytes": self.max_edata_bytes,
                 "edata_inline_records": sum(
-                    record.serialized_bytes is not None
+                    record.serialized_bytes is not None or record.native
                     for record in self._edata.values()
                 ),
                 "edata_bulk_records": sum(

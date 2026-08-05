@@ -64,7 +64,11 @@ def main():
         )
         host, port = service.start()
         client = ControllerClient(
-            f"http://{host}:{port}", "pruning-token"
+            f"http://{host}:{port}",
+            "pruning-token",
+            native_endpoint=(
+                f"tcp://127.0.0.1:{service.native_address[1]}"
+            ),
         )
         try:
             metadata, function_payload = serialize(sum)
@@ -122,6 +126,15 @@ def main():
                 payloads[data_id] = payload
                 client.publish_idata(data_id, 1, payload)
                 client.set_task_state(task_id, "completed")
+            client.native.publish_idata_metadata(
+                (
+                    data_id,
+                    1,
+                    hashlib.sha256(payload).hexdigest(),
+                    len(payload),
+                )
+                for data_id, payload in payloads.items()
+            )
 
             client.set_required_output(outputs[1], True)
             client.persist_idata(outputs[0])
@@ -167,6 +180,7 @@ def main():
                 "source",
                 1,
             )
+            client.project_data_events((), replicas=(worker_replica,))
             lease = client.acquire_replica(
                 f"i:{outputs[0]}",
                 worker_replica["replica_id"],
@@ -217,14 +231,9 @@ def main():
             assert duplicate["deferred"] == result["deferred"]
             assert not duplicate["applied"]
             client.release_replica(lease["lease_id"], True)
-            continued = state.continue_deferred_pruning(
-                "pruning:test-release",
-                [outputs[0]]
-            )
-            recovered_response = client.continue_deferred_pruning(
+            continued = client.continue_deferred_pruning(
                 "pruning:test-release", [outputs[0]]
             )
-            assert recovered_response == continued
             assert (
                 client.continue_deferred_pruning(
                     "pruning:test-release", [outputs[0]]
@@ -277,7 +286,7 @@ def main():
             )
             assert bounded_snapshot[
                 "pruning_continuation_idempotent"
-            ] == 3
+            ] == 2
             assert bounded_snapshot[
                 "pruning_continuation_evictions"
             ] == 1

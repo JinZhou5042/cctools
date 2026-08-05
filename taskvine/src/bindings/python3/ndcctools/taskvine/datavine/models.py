@@ -44,13 +44,14 @@ class EDataRecord:
     serialized_bytes: bytes | None
     stable_path: str | None = None
     serialized_size: int | None = None
+    native: bool = False
 
     def __post_init__(self):
         inline = self.serialized_bytes is not None
         stable = self.stable_path is not None
-        if inline == stable:
+        if inline + stable + bool(self.native) != 1:
             raise ValueError(
-                "EData must have exactly one inline or stable origin"
+                "EData must have exactly one inline, native, or stable origin"
             )
         size = (
             len(self.serialized_bytes)

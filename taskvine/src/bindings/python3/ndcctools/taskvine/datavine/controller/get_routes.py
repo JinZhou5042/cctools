@@ -68,6 +68,8 @@ class GetRouteFactory:
                                 "storage": (
                                     "controller-memory"
                                     if record.serialized_bytes is not None
+                                    else "native-memory"
+                                    if record.native
                                     else "bulk-origin"
                                 ),
                                 "origin_path": record.stable_path,
@@ -75,6 +77,10 @@ class GetRouteFactory:
                         )
                         return
                     payload = record.serialized_bytes
+                    if record.native:
+                        payload = owner._native_client.get_edata(
+                            record.data_id, allow_shared=True
+                        )["payload"]
                     if payload is None:
                         self._error(
                             409,

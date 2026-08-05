@@ -21,7 +21,7 @@ See the file COPYING for details.
 #define JOURNAL_MAGIC UINT32_C(0x44564a31)
 #define JOURNAL_VERSION 1
 #define JOURNAL_HEADER_SIZE 24
-#define JOURNAL_MAX_PAYLOAD (16U * 1024U * 1024U)
+#define JOURNAL_MAX_PAYLOAD (64U * 1024U * 1024U)
 #define JOURNAL_GROUP_COMMIT_NS 1000000L
 
 struct vine_datavine_journal {

@@ -218,15 +218,15 @@ static int edata_protocol(int port)
 	const char *serialized = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
 	const unsigned char metadata[] = "{}";
 	const unsigned char data[] = "hello";
-	unsigned char record[4 + 148 + 2 + 5];
+	unsigned char record[4 + 144 + 2 + 5];
 	vine_datavine_rpc_put_u32(record, 1);
-	vine_datavine_rpc_put_u64(record + 4, 1);
-	vine_datavine_rpc_put_u32(record + 12, 2);
-	vine_datavine_rpc_put_u64(record + 16, 5);
-	memcpy(record + 24, content, 64);
-	memcpy(record + 88, serialized, 64);
-	memcpy(record + 152, metadata, 2);
-	memcpy(record + 154, data, 5);
+	vine_datavine_rpc_put_u32(record + 4, 1);
+	vine_datavine_rpc_put_u32(record + 8, 2);
+	vine_datavine_rpc_put_u64(record + 12, 5);
+	memcpy(record + 20, content, 64);
+	memcpy(record + 84, serialized, 64);
+	memcpy(record + 148, metadata, 2);
+	memcpy(record + 150, data, 5);
 	if (!request(&client, VINE_DATAVINE_RPC_REGISTER_EDATA, record, sizeof(record))) {
 		close(client.fd);
 		return 0;
@@ -235,7 +235,7 @@ static int edata_protocol(int port)
 	vine_datavine_rpc_put_u64(request_data, 1);
 	unsigned char *body = 0;
 	uint32_t body_size = 0;
-	int valid = request_response(&client, VINE_DATAVINE_RPC_GET_EDATA, request_data, sizeof(request_data), &body, &body_size) && body_size == 147 && vine_datavine_rpc_get_u32(body) == 2 && vine_datavine_rpc_get_u64(body + 4) == 5 && !memcmp(body + 12, content, 64) && !memcmp(body + 76, serialized, 64) && !memcmp(body + 140, metadata, 2) && !memcmp(body + 142, data, 5);
+	int valid = request_response(&client, VINE_DATAVINE_RPC_GET_EDATA, request_data, sizeof(request_data), &body, &body_size) && body_size == 151 && vine_datavine_rpc_get_u32(body) == 2 && vine_datavine_rpc_get_u64(body + 4) == 5 && !memcmp(body + 16, content, 64) && !memcmp(body + 80, serialized, 64) && !memcmp(body + 144, metadata, 2) && !memcmp(body + 146, data, 5);
 	free(body);
 	close(client.fd);
 	return valid;
@@ -251,7 +251,7 @@ static int edata_available(int port)
 	vine_datavine_rpc_put_u64(request_data, 1);
 	unsigned char *body = 0;
 	uint32_t body_size = 0;
-	int valid = request_response(&client, VINE_DATAVINE_RPC_GET_EDATA, request_data, sizeof(request_data), &body, &body_size) && body_size == 147 && !memcmp(body + 142, "hello", 5);
+	int valid = request_response(&client, VINE_DATAVINE_RPC_GET_EDATA, request_data, sizeof(request_data), &body, &body_size) && body_size == 151 && !memcmp(body + 146, "hello", 5);
 	free(body);
 	close(client.fd);
 	return valid;
@@ -266,7 +266,7 @@ static int journal_recovery_protocol(int threads)
 	}
 	close(fd);
 	struct vine_datavine_rpc_server *server = vine_datavine_rpc_server_create(
-			"127.0.0.1", 0, "test-token", threads, 128, path);
+			"127.0.0.1", 0, "test-token", threads, 128, 1024 * 1024, path);
 	int valid = server && edata_protocol(vine_datavine_rpc_server_port(server)) && claim_worker(vine_datavine_rpc_server_port(server), "recovered");
 	vine_datavine_rpc_server_delete(server);
 	fd = open(path, O_WRONLY | O_APPEND);
@@ -277,7 +277,7 @@ static int journal_recovery_protocol(int threads)
 	server = 0;
 	if (valid) {
 		server = vine_datavine_rpc_server_create(
-				"127.0.0.1", 0, "test-token", threads, 128, path);
+				"127.0.0.1", 0, "test-token", threads, 128, 1024 * 1024, path);
 	}
 	valid &= server && edata_available(vine_datavine_rpc_server_port(server)) && claim_worker(vine_datavine_rpc_server_port(server), "recovered");
 	vine_datavine_rpc_server_delete(server);
@@ -372,7 +372,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	struct vine_datavine_rpc_server *server = vine_datavine_rpc_server_create(
-			"127.0.0.1", 0, "test-token", server_threads, records, 0);
+			"127.0.0.1", 0, "test-token", server_threads, records, 1024 * 1024, 0);
 	if (!server || !allocate_records(vine_datavine_rpc_server_port(server), records)) {
 		return 2;
 	}

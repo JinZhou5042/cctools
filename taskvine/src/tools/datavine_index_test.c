@@ -42,7 +42,7 @@ int main(int argc, char **argv)
 	if (threads < 1 || records < threads) {
 		return 2;
 	}
-	struct vine_datavine_index *index = vine_datavine_index_create(records, 256);
+	struct vine_datavine_index *index = vine_datavine_index_create(records, 1024 * 1024, 256);
 	if (!index) {
 		return 2;
 	}

@@ -53,7 +53,10 @@ class MetadataStateMixin:
                     "metadata": record.metadata,
                     "stable_path": record.stable_path,
                     "serialized_size": record.serialized_size,
-                    "inline": record.serialized_bytes is not None,
+                    "origin": (
+                        "inline" if record.serialized_bytes is not None
+                        else "native" if record.native else "stable"
+                    ),
                 },
             ))
         records.extend(
@@ -106,13 +109,16 @@ class MetadataStateMixin:
     def _restore_edata(self, native_edata):
         for data_id, value in self._metadata.load("edata"):
             payload = None
-            if value["inline"]:
+            if value["origin"] != "stable":
                 native = native_edata(data_id)
-                payload = native["payload"]
+                if value["origin"] == "inline":
+                    payload = native["payload"]
                 if (
                     native["content_hash"] != value["content_hash"]
                     or native["serialized_sha256"]
                     != value["serialized_sha256"]
+                    or native["serialized_size"]
+                    != value["serialized_size"]
                 ):
                     raise RuntimeError("native EData metadata mismatch")
             record = EDataRecord(
@@ -123,13 +129,17 @@ class MetadataStateMixin:
                 payload,
                 value["stable_path"],
                 value["serialized_size"],
+                value["origin"] == "native",
             )
             self._edata[data_id] = record
             self._buckets.setdefault(
                 (record.metadata, record.content_hash), []
             ).append(data_id)
-            if payload is not None:
-                self._edata_bytes += len(payload)
+            if payload is not None or record.native:
+                self._edata_bytes += (
+                    record.serialized_size
+                    if record.native else len(payload)
+                )
             else:
                 self._edata_bulk_bytes += record.serialized_size
         self._next_edata_id = max(self._edata, default=0) + 1
@@ -230,13 +240,13 @@ class MetadataStateMixin:
                 f"e:{record.data_id}",
                 (
                     f"controller-edata-{record.data_id}"
-                    if record.serialized_bytes is not None
+                    if record.serialized_bytes is not None or record.native
                     else f"bulk-origin-edata-{record.data_id}"
                 ),
                 1,
                 (
                     "controller-memory"
-                    if record.serialized_bytes is not None
+                    if record.serialized_bytes is not None or record.native
                     else "sharedfs"
                 ),
                 record.content_hash,

@@ -12,6 +12,7 @@ _MAGIC = 0x44564331
 _VERSION = 1
 _AUTH = 1
 _ALLOCATE_BATCH = 3
+_PUBLISH_BATCH = 4
 _CLAIM_WORKER = 5
 _PUBLISH_OUTPUTS = 6
 _DISCONNECT_WORKER = 7
@@ -23,9 +24,10 @@ _GET_EDATA = 12
 _INVALIDATE_REPLICA = 13
 _RESTORE_REPLICA = 14
 _CONFIRM_REPLICA_PRUNED = 15
+_MARK_EDATA_SHARED = 16
 _OK = 0
 _REJECTED = 3
-_MAX_BODY = 16 * 1024 * 1024
+_MAX_BODY = 64 * 1024 * 1024
 
 
 class NativeControllerError(RuntimeError):
@@ -51,6 +53,7 @@ class NativeControllerClient:
         self._request_ids = itertools.count(1)
         self._request_id_lock = threading.Lock()
         self._worker_endpoints = {}
+        self._worker_epochs = {}
 
     @staticmethod
     def _read(stream, size):
@@ -136,20 +139,40 @@ class NativeControllerClient:
         if len(body) != 4 or struct.unpack("!I", body)[0] != len(records):
             raise RuntimeError("native Controller returned incomplete allocation")
 
+    def publish_idata_metadata(self, records):
+        records = tuple(records)
+        payload = [struct.pack("!I", len(records))]
+        payload.extend(
+            struct.pack(
+                "!qI4xq64s",
+                int(data_id),
+                int(attempt),
+                int(size),
+                str(content_hash).encode("ascii"),
+            )
+            for data_id, attempt, content_hash, size in records
+        )
+        body = self.request(_PUBLISH_BATCH, b"".join(payload))
+        if len(body) != 4 or struct.unpack("!I", body)[0] != len(records):
+            raise RuntimeError("native Controller returned incomplete publication")
+
     def register_edata(self, records):
         batch = []
         batch_size = 4
+        data_ids = []
         for record in records:
             metadata = json.dumps(
-                record[3], sort_keys=True, separators=(",", ":")
+                record[0], sort_keys=True, separators=(",", ":")
             ).encode("ascii")
-            payload = bytes(record[4])
+            inline = record[3] is not None
+            payload = bytes(record[3]) if inline else b""
+            size = int(record[4])
             encoded = (
                 struct.pack(
-                    "!qIQ64s64s",
-                    int(record[0]),
+                    "!IIQ64s64s",
+                    int(inline),
                     len(metadata),
-                    len(payload),
+                    size,
                     str(record[1]).encode("ascii"),
                     str(record[2]).encode("ascii"),
                 )
@@ -157,36 +180,58 @@ class NativeControllerClient:
                 + payload
             )
             if len(encoded) + 4 > _MAX_BODY:
-                continue
+                raise ValueError("EData exceeds native Controller RPC limit")
             if batch and batch_size + len(encoded) > _MAX_BODY:
-                self._register_edata_batch(batch)
+                data_ids.extend(self._register_edata_batch(batch))
                 batch = []
                 batch_size = 4
             batch.append(encoded)
             batch_size += len(encoded)
         if batch:
-            self._register_edata_batch(batch)
+            data_ids.extend(self._register_edata_batch(batch))
+        return tuple(data_ids)
 
     def _register_edata_batch(self, records):
         body = self.request(
             _REGISTER_EDATA,
             struct.pack("!I", len(records)) + b"".join(records),
         )
-        if len(body) != 4 or struct.unpack("!I", body)[0] != len(records):
+        if len(body) != 4 + 8 * len(records) or struct.unpack_from(
+            "!I", body
+        )[0] != len(records):
             raise RuntimeError("native Controller returned incomplete EData")
+        return struct.unpack_from(f"!{len(records)}q", body, 4)
 
-    def get_edata(self, data_id):
-        body = self.request(_GET_EDATA, struct.pack("!q", int(data_id)))
-        if len(body) < 140:
+    def get_edata(self, data_id, allow_shared=False, metadata_only=False):
+        request = struct.pack("!q", int(data_id))
+        options = int(bool(allow_shared)) | (int(bool(metadata_only)) << 1)
+        if options:
+            request += struct.pack("!I", options)
+        body = self.request(_GET_EDATA, request)
+        if len(body) < 148:
             raise RuntimeError("native Controller returned invalid EData")
-        metadata_size, payload_size = struct.unpack_from("!IQ", body)
-        if len(body) != 140 + metadata_size + payload_size:
+        serialized_size, payload_size, cache_globally = struct.unpack_from(
+            "!QQI", body
+        )
+        if len(body) != 148 + payload_size:
             raise RuntimeError("native Controller returned truncated EData")
         return {
-            "content_hash": body[12:76].decode("ascii"),
-            "serialized_sha256": body[76:140].decode("ascii"),
-            "payload": body[140 + metadata_size:],
+            "content_hash": body[20:84].decode("ascii"),
+            "serialized_sha256": body[84:148].decode("ascii"),
+            "cache_globally": bool(cache_globally),
+            "serialized_size": serialized_size,
+            "payload": body[148:],
         }
+
+    def mark_edata_shared(self, data_ids):
+        data_ids = tuple(map(int, data_ids))
+        body = self.request(
+            _MARK_EDATA_SHARED,
+            struct.pack("!I", len(data_ids))
+            + b"".join(struct.pack("!q", value) for value in data_ids),
+        )
+        if len(body) != 4 or struct.unpack("!I", body)[0] != len(data_ids):
+            raise RuntimeError("native Controller returned incomplete policy update")
 
     def claim_worker(self, worker_id, endpoint):
         worker = str(worker_id).encode("utf-8")
@@ -197,9 +242,11 @@ class NativeControllerClient:
         )
         if len(body) != 8:
             raise RuntimeError("native Controller returned invalid worker epoch")
+        epoch = struct.unpack("!Q", body)[0]
         with self._request_id_lock:
             self._worker_endpoints[str(worker_id)] = address
-        return struct.unpack("!Q", body)[0]
+            self._worker_epochs[str(worker_id)] = epoch
+        return epoch
 
     def _worker_endpoint(self, worker_id):
         with self._request_id_lock:
@@ -210,6 +257,10 @@ class NativeControllerClient:
 
     def worker_endpoint(self, worker_id):
         return self._worker_endpoint(worker_id).decode("utf-8")
+
+    def worker_epoch(self, worker_id):
+        with self._request_id_lock:
+            return self._worker_epochs.get(str(worker_id))
 
     def disconnect_worker(self, worker_id, epoch):
         worker = str(worker_id).encode("utf-8")

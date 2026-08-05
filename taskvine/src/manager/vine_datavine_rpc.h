@@ -28,6 +28,7 @@ enum vine_datavine_rpc_opcode {
 	VINE_DATAVINE_RPC_INVALIDATE_REPLICA = 13,
 	VINE_DATAVINE_RPC_RESTORE_REPLICA = 14,
 	VINE_DATAVINE_RPC_CONFIRM_REPLICA_PRUNED = 15,
+	VINE_DATAVINE_RPC_MARK_EDATA_SHARED = 16,
 };
 
 enum vine_datavine_rpc_status {
@@ -43,7 +44,8 @@ struct vine_datavine_rpc_server;
 
 struct vine_datavine_rpc_server *vine_datavine_rpc_server_create(
 		const char *host, int port, const char *token, int threads,
-		int64_t maximum_data_id, const char *journal_path);
+		int64_t maximum_data_id, uint64_t maximum_edata_bytes,
+		const char *journal_path);
 void vine_datavine_rpc_server_delete(struct vine_datavine_rpc_server *server);
 int vine_datavine_rpc_server_port(const struct vine_datavine_rpc_server *server);
 void vine_datavine_rpc_server_get_metrics(

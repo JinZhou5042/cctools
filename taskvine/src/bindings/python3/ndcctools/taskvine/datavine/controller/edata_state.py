@@ -7,6 +7,65 @@ from ..models import EDataRecord, SerializationMetadata
 
 
 class EDataStateMixin:
+    def register_native_edata_batch(self, values):
+        records = []
+        with self._lock, self._metadata_batch():
+            for (
+                data_id,
+                metadata,
+                content_hash,
+                serialized_sha256,
+                serialized_size,
+            ) in values:
+                if not isinstance(metadata, SerializationMetadata):
+                    raise TypeError("metadata must be SerializationMetadata")
+                data_id = int(data_id)
+                serialized_size = int(serialized_size)
+                if data_id < 1 or serialized_size < 0:
+                    raise ValueError("invalid native EData projection")
+                self._registrations += 1
+                existing = self._edata.get(data_id)
+                if existing is not None:
+                    if (
+                        existing.content_hash != content_hash
+                        or existing.serialized_sha256 != serialized_sha256
+                        or existing.metadata != metadata
+                        or existing.serialized_size != serialized_size
+                        or not existing.native
+                    ):
+                        raise ValueError(f"conflicting EDataID {data_id}")
+                    records.append(existing)
+                    continue
+                if self._edata_bytes + serialized_size > self.max_edata_bytes:
+                    raise MemoryError("Controller EData capacity exceeded")
+                record = EDataRecord(
+                    data_id,
+                    str(content_hash),
+                    str(serialized_sha256),
+                    metadata,
+                    None,
+                    None,
+                    serialized_size,
+                    True,
+                )
+                self._publish_replica(
+                    f"e:{data_id}",
+                    f"controller-edata-{data_id}",
+                    1,
+                    "controller-memory",
+                    record.content_hash,
+                    serialized_size,
+                )
+                self._edata[data_id] = record
+                self._buckets.setdefault(
+                    (metadata, record.content_hash), []
+                ).append(data_id)
+                self._edata_bytes += serialized_size
+                self._next_edata_id = max(self._next_edata_id, data_id + 1)
+                self._mark_metadata("edata", (data_id,))
+                records.append(record)
+        return tuple(records)
+
     def register_edata(self, metadata, serialized_bytes):
         if not isinstance(metadata, SerializationMetadata):
             raise TypeError("metadata must be SerializationMetadata")
@@ -97,7 +156,13 @@ class EDataStateMixin:
         return offset == len(serialized_bytes)
 
     def register_edata_origin(
-        self, metadata, stable_path, content_hash, serialized_size
+        self,
+        metadata,
+        stable_path,
+        content_hash,
+        serialized_size,
+        data_id=None,
+        serialized_sha256=None,
     ):
         if not isinstance(metadata, SerializationMetadata):
             raise TypeError("metadata must be SerializationMetadata")
@@ -132,6 +197,12 @@ class EDataStateMixin:
                 serialized_digest.update(chunk)
         if digest.hexdigest() != str(content_hash):
             raise ValueError("bulk origin content hash mismatch")
+        actual_serialized_sha256 = serialized_digest.hexdigest()
+        if (
+            serialized_sha256 is not None
+            and actual_serialized_sha256 != str(serialized_sha256)
+        ):
+            raise ValueError("bulk origin serialized hash mismatch")
         bucket_key = (metadata, str(content_hash))
         with self._lock, self._metadata_batch():
             self._registrations += 1
@@ -143,16 +214,20 @@ class EDataStateMixin:
                     if self._edata_inline_origin_equal(
                         record.serialized_bytes, resolved
                     ):
-                        return record
+                        if data_id is None or int(data_id) == record.data_id:
+                            return record
                 elif self._edata_origins_equal(
                     record.stable_path, resolved, serialized_size
                 ):
-                    return record
-            data_id = self._next_edata_id
+                    if data_id is None or int(data_id) == record.data_id:
+                        return record
+            data_id = self._next_edata_id if data_id is None else int(data_id)
+            if data_id < 1 or data_id in self._edata:
+                raise ValueError(f"conflicting EDataID {data_id}")
             record = EDataRecord(
                 data_id,
                 str(content_hash),
-                serialized_digest.hexdigest(),
+                actual_serialized_sha256,
                 metadata,
                 None,
                 str(resolved),
@@ -166,7 +241,7 @@ class EDataStateMixin:
                 record.content_hash,
                 serialized_size,
             )
-            self._next_edata_id += 1
+            self._next_edata_id = max(self._next_edata_id, data_id + 1)
             self._edata[data_id] = record
             self._buckets.setdefault(bucket_key, []).append(data_id)
             self._edata_bulk_bytes += serialized_size
@@ -183,6 +258,14 @@ class EDataStateMixin:
     def edata_has_shared_consumers(self, data_id):
         with self._lock:
             return len(self._edata_consumers.get(int(data_id), ())) > 1
+
+    def shared_edata_ids(self):
+        with self._lock:
+            return tuple(
+                data_id
+                for data_id, consumers in self._edata_consumers.items()
+                if len(consumers) > 1
+            )
 
     def record_edata_fetch(self, data_id):
         with self._lock:

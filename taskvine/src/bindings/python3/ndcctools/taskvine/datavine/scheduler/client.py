@@ -58,7 +58,6 @@ class ControllerClient:
             else None
         )
         self._native_edata_metadata = {}
-        self._native_edata_pending = {}
         if (
             self.transient_retries < 0
             or self.idempotent_transient_retries < 0
@@ -341,8 +340,6 @@ class ControllerClient:
             {"worker_id": str(worker_id), "epoch": int(epoch)},
         )
         worker = json.loads(payload)
-        if self.native is not None:
-            self.native.disconnect_worker(worker_id, epoch)
         return worker
 
     def reconcile_workers(self, active_worker_ids):
@@ -390,6 +387,13 @@ class ControllerClient:
             except NativeControllerError as exc:
                 if exc.status != 3:
                     raise
+                known_epoch = self.native.worker_epoch(worker_id)
+                if known_epoch == int(worker_epoch):
+                    raise DataVineRemoteError(
+                        "logical data identity conflicts with replica"
+                    ) from None
+                if known_epoch is not None:
+                    raise DataVineRemoteError("stale worker epoch") from None
                 worker_epoch = int(
                     self.claim_worker(
                         worker_id,
@@ -584,6 +588,12 @@ class ControllerClient:
         worker_id,
         worker_epoch=1,
     ):
+        if self.native is not None:
+            try:
+                self.native.invalidate_replica(data_id, replica_id)
+            except NativeControllerError as exc:
+                if exc.status != 5:
+                    raise
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/replicas/invalidate",
@@ -663,23 +673,16 @@ class ControllerClient:
                     next(iter(excluded_worker_ids), None),
                 )
             except NativeControllerError as exc:
-                if exc.status != 3:
-                    raise
-                destination_worker_epoch = int(
-                    self.claim_worker(
-                        destination_worker_id,
-                        self.native.worker_endpoint(
-                            destination_worker_id
-                        ),
-                    )["epoch"]
-                )
-                resolved = self.native.resolve_source(
-                    data_id,
-                    destination_worker_id,
-                    destination_worker_epoch,
-                    transfer_id,
-                    next(iter(excluded_worker_ids), None),
-                )
+                if exc.status == 5:
+                    raise DataVineRemoteError(
+                        "no available worker source"
+                    ) from None
+                if exc.status == 3:
+                    raise DataVineRemoteError(
+                        "transfer identity already completed or source "
+                        "request rejected"
+                    ) from None
+                raise
             return resolved
         payload, _ = self._request(
             "POST",
@@ -748,6 +751,10 @@ class ControllerClient:
                     "success": bool(success),
                 }
             except NativeControllerError as exc:
+                if exc.status == 3:
+                    raise DataVineRemoteError(
+                        "conflicting duplicate lease release"
+                    ) from None
                 if exc.status != 5:
                     raise
         payload, _ = self._request(
@@ -873,77 +880,110 @@ class ControllerClient:
         return json.loads(payload)
 
     def register_edata(self, metadata, serialized_bytes):
-        payload, _ = self._request(
-            "POST",
-            f"{API_PREFIX}/edata/register",
-            {
-                "metadata": metadata.to_dict(),
-                "serialized_bytes": base64.b64encode(
-                    serialized_bytes
-                ).decode("ascii"),
-            },
-        )
-        result = json.loads(payload)
-        if self.native is not None:
-            self._native_edata_pending[int(result["data_id"])] = (
-                result["data_id"],
-                result["content_hash"],
-                result["serialized_sha256"],
-                metadata.to_dict(),
-                serialized_bytes,
-            )
-        return result
+        return self.register_edata_batch(((metadata, serialized_bytes),))[0]
 
     def register_edata_batch(self, values):
         values = tuple(values)
+        if self.native is None:
+            raise RuntimeError("native Data Controller is required")
+        prepared = tuple(
+            (
+                metadata,
+                bytes(value),
+                EDataRecord.digest(metadata, value),
+                hashlib.sha256(value).hexdigest(),
+            )
+            for metadata, value in values
+        )
+        data_ids = self.native.register_edata(
+            (
+                metadata.to_dict(),
+                content_hash,
+                serialized_sha256,
+                value,
+                len(value),
+            )
+            for metadata, value, content_hash, serialized_sha256 in prepared
+        )
+        metadata_table = tuple(dict.fromkeys(
+            metadata for metadata, _, _, _ in prepared
+        ))
+        metadata_index = {
+            metadata: index
+            for index, metadata in enumerate(metadata_table)
+        }
         payload, _ = self._request(
             "POST",
-            f"{API_PREFIX}/edata/register-batch",
+            f"{API_PREFIX}/edata/project-batch",
             {
+                "metadata": [
+                    metadata.to_dict() for metadata in metadata_table
+                ],
                 "values": [
                     {
-                        "metadata": metadata.to_dict(),
-                        "serialized_bytes": base64.b64encode(value).decode(
-                            "ascii"
-                        ),
+                        "data_id": data_id,
+                        "metadata": metadata_index[metadata],
+                        "content_hash": content_hash,
+                        "serialized_sha256": serialized_sha256,
+                        "size": len(value),
                     }
-                    for metadata, value in values
+                    for data_id, (
+                        metadata,
+                        value,
+                        content_hash,
+                        serialized_sha256,
+                    ) in zip(data_ids, prepared)
                 ]
             },
         )
-        results = json.loads(payload)
-        if self.native is not None:
-            for result, (metadata, value) in zip(results, values):
-                self._native_edata_pending[int(result["data_id"])] = (
-                    result["data_id"],
-                    result["content_hash"],
-                    result["serialized_sha256"],
-                    metadata.to_dict(),
-                    value,
-                )
-        return results
+        acknowledgement = json.loads(payload)
+        if acknowledgement.get("registered") != len(prepared):
+            raise DataVineRemoteError(
+                "Controller returned incomplete EData projection"
+            )
+        return tuple(
+            {
+                "data_id": int(data_id),
+                "content_hash": content_hash,
+                "serialized_sha256": serialized_sha256,
+                "size": len(value),
+                "storage": "native-memory",
+            }
+            for data_id, (
+                _, value, content_hash, serialized_sha256
+            ) in zip(data_ids, prepared)
+        )
 
     def finalize_native_edata(self, shared_data_ids=()):
-        if self.native is None:
-            return
-        shared = {int(data_id) for data_id in shared_data_ids}
-        self.native.register_edata(
-            record
-            for data_id, record in self._native_edata_pending.items()
-            if data_id not in shared
-        )
-        self._native_edata_pending.clear()
+        if self.native is not None:
+            self.native.mark_edata_shared(shared_data_ids)
 
     def register_edata_origin(
-        self, metadata, origin_path, content_hash, size
+        self,
+        metadata,
+        origin_path,
+        content_hash,
+        serialized_sha256,
+        size,
     ):
+        if self.native is None:
+            raise RuntimeError("native Data Controller is required")
+        data_id = self.native.register_edata(((
+            metadata.to_dict(),
+            str(content_hash),
+            serialized_sha256,
+            None,
+            int(size),
+        ),))[0]
         payload, _ = self._request(
             "POST",
             f"{API_PREFIX}/edata/register-origin",
             {
+                "data_id": data_id,
                 "metadata": metadata.to_dict(),
                 "origin_path": str(origin_path),
                 "content_hash": str(content_hash),
+                "serialized_sha256": serialized_sha256,
                 "size": int(size),
             },
         )

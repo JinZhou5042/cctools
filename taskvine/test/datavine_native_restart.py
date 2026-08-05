@@ -74,13 +74,15 @@ def crash_recovery(root):
     process, native = start_process(root, ready)
     payload = b"process-crash-edata"
     digest = hashlib.sha256(payload).hexdigest()
-    native.register_edata(((7, digest, digest, {}, payload),))
+    data_id = native.register_edata(((
+        {}, digest, digest, payload, len(payload)
+    ),))[0]
     os.kill(process.pid, signal.SIGKILL)
     process.wait()
     ready.unlink()
     process, recovered = start_process(root, ready)
     try:
-        assert recovered.get_edata(7)["payload"] == payload
+        assert recovered.get_edata(data_id)["payload"] == payload
     finally:
         process.terminate()
         process.wait(timeout=30)
@@ -94,7 +96,9 @@ def corrupt_journal_rejected():
         native = client(service)
         payload = b"corruption-must-fail-closed"
         digest = hashlib.sha256(payload).hexdigest()
-        native.register_edata(((1, digest, digest, {}, payload),))
+        assert native.register_edata(((
+            {}, digest, digest, payload, len(payload)
+        ),)) == (1,)
         service.stop()
         journal = Path(root) / "controller-native.wal"
         with journal.open("r+b") as stream:
@@ -136,7 +140,9 @@ def main():
         first = client(service)
         payload = b"persistent-edata"
         digest = hashlib.sha256(payload).hexdigest()
-        first.register_edata(((1, digest, digest, {}, payload),))
+        assert first.register_edata(((
+            {}, digest, digest, payload, len(payload)
+        ),)) == (1,)
         journal = service.snapshot()["native_journal"]
         assert journal["waits"] >= 1
         assert journal["durable_sequence"] == journal["commits"]

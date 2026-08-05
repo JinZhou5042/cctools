@@ -40,16 +40,24 @@ def wait_durable(state, data_id):
 
 def register_function(state, native):
     metadata, payload = serialize(bytes)
-    record = state.register_edata(metadata, payload)
-    native.register_edata((
-        (
-            record.data_id,
-            record.content_hash,
-            record.serialized_sha256,
-            metadata.to_dict(),
-            payload,
-        ),
-    ))
+    content_hash = hashlib.sha256(
+        metadata.identity_bytes() + b"\0" + payload
+    ).hexdigest()
+    serialized_sha256 = hashlib.sha256(payload).hexdigest()
+    data_id = native.register_edata(((
+        metadata.to_dict(),
+        content_hash,
+        serialized_sha256,
+        payload,
+        len(payload),
+    ),))[0]
+    record = state.register_native_edata_batch(((
+        data_id,
+        metadata,
+        content_hash,
+        serialized_sha256,
+        len(payload),
+    ),))[0]
     return record, payload
 
 
@@ -232,9 +240,12 @@ def main():
         expected = state.pruning.plan().semantic()
         service.stop()
 
-        state, service, _ = start(root)
+        state, service, recovered_native = start(root)
         try:
-            assert state.get_edata(function.data_id).serialized_bytes == payload
+            assert state.get_edata(function.data_id).native
+            assert recovered_native.get_edata(
+                function.data_id, allow_shared=True
+            )["payload"] == payload
             assert state.get_task(2).input_data_ids == (first.data_id,)
             assert state.get_idata(first.data_id).serialized_bytes == first_payload
             assert state.get_idata(first.data_id).durability == "durable"

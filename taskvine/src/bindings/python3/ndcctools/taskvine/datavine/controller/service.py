@@ -84,16 +84,17 @@ class ControllerService:
         )
         return value
 
-    def sync_native_leases(self, data_ids):
+    def sync_native_leases(self, data_ids, kind="i"):
         if self._native_server is None:
             return
         for data_id in data_ids:
+            key = f"{kind}:{int(data_id)}"
             native = {
                 record["replica_id"]: record
-                for record in self.worker_replicas(f"i:{int(data_id)}")
+                for record in self.worker_replicas(key)
             }
             for replica in self.state.replicas.records_for(
-                f"i:{int(data_id)}"
+                key
             ):
                 if replica.tier not in ("worker-dram", "worker-disk"):
                     continue
@@ -105,8 +106,17 @@ class ControllerService:
                     else 0
                 )
                 self.state.replicas.synchronize_active_leases(
-                    f"i:{int(data_id)}", replica.replica_id, count
+                    key, replica.replica_id, count
                 )
+
+    def sync_all_native_leases(self):
+        for data_id in self.state.replicas.data_ids():
+            kind, token = data_id.split(":", 1)
+            self.sync_native_leases((token,), kind)
+
+    def disconnect_native_worker(self, worker_id, epoch):
+        if self._native_client is not None:
+            self._native_client.disconnect_worker(worker_id, epoch)
 
     def worker_replicas(self, data_id):
         if self._native_server is None:
@@ -115,6 +125,20 @@ class ControllerService:
         return cvine.vine_datavine_rpc_server_replicas_as_list(
             self._native_server, kind, int(token)
         )
+
+    def invalidate_native_data(self, data_id):
+        if self._native_client is None:
+            return
+        for replica in self.worker_replicas(data_id):
+            if replica["state"] != "available":
+                continue
+            try:
+                self._native_client.invalidate_replica(
+                    data_id, replica["replica_id"]
+                )
+            except NativeControllerError as exc:
+                if exc.status != 5:
+                    raise
 
     def replica_records(self, data_id):
         records = self.worker_replicas(data_id)
@@ -187,6 +211,7 @@ class ControllerService:
             self.token,
             8,
             self.state.max_replicas,
+            self.state.max_edata_bytes,
             self.state.native_journal_path,
         )
         if self._native_server is None:
@@ -200,7 +225,13 @@ class ControllerService:
             self.token,
         )
         self.state.restore_metadata(
-            self._native_client.get_edata, self.worker_replicas
+            lambda data_id: self._native_client.get_edata(
+                data_id, allow_shared=True, metadata_only=True
+            ),
+            self.worker_replicas,
+        )
+        self._native_client.mark_edata_shared(
+            self.state.shared_edata_ids()
         )
         Handler = ControllerHandlerFactory.create(self)
 

@@ -2,6 +2,7 @@
 
 import dataclasses
 from collections import Counter
+import hashlib
 import os
 from pathlib import Path
 import time
@@ -172,7 +173,11 @@ class WorkflowRegistrar:
                     temporary.unlink(missing_ok=True)
             os.chmod(path, 0o444)
             result = self.controller.register_edata_origin(
-                metadata, path, digest, len(payload)
+                metadata,
+                path,
+                digest,
+                hashlib.sha256(payload).hexdigest(),
+                len(payload),
             )
         else:
             result = self.controller.register_edata(metadata, payload)
