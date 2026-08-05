@@ -7,26 +7,28 @@ import struct
 import threading
 import urllib.parse
 
+from ndcctools.taskvine import cvine
+
 
 _MAGIC = 0x44564331
-_VERSION = 1
-_AUTH = 1
-_ALLOCATE_BATCH = 3
-_PUBLISH_BATCH = 4
-_CLAIM_WORKER = 5
-_PUBLISH_OUTPUTS = 6
-_DISCONNECT_WORKER = 7
-_REPORT_REPLICA = 8
-_RESOLVE_SOURCE = 9
-_RELEASE_SOURCE = 10
-_REGISTER_EDATA = 11
-_GET_EDATA = 12
-_INVALIDATE_REPLICA = 13
-_RESTORE_REPLICA = 14
-_CONFIRM_REPLICA_PRUNED = 15
-_MARK_EDATA_SHARED = 16
-_OK = 0
-_REJECTED = 3
+_VERSION = cvine.VINE_DATAVINE_RPC_VERSION
+_AUTH = cvine.VINE_DATAVINE_RPC_AUTH
+_ALLOCATE_BATCH = cvine.VINE_DATAVINE_RPC_ALLOCATE_BATCH
+_PUBLISH_BATCH = cvine.VINE_DATAVINE_RPC_PUBLISH_BATCH
+_CLAIM_WORKER = cvine.VINE_DATAVINE_RPC_CLAIM_WORKER
+_PUBLISH_OUTPUTS = cvine.VINE_DATAVINE_RPC_PUBLISH_OUTPUTS
+_DISCONNECT_WORKER = cvine.VINE_DATAVINE_RPC_DISCONNECT_WORKER
+_REPORT_REPLICA = cvine.VINE_DATAVINE_RPC_REPORT_REPLICA
+_RESOLVE_SOURCE = cvine.VINE_DATAVINE_RPC_RESOLVE_SOURCE
+_RELEASE_SOURCE = cvine.VINE_DATAVINE_RPC_RELEASE_SOURCE
+_REGISTER_EDATA = cvine.VINE_DATAVINE_RPC_REGISTER_EDATA
+_GET_EDATA = cvine.VINE_DATAVINE_RPC_GET_EDATA
+_INVALIDATE_REPLICA = cvine.VINE_DATAVINE_RPC_INVALIDATE_REPLICA
+_RESTORE_REPLICA = cvine.VINE_DATAVINE_RPC_RESTORE_REPLICA
+_CONFIRM_REPLICA_PRUNED = cvine.VINE_DATAVINE_RPC_CONFIRM_REPLICA_PRUNED
+_MARK_EDATA_SHARED = cvine.VINE_DATAVINE_RPC_MARK_EDATA_SHARED
+_OK = cvine.VINE_DATAVINE_RPC_OK
+_REJECTED = cvine.VINE_DATAVINE_RPC_REJECTED
 _MAX_BODY = 64 * 1024 * 1024
 
 
@@ -480,3 +482,89 @@ class NativeControllerClient:
             struct.pack("!cxH4xq", kind.encode("ascii"), len(replica), int(token))
             + replica,
         )
+
+
+class NativeControllerCore:
+    """Owns the native C Controller without workflow or policy semantics."""
+
+    def __init__(
+        self,
+        host,
+        token,
+        maximum_data_id,
+        maximum_edata_bytes,
+        journal_path=None,
+        threads=8,
+    ):
+        self.host = str(host)
+        self.token = str(token)
+        self.maximum_data_id = int(maximum_data_id)
+        self.maximum_edata_bytes = int(maximum_edata_bytes)
+        self.journal_path = journal_path
+        self.threads = int(threads)
+        self._server = None
+        self._client = None
+        self.address = None
+
+    @property
+    def running(self):
+        return self._server is not None
+
+    @property
+    def client(self):
+        if self._client is None:
+            raise RuntimeError("native Controller is not running")
+        return self._client
+
+    def start(self):
+        if self.running:
+            raise RuntimeError("native Controller is already running")
+        server = cvine.vine_datavine_rpc_server_create(
+            self.host,
+            0,
+            self.token,
+            self.threads,
+            self.maximum_data_id,
+            self.maximum_edata_bytes,
+            self.journal_path,
+        )
+        if server is None:
+            raise RuntimeError("could not start native Data Controller")
+        self._server = server
+        self.address = (
+            self.host,
+            cvine.vine_datavine_rpc_server_port(server),
+        )
+        self._client = NativeControllerClient(
+            f"tcp://{self.address[0]}:{self.address[1]}", self.token
+        )
+        return self.address
+
+    def metrics(self):
+        if not self.running:
+            return None
+        return cvine.vine_datavine_rpc_server_metrics_as_dict(
+            self._server
+        )
+
+    def journal_metrics(self):
+        if not self.running:
+            return None
+        return cvine.vine_datavine_rpc_server_journal_metrics_as_dict(
+            self._server
+        )
+
+    def replicas(self, data_id):
+        if not self.running:
+            return []
+        kind, token = str(data_id).split(":", 1)
+        return cvine.vine_datavine_rpc_server_replicas_as_list(
+            self._server, kind, int(token)
+        )
+
+    def stop(self):
+        self._client = None
+        if self._server is not None:
+            cvine.vine_datavine_rpc_server_delete(self._server)
+            self._server = None
+        self.address = None

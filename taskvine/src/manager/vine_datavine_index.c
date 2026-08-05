@@ -331,8 +331,8 @@ int vine_datavine_index_register_edata(struct vine_datavine_index *index,
 int vine_datavine_index_get_edata(struct vine_datavine_index *index,
 		int64_t data_id, char content_hash[65],
 		char serialized_hash[65], unsigned char **payload,
-	size_t *payload_size, uint64_t *serialized_size,
-	int *cache_globally, int allow_shared, int include_payload)
+		size_t *payload_size, uint64_t *serialized_size,
+		int *cache_globally, int allow_shared, int include_payload)
 {
 	if (!content_hash || !serialized_hash || !payload || !payload_size || !serialized_size || !cache_globally) {
 		return 0;
@@ -401,9 +401,7 @@ int vine_datavine_index_validate_edata(struct vine_datavine_index *index,
 	}
 	pthread_mutex_t *shard = get_shard(index, data_id);
 	pthread_mutex_lock(shard);
-	int valid = slot->edata_content_hash[0]
-			&& !strcmp(slot->edata_content_hash, content_hash)
-			&& slot->edata_serialized_size == (uint64_t)size;
+	int valid = slot->edata_content_hash[0] && !strcmp(slot->edata_content_hash, content_hash) && slot->edata_serialized_size == (uint64_t)size;
 	pthread_mutex_unlock(shard);
 	return valid;
 }

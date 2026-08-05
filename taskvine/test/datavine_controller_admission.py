@@ -13,7 +13,7 @@ from ndcctools.taskvine.datavine.controller.service import (
 from ndcctools.taskvine.datavine.controller.state import ControllerState
 from ndcctools.taskvine.datavine.models import TaskRecord
 from ndcctools.taskvine.datavine.protocol import DataVineRemoteError
-from ndcctools.taskvine.datavine.scheduler.client import ControllerClient
+from ndcctools.taskvine.datavine.client import ControllerClient
 from ndcctools.taskvine.datavine.serialization import serialize
 
 

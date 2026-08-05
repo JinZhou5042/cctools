@@ -368,6 +368,8 @@ def run_bounded_case(factory_manager=None, persistence_mode="cancel"):
     assert snapshot["idata_inline_records"] == 0
     assert snapshot["external_persistence_requests"] == 2
     assert snapshot["external_persistence_durable"] == 2
+    assert snapshot["external_persistence_retired"] == 0
+    assert snapshot["persistence_active"] == 0
     assert snapshot["durable_hashes_valid"]
     assert snapshot["persistence_temporary_files"] == []
     assert (

@@ -7,7 +7,7 @@ from pathlib import Path
 import time
 import uuid
 
-from ..scheduler.client import ControllerClient
+from ..client import ControllerClient
 
 
 def _open_source(client, args):

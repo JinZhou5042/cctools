@@ -2,9 +2,7 @@
 
 import threading
 
-from ndcctools.taskvine import cvine
-
-from ..native import NativeControllerClient, NativeControllerError
+from ..native import NativeControllerCore, NativeControllerError
 from .admission import ByteServingAdmission, BoundedThreadingHTTPServer
 from .handler import ControllerHandlerFactory
 from .faults import TransferFaults
@@ -22,6 +20,7 @@ class ControllerService:
         max_serving_concurrency=8,
         max_serving_bytes=64 * 1024 * 1024,
         serving_hook=None,
+        native=None,
     ):
         if not token:
             raise ValueError("Controller token is required")
@@ -37,16 +36,13 @@ class ControllerService:
         self.transfer_faults = TransferFaults()
         self._server = None
         self._thread = None
-        self._native_server = None
-        self._native_client = None
+        self.native = native
         self.native_address = None
 
     def snapshot(self):
         value = self.state.snapshot()
-        if self._native_server is not None:
-            native = cvine.vine_datavine_rpc_server_metrics_as_dict(
-                self._native_server
-            )
+        if self.native is not None and self.native.running:
+            native = self.native.metrics()
             directory = value["replica_directory"]
             additions = {
                 "active_leases": native["active_leases"],
@@ -70,11 +66,7 @@ class ControllerService:
             for key, count in additions.items():
                 directory[key] = directory.get(key, 0) + count
             directory["native"] = native
-            value["native_journal"] = (
-                cvine.vine_datavine_rpc_server_journal_metrics_as_dict(
-                    self._native_server
-                )
-            )
+            value["native_journal"] = self.native.journal_metrics()
         value["byte_serving"] = self.byte_serving.snapshot()
         value["transfer_faults"] = self.transfer_faults.snapshot()
         value["request_admission"] = (
@@ -85,7 +77,7 @@ class ControllerService:
         return value
 
     def sync_native_leases(self, data_ids, kind="i"):
-        if self._native_server is None:
+        if self.native is None or not self.native.running:
             return
         for data_id in data_ids:
             key = f"{kind}:{int(data_id)}"
@@ -115,25 +107,27 @@ class ControllerService:
             self.sync_native_leases((token,), kind)
 
     def disconnect_native_worker(self, worker_id, epoch):
-        if self._native_client is not None:
-            self._native_client.disconnect_worker(worker_id, epoch)
+        if self.native is not None and self.native.running:
+            self.native.client.disconnect_worker(worker_id, epoch)
 
     def worker_replicas(self, data_id):
-        if self._native_server is None:
+        if self.native is None or not self.native.running:
             return []
-        kind, token = str(data_id).split(":", 1)
-        return cvine.vine_datavine_rpc_server_replicas_as_list(
-            self._native_server, kind, int(token)
-        )
+        return self.native.replicas(data_id)
+
+    def get_native_edata(self, data_id, **options):
+        if self.native is None or not self.native.running:
+            raise RuntimeError("native Controller is not running")
+        return self.native.client.get_edata(data_id, **options)
 
     def invalidate_native_data(self, data_id):
-        if self._native_client is None:
+        if self.native is None or not self.native.running:
             return
         for replica in self.worker_replicas(data_id):
             if replica["state"] != "available":
                 continue
             try:
-                self._native_client.invalidate_replica(
+                self.native.client.invalidate_replica(
                     data_id, replica["replica_id"]
                 )
             except NativeControllerError as exc:
@@ -177,7 +171,7 @@ class ControllerService:
         return records
 
     def apply_native_pruning(self, result):
-        if self._native_client is None:
+        if self.native is None or not self.native.running:
             return
         for record in (*result.get("applied", ()), *result.get("deferred", ())):
             if record.get("action") not in (
@@ -186,7 +180,7 @@ class ControllerService:
             ):
                 continue
             try:
-                self._native_client.invalidate_replica(
+                self.native.client.invalidate_replica(
                     f"i:{int(record['data_id'])}", record["replica_id"]
                 )
             except NativeControllerError as exc:
@@ -197,7 +191,7 @@ class ControllerService:
             if replica_id is None:
                 continue
             try:
-                self._native_client.restore_replica(
+                self.native.client.restore_replica(
                     f"i:{int(record['data_id'])}", replica_id
                 )
             except NativeControllerError as exc:
@@ -205,32 +199,22 @@ class ControllerService:
                     raise
 
     def start(self):
-        self._native_server = cvine.vine_datavine_rpc_server_create(
-            self.host,
-            0,
-            self.token,
-            8,
-            self.state.max_replicas,
-            self.state.max_edata_bytes,
-            self.state.native_journal_path,
-        )
-        if self._native_server is None:
-            raise RuntimeError("could not start native Data Controller")
-        self.native_address = (
-            self.host,
-            cvine.vine_datavine_rpc_server_port(self._native_server),
-        )
-        self._native_client = NativeControllerClient(
-            f"tcp://{self.native_address[0]}:{self.native_address[1]}",
-            self.token,
-        )
+        if self.native is None:
+            self.native = NativeControllerCore(
+                self.host,
+                self.token,
+                self.state.max_replicas,
+                self.state.max_edata_bytes,
+                self.state.native_journal_path,
+            )
+        self.native_address = self.native.start()
         self.state.restore_metadata(
-            lambda data_id: self._native_client.get_edata(
+            lambda data_id: self.native.client.get_edata(
                 data_id, allow_shared=True, metadata_only=True
             ),
             self.worker_replicas,
         )
-        self._native_client.mark_edata_shared(
+        self.native.client.mark_edata_shared(
             self.state.shared_edata_ids()
         )
         Handler = ControllerHandlerFactory.create(self)
@@ -261,10 +245,8 @@ class ControllerService:
             if self._thread.is_alive():
                 raise RuntimeError("Controller thread did not stop")
         self.state.stop()
-        self._native_client = None
-        if self._native_server is not None:
-            cvine.vine_datavine_rpc_server_delete(self._native_server)
-            self._native_server = None
+        if self.native is not None:
+            self.native.stop()
         self.native_address = None
         self._server = None
         self._thread = None

@@ -78,7 +78,7 @@ class GetRouteFactory:
                         return
                     payload = record.serialized_bytes
                     if record.native:
-                        payload = owner._native_client.get_edata(
+                        payload = owner.get_native_edata(
                             record.data_id, allow_shared=True
                         )["payload"]
                     if payload is None:

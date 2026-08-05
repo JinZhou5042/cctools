@@ -16,7 +16,7 @@ import cloudpickle
 from ndcctools.taskvine.datavine import (
     ControllerClient,
     SerializationMetadata,
-    TaskSchedulerThread,
+    WorkflowDriver,
 )
 from ndcctools.taskvine.datavine.protocol import DataVineRemoteError
 
@@ -56,7 +56,7 @@ def stop_cancellation_contract():
             pass
         scheduler._raise_if_stopping()
 
-    scheduler = TaskSchedulerThread(object()).start()
+    scheduler = WorkflowDriver(object()).start()
     scheduler._op_wait_for_stop = _op_wait_for_stop.__get__(scheduler)
     operation = scheduler.submit("wait_for_stop")
     assert started.wait(timeout=5)
@@ -113,7 +113,7 @@ def main():
             assert health["status"] == "ready"
             assert health["controller_thread"] == ready["controller_thread"]
 
-            scheduler = TaskSchedulerThread(client).start()
+            scheduler = WorkflowDriver(client).start()
             assert scheduler.thread_ident is not None
             assert scheduler.thread_ident != ready["controller_thread"]
             value = {"shared": [1, 2, 3]}

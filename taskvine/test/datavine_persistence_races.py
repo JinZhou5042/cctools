@@ -10,7 +10,7 @@ import time
 from ndcctools.taskvine.datavine.controller.service import ControllerService
 from ndcctools.taskvine.datavine.controller.state import ControllerState
 from ndcctools.taskvine.datavine.models import TaskRecord
-from ndcctools.taskvine.datavine.scheduler.client import ControllerClient
+from ndcctools.taskvine.datavine.client import ControllerClient
 from ndcctools.taskvine.datavine.serialization import serialize
 
 

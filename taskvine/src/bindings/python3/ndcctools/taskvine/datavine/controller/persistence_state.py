@@ -8,6 +8,10 @@ from pathlib import Path
 from ..persistence.manager import PersistenceRequest
 
 
+class PersistenceBusy(RuntimeError):
+    pass
+
+
 class PersistenceStateMixin:
     def request_persistence(self, data_id):
         with self._lock, self._metadata_batch():
@@ -26,15 +30,29 @@ class PersistenceStateMixin:
                     raise ValueError(
                         "cannot persist unavailable IData"
                     )
-                active_external = sum(
-                    job.get("mode") == "worker"
+                previous = self._persistence_jobs.get(old.data_id)
+                if (
+                    previous is not None
+                    and previous.get("mode") == "worker"
+                    and previous["state"] == "cancelling"
+                ):
+                    self._retired_external_persistence[
+                        previous["request_id"]
+                    ] = previous
+                active_requests = {
+                    job["request_id"]
+                    for job in self._persistence_jobs.values()
+                    if job.get("mode") == "worker"
                     and job["state"] in (
                         "queued",
                         "writing",
                         "cancelling",
                     )
-                    for job in self._persistence_jobs.values()
+                }
+                active_requests.update(
+                    self._retired_external_persistence
                 )
+                active_external = len(active_requests)
                 capacity = (
                     self._persistence.queue_capacity
                     + self._persistence.worker_count
@@ -119,7 +137,7 @@ class PersistenceStateMixin:
                 len(self._persistence_active_ids)
                 >= self._persistence.worker_count
             ):
-                raise RuntimeError(
+                raise PersistenceBusy(
                     "global persistence concurrency exceeded"
                 )
             job["state"] = "writing"
@@ -144,6 +162,13 @@ class PersistenceStateMixin:
         cancelled_target = None
         with self._lock, self._metadata_batch():
             old = self.get_idata(data_id)
+            retired = self._retired_external_persistence.pop(
+                str(request_id), None
+            )
+            if retired is not None:
+                self._release_persistence_slot(request_id)
+                Path(retired["target_path"]).unlink(missing_ok=True)
+                return old
             job = self._persistence_jobs.get(old.data_id)
             if (
                 job is not None
@@ -298,6 +323,13 @@ class PersistenceStateMixin:
     ):
         with self._lock, self._metadata_batch():
             old = self.get_idata(data_id)
+            retired = self._retired_external_persistence.pop(
+                str(request_id), None
+            )
+            if retired is not None:
+                self._release_persistence_slot(request_id)
+                Path(retired["target_path"]).unlink(missing_ok=True)
+                return "cancelled"
             job = self._persistence_jobs.get(old.data_id)
             if (
                 job is None

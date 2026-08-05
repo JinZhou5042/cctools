@@ -18,7 +18,7 @@ from ndcctools.taskvine.datavine.protocol import (
     DataVineSchemaError,
 )
 from ndcctools.taskvine.datavine.serialization import serialize
-from ndcctools.taskvine.datavine.scheduler.client import ControllerClient
+from ndcctools.taskvine.datavine.client import ControllerClient
 
 
 def main():

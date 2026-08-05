@@ -113,6 +113,7 @@ class ControllerState(
         self._persistence_requests = 0
         self._persistence_sequence = 0
         self._persistence_jobs = {}
+        self._retired_external_persistence = {}
         self._persistence_active_ids = set()
         self._persistence_stale_completions = 0
         self._persistence_cleanup_failures = 0
@@ -268,6 +269,9 @@ class ControllerState(
                     job.get("mode") == "worker"
                     and job["state"] == "durable"
                     for job in self._persistence_jobs.values()
+                ),
+                "external_persistence_retired": len(
+                    self._retired_external_persistence
                 ),
                 "persistence_stale_completions": (
                     self._persistence_stale_completions

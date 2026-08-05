@@ -15,6 +15,7 @@ class OutputPublisher:
             self.worker_epoch = int(committed[0]["worker_epoch"])
         return committed
 
+
 class SourceResolver:
     def __init__(self, client):
         self.client = client

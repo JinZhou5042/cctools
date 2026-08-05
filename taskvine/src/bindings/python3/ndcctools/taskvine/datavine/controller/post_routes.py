@@ -14,6 +14,7 @@ from ..codec import (
     encode_compact_task_record,
 )
 from ..protocol import API_PREFIX, DataVineSchemaError
+from .persistence_state import PersistenceBusy
 
 
 def _resolve_edata(owner, request):
@@ -63,7 +64,7 @@ def _resolve_edata(owner, request):
             "source_type": "controller-memory",
         }, record.serialized_bytes
     if record.native:
-        native = owner._native_client.get_edata(
+        native = owner.get_native_edata(
             data_id, allow_shared=True
         )
         return {
@@ -850,6 +851,9 @@ class PostRouteFactory:
                         job = owner.state.begin_external_persistence(
                             int(token), request["request_id"]
                         )
+                    except PersistenceBusy as exc:
+                        self._error(429, exc)
+                        return
                     except Exception as exc:
                         self._error(400, exc)
                         return

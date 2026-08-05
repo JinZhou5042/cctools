@@ -1,4 +1,4 @@
-"""Scheduler-side client for the standalone Data Controller."""
+"""Shared client for the Data Controller control plane."""
 
 import base64
 import http.client
@@ -14,16 +14,16 @@ import uuid
 
 import hashlib
 
-from ..codec import (
+from .codec import (
     TASK_RECORD_COMPACT_FORMAT,
     decode_compact_task_record,
     decode_serialization_metadata,
     decode_task_record,
     encode_compact_task_record,
 )
-from ..models import EDataRecord, TaskRecord
-from ..native import NativeControllerClient, NativeControllerError
-from ..protocol import (
+from .models import EDataRecord, TaskRecord
+from .native import NativeControllerClient, NativeControllerError
+from .protocol import (
     API_PREFIX,
     DataVineRemoteError,
     TOKEN_HEADER,

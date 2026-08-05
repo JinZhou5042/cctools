@@ -35,10 +35,9 @@ SOURCES = \
 	vine_datavine_directory.c \
 	vine_datavine_rpc.c
 
-PUBLIC_HEADERS = taskvine.h
+PUBLIC_HEADERS = taskvine.h vine_datavine_protocol.h
 
 OBJECTS = $(SOURCES:%.c=%.o)
-PUBLIC_HEADERS = taskvine.h
 LIBRARIES = libtaskvine.a
 TARGETS = $(LIBRARIES)
 

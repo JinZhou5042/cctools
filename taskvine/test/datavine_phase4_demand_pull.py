@@ -17,7 +17,7 @@ import time
 
 from ndcctools.taskvine.datavine import (
     ControllerClient,
-    TaskSchedulerThread,
+    WorkflowDriver,
     Workflow,
 )
 
@@ -228,7 +228,7 @@ def run_case(
             )
             if controller_client_wrapper is not None:
                 client = controller_client_wrapper(client)
-            scheduler = TaskSchedulerThread(
+            scheduler = WorkflowDriver(
                 client,
                 bulk_origin,
                 (

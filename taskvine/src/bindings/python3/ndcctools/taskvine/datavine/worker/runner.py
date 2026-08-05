@@ -5,7 +5,7 @@ import dataclasses
 import os
 import time
 
-from ..scheduler.client import ControllerClient
+from ..client import ControllerClient
 from .control import SourceResolver
 from .cache import PROCESS_CACHE
 from .inputs import InputResolver

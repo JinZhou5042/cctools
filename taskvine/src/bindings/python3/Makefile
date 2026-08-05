@@ -17,7 +17,9 @@ TARGETS = $(LIBRARIES)
 
 all: $(TARGETS)
 
-vine_wrap.c: taskvine.i
+vine_wrap.c: taskvine.i \
+	../../manager/vine_datavine_protocol.h \
+	../../manager/vine_datavine_rpc.h
 	@echo "SWIG taskvine.i (python)"
 	@$(CCTOOLS_SWIG) -o vine_wrap.c -outdir ndcctools/taskvine -python -I$(CCTOOLS_HOME)/dttools/src -I$(CCTOOLS_HOME)/taskvine/src/manager taskvine.i
 

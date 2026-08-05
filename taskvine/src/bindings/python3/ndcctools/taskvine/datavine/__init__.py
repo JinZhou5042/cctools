@@ -1,8 +1,8 @@
 """DataVine workflow-owned data plane."""
 
 from .models import EDataRecord, SerializationMetadata, TaskRecord
-from .scheduler.client import ControllerClient
-from .scheduler.thread import TaskSchedulerThread
+from .client import ControllerClient
+from .scheduler.driver import WorkflowDriver
 from .workflow import OutputRef, Workflow, WorkflowTask
 
 __all__ = [
@@ -10,7 +10,7 @@ __all__ = [
     "EDataRecord",
     "SerializationMetadata",
     "TaskRecord",
-    "TaskSchedulerThread",
+    "WorkflowDriver",
     "OutputRef",
     "Workflow",
     "WorkflowTask",

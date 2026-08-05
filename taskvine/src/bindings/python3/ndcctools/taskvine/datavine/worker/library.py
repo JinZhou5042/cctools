@@ -80,7 +80,7 @@ def execute_datavine_task(
     from .control import OutputPublisher
     from .cache import PROCESS_CACHE
     from ..models import TaskRecord
-    from ..scheduler.client import ControllerClient
+    from ..client import ControllerClient
 
     controller_key = (controller, token, native_controller)
     with PROCESS_CACHE.lock:

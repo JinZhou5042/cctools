@@ -165,4 +165,5 @@ into a swig function f(data) */
 }
 
 %include "taskvine.h"
+%include "vine_datavine_protocol.h"
 %include "vine_datavine_rpc.h"

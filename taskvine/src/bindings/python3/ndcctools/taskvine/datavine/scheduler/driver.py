@@ -1,4 +1,4 @@
-"""Single-owner Task Scheduler thread."""
+"""Python workflow driver over the C TaskVine scheduler."""
 
 import collections
 import concurrent.futures
@@ -36,7 +36,7 @@ from .run_context import WorkflowRunContext
 from .task_factory import DataVineCall, TaskFactory, ensure_worker_library
 
 
-class TaskSchedulerThread:
+class WorkflowDriver:
     _registration_batch_size = 4096
 
     def __init__(
@@ -55,7 +55,7 @@ class TaskSchedulerThread:
         self._commands = queue.Queue()
         self._thread = threading.Thread(
             target=self._run,
-            name="datavine-task-scheduler",
+            name="datavine-workflow-driver",
             daemon=False,
         )
         self._owner_ident = None
@@ -81,11 +81,11 @@ class TaskSchedulerThread:
 
     def start(self):
         if self._started:
-            raise RuntimeError("Task Scheduler already started")
+            raise RuntimeError("Workflow Driver already started")
         self._started = True
         self._thread.start()
         if not self._ready.wait(timeout=10):
-            raise RuntimeError("Task Scheduler thread did not start")
+            raise RuntimeError("Workflow Driver thread did not start")
         return self
 
     def call(self, operation, *args, **kwargs):
@@ -93,7 +93,7 @@ class TaskSchedulerThread:
 
     def submit(self, operation, *args, **kwargs):
         if not self._started:
-            raise RuntimeError("Task Scheduler is not started")
+            raise RuntimeError("Workflow Driver is not started")
         future = concurrent.futures.Future()
         self._commands.put((operation, args, kwargs, future))
         return future
@@ -107,17 +107,17 @@ class TaskSchedulerThread:
             future.result(timeout=30)
         except concurrent.futures.TimeoutError as exc:
             raise RuntimeError(
-                "Task Scheduler operation did not stop within 30 seconds"
+                "Workflow Driver operation did not stop within 30 seconds"
             ) from exc
         self._thread.join(timeout=10)
         if self._thread.is_alive():
-            raise RuntimeError("Task Scheduler thread did not stop")
+            raise RuntimeError("Workflow Driver thread did not stop")
         self._started = False
 
     def _raise_if_stopping(self):
         if self._stop_requested.is_set():
             raise concurrent.futures.CancelledError(
-                "Task Scheduler stop requested"
+                "Workflow Driver stop requested"
             )
 
     def _run(self):
@@ -140,7 +140,7 @@ class TaskSchedulerThread:
     def _assert_owner(self):
         if threading.get_ident() != self._owner_ident:
             raise RuntimeError(
-                "Task Scheduler state mutation outside scheduler thread"
+                "Workflow Driver state mutation outside owner thread"
             )
 
     def _op_register_edata(self, metadata, serialized_bytes):
@@ -1751,11 +1751,14 @@ class TaskSchedulerThread:
                             )[:2048],
                         }
                     )
-                    if (
+                    injected_failure_observed = (
                         "DATAVINE_PERSISTENCE_INJECTED_FAILURE"
                         in str(persistence_error or completed.output)
-                    ):
+                    )
+                    if injected_failure_observed:
                         persistence.injected_failures_observed += 1
+                    elif request.get("inject_failure_during_write"):
+                        persistence.injected_external_failures -= 1
                     status = self.controller.idata_status(data_id)
                     if status["durability"] not in (
                         "failed",
@@ -1858,6 +1861,17 @@ class TaskSchedulerThread:
                             f"stdout={persistence_error or completed.output}"
                         )
                 status = self.controller.idata_status(data_id)
+                current_request_id = (
+                    status.get("persistence_request") or {}
+                ).get("request_id")
+                if status["durability"] != "durable" and (
+                    int(status["attempt"]) > int(request["attempt"])
+                    or (
+                        current_request_id is not None
+                        and current_request_id != request["request_id"]
+                    )
+                ):
+                    continue
                 if status["durability"] == "cancelled":
                     if not status["available"]:
                         continue

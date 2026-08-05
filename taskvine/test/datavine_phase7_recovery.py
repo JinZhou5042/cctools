@@ -4,8 +4,8 @@ import argparse
 import json
 
 from ndcctools.taskvine.datavine import Workflow
-from ndcctools.taskvine.datavine.scheduler.thread import (
-    TaskSchedulerThread,
+from ndcctools.taskvine.datavine.scheduler.driver import (
+    WorkflowDriver,
 )
 from datavine_phase4_demand_pull import run_case
 
@@ -52,7 +52,7 @@ class ReconciliationRecorder:
 def worker_status_contract():
     controller = ReconciliationRecorder()
     manager = TransientWorkerStatusManager()
-    scheduler = TaskSchedulerThread(controller)
+    scheduler = WorkflowDriver(controller)
     scheduler._manager = manager
     observed = scheduler._sync_worker_epochs()
     assert observed == {"worker-stable"}

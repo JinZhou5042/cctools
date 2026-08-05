@@ -73,6 +73,7 @@ def format_logical_outputs(
         "attempts_by_task_complete": bool(detailed),
     }
 
+
 def format_manager_metrics(stats):
     """Copy the stable Manager timing and byte counters."""
 
