@@ -93,6 +93,7 @@ def _execute_datavine_task(
     task_record,
     allow_peer_transfer,
     transfer_faults,
+    diagnostics,
 ):
     """Execute one logical task through the worker-owned data path."""
     from .runner import execute_task
@@ -120,9 +121,11 @@ def _execute_datavine_task(
 
     events = []
     outputs = []
-    timings = {}
-    started = time.monotonic()
-    retries_before = client.thread_transient_retry_count
+    timings = {} if diagnostics else None
+    started = time.monotonic() if diagnostics else 0.0
+    retries_before = (
+        client.thread_transient_retry_count if diagnostics else 0
+    )
     error = None
     try:
         result = execute_task(
@@ -141,7 +144,7 @@ def _execute_datavine_task(
             raise RuntimeError(
                 f"DataVine TaskID {task_id} runner returned {result}"
             )
-        publish_started = time.monotonic()
+        publish_started = time.monotonic() if diagnostics else 0.0
         if outputs:
             publisher_key = controller_key + (
                 outputs[0]["worker_id"],
@@ -164,9 +167,10 @@ def _execute_datavine_task(
                 raise RuntimeError(
                     "Controller returned incomplete publications"
                 )
-        timings["controller_publication"] = (
-            time.monotonic() - publish_started
-        )
+        if diagnostics:
+            timings["controller_publication"] = (
+                time.monotonic() - publish_started
+            )
     except Exception:
         error = traceback.format_exc()
     finally:
@@ -186,18 +190,23 @@ def _execute_datavine_task(
             )
             for output in outputs
         )
+    diagnostic_row = (
+        (
+            time.monotonic() - started,
+            tuple(timings.items()),
+            client.thread_transient_retry_count - retries_before,
+            _cache_snapshot(PROCESS_CACHE),
+        )
+        if diagnostics
+        else None
+    )
     return (
-        "datavine-task-v3",
+        "datavine-task-v4",
         int(task_id),
-        events,
-        _cache_snapshot(PROCESS_CACHE),
-        client.thread_transient_retry_count - retries_before,
         outputs,
+        events,
         error,
-        time.monotonic() - started,
-        tuple(timings.items()),
-        error is None,
-        error is None and client.native is not None,
+        diagnostic_row,
     )
 
 
@@ -211,6 +220,7 @@ def execute_datavine_task(
     task_record,
     allow_peer_transfer,
     transfer_faults,
+    diagnostics,
 ):
     try:
         return _execute_datavine_task(
@@ -223,18 +233,14 @@ def execute_datavine_task(
             task_record,
             allow_peer_transfer,
             transfer_faults,
+            diagnostics,
         )
     except Exception:
         return (
-            "datavine-task-v3",
+            "datavine-task-v4",
             int(task_id),
             [],
-            ("", int(worker_dram_cache_bytes), 0, 0, 0, 0, 0, 0),
-            0,
             [],
             traceback.format_exc(),
-            0.0,
-            (),
-            False,
-            False,
+            None,
         )

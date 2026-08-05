@@ -87,6 +87,7 @@ class TaskFactory:
         worker_dram_cache_bytes,
         allow_peer_transfer=True,
         transfer_faults=False,
+        diagnostics=False,
     ):
         self.manager = manager
         self.controller = controller
@@ -95,6 +96,7 @@ class TaskFactory:
         self.worker_dram_cache_bytes = int(worker_dram_cache_bytes)
         self.allow_peer_transfer = bool(allow_peer_transfer)
         self.transfer_faults = bool(transfer_faults)
+        self.diagnostics = bool(diagnostics)
 
     def make_physical_task(
         self,
@@ -115,6 +117,7 @@ class TaskFactory:
             record.to_row(),
             self.allow_peer_transfer,
             self.transfer_faults,
+            self.diagnostics,
         )
         task.set_tag(str(task_id))
         task.set_category("datavine-compute")

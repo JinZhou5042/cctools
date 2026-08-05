@@ -39,7 +39,7 @@ from .task_factory import DataVineCall, TaskFactory, ensure_worker_library
 class WorkflowDriver:
     _registration_batch_size = 4096
     _compute_attempt_limit = 3
-    _compute_submission_window = 4096
+    _compute_submission_window = 1024
 
     def __init__(
         self,
@@ -453,6 +453,15 @@ class WorkflowDriver:
             worker_dram_cache_bytes,
             allow_peer_transfer=self._peer_transfers_enabled,
             transfer_faults=transfer_faults_enabled,
+            diagnostics=detailed_report,
+        )
+        compute_submission_window = max(
+            self._compute_submission_window,
+            4
+            * sum(
+                int(worker["cores_total"])
+                for worker in self._manager.status("workers")
+            ),
         )
         workflow_registration_elapsed = (
             time.monotonic() - workflow_run_started
@@ -1449,7 +1458,7 @@ class WorkflowDriver:
                 persistence_frontier_ready,
                 max(
                     0,
-                    self._compute_submission_window
+                    compute_submission_window
                     - len(execution.running),
                 ),
             )
@@ -1986,8 +1995,8 @@ class WorkflowDriver:
                 task_output
                 if (
                     isinstance(task_output, tuple)
-                    and len(task_output) == 11
-                    and task_output[0] == "datavine-task-v3"
+                    and len(task_output) == 6
+                    and task_output[0] == "datavine-task-v4"
                 )
                 else None
             )
@@ -1995,23 +2004,29 @@ class WorkflowDriver:
                 (
                     _,
                     returned_task_id,
-                    events,
-                    cache_snapshot,
-                    controller_retries,
                     outputs,
+                    events,
                     error,
-                    worker_seconds,
-                    timing_rows,
-                    outputs_committed,
-                    native_committed,
+                    diagnostics,
                 ) = structured_task
                 if int(returned_task_id) != logical_id:
                     raise RuntimeError(
                         "worker returned a mismatched logical TaskID"
                     )
-                execution.worker_seconds += float(worker_seconds)
-                for name, seconds in timing_rows:
-                    execution.worker_timing_seconds[name] += float(seconds)
+                if diagnostics is not None:
+                    (
+                        worker_seconds,
+                        timing_rows,
+                        controller_retries,
+                        cache_snapshot,
+                    ) = diagnostics
+                    execution.worker_seconds += float(worker_seconds)
+                    for name, seconds in timing_rows:
+                        execution.worker_timing_seconds[name] += float(seconds)
+                    execution.worker_controller_retries += int(
+                        controller_retries
+                    )
+                    record_worker_dram_cache(cache_snapshot)
                 if error is not None:
                     reported_missing = set()
                     marker = "IData is not available: i:"
@@ -2098,14 +2113,8 @@ class WorkflowDriver:
                         }
                     )
                 outputs = decoded_outputs
-                if native_committed:
+                if self.controller.native_endpoint:
                     record_output_projection(outputs)
-                elif not outputs_committed:
-                    committed = self.controller.commit_outputs(outputs)
-                    if len(committed) != len(outputs):
-                        raise RuntimeError(
-                            "Controller returned incomplete output commits"
-                        )
                 for line in events:
                     if line.startswith("DATAVINE_REPLICA_OBSERVED "):
                         observation = json.loads(
@@ -2136,10 +2145,6 @@ class WorkflowDriver:
                     line.startswith("DATAVINE_PEER_FETCH i:")
                     for line in events
                 )
-                execution.worker_controller_retries += int(
-                    controller_retries
-                )
-                record_worker_dram_cache(cache_snapshot)
                 for output in outputs:
                     if (
                         output.get("worker_id")
@@ -2367,6 +2372,7 @@ class WorkflowDriver:
             ),
             "physical_attempts": sum(self._run_context.attempts.values()),
             "physical_compute_submissions": execution.physical_submissions,
+            "compute_submission_window": compute_submission_window,
             "physical_task_build_seconds": (
                 execution.physical_task_build_seconds
             ),
