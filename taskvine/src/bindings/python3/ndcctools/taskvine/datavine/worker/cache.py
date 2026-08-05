@@ -205,11 +205,12 @@ class WorkerDiskStore:
         path = self._path(
             scope, data_key, content_hash, len(payload)
         )
-        temporary = path.with_name(
-            f".{path.name}.{os.getpid()}.{threading.get_ident()}"
-        )
-        temporary.write_bytes(payload)
-        os.replace(temporary, path)
+        try:
+            with path.open("xb") as stream:
+                stream.write(payload)
+        except FileExistsError:
+            if self._read(path, content_hash, len(payload)) is None:
+                path.write_bytes(payload)
         old = self._data_paths.get((scope, str(data_key)))
         self._data_paths[(scope, str(data_key))] = path
         if old is not None and old != path:

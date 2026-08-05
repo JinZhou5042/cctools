@@ -101,7 +101,7 @@ static int client_open(struct client *client, int port)
 	return client->fd >= 0 && connect(client->fd, (struct sockaddr *)&address, sizeof(address)) == 0 && request(client, VINE_DATAVINE_RPC_AUTH, (const unsigned char *)"test-token", 10);
 }
 
-static int claim_worker(int port, const char *worker_id)
+static int claim_worker(int port, const char *worker_id, uint64_t expected_epoch)
 {
 	struct client client = {.fd = -1};
 	if (!client_open(&client, port)) {
@@ -119,7 +119,7 @@ static int claim_worker(int port, const char *worker_id)
 	memcpy(payload + 4 + worker_length, endpoint, endpoint_length);
 	unsigned char *body = 0;
 	uint32_t body_size = 0;
-	int valid = request_response(&client, VINE_DATAVINE_RPC_CLAIM_WORKER, payload, (uint32_t)(4 + worker_length + endpoint_length), &body, &body_size) && body_size == 8 && vine_datavine_rpc_get_u64(body) == 1;
+	int valid = request_response(&client, VINE_DATAVINE_RPC_CLAIM_WORKER, payload, (uint32_t)(4 + worker_length + endpoint_length), &body, &body_size) && body_size == 8 && vine_datavine_rpc_get_u64(body) == expected_epoch;
 	free(body);
 	close(client.fd);
 	return valid;
@@ -127,7 +127,7 @@ static int claim_worker(int port, const char *worker_id)
 
 static int source_protocol(int port, const char *source_worker)
 {
-	if (!claim_worker(port, "destination")) {
+	if (!claim_worker(port, "destination", 1)) {
 		return 0;
 	}
 	struct client client = {.fd = -1};
@@ -150,9 +150,9 @@ static int source_protocol(int port, const char *source_worker)
 	report[6] = (unsigned char)(endpoint_length >> 8);
 	report[7] = (unsigned char)endpoint_length;
 	vine_datavine_rpc_put_u64(report + 8, 1);
-	vine_datavine_rpc_put_u64(report + 16, 42);
+	vine_datavine_rpc_put_u64(report + 16, 1);
 	vine_datavine_rpc_put_u32(report + 24, 1);
-	vine_datavine_rpc_put_u64(report + 32, 1);
+	vine_datavine_rpc_put_u64(report + 32, 5);
 	memcpy(report + 40,
 			"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
 			64);
@@ -175,7 +175,7 @@ static int source_protocol(int port, const char *source_worker)
 	resolve[4] = (unsigned char)(transfer_length >> 8);
 	resolve[5] = (unsigned char)transfer_length;
 	vine_datavine_rpc_put_u64(resolve + 8, 1);
-	vine_datavine_rpc_put_u64(resolve + 16, 42);
+	vine_datavine_rpc_put_u64(resolve + 16, 1);
 	memcpy(resolve + 24, destination, destination_length);
 	memcpy(resolve + 24 + destination_length, transfer, transfer_length);
 	unsigned char *body = 0;
@@ -201,7 +201,7 @@ static int source_protocol(int port, const char *source_worker)
 	invalidate[0] = 'e';
 	invalidate[2] = (unsigned char)(replica_length >> 8);
 	invalidate[3] = (unsigned char)replica_length;
-	vine_datavine_rpc_put_u64(invalidate + 8, 42);
+	vine_datavine_rpc_put_u64(invalidate + 8, 1);
 	memcpy(invalidate + 16, replica_id, replica_length);
 	valid &= request(&client, VINE_DATAVINE_RPC_INVALIDATE_REPLICA, invalidate, 16 + replica_length);
 	close(client.fd);
@@ -235,7 +235,7 @@ static int edata_protocol(int port)
 	vine_datavine_rpc_put_u64(request_data, 1);
 	unsigned char *body = 0;
 	uint32_t body_size = 0;
-	int valid = request_response(&client, VINE_DATAVINE_RPC_GET_EDATA, request_data, sizeof(request_data), &body, &body_size) && body_size == 151 && vine_datavine_rpc_get_u32(body) == 2 && vine_datavine_rpc_get_u64(body + 4) == 5 && !memcmp(body + 16, content, 64) && !memcmp(body + 80, serialized, 64) && !memcmp(body + 144, metadata, 2) && !memcmp(body + 146, data, 5);
+	int valid = request_response(&client, VINE_DATAVINE_RPC_GET_EDATA, request_data, sizeof(request_data), &body, &body_size) && body_size == 153 && vine_datavine_rpc_get_u64(body) == 5 && vine_datavine_rpc_get_u64(body + 8) == 5 && !memcmp(body + 20, content, 64) && !memcmp(body + 84, serialized, 64) && !memcmp(body + 148, data, 5);
 	free(body);
 	close(client.fd);
 	return valid;
@@ -251,7 +251,7 @@ static int edata_available(int port)
 	vine_datavine_rpc_put_u64(request_data, 1);
 	unsigned char *body = 0;
 	uint32_t body_size = 0;
-	int valid = request_response(&client, VINE_DATAVINE_RPC_GET_EDATA, request_data, sizeof(request_data), &body, &body_size) && body_size == 151 && !memcmp(body + 146, "hello", 5);
+	int valid = request_response(&client, VINE_DATAVINE_RPC_GET_EDATA, request_data, sizeof(request_data), &body, &body_size) && body_size == 153 && !memcmp(body + 148, "hello", 5);
 	free(body);
 	close(client.fd);
 	return valid;
@@ -267,7 +267,10 @@ static int journal_recovery_protocol(int threads)
 	close(fd);
 	struct vine_datavine_rpc_server *server = vine_datavine_rpc_server_create(
 			"127.0.0.1", 0, "test-token", threads, 128, 1024 * 1024, path);
-	int valid = server && edata_protocol(vine_datavine_rpc_server_port(server)) && claim_worker(vine_datavine_rpc_server_port(server), "recovered");
+	int valid = server && edata_protocol(vine_datavine_rpc_server_port(server));
+	if (valid) {
+		valid = claim_worker(vine_datavine_rpc_server_port(server), "recovered", 1);
+	}
 	vine_datavine_rpc_server_delete(server);
 	fd = open(path, O_WRONLY | O_APPEND);
 	valid &= fd >= 0 && write(fd, "end", 3) == 3;
@@ -279,7 +282,10 @@ static int journal_recovery_protocol(int threads)
 		server = vine_datavine_rpc_server_create(
 				"127.0.0.1", 0, "test-token", threads, 128, 1024 * 1024, path);
 	}
-	valid &= server && edata_available(vine_datavine_rpc_server_port(server)) && claim_worker(vine_datavine_rpc_server_port(server), "recovered");
+	valid &= server && edata_available(vine_datavine_rpc_server_port(server));
+	if (valid) {
+		valid = claim_worker(vine_datavine_rpc_server_port(server), "recovered", 1);
+	}
 	vine_datavine_rpc_server_delete(server);
 	unlink(path);
 	return valid;
@@ -383,15 +389,15 @@ int main(int argc, char **argv)
 		int64_t count = (records - assigned) / (clients - i);
 		char worker_id[32];
 		snprintf(worker_id, sizeof(worker_id), "worker-%lld", (long long)assigned + 1);
-		if (!claim_worker(vine_datavine_rpc_server_port(server), worker_id)) {
+		if (!claim_worker(vine_datavine_rpc_server_port(server), worker_id, 1)) {
 			return 2;
 		}
 		assigned += count;
 	}
-	if (!source_protocol(vine_datavine_rpc_server_port(server), "worker-1")) {
+	if (!edata_protocol(vine_datavine_rpc_server_port(server))) {
 		return 2;
 	}
-	if (!edata_protocol(vine_datavine_rpc_server_port(server))) {
+	if (!source_protocol(vine_datavine_rpc_server_port(server), "worker-1")) {
 		return 2;
 	}
 	assigned = 0;

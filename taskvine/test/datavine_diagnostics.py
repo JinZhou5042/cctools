@@ -28,6 +28,21 @@ def main():
     ]
     assert ranked[-1]["count"] == 3
     assert len(ranked) == 4
+    complete = rank_bottlenecks(
+        {"execution": 1.0},
+        {},
+        {},
+        worker_timing={"disk": 0.5},
+        manager_timing_us={"send": 250_000},
+        task_count=100,
+    )
+    assert [entry["category"] for entry in complete] == [
+        "workflow",
+        "worker",
+        "manager",
+    ]
+    assert complete[1]["scope"] == "cumulative-task-time"
+    assert complete[1]["microseconds_per_task"] == 5000
     try:
         rank_bottlenecks({}, {}, {}, 0)
     except ValueError:

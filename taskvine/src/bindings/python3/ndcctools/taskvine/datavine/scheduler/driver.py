@@ -481,31 +481,32 @@ class WorkflowDriver:
                 raise KeyError(
                     f"unknown result TaskIDs {sorted(unknown_results)}"
                 )
-        required_result_data_ids = {
-            data_id
-            for task_id in result_task_ids
-            for data_id in self._run_context.logical_output_slots[task_id]
-        }
         task_by_id = {task.task_id: task for task in workflow.tasks}
         execution = ExecutionState(pending=set(task_by_id))
         physical_completion_queue = collections.deque()
 
         def record_worker_dram_cache(value):
-            worker_id = value.get("worker_id")
+            (
+                worker_id,
+                capacity_bytes,
+                bytes_used,
+                items,
+                hits,
+                misses,
+                admissions,
+                evictions,
+            ) = value
             if not worker_id:
                 raise RuntimeError("DRAM cache report lacks WorkerID")
             execution.worker_dram_cache[worker_id] = {
-                key: item
-                for key, item in value.items()
-                if key != "worker_id"
+                "capacity_bytes": int(capacity_bytes),
+                "bytes": int(bytes_used),
+                "items": int(items),
+                "hits": int(hits),
+                "misses": int(misses),
+                "admissions": int(admissions),
+                "evictions": int(evictions),
             }
-
-        def record_worker_dram_cache_events(lines):
-            for line in lines:
-                if not line.startswith("DATAVINE_DRAM_CACHE "):
-                    continue
-                value = json.loads(line.split(" ", 1)[1])
-                record_worker_dram_cache(value)
 
         explicit_persistence_frontiers = (
             persistence_attempts_by_task is not None
@@ -1925,25 +1926,33 @@ class WorkflowDriver:
             structured_task = (
                 completed.output
                 if (
-                    isinstance(completed.output, dict)
-                    and completed.output.get("protocol")
-                    == "datavine-task-v1"
+                    isinstance(completed.output, tuple)
+                    and len(completed.output) == 11
+                    and completed.output[0] == "datavine-task-v2"
                 )
                 else None
             )
             if structured_task is not None:
-                if int(structured_task["task_id"]) != logical_id:
+                (
+                    _,
+                    returned_task_id,
+                    events,
+                    cache_snapshot,
+                    controller_retries,
+                    outputs,
+                    error,
+                    worker_seconds,
+                    timing_rows,
+                    outputs_committed,
+                    native_committed,
+                ) = structured_task
+                if int(returned_task_id) != logical_id:
                     raise RuntimeError(
                         "worker returned a mismatched logical TaskID"
                     )
-                execution.worker_seconds += float(
-                    structured_task["worker_seconds"]
-                )
-                for name, seconds in structured_task[
-                    "timing_seconds"
-                ].items():
+                execution.worker_seconds += float(worker_seconds)
+                for name, seconds in timing_rows:
                     execution.worker_timing_seconds[name] += float(seconds)
-                error = structured_task["error"]
                 if error is not None:
                     reported_missing = set()
                     marker = "IData is not available: i:"
@@ -1977,7 +1986,7 @@ class WorkflowDriver:
                             "error": str(error)[:2048],
                             "data_events": [
                                 line
-                                for line in structured_task["events"]
+                                for line in events
                                 if line.startswith(
                                     "DATAVINE_PEER_"
                                 )
@@ -1989,7 +1998,6 @@ class WorkflowDriver:
                     execution.pending.add(logical_id)
                     ready_queue.mark_pending(logical_id)
                     continue
-                outputs = structured_task["outputs"]
                 expected_output_ids = self._run_context.logical_output_slots[
                     logical_id
                 ]
@@ -2011,15 +2019,14 @@ class WorkflowDriver:
                         raise RuntimeError(
                             f"TaskID {logical_id} returned mismatched output"
                         )
-                if structured_task.get("native_committed"):
+                if native_committed:
                     record_output_projection(outputs)
-                elif not structured_task["outputs_committed"]:
+                elif not outputs_committed:
                     committed = self.controller.commit_outputs(outputs)
                     if len(committed) != len(outputs):
                         raise RuntimeError(
                             "Controller returned incomplete output commits"
                         )
-                events = structured_task["events"]
                 for line in events:
                     if line.startswith("DATAVINE_REPLICA_OBSERVED "):
                         observation = json.loads(
@@ -2050,9 +2057,9 @@ class WorkflowDriver:
                     for line in events
                 )
                 execution.worker_controller_retries += int(
-                    structured_task["controller_retries"]
+                    controller_retries
                 )
-                record_worker_dram_cache(structured_task["cache"])
+                record_worker_dram_cache(cache_snapshot)
                 for output in outputs:
                     if output.get("worker_id") and str(
                         output.get("tier", "")
@@ -2068,23 +2075,6 @@ class WorkflowDriver:
                         remaining_cache_uses[data_key] -= 1
                 maybe_inject_worker_loss(logical_id)
                 continue
-            completed_output = (
-                completed.output
-                if isinstance(completed.output, str)
-                else ""
-            )
-            execution.local_idata_hits += completed_output.count(
-                "DATAVINE_LOCAL_IDATA"
-            )
-            execution.peer_idata_fetches += completed_output.count(
-                "DATAVINE_PEER_FETCH i:"
-            )
-            execution.worker_controller_retries += sum(
-                int(line.split(" ", 1)[1])
-                for line in completed_output.splitlines()
-                if line.startswith("DATAVINE_CONTROLLER_RETRIES ")
-            )
-            record_worker_dram_cache_events(completed_output.splitlines())
             if not completed.successful():
                 # A worker can disappear after its replica was selected but
                 # before a dependent task starts. Reconcile first, then turn
@@ -2141,108 +2131,9 @@ class WorkflowDriver:
                     f"exit={completed.exit_code} "
                     f"stdout={completed.output!r}"
                 )
-            if not isinstance(completed.output, str):
-                raise RuntimeError(
-                    f"TaskID {logical_id} returned non-text successful "
-                    f"output {completed.output!r}"
-                )
-            observation_lines = [
-                line[len("DATAVINE_REPLICA_OBSERVED "):]
-                for line in completed.output.splitlines()
-                if line.startswith("DATAVINE_REPLICA_OBSERVED ")
-            ]
-            for line in observation_lines:
-                self._cache_admission.observe(json.loads(line))
-            preparation_lines = [
-                line[len("DATAVINE_REPLICA_PREPARED "):]
-                for line in completed.output.splitlines()
-                if line.startswith("DATAVINE_REPLICA_PREPARED ")
-            ]
-            expected_output_ids = self._run_context.logical_output_slots[logical_id]
-            if len(preparation_lines) != len(expected_output_ids):
-                raise RuntimeError(
-                    f"TaskID {logical_id} returned "
-                    f"{len(preparation_lines)} replica preparations; "
-                    f"expected {len(expected_output_ids)}"
-                )
-            preparations = {
-                int(preparation["output_index"]): preparation
-                for preparation in map(json.loads, preparation_lines)
-            }
-            if set(preparations) != set(range(len(expected_output_ids))):
-                raise RuntimeError(
-                    f"TaskID {logical_id} returned invalid output slots"
-                )
-            for output_index, output_data_id in enumerate(
-                expected_output_ids
-            ):
-                preparation = preparations[output_index]
-                if (
-                    preparation["data_id"] != f"i:{output_data_id}"
-                    or preparation["attempt"]
-                    != self._run_context.attempts[logical_id]
-                ):
-                    raise RuntimeError(
-                        f"TaskID {logical_id} returned mismatched replica"
-                    )
-                self.controller.commit_replica(
-                    preparation["data_id"],
-                    preparation["replica_id"],
-                    preparation["generation"],
-                    preparation["attempt"],
-                    preparation["content_hash"],
-                    preparation["size"],
-                )
-                self._cache_admission.observe(preparation)
-                # Every output slot must be published before the logical task
-                # can complete.
-                output_status = self.controller.idata_status(
-                    output_data_id
-                )
-                if (
-                    not output_status["available"]
-                    or output_status["attempt"]
-                    != self._run_context.attempts[logical_id]
-                    or output_status["content_hash"]
-                    != preparation["content_hash"]
-                    or output_status["size"] != preparation["size"]
-                ):
-                    raise RuntimeError(
-                        f"TaskID {logical_id} output {output_index} "
-                        "publication is not available"
-                    )
-            queue_task_persistence(logical_id, expected_output_ids)
-            record_completed_task_state(logical_id)
-            execution.done.add(logical_id)
-            ready_queue.mark_done(logical_id, execution.pending)
-            if logical_id not in execution.completed_once:
-                execution.completed_once.add(logical_id)
-                for data_key in task_cache_inputs[logical_id]:
-                    remaining_cache_uses[data_key] -= 1
-            if (
-                inject_global_loss_after == logical_id
-                and not execution.loss_injected
-            ):
-                self.controller.invalidate_idata(
-                    output_ids[logical_id]
-                )
-                execution.recovery_audit_data_ids.add(output_ids[logical_id])
-                execution.loss_injected = True
-            maybe_inject_worker_loss(logical_id)
-            flush_output_projections()
-            self._cache_admission.enforce(
-                effective_retention_bytes,
-                effective_retention_items,
-                remaining_cache_uses,
-                {
-                    data_key
-                    for running_logical_id in execution.running.values()
-                    for data_key in task_cache_inputs[running_logical_id]
-                }
-                | {
-                    f"i:{data_id}"
-                    for data_id in required_result_data_ids
-                },
+            raise RuntimeError(
+                f"TaskID {logical_id} returned an invalid DataVine result "
+                f"{completed.output!r}"
             )
         flush_output_projections()
         flush_completed_task_states()
@@ -2396,6 +2287,11 @@ class WorkflowDriver:
                 workflow_timing,
                 registration_timing,
                 controller_request_metrics,
+                worker_timing=execution.worker_timing_seconds,
+                manager_timing_us=format_manager_metrics(manager_stats)[
+                    "manager_timing_us"
+                ],
+                task_count=len(output_ids),
             ),
             "recovery_reexecutions": execution.recovery_reexecutions,
             "unavailable_input_recoveries": (

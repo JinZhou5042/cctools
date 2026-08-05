@@ -60,8 +60,16 @@ def persist_datavine_idata(
 def _cache_snapshot(process_cache):
     with process_cache.lock:
         snapshot = process_cache.data.snapshot()
-    snapshot["worker_id"] = os.environ.get("VINE_WORKER_ID", "")
-    return snapshot
+    return (
+        os.environ.get("VINE_WORKER_ID", ""),
+        snapshot["capacity_bytes"],
+        snapshot["bytes"],
+        snapshot["items"],
+        snapshot["hits"],
+        snapshot["misses"],
+        snapshot["admissions"],
+        snapshot["evictions"],
+    )
 
 
 def execute_datavine_task(
@@ -98,7 +106,7 @@ def execute_datavine_task(
     with PROCESS_CACHE.lock:
         PROCESS_CACHE.task_records[
             (controller, token, int(task_id))
-        ] = TaskRecord.from_dict(task_record)
+        ] = TaskRecord.from_row(task_record)
 
     events = []
     outputs = []
@@ -157,18 +165,16 @@ def execute_datavine_task(
     finally:
         for output in outputs:
             output.pop("payload", None)
-    return {
-        "protocol": "datavine-task-v1",
-        "task_id": int(task_id),
-        "events": events,
-        "cache": _cache_snapshot(PROCESS_CACHE),
-        "controller_retries": (
-            client.thread_transient_retry_count - retries_before
-        ),
-        "outputs": outputs,
-        "error": error,
-        "worker_seconds": time.monotonic() - started,
-        "timing_seconds": timings,
-        "outputs_committed": error is None,
-        "native_committed": error is None and client.native is not None,
-    }
+    return (
+        "datavine-task-v2",
+        int(task_id),
+        events,
+        _cache_snapshot(PROCESS_CACHE),
+        client.thread_transient_retry_count - retries_before,
+        outputs,
+        error,
+        time.monotonic() - started,
+        tuple(timings.items()),
+        error is None,
+        error is None and client.native is not None,
+    )

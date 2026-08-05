@@ -1,6 +1,7 @@
 """Protocol-neutral immutable DataVine records."""
 
 import dataclasses
+import functools
 import hashlib
 import json
 
@@ -16,6 +17,7 @@ class SerializationMetadata:
     type_qualname: str
     domain: str = "value"
 
+    @functools.cache
     def identity_bytes(self):
         values = dataclasses.asdict(self)
         values["python_version"] = list(self.python_version)
@@ -125,6 +127,20 @@ class TaskRecord:
             "output_data_ids": list(self.output_data_ids),
             "input_data_ids": list(self.input_data_ids),
         }
+
+    def to_row(self):
+        return (
+            self.task_id,
+            self.function_data_id,
+            self.positional,
+            self.keyword,
+            self.output_data_ids,
+            self.input_data_ids,
+        )
+
+    @classmethod
+    def from_row(cls, value):
+        return cls(*value)
 
     @classmethod
     def from_dict(cls, value):

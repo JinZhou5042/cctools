@@ -112,7 +112,7 @@ class TaskFactory:
             task_id,
             attempt,
             self.worker_dram_cache_bytes,
-            record.to_dict(),
+            record.to_row(),
             self.allow_peer_transfer,
             self.transfer_faults,
         )
