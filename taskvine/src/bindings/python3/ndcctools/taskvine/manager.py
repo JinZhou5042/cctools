@@ -965,6 +965,7 @@ class Manager(object):
     # - "attempt-schedule-depth" The amount of tasks to attempt scheduling on each pass of send_one_task in the main loop. (default=100)
     # - "category-steady-n-tasks" Set the number of tasks considered when computing category buckets.
     # - "default-transfer-rate" The assumed network bandwidth used until sufficient data has been collected.  (1MB/s)
+    # - "disable-manager-logs" If 1, disable debug, performance, transaction, and taskgraph logs.
     # - "disconnect-slow-workers-factor" Set the multiplier of the average task time at which point to disconnect a worker; disabled if less than 1. (default=0)
     # - "hungry-minimum" Mimimum number of tasks to consider manager not hungry. (default=10)
     # - "hungry-minimum-factor" Queue is hungry if number of waiting tasks is less than hungry-minumum-factor x (number of workers) | 2 |

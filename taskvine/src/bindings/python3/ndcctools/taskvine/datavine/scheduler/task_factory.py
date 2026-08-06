@@ -54,6 +54,7 @@ def ensure_worker_library(manager):
         return
     from ..worker.library import (
         execute_datavine_task,
+        initialize_datavine_library,
         persist_datavine_idata,
         warm_datavine_worker,
     )
@@ -65,13 +66,17 @@ def ensure_worker_library(manager):
         warm_datavine_worker,
         add_env=False,
         exec_mode="direct",
+        library_context_info=[initialize_datavine_library, [], {}],
     )
     workers = manager.status("workers")
-    library.set_function_slots(
+    shard_cores = min(
+        2,
         min(int(worker["cores_total"]) for worker in workers)
         if workers
-        else 1
+        else 1,
     )
+    library.set_cores(shard_cores)
+    library.set_function_slots(shard_cores)
     manager.install_library(library)
 
 

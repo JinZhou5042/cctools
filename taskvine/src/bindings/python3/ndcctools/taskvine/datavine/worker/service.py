@@ -154,12 +154,14 @@ class WorkerDataService:
     ):
         for attempt in range(2):
             connection = getattr(self._connections, "socket", None)
-            if connection is None:
-                connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                connection.settimeout(2)
-                connection.connect(self._socket_address)
-                self._connections.socket = connection
             try:
+                if connection is None:
+                    connection = socket.socket(
+                        socket.AF_UNIX, socket.SOCK_STREAM
+                    )
+                    connection.settimeout(2)
+                    connection.connect(self._socket_address)
+                    self._connections.socket = connection
                 connection.sendall(request + payload)
                 response = _recv_exact(connection, response_size)
                 if not size_prefixed:
@@ -293,6 +295,9 @@ def _serve(root, owner_pid):
                 else:
                     return
 
+    class LocalServer(socketserver.ThreadingUnixStreamServer):
+        request_queue_size = socket.SOMAXCONN
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -394,7 +399,7 @@ def _serve(root, owner_pid):
         def log_message(self, format, *args):
             return
 
-    local_server = socketserver.ThreadingUnixStreamServer(
+    local_server = LocalServer(
         _socket_address(capability), LocalHandler
     )
     local_server.daemon_threads = True

@@ -5968,6 +5968,25 @@ void vine_set_manager_preferred_connection(struct vine_manager *q, const char *p
 	q->manager_preferred_connection = xxstrdup(preferred_connection);
 }
 
+static void vine_disable_manager_logs(struct vine_manager *q)
+{
+	if (q->perf_logfile) {
+		fclose(q->perf_logfile);
+		q->perf_logfile = NULL;
+	}
+	if (q->txn_logfile) {
+		vine_txn_log_write_manager(q, "END");
+		fclose(q->txn_logfile);
+		q->txn_logfile = NULL;
+	}
+	if (q->graph_logfile) {
+		vine_taskgraph_log_write_footer(q);
+		fclose(q->graph_logfile);
+		q->graph_logfile = NULL;
+	}
+	debug_flags_clear();
+}
+
 int vine_tune(struct vine_manager *q, const char *name, double value)
 {
 	if (!strcmp(name, "attempt-schedule-depth")) {
@@ -5996,6 +6015,11 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "keepalive-timeout")) {
 		q->keepalive_timeout = MAX(0, (int)value);
+
+	} else if (!strcmp(name, "disable-manager-logs")) {
+		if (value > 0) {
+			vine_disable_manager_logs(q);
+		}
 
 	} else if (!strcmp(name, "long-timeout")) {
 		q->long_timeout = MAX(1, (int)value);

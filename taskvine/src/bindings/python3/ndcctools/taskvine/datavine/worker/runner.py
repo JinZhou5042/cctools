@@ -23,6 +23,17 @@ class WorkerRuntime:
     source_resolver: SourceResolver
 
 
+def initialize_data_service():
+    worker_id = os.environ.get("VINE_WORKER_ID")
+    if not worker_id:
+        raise RuntimeError("TaskVine worker incarnation is unavailable")
+    with PROCESS_CACHE.context_lock:
+        PROCESS_CACHE.disk.configure(worker_id)
+        if PROCESS_CACHE.data_service is None:
+            PROCESS_CACHE.data_service = WorkerDataService(PROCESS_CACHE)
+        return PROCESS_CACHE.data_service
+
+
 def initialize_worker(controller, token, native_controller):
     controller = str(controller)
     token = str(token)
@@ -44,10 +55,7 @@ def initialize_worker(controller, token, native_controller):
                 native_endpoint=native_controller,
             )
             PROCESS_CACHE.clients[controller_key] = client
-        PROCESS_CACHE.disk.configure(worker_id)
-        if PROCESS_CACHE.data_service is None:
-            PROCESS_CACHE.data_service = WorkerDataService(PROCESS_CACHE)
-        source_endpoint = PROCESS_CACHE.data_service.endpoint(
+        source_endpoint = initialize_data_service().endpoint(
             controller, token
         )
         worker_epoch = int(

@@ -244,6 +244,7 @@ def run_case(
                 factory_manager or f"datavine-{name}",
                 str(root / "run-info"),
                 peer_transfers,
+                detailed_report,
             )
             if not factory_manager:
                 workers.extend(

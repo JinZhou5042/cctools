@@ -5,6 +5,12 @@ import time
 import traceback
 
 
+def initialize_datavine_library():
+    from .runner import initialize_data_service
+
+    initialize_data_service()
+
+
 def warm_datavine_worker(controller, token, native_controller):
     from .runner import initialize_worker
 

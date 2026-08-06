@@ -195,7 +195,7 @@ class WorkflowDriver:
             if not completed.successful():
                 raise RuntimeError(
                     "DataVine worker library warmup failed: "
-                    f"{completed.output!r}"
+                    f"result={completed.result} exit_code={completed.exit_code}"
                 )
             task_ids.remove(completed.id)
         return True
@@ -310,7 +310,12 @@ class WorkflowDriver:
         }
 
     def _op_create_manager(
-        self, port=0, name=None, run_info_path=None, peer_transfers=True
+        self,
+        port=0,
+        name=None,
+        run_info_path=None,
+        peer_transfers=True,
+        manager_logs=False,
     ):
         self._assert_owner()
         if self._manager is not None:
@@ -321,6 +326,11 @@ class WorkflowDriver:
         if run_info_path is not None:
             kwargs["run_info_path"] = run_info_path
         self._manager = Manager(**kwargs)
+        if (
+            not manager_logs
+            and self._manager.tune("disable-manager-logs", 1) < 0
+        ):
+            raise RuntimeError("could not disable TaskVine Manager logs")
         debug_file = os.environ.get("DATAVINE_MANAGER_DEBUG_FILE")
         if debug_file and not cvine.vine_enable_debug_log(debug_file):
             raise RuntimeError("could not enable TaskVine Manager debug log")

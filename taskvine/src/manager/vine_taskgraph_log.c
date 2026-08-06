@@ -8,6 +8,9 @@
 
 void vine_taskgraph_log_write_header(struct vine_manager *q)
 {
+	if (!q || !q->graph_logfile)
+		return;
+
 	fprintf(q->graph_logfile, "# taskvine taskgraph version 2\n");
 	fprintf(q->graph_logfile, "# TASK taskid \"program\" INPUTS fileid1 fileid fileid3 ... OUTPUTS fileid4 fileid5 ...\n");
 	fprintf(q->graph_logfile, "# FILE fileid \"source\" size\n");
@@ -15,7 +18,7 @@ void vine_taskgraph_log_write_header(struct vine_manager *q)
 
 void vine_taskgraph_log_write_task(struct vine_manager *q, struct vine_task *t)
 {
-	if (!t)
+	if (!q || !q->graph_logfile || !t)
 		return;
 
 	int id = t->task_id;
@@ -48,7 +51,7 @@ void vine_taskgraph_log_write_task(struct vine_manager *q, struct vine_task *t)
 
 void vine_taskgraph_log_write_mini_task(struct vine_manager *q, struct vine_task *t, const char *task_name, const char *output_name)
 {
-	if (!t)
+	if (!q || !q->graph_logfile || !t)
 		return;
 
 	/* XXX Mini-tasks do not have unique ID numbers, so make it up from the pointer address. */
@@ -78,7 +81,7 @@ void vine_taskgraph_log_write_mini_task(struct vine_manager *q, struct vine_task
 
 void vine_taskgraph_log_write_file(struct vine_manager *q, struct vine_file *f)
 {
-	if (!f)
+	if (!q || !q->graph_logfile || !f)
 		return;
 
 	fprintf(q->graph_logfile, "FILE %s \"%s\" %ld\n", f->cached_name, f->source ? f->source : "", f->size);
@@ -89,5 +92,8 @@ void vine_taskgraph_log_write_file(struct vine_manager *q, struct vine_file *f)
 
 void vine_taskgraph_log_write_footer(struct vine_manager *q)
 {
+	if (!q || !q->graph_logfile)
+		return;
+
 	fprintf(q->graph_logfile, "# end\n");
 }

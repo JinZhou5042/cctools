@@ -6,6 +6,7 @@ import gc
 import json
 from pathlib import Path
 import sys
+import tempfile
 import time
 
 from ndcctools.taskvine import FunctionCall, Manager, PythonTask
@@ -65,7 +66,12 @@ def run_taskvine(
     latency_sample_capacity,
     process_sample_interval,
 ):
-    manager = Manager(port=0)
+    runtime = tempfile.TemporaryDirectory(
+        prefix=f"datavine-{mode}-", dir="/tmp"
+    )
+    manager = Manager(port=0, run_info_path=runtime.name)
+    if manager.tune("disable-manager-logs", 1) < 0:
+        raise RuntimeError("could not disable TaskVine Manager logs")
     library_name = f"datavine-architecture-{mode}"
     if mode in FUNCTIONCALL_MODES:
         exec_method = mode.removeprefix("functioncall-")
@@ -162,6 +168,7 @@ def run_taskvine(
             sampler.stop()
         stop_workers(processes)
         manager._free()
+        runtime.cleanup()
         gc.collect()
 
 
