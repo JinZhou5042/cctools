@@ -283,6 +283,18 @@ The 2026-08-11 result-plane redesign is the active gate:
 - [x] Establish Git implementation checkpoint `d64387542` containing the worker-local source,
   focused tests, compact acceptance evidence, current documentation, and no
   Factory/journal/debug residue; the post-commit runner reproduced 9/9 PASS.
+- [x] Add cumulative output-publication stage metrics without returning result
+  payloads through Runtime. The 1x1 profile isolated repeated Python input
+  decode (923 ms) rather than Controller publication (about 27 ms) as the 32
+  MiB reuse bottleneck.
+- [x] Stream worker-local cloudpickle inputs directly from files. The
+  three-repetition local median reached 0.905x TaskVine for 32 MiB reuse while
+  the complete source regression remained 9/9 PASS. This is a pilot; the
+  resident 10x16 performance gate remains OPEN.
+- [ ] Profile the residual wide multi-output fixed cost, where decode is only
+  2.5 ms and the 1x1 rate remains 0.670x. Any optimization must preserve one
+  physical task per logical task, requested-output durability, and the single
+  Data Controller authority.
 
 ## 11. Ordered next work
 

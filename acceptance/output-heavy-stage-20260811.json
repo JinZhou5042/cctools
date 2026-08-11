@@ -1,0 +1,91 @@
+{
+  "artifact_type": "datavine-output-heavy-stage-profile",
+  "status": "PASS",
+  "date": "2026-08-11",
+  "scope": "local-pilot-1x1",
+  "change": "stream worker-local cloudpickle inputs directly from files instead of copying each file into a bytes object before deserialization",
+  "contract": {
+    "runtime_reads_result_payload": false,
+    "manifest": "DVM1 compact metadata only",
+    "non_requested_intermediates": "TaskVine VINE_TEMP worker cache",
+    "requested_results": "Data Controller managed files",
+    "metric_transport": "optional compact DVM1 M line",
+    "old_manifest_compatible": true
+  },
+  "baseline_single_repetition": {
+    "artifact": "/tmp/datavine-stage-metrics-decode.ifZKKn/summary.json",
+    "large_reuse_32mb": {
+      "datavine_seconds": 3.0034741200506687,
+      "taskvine_seconds": 2.2626229180023074,
+      "datavine_to_taskvine_rate": 0.7533352469719756,
+      "python_decode_seconds": 0.923128,
+      "publication_controller_seconds": 0.026613
+    },
+    "selective_multi_output_wide": {
+      "datavine_seconds": 0.21339799708221108,
+      "taskvine_seconds": 0.13726299302652478,
+      "datavine_to_taskvine_rate": 0.6432253109369369,
+      "python_decode_seconds": 0.003815,
+      "publication_controller_seconds": 0.003385
+    }
+  },
+  "stream_load_three_repetition_medians": {
+    "artifact": "/tmp/datavine-stage-stream-load.iVzh6m/summary.json",
+    "large_reuse_32mb": {
+      "datavine_seconds": 2.409233879065141,
+      "taskvine_seconds": 2.18081994401291,
+      "datavine_to_taskvine_rate": 0.9051922949295139,
+      "python_decode_seconds": 0.4305,
+      "python_function_seconds": 1.592045,
+      "python_serialize_seconds": 0.142123,
+      "python_fsync_seconds": 0.014922,
+      "publication_controller_seconds": 0.026619,
+      "publication_outputs": 17,
+      "publication_remote_outputs": 1,
+      "publication_durable_outputs": 16,
+      "publication_bytes": 33558176
+    },
+    "selective_multi_output_wide": {
+      "datavine_seconds": 0.2113781210500747,
+      "taskvine_seconds": 0.1416534900199622,
+      "datavine_to_taskvine_rate": 0.6701426302602292,
+      "python_decode_seconds": 0.002536,
+      "python_function_seconds": 0.100133,
+      "python_serialize_seconds": 0.008018,
+      "python_fsync_seconds": 0.001747,
+      "publication_controller_seconds": 0.003512,
+      "publication_outputs": 4,
+      "publication_remote_outputs": 2,
+      "publication_durable_outputs": 2,
+      "publication_bytes": 1049352
+    }
+  },
+  "observations": {
+    "large_reuse_decode_reduction_fraction": 0.533650209068288,
+    "large_reuse_rate_improvement_fraction": 0.20157964009772056,
+    "controller_is_primary_bottleneck": false,
+    "distributed_performance_parity_claimed": false
+  },
+  "regression": {
+    "artifact": "/tmp/datavine-regression-stream-load-20260811.json",
+    "status": "PASS",
+    "passed": 9,
+    "total": 9,
+    "go_binary": "/users/jzhou24/graph_optimization/factories/datavine_workflow_go-20260811",
+    "results": [
+      {"test": "TR_datavine_dynamic_workflow.sh", "passed": true},
+      {"test": "TR_datavine_go_workflow.sh", "passed": true},
+      {"test": "TR_datavine_module_boundaries.sh", "passed": true},
+      {"test": "TR_datavine_notebook_workflow.sh", "passed": true},
+      {"test": "TR_datavine_shell_workflow.sh", "passed": true},
+      {"test": "TR_datavine_workflow_execution.sh", "passed": true},
+      {"test": "TR_datavine_workflow_ir.sh", "passed": true},
+      {"test": "TR_datavine_workflow_lifecycle.sh", "passed": true},
+      {"test": "TR_datavine_workflow_service.sh", "passed": true}
+    ]
+  },
+  "reproduction": {
+    "comparison": "conda run -p /groups/dthain/users/jzhou24/miniconda/envs/datavine python acceptance/scripts/compare_workflows.py --workflows large_reuse_32mb,selective_multi_output_wide --repetitions 3 --workers 1 --cores 1 --batch-type local --backend-order datavine-first --output-dir OUTPUT_DIR",
+    "regression": "DATAVINE_GO_BINARY=/users/jzhou24/graph_optimization/factories/datavine_workflow_go-20260811 DATAVINE_REGRESSION_REPORT=REPORT conda run -p /groups/dthain/users/jzhou24/miniconda/envs/datavine bash acceptance/scripts/run_regression.sh"
+  }
+}

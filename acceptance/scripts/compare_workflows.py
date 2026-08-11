@@ -34,6 +34,9 @@ PHYSICAL_COUNTS = re.compile(
     r"physical_submissions=(?P<submitted>[0-9]+) "
     r"physical_completions=(?P<completed>[0-9]+)"
 )
+RUNTIME_METRIC = re.compile(
+    r"\b(?P<name>[a-z_]+)=(?P<value>[0-9]+(?:\.[0-9]+)?)"
+)
 
 
 def work_unit(task_key, iterations, seed, output_bytes, *parents):
@@ -415,6 +418,28 @@ def physical_counts(log_path, workflow_id):
     return {"submissions": submitted, "completions": completed}
 
 
+def runtime_stages(log_path, workflow_id):
+    totals = {}
+    matched = 0
+    for line in log_path.read_text().splitlines():
+        if f"datavine workflow {workflow_id} " not in line:
+            continue
+        values = {
+            match.group("name"): match.group("value")
+            for match in RUNTIME_METRIC.finditer(line)
+        }
+        if "setup_seconds" not in values:
+            continue
+        matched += 1
+        for name, value in values.items():
+            parsed = float(value) if name.endswith("_seconds") else int(value)
+            totals[name] = totals.get(name, 0) + parsed
+    if not matched:
+        raise RuntimeError(f"missing runtime stage metrics for {workflow_id}")
+    totals["runtime_invocations"] = matched
+    return totals
+
+
 def wait_datavine(client, workflow_id, roots, timeout=900):
     deadline = time.monotonic() + timeout
     while True:
@@ -562,6 +587,7 @@ def run_datavine(pool, root, name, spec, repetition):
         peak = sampler.stop()
         service_log.flush()
         counts = physical_counts(service_log_path, workflow_id)
+        stages = runtime_stages(service_log_path, workflow_id)
         expected_counts = {"submissions": logical_tasks, "completions": logical_tasks}
         if counts != expected_counts:
             raise RuntimeError({"expected": expected_counts, "physical": counts})
@@ -572,6 +598,7 @@ def run_datavine(pool, root, name, spec, repetition):
             "repetition": repetition,
             "logical_tasks": logical_tasks,
             "physical_tasks": counts,
+            "runtime_stages": stages,
             "build_submit_seconds": submitted - started,
             "post_submit_seconds": completed - submitted,
             "total_seconds": completed - started,
@@ -762,6 +789,14 @@ def summarize(runs):
                 "max_total_seconds": max(totals),
                 "median_tasks_per_second": statistics.median(rates),
             }
+            if backend == "datavine":
+                stage_names = sorted(values[0]["runtime_stages"])
+                row[backend]["median_runtime_stages"] = {
+                    stage: statistics.median(
+                        item["runtime_stages"][stage] for item in values
+                    )
+                    for stage in stage_names
+                }
         row["datavine_to_taskvine_rate"] = (
             row["datavine"]["median_tasks_per_second"] /
             row["taskvine"]["median_tasks_per_second"]

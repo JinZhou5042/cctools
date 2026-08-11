@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DATA_READY_BATCH 1
@@ -48,6 +49,7 @@ struct vine_datavine_data_publication {
 	pthread_cond_t changed;
 	int done;
 	int successful;
+	struct vine_datavine_data_publication_metrics metrics;
 };
 
 struct publication_job {
@@ -57,6 +59,11 @@ struct publication_job {
 	struct publication_output *outputs;
 	size_t count;
 	struct vine_datavine_data_publication *publication;
+	struct timespec queued_at;
+	uint64_t decode_nanoseconds;
+	uint64_t function_nanoseconds;
+	uint64_t serialize_nanoseconds;
+	uint64_t fsync_nanoseconds;
 	struct publication_job *next;
 };
 
@@ -79,6 +86,13 @@ struct vine_datavine_data_controller {
 	int queued_initialized;
 	int space_initialized;
 };
+
+static uint64_t elapsed_nanoseconds(
+		const struct timespec *started, const struct timespec *finished)
+{
+	return (uint64_t)((finished->tv_sec - started->tv_sec) * INT64_C(1000000000) +
+			  finished->tv_nsec - started->tv_nsec);
+}
 
 static void data_result_delete(void *value)
 {
@@ -126,8 +140,7 @@ static int output_path(struct vine_datavine_data_controller *controller,
 static int output_path_in_directory(const char *directory, uint64_t data_id,
 		uint32_t attempt, char path[PATH_MAX])
 {
-	return snprintf(path, PATH_MAX, "%s/%llu.%u.data", directory,
-			(unsigned long long)data_id, attempt) < PATH_MAX;
+	return snprintf(path, PATH_MAX, "%s/%llu.%u.data", directory, (unsigned long long)data_id, attempt) < PATH_MAX;
 }
 
 static int write_all(int fd, const char *data, size_t size)
@@ -492,9 +505,12 @@ static int validate_catalog(struct vine_datavine_data_controller *controller)
 }
 
 static void publication_finish(
-		struct vine_datavine_data_publication *publication, int successful)
+		struct vine_datavine_data_publication *publication, int successful,
+		const struct vine_datavine_data_publication_metrics *metrics)
 {
 	pthread_mutex_lock(&publication->lock);
+	if (metrics)
+		publication->metrics = *metrics;
 	publication->successful = successful;
 	publication->done = 1;
 	pthread_cond_broadcast(&publication->changed);
@@ -502,7 +518,8 @@ static void publication_finish(
 }
 
 static int commit_job(struct vine_datavine_data_controller *controller,
-		struct publication_job *job)
+		struct publication_job *job,
+		struct vine_datavine_data_publication_metrics *metrics)
 {
 	struct publication_output *durable = calloc(job->count, sizeof(*durable));
 	struct publication_output *soft = calloc(job->count, sizeof(*soft));
@@ -515,10 +532,12 @@ static int commit_job(struct vine_datavine_data_controller *controller,
 		else
 			durable[durable_count++] = job->outputs[index];
 	}
+	metrics->outputs = job->count;
+	metrics->remote_outputs = soft_count;
+	metrics->durable_outputs = durable_count;
 	if (soft_count) {
 		pthread_mutex_lock(&controller->lock);
-		valid = install_soft_results(controller, job->workflow_id,
-				soft, soft_count);
+		valid = install_soft_results(controller, job->workflow_id, soft, soft_count);
 		pthread_mutex_unlock(&controller->lock);
 	}
 	for (size_t index = 0; valid && index < durable_count; index++) {
@@ -531,10 +550,13 @@ static int commit_job(struct vine_datavine_data_controller *controller,
 	}
 	if (valid && durable_count) {
 		pthread_mutex_lock(&controller->lock);
-		valid = install_results(controller, job->workflow_id,
-				durable, durable_count, 0);
+		valid = install_results(controller, job->workflow_id, durable, durable_count, 0);
 		pthread_mutex_unlock(&controller->lock);
 	}
+	for (size_t index = 0; index < soft_count; index++)
+		metrics->output_bytes += soft[index].info.size;
+	for (size_t index = 0; index < durable_count; index++)
+		metrics->output_bytes += durable[index].info.size;
 	free(soft);
 	free(durable);
 	return valid;
@@ -571,7 +593,19 @@ static void *data_worker(void *argument)
 		controller->queued_count--;
 		pthread_cond_broadcast(&controller->space);
 		pthread_mutex_unlock(&controller->queue_lock);
-		publication_finish(job->publication, commit_job(controller, job));
+		struct timespec started;
+		struct timespec finished;
+		struct vine_datavine_data_publication_metrics metrics = {0};
+		clock_gettime(CLOCK_MONOTONIC, &started);
+		metrics.queue_nanoseconds = elapsed_nanoseconds(&job->queued_at, &started);
+		metrics.decode_nanoseconds = job->decode_nanoseconds;
+		metrics.function_nanoseconds = job->function_nanoseconds;
+		metrics.serialize_nanoseconds = job->serialize_nanoseconds;
+		metrics.fsync_nanoseconds = job->fsync_nanoseconds;
+		int committed = commit_job(controller, job, &metrics);
+		clock_gettime(CLOCK_MONOTONIC, &finished);
+		metrics.commit_nanoseconds = elapsed_nanoseconds(&started, &finished);
+		publication_finish(job->publication, committed, &metrics);
 		job_delete(job);
 	}
 	return 0;
@@ -645,7 +679,7 @@ void vine_datavine_data_controller_close(
 		pthread_join(controller->threads[index], 0);
 	while (controller->head) {
 		struct publication_job *next = controller->head->next;
-		publication_finish(controller->head->publication, 0);
+		publication_finish(controller->head->publication, 0, 0);
 		job_delete(controller->head);
 		controller->head = next;
 	}
@@ -686,7 +720,7 @@ int vine_datavine_data_controller_bind_outputs(
 	struct jx *output_files = jx_lookup(executor, "output_files");
 	struct jx *output_ids = jx_lookup(task, "output_data_ids");
 	int worker_local = !strcmp(jx_lookup_string(executor, "kind"), "python") &&
-			!strcmp(jx_lookup_string(executor, "version"), "callable-v1");
+			   !strcmp(jx_lookup_string(executor, "version"), "callable-v1");
 	if (!output_files)
 		return jx_array_length(output_ids) == 1;
 	if (jx_array_length(output_files) != jx_array_length(output_ids))
@@ -702,16 +736,15 @@ int vine_datavine_data_controller_bind_outputs(
 		char path[PATH_MAX];
 		int remote_only = worker_local && !itable_lookup(requested, data_id);
 		if (!remote_only && !directory_ready) {
-			directory_ready = workflow_directory(controller, workflow_id,
-					directory);
+			directory_ready = workflow_directory(controller, workflow_id, directory);
 			if (!directory_ready)
 				return 0;
 		}
 		struct vine_file *file = remote_only
-						 ? vine_declare_temp(manager)
-						 : (output_path_in_directory(directory, data_id, attempt, path)
-									 ? vine_declare_file(manager, path, VINE_CACHE_LEVEL_WORKFLOW, 0)
-									 : 0);
+							 ? vine_declare_temp(manager)
+							 : (output_path_in_directory(directory, data_id, attempt, path)
+											   ? vine_declare_file(manager, path, VINE_CACHE_LEVEL_WORKFLOW, 0)
+											   : 0);
 		const char *remote_name = jx_array_index(
 				output_files, index)
 							  ->u.string_value;
@@ -772,7 +805,10 @@ static int fill_output_metadata(struct publication_output *output,
 }
 
 static int parse_output_manifest(const char *manifest,
-		struct publication_output *outputs, size_t count)
+		struct publication_output *outputs, size_t count,
+		uint64_t *decode_nanoseconds, uint64_t *function_nanoseconds,
+		uint64_t *serialize_nanoseconds,
+		uint64_t *fsync_nanoseconds)
 {
 	if (!manifest || strncmp(manifest, "DVM1\n", 5))
 		return 0;
@@ -794,7 +830,27 @@ static int parse_output_manifest(const char *manifest,
 		outputs[index].info.size = (uint64_t)size;
 		end += 65;
 	}
-	return *end == 0;
+	if (!*end)
+		return 1;
+	unsigned long long decode_ns = 0;
+	unsigned long long function_ns = 0;
+	unsigned long long serialize_ns = 0;
+	unsigned long long fsync_ns = 0;
+	char trailing = 0;
+	int fields = sscanf(end, "M %llu %llu %llu %llu\n%c", &decode_ns,
+			&function_ns, &serialize_ns, &fsync_ns, &trailing);
+	if (fields != 4) {
+		decode_ns = 0;
+		fields = sscanf(end, "M %llu %llu %llu\n%c", &function_ns,
+				&serialize_ns, &fsync_ns, &trailing);
+		if (fields != 3)
+			return 0;
+	}
+	*decode_nanoseconds = (uint64_t)decode_ns;
+	*function_nanoseconds = (uint64_t)function_ns;
+	*serialize_nanoseconds = (uint64_t)serialize_ns;
+	*fsync_nanoseconds = (uint64_t)fsync_ns;
+	return 1;
 }
 
 struct vine_datavine_data_publication *
@@ -814,8 +870,8 @@ vine_datavine_data_controller_publish_async(
 			"output_files");
 	struct jx *executor = jx_lookup(task, "executor");
 	int worker_local = output_files &&
-			!strcmp(jx_lookup_string(executor, "kind"), "python") &&
-			!strcmp(jx_lookup_string(executor, "version"), "callable-v1");
+			   !strcmp(jx_lookup_string(executor, "kind"), "python") &&
+			   !strcmp(jx_lookup_string(executor, "version"), "callable-v1");
 	const char *plain_output = output_files ? 0 : vine_task_get_stdout(completed);
 	size_t plain_output_size = plain_output ? strlen(plain_output) : 0;
 	int total = jx_array_length(output_ids);
@@ -831,12 +887,11 @@ vine_datavine_data_controller_publish_async(
 	job->outputs = calloc((size_t)total, sizeof(*job->outputs));
 	job->publication = publication;
 	struct publication_output *manifest_outputs = worker_local
-									? calloc((size_t)total, sizeof(*manifest_outputs))
-									: 0;
+								      ? calloc((size_t)total, sizeof(*manifest_outputs))
+								      : 0;
 	int valid = job->workflow_id && job->outputs &&
-		(!worker_local || (manifest_outputs && parse_output_manifest(
-								vine_task_get_stdout(completed), manifest_outputs,
-								(size_t)total)));
+		    (!worker_local || (manifest_outputs && parse_output_manifest(
+									   vine_task_get_stdout(completed), manifest_outputs, (size_t)total, &job->decode_nanoseconds, &job->function_nanoseconds, &job->serialize_nanoseconds, &job->fsync_nanoseconds)));
 	char directory[PATH_MAX];
 	int directory_ready = 0;
 	for (int index = 0; valid && index < total; index++) {
@@ -848,21 +903,17 @@ vine_datavine_data_controller_publish_async(
 		char path[PATH_MAX];
 		struct publication_output *output = &job->outputs[job->count++];
 		int durable_worker_output = worker_local &&
-			itable_lookup(requested, data_id) != 0;
+					    itable_lookup(requested, data_id) != 0;
 		if ((!worker_local || durable_worker_output) && !directory_ready)
-			directory_ready = workflow_directory(controller, workflow_id,
-					directory);
+			directory_ready = workflow_directory(controller, workflow_id, directory);
 		valid = ((!worker_local || durable_worker_output)
-					 ? directory_ready && output_path_in_directory(
-							directory, data_id, attempt, path)
-					 : 1) &&
-			fill_output_metadata(output, itable_lookup(data, data_id), requested,
-					data_id, attempt,
-					worker_local && !durable_worker_output ? 0 : path);
+							? directory_ready && output_path_in_directory(
+											     directory, data_id, attempt, path)
+							: 1) &&
+			fill_output_metadata(output, itable_lookup(data, data_id), requested, data_id, attempt, worker_local && !durable_worker_output ? 0 : path);
 		if (valid && worker_local) {
 			output->info.size = manifest_outputs[index].info.size;
-			memcpy(output->info.sha256, manifest_outputs[index].info.sha256,
-					sizeof(output->info.sha256));
+			memcpy(output->info.sha256, manifest_outputs[index].info.sha256, sizeof(output->info.sha256));
 			output->remote_file = itable_lookup(files, data_id);
 			valid = output->remote_file != 0;
 			output->remote_only = !durable_worker_output;
@@ -890,7 +941,7 @@ vine_datavine_data_controller_publish_async(
 		return 0;
 	}
 	if (!job->count) {
-		publication_finish(publication, 1);
+		publication_finish(publication, 1, 0);
 		job_delete(job);
 		return publication;
 	}
@@ -909,6 +960,7 @@ vine_datavine_data_controller_publish_async(
 	else
 		controller->head = job;
 	controller->tail = job;
+	clock_gettime(CLOCK_MONOTONIC, &job->queued_at);
 	controller->queued_count++;
 	pthread_cond_signal(&controller->queued);
 	pthread_mutex_unlock(&controller->queue_lock);
@@ -937,6 +989,20 @@ int vine_datavine_data_publication_wait(
 	int successful = publication->successful;
 	pthread_mutex_unlock(&publication->lock);
 	return successful;
+}
+
+int vine_datavine_data_publication_get_metrics(
+		struct vine_datavine_data_publication *publication,
+		struct vine_datavine_data_publication_metrics *metrics)
+{
+	if (!publication || !metrics)
+		return 0;
+	pthread_mutex_lock(&publication->lock);
+	int ready = publication->done;
+	if (ready)
+		*metrics = publication->metrics;
+	pthread_mutex_unlock(&publication->lock);
+	return ready;
 }
 
 void vine_datavine_data_publication_delete(
@@ -1045,7 +1111,7 @@ struct vine_file *vine_datavine_data_controller_restore_file(
 	free(key);
 	struct vine_file *file = remote_file
 						 ? remote_file
-						 : path
+				 : path
 						 ? vine_declare_file(manager, path, VINE_CACHE_LEVEL_WORKFLOW, 0)
 						 : 0;
 	free(path);
@@ -1063,8 +1129,8 @@ int vine_datavine_data_controller_finish_workflow(
 	size_t capacity = (size_t)hash_table_size(controller->results);
 	uint64_t *drop = capacity ? malloc(capacity * sizeof(*drop)) : 0;
 	uint64_t *durable_drop = capacity
-					 ? malloc(capacity * sizeof(*durable_drop))
-					 : 0;
+						 ? malloc(capacity * sizeof(*durable_drop))
+						 : 0;
 	char *key;
 	struct data_result *result;
 	int iterator;

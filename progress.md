@@ -183,6 +183,28 @@ remaining fixed cost is per-task FunctionCall/materialization plus durable
 requested-output handling, not large intermediate transfer through Runtime.
 See `acceptance/worker-local-data-plane-20260811.json`.
 
+### Output-heavy stage profile and first optimization
+
+Low-overhead cumulative stage metrics now separate Data Controller queue and
+commit work from Python input decode, user-function execution, serialization,
+and fsync. Runtime still consumes task state only; the optional timing values
+travel in the compact DVM1 manifest and no result payload is returned through
+stdout.
+
+The 1x1 local pilot showed that the Controller was not the 32 MiB reuse
+bottleneck: publication queue/commit/prepare totaled about 27 ms while repeated
+Python input decode totaled 923 ms. Replacing `read_bytes()` plus
+`cloudpickle.loads()` with streaming `cloudpickle.load()` reduced the
+three-repetition median decode total to 431 ms. The resulting 32 MiB reuse rate
+was 0.905x TaskVine (DataVine 2.409 s, TaskVine 2.181 s), versus 0.753x in the
+single pre-change diagnostic. Wide multi-output remained 0.670x; its decode
+cost was only 2.5 ms, so its remaining gap is a separate per-task/output path.
+
+The complete source regression passed 9/9, including the prebuilt Go adaptor.
+This is a local performance pilot, not a replacement for the resident 10x16
+campaign or a distributed parity claim. See
+`acceptance/output-heavy-stage-20260811.json`.
+
 ### Historical post-Data-Controller rerun
 
 The 2026-08-11 crossed-order rerun used two backend orders, five repetitions

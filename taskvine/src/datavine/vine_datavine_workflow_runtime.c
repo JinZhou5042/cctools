@@ -51,6 +51,20 @@ struct pending_publication {
 	struct pending_publication *next;
 };
 
+struct publication_stage_totals {
+	uint64_t prepare_nanoseconds;
+	uint64_t queue_nanoseconds;
+	uint64_t commit_nanoseconds;
+	uint64_t decode_nanoseconds;
+	uint64_t function_nanoseconds;
+	uint64_t serialize_nanoseconds;
+	uint64_t fsync_nanoseconds;
+	uint64_t outputs;
+	uint64_t remote_outputs;
+	uint64_t durable_outputs;
+	uint64_t output_bytes;
+};
+
 struct execution_mailbox {
 	pthread_mutex_t lock;
 	struct completion_node *head;
@@ -531,9 +545,9 @@ static int task_outputs_recoverable(
 			continue;
 		struct vine_datavine_workflow_result_info info;
 		if (!vine_datavine_data_controller_result_active(
-					runtime->data_controller, workflow_id, data_id) &&
+				    runtime->data_controller, workflow_id, data_id) &&
 				!vine_datavine_workflow_store_legacy_result_info(
-					runtime->store, workflow_id, data_id, &info))
+						runtime->store, workflow_id, data_id, &info))
 			return 0;
 	}
 	return task != 0;
@@ -545,9 +559,9 @@ static int restore_completed_tasks(struct vine_datavine_workflow_runtime *runtim
 	int64_t *task_ids = 0;
 	size_t count = 0;
 	if (!vine_datavine_workflow_store_completed_task_ids(runtime->store,
-			workflow_id,
-			&task_ids,
-			&count))
+			    workflow_id,
+			    &task_ids,
+			    &count))
 		return 0;
 	for (size_t index = 0; index < count; index++) {
 		unsigned char encoded[8];
@@ -580,8 +594,7 @@ static int filter_recoverable_tasks(
 		struct jx *task = itable_lookup(tasks, task_id);
 		/* Worker-local temp values intentionally are not journaled. After a
 		 * service restart they are gone, so their producers must run again. */
-		if (task_outputs_recoverable(runtime, workflow_id, task,
-				consumers, requested) &&
+		if (task_outputs_recoverable(runtime, workflow_id, task, consumers, requested) &&
 				buffer_putlstring(&filtered, (const char *)(encoded + offset), 8) < 0)
 			valid = 0;
 	}
@@ -946,8 +959,7 @@ static struct vine_datavine_data_publication *publish_task_outputs(
 	if (jx_array_length(outputs) < 1)
 		return 0;
 	return vine_datavine_data_controller_publish_async(
-			runtime->data_controller, workflow_id, task, data, files,
-			consumers, requested, attempt, retain_all, completed);
+			runtime->data_controller, workflow_id, task, data, files, consumers, requested, attempt, retain_all, completed);
 }
 
 static int restore_published_outputs(
@@ -1029,6 +1041,7 @@ static int drain_publications(
 		struct pending_publication **head, uint64_t *publishing,
 		int block_one, uint32_t *completed_count,
 		uint64_t *publish_nanoseconds,
+		struct publication_stage_totals *publication_stages,
 		uint64_t *completion_event_nanoseconds)
 {
 	struct pending_publication **link = head;
@@ -1048,13 +1061,25 @@ static int drain_publications(
 		if (!published && getenv("DATAVINE_WORKFLOW_METRICS"))
 			fprintf(stderr,
 					"datavine workflow %s publication_failed logical_id=%lld\n",
-					workflow_id, (long long)pending->logical_id);
+					workflow_id,
+					(long long)pending->logical_id);
 		clock_gettime(CLOCK_MONOTONIC, &finished);
 		*publish_nanoseconds += elapsed_nanoseconds(&started, &finished);
-		valid = finish_logical_attempt(runtime, workflow_id, scheduler, files,
-				consumers, requested, pending->task, pending->logical_id,
-				pending->attempt, pending->task_result, published,
-				completion_event_nanoseconds);
+		struct vine_datavine_data_publication_metrics metrics;
+		if (vine_datavine_data_publication_get_metrics(
+				    pending->publication, &metrics)) {
+			publication_stages->queue_nanoseconds += metrics.queue_nanoseconds;
+			publication_stages->commit_nanoseconds += metrics.commit_nanoseconds;
+			publication_stages->decode_nanoseconds += metrics.decode_nanoseconds;
+			publication_stages->function_nanoseconds += metrics.function_nanoseconds;
+			publication_stages->serialize_nanoseconds += metrics.serialize_nanoseconds;
+			publication_stages->fsync_nanoseconds += metrics.fsync_nanoseconds;
+			publication_stages->outputs += metrics.outputs;
+			publication_stages->remote_outputs += metrics.remote_outputs;
+			publication_stages->durable_outputs += metrics.durable_outputs;
+			publication_stages->output_bytes += metrics.output_bytes;
+		}
+		valid = finish_logical_attempt(runtime, workflow_id, scheduler, files, consumers, requested, pending->task, pending->logical_id, pending->attempt, pending->task_result, published, completion_event_nanoseconds);
 		vine_datavine_data_publication_delete(pending->publication);
 		*link = pending->next;
 		free(pending);
@@ -1168,8 +1193,7 @@ static int execution_resources_create(struct execution_resources *resources,
 			restore_outputs(runtime, workflow_id, resources->data, resources->files, resources->consumers);
 		pthread_mutex_unlock(&runtime->manager_lock);
 	}
-	valid = valid && restore_completed_tasks(runtime, workflow_id,
-		&resources->recovered_tasks) &&
+	valid = valid && restore_completed_tasks(runtime, workflow_id, &resources->recovered_tasks) &&
 		build_scheduler(root, resources->data, resources->tasks, &resources->scheduler);
 	if (valid) {
 		struct jx *policy = jx_lookup(root, "policy");
@@ -1240,6 +1264,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 	uint64_t submit_nanoseconds = 0;
 	uint64_t submission_event_nanoseconds = 0;
 	uint64_t publish_nanoseconds = 0;
+	struct publication_stage_totals publication_stages = {0};
 	uint64_t completion_event_nanoseconds = 0;
 	uint64_t checkpoint_nanoseconds = 0;
 	uint64_t physical_submissions = 0;
@@ -1247,10 +1272,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 	int quiescent = 0;
 	int recovered_applied = 0;
 	while (valid && !atomic_load(&runtime->stopping)) {
-		valid = drain_publications(runtime, workflow_id, scheduler, files,
-				consumers, requested, &pending_publications, &publishing, 0,
-				&uncheckpointed_completions, &publish_nanoseconds,
-				&completion_event_nanoseconds);
+		valid = drain_publications(runtime, workflow_id, scheduler, files, consumers, requested, &pending_publications, &publishing, 0, &uncheckpointed_completions, &publish_nanoseconds, &publication_stages, &completion_event_nanoseconds);
 		if (!valid)
 			break;
 		struct vine_datavine_workflow_info workflow_info;
@@ -1298,8 +1320,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 		if (!valid)
 			break;
 		if (!recovered_applied) {
-			valid = filter_recoverable_tasks(runtime, workflow_id, tasks,
-					consumers, requested, &resources.recovered_tasks);
+			valid = filter_recoverable_tasks(runtime, workflow_id, tasks, consumers, requested, &resources.recovered_tasks);
 			size_t recovered_size = 0;
 			const char *recovered = buffer_tolstring(&resources.recovered_tasks,
 					&recovered_size);
@@ -1391,11 +1412,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 		}
 		if (!running) {
 			if (publishing) {
-				valid = drain_publications(runtime, workflow_id, scheduler, files,
-						consumers, requested, &pending_publications,
-						&publishing, 1, &uncheckpointed_completions,
-						&publish_nanoseconds,
-						&completion_event_nanoseconds);
+				valid = drain_publications(runtime, workflow_id, scheduler, files, consumers, requested, &pending_publications, &publishing, 1, &uncheckpointed_completions, &publish_nanoseconds, &publication_stages, &completion_event_nanoseconds);
 				continue;
 			}
 			valid = 0;
@@ -1424,7 +1441,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				fprintf(stderr,
 						"datavine workflow %s task_failed logical_id=%lld "
 						"result=%d exit_code=%d\n",
-						workflow_id, (long long)completed_logical_id,
+						workflow_id,
+						(long long)completed_logical_id,
 						vine_task_get_result(completed),
 						vine_task_get_exit_code(completed));
 			int task_valid = completed_logical_id > 0;
@@ -1434,12 +1452,15 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			uint32_t attempt = task_valid ? attempts[completed_logical_id] : 0;
 			if (physical_success) {
 				struct pending_publication *pending = calloc(1, sizeof(*pending));
+				struct timespec publication_started;
+				struct timespec publication_finished;
+				clock_gettime(CLOCK_MONOTONIC, &publication_started);
 				struct vine_datavine_data_publication *publication =
-						pending ? publish_task_outputs(runtime, workflow_id, task,
-								data, files, consumers, requested, completed,
-								attempt,
-								workflow_info.state != VINE_DATAVINE_WORKFLOW_RUNNING)
+						pending ? publish_task_outputs(runtime, workflow_id, task, data, files, consumers, requested, completed, attempt, workflow_info.state != VINE_DATAVINE_WORKFLOW_RUNNING)
 							: 0;
+				clock_gettime(CLOCK_MONOTONIC, &publication_finished);
+				publication_stages.prepare_nanoseconds += elapsed_nanoseconds(
+						&publication_started, &publication_finished);
 				if (publication) {
 					pending->publication = publication;
 					pending->task = task;
@@ -1451,17 +1472,11 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 					publishing++;
 				} else {
 					free(pending);
-					task_valid = finish_logical_attempt(runtime, workflow_id,
-							scheduler, files, consumers, requested, task,
-							completed_logical_id, attempt, task_result, 0,
-							&completion_event_nanoseconds);
+					task_valid = finish_logical_attempt(runtime, workflow_id, scheduler, files, consumers, requested, task, completed_logical_id, attempt, task_result, 0, &completion_event_nanoseconds);
 					uncheckpointed_completions += completed_logical_id > 0;
 				}
 			} else {
-				task_valid = finish_logical_attempt(runtime, workflow_id,
-						scheduler, files, consumers, requested, task,
-						completed_logical_id, attempt, task_result, 0,
-						&completion_event_nanoseconds);
+				task_valid = finish_logical_attempt(runtime, workflow_id, scheduler, files, consumers, requested, task, completed_logical_id, attempt, task_result, 0, &completion_event_nanoseconds);
 				uncheckpointed_completions += completed_logical_id > 0;
 			}
 			vine_task_delete(completed);
@@ -1511,6 +1526,14 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				"physical_submissions=%llu physical_completions=%llu "
 				"materialize_seconds=%.6f submit_seconds=%.6f "
 				"submission_event_seconds=%.6f publish_seconds=%.6f "
+				"publication_prepare_seconds=%.6f "
+				"publication_queue_seconds=%.6f "
+				"publication_commit_seconds=%.6f "
+				"python_decode_seconds=%.6f python_function_seconds=%.6f "
+				"python_serialize_seconds=%.6f "
+				"python_fsync_seconds=%.6f "
+				"publication_outputs=%llu publication_remote_outputs=%llu "
+				"publication_durable_outputs=%llu publication_bytes=%llu "
 				"completion_event_seconds=%.6f checkpoint_seconds=%.6f\n",
 				workflow_id,
 				setup_seconds,
@@ -1521,6 +1544,17 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				submit_nanoseconds / 1e9,
 				submission_event_nanoseconds / 1e9,
 				publish_nanoseconds / 1e9,
+				publication_stages.prepare_nanoseconds / 1e9,
+				publication_stages.queue_nanoseconds / 1e9,
+				publication_stages.commit_nanoseconds / 1e9,
+				publication_stages.decode_nanoseconds / 1e9,
+				publication_stages.function_nanoseconds / 1e9,
+				publication_stages.serialize_nanoseconds / 1e9,
+				publication_stages.fsync_nanoseconds / 1e9,
+				(unsigned long long)publication_stages.outputs,
+				(unsigned long long)publication_stages.remote_outputs,
+				(unsigned long long)publication_stages.durable_outputs,
+				(unsigned long long)publication_stages.output_bytes,
 				completion_event_nanoseconds / 1e9,
 				checkpoint_nanoseconds / 1e9);
 	if (quiescent && valid && !atomic_load(&runtime->stopping))
@@ -1555,8 +1589,7 @@ static void *runtime_main(void *argument)
 					    &error)) {
 				manager_lane_lock(runtime);
 				vine_datavine_data_controller_finish_workflow(
-						runtime->data_controller, runtime->manager,
-						info.workflow_id);
+						runtime->data_controller, runtime->manager, info.workflow_id);
 				pthread_mutex_unlock(&runtime->manager_lock);
 			}
 		}

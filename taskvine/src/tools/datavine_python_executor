@@ -49,10 +49,14 @@ class HashingWriter:
         return self.stream.fileno()
 
 
-def write_manifest(entries):
-    payload = "DVM1\n{}\n{}".format(
+def write_manifest(entries, decode_ns, function_ns, serialize_ns, fsync_ns):
+    payload = "DVM1\n{}\n{}M {} {} {} {}\n".format(
         len(entries),
         "".join(f"{size} {digest}\n" for size, digest in entries),
+        decode_ns,
+        function_ns,
+        serialize_ns,
+        fsync_ns,
     ).encode("ascii")
     temporary = Path(MANIFEST_NAME + ".part")
     with temporary.open("wb") as stream:
@@ -150,7 +154,8 @@ def callable_main(data_root, invocation_bytes, function_bytes):
     def decode(value):
         kind, body = value
         if kind == "ref":
-            return cloudpickle.loads((data_root / str(body)).read_bytes())
+            with (data_root / str(body)).open("rb") as stream:
+                return cloudpickle.load(stream)
         if kind == "tuple":
             return tuple(decode(item) for item in body)
         if kind == "list":
@@ -161,25 +166,34 @@ def callable_main(data_root, invocation_bytes, function_bytes):
             return cloudpickle.loads(body)
         raise ValueError("unknown Python invocation value kind")
 
+    decode_started = time.monotonic_ns()
     function = cloudpickle.loads(function_bytes)
-    result = function(
-        *(decode(value) for value in payload["args"]),
-        **{key: decode(value) for key, value in payload["kwargs"].items()},
-    )
+    args = tuple(decode(value) for value in payload["args"])
+    kwargs = {key: decode(value) for key, value in payload["kwargs"].items()}
+    decode_ns = time.monotonic_ns() - decode_started
+    function_started = time.monotonic_ns()
+    result = function(*args, **kwargs)
+    function_ns = time.monotonic_ns() - function_started
     outputs = tuple(result) if output_count != 1 else (result,)
     if len(outputs) != output_count:
         raise ValueError("Python callable returned the wrong output count")
     entries = []
+    serialize_ns = 0
+    fsync_ns = 0
     for target, value in zip(output_paths, outputs):
         temporary = target.with_name(target.name + ".part")
         with temporary.open("wb") as stream:
             writer = HashingWriter(stream)
+            serialize_started = time.monotonic_ns()
             cloudpickle.dump(value, writer)
+            serialize_ns += time.monotonic_ns() - serialize_started
+            fsync_started = time.monotonic_ns()
             writer.flush()
             os.fsync(writer.fileno())
+            fsync_ns += time.monotonic_ns() - fsync_started
             entries.append((writer.size, writer.digest.hexdigest()))
         os.replace(temporary, target)
-    write_manifest(entries)
+    write_manifest(entries, decode_ns, function_ns, serialize_ns, fsync_ns)
 
 
 def child_main(

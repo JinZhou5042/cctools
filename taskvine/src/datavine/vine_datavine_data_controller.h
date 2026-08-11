@@ -14,6 +14,19 @@ struct vine_file;
 struct vine_manager;
 struct vine_task;
 
+struct vine_datavine_data_publication_metrics {
+	uint64_t queue_nanoseconds;
+	uint64_t commit_nanoseconds;
+	uint64_t decode_nanoseconds;
+	uint64_t function_nanoseconds;
+	uint64_t serialize_nanoseconds;
+	uint64_t fsync_nanoseconds;
+	uint64_t outputs;
+	uint64_t remote_outputs;
+	uint64_t durable_outputs;
+	uint64_t output_bytes;
+};
+
 struct vine_datavine_data_controller *vine_datavine_data_controller_open(
 		const char *workflow_journal_path, size_t threads);
 void vine_datavine_data_controller_close(
@@ -39,6 +52,9 @@ int vine_datavine_data_publication_ready(
 		struct vine_datavine_data_publication *publication);
 int vine_datavine_data_publication_wait(
 		struct vine_datavine_data_publication *publication);
+int vine_datavine_data_publication_get_metrics(
+		struct vine_datavine_data_publication *publication,
+		struct vine_datavine_data_publication_metrics *metrics);
 void vine_datavine_data_publication_delete(
 		struct vine_datavine_data_publication *publication);
 
