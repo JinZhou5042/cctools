@@ -277,9 +277,10 @@ The 2026-08-11 result-plane redesign is the active gate:
 - [x] Build and hash-verify the worker-local candidate package and pass packed
   1x2x10k at exactly 10,000/10,000 and 3,365 Runtime tasks/s. Keep production
   unchanged while Go remains environment-blocked.
-- [ ] Establish a clean Git checkpoint containing the worker-local source,
+- [x] Establish Git implementation checkpoint `d64387542` containing the worker-local source,
   focused tests, compact acceptance evidence, current documentation, and no
-  Factory/journal/debug residue; rerun source gates from that checkpoint.
+  Factory/journal/debug residue; the post-commit runner reproduced 8/8
+  executable PASS with only the environment-blocked Go contract failing.
 
 ## 11. Ordered next work
 

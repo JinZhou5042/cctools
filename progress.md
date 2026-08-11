@@ -50,6 +50,10 @@ result payloads; its old result records are replay-only compatibility.
 
 ## Current evidence
 
+The worker-local implementation checkpoint is Git commit `d64387542`. The
+post-commit contract artifact records that commit directly; compact evidence
+and handoff hashes are retained in the following documentation-only commit.
+
 The worker-local Data Controller redesign passes warning-clean builds, module
 boundaries, and its expanded execution contract: live result fetch before
 workflow termination, restart fetch, selective pruning, multi-output atomicity,
