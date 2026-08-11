@@ -32,6 +32,7 @@ struct itable {
 	struct entry *ientry;
 	int iteration_index;
 	int need_compact;
+	int deleted_count;
 };
 
 struct itable *itable_create(int bucket_count)
@@ -56,6 +57,7 @@ struct itable *itable_create(int bucket_count)
 	h->ientry = 0;
 	h->iteration_index = 0;
 	h->need_compact = 0;
+	h->deleted_count = 0;
 	return h;
 }
 
@@ -81,6 +83,7 @@ void itable_clear(struct itable *h, void (*delete_func)(void *))
 
 	h->size = 0;
 	h->need_compact = 0;
+	h->deleted_count = 0;
 	h->iteration_index = (h->iteration_index + 1) % ITERATION_MAX;
 }
 
@@ -146,6 +149,7 @@ static int itable_reduce_buckets(struct itable *h)
 	h->buckets = new_buckets;
 	h->bucket_count = new_count;
 	h->need_compact = 0;
+	h->deleted_count = 0;
 
 	h->iteration_index = (h->iteration_index + 1) % ITERATION_MAX;
 
@@ -186,6 +190,7 @@ void itable_compact(struct itable *h)
 	}
 
 	h->need_compact = 0;
+	h->deleted_count = 0;
 	if (((float)h->size / h->bucket_count) < DEFAULT_MIN_LOAD) {
 		itable_reduce_buckets(h);
 	}
@@ -250,6 +255,7 @@ static int itable_double_buckets(struct itable *h)
 	h->buckets = new_buckets;
 	h->bucket_count = new_count;
 	h->need_compact = 0;
+	h->deleted_count = 0;
 
 	h->iteration_index = (h->iteration_index + 1) % ITERATION_MAX;
 
@@ -260,6 +266,18 @@ int itable_insert(struct itable *h, UINT64_T key, const void *value)
 {
 	struct entry *e;
 	UINT64_T index;
+
+	/*
+	Deleted entries remain linked so that removal is safe while an iterator is
+	active.  Tables with a small live working set and a long stream of unique
+	keys (for example, a worker's current task table) would otherwise build
+	unbounded tombstone chains and make insertion progressively slower.  An
+	insert already invalidates an active iterator, so compacting here preserves
+	the existing iterator contract while bounding the lookup chain length.
+	*/
+	if (h->need_compact && h->deleted_count > h->bucket_count / 4) {
+		itable_compact(h);
+	}
 
 	if (((float)h->size / h->bucket_count) > DEFAULT_MAX_LOAD)
 		itable_double_buckets(h);
@@ -274,6 +292,7 @@ int itable_insert(struct itable *h, UINT64_T key, const void *value)
 			e->deleted = 0;
 			if (was_deleted) {
 				h->size++;
+				h->deleted_count--;
 			}
 			h->iteration_index = (h->iteration_index + 1) % ITERATION_MAX;
 			return 1;
@@ -318,6 +337,7 @@ void *itable_remove(struct itable *h, UINT64_T key)
 			}
 			e->deleted = 1;
 			h->need_compact = 1;
+			h->deleted_count++;
 			value = e->value;
 
 			h->size--;

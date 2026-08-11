@@ -35,6 +35,7 @@ class Task(object):
     # @param command    The shell command line to be exected by the task.
     # @param task_info  Optional dictionary containing specified task parameters.
     def __init__(self, command, **task_info):
+        native_task = task_info.pop("_native_task", None)
         self._task = None
 
         self._manager = None  # set when task is submitted
@@ -46,7 +47,7 @@ class Task(object):
         # mini tasks are freed when the manager frees their associated file structure
         self._manager_will_free = False
 
-        self._task = cvine.vine_task_create(command)
+        self._task = native_task or cvine.vine_task_create(command)
         if not self._task:
             raise Exception("Unable to create internal Task structure")
 
@@ -285,6 +286,11 @@ class Task(object):
     def set_function_slots(self, nslots):
         return cvine.vine_task_set_function_slots(self._task, nslots)
 
+    ##
+    # Set the minimum number of library process copies per worker.
+    #
+    # @param self Reference to this library task.
+    # @param ninstances Minimum library copies per worker.
     ##
     # Set the execution mode of functions in a library.
     # This is not needed for regular tasks.

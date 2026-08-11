@@ -12,6 +12,8 @@ SOURCES = \
 	vine_catalog.c \
 	vine_counters.c \
 	vine_resources.c \
+	vine_function_call.c \
+	vine_task_frame.c \
 	vine_task.c \
 	vine_file.c \
 	vine_mount.c \
@@ -29,13 +31,9 @@ SOURCES = \
 	vine_fair.c \
 	vine_runtime_dir.c \
 	vine_task_groups.c \
-	vine_temp.c \
-	vine_datavine_journal.c \
-	vine_datavine_index.c \
-	vine_datavine_directory.c \
-	vine_datavine_rpc.c
+	vine_temp.c
 
-PUBLIC_HEADERS = taskvine.h vine_datavine_protocol.h
+PUBLIC_HEADERS = taskvine.h
 
 OBJECTS = $(SOURCES:%.c=%.o)
 LIBRARIES = libtaskvine.a

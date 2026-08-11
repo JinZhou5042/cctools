@@ -1,0 +1,51 @@
+{
+  "artifact_type": "datavine-data-controller-crossed-order-comparison",
+  "status": "PASS",
+  "date": "2026-08-11",
+  "configuration": {
+    "workers": 10,
+    "cores_per_worker": 16,
+    "resident_pool": true,
+    "all_connected_before_dispatch": true,
+    "repetitions_per_order": 5,
+    "backend_orders": ["taskvine-first", "datavine-first"]
+  },
+  "correctness": {
+    "backend_runs": 40,
+    "result_content_validated": true,
+    "one_logical_task_per_physical_task": true,
+    "large_reuse_32mb_completions_per_backend": 1610,
+    "selective_multi_output_wide_completions_per_backend": 4800
+  },
+  "results": {
+    "large_reuse_32mb": {
+      "repetitions_per_backend": 10,
+      "taskvine_median_seconds": 0.790520,
+      "datavine_median_seconds": 2.542171,
+      "datavine_to_taskvine_rate": 0.310962,
+      "datavine_runtime_median_seconds": 2.268351,
+      "datavine_materialize_median_seconds": 0.475461,
+      "datavine_publication_wait_median_seconds": 0.195048,
+      "pre_data_controller_rate_ratio": 0.575995
+    },
+    "selective_multi_output_wide": {
+      "repetitions_per_backend": 10,
+      "taskvine_median_seconds": 1.593443,
+      "datavine_median_seconds": 8.783422,
+      "datavine_to_taskvine_rate": 0.181415,
+      "datavine_runtime_median_seconds": 8.067140,
+      "datavine_materialize_median_seconds": 1.769057,
+      "datavine_publication_wait_median_seconds": 0.000046,
+      "pre_data_controller_rate_ratio": 0.423966
+    }
+  },
+  "interpretation": "The Data Controller removes synchronous publication from the Runtime hot path, but per-output TaskVine file declaration, transfer, and controller-side hashing dominate these large-output workflows. This implementation is not yet a performance win for either workload.",
+  "source_artifacts": [
+    "acceptance/sc-workflow-data-controller-20260811-10x16-n5/summary.json",
+    "acceptance/sc-workflow-data-controller-20260811-10x16-reverse-n5/summary.json"
+  ],
+  "source_sha256": [
+    "585bdca22c42f300f5583474fa98941631ee793db1881088b4250a3cc7c8afe0",
+    "4abb0a75cc20cf8b5d4b7e8666cc84557e8223048272dee9bdc12c692b6832fc"
+  ]
+}

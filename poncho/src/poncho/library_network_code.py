@@ -24,6 +24,7 @@ import threading
 import time
 from datetime import datetime
 import socket
+import struct
 
 
 _sandbox_cwd_lock = threading.Lock()
@@ -149,7 +150,21 @@ def start_function(in_pipe_fd, thread_limit=1, read_only=False):
         stdout_timed_message("error: invalid function name")
         exit(1)
 
-    if inline_event:
+    if (
+        function_name == "execute_datavine_task_ticket"
+        and len(inline_event) == 32
+        and inline_event.startswith(b"DVT1")
+    ):
+        magic, reserved, task_id, generation, configuration = struct.unpack(
+            "!4sIQQQ", inline_event
+        )
+        if reserved:
+            raise ValueError("invalid DataVine ticket reserved field")
+        event = {
+            "fn_args": (task_id, generation, configuration),
+            "fn_kwargs": {},
+        }
+    elif inline_event:
         event = cloudpickle.loads(inline_event)
     else:
         with open(os.path.join(function_sandbox, "infile"), "rb") as f:
@@ -168,7 +183,7 @@ def start_function(in_pipe_fd, thread_limit=1, read_only=False):
     return execute_function(invocation, thread_limit)
 
 
-def execute_function(invocation, thread_limit=1):
+def _execute_function(invocation, thread_limit=1):
     (
         function_id,
         function_name,
@@ -177,99 +192,126 @@ def execute_function(invocation, thread_limit=1):
         event,
         inline_event,
     ) = invocation
-    with threadpool_limits(limits=thread_limit):
-        if exec_method == "direct":
-            try:
-                if inline_event:
-                    result = globals()[function_name](event)
-                else:
-                    with _sandbox_cwd_lock:
-                        library_sandbox = os.getcwd()
-                        try:
-                            os.chdir(function_sandbox)
-                            result = globals()[function_name](event)
-                            with open("outfile", "wb") as f:
-                                cloudpickle.dump(result, f)
-                        finally:
-                            os.chdir(library_sandbox)
-                if not result["Success"]:
-                    raise RuntimeError(result["Reason"])
-            except Exception as e:
-                raise RuntimeError(
-                    f"Library code: Function call failed due to {e}"
-                ) from e
-            return -1, function_id, result if inline_event else None
-        elif exec_method == "fork":
-            p = os.fork()
-            if p == 0:
-                exit_status = 1
-
-                try:
-                    # change the working directory to the function's sandbox
-                    os.chdir(function_sandbox)
-
-                    stdout_timed_message(f"TASK {function_id} {function_name} arrives, starting to run in process {os.getpid()}")
-
+    if exec_method == "direct":
+        try:
+            if inline_event:
+                result = globals()[function_name](event)
+            else:
+                with _sandbox_cwd_lock:
+                    library_sandbox = os.getcwd()
                     try:
-                        # each child process independently redirects its own stdout/stderr.
-                        with open(function_stdout_filename, "wb") as f:
-                            os.dup2(f.fileno(), sys.stdout.fileno())  # redirect stdout
-                            os.dup2(f.fileno(), sys.stderr.fileno())  # redirect stderr
-
-                        # once the file descriptors are redirected, we can start the function execution
-                        stdout_timed_message(f"TASK {function_id} {function_name} starts in PID {os.getpid()}")
+                        os.chdir(function_sandbox)
                         result = globals()[function_name](event)
-                        stdout_timed_message(f"TASK {function_id} {function_name} finished")
-
-                    except Exception:
-                        stdout_timed_message(f"TASK {function_id} error: can't execute {function_name} due to {traceback.format_exc()}")
-                        exit_status = 2
-                        raise
-
-                    try:
                         with open("outfile", "wb") as f:
                             cloudpickle.dump(result, f)
-                    except Exception:
-                        stdout_timed_message(f"TASK {function_id} error: can't load the result from outfile")
-                        exit_status = 3
-                        if os.path.exists("outfile"):
-                            os.remove("outfile")
-                        raise
+                    finally:
+                        os.chdir(library_sandbox)
+            if not result["Success"]:
+                raise RuntimeError(result["Reason"])
+        except Exception as e:
+            raise RuntimeError(
+                f"Library code: Function call failed due to {e}"
+            ) from e
+        return -1, function_id, result if inline_event else None
+    elif exec_method == "fork":
+        p = os.fork()
+        if p == 0:
+            exit_status = 1
 
-                    try:
-                        if not result["Success"]:
-                            exit_status = 4
-                    except Exception:
-                        stdout_timed_message(f"TASK {function_id} error: the result is invalid")
-                        exit_status = 5
-                        raise
+            try:
+                # change the working directory to the function's sandbox
+                os.chdir(function_sandbox)
 
-                    # nothing failed
-                    stdout_timed_message(f"TASK {function_id} finished successfully")
-                    exit_status = 0
-                except Exception as e:
-                    stdout_timed_message(f"TASK {function_id} error: execution failed due to {e}")
-                finally:
-                    os._exit(exit_status)
-            elif p < 0:
-                stdout_timed_message(f"TASK {function_id} error: unable to fork to execute {function_name}")
-                return -1, function_id, None
+                stdout_timed_message(f"TASK {function_id} {function_name} arrives, starting to run in process {os.getpid()}")
 
-            # return pid and function id of child process to parent.
-            else:
-                return p, function_id, None
-        else:
-            stdout_timed_message(f"error: invalid execution method {exec_method}")
+                try:
+                    # each child process independently redirects its own stdout/stderr.
+                    with open(function_stdout_filename, "wb") as f:
+                        os.dup2(f.fileno(), sys.stdout.fileno())  # redirect stdout
+                        os.dup2(f.fileno(), sys.stderr.fileno())  # redirect stderr
+
+                    # once the file descriptors are redirected, we can start the function execution
+                    stdout_timed_message(f"TASK {function_id} {function_name} starts in PID {os.getpid()}")
+                    result = globals()[function_name](event)
+                    stdout_timed_message(f"TASK {function_id} {function_name} finished")
+
+                except Exception:
+                    stdout_timed_message(f"TASK {function_id} error: can't execute {function_name} due to {traceback.format_exc()}")
+                    exit_status = 2
+                    raise
+
+                try:
+                    with open("outfile", "wb") as f:
+                        cloudpickle.dump(result, f)
+                except Exception:
+                    stdout_timed_message(f"TASK {function_id} error: can't load the result from outfile")
+                    exit_status = 3
+                    if os.path.exists("outfile"):
+                        os.remove("outfile")
+                    raise
+
+                try:
+                    if not result["Success"]:
+                        exit_status = 4
+                except Exception:
+                    stdout_timed_message(f"TASK {function_id} error: the result is invalid")
+                    exit_status = 5
+                    raise
+
+                # nothing failed
+                stdout_timed_message(f"TASK {function_id} finished successfully")
+                exit_status = 0
+            except Exception as e:
+                stdout_timed_message(f"TASK {function_id} error: execution failed due to {e}")
+            finally:
+                os._exit(exit_status)
+        elif p < 0:
+            stdout_timed_message(f"TASK {function_id} error: unable to fork to execute {function_name}")
             return -1, function_id, None
+
+        # return pid and function id of child process to parent.
+        else:
+            return p, function_id, None
+    else:
+        stdout_timed_message(f"error: invalid execution method {exec_method}")
+        return -1, function_id, None
+
+
+def execute_function(invocation, thread_limit=1):
+    if exec_method == "direct":
+        return _execute_function(invocation, thread_limit)
+    with threadpool_limits(limits=thread_limit):
+        return _execute_function(invocation, thread_limit)
+
+
+def _compact_datavine_result(result):
+    """Encode the output-free DataVine success sentinel without pickle."""
+
+    if not isinstance(result, dict):
+        return None
+    if result.get("Success") is not True or result.get("Reason") is not None:
+        return None
+    value = result.get("Result")
+    if (
+        not isinstance(value, tuple)
+        or len(value) != 2
+        or value[0] != "datavine-task-elided-v1"
+        or isinstance(value[1], bool)
+        or not isinstance(value[1], int)
+    ):
+        return None
+    return f"datavine-elided-v1:{value[1]}".encode("ascii")
 
 
 # Send result of a function execution to worker. Wake worker up to do work with SIGCHLD.
 def send_result(out_pipe_fd, worker_pid, task_id, exit_code, result=None):
-    payload = (
-        base64.b64encode(cloudpickle.dumps(result))
-        if result is not None
-        else b""
-    )
+    payload = _compact_datavine_result(result)
+    if payload is None:
+        payload = (
+            base64.b64encode(cloudpickle.dumps(result))
+            if result is not None
+            else b""
+        )
     header = f"{task_id} {exit_code} {len(payload)}\n".encode()
     frame = header + payload
     os.writev(out_pipe_fd, [str(len(frame)).encode(), b"\n", frame])
@@ -338,8 +380,18 @@ def main():
     )
     args = parser.parse_args()
 
+    # Read the execution contract before validating dispatch depth. Direct
+    # libraries may keep a small queue beyond their CPU count; fork libraries
+    # still require one slot per allocated core.
+    with open('library_info.clpk', 'rb') as f:
+        library_info = cloudpickle.load(f)
+    library_exec_method = library_info['exec_mode']
+
     # check if library cores and function slots are valid
-    if args.function_slots > args.library_cores:
+    if (
+        args.function_slots > args.library_cores
+        and library_exec_method != "direct"
+    ):
         stdout_timed_message("error: function slots cannot be more than library cores")
         exit(1)
     elif args.function_slots < 1:
@@ -350,7 +402,9 @@ def main():
         exit(1)
 
     try:
-        thread_limit = args.library_cores // args.function_slots
+        thread_limit = max(
+            1, args.library_cores // args.function_slots
+        )
     except Exception as e:
         stdout_timed_message(f"error: {e}")
         exit(1)
@@ -383,10 +437,6 @@ def main():
     # mapping of child pid to function id of currently running functions
     pid_to_func_id = {}
 
-    # read in information about this library
-    with open('library_info.clpk', 'rb') as f:
-        library_info = cloudpickle.load(f)
-
     # load and execute this library's context
     library_context_info = cloudpickle.loads(library_info['context_info'])
     context_vars = None
@@ -408,13 +458,20 @@ def main():
     # set execution mode of functions in this library
     global exec_method
     exec_method = library_info['exec_mode']
+    # Direct libraries are persistent, so apply the native thread limit once
+    # for their lifetime instead of rescanning loaded libraries per call.
+    _direct_threadpool_limit = (
+        threadpool_limits(limits=thread_limit)
+        if exec_method == "direct"
+        else None
+    )
     direct_results = queue.SimpleQueue()
     direct_executor = (
         concurrent.futures.ThreadPoolExecutor(
-            max_workers=args.function_slots,
+            max_workers=args.library_cores,
             thread_name_prefix="vine-function",
         )
-        if exec_method == "direct"
+        if exec_method == "direct" and args.library_cores > 1
         else None
     )
 
@@ -466,12 +523,37 @@ def main():
                         in_pipe_fd, thread_limit, read_only=True
                     )
                     func_id = invocation[0]
-                    future = direct_executor.submit(
-                        execute_function, invocation, thread_limit
-                    )
-                    future.add_done_callback(
-                        lambda done, fid=func_id: direct_done(fid, done)
-                    )
+                    if args.library_cores == 1:
+                        try:
+                            _, returned_id, result = execute_function(
+                                invocation, thread_limit
+                            )
+                            if returned_id != func_id:
+                                raise RuntimeError(
+                                    "function result TaskID mismatch"
+                                )
+                            send_result(
+                                out_pipe_fd,
+                                args.worker_pid,
+                                func_id,
+                                0,
+                                result,
+                            )
+                        except BaseException:
+                            stdout_timed_message(traceback.format_exc())
+                            send_result(
+                                out_pipe_fd,
+                                args.worker_pid,
+                                func_id,
+                                1,
+                            )
+                    else:
+                        future = direct_executor.submit(
+                            execute_function, invocation, thread_limit
+                        )
+                        future.add_done_callback(
+                            lambda done, fid=func_id: direct_done(fid, done)
+                        )
                 else:
                     pid, func_id, _ = start_function(in_pipe_fd, thread_limit)
                     # pid == -1 indicates a failure during fork/setup of the function execution

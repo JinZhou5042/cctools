@@ -1,0 +1,64 @@
+{
+  "artifact_type": "datavine-worker-local-data-plane-evidence",
+  "date": "2026-08-11",
+  "status": "PASS_WITH_PERFORMANCE_LIMITATION",
+  "architecture": {
+    "intermediate_outputs": "TaskVine VINE_TEMP worker cache with peer transfer",
+    "requested_outputs": "TaskVine output transfer to Data Controller owned files",
+    "runtime_payload_access": false,
+    "python_result_encoding": "cloudpickle file with streamed SHA-256 plus DVM1 metadata manifest",
+    "base64_result_transport": false,
+    "controller_threads": 4,
+    "restart_policy": "recompute producers whose retained worker-local outputs are unavailable"
+  },
+  "correctness": {
+    "supported_regressions_passed": 8,
+    "supported_regressions_total": 8,
+    "go_gate": "environment-blocked: no DATAVINE_GO_BINARY, DATAVINE_GO_COMPILER, or go compiler",
+    "worker_local_restart_recompute": true,
+    "requested_result_restart_fetch": true,
+    "exact_100k": {"submissions": 100000, "completions": 100000},
+    "exact_1m": {"submissions": 1000000, "completions": 1000000}
+  },
+  "scale": {
+    "runtime_tasks_per_second_100k": 4303.451086615304,
+    "runtime_tasks_per_second_1m": 4121.500865165696,
+    "peak_rss_bytes_1m": 4038578176
+  },
+  "packed_candidate": {
+    "path": "/users/jzhou24/graph_optimization/factories/datavine.worker-local-candidate-20260811.tar.gz",
+    "sha256": "67c202c328b38f59d5da68a68ade5a05abdc076bdb1b57f49f15ad00a5b6f0bf",
+    "cloudpickle": "3.1.2",
+    "exact_10k": {"submissions": 10000, "completions": 10000},
+    "runtime_tasks_per_second": 3364.7977387292103,
+    "production_promoted": false
+  },
+  "final_10x16_n5": {
+    "worker_gate": "exactly 10 workers and 160 cores before dispatch",
+    "large_reuse_32mb": {
+      "taskvine_median_seconds": 0.814702411997132,
+      "datavine_median_seconds": 2.4997809659689665,
+      "datavine_to_taskvine_rate": 0.32590951890912434
+    },
+    "selective_multi_output_wide": {
+      "taskvine_median_seconds": 1.5430344300111756,
+      "datavine_median_seconds": 4.2726900320267305,
+      "datavine_to_taskvine_rate": 0.36113886531554557
+    },
+    "physical_task_count_mismatches": 0,
+    "result_mismatches": 0,
+    "controller_data_files": 2401,
+    "controller_data_bytes": 555786,
+    "maximum_controller_data_file_bytes": 236,
+    "large_intermediate_persisted_to_controller": false
+  },
+  "cross_order_hybrid_n5": {
+    "large_reuse_32mb_datavine_to_taskvine_rate": 0.43657335755252275,
+    "selective_multi_output_wide_datavine_to_taskvine_rate": 0.3915667405973886
+  },
+  "historical_data_controller_rate": {
+    "large_reuse_32mb": 0.311,
+    "selective_multi_output_wide": 0.181
+  },
+  "conclusion": "Worker-local intermediates remove large payload persistence and more than double the wide-workflow relative rate in the crossed-order run, but DataVine remains slower than TaskVine for these output-heavy shapes. Opportunistic Condor variability prevents a causal hardware claim."
+}

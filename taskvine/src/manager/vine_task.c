@@ -7,6 +7,7 @@ See the file COPYING for details.
 #include "vine_task.h"
 #include "vine_counters.h"
 #include "vine_file.h"
+#include "vine_function_call.h"
 #include "vine_manager.h"
 #include "vine_mount.h"
 #include "vine_worker_info.h"
@@ -58,9 +59,7 @@ struct vine_task *vine_task_create(const char *command_line)
 	t->worker_selection_algorithm = VINE_SCHEDULE_UNSET;
 
 	t->state = VINE_TASK_INITIAL;
-	t->function_slots_requested = -1;
-	t->function_slots_total = 0;
-	t->function_slots_inuse = 0;
+	vine_function_call_task_init(t);
 
 	t->result = VINE_RESULT_UNKNOWN;
 	t->exit_code = -1;
@@ -103,8 +102,7 @@ void vine_task_clean(struct vine_task *t)
 	t->bytes_transferred = 0;
 
 	t->library_task = 0;
-	t->function_slots_total = 0;
-	t->function_slots_inuse = 0;
+	vine_function_call_task_reset(t);
 
 	free(t->output);
 	t->output = NULL;
@@ -214,8 +212,6 @@ struct vine_task *vine_task_copy(const struct vine_task *task)
 	/* Static features of task are copied. */
 	if (task->needs_library)
 		vine_task_set_library_required(new, task->needs_library);
-	if (task->function_input)
-		vine_task_set_function_input(new, task->function_input, task->function_input_length);
 	if (task->provides_library)
 		vine_task_set_library_provided(new, task->provides_library);
 	if (task->func_exec_mode)
@@ -237,7 +233,7 @@ struct vine_task *vine_task_copy(const struct vine_task *task)
 	vine_task_mount_list_copy(new->output_mounts, task->output_mounts);
 	vine_task_string_list_copy(new->env_list, task->env_list);
 	vine_task_string_list_copy(new->feature_list, task->feature_list);
-	new->function_slots_requested = task->function_slots_requested;
+	vine_function_call_task_copy(new, task);
 
 	/* Scheduling features of task are copied. */
 	new->resource_request = task->resource_request;
@@ -327,18 +323,6 @@ const char *vine_task_get_library_provided(struct vine_task *t)
 void vine_task_set_function_slots(struct vine_task *t, int nslots)
 {
 	t->function_slots_requested = nslots;
-}
-
-void vine_task_set_function_input(struct vine_task *t, const char *buffer, size_t size)
-{
-	free(t->function_input);
-	t->function_input = 0;
-	t->function_input_length = 0;
-	if (buffer && size) {
-		t->function_input = xxmalloc(size);
-		memcpy(t->function_input, buffer, size);
-		t->function_input_length = size;
-	}
 }
 
 void vine_task_set_function_exec_mode(struct vine_task *t, vine_task_func_exec_mode_t exec_mode)
@@ -765,7 +749,7 @@ void vine_task_delete(struct vine_task *t)
 	free(t->category);
 
 	free(t->needs_library);
-	free(t->function_input);
+	vine_function_call_task_delete(t);
 	free(t->provides_library);
 
 	free(t->monitor_output_directory);
@@ -844,6 +828,23 @@ const char *vine_task_get_state(struct vine_task *t)
 	return vine_task_state_to_string(t->state);
 }
 
+int vine_task_get_recovery_source_task_id(struct vine_task *t)
+{
+	if (!t || t->type != VINE_TASK_TYPE_RECOVERY) {
+		return 0;
+	}
+
+	struct vine_mount *m;
+	LIST_ITERATE(t->output_mounts, m)
+	{
+		if (m && m->file && m->file->original_producer_task_id > 0) {
+			return m->file->original_producer_task_id;
+		}
+	}
+
+	return 0;
+}
+
 #define METRIC(x) \
 	if (!strcmp(name, #x)) \
 		return t->x;
@@ -855,12 +856,15 @@ int64_t vine_task_get_metric(struct vine_task *t, const char *name)
 	METRIC(time_when_commit_end);
 	METRIC(time_when_retrieval);
 	METRIC(time_workers_execute_last);
+	METRIC(time_workers_execute_last_start);
+	METRIC(time_workers_execute_last_end);
 	METRIC(time_workers_execute_all);
 	METRIC(time_workers_execute_exhaustion);
 	METRIC(time_workers_execute_failure);
 	METRIC(bytes_received);
 	METRIC(bytes_sent);
 	METRIC(bytes_transferred);
+	METRIC(library_task_id);
 	return 0;
 }
 

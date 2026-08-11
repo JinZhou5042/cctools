@@ -12,9 +12,11 @@ See the file COPYING for details.
 #include "vine_mount.h"
 #include "vine_protocol.h"
 #include "vine_task.h"
+#include "vine_task_frame.h"
 #include "vine_txn_log.h"
 #include "vine_worker_info.h"
 
+#include "buffer.h"
 #include "create_dir.h"
 #include "debug.h"
 #include "host_disk_info.h"
@@ -441,12 +443,8 @@ static vine_result_code_t vine_manager_put_input_file_if_needed(struct vine_mana
 	/* Now send the actual file. */
 	vine_result_code_t result = vine_manager_put_input_file(q, w, t, m, file_to_send);
 	if (result == VINE_MGR_FAILURE && m->substitute) {
-		/*
-		A DataVine-bound peer is only a usable source after the Controller
-		authorizes its transfer lease.  A cache observation made by TaskVine
-		alone is soft state, so discard the substitute and retry the stable
-		origin without rolling back computation.
-		*/
+		/* A peer substitute is soft state.  If it disappears, retry the
+		 * stable origin without rolling back the computation. */
 		vine_file_delete(m->substitute);
 		m->substitute = 0;
 		result = vine_manager_put_input_file(q, w, t, m, m->file);
@@ -486,20 +484,14 @@ It does not perform any resource management.
 This allows it to be used for both regular tasks and mini tasks.
 */
 
-vine_result_code_t vine_manager_put_task(
-		struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, const char *command_line, struct rmsummary *limits, struct vine_file *target)
+static vine_result_code_t vine_manager_put_task_streaming(
+		struct vine_manager *q,
+		struct vine_worker_info *w,
+		struct vine_task *t,
+		const char *command_line,
+		struct rmsummary *limits,
+		struct vine_file *target)
 {
-	if (target) {
-		if (vine_file_replica_table_lookup(w, target->cached_name)) {
-			/* do nothing, file already at worker */
-			debug(D_NOTICE, "cannot put mini_task %s at %s. Already at worker.", target->cached_name, w->addrport);
-			return VINE_SUCCESS;
-		}
-	}
-
-	vine_result_code_t result = vine_manager_put_input_files(q, w, t);
-	if (result != VINE_SUCCESS)
-		return result;
 
 	if (target) {
 		/* If the user provide mode bits manually, use them here. */
@@ -524,6 +516,10 @@ vine_result_code_t vine_manager_put_task(
 
 	if (t->needs_library) {
 		vine_manager_send(q, w, "needs_library %s\n", t->needs_library);
+		if (t->library_task) {
+			vine_manager_send(q, w, "library_task_id %d\n", t->library_task_id);
+			vine_manager_send(q, w, "function_credit_generation %" PRId64 "\n", t->function_credit_generation);
+		}
 		if (t->function_input_length) {
 			vine_manager_send(q, w, "function_input %zu\n", t->function_input_length);
 			link_putlstring(w->link, t->function_input, t->function_input_length, time(0) + q->short_timeout);
@@ -603,4 +599,41 @@ vine_result_code_t vine_manager_put_task(
 	} else {
 		return VINE_WORKER_FAILURE;
 	}
+}
+
+vine_result_code_t vine_manager_put_task(
+		struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, const char *command_line, struct rmsummary *limits, struct vine_file *target)
+{
+	if (target && vine_file_replica_table_lookup(w, target->cached_name)) {
+		debug(D_NOTICE, "cannot put mini_task %s at %s. Already at worker.", target->cached_name, w->addrport);
+		return VINE_SUCCESS;
+	}
+
+	vine_result_code_t result = vine_manager_put_input_files(q, w, t);
+	if (result != VINE_SUCCESS)
+		return result;
+
+	if (!command_line) {
+		command_line = t->command_line;
+	}
+
+	buffer_t frame[1];
+	if (!vine_task_frame_build(frame, q, t, command_line, limits, target)) {
+		return vine_manager_put_task_streaming(q, w, t, command_line, limits, target);
+	}
+
+	size_t frame_length = 0;
+	const char *frame_data = buffer_tolstring(frame, &frame_length);
+	debug(D_VINE, "tx task frame to %s (%s): task=%d bytes=%zu", w->hostname, w->addrport, t->task_id, frame_length);
+	ssize_t written = link_putlstring(w->link, frame_data, frame_length, time(0) + q->short_timeout);
+	buffer_free(frame);
+
+	if (written != (ssize_t)frame_length) {
+		return VINE_WORKER_FAILURE;
+	}
+
+	if (target) {
+		vine_file_replica_table_get_or_create(q, w, target->cached_name, target->type, target->cache_level, target->size, target->mtime);
+	}
+	return VINE_SUCCESS;
 }

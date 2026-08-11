@@ -1,23 +1,24 @@
 include ../../config.mk
 include ../../rules.mk
 
-TARGETS=manager worker tools bindings examples
+TARGETS=manager datavine worker tools bindings examples
 
 all: $(TARGETS)
 
+datavine: manager
 worker: manager
 bindings: manager
-tools: manager
+tools: manager datavine
 examples: manager worker tools bindings
 
 $(TARGETS): %:
 	$(MAKE) -C $@ $(MAKECMDGOALS)
 
 install:
-	for d in $(TARGETS); do $(MAKE) -C $$d install; done
+	set -e; for d in $(TARGETS); do $(MAKE) -C $$d install; done
 
 clean:
-	for d in $(TARGETS); do $(MAKE) -C $$d clean; done
+	set -e; for d in $(TARGETS); do $(MAKE) -C $$d clean; done
 
 lint: $(TARGETS)
 

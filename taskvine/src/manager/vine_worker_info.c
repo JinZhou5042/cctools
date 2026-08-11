@@ -11,6 +11,8 @@ See the file COPYING for details.
 #include "vine_resources.h"
 #include "vine_task.h"
 
+#include "macros.h"
+
 struct vine_worker_info *vine_worker_create(struct link *lnk)
 {
 	struct vine_worker_info *w = malloc(sizeof(*w));
@@ -49,6 +51,37 @@ struct vine_worker_info *vine_worker_create(struct link *lnk)
 	w->outgoing_xfer_counter = 0;
 
 	return w;
+}
+
+void vine_worker_account_task_started(struct vine_worker_info *worker,
+		struct vine_task *task)
+{
+	worker->tasks_committed++;
+	worker->tasks_running++;
+	struct rmsummary *box = task->current_resource_box;
+	if (box) {
+		worker->resources->cores.inuse += box->cores;
+		worker->resources->memory.inuse += box->memory;
+		worker->resources->gpus.inuse += box->gpus;
+		worker->resources->disk.inuse += box->disk;
+	}
+}
+
+void vine_worker_account_task_completed(struct vine_worker_info *worker,
+		struct vine_task *task)
+{
+	if (worker->tasks_running > 0)
+		worker->tasks_running--;
+	worker->tasks_waiting_retrieval++;
+	struct rmsummary *box = task->current_resource_box;
+	if (box) {
+		worker->resources->cores.inuse = MAX(0,
+				worker->resources->cores.inuse - box->cores);
+		worker->resources->memory.inuse = MAX(0,
+				worker->resources->memory.inuse - box->memory);
+		worker->resources->gpus.inuse = MAX(0,
+				worker->resources->gpus.inuse - box->gpus);
+	}
 }
 
 void vine_worker_delete(struct vine_worker_info *w)

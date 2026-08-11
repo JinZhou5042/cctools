@@ -1,6 +1,10 @@
 /* taskvine.i */
 %module cvine
 
+/* Release the GIL only while the Manager blocks for a completion. */
+%nothread;
+%thread vine_wait_for_tag;
+
 %include carrays.i
 %array_functions(struct rmsummary *, rmsummayArray);
 
@@ -11,7 +15,6 @@
 %{
 	#include "int_sizes.h"
 	#include "taskvine.h"
-	#include "vine_datavine_rpc.h"
 %}
 
 /* We compile with -D__LARGE64_FILES, thus off_t is at least 64bit.
@@ -32,10 +35,6 @@ long long int is guaranteed to be at least 64bit. */
 %ignore vine_cancel_all_tasks;
 %ignore input_files;
 %ignore output_files;
-%ignore vine_datavine_rpc_get_u32;
-%ignore vine_datavine_rpc_get_u64;
-%ignore vine_datavine_rpc_put_u32;
-%ignore vine_datavine_rpc_put_u64;
 
 /* When we enounter buffer_length in the prototype of vine_task_get_output_buffer,
 treat it as an output parameter to be filled in. */
@@ -69,86 +68,6 @@ into a swig function f(data) */
 	PyObject *vine_file_contents_as_bytes(struct vine_file *f) {
 		return PyBytes_FromStringAndSize(vine_file_contents(f), vine_file_size(f));
 	}
-
-	PyObject *vine_datavine_rpc_server_metrics_as_dict(struct vine_datavine_rpc_server *server) {
-		struct vine_datavine_directory_metrics metrics = {0};
-		vine_datavine_rpc_server_get_metrics(server, &metrics);
-		return Py_BuildValue(
-				"{s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K}",
-				"workers", metrics.workers,
-				"replicas", metrics.replicas,
-				"active_leases", metrics.active_leases,
-				"source_selections", metrics.source_selections,
-				"source_misses", metrics.source_misses,
-				"releases", metrics.releases,
-				"release_failures", metrics.release_failures,
-				"idempotent_releases", metrics.idempotent_releases,
-				"invalidations", metrics.invalidations,
-				"restorations", metrics.restorations,
-				"prunes", metrics.prunes,
-				"stale_rejections", metrics.stale_rejections);
-	}
-
-	PyObject *vine_datavine_rpc_server_journal_metrics_as_dict(struct vine_datavine_rpc_server *server) {
-		struct vine_datavine_journal_metrics metrics = {0};
-		vine_datavine_rpc_server_get_journal_metrics(server, &metrics);
-		return Py_BuildValue(
-				"{s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K}",
-				"commits", metrics.commits,
-				"bytes", metrics.bytes,
-				"syncs", metrics.syncs,
-				"sync_nanoseconds", metrics.sync_nanoseconds,
-				"maximum_group", metrics.maximum_group,
-				"waits", metrics.waits,
-				"replayed", metrics.replayed,
-				"truncated_tails", metrics.truncated_tails,
-				"durable_sequence", metrics.durable_sequence);
-	}
-
-	PyObject *vine_datavine_rpc_server_replicas_as_list(
-			struct vine_datavine_rpc_server *server, char kind, int64_t data_id) {
-		struct vine_datavine_replica_snapshot *records = 0;
-		size_t count = 0;
-		if (!vine_datavine_rpc_server_snapshot_replicas(
-				server, kind, data_id, &records, &count)) {
-			PyErr_SetString(PyExc_RuntimeError, "could not snapshot native replicas");
-			return 0;
-		}
-		PyObject *result = PyList_New((Py_ssize_t)count);
-		if (!result) {
-			free(records);
-			return 0;
-		}
-		for (size_t i = 0; i < count; i++) {
-			struct vine_datavine_replica_record *record = &records[i].replica;
-			char qualified[64];
-			snprintf(qualified, sizeof(qualified), "%c:%lld", record->kind, (long long)record->data_id);
-			const char *tier = record->tier == VINE_DATAVINE_WORKER_DRAM ? "worker-dram" : "worker-disk";
-			const char *state = records[i].state == 2 ? "pruned" : records[i].state ? "available" : record->active_leases ? "retiring" : "invalid";
-			PyObject *item = Py_BuildValue(
-					"{s:s,s:s,s:K,s:i,s:s,s:s,s:L,s:s,s:I,s:s,s:K,s:s}",
-					"data_id", qualified,
-					"replica_id", record->replica_id,
-					"generation", record->generation,
-					"attempt", record->attempt,
-					"tier", tier,
-					"content_hash", record->content_hash,
-					"size", (long long)record->size,
-					"state", state,
-					"load", record->active_leases,
-					"worker_id", record->worker_id,
-					"worker_epoch", record->worker_epoch,
-					"source_endpoint", records[i].endpoint);
-			if (!item) {
-				free(records);
-				Py_DECREF(result);
-				return 0;
-			}
-			PyList_SET_ITEM(result, (Py_ssize_t)i, item);
-		}
-		free(records);
-		return result;
-	}
 %}
 
 %include "stdint.i"
@@ -165,5 +84,3 @@ into a swig function f(data) */
 }
 
 %include "taskvine.h"
-%include "vine_datavine_protocol.h"
-%include "vine_datavine_rpc.h"

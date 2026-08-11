@@ -41,13 +41,13 @@ expected events.
 /** Select optional handling for input and output files: caching, unpacking, watching, etc. **/
 
 typedef enum {
-	VINE_TRANSFER_ALWAYS = 0, /**< Always transfer this file when needed. */
-	VINE_FIXED_LOCATION = 1, /**< Never transfer input files with this flag to a worker for execution. Task won't be
+	VINE_TRANSFER_ALWAYS = 0,   /**< Always transfer this file when needed. */
+	VINE_FIXED_LOCATION = 1,    /**< Never transfer input files with this flag to a worker for execution. Task won't be
 				    dispatched to a worker unless file is already cached there.*/
-	VINE_WATCH = 2,		 /**< Watch the output file and send back changes as the task runs. */
-	VINE_FAILURE_ONLY = 4,	 /**< Only return this output file if the task failed.  (Useful for returning large log
+	VINE_WATCH = 2,		    /**< Watch the output file and send back changes as the task runs. */
+	VINE_FAILURE_ONLY = 4,	    /**< Only return this output file if the task failed.  (Useful for returning large log
 				    files.) */
-	VINE_SUCCESS_ONLY = 8,	 /**< Only return this output file if the task succeeded. */
+	VINE_SUCCESS_ONLY = 8,	    /**< Only return this output file if the task succeeded. */
 	VINE_RETRACT_ON_RESET = 16, /**< Remove this file from the mount lists if the task is reset. (TaskVine internal
 				       use only.) */
 	VINE_MOUNT_SYMLINK = 32,    /**< Permit this directory to be mounted via symlink instead of hardlink. */
@@ -73,12 +73,12 @@ typedef enum {
 /** Select overall scheduling algorithm for matching tasks to workers. */
 typedef enum {
 	VINE_SCHEDULE_UNSET = 0, /**< Internal use only. */
-	VINE_SCHEDULE_FCFS,      /**< Select worker on a first-come-first-serve basis. (deprecated, same as random) */
-	VINE_SCHEDULE_FILES,     /**< Select worker that has the most data required by the task. (default) */
-	VINE_SCHEDULE_TIME,      /**< Select worker that has the fastest execution time on previous tasks. */
-	VINE_SCHEDULE_RAND,      /**< Select a random worker. */
-	VINE_SCHEDULE_WORST,     /**< Select the worst fit worker (the worker with more unused resources). */
-	VINE_SCHEDULE_DISK       /**< Select the worker with the largest free disk space. */
+	VINE_SCHEDULE_FCFS,	 /**< Select worker on a first-come-first-serve basis. (deprecated, same as random) */
+	VINE_SCHEDULE_FILES,	 /**< Select worker that has the most data required by the task. (default) */
+	VINE_SCHEDULE_TIME,	 /**< Select worker that has the fastest execution time on previous tasks. */
+	VINE_SCHEDULE_RAND,	 /**< Select a random worker. */
+	VINE_SCHEDULE_WORST,	 /**< Select the worst fit worker (the worker with more unused resources). */
+	VINE_SCHEDULE_DISK	 /**< Select the worker with the largest free disk space. */
 } vine_schedule_t;
 
 /** Possible outcomes for a task, returned by @ref vine_task_get_result.
@@ -86,21 +86,21 @@ These results can be converted to a string with @ref vine_result_string.
 */
 
 typedef enum {
-	VINE_RESULT_SUCCESS = 0,	/**< The task ran successfully, and its Unix exit code is given by @ref
-					   vine_task_get_exit_code */
-	VINE_RESULT_INPUT_MISSING = 1,	/**< The task cannot be run due to a missing input file **/
-	VINE_RESULT_OUTPUT_MISSING = 2, /**< The task ran but failed to generate a specified output file **/
-	VINE_RESULT_STDOUT_MISSING = 4, /**< The task ran but its stdout has been truncated **/
-	VINE_RESULT_SIGNAL = 1 << 3,	/**< The task was terminated with a signal **/
+	VINE_RESULT_SUCCESS = 0,		  /**< The task ran successfully, and its Unix exit code is given by @ref
+						  vine_task_get_exit_code */
+	VINE_RESULT_INPUT_MISSING = 1,		  /**< The task cannot be run due to a missing input file **/
+	VINE_RESULT_OUTPUT_MISSING = 2,		  /**< The task ran but failed to generate a specified output file **/
+	VINE_RESULT_STDOUT_MISSING = 4,		  /**< The task ran but its stdout has been truncated **/
+	VINE_RESULT_SIGNAL = 1 << 3,		  /**< The task was terminated with a signal **/
 	VINE_RESULT_RESOURCE_EXHAUSTION = 2 << 3, /**< The task used more resources than requested **/
-	VINE_RESULT_MAX_END_TIME = 3 << 3,  /**< The task ran after the specified (absolute since epoch) end time. **/
-	VINE_RESULT_UNKNOWN = 4 << 3,	    /**< The result could not be classified. **/
-	VINE_RESULT_FORSAKEN = 5 << 3,	    /**< The task failed, but it was not a task error **/
-	VINE_RESULT_MAX_RETRIES = 6 << 3,   /**< Currently unused. **/
-	VINE_RESULT_MAX_WALL_TIME = 7 << 3, /**< The task ran for more than the specified time (relative since running
-					       in a worker). **/
+	VINE_RESULT_MAX_END_TIME = 3 << 3,	  /**< The task ran after the specified (absolute since epoch) end time. **/
+	VINE_RESULT_UNKNOWN = 4 << 3,		  /**< The result could not be classified. **/
+	VINE_RESULT_FORSAKEN = 5 << 3,		  /**< The task failed, but it was not a task error **/
+	VINE_RESULT_MAX_RETRIES = 6 << 3,	  /**< Currently unused. **/
+	VINE_RESULT_MAX_WALL_TIME = 7 << 3,	  /**< The task ran for more than the specified time (relative since running
+						  in a worker). **/
 	VINE_RESULT_RMONITOR_ERROR =
-			8 << 3, /**< The task failed because the monitor did not produce a summary report. **/
+			8 << 3,			      /**< The task failed because the monitor did not produce a summary report. **/
 	VINE_RESULT_OUTPUT_TRANSFER_ERROR = 9 << 3,   /**< The task failed because an output could be transfered to the
 							 manager (not enough disk space, incorrect write permissions. */
 	VINE_RESULT_FIXED_LOCATION_MISSING = 10 << 3, /**< The task failed because no worker could satisfy the fixed
@@ -108,7 +108,7 @@ typedef enum {
 	VINE_RESULT_CANCELLED = 11 << 3,	      /**< The task was cancelled by the caller. */
 	VINE_RESULT_LIBRARY_EXIT = 12 << 3,	      /**< Task is a library that has terminated. **/
 	VINE_RESULT_SANDBOX_EXHAUSTION = 13 << 3,     /**< The task used more disk than the allowed sandbox. **/
-	VINE_RESULT_MISSING_LIBRARY = 14 << 3         /**< The task is a function requiring a library that does not exist. */
+	VINE_RESULT_MISSING_LIBRARY = 14 << 3	      /**< The task is a function requiring a library that does not exist. */
 } vine_result_t;
 
 /** Select how to allocate resources for similar tasks with @ref vine_set_category_mode */
@@ -146,13 +146,12 @@ typedef enum {
 
 /** The type of an input or output file to attach to a task. */
 typedef enum {
-	VINE_FILE = 1,              /**< A file or directory present at the manager. **/
-	VINE_URL,                   /**< A file obtained by downloading from a URL. */
-	VINE_TEMP,                  /**< A temporary file created as an output of a task. */
-	VINE_BUFFER,                /**< A file obtained from data in the manager's memory space. */
-	VINE_MINI_TASK,             /**< A file obtained by executing a Unix command line. */
+	VINE_FILE = 1,	/**< A file or directory present at the manager. **/
+	VINE_URL,	/**< A file obtained by downloading from a URL. */
+	VINE_TEMP,	/**< A temporary file created as an output of a task. */
+	VINE_BUFFER,	/**< A file obtained from data in the manager's memory space. */
+	VINE_MINI_TASK, /**< A file obtained by executing a Unix command line. */
 } vine_file_type_t;
-
 
 /** Statistics describing a manager. */
 struct vine_stats {
@@ -180,15 +179,15 @@ struct vine_stats {
 	int tasks_on_workers;	/**< Number of tasks currently dispatched to some worker. */
 	int tasks_running;	/**< Number of tasks currently executing at some worker. */
 	int tasks_with_results; /**< Number of tasks with retrieved results and waiting to be returned to user. */
-	int tasks_recovery;     /**< Total number of recovery tasks submitted. */
+	int tasks_recovery;	/**< Total number of recovery tasks submitted. */
 
 	/* Cumulative stats for tasks: */
-	int tasks_submitted;  /**< Total number of tasks submitted to the manager. */
-	int tasks_dispatched; /**< Total number of tasks dispatch to workers. */
-	int tasks_done;	      /**< Total number of tasks completed (includes tasks_failed and tasks_successful) */
-	int tasks_failed;     /**< Total number of tasks completed with result other than VINE_RESULT_SUCCESS. (includes retries) */
-	int tasks_successful; /**< Total number of task completed and returned to the user with a successful exit status. */
-	int tasks_cancelled;  /**< Total number of tasks cancelled. */
+	int tasks_submitted;	      /**< Total number of tasks submitted to the manager. */
+	int tasks_dispatched;	      /**< Total number of tasks dispatch to workers. */
+	int tasks_done;		      /**< Total number of tasks completed (includes tasks_failed and tasks_successful) */
+	int tasks_failed;	      /**< Total number of tasks completed with result other than VINE_RESULT_SUCCESS. (includes retries) */
+	int tasks_successful;	      /**< Total number of task completed and returned to the user with a successful exit status. */
+	int tasks_cancelled;	      /**< Total number of tasks cancelled. */
 	int tasks_exhausted_attempts; /**< Total number of task executions that failed given resource exhaustion. */
 
 	/* All times in microseconds */
@@ -196,8 +195,8 @@ struct vine_stats {
 
 	/* Master time statistics: */
 	timestamp_t time_when_started; /**< Absolute time at which the manager started. */
-	timestamp_t time_send; /**< Total time spent in sending tasks to workers (tasks descriptions, and input files.).
-				*/
+	timestamp_t time_send;	       /**< Total time spent in sending tasks to workers (tasks descriptions, and input files.).
+					*/
 	timestamp_t time_receive;      /**< Total time spent in receiving results from workers (output files.). */
 	timestamp_t time_send_good;    /**< Total time spent in sending data to workers for tasks with result
 					  VINE_RESULT_SUCCESS. */
@@ -207,10 +206,10 @@ struct vine_stats {
 					  including workers' standard output, new workers connections, resources updates,
 					  etc. */
 	timestamp_t time_internal;     /**< Total time the manager spents in internal processing. */
-	timestamp_t time_polling; /**< Total time blocking waiting for worker communications (i.e., manager idle waiting
-				     for a worker message). */
-	timestamp_t time_application; /**< Total time spent outside vine_wait. */
-	timestamp_t time_scheduling;  /**< Total time spend matching tasks to workers. */
+	timestamp_t time_polling;      /**< Total time blocking waiting for worker communications (i.e., manager idle waiting
+					  for a worker message). */
+	timestamp_t time_application;  /**< Total time spent outside vine_wait. */
+	timestamp_t time_scheduling;   /**< Total time spend matching tasks to workers. */
 
 	/* Workers time statistics: */
 	timestamp_t time_workers_execute;	     /**< Total time workers spent executing done tasks. */
@@ -220,24 +219,22 @@ struct vine_stats {
 							resources. */
 
 	/* BW statistics */
-	int64_t bytes_sent; /**< Total number of file bytes (not including protocol control msg bytes) sent out to the
-			       workers by the manager. */
+	int64_t bytes_sent;	/**< Total number of file bytes (not including protocol control msg bytes) sent out to the
+				   workers by the manager. */
 	int64_t bytes_received; /**< Total number of file bytes (not including protocol control msg bytes) received from
 				   the workers by the manager. */
-	double bandwidth; /**< Average network bandwidth in MB/S observed by the manager when transferring to workers.
-			   */
+	double bandwidth;	/**< Average network bandwidth in MB/S observed by the manager when transferring to workers.
+				 */
 
 	/* resources statistics */
-	int capacity_tasks;  /**< The estimated number of tasks that this manager can effectively support. */
-	int capacity_cores;  /**< The estimated number of workers' cores that this manager can effectively support.*/
-	int capacity_memory; /**< The estimated number of workers' MB of RAM that this manager can effectively
-				support.*/
-	int capacity_disk; /**< The estimated number of workers' MB of disk that this manager can effectively support.*/
-	int capacity_gpus; /**< The estimated number of workers' GPUs that this manager can effectively support.*/
+	int capacity_tasks;	    /**< The estimated number of tasks that this manager can effectively support. */
+	int capacity_cores;	    /**< The estimated number of workers' cores that this manager can effectively support.*/
+	int capacity_memory;	    /**< The estimated number of workers' MB of RAM that this manager can effectively support.*/
+	int capacity_disk;	    /**< The estimated number of workers' MB of disk that this manager can effectively support.*/
+	int capacity_gpus;	    /**< The estimated number of workers' GPUs that this manager can effectively support.*/
 	int capacity_instantaneous; /**< The estimated number of tasks that this manager can support considering only
 				       the most recently completed task. */
-	int capacity_weighted; /**< The estimated number of tasks that this manager can support placing greater weight
-				  on the most recently completed task. */
+	int capacity_weighted;	    /**< The estimated number of tasks that this manager can support placing greater weight on the most recently completed task. */
 
 	int64_t total_cores;  /**< Total number of cores aggregated across the connected workers. */
 	int64_t total_memory; /**< Total memory in MB aggregated across the connected workers. */
@@ -275,6 +272,9 @@ vine_task_set_command
 @return A new task object, or null if it could not be created.
 */
 struct vine_task *vine_task_create(const char *full_command);
+
+const char *vine_task_get_function_input(const struct vine_task *task);
+size_t vine_task_get_function_input_size(const struct vine_task *task);
 
 /** Delete a task.
 This may be called on tasks after they are returned from @ref vine_wait.
@@ -499,6 +499,12 @@ int vine_task_set_monitor_output(struct vine_task *t, const char *monitor_output
 */
 
 const char *vine_task_get_state(struct vine_task *t);
+
+/** Return the original task id that a recovery task is restoring.
+@param t A task object.
+@return The source task id for a recovery task, or zero for non-recovery tasks.
+*/
+int vine_task_get_recovery_source_task_id(struct vine_task *t);
 
 /** Get the command line of the task.
 @param t A task object.
@@ -726,6 +732,14 @@ has previously been called on this object.
 */
 const char *vine_file_contents(struct vine_file *f);
 
+/** Release a reference to a file object.
+Most declared files should be released with @ref vine_undeclare_file; this function is for file references owned outside
+the manager declaration table.
+@param f A file object.
+@return The remaining reference count, or zero.
+*/
+int vine_file_delete(struct vine_file *f);
+
 /** Get the length of a vine file.
 @param f A file object.
 @return The length of the file, or zero if unknown.
@@ -744,6 +758,18 @@ const char *vine_file_source(struct vine_file *f);
 @return A file type.
 */
 vine_file_type_t vine_file_type(struct vine_file *f);
+
+/** Get the manager-side cached name of a file.
+@param f A file object.
+@return The cached name, or null.
+*/
+const char *vine_file_cached_name(struct vine_file *f);
+
+/** Return non-zero if a file is currently being recovered.
+@param f A file object.
+@return Non-zero if the file is currently being recovered.
+*/
+int vine_file_is_recovering(struct vine_file *f);
 
 /** Get the number of replicas of a file.
 @param m A manager object
@@ -912,7 +938,7 @@ that do not inherently contain mode bits.
 @param f A file object of any kind.
 @param mode The Unix mode bits to be applied to the file.
 */
-void vine_file_set_mode( struct vine_file *f, int mode );
+void vine_file_set_mode(struct vine_file *f, int mode);
 
 /** Fetch the contents of a file.
 The contents of the given file will be loaded from disk or pulled back from the cluster
@@ -946,6 +972,13 @@ but is still available on the manager's site, and can be recovered by submitting
 @return The number of replicas pruned.
 */
 int vine_prune_file(struct vine_manager *m, struct vine_file *f);
+
+/** Return a declared file by its cached name, or NULL if it is unknown to the manager.
+@param m A manager object.
+@param cached_name The file cache name.
+@return The declared file object, or null.
+*/
+struct vine_file *vine_manager_lookup_file(struct vine_manager *m, const char *cached_name);
 
 //@}
 
@@ -1034,14 +1067,6 @@ This is a testing support hook, not a normal manager control operation.
 */
 int vine_manager_release_random_worker(struct vine_manager *m);
 
-/** Shut down one named worker for deterministic failure-injection tests.
-This is a testing support hook, not a normal manager control operation.
-@param m A manager object.
-@param worker_id The exact TaskVine WorkerID to terminate.
-@return Non-zero if the named worker was found and shut down.
-*/
-int vine_manager_shut_down_worker_by_id(struct vine_manager *m, const char *worker_id);
-
 /** Wait for a task to complete.
 This call will block until either a task has completed, the timeout has expired, or the manager is empty.
 If a task has completed, the corresponding task object will be returned by this function.
@@ -1061,6 +1086,15 @@ task, or there is completed child process (call @ref process_wait to retrieve th
 process).
 */
 struct vine_task *vine_wait(struct vine_manager *m, int timeout);
+
+/** Progress the manager and wait up to a bounded number of milliseconds.
+This is useful for event loops that must interleave TaskVine progress with
+other local work more frequently than the one-second vine_wait granularity.
+@param m A manager object.
+@param timeout Maximum milliseconds to wait. Zero returns immediately.
+@returns A completed task description, or null if none became available.
+*/
+struct vine_task *vine_wait_for_milliseconds(struct vine_manager *m, int timeout);
 
 /** Wait for a task with a given task to complete.
 Similar to @ref vine_wait, but guarantees that the returned task has the specified tag.
@@ -1146,6 +1180,14 @@ int vine_enable_peer_transfers(struct vine_manager *m);
 
 /** Disable taskvine peer transfers to be scheduled by the manager **/
 int vine_disable_peer_transfers(struct vine_manager *m);
+
+/** Enable external recovery handling by returning recovery tasks from vine_wait.
+By default, recovery tasks are handled internally by the manager. **/
+int vine_enable_external_recovery_handling(struct vine_manager *m);
+
+/** Disable external recovery handling.
+Recovery tasks will be handled internally by the manager. **/
+int vine_disable_external_recovery_handling(struct vine_manager *m);
 
 /** When enabled, resources to tasks in are assigned in proportion to the size
 of the worker. If a resource is specified (e.g. with @ref vine_task_set_cores),
@@ -1462,6 +1504,7 @@ deactivated if less than 1. (default=0)
  - "keepalive-timeout" Set the minimum number of seconds to wait for a keepalive response from worker before marking it
 as dead. (default=30)
  - "short-timeout" Set the minimum timeout when sending a brief message to a single worker. (default=5s)
+ - "idle-poll-milliseconds" Set the maximum idle poll interval inside vine_wait. (default=1000ms)
  - "monitor-interval" Maximum number of seconds between resource monitor measurements. If less than 1, use default (5s).
 (default=5)
  - "category-steady-n-tasks" Set the number of tasks considered when computing category buckets.

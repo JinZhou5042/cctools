@@ -1,1 +1,0 @@
-"""Controlled durable persistence subsystem."""

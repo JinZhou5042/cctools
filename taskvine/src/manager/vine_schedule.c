@@ -169,7 +169,7 @@ static int check_worker_have_committable_resources(struct vine_manager *q, struc
 		int iteration;
 		ITABLE_ITERATE(w->current_libraries, iteration, task_id, t)
 		{
-			if (t->function_slots_inuse < t->function_slots_total) {
+			if (t->function_slots_inuse < t->function_slots_total && t->function_slots_reported_free > 0) {
 				return 1;
 			}
 		}
@@ -325,15 +325,41 @@ struct vine_task *vine_schedule_find_library(struct vine_manager *q, struct vine
 {
 	uint64_t task_id;
 	struct vine_task *library_task;
+	struct vine_task *available = 0;
+	int matching_instances = 0;
 	int iteration;
 	ITABLE_ITERATE(w->current_libraries, iteration, task_id, library_task)
 	{
-		if (!strcmp(library_task->provides_library, library_name) && (library_task->function_slots_inuse < library_task->function_slots_total)) {
-			return library_task;
+		if (!strcmp(library_task->provides_library, library_name)) {
+			matching_instances++;
+			if (
+					library_task->function_slots_inuse < library_task->function_slots_total && library_task->function_slots_reported_free > 0 && (!available || library_task->function_slots_inuse < available->function_slots_inuse)) {
+				available = library_task;
+			}
 		}
 	}
+	if (matching_instances < 1) {
+		return 0;
+	}
+	return available;
+}
 
-	return 0;
+/* A starting instance counts: sending another one for every function waiting
+ * on its first credit creates an unbounded library startup storm. */
+int vine_schedule_library_needs_instance(struct vine_manager *q,
+		struct vine_worker_info *w, const char *library_name)
+{
+	int matching_instances = 0;
+	(void)q;
+	uint64_t task_id;
+	struct vine_task *library_task;
+	int iterator;
+	ITABLE_ITERATE(w->current_libraries, iterator, task_id, library_task)
+	{
+		if (!strcmp(library_task->provides_library, library_name))
+			matching_instances++;
+	}
+	return matching_instances < 1;
 }
 
 /* Count the number of free cores on a worker. */
@@ -348,7 +374,9 @@ static int count_worker_free_cores(struct vine_manager *q, struct vine_worker_in
 	int iteration;
 	ITABLE_ITERATE(w->current_libraries, iteration, task_id, t)
 	{
-		free_cores += t->function_slots_total - t->function_slots_inuse;
+		free_cores += MIN(
+				t->function_slots_total - t->function_slots_inuse,
+				t->function_slots_reported_free);
 	}
 
 	/* count the free cores on the worker */
@@ -437,8 +465,21 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 		switch (a) {
 		case VINE_SCHEDULE_FILES:
 			/* Find the worker that has the largest quantity of cached data needed by this task,
-			 * so as to minimize transfer work that must be done by the manager. */
-			priority = cached_input_size;
+			 * so as to minimize transfer work that must be done by the manager.
+			 *
+			 * A task without mounted inputs has no data-locality preference.  Giving every
+			 * worker the identical zero priority makes the heap's deterministic tie order
+			 * act like sticky affinity: the workers whose completion messages are handled
+			 * first can be refilled indefinitely while equally idle workers starve.  For
+			 * this case, rank by current free execution capacity instead.  A dispatched
+			 * function consumes one credit immediately, so the next task naturally moves
+			 * to another worker.  Tasks with inputs retain strict cached-byte priority.
+			 */
+			if (cached_input_size == 0 && uncached_input_size == 0) {
+				priority = count_worker_free_cores(q, w);
+			} else {
+				priority = cached_input_size;
+			}
 			break;
 		case VINE_SCHEDULE_DISK:
 			/* Find the worker that will be left with the most disk space if the task is finished there */

@@ -11,19 +11,21 @@ CCTOOLS_FLAKE8_IGNORE_FILES = "cvine.py"
 
 DSPYTHONSO = ndcctools/taskvine/_cvine.$(CCTOOLS_DYNAMIC_SUFFIX)
 DATAVINE_MODULE_DIR = $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/datavine
+DATAVINE_ADAPTOR_FILES = __init__.py workflow.py workflow_client.py
 LIBRARIES = $(DSPYTHONSO)
 OBJECTS = vine_wrap.o
 TARGETS = $(LIBRARIES)
 
 all: $(TARGETS)
 
-vine_wrap.c: taskvine.i \
-	../../manager/vine_datavine_protocol.h \
-	../../manager/vine_datavine_rpc.h
+vine_wrap.c: taskvine.i
 	@echo "SWIG taskvine.i (python)"
-	@$(CCTOOLS_SWIG) -o vine_wrap.c -outdir ndcctools/taskvine -python -I$(CCTOOLS_HOME)/dttools/src -I$(CCTOOLS_HOME)/taskvine/src/manager taskvine.i
+	@$(CCTOOLS_SWIG) -threads -o vine_wrap.c -outdir ndcctools/taskvine -python -I$(CCTOOLS_HOME)/dttools/src -I$(CCTOOLS_HOME)/taskvine/src/manager taskvine.i
 
-$(DSPYTHONSO): vine_wrap.o $(EXTERNAL_DEPENDENCIES)
+$(DSPYTHONSO): vine_wrap.o \
+	$(CCTOOLS_HOME)/taskvine/src/manager/libtaskvine.a \
+	$(CCTOOLS_HOME)/dttools/src/libdttools.a \
+	$(EXTERNAL_DEPENDENCIES)
 
 test:
 
@@ -38,6 +40,6 @@ install: all
 	cp ndcctools/taskvine/*.py $(DSPYTHONSO) $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine
 	cp ndcctools/taskvine/compat/*.py $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/compat
 	rm -rf $(DATAVINE_MODULE_DIR)
-	cd ndcctools/taskvine/datavine && find . -type d -print | while read dir; do mkdir -p "$(DATAVINE_MODULE_DIR)/$$dir"; done
-	cd ndcctools/taskvine/datavine && find . -type f \( -name '*.py' -o -name '*.md' \) -print | while read file; do cp "$$file" "$(DATAVINE_MODULE_DIR)/$$file"; done
+	mkdir -p $(DATAVINE_MODULE_DIR)
+	cd ndcctools/taskvine/datavine && cp $(DATAVINE_ADAPTOR_FILES) $(DATAVINE_MODULE_DIR)
 	cp taskvine.py $(CCTOOLS_PYTHON3_PATH)/

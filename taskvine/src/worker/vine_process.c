@@ -100,6 +100,7 @@ struct vine_process *vine_process_create(struct vine_task *task, vine_process_ty
 	p->output_length = 0;
 
 	p->functions_running = 0;
+	p->function_credit_generation = 0;
 	p->library_ready = 0;
 
 	/* Note that create_dir recursively creates parents, so a single one is sufficient. */

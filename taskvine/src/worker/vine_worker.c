@@ -55,7 +55,6 @@ See the file COPYING for details.
 #include "trash.h"
 #include "unlink_recursive.h"
 #include "url_encode.h"
-#include "uuid.h"
 #include "xpu_tracker.h"
 #include "xxmalloc.h"
 
@@ -686,6 +685,11 @@ static int start_process(struct vine_process *p, struct link *manager)
 		/* If this process represents a function, update the number running. */
 		if (t->needs_library) {
 			p->library_process->functions_running++;
+			send_async_message(manager,
+					"info function-start %d %d %" PRId64 "\n",
+					t->task_id,
+					t->library_task_id,
+					t->function_credit_generation);
 		}
 	} else {
 		fatal("unable to start task_id %d!", p->task->task_id);
@@ -879,7 +883,6 @@ static int handle_completed_tasks(struct link *manager)
 	}
 
 	list_delete(failed_libraries);
-
 	return 1;
 }
 
@@ -942,6 +945,18 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			free(cmd);
 		} else if (sscanf(line, "needs_library %s", library_name) == 1) {
 			vine_task_set_library_required(task, library_name);
+		} else if (sscanf(line, "library_task_id %" PRId64, &n) == 1) {
+			if (n <= 0 || n > INT_MAX) {
+				vine_task_delete(task);
+				return 0;
+			}
+			task->library_task_id = (int)n;
+		} else if (sscanf(line, "function_credit_generation %" PRId64, &n) == 1) {
+			if (n <= 0) {
+				vine_task_delete(task);
+				return 0;
+			}
+			task->function_credit_generation = n;
 		} else if (sscanf(line, "function_input %" PRId64, &n) == 1) {
 			if (n <= 0 || n > 1024LL * 1024 * 1024) {
 				vine_task_delete(task);
@@ -1040,7 +1055,6 @@ static int do_task(struct link *manager, int task_id, time_t stoptime)
 	itable_insert(procs_table, task_id, p);
 
 	normalize_resources(p);
-
 	list_push_tail(procs_waiting, p);
 	vine_watcher_add_process(watcher, p);
 
@@ -1175,6 +1189,22 @@ static int do_kill(int task_id)
 
 	vine_process_delete(p);
 
+	return 1;
+}
+
+static int do_function_revoke(struct link *manager, int task_id, int library_task_id, int64_t generation)
+{
+	struct vine_process *p = itable_lookup(procs_table, task_id);
+	int revoked = p && p->task->needs_library && p->task->library_task_id == library_task_id && p->task->function_credit_generation == generation;
+	if (revoked) {
+		do_kill(task_id);
+	}
+	send_message(manager,
+			"info function-revoked %d %d %" PRId64 " %d\n",
+			task_id,
+			library_task_id,
+			generation,
+			revoked);
 	return 1;
 }
 
@@ -1398,6 +1428,12 @@ static int handle_manager(struct link *manager)
 		} else if (sscanf(line, "get %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = vine_transfer_put_any(manager, cache_manager, filename, VINE_TRANSFER_MODE_ANY, time(0) + options->active_timeout);
+		} else if (sscanf(line, "revoke %" SCNd64 " %d %" SCNd64, &task_id, &n, &length) == 3) {
+			if (task_id >= 0 && n > 0 && length > 0) {
+				r = do_function_revoke(manager, task_id, n, length);
+			} else {
+				r = 0;
+			}
 		} else if (sscanf(line, "kill %" SCNd64, &task_id) == 1) {
 			if (task_id >= 0) {
 				r = do_kill(task_id);
@@ -1466,8 +1502,16 @@ static int task_resources_fit_eventually(struct vine_task *t)
 Find a suitable library process that can provide a slot to run this library right NOW.
 */
 
-static struct vine_process *find_running_library_for_function(const char *library_name)
+static struct vine_process *find_running_library_for_function(const char *library_name, int library_task_id)
 {
+	if (library_task_id > 0) {
+		struct vine_process *p = itable_lookup(procs_running, library_task_id);
+		if (p && p->task->provides_library && !strcmp(p->task->provides_library, library_name) && p->library_ready && p->functions_running < p->task->function_slots_total) {
+			return p;
+		}
+		return 0;
+	}
+
 	uint64_t task_id;
 	struct vine_process *p;
 	int iteration;
@@ -1495,7 +1539,8 @@ static int process_ready_to_run_now(struct vine_process *p, struct vine_cache *c
 
 	if (p->task->needs_library) {
 		/* Here is where we attach a function to a specific library. */
-		p->library_process = find_running_library_for_function(p->task->needs_library);
+		p->library_process = find_running_library_for_function(
+				p->task->needs_library, p->task->library_task_id);
 		if (!p->library_process)
 			return 0;
 	}
@@ -1503,7 +1548,6 @@ static int process_ready_to_run_now(struct vine_process *p, struct vine_cache *c
 	vine_cache_status_t status = vine_sandbox_ensure(p, cache, manager, procs_table);
 	if (status != VINE_CACHE_STATUS_READY)
 		return 0;
-
 	return 1;
 }
 
@@ -1511,8 +1555,16 @@ static int process_ready_to_run_now(struct vine_process *p, struct vine_cache *c
 Find a suitable library process that could serve this function in the future.
 */
 
-static struct vine_process *find_future_library_for_function(const char *library_name)
+static struct vine_process *find_future_library_for_function(const char *library_name, int library_task_id)
 {
+	if (library_task_id > 0) {
+		struct vine_process *p = itable_lookup(procs_table, library_task_id);
+		if (p && p->task->provides_library && !strcmp(p->task->provides_library, library_name)) {
+			return p;
+		}
+		return 0;
+	}
+
 	uint64_t task_id;
 	struct vine_process *p;
 	int iteration;
@@ -1539,7 +1591,8 @@ static int process_can_run_eventually(struct vine_process *p, struct vine_cache 
 
 	if (p->task->needs_library) {
 		/* Note that we check for *some* library but do not bind to it. */
-		struct vine_process *p_future = find_future_library_for_function(p->task->needs_library);
+		struct vine_process *p_future = find_future_library_for_function(
+				p->task->needs_library, p->task->library_task_id);
 		if (!p_future || p_future->result == VINE_RESULT_LIBRARY_EXIT) {
 			debug(D_VINE, "task %d does not match any library \"%s\"", p->task->task_id, p->task->needs_library);
 			return 0;
@@ -1700,6 +1753,7 @@ static void check_libraries_ready(struct link *manager)
 	uint64_t library_task_id;
 	struct vine_process *library_process;
 	int iteration;
+	struct list *failed_libraries = list_create();
 
 	struct link_info library_link_info;
 	library_link_info.events = LINK_READ;
@@ -1719,13 +1773,20 @@ static void check_libraries_ready(struct link *manager)
 			if (check_library_startup(library_process)) {
 				debug(D_VINE, "Library %s reports ready to execute functions.", library_process->task->provides_library);
 				library_process->library_ready = 1;
+				library_process->function_credit_generation++;
+				send_message(
+						manager,
+						"info function-credit %d %d %" PRId64 "\n",
+						library_process->task->task_id,
+						library_process->task->function_slots_total,
+						library_process->function_credit_generation);
 			} else {
 				/* Kill library if it fails the startup check. */
 				debug(D_VINE,
 						"Library %s task id %" PRIu64 " verification failed (unexpected response). Killing it.",
 						library_process->task->provides_library,
 						library_task_id);
-				handle_failed_library_process(library_process, manager);
+				list_push_tail(failed_libraries, library_process);
 			}
 		} else {
 			/* The library is running and the link has no readable data, do nothing until the
@@ -1734,6 +1795,11 @@ static void check_libraries_ready(struct link *manager)
 
 		library_link_info.revents = 0;
 	}
+
+	while ((library_process = list_pop_head(failed_libraries))) {
+		handle_failed_library_process(library_process, manager);
+	}
+	list_delete(failed_libraries);
 }
 
 static int library_functions_running(void)
@@ -1802,8 +1868,8 @@ static void vine_worker_serve_manager(struct link *manager)
 		*/
 
 		int wait_msec = library_functions_running()
-				? 1
-				: 5000;
+						? 1
+						: 5000;
 
 		if (sigchld_received_flag) {
 			wait_msec = 0;
@@ -2314,12 +2380,6 @@ void vine_worker_create_structures()
 	total_resources = vine_resources_create();
 
 	worker_id = make_worker_id();
-	/*
-	Expose the unique worker incarnation to DataVine task processes.  This is
-	soft-state identity, not an authentication credential; Controller requests
-	remain token-authenticated.
-	*/
-	setenv("VINE_WORKER_ID", worker_id, 1);
 }
 
 /* Final cleanup of all worker structures before exiting */

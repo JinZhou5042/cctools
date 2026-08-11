@@ -14,6 +14,7 @@ import os
 import pathlib
 import signal
 import subprocess
+import tempfile
 import time
 
 test_dir = pathlib.Path(os.environ["TEST_DIR"])
@@ -23,35 +24,43 @@ commit = subprocess.check_output(
     text=True,
 ).strip()
 results = []
-for script in sorted(test_dir.glob("TR_datavine_*.sh")):
-    started = time.monotonic()
-    proc = subprocess.Popen(
-        ["bash", str(script), "run"],
-        cwd=test_dir,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        output, _ = proc.communicate(timeout=timeout)
-        returncode = proc.returncode
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGTERM)
+with tempfile.TemporaryDirectory(prefix="datavine-regression-") as run_info:
+    for script in sorted(test_dir.glob("TR_datavine_*.sh")):
+        runtime_path = pathlib.Path(run_info) / script.stem
+        runtime_path.mkdir()
+        environment = dict(
+            os.environ,
+            DATAVINE_RUNTIME_INFO_PATH=str(runtime_path),
+        )
+        started = time.monotonic()
+        proc = subprocess.Popen(
+            ["bash", str(script), "run"],
+            cwd=test_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+            env=environment,
+        )
         try:
-            output, _ = proc.communicate(timeout=5)
+            output, _ = proc.communicate(timeout=timeout)
+            returncode = proc.returncode
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            output, _ = proc.communicate()
-        returncode = 124
-    results.append({
-        "test": script.name,
-        "returncode": returncode,
-        "elapsed_seconds": round(time.monotonic() - started, 3),
-        "passed": returncode == 0,
-    })
-    if returncode:
-        print(output, end="")
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                output, _ = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                output, _ = proc.communicate()
+            returncode = 124
+        results.append({
+            "test": script.name,
+            "returncode": returncode,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "passed": returncode == 0,
+        })
+        if returncode:
+            print(output, end="")
 
 report = {
     "artifact_type": "datavine-regression-suite",
