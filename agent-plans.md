@@ -302,9 +302,11 @@ The 2026-08-11 result-plane redesign is the active gate:
 - [x] Fail closed on a transient TaskVine reference error in the first reverse
   attempt, prove DataVine's 320 persisted results match stable TaskVine r2-r5,
   add same-backend repetition validation, and pass a clean reverse rerun.
-- [ ] Decide promotion after a final candidate smoke. The remaining cluster
-  wide bottleneck is concurrent publication queue/fsync; do not add another
-  data agent or control plane to address it.
+- [x] Promote the exact verified candidate atomically after the active-path
+  1x2x10k smoke passed 10,000/10,000 at 3,370 Runtime tasks/s. Retain the old
+  worker-local archive as exact rollback.
+- [ ] Optimize the remaining cluster-wide concurrent publication queue/fsync
+  without adding another data agent or control plane.
 
 ## 11. Ordered next work
 

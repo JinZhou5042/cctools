@@ -100,8 +100,18 @@
       "runtime_tasks_per_second": 3348.899776354731,
       "peak_rss_bytes": 74866688
     },
-    "production_overwritten": false,
-    "production_sha256": "67c202c328b38f59d5da68a68ade5a05abdc076bdb1b57f49f15ad00a5b6f0bf"
+    "production_overwritten": true,
+    "production_sha256": "9c1c8372c3cbc4baf43317257408213d07867938c6e0f767fb1009f018c8b9ca",
+    "rollback_sha256": "67c202c328b38f59d5da68a68ade5a05abdc076bdb1b57f49f15ad00a5b6f0bf",
+    "active_path_smoke_1x2x10000": {
+      "artifact": "/tmp/datavine-output-heavy-production-smoke-1x2x10k.json",
+      "artifact_sha256": "a8e28e3290ff30f08927fc57743820aff5e947a9bb1e392729d643693fa909d5",
+      "status": "PASS",
+      "physical_submissions": 10000,
+      "physical_completions": 10000,
+      "runtime_tasks_per_second": 3369.599783212719,
+      "peak_rss_bytes": 74756096
+    }
   },
   "cluster_crossed_order_10x16x5": {
     "status": "PASS",
@@ -141,7 +151,7 @@
     "distributed_performance_parity_claimed": false
   },
   "regression": {
-    "artifact": "/tmp/datavine-regression-active-poll-20260811.json",
+    "artifact": "/tmp/datavine-regression-output-heavy-postpromotion-20260811.json",
     "status": "PASS",
     "passed": 9,
     "total": 9,

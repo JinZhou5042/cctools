@@ -123,7 +123,9 @@ Artifacts:
 Promoted package:
 
 - active: `/users/jzhou24/graph_optimization/factories/datavine.tar.gz`
-- active SHA-256: `67c202c328b38f59d5da68a68ade5a05abdc076bdb1b57f49f15ad00a5b6f0bf`
+- active SHA-256: `9c1c8372c3cbc4baf43317257408213d07867938c6e0f767fb1009f018c8b9ca`
+- output-heavy rollback: `datavine.worker-local-candidate-20260811.tar.gz`,
+  SHA-256 `67c202c328b38f59d5da68a68ade5a05abdc076bdb1b57f49f15ad00a5b6f0bf`
 - rollback hard link: `datavine.deep-review-20260810.tar.gz`
 - rollback SHA-256: `8933446d6583ada6f8d23033012eb618f700b7b1a25b102a93c13661ca19c9e9`
 - Go adaptor: `datavine_workflow_go-20260811`, SHA-256
@@ -133,6 +135,10 @@ Promoted package:
 package-local hashes matched the installed `datavine_workflow`,
 `datavine_executor`, `datavine_python_executor`, and `vine_worker`. Packed
 1x2x10k completed exactly with 75.3 MB peak RSS, 45 FDs, and six processes.
+
+After the output-heavy 9/9, packed, and crossed-order gates, the new candidate
+was promoted atomically. The active-path smoke completed exactly 10,000/10,000
+at 3,370 Runtime tasks/s and 74.8 MB peak RSS.
 
 ## Reproduction
 
