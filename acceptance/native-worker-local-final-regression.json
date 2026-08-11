@@ -1,63 +1,63 @@
 {
   "artifact_type": "datavine-regression-suite",
-  "commit": "d643875422c20326fc7f6fc1a7b2a8565c9ac5d6",
-  "passed_count": 8,
+  "commit": "41254c298083c01747256423fa4ff7f649e4315f",
+  "passed_count": 9,
   "results": [
     {
-      "elapsed_seconds": 0.786,
+      "elapsed_seconds": 0.779,
       "passed": true,
       "returncode": 0,
       "test": "TR_datavine_dynamic_workflow.sh"
     },
     {
-      "elapsed_seconds": 0.073,
-      "passed": false,
-      "returncode": 2,
+      "elapsed_seconds": 17.612,
+      "passed": true,
+      "returncode": 0,
       "test": "TR_datavine_go_workflow.sh"
     },
     {
-      "elapsed_seconds": 0.418,
+      "elapsed_seconds": 2.11,
       "passed": true,
       "returncode": 0,
       "test": "TR_datavine_module_boundaries.sh"
     },
     {
-      "elapsed_seconds": 22.107,
+      "elapsed_seconds": 21.195,
       "passed": true,
       "returncode": 0,
       "test": "TR_datavine_notebook_workflow.sh"
     },
     {
-      "elapsed_seconds": 1.238,
+      "elapsed_seconds": 1.301,
       "passed": true,
       "returncode": 0,
       "test": "TR_datavine_shell_workflow.sh"
     },
     {
-      "elapsed_seconds": 7.21,
+      "elapsed_seconds": 7.228,
       "passed": true,
       "returncode": 0,
       "test": "TR_datavine_workflow_execution.sh"
     },
     {
-      "elapsed_seconds": 0.374,
+      "elapsed_seconds": 0.381,
       "passed": true,
       "returncode": 0,
       "test": "TR_datavine_workflow_ir.sh"
     },
     {
-      "elapsed_seconds": 8.837,
+      "elapsed_seconds": 8.389,
       "passed": true,
       "returncode": 0,
       "test": "TR_datavine_workflow_lifecycle.sh"
     },
     {
-      "elapsed_seconds": 1.963,
+      "elapsed_seconds": 1.93,
       "passed": true,
       "returncode": 0,
       "test": "TR_datavine_workflow_service.sh"
     }
   ],
-  "status": "FAIL",
+  "status": "PASS",
   "test_count": 9
 }

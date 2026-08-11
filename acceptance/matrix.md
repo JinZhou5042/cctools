@@ -2,7 +2,7 @@
 
 Updated: 2026-08-11
 
-Status: **WORKER-LOCAL CORRECTNESS PASS; FULL 9/9 AND PERFORMANCE PARITY OPEN**
+Status: **WORKER-LOCAL CORRECTNESS AND 9/9 PASS; PERFORMANCE PARITY OPEN**
 
 ## Architecture and correctness
 
@@ -18,7 +18,7 @@ Status: **WORKER-LOCAL CORRECTNESS PASS; FULL 9/9 AND PERFORMANCE PARITY OPEN**
 | Live result | PASS | a requested DataID is fetchable immediately after its task commit while downstream work is still running |
 | Payload isolation | PASS | 2 MiB result stays in immutable Data Controller storage; workflow journal remains under 1 MiB |
 | Corruption | PASS | modified result file makes service restart fail closed |
-| Regression | PARTIAL PASS | 8/8 executable contracts pass; ninth Go contract is environment-blocked by absent compiler/binary |
+| Regression | PASS | 9/9 contracts pass; Go was compiled with isolated Go 1.22.5 and revalidated with a hash-verified static prebuilt adaptor |
 
 ## Scale and CPU
 
@@ -49,7 +49,7 @@ execution.
 | RPC bounds | PASS | capabilities preflight and bounded frames, clients, queues, identifiers, tasks, and results |
 | Worker/restart recovery | PASS | lifecycle suite covers retry, worker loss, restart, checkpoint resume, and cancellation |
 | Generated residue | PASS | runtime info is temporary; old run directories, snapshots, logs, and retired test binaries removed |
-| Packed candidate | PASS, not promoted | worker-local SHA-256 `67c202c328b38f59d5da68a68ade5a05abdc076bdb1b57f49f15ad00a5b6f0bf`; package-local hashes match and packed 1x2x10k exact execution passes; production remains unchanged pending Go gate |
+| Production package | PASS, promoted | active `datavine.tar.gz` is worker-local SHA-256 `67c202c328b38f59d5da68a68ade5a05abdc076bdb1b57f49f15ad00a5b6f0bf`; direct active-path smoke passed 10,000/10,000; prior `8933446d...c9e9` package remains as rollback |
 | Multi-manager/Foreman | OPEN | no current sharded metadata or partition acceptance |
 | Cross-version migration | OPEN | replay-compatible v1 records exist; incompatible migration tool does not |
 | Multi-tenant security | OPEN | token authentication exists; TLS, rotation, and authorization domains do not |

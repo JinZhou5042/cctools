@@ -250,7 +250,8 @@ The 2026-08-11 result-plane redesign is the active gate:
   published, and unrelated workflows no longer incur TaskVine recovery delay.
 - [x] Rerun exact 100k/1M with 100% physical count agreement; Runtime reaches
   4,360 and 4,292 tasks/s respectively.
-- [ ] Obtain 9/9 when a Go compiler or prebuilt adaptor is available.
+- [x] Obtain 9/9 with isolated Go 1.22.5, retain a hash-verified static
+  prebuilt adaptor, and revalidate the Go contract through that binary.
 - [x] Rebuild and hash-verify a packed candidate; packed 1x2x10k passes exact.
   Do not promote over production until the Go environment gate is available.
 - [x] Rerun 32 MiB reuse and wide multi-output in both backend orders with ten
@@ -275,12 +276,13 @@ The 2026-08-11 result-plane redesign is the active gate:
   is 0.437x and 0.392x. No large intermediate is persisted to the Controller.
   This closes architecture correctness, but performance parity remains OPEN.
 - [x] Build and hash-verify the worker-local candidate package and pass packed
-  1x2x10k at exactly 10,000/10,000 and 3,365 Runtime tasks/s. Keep production
-  unchanged while Go remains environment-blocked.
+  1x2x10k at exactly 10,000/10,000 and 3,365 Runtime tasks/s. Promote that
+  exact archive only after the 9/9 gate; retain the previous production hard
+  link as rollback. The active production path then passed 10,000/10,000 at
+  3,707 Runtime tasks/s.
 - [x] Establish Git implementation checkpoint `d64387542` containing the worker-local source,
   focused tests, compact acceptance evidence, current documentation, and no
-  Factory/journal/debug residue; the post-commit runner reproduced 8/8
-  executable PASS with only the environment-blocked Go contract failing.
+  Factory/journal/debug residue; the post-commit runner reproduced 9/9 PASS.
 
 ## 11. Ordered next work
 

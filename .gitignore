@@ -32,6 +32,7 @@ cctools.lint.out
 !/acceptance/data-controller-experiment-*.json
 !/acceptance/native-worker-local-*.json
 !/acceptance/worker-local-data-plane-*.json
+!/acceptance/go-adaptor-*.json
 /acceptance/sc-workflow-*/
 /vine-run-info/
 **/vine-run-info/

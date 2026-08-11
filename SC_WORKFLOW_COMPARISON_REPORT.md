@@ -300,10 +300,10 @@ all five fixed distributed repetitions pass.
 
 Final source validation passed the warning-clean DataVine/tools build, module
 boundary test, affected native execution contract, driver syntax/help check,
-artifact checksums, and `git diff --check`. The full supported-contract runner
-passed eight of nine tests. The Go adaptor test was not runnable because this
-environment has no configured Go binary/compiler; this gate remains explicitly
-environment-blocked rather than being reported as a 9/9 pass.
+artifact checksums, and `git diff --check`. The worker-local checkpoint's full
+supported-contract runner later passed 9/9 using isolated Go 1.22.5. The Go
+contract also passed independently through the retained hash-verified static
+prebuilt adaptor.
 
 ## Resource observations
 

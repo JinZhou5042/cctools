@@ -51,41 +51,42 @@ result payloads; its old result records are replay-only compatibility.
 ## Current evidence
 
 The worker-local implementation checkpoint is Git commit `d64387542`. The
-post-commit contract artifact records that commit directly; compact evidence
-and handoff hashes are retained in the following documentation-only commit.
+post-commit contract artifacts record the implementation/validation commits
+directly; compact evidence and handoff hashes are retained in subsequent
+documentation commits.
 
 The worker-local Data Controller redesign passes warning-clean builds, module
 boundaries, and its expanded execution contract: live result fetch before
 workflow termination, restart fetch, selective pruning, multi-output atomicity,
 2 MiB payload exclusion from the workflow journal, corruption rejection, and
 forced service restart with recomputation of a non-durable intermediate.
-The full runner is 8/9: every executable contract passes, including notebook
-cross-workflow concurrency after failed-output cleanup was fixed; Go alone is
-environment-blocked because no Go compiler/binary exists. Fresh strict scale
-runs pass at exactly 100k and 1M physical submissions/completions.
+The full runner is 9/9 PASS, including notebook cross-workflow concurrency and
+the Go direct-protocol/dynamic-delta contract. Go was compiled in an isolated
+Go 1.22.5 prefix, then the same contract passed using the retained static
+prebuilt adaptor. Fresh strict scale runs pass at exactly 100k and 1M physical
+submissions/completions.
 
 A post-redesign candidate package was rebuilt from the active conda
 environment and verified with `poncho_package_run`: cloudpickle is 3.1.2 and
 the package-local service, native executor, Python executor, and worker hashes
 match this build. Packed 1x2x10k passed exactly at 3,403 runtime tasks/s and
 74.7 MB peak RSS. Candidate SHA-256 is `d9427cec...115821d`; it is retained as
-`datavine.data-controller-candidate-20260811.tar.gz`. The active production
-package was deliberately not overwritten while the Go contract is
-environment-blocked.
+`datavine.data-controller-candidate-20260811.tar.gz`. This superseded package
+was not promoted.
 
 The final worker-local candidate is
 `datavine.worker-local-candidate-20260811.tar.gz`, SHA-256
 `67c202c328b38f59d5da68a68ade5a05abdc076bdb1b57f49f15ad00a5b6f0bf`.
 `poncho_package_run` confirms cloudpickle 3.1.2 and exact hashes for the
 service, native executor, Python executor, and worker. Its packed 1x2x10k gate
-passes exactly at 3,365 Runtime tasks/s and 75.3 MB peak RSS. Production remains
-unchanged pending the Go environment gate.
+passes exactly at 3,365 Runtime tasks/s and 75.3 MB peak RSS. After the 9/9 Go
+gate, this exact archive was promoted atomically to production.
 
 | Gate | Result |
 |---|---|
 | Warning-clean C build | PASS |
 | Python static/module boundary | PASS |
-| Supported executable contracts | PASS, 8/8; Go environment-blocked |
+| Supported executable contracts | PASS, 9/9 |
 | Exact 100k independent tasks | PASS, 28.63 s E2E, 4,303 runtime tasks/s, 447 MB RSS |
 | Exact 1M independent tasks | PASS, 295.64 s E2E, 4,122 runtime tasks/s, 4.04 GB RSS, 44 FDs, 5 processes |
 | CPU fork, 1 core | PASS, DV/FC 1.003, 97.56% useful CPU |
@@ -93,12 +94,11 @@ unchanged pending the Go environment gate.
 The no-grouping guard was revalidated after the cleanup with a live 1x1 smoke:
 1,000 logical tasks produced exactly 1,000 TaskVine submissions and 1,000
 TaskVine completions. The scale driver now records these counts and fails on
-any mismatch. The post-change regression run passed 8/9 contracts; the Go
-adaptor contract was not run because neither `DATAVINE_GO_BINARY` nor a Go
-compiler is installed in the active environment.
+any mismatch. The post-checkpoint regression run passed all 9/9 contracts.
 | CPU fork, 4 cores | PASS, DV/FC 1.003, 97.07% useful CPU |
 | CPU fork, 16 cores | PASS, DV/FC 0.966, 92.01% useful CPU |
 | Package rebuild and packed E2E | PASS, 10,000/10,000; 3,365 Runtime tasks/s, 2,786 tasks/s end-to-end |
+| Promoted active-package smoke | PASS, 10,000/10,000; 3,707 Runtime tasks/s, 3,033 tasks/s end-to-end |
 
 Artifacts:
 
@@ -110,7 +110,9 @@ Artifacts:
 - `acceptance/native-worker-local-hybrid-1x1x100k.json`
 - `acceptance/native-worker-local-hybrid-1x1x1m.json`
 - `acceptance/native-worker-local-packed-1x2x10k.json`
+- `acceptance/native-worker-local-production-smoke-1x2x10k.json`
 - `acceptance/worker-local-data-plane-20260811.json`
+- `acceptance/go-adaptor-20260811.json`
 - `acceptance/sc-workflow-worker-local-final-20260811-10x16-n5/summary.json`
 - `acceptance/native-regression-deep-review.json`
 - `acceptance/native-workflow-one-lease-1x1x100k.json`
@@ -121,13 +123,16 @@ Artifacts:
 Promoted package:
 
 - active: `/users/jzhou24/graph_optimization/factories/datavine.tar.gz`
-- dated hard link: `datavine.deep-review-20260810.tar.gz`
-- SHA-256: `8933446d6583ada6f8d23033012eb618f700b7b1a25b102a93c13661ca19c9e9`
+- active SHA-256: `67c202c328b38f59d5da68a68ade5a05abdc076bdb1b57f49f15ad00a5b6f0bf`
+- rollback hard link: `datavine.deep-review-20260810.tar.gz`
+- rollback SHA-256: `8933446d6583ada6f8d23033012eb618f700b7b1a25b102a93c13661ca19c9e9`
+- Go adaptor: `datavine_workflow_go-20260811`, SHA-256
+  `9a52d76a35474cc8e7f5da5b26633428c0f929753ef218d9e7aaa7e9d5ddffd4`
 
 `poncho_package_run` imported cloudpickle 3.1.2 and the DataVine API;
 package-local hashes matched the installed `datavine_workflow`,
 `datavine_executor`, `datavine_python_executor`, and `vine_worker`. Packed
-1x2x10k completed exactly with 75.3 MB peak RSS, 43 FDs, and six processes.
+1x2x10k completed exactly with 75.3 MB peak RSS, 45 FDs, and six processes.
 
 ## Reproduction
 

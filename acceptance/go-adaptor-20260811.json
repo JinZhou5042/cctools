@@ -1,0 +1,26 @@
+{
+  "artifact_type": "datavine-go-adaptor-evidence",
+  "date": "2026-08-11",
+  "status": "PASS",
+  "source_commit": "41254c298083c01747256423fa4ff7f649e4315f",
+  "compiler": "go1.22.5 linux/amd64",
+  "compiler_environment": "isolated temporary conda-forge prefix",
+  "full_regression": {
+    "passed": 9,
+    "total": 9
+  },
+  "prebuilt_adaptor": {
+    "path": "/users/jzhou24/graph_optimization/factories/datavine_workflow_go-20260811",
+    "sha256": "9a52d76a35474cc8e7f5da5b26633428c0f929753ef218d9e7aaa7e9d5ddffd4",
+    "bytes": 2244760,
+    "statically_linked": true,
+    "contract_passed": true
+  },
+  "contract": {
+    "direct_protocol": true,
+    "shared_fixture_executed": true,
+    "python_dependency": false,
+    "exact_result": true,
+    "dynamic_delta": true
+  }
+}

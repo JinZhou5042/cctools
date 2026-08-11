@@ -12,9 +12,9 @@
     "restart_policy": "recompute producers whose retained worker-local outputs are unavailable"
   },
   "correctness": {
-    "supported_regressions_passed": 8,
-    "supported_regressions_total": 8,
-    "go_gate": "environment-blocked: no DATAVINE_GO_BINARY, DATAVINE_GO_COMPILER, or go compiler",
+    "supported_regressions_passed": 9,
+    "supported_regressions_total": 9,
+    "go_gate": "PASS with Go 1.22.5 compiler and hash-verified static prebuilt adaptor",
     "worker_local_restart_recompute": true,
     "requested_result_restart_fetch": true,
     "exact_100k": {"submissions": 100000, "completions": 100000},
@@ -31,7 +31,26 @@
     "cloudpickle": "3.1.2",
     "exact_10k": {"submissions": 10000, "completions": 10000},
     "runtime_tasks_per_second": 3364.7977387292103,
-    "production_promoted": false
+    "production_promoted": true
+  },
+  "promotion": {
+    "active_path": "/users/jzhou24/graph_optimization/factories/datavine.tar.gz",
+    "active_sha256": "67c202c328b38f59d5da68a68ade5a05abdc076bdb1b57f49f15ad00a5b6f0bf",
+    "rollback_path": "/users/jzhou24/graph_optimization/factories/datavine.deep-review-20260810.tar.gz",
+    "rollback_sha256": "8933446d6583ada6f8d23033012eb618f700b7b1a25b102a93c13661ca19c9e9",
+    "active_package_smoke": {
+      "submissions": 10000,
+      "completions": 10000,
+      "runtime_tasks_per_second": 3707.1034416069956,
+      "end_to_end_tasks_per_second": 3032.651721628238
+    }
+  },
+  "go_adaptor": {
+    "path": "/users/jzhou24/graph_optimization/factories/datavine_workflow_go-20260811",
+    "sha256": "9a52d76a35474cc8e7f5da5b26633428c0f929753ef218d9e7aaa7e9d5ddffd4",
+    "compiler": "go1.22.5 linux/amd64",
+    "statically_linked": true,
+    "prebuilt_contract_passed": true
   },
   "final_10x16_n5": {
     "worker_gate": "exactly 10 workers and 160 cores before dispatch",
