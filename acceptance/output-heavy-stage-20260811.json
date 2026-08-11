@@ -60,6 +60,31 @@
       "publication_bytes": 1049352
     }
   },
+  "active_poll_followup": {
+    "change": "measure Manager lock wait and tune the existing idle-poll-milliseconds setting to 1 only while workflows execute, restoring 10 while idle",
+    "taskvine_core_changed": false,
+    "selective_multi_output_wide_five_repetition_medians": {
+      "artifact": "/tmp/datavine-active-tuned-poll.GHG8Ku/summary.json",
+      "datavine_seconds": 0.16994655004236847,
+      "taskvine_seconds": 0.13998683402314782,
+      "datavine_to_taskvine_rate": 0.8237109490498539,
+      "manager_lock_seconds": 0.001587,
+      "pre_tune_datavine_seconds": 0.21025012107566,
+      "pre_tune_datavine_to_taskvine_rate": 0.6751794545166867,
+      "pre_tune_manager_lock_seconds": 0.019131,
+      "datavine_time_reduction_fraction": 0.19169344981631642,
+      "rate_improvement_fraction": 0.21998817283249594,
+      "manager_lock_reduction_fraction": 0.9170456327426689
+    },
+    "large_reuse_32mb_three_repetition_medians": {
+      "artifact": "/tmp/datavine-active-tuned-reuse.NCzIwI/summary.json",
+      "datavine_seconds": 2.4990930509520695,
+      "taskvine_seconds": 2.402074814075604,
+      "datavine_to_taskvine_rate": 0.9611786216445584,
+      "manager_lock_seconds": 0.004403,
+      "python_decode_seconds": 0.495259
+    }
+  },
   "observations": {
     "large_reuse_decode_reduction_fraction": 0.533650209068288,
     "large_reuse_rate_improvement_fraction": 0.20157964009772056,
@@ -67,7 +92,7 @@
     "distributed_performance_parity_claimed": false
   },
   "regression": {
-    "artifact": "/tmp/datavine-regression-stream-load-20260811.json",
+    "artifact": "/tmp/datavine-regression-active-poll-20260811.json",
     "status": "PASS",
     "passed": 9,
     "total": 9,

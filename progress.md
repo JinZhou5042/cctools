@@ -200,6 +200,15 @@ was 0.905x TaskVine (DataVine 2.409 s, TaskVine 2.181 s), versus 0.753x in the
 single pre-change diagnostic. Wide multi-output remained 0.670x; its decode
 cost was only 2.5 ms, so its remaining gap is a separate per-task/output path.
 
+That follow-up path exposed about 19 ms median Manager-lock wait caused by the
+10 ms completion-pump poll across dependency waves. Runtime now uses TaskVine's
+existing `idle-poll-milliseconds` tune at 1 ms only while workflows execute and
+restores 10 ms while idle; TaskVine Core is unchanged. In a five-repetition
+local run, wide multi-output improved from the untuned 0.675x to 0.824x
+TaskVine (DataVine 170 ms, TaskVine 140 ms), and median lock wait fell to 1.6
+ms. A three-repetition 32 MiB reuse check reached 0.961x and showed no local
+regression.
+
 The complete source regression passed 9/9, including the prebuilt Go adaptor.
 This is a local performance pilot, not a replacement for the resident 10x16
 campaign or a distributed parity claim. See

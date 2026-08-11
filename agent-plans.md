@@ -291,10 +291,13 @@ The 2026-08-11 result-plane redesign is the active gate:
   three-repetition local median reached 0.905x TaskVine for 32 MiB reuse while
   the complete source regression remained 9/9 PASS. This is a pilot; the
   resident 10x16 performance gate remains OPEN.
-- [ ] Profile the residual wide multi-output fixed cost, where decode is only
-  2.5 ms and the 1x1 rate remains 0.670x. Any optimization must preserve one
-  physical task per logical task, requested-output durability, and the single
-  Data Controller authority.
+- [x] Profile the residual wide fixed cost. Manager-lock wait was about 19 ms;
+  an active-only 1 ms Manager idle-poll tune reduced it to 1.6 ms and raised
+  the five-repetition local wide rate from 0.675x to 0.824x TaskVine without
+  changing TaskVine Core. A 32 MiB reuse check reached 0.961x and 9/9 passed.
+- [ ] Rebuild a candidate and rerun the resident 10x16 crossed-order
+  output-heavy gate. Local 1x1 gains are not a distributed promotion result;
+  production remains on the prior verified worker-local package meanwhile.
 
 ## 11. Ordered next work
 

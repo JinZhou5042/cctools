@@ -107,6 +107,7 @@ struct vine_datavine_workflow_runtime {
 	struct itable *completion_owners;
 	atomic_int stopping;
 	atomic_int lanes_running;
+	atomic_int workflows_running;
 };
 
 static void manager_lane_lock(struct vine_datavine_workflow_runtime *runtime)
@@ -208,10 +209,19 @@ static void cancel_running_tasks(struct vine_datavine_workflow_runtime *runtime,
 static void *runtime_pump(void *argument)
 {
 	struct vine_datavine_workflow_runtime *runtime = argument;
+	int poll_milliseconds = 10;
 	while (!atomic_load(&runtime->stopping) ||
 			atomic_load(&runtime->lanes_running)) {
+		int active = atomic_load(&runtime->workflows_running) > 0;
+		int desired_poll_milliseconds = active ? 1 : 10;
 		pthread_mutex_lock(&runtime->manager_lock);
-		struct vine_task *task = vine_wait_for_milliseconds(runtime->manager, 10);
+		if (desired_poll_milliseconds != poll_milliseconds) {
+			vine_tune(runtime->manager, "idle-poll-milliseconds",
+					desired_poll_milliseconds);
+			poll_milliseconds = desired_poll_milliseconds;
+		}
+		struct vine_task *task = vine_wait_for_milliseconds(
+				runtime->manager, poll_milliseconds);
 		pthread_mutex_unlock(&runtime->manager_lock);
 		if (!task) {
 			usleep(1000);
@@ -1262,6 +1272,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 	uint32_t uncheckpointed_completions = 0;
 	uint64_t materialize_nanoseconds = 0;
 	uint64_t submit_nanoseconds = 0;
+	uint64_t manager_lock_nanoseconds = 0;
 	uint64_t submission_event_nanoseconds = 0;
 	uint64_t publish_nanoseconds = 0;
 	struct publication_stage_totals publication_stages = {0};
@@ -1331,7 +1342,13 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				break;
 		}
 		int64_t logical_id;
+		struct timespec manager_lock_started;
+		struct timespec manager_lock_finished;
+		clock_gettime(CLOCK_MONOTONIC, &manager_lock_started);
 		manager_lane_lock(runtime);
+		clock_gettime(CLOCK_MONOTONIC, &manager_lock_finished);
+		manager_lock_nanoseconds += elapsed_nanoseconds(
+				&manager_lock_started, &manager_lock_finished);
 		while (running + publishing < DATAVINE_WORKFLOW_SUBMISSION_WINDOW &&
 				(logical_id = vine_datavine_scheduler_take(scheduler)) > 0) {
 			struct jx *task = itable_lookup(tasks, (uint64_t)logical_id);
@@ -1525,6 +1542,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				"datavine workflow %s setup_seconds=%.6f run_seconds=%.6f "
 				"physical_submissions=%llu physical_completions=%llu "
 				"materialize_seconds=%.6f submit_seconds=%.6f "
+				"manager_lock_seconds=%.6f "
 				"submission_event_seconds=%.6f publish_seconds=%.6f "
 				"publication_prepare_seconds=%.6f "
 				"publication_queue_seconds=%.6f "
@@ -1542,6 +1560,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				(unsigned long long)physical_completions,
 				materialize_nanoseconds / 1e9,
 				submit_nanoseconds / 1e9,
+				manager_lock_nanoseconds / 1e9,
 				submission_event_nanoseconds / 1e9,
 				publish_nanoseconds / 1e9,
 				publication_stages.prepare_nanoseconds / 1e9,
@@ -1578,7 +1597,9 @@ static void *runtime_main(void *argument)
 			usleep(1000);
 			continue;
 		}
+		atomic_fetch_add(&runtime->workflows_running, 1);
 		int outcome = execute_document(runtime, info.workflow_id, document, document_size);
+		atomic_fetch_sub(&runtime->workflows_running, 1);
 		free(document);
 		if (!atomic_load(&runtime->stopping) && outcome != 2) {
 			struct vine_datavine_workflow_error error;
@@ -1647,6 +1668,7 @@ struct vine_datavine_workflow_runtime *vine_datavine_workflow_runtime_start(
 		return 0;
 	atomic_init(&runtime->stopping, 0);
 	atomic_init(&runtime->lanes_running, 0);
+	atomic_init(&runtime->workflows_running, 0);
 	runtime->store = store;
 	runtime->data_controller = data_controller;
 	runtime->manager = manager;
