@@ -209,6 +209,27 @@ TaskVine (DataVine 170 ms, TaskVine 140 ms), and median lock wait fell to 1.6
 ms. A three-repetition 32 MiB reuse check reached 0.961x and showed no local
 regression.
 
+The candidate package is
+`datavine.output-heavy-candidate-20260811.tar.gz`, SHA-256
+`9c1c8372c3cbc4baf43317257408213d07867938c6e0f767fb1009f018c8b9ca`.
+Package-local cloudpickle/API and all four executable hashes match the installed
+build. Its packed 1x2x10k gate passed exactly at 3,349 Runtime tasks/s and 74.9
+MB peak RSS. Production was not overwritten during this gate.
+
+The resident 10x16 crossed-order campaign then passed 40 valid backend-runs
+and 12,820 exact physical tasks. DataVine-first rates were 0.650x for 32 MiB
+reuse and 0.411x for wide multi-output; TaskVine-first rates were 0.691x and
+0.420x. A discarded first reverse-order attempt fail-closed when TaskVine r1
+duplicated `select-0` into two `select-2` results. TaskVine r2-r5 and the 320
+persisted DataVine values agreed exactly; a clean reverse rerun passed. The
+driver now checks same-backend consistency across repetitions so this class of
+reference nondeterminism is reported at its source.
+
+At cluster scale, Manager-lock time is negligible for wide multi-output while
+cumulative Controller publication queue and Python fsync are high. Therefore
+the next optimization target is bounded concurrent publication/durability,
+not further poll tuning or any new control plane.
+
 The complete source regression passed 9/9, including the prebuilt Go adaptor.
 This is a local performance pilot, not a replacement for the resident 10x16
 campaign or a distributed parity claim. See

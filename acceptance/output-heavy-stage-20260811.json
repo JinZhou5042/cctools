@@ -85,6 +85,55 @@
       "python_decode_seconds": 0.495259
     }
   },
+  "candidate": {
+    "path": "/users/jzhou24/graph_optimization/factories/datavine.output-heavy-candidate-20260811.tar.gz",
+    "sha256": "9c1c8372c3cbc4baf43317257408213d07867938c6e0f767fb1009f018c8b9ca",
+    "source_commit": "cc5ab3b93c7069b5ab61ecbb63699bcad82575da",
+    "cloudpickle": "3.1.2",
+    "package_hashes_match_installed_build": true,
+    "packed_1x2x10000": {
+      "artifact": "/tmp/datavine-output-heavy-packed-1x2x10k.json",
+      "artifact_sha256": "62cf16033f5a903e36c3a753db53b280052fb583f65d4936bda02650016ee027",
+      "status": "PASS",
+      "physical_submissions": 10000,
+      "physical_completions": 10000,
+      "runtime_tasks_per_second": 3348.899776354731,
+      "peak_rss_bytes": 74866688
+    },
+    "production_overwritten": false,
+    "production_sha256": "67c202c328b38f59d5da68a68ade5a05abdc076bdb1b57f49f15ad00a5b6f0bf"
+  },
+  "cluster_crossed_order_10x16x5": {
+    "status": "PASS",
+    "valid_backend_runs": 40,
+    "valid_physical_tasks": 12820,
+    "exact_counts": true,
+    "exact_results": true,
+    "datavine_first": {
+      "artifact": "/tmp/datavine-output-heavy-10x16.NLzJdO/datavine-first/summary.json",
+      "artifact_sha256": "97a58b5b4bef8cbbc90b2038c9bd7fa5bc98b56ba0b0f5afc216263b203bd6d9",
+      "large_reuse_32mb_rate": 0.6499906900505757,
+      "selective_multi_output_wide_rate": 0.41110241387317076
+    },
+    "taskvine_first": {
+      "artifact": "/tmp/datavine-output-heavy-10x16.NLzJdO/taskvine-first-rerun/summary.json",
+      "artifact_sha256": "a16c1cf19e80aa2fcdb9cc49a8dfe48663fe49f5d55a187c269ad60c3e19a4f3",
+      "large_reuse_32mb_rate": 0.690580146495022,
+      "selective_multi_output_wide_rate": 0.4196963978139609
+    },
+    "failed_reference_attempt": {
+      "status": "FAIL_CLOSED",
+      "reason": "TaskVine repetition 1 returned select-0 for two select-2 sinks; TaskVine repetitions 2 through 5 and all DataVine persisted outputs agreed 320 of 320",
+      "mismatch_indices": [3, 7],
+      "data_file_ids": [18, 34],
+      "taskvine_r1_artifact_sha256": "c95a6c45556092f710fc89f0da56e07c275dccf15ace69d7839318e28cc4e491",
+      "included_in_performance_summary": false,
+      "driver_now_checks_same_backend_repetition_consistency": true
+    },
+    "remaining_bottleneck": "concurrent publication queue and output fsync for wide multi-output",
+    "manager_lock_is_cluster_wide_bottleneck": false,
+    "condor_jobs_remaining": 0
+  },
   "observations": {
     "large_reuse_decode_reduction_fraction": 0.533650209068288,
     "large_reuse_rate_improvement_fraction": 0.20157964009772056,

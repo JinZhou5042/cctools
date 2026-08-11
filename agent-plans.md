@@ -295,9 +295,16 @@ The 2026-08-11 result-plane redesign is the active gate:
   an active-only 1 ms Manager idle-poll tune reduced it to 1.6 ms and raised
   the five-repetition local wide rate from 0.675x to 0.824x TaskVine without
   changing TaskVine Core. A 32 MiB reuse check reached 0.961x and 9/9 passed.
-- [ ] Rebuild a candidate and rerun the resident 10x16 crossed-order
-  output-heavy gate. Local 1x1 gains are not a distributed promotion result;
-  production remains on the prior verified worker-local package meanwhile.
+- [x] Rebuild and hash-verify the output-heavy candidate; packed 1x2x10k passed
+  exactly at 3,349 Runtime tasks/s. The clean resident 10x16 crossed-order gate
+  passed 40 backend-runs/12,820 physical tasks. Rates were 0.650x/0.691x for
+  32 MiB reuse and 0.411x/0.420x for wide multi-output.
+- [x] Fail closed on a transient TaskVine reference error in the first reverse
+  attempt, prove DataVine's 320 persisted results match stable TaskVine r2-r5,
+  add same-backend repetition validation, and pass a clean reverse rerun.
+- [ ] Decide promotion after a final candidate smoke. The remaining cluster
+  wide bottleneck is concurrent publication queue/fsync; do not add another
+  data agent or control plane to address it.
 
 ## 11. Ordered next work
 

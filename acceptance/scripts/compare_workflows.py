@@ -876,6 +876,13 @@ def main():
                 result = runner(pool, run_root, name, specs[name], repetition)
                 if expected[name] is not None and result["results"] != expected[name]:
                     raise RuntimeError(f"{name}/{backend}: result mismatch")
+                repetition_peer = next((item for item in runs
+                    if item["workflow"] == name and item["backend"] == backend), None)
+                if (repetition_peer and
+                        repetition_peer["results"] != result["results"]):
+                    raise RuntimeError(
+                        f"{name}/{backend}: result mismatch across repetitions"
+                    )
                 comparison_peer = next((item for item in runs
                     if item["workflow"] == name and item["repetition"] == repetition
                     and item["backend"] != backend), None)
