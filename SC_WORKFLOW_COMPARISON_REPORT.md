@@ -93,6 +93,25 @@ protocol:
 The final taskvine-first 10x16 n=5 run used the exact committed implementation.
 A preceding datavine-first hybrid n=5 run provides order corroboration.
 
+### Bottleneck optimization follow-up: 2026-08-11
+
+The next source round removed the measured serialization and durability hot
+spots without changing the ownership model. Concurrent Controller
+publications now use the existing journal enqueue/commit interface with a
+bounded 1 ms coalescing leader. Durable results become visible only after the
+shared barrier. A compact DVP4 ticket lets the Python child skip unconsumed
+outputs and fsync only requested outputs; DVP3 remains compatible. Reused
+callable objects are cloudpickled once per Workflow.
+
+The exact 10x16 n=5 follow-up passed all 20 backend runs. The 32 MiB reuse
+median is 0.609 s DataVine versus 0.496 s TaskVine (0.814x). Wide multi-output
+is 0.679 s versus 0.407 s (0.599x), a 28.8% DataVine wall-time reduction from
+the preceding clean 0.954 s result. Wide recorded 16 journal commits for 320
+durable outputs, proving the former per-output barrier is closed. DataVine
+still does not match TaskVine on this output-heavy shape; the remaining gap is
+the one-task/one-fork execution and strict requested-result publication/fetch
+path. See `acceptance/bottleneck-optimization-20260811.json`.
+
 | Workflow | TaskVine median | DataVine median | DV/TV rate | Cross-order rate | Old file-backed rate |
 |---|---:|---:|---:|---:|---:|
 | 32 MiB reuse | 0.815 s | 2.500 s | 0.326x | 0.437x | 0.311x |

@@ -4,6 +4,7 @@
 *.gz -whitespace binary
 *.html whitespace=-indent-with-non-tab
 *.jpg -whitespace binary
+*.json whitespace=-indent-with-non-tab
 *.m4 whitespace=-indent-with-non-tab
 *.png -whitespace binary
 *.py whitespace=-indent-with-non-tab

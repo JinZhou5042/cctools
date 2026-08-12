@@ -236,6 +236,47 @@ cumulative Controller publication queue and Python fsync are high. Therefore
 the next optimization target is bounded concurrent publication/durability,
 not further poll tuning or any new control plane.
 
+That bottleneck round is now complete at source commit `d9f0c9e4c`. The
+existing four Data Controller workers prepare publications concurrently; a
+bounded 1 ms leader window coalesces ready metadata records and uses journal
+enqueue followed by one commit barrier. Results remain invisible until the
+barrier succeeds, replay retains the existing `DATA_READY_BATCH` format, and
+there is still one Controller owner with no new service, RPC, or TaskVine Core
+logic. In the final 10x16 n=5 wide run, 320 durable outputs required a median
+16 journal barriers rather than one synchronous barrier per output.
+
+The compact DVP4 Python ticket also carries retained/durable output policy.
+Unconsumed outputs are not serialized, recomputable `VINE_TEMP` outputs and
+the worker-local DVM1 manifest are not fsynced, and requested outputs keep
+their durability fsync. DVP3 tickets remain readable. A focused executable
+contract passes `retained=2 skipped=1 remote-fsync=0 durable-fsync=1`.
+Repeated use of one callable object now fixes and reuses one cloudpickle
+snapshot per Workflow: a 480-task profile performs one function dump and
+builds in 24.4 ms instead of the prior approximately 114 ms. Public
+`document()`/`delta_document()` still return isolated copies; synchronous
+submit/append avoid a redundant private whole-graph copy.
+
+The post-commit regression is 10/10 PASS, including the retained Go adaptor.
+The final exact 10x16 n=5 comparison passed 20 backend runs:
+
+- 32 MiB reuse: DataVine 0.609 s, TaskVine 0.496 s, rate 0.814x;
+- wide multi-output: DataVine 0.679 s, TaskVine 0.407 s, rate 0.599x;
+- wide DataVine wall time fell 28.8% from the preceding clean 0.954 s result.
+
+This is a material improvement, not performance parity. The remaining wide
+gap is now the 480-task one-fork execution plus strict requested-result
+publication/fetch path, not Manager locking or per-output journal barriers.
+The verified but unpromoted candidate is
+`datavine.bottleneck-candidate-20260811.tar.gz`, SHA-256
+`32e1361324df69be2db88258565f3ad393d2eb16ff9228e99387b895d9abba6d`.
+Its packed 1x2x10k gate passed exactly at 3,382 Runtime tasks/s. This exact
+archive was then promoted atomically; the active-path 1x2x10k smoke passed
+10,000/10,000 at 3,332 Runtime tasks/s. The prior production archive remains
+available as `datavine.output-heavy-candidate-20260811.tar.gz`, SHA-256
+`9c1c8372c3cbc4baf43317257408213d07867938c6e0f767fb1009f018c8b9ca`.
+Full evidence is in
+`acceptance/bottleneck-optimization-20260811.json`.
+
 The complete source regression passed 9/9, including the prebuilt Go adaptor.
 This is a local performance pilot, not a replacement for the resident 10x16
 campaign or a distributed parity claim. See

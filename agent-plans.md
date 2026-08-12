@@ -305,8 +305,27 @@ The 2026-08-11 result-plane redesign is the active gate:
 - [x] Promote the exact verified candidate atomically after the active-path
   1x2x10k smoke passed 10,000/10,000 at 3,370 Runtime tasks/s. Retain the old
   worker-local archive as exact rollback.
-- [ ] Optimize the remaining cluster-wide concurrent publication queue/fsync
-  without adding another data agent or control plane.
+- [x] Batch concurrent durable publications inside the existing Controller
+  with a bounded 1 ms leader window and one journal barrier per ready group.
+  Preserve post-durability visibility and replay; add no agent, RPC, or
+  TaskVine Core logic. Final wide median records 16 barriers for 320 durable
+  outputs.
+- [x] Add compact DVP4 retained/durable output policy with DVP3 compatibility.
+  Skip unconsumed output serialization and recomputable VINE_TEMP/manifest
+  fsync while preserving requested-output fsync; focused contract PASS.
+- [x] Cache one callable snapshot per Workflow object identity and avoid the
+  redundant private deep copy on synchronous submit/append. The 480-task
+  profile performs one function cloudpickle and builds in 24.4 ms.
+- [x] Pass the post-commit regression 10/10, exact packed 1x2x10k at 3,382
+  Runtime tasks/s, and final 10x16 n=5 exactness. Rates improve to 0.814x for
+  32 MiB reuse and 0.599x for wide; retain an explicit performance limitation.
+- [x] Promote the exact hash-verified candidate atomically and pass the active
+  production-path 1x2x10k smoke at 10,000/10,000 and 3,332 Runtime tasks/s;
+  retain the preceding production package as rollback.
+- [ ] Close the remaining output-heavy execution/fetch gap. Do not optimize
+  Manager polling or journal barriers again without new evidence; next profile
+  must separate per-fork executor overhead from strict requested-result
+  publication/fetch and compare equal durability semantics.
 
 ## 11. Ordered next work
 
