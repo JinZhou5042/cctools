@@ -277,7 +277,20 @@ available as `datavine.output-heavy-candidate-20260811.tar.gz`, SHA-256
 Full evidence is in
 `acceptance/bottleneck-optimization-20260811.json`.
 
-The complete source regression passed 9/9, including the prebuilt Go adaptor.
+The next data-intensive campaign is now designed in
+`SC_SCIENTIFIC_WORKFLOW_BENCHMARK_PLAN.md`. It separates TV-native performance,
+DV-native durability, and an optional TaskVine durable-sink diagnostic instead
+of claiming false semantic equivalence. Controlled families cover partitioned
+HEP scan/reduce, shared calibration reuse, genomics shuffle/merge, climate tile
+iteration, adaptive parameter search, and ensemble checkpoint/reduce. The plan
+defines cold/warm/peer/cache-pressure placement, theoretical byte lower bounds,
+strong and weak scaling through paired reserved nodes, exact storage/recovery
+gates, statistics, resource caps, and a staged real-application ladder. The
+design is complete; generator, artifact schema, remote sampler and HEP-S driver
+remain OPEN.
+
+The complete source regression passed 10/10, including the focused output
+retention/durability contract and the prebuilt Go adaptor.
 This is a local performance pilot, not a replacement for the resident 10x16
 campaign or a distributed parity claim. See
 `acceptance/output-heavy-stage-20260811.json`.

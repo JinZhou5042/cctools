@@ -2,7 +2,7 @@
 
 Updated: 2026-08-11
 
-Status: **WORKER-LOCAL CORRECTNESS AND 9/9 PASS; PERFORMANCE PARITY OPEN**
+Status: **WORKER-LOCAL CORRECTNESS AND 10/10 PASS; PERFORMANCE PARITY OPEN**
 
 ## Architecture and correctness
 
@@ -18,7 +18,7 @@ Status: **WORKER-LOCAL CORRECTNESS AND 9/9 PASS; PERFORMANCE PARITY OPEN**
 | Live result | PASS | a requested DataID is fetchable immediately after its task commit while downstream work is still running |
 | Payload isolation | PASS | 2 MiB result stays in immutable Data Controller storage; workflow journal remains under 1 MiB |
 | Corruption | PASS | modified result file makes service restart fail closed |
-| Regression | PASS | 9/9 contracts pass; Go was compiled with isolated Go 1.22.5 and revalidated with a hash-verified static prebuilt adaptor |
+| Regression | PASS | 10/10 contracts pass, including focused output retention/durability and the hash-verified Go adaptor |
 
 ## Scale and CPU
 
@@ -30,10 +30,11 @@ Status: **WORKER-LOCAL CORRECTNESS AND 9/9 PASS; PERFORMANCE PARITY OPEN**
 | CPU fork 4 cores | PASS | rate 1.003; 97.07% useful CPU |
 | CPU fork 16 cores | PASS | rate 0.966; 92.01% useful CPU |
 | Multi-worker workflow characterization | PILOT PASS | worker-local persistent 10x16 Condor pools reached the exact all-connected gate with zero physical-task or result mismatch; homogeneous reserved-node publication run remains OPEN |
-| Data-aware advantage | MIXED / LIMITATION | final-order worker-local 10x16 rerun: 32 MiB reuse is 0.326x and wide multi-output 0.361x versus TaskVine; no large intermediate persisted to the Controller |
+| Data-aware advantage | MIXED / LIMITATION | bottleneck-optimized exact 10x16 n=5: 32 MiB reuse is 0.814x and wide multi-output 0.599x versus TaskVine; wide wall falls 28.8%, but parity remains OPEN |
 
-The 100k/1M and the two data-heavy rows are fresh worker-local runs. CPU and
-the remaining workflow-shape rows remain historical pre-worker-local baselines.
+The 100k/1M rows are worker-local scale runs, and the two data-heavy rows are
+the bottleneck-optimized exact 10x16, n=5 results. CPU and the remaining
+workflow-shape rows remain historical pre-worker-local baselines.
 
 The removed grouped-noop implementation previously reported roughly 16k to
 17k tasks/s at 1M scale. That number is historical and invalid for independent
@@ -49,7 +50,7 @@ execution.
 | RPC bounds | PASS | capabilities preflight and bounded frames, clients, queues, identifiers, tasks, and results |
 | Worker/restart recovery | PASS | lifecycle suite covers retry, worker loss, restart, checkpoint resume, and cancellation |
 | Generated residue | PASS | runtime info is temporary; old run directories, snapshots, logs, and retired test binaries removed |
-| Production package | PASS, promoted | active `datavine.tar.gz` is worker-local SHA-256 `67c202c328b38f59d5da68a68ade5a05abdc076bdb1b57f49f15ad00a5b6f0bf`; direct active-path smoke passed 10,000/10,000; prior `8933446d...c9e9` package remains as rollback |
+| Production package | PASS, promoted | active `datavine.tar.gz` SHA-256 is `32e1361324df69be2db88258565f3ad393d2eb16ff9228e99387b895d9abba6d`; active-path smoke passed 10,000/10,000 at 3,332 Runtime tasks/s; prior `9c1c8372...5b9ca` package remains as rollback |
 | Multi-manager/Foreman | OPEN | no current sharded metadata or partition acceptance |
 | Cross-version migration | OPEN | replay-compatible v1 records exist; incompatible migration tool does not |
 | Multi-tenant security | OPEN | token authentication exists; TLS, rotation, and authorization domains do not |

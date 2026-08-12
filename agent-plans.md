@@ -326,6 +326,17 @@ The 2026-08-11 result-plane redesign is the active gate:
   Manager polling or journal barriers again without new evidence; next profile
   must separate per-fork executor overhead from strict requested-result
   publication/fetch and compare equal durability semantics.
+- [x] Design the next data-intensive scientific workflow suite. The frozen
+  plan defines partitioned HEP scan/reduce, shared calibration reuse, genomics
+  shuffle/merge, climate tiled iteration, adaptive search and ensemble
+  checkpoint workloads; cold/warm/peer/cache-pressure placement; strong/weak
+  scaling; equal-sink versus native TaskVine contracts; remote byte/resource
+  accounting; fault recovery; paired statistics; and explicit promotion gates.
+  See `SC_SCIENTIFIC_WORKFLOW_BENCHMARK_PLAN.md`.
+- [ ] Implement the suite foundation: versioned artifact schema,
+  deterministic non-sparse data generator, remote resource/byte sampler and
+  HEP-S three-contract driver. Do not launch a large campaign until transfer
+  accounting is calibrated and the local exactness/storage gates pass.
 
 ## 11. Ordered next work
 
