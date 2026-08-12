@@ -25,6 +25,7 @@ struct vine_datavine_data_publication_metrics {
 	uint64_t remote_outputs;
 	uint64_t durable_outputs;
 	uint64_t output_bytes;
+	uint64_t journal_commits;
 };
 
 struct vine_datavine_data_controller *vine_datavine_data_controller_open(

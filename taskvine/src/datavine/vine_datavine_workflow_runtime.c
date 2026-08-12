@@ -63,6 +63,7 @@ struct publication_stage_totals {
 	uint64_t remote_outputs;
 	uint64_t durable_outputs;
 	uint64_t output_bytes;
+	uint64_t journal_commits;
 };
 
 struct execution_mailbox {
@@ -302,7 +303,8 @@ static struct vine_task *create_native_ticket(int64_t task_id,
 }
 
 static struct vine_task *create_python_ticket(struct jx *task,
-		struct jx *executor, struct itable *data)
+		struct jx *executor, struct itable *data, struct itable *consumers,
+		struct itable *requested, int retain_all)
 {
 	uint64_t payload_id = (uint64_t)jx_lookup_integer(executor, "payload_ref");
 	if (!payload_id)
@@ -335,20 +337,25 @@ static struct vine_task *create_python_ticket(struct jx *task,
 		}
 		size_t invocation_size = 0;
 		const char *invocation_bytes = buffer_tolstring(&invocation, &invocation_size);
-		if (invocation_size > UINT32_MAX || invocation_size > SIZE_MAX - 56) {
+		struct jx *outputs = jx_lookup(task, "output_data_ids");
+		size_t output_count = (size_t)jx_array_length(outputs);
+		if (!output_count || output_count > UINT32_MAX ||
+				invocation_size > UINT32_MAX || output_count > (SIZE_MAX - 60) / 2 ||
+				invocation_size > SIZE_MAX - 60 - output_count * 2) {
 			buffer_free(&invocation);
 			return 0;
 		}
-		ticket_size = 56 + invocation_size;
+		ticket_size = 60 + output_count * 2 + invocation_size;
 		ticket = calloc(1, ticket_size);
 		if (!ticket) {
 			buffer_free(&invocation);
 			return 0;
 		}
-		memcpy(ticket, "DVP3", 4);
+		memcpy(ticket, "DVP4", 4);
 		vine_datavine_put_u32(ticket + 4, (uint32_t)invocation_size);
 		vine_datavine_put_u64(ticket + 8, function_ref);
 		vine_datavine_put_u64(ticket + 16, wall_seconds);
+		vine_datavine_put_u32(ticket + 56, (uint32_t)output_count);
 		for (size_t index = 0; index < 32; index++) {
 			unsigned int value = 0;
 			if (sscanf(digest + index * 2, "%2x", &value) != 1) {
@@ -358,7 +365,15 @@ static struct vine_task *create_python_ticket(struct jx *task,
 			}
 			ticket[24 + index] = (unsigned char)value;
 		}
-		memcpy(ticket + 56, invocation_bytes, invocation_size);
+		for (size_t index = 0; index < output_count; index++) {
+			uint64_t data_id = (uint64_t)jx_array_index(outputs, (int)index)
+							->u.integer_value;
+			ticket[60 + index] = retain_all ||
+				itable_lookup(consumers, data_id) || itable_lookup(requested, data_id);
+			ticket[60 + output_count + index] =
+				itable_lookup(requested, data_id) != 0;
+		}
+		memcpy(ticket + 60 + output_count * 2, invocation_bytes, invocation_size);
 		buffer_free(&invocation);
 		function_name = "datavine_python_callable";
 	}
@@ -835,7 +850,8 @@ static struct vine_task *materialize(struct vine_manager *manager,
 	}
 	struct vine_task *physical = 0;
 	if (python_fork) {
-		physical = create_python_ticket(task, executor, data);
+		physical = create_python_ticket(
+				task, executor, data, consumers, requested, retain_all);
 	} else if (!strcmp(kind, "taskvine")) {
 		size_t input_size = 0;
 		const unsigned char *input = (const unsigned char *)
@@ -1088,6 +1104,7 @@ static int drain_publications(
 			publication_stages->remote_outputs += metrics.remote_outputs;
 			publication_stages->durable_outputs += metrics.durable_outputs;
 			publication_stages->output_bytes += metrics.output_bytes;
+			publication_stages->journal_commits += metrics.journal_commits;
 		}
 		valid = finish_logical_attempt(runtime, workflow_id, scheduler, files, consumers, requested, pending->task, pending->logical_id, pending->attempt, pending->task_result, published, completion_event_nanoseconds);
 		vine_datavine_data_publication_delete(pending->publication);
@@ -1552,6 +1569,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				"python_fsync_seconds=%.6f "
 				"publication_outputs=%llu publication_remote_outputs=%llu "
 				"publication_durable_outputs=%llu publication_bytes=%llu "
+				"publication_journal_commits=%llu "
 				"completion_event_seconds=%.6f checkpoint_seconds=%.6f\n",
 				workflow_id,
 				setup_seconds,
@@ -1574,6 +1592,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				(unsigned long long)publication_stages.remote_outputs,
 				(unsigned long long)publication_stages.durable_outputs,
 				(unsigned long long)publication_stages.output_bytes,
+				(unsigned long long)publication_stages.journal_commits,
 				completion_event_nanoseconds / 1e9,
 				checkpoint_nanoseconds / 1e9);
 	if (quiescent && valid && !atomic_load(&runtime->stopping))

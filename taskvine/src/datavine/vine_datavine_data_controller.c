@@ -11,6 +11,7 @@
 #include "vine_datavine_protocol.h"
 #include "vine_datavine_workflow_store.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <openssl/evp.h>
@@ -27,6 +28,7 @@
 #define DATA_READY_BATCH 1
 #define DATA_RELEASE_BATCH 2
 #define DATA_QUEUE_LIMIT 4096
+#define DATA_COMMIT_COALESCE_NS 1000000L
 
 struct data_result {
 	struct vine_datavine_workflow_result_info info;
@@ -64,7 +66,17 @@ struct publication_job {
 	uint64_t function_nanoseconds;
 	uint64_t serialize_nanoseconds;
 	uint64_t fsync_nanoseconds;
+	struct vine_datavine_data_publication_metrics metrics;
+	struct timespec commit_started;
+	struct publication_output *durable;
+	size_t durable_count;
 	struct publication_job *next;
+};
+
+struct result_installation {
+	struct data_result **pending;
+	char **keys;
+	size_t count;
 };
 
 struct vine_datavine_data_controller {
@@ -72,6 +84,7 @@ struct vine_datavine_data_controller {
 	pthread_mutex_t queue_lock;
 	pthread_cond_t queued;
 	pthread_cond_t space;
+	pthread_cond_t prepared;
 	struct hash_table *results;
 	struct vine_datavine_journal *journal;
 	char *root;
@@ -80,11 +93,15 @@ struct vine_datavine_data_controller {
 	size_t queued_count;
 	struct publication_job *head;
 	struct publication_job *tail;
+	struct publication_job *prepared_head;
+	struct publication_job *prepared_tail;
+	int commit_active;
 	int stopping;
 	int lock_initialized;
 	int queue_lock_initialized;
 	int queued_initialized;
 	int space_initialized;
+	int prepared_initialized;
 };
 
 static uint64_t elapsed_nanoseconds(
@@ -281,18 +298,35 @@ static unsigned char *encode_publication(const char *workflow_id,
 	return payload;
 }
 
-static int install_results(struct vine_datavine_data_controller *controller,
-		const char *workflow_id, struct publication_output *outputs,
-		size_t count, int replay)
+static void installation_delete(struct result_installation *installation)
 {
-	struct data_result **pending = calloc(count, sizeof(*pending));
-	char **keys = calloc(count, sizeof(*keys));
-	int valid = pending && keys;
+	if (!installation)
+		return;
+	for (size_t index = 0; index < installation->count; index++) {
+		data_result_delete(installation->pending ? installation->pending[index] : 0);
+		free(installation->keys ? installation->keys[index] : 0);
+	}
+	free(installation->pending);
+	free(installation->keys);
+	memset(installation, 0, sizeof(*installation));
+}
+
+static int installation_prepare(struct vine_datavine_data_controller *controller,
+		const char *workflow_id, struct publication_output *outputs,
+		size_t count, struct result_installation *installation)
+{
+	memset(installation, 0, sizeof(*installation));
+	installation->pending = calloc(count, sizeof(*installation->pending));
+	installation->keys = calloc(count, sizeof(*installation->keys));
+	installation->count = count;
+	int valid = installation->pending && installation->keys;
 	for (size_t index = 0; valid && index < count; index++) {
-		keys[index] = result_key(workflow_id, outputs[index].info.data_id);
-		struct data_result *known = keys[index]
-							    ? hash_table_lookup(controller->results, keys[index])
-							    : 0;
+		installation->keys[index] = result_key(
+				workflow_id, outputs[index].info.data_id);
+		struct data_result *known = 0;
+		if (installation->keys[index])
+			known = hash_table_lookup(controller->results,
+					installation->keys[index]);
 		if (known) {
 			valid = known->info.attempt <= outputs[index].info.attempt;
 			if (!valid)
@@ -303,15 +337,51 @@ static int install_results(struct vine_datavine_data_controller *controller,
 				continue;
 			}
 		}
-		pending[index] = calloc(1, sizeof(*pending[index]));
-		if (pending[index]) {
-			pending[index]->info = outputs[index].info;
-			pending[index]->path = strdup(outputs[index].path);
-			pending[index]->remote_file = outputs[index].remote_file;
-			pending[index]->durable = 1;
+		installation->pending[index] = calloc(
+				1, sizeof(*installation->pending[index]));
+		if (installation->pending[index]) {
+			installation->pending[index]->info = outputs[index].info;
+			installation->pending[index]->path = strdup(outputs[index].path);
+			installation->pending[index]->remote_file = outputs[index].remote_file;
+			installation->pending[index]->durable = 1;
 		}
-		valid = keys[index] && pending[index] && pending[index]->path;
+		valid = installation->keys[index] && installation->pending[index] &&
+			installation->pending[index]->path;
 	}
+	if (!valid)
+		installation_delete(installation);
+	return valid;
+}
+
+static void installation_apply(struct vine_datavine_data_controller *controller,
+		struct result_installation *installation)
+{
+	for (size_t index = 0; index < installation->count; index++) {
+		struct data_result *known = hash_table_lookup(
+				controller->results, installation->keys[index]);
+		if (known && installation->pending[index] &&
+				known->info.attempt < installation->pending[index]->info.attempt) {
+			known = hash_table_remove(controller->results,
+					installation->keys[index]);
+			unlink(known->path);
+			data_result_delete(known);
+		}
+		char *key = installation->keys[index];
+		if (!hash_table_lookup(controller->results, key)) {
+			if (!hash_table_insert(controller->results, key,
+					installation->pending[index]))
+				abort();
+			installation->pending[index] = 0;
+		}
+	}
+}
+
+static int install_results(struct vine_datavine_data_controller *controller,
+		const char *workflow_id, struct publication_output *outputs,
+		size_t count, int replay)
+{
+	struct result_installation installation;
+	int valid = installation_prepare(controller, workflow_id, outputs, count, &installation);
 	if (valid && !replay) {
 		size_t payload_size = 0;
 		unsigned char *payload = encode_publication(
@@ -322,34 +392,9 @@ static int install_results(struct vine_datavine_data_controller *controller,
 						   payload_size);
 		free(payload);
 	}
-	if (valid) {
-		for (size_t index = 0; index < count; index++) {
-			struct data_result *known = hash_table_lookup(
-					controller->results, keys[index]);
-			if (known && known->info.attempt < outputs[index].info.attempt) {
-				known = hash_table_remove(controller->results, keys[index]);
-				unlink(known->path);
-				data_result_delete(known);
-			}
-			if (!hash_table_lookup(controller->results, keys[index])) {
-				if (!pending[index]) {
-					valid = 0;
-					break;
-				}
-				if (!hash_table_insert(controller->results,
-						    keys[index],
-						    pending[index]))
-					abort();
-				pending[index] = 0;
-			}
-		}
-	}
-	for (size_t index = 0; index < count; index++) {
-		data_result_delete(pending ? pending[index] : 0);
-		free(keys ? keys[index] : 0);
-	}
-	free(pending);
-	free(keys);
+	if (valid)
+		installation_apply(controller, &installation);
+	installation_delete(&installation);
 	return valid;
 }
 
@@ -517,49 +562,156 @@ static void publication_finish(
 	pthread_mutex_unlock(&publication->lock);
 }
 
-static int commit_job(struct vine_datavine_data_controller *controller,
-		struct publication_job *job,
-		struct vine_datavine_data_publication_metrics *metrics)
+static int prepare_job(struct vine_datavine_data_controller *controller,
+		struct publication_job *job)
 {
-	struct publication_output *durable = calloc(job->count, sizeof(*durable));
+	job->durable = calloc(job->count, sizeof(*job->durable));
 	struct publication_output *soft = calloc(job->count, sizeof(*soft));
-	size_t durable_count = 0;
 	size_t soft_count = 0;
-	int valid = durable && soft;
+	int valid = job->durable && soft;
 	for (size_t index = 0; valid && index < job->count; index++) {
 		if (job->outputs[index].remote_only)
 			soft[soft_count++] = job->outputs[index];
 		else
-			durable[durable_count++] = job->outputs[index];
+			job->durable[job->durable_count++] = job->outputs[index];
 	}
-	metrics->outputs = job->count;
-	metrics->remote_outputs = soft_count;
-	metrics->durable_outputs = durable_count;
+	job->metrics.outputs = job->count;
+	job->metrics.remote_outputs = soft_count;
+	job->metrics.durable_outputs = job->durable_count;
 	if (soft_count) {
 		pthread_mutex_lock(&controller->lock);
 		valid = install_soft_results(controller, job->workflow_id, soft, soft_count);
 		pthread_mutex_unlock(&controller->lock);
 	}
-	for (size_t index = 0; valid && index < durable_count; index++) {
-		struct publication_output *output = &durable[index];
+	for (size_t index = 0; valid && index < job->durable_count; index++) {
+		struct publication_output *output = &job->durable[index];
 		unsigned char digest[32];
 		valid = write_plain_output(output) &&
 			hash_file(output->path, &output->info.size, digest);
 		if (valid)
 			digest_hex(digest, output->info.sha256);
 	}
-	if (valid && durable_count) {
-		pthread_mutex_lock(&controller->lock);
-		valid = install_results(controller, job->workflow_id, durable, durable_count, 0);
-		pthread_mutex_unlock(&controller->lock);
-	}
 	for (size_t index = 0; index < soft_count; index++)
-		metrics->output_bytes += soft[index].info.size;
-	for (size_t index = 0; index < durable_count; index++)
-		metrics->output_bytes += durable[index].info.size;
+		job->metrics.output_bytes += soft[index].info.size;
+	for (size_t index = 0; index < job->durable_count; index++)
+		job->metrics.output_bytes += job->durable[index].info.size;
 	free(soft);
-	free(durable);
 	return valid;
+}
+
+static int batch_has_duplicate_results(struct publication_job *jobs)
+{
+	struct hash_table *seen = hash_table_create(0, 0);
+	int duplicate = seen == 0;
+	for (struct publication_job *job = jobs; !duplicate && job; job = job->next) {
+		for (size_t index = 0; index < job->durable_count; index++) {
+			char *key = result_key(job->workflow_id,
+					job->durable[index].info.data_id);
+			duplicate = !key || hash_table_lookup(seen, key);
+			if (!duplicate && !hash_table_insert(seen, key, (void *)seen))
+				abort();
+			free(key);
+			if (duplicate)
+				break;
+		}
+	}
+	if (seen)
+		hash_table_delete(seen);
+	return duplicate;
+}
+
+static void finish_job(struct publication_job *job, int successful)
+{
+	struct timespec finished;
+	clock_gettime(CLOCK_MONOTONIC, &finished);
+	job->metrics.commit_nanoseconds = elapsed_nanoseconds(
+			&job->commit_started, &finished);
+	publication_finish(job->publication, successful, &job->metrics);
+}
+
+static void commit_job_group(struct vine_datavine_data_controller *controller,
+		struct publication_job *jobs)
+{
+	size_t count = 0;
+	for (struct publication_job *job = jobs; job; job = job->next)
+		count++;
+	struct publication_job **accepted = calloc(count, sizeof(*accepted));
+	struct result_installation *installations = calloc(count, sizeof(*installations));
+	unsigned char **payloads = calloc(count, sizeof(*payloads));
+	size_t *payload_sizes = calloc(count, sizeof(*payload_sizes));
+	int *success = calloc(count, sizeof(*success));
+	int allocated = accepted && installations && payloads && payload_sizes && success;
+	size_t accepted_count = 0;
+
+	pthread_mutex_lock(&controller->lock);
+	for (struct publication_job *job = jobs; allocated && job; job = job->next) {
+		struct result_installation *installation =
+				&installations[accepted_count];
+		if (!installation_prepare(controller, job->workflow_id, job->durable, job->durable_count, installation))
+			continue;
+		payloads[accepted_count] = encode_publication(job->workflow_id,
+				job->durable,
+				job->durable_count,
+				&payload_sizes[accepted_count]);
+		if (!payloads[accepted_count]) {
+			installation_delete(installation);
+			continue;
+		}
+		accepted[accepted_count++] = job;
+	}
+	int committed = allocated && accepted_count;
+	for (size_t index = 0; committed && index < accepted_count; index++) {
+		if (index + 1 < accepted_count)
+			committed = vine_datavine_journal_enqueue(controller->journal,
+					DATA_READY_BATCH, payloads[index], payload_sizes[index]);
+		else
+			committed = vine_datavine_journal_commit(controller->journal,
+					DATA_READY_BATCH, payloads[index], payload_sizes[index]);
+	}
+	if (committed) {
+		accepted[0]->metrics.journal_commits++;
+		for (size_t index = 0; index < accepted_count; index++) {
+			installation_apply(controller, &installations[index]);
+			success[index] = 1;
+		}
+	}
+	pthread_mutex_unlock(&controller->lock);
+
+	for (size_t index = 0; index < accepted_count; index++) {
+		installation_delete(&installations[index]);
+		free(payloads[index]);
+	}
+	for (struct publication_job *job = jobs; job; job = job->next) {
+		int job_success = 0;
+		for (size_t index = 0; index < accepted_count; index++) {
+			if (accepted[index] == job) {
+				job_success = success[index];
+				break;
+			}
+		}
+		finish_job(job, job_success);
+	}
+	free(success);
+	free(payload_sizes);
+	free(payloads);
+	free(installations);
+	free(accepted);
+}
+
+static void commit_prepared_jobs(struct vine_datavine_data_controller *controller,
+		struct publication_job *jobs)
+{
+	if (!batch_has_duplicate_results(jobs)) {
+		commit_job_group(controller, jobs);
+		return;
+	}
+	while (jobs) {
+		struct publication_job *next = jobs->next;
+		jobs->next = 0;
+		commit_job_group(controller, jobs);
+		jobs->next = next;
+		jobs = next;
+	}
 }
 
 static void job_delete(struct publication_job *job)
@@ -570,6 +722,7 @@ static void job_delete(struct publication_job *job)
 		free(job->outputs[index].path);
 		free(job->outputs[index].plain_data);
 	}
+	free(job->durable);
 	free(job->outputs);
 	free(job->workflow_id);
 	free(job);
@@ -593,20 +746,68 @@ static void *data_worker(void *argument)
 		controller->queued_count--;
 		pthread_cond_broadcast(&controller->space);
 		pthread_mutex_unlock(&controller->queue_lock);
-		struct timespec started;
-		struct timespec finished;
-		struct vine_datavine_data_publication_metrics metrics = {0};
-		clock_gettime(CLOCK_MONOTONIC, &started);
-		metrics.queue_nanoseconds = elapsed_nanoseconds(&job->queued_at, &started);
-		metrics.decode_nanoseconds = job->decode_nanoseconds;
-		metrics.function_nanoseconds = job->function_nanoseconds;
-		metrics.serialize_nanoseconds = job->serialize_nanoseconds;
-		metrics.fsync_nanoseconds = job->fsync_nanoseconds;
-		int committed = commit_job(controller, job, &metrics);
-		clock_gettime(CLOCK_MONOTONIC, &finished);
-		metrics.commit_nanoseconds = elapsed_nanoseconds(&started, &finished);
-		publication_finish(job->publication, committed, &metrics);
-		job_delete(job);
+		clock_gettime(CLOCK_MONOTONIC, &job->commit_started);
+		job->metrics.queue_nanoseconds = elapsed_nanoseconds(
+				&job->queued_at, &job->commit_started);
+		job->metrics.decode_nanoseconds = job->decode_nanoseconds;
+		job->metrics.function_nanoseconds = job->function_nanoseconds;
+		job->metrics.serialize_nanoseconds = job->serialize_nanoseconds;
+		job->metrics.fsync_nanoseconds = job->fsync_nanoseconds;
+		if (!prepare_job(controller, job)) {
+			finish_job(job, 0);
+			job_delete(job);
+			continue;
+		}
+		if (!job->durable_count) {
+			finish_job(job, 1);
+			job_delete(job);
+			continue;
+		}
+
+		pthread_mutex_lock(&controller->queue_lock);
+		job->next = 0;
+		if (controller->prepared_tail)
+			controller->prepared_tail->next = job;
+	else
+		controller->prepared_head = job;
+	controller->prepared_tail = job;
+	pthread_cond_signal(&controller->prepared);
+	if (controller->commit_active) {
+			pthread_mutex_unlock(&controller->queue_lock);
+			continue;
+		}
+		controller->commit_active = 1;
+		for (;;) {
+			if (!controller->stopping) {
+				struct timespec deadline;
+				clock_gettime(CLOCK_REALTIME, &deadline);
+				deadline.tv_nsec += DATA_COMMIT_COALESCE_NS;
+				if (deadline.tv_nsec >= INT64_C(1000000000)) {
+					deadline.tv_sec++;
+					deadline.tv_nsec -= INT64_C(1000000000);
+				}
+				while (!controller->stopping &&
+						pthread_cond_timedwait(&controller->prepared,
+								&controller->queue_lock, &deadline) != ETIMEDOUT) {
+				}
+			}
+			struct publication_job *batch = controller->prepared_head;
+			controller->prepared_head = 0;
+			controller->prepared_tail = 0;
+			pthread_mutex_unlock(&controller->queue_lock);
+			commit_prepared_jobs(controller, batch);
+			while (batch) {
+				struct publication_job *next = batch->next;
+				job_delete(batch);
+				batch = next;
+			}
+			pthread_mutex_lock(&controller->queue_lock);
+			if (!controller->prepared_head) {
+				controller->commit_active = 0;
+				pthread_mutex_unlock(&controller->queue_lock);
+				break;
+			}
+		}
 	}
 	return 0;
 }
@@ -639,7 +840,10 @@ struct vine_datavine_data_controller *vine_datavine_data_controller_open(
 	if (controller->queued_initialized &&
 			!pthread_cond_init(&controller->space, 0))
 		controller->space_initialized = 1;
-	valid = valid && controller->space_initialized;
+	if (controller->space_initialized &&
+			!pthread_cond_init(&controller->prepared, 0))
+		controller->prepared_initialized = 1;
+	valid = valid && controller->prepared_initialized;
 	controller->results = hash_table_create(0, 0);
 	controller->journal = valid ? vine_datavine_journal_open(catalog) : 0;
 	controller->threads = calloc(threads, sizeof(*controller->threads));
@@ -673,6 +877,8 @@ void vine_datavine_data_controller_close(
 			pthread_cond_broadcast(&controller->queued);
 		if (controller->space_initialized)
 			pthread_cond_broadcast(&controller->space);
+		if (controller->prepared_initialized)
+			pthread_cond_broadcast(&controller->prepared);
 		pthread_mutex_unlock(&controller->queue_lock);
 	}
 	for (size_t index = 0; index < controller->thread_count; index++)
@@ -691,6 +897,8 @@ void vine_datavine_data_controller_close(
 	}
 	free(controller->threads);
 	free(controller->root);
+	if (controller->prepared_initialized)
+		pthread_cond_destroy(&controller->prepared);
 	if (controller->space_initialized)
 		pthread_cond_destroy(&controller->space);
 	if (controller->queued_initialized)
@@ -837,12 +1045,10 @@ static int parse_output_manifest(const char *manifest,
 	unsigned long long serialize_ns = 0;
 	unsigned long long fsync_ns = 0;
 	char trailing = 0;
-	int fields = sscanf(end, "M %llu %llu %llu %llu\n%c", &decode_ns,
-			&function_ns, &serialize_ns, &fsync_ns, &trailing);
+	int fields = sscanf(end, "M %llu %llu %llu %llu\n%c", &decode_ns, &function_ns, &serialize_ns, &fsync_ns, &trailing);
 	if (fields != 4) {
 		decode_ns = 0;
-		fields = sscanf(end, "M %llu %llu %llu\n%c", &function_ns,
-				&serialize_ns, &fsync_ns, &trailing);
+		fields = sscanf(end, "M %llu %llu %llu\n%c", &function_ns, &serialize_ns, &fsync_ns, &trailing);
 		if (fields != 3)
 			return 0;
 	}

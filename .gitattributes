@@ -9,6 +9,7 @@
 *.py whitespace=-indent-with-non-tab
 *.sh whitespace=-indent-with-non-tab
 *.xml whitespace=-indent-with-non-tab,cr-at-eol
+taskvine/src/tools/datavine_python_executor whitespace=-indent-with-non-tab
 
 COPYING -whitespace
 

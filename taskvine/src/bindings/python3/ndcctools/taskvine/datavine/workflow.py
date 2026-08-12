@@ -56,6 +56,7 @@ class Workflow:
         self._committed_data = 0
         self._committed_requested = set()
         self._python_functions = {}
+        self._python_function_objects = {}
 
     def _data_ref(self, codec, origin, content_sha256=None):
         data_id = self._next_data_id
@@ -284,16 +285,30 @@ class Workflow:
                 )
             return ("pickle", cloudpickle.dumps(value))
 
-        function_bytes = cloudpickle.dumps(function)
-        function_digest = hashlib.sha256(function_bytes).hexdigest()
-        function_ref = self._python_functions.get(function_digest)
-        if function_ref is None:
-            function_ref = self.inline(
+        cached_function = self._python_function_objects.get(id(function))
+        if cached_function is not None and cached_function[0] is function:
+            _, function_bytes, function_digest, function_ref = cached_function
+        else:
+            # A callable is a stable workflow resource: its first use fixes the
+            # cloudpickle snapshot for every task that reuses the same object.
+            # Callers that need a later closure/object state must pass a new
+            # callable object, which makes the different task semantics explicit.
+            function_bytes = cloudpickle.dumps(function)
+            function_digest = hashlib.sha256(function_bytes).hexdigest()
+            function_ref = self._python_functions.get(function_digest)
+            if function_ref is None:
+                function_ref = self.inline(
+                    function_bytes,
+                    codec=("python/callable", "1"),
+                    content_sha256=function_digest,
+                )
+                self._python_functions[function_digest] = function_ref
+            self._python_function_objects[id(function)] = (
+                function,
                 function_bytes,
-                codec=("python/callable", "1"),
-                content_sha256=function_digest,
+                function_digest,
+                function_ref,
             )
-            self._python_functions[function_digest] = function_ref
 
         payload = cloudpickle.dumps(
             {
@@ -334,13 +349,16 @@ class Workflow:
             self._requested.add(output.data_id)
         return self
 
-    def document(self, *, idempotency_key=None):
+    def _document(self, *, idempotency_key=None, copy_records):
         document = {
             "schema": _WORKFLOW_SCHEMA,
             "idempotency_key": str(idempotency_key or self.idempotency_key),
             "mode": "streaming" if self.streaming else "sealed",
-            "tasks": copy.deepcopy(self._tasks),
-            "data": copy.deepcopy(sorted(self._data, key=lambda item: item["data_id"])),
+            "tasks": copy.deepcopy(self._tasks) if copy_records else self._tasks,
+            "data": (
+                copy.deepcopy(sorted(self._data, key=lambda item: item["data_id"]))
+                if copy_records else self._data
+            ),
             "requested_outputs": sorted(self._requested),
             "policy": {
                 "maximum_tasks": self.maximum_tasks,
@@ -350,11 +368,17 @@ class Workflow:
         if self.workflow_id is not None:
             document["workflow_id"] = self.workflow_id
         if self.metadata:
-            document["metadata"] = copy.deepcopy(self.metadata)
+            document["metadata"] = (
+                copy.deepcopy(self.metadata) if copy_records else self.metadata
+            )
         return document
 
-    def delta_document(
-        self, task_start, data_start, requested_before, *, idempotency_key
+    def document(self, *, idempotency_key=None):
+        return self._document(idempotency_key=idempotency_key, copy_records=True)
+
+    def _delta_document(
+        self, task_start, data_start, requested_before, *, idempotency_key,
+        copy_records,
     ):
         """Return only records created since the caller's last commit."""
 
@@ -364,10 +388,24 @@ class Workflow:
             "schema": _WORKFLOW_DELTA_SCHEMA,
             "workflow_id": self.workflow_id,
             "idempotency_key": str(idempotency_key),
-            "tasks": copy.deepcopy(self._tasks[task_start:]),
-            "data": copy.deepcopy(self._data[data_start:]),
+            "tasks": (
+                copy.deepcopy(self._tasks[task_start:])
+                if copy_records else self._tasks[task_start:]
+            ),
+            "data": (
+                copy.deepcopy(self._data[data_start:])
+                if copy_records else self._data[data_start:]
+            ),
             "requested_outputs": sorted(self._requested - requested_before),
         }
+
+    def delta_document(
+        self, task_start, data_start, requested_before, *, idempotency_key
+    ):
+        return self._delta_document(
+            task_start, data_start, requested_before,
+            idempotency_key=idempotency_key, copy_records=True,
+        )
 
     def _require_capabilities(self, client, *, delta=False):
         try:
@@ -405,7 +443,7 @@ class Workflow:
 
     def submit(self, client):
         self._require_capabilities(client)
-        info = client.submit_workflow(self.document())
+        info = client.submit_workflow(self._document(copy_records=False))
         self._mark_committed()
         return info
 
@@ -413,11 +451,12 @@ class Workflow:
         if self.workflow_id is None:
             raise ValueError("append requires an explicit workflow_id")
         self._require_capabilities(client, delta=True)
-        document = self.delta_document(
+        document = self._delta_document(
             self._committed_tasks,
             self._committed_data,
             self._committed_requested,
             idempotency_key=idempotency_key,
+            copy_records=False,
         )
         info = client.append_workflow(
             self.workflow_id,
