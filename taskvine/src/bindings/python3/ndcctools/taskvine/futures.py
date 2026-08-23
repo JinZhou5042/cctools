@@ -58,10 +58,14 @@ def wait(fs, timeout=None, return_when=ALL_COMPLETED):
 
     start = time.perf_counter()
     time_check = float('inf') if timeout is None else timeout
-    result_timeout = min(timeout, 5) if timeout is not None else 5
-
     done = False
     while time.perf_counter() - start < time_check and not done:
+        completed_before = len(results.done)
+        # One bounded blocking poll drives manager network progress.  All
+        # remaining futures are then checked without blocking, so a wide list
+        # has at most one second of head-of-line delay per complete scan rather
+        # than up to five seconds per not-yet-ready future.
+        blocking_poll_available = True
         for f in fs:
             # skip if future is complete
             if f in results.done:
@@ -69,6 +73,8 @@ def wait(fs, timeout=None, return_when=ALL_COMPLETED):
 
             try:
                 # check for completion
+                result_timeout = 1 if blocking_poll_available else 0
+                blocking_poll_available = False
                 f.result(timeout=result_timeout)
             except TimeoutError:
                 # TimeoutError's are expected since we are polling the
@@ -94,6 +100,11 @@ def wait(fs, timeout=None, return_when=ALL_COMPLETED):
             # check form timeout
             if time.perf_counter() - start > time_check:
                 break
+
+        if len(results.done) == completed_before and not done:
+            remaining = time_check - (time.perf_counter() - start)
+            if remaining > 0:
+                time.sleep(min(0.01, remaining))
 
     # add incomplete futures to set
     for f in fs:

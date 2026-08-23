@@ -13,8 +13,12 @@ See the file COPYING for details.
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -34,6 +38,7 @@ struct vine_datavine_rpc_server;
 struct rpc_connection {
 	int fd;
 	int authorized;
+	char object_digest[65];
 	time_t last_activity;
 	unsigned char header[VINE_DATAVINE_RPC_REQUEST_HEADER];
 	size_t header_used;
@@ -43,8 +48,22 @@ struct rpc_connection {
 	unsigned char *response;
 	size_t response_size;
 	size_t response_used;
+	int waiting_terminal;
+	uint16_t waiting_opcode;
+	uint64_t waiting_request_id;
+	char waiting_workflow_id[VINE_DATAVINE_WORKFLOW_IDENTIFIER_MAX + 1];
 	struct rpc_connection *next;
 };
+
+static int lowercase_hex(const unsigned char *value, size_t size)
+{
+	for (size_t index = 0; index < size; index++) {
+		if (!((value[index] >= '0' && value[index] <= '9') ||
+					(value[index] >= 'a' && value[index] <= 'f')))
+			return 0;
+	}
+	return 1;
+}
 
 struct rpc_thread {
 	struct vine_datavine_rpc_server *server;
@@ -65,6 +84,42 @@ struct vine_datavine_rpc_server {
 	atomic_int stopping;
 	atomic_size_t active_connections;
 };
+
+static int validate_object_ticket(struct vine_datavine_rpc_server *server,
+		const unsigned char *ticket, size_t ticket_size,
+		char object_digest[65])
+{
+	/* lowercase sha256 + lowercase HMAC-SHA256. */
+	if (ticket_size != 128 || !lowercase_hex(ticket, 128))
+		return 0;
+	unsigned char message[84] = "datavine-object-v1:";
+	memcpy(message + 19, ticket, 64);
+	unsigned char signature[EVP_MAX_MD_SIZE];
+	unsigned int signature_size = 0;
+	if (!HMAC(EVP_sha256(), server->token, (int)server->token_length, message, 83, signature, &signature_size) || signature_size != 32)
+		return 0;
+	unsigned char encoded[64];
+	static const unsigned char hexadecimal[] = "0123456789abcdef";
+	for (size_t index = 0; index < 32; index++) {
+		encoded[index * 2] = hexadecimal[signature[index] >> 4];
+		encoded[index * 2 + 1] = hexadecimal[signature[index] & 15];
+	}
+	if (CRYPTO_memcmp(encoded, ticket + 64, 64))
+		return 0;
+	memcpy(object_digest, ticket, 64);
+	object_digest[64] = 0;
+	return 1;
+}
+
+static int authorize_object(struct vine_datavine_rpc_server *server,
+		struct rpc_connection *connection)
+{
+	/* Compatibility auth frame: DVO1 + one object ticket. */
+	if (connection->payload_size != 132 ||
+			memcmp(connection->payload, "DVO1", 4))
+		return 0;
+	return validate_object_ticket(server, connection->payload + 4, 128, connection->object_digest);
+}
 
 struct vine_datavine_workflow_store *vine_datavine_rpc_server_workflow_store(
 		struct vine_datavine_rpc_server *server)
@@ -149,6 +204,15 @@ static int response_create(struct rpc_connection *connection, uint16_t opcode,
 		memcpy(header + VINE_DATAVINE_RPC_RESPONSE_HEADER, payload, payload_size);
 	}
 	return 1;
+}
+
+static void request_clear(struct rpc_connection *connection)
+{
+	free(connection->payload);
+	connection->payload = 0;
+	connection->header_used = 0;
+	connection->payload_size = 0;
+	connection->payload_used = 0;
 }
 
 static uint32_t workflow_status(const struct vine_datavine_workflow_error *error)
@@ -298,8 +362,8 @@ static uint32_t workflow_describe(struct vine_datavine_rpc_server *server,
 		return VINE_DATAVINE_RPC_INVALID;
 	struct vine_datavine_workflow_info info;
 	if (!vine_datavine_workflow_store_describe(server->workflow_store,
-			    workflow_id,
-			    &info))
+				workflow_id,
+				&info))
 		return VINE_DATAVINE_RPC_NOT_FOUND;
 	if (encode_workflow_info(&info, result, result_size))
 		return VINE_DATAVINE_RPC_OK;
@@ -316,11 +380,11 @@ static uint32_t workflow_frontier(struct vine_datavine_rpc_server *server,
 		return VINE_DATAVINE_RPC_INVALID;
 	uint64_t maximum_task_id, maximum_data_id, maximum_tasks, maximum_edges;
 	if (!vine_datavine_workflow_store_frontier(server->workflow_store,
-			    workflow_id,
-			    &maximum_task_id,
-			    &maximum_data_id,
-			    &maximum_tasks,
-			    &maximum_edges))
+				workflow_id,
+				&maximum_task_id,
+				&maximum_data_id,
+				&maximum_tasks,
+				&maximum_edges))
 		return VINE_DATAVINE_RPC_NOT_FOUND;
 	*result = malloc(32);
 	if (!*result)
@@ -384,10 +448,10 @@ static uint32_t workflow_fetch_result(struct vine_datavine_rpc_server *server,
 		return VINE_DATAVINE_RPC_INVALID;
 	char *data = 0;
 	if (!vine_datavine_data_controller_fetch_result(server->data_controller,
-			    workflow_id,
-			    vine_datavine_get_u64(payload + 4),
-			    &data,
-			    result_size) &&
+				workflow_id,
+				vine_datavine_get_u64(payload + 4),
+				&data,
+				result_size) &&
 			!vine_datavine_workflow_store_legacy_fetch_result(server->workflow_store,
 					workflow_id,
 					vine_datavine_get_u64(payload + 4),
@@ -408,9 +472,9 @@ static uint32_t workflow_result_info(struct vine_datavine_rpc_server *server,
 		return VINE_DATAVINE_RPC_INVALID;
 	struct vine_datavine_workflow_result_info info;
 	if (!vine_datavine_data_controller_result_info(server->data_controller,
-			    workflow_id,
-			    vine_datavine_get_u64(payload + 4),
-			    &info) &&
+				workflow_id,
+				vine_datavine_get_u64(payload + 4),
+				&info) &&
 			!vine_datavine_workflow_store_legacy_result_info(server->workflow_store,
 					workflow_id,
 					vine_datavine_get_u64(payload + 4),
@@ -425,6 +489,199 @@ static uint32_t workflow_result_info(struct vine_datavine_rpc_server *server,
 	*result = (unsigned char *)encoded;
 	*result_size = strlen(encoded);
 	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t workflow_result_path(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size,
+		unsigned char **result, size_t *result_size)
+{
+	char workflow_id[VINE_DATAVINE_WORKFLOW_IDENTIFIER_MAX + 1];
+	char path[PATH_MAX];
+	if (!server->data_controller ||
+			!decode_workflow_id(payload, size, 12, 0, workflow_id) ||
+			!vine_datavine_data_controller_result_path(server->data_controller,
+					workflow_id,
+					vine_datavine_get_u64(payload + 4),
+					path,
+					sizeof(path)))
+		return VINE_DATAVINE_RPC_NOT_FOUND;
+	*result_size = strlen(path);
+	*result = malloc(*result_size);
+	if (!*result)
+		return VINE_DATAVINE_RPC_INTERNAL;
+	memcpy(*result, path, *result_size);
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t workflow_result_descriptors(
+		struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size,
+		unsigned char **result, size_t *result_size)
+{
+	char workflow_id[VINE_DATAVINE_WORKFLOW_IDENTIFIER_MAX + 1];
+	uint16_t id_size = decode_workflow_id(payload, size, 8, 1, workflow_id);
+	uint32_t count = size >= 8 ? vine_datavine_get_u32(payload + 4) : 0;
+	if (!server->data_controller || !id_size || !count ||
+			count > (VINE_DATAVINE_RPC_MAX_PAYLOAD - 8U - id_size) / 8U ||
+			size != 8U + id_size + (size_t)count * 8U)
+		return VINE_DATAVINE_RPC_INVALID;
+	uint64_t *data_ids = calloc(count, sizeof(*data_ids));
+	struct vine_datavine_workflow_result_info *infos =
+			calloc(count, sizeof(*infos));
+	char **paths = calloc(count, sizeof(*paths));
+	if (!data_ids || !infos || !paths) {
+		free(paths);
+		free(infos);
+		free(data_ids);
+		return VINE_DATAVINE_RPC_INTERNAL;
+	}
+	for (uint32_t index = 0; index < count; index++)
+		data_ids[index] = vine_datavine_get_u64(
+				payload + 8 + id_size + (size_t)index * 8);
+	int found = vine_datavine_data_controller_result_descriptors(
+			server->data_controller, workflow_id, data_ids, count, infos, paths);
+	uint32_t status = found ? VINE_DATAVINE_RPC_OK : VINE_DATAVINE_RPC_NOT_FOUND;
+	size_t encoded_size = 8;
+	for (uint32_t index = 0; status == VINE_DATAVINE_RPC_OK && index < count;
+			index++) {
+		size_t path_size = strlen(paths[index]);
+		if (!path_size || path_size > UINT16_MAX ||
+				encoded_size > VINE_DATAVINE_RPC_MAX_PAYLOAD - 88U - path_size)
+			status = VINE_DATAVINE_RPC_INTERNAL;
+		else
+			encoded_size += 88U + path_size;
+	}
+	if (status == VINE_DATAVINE_RPC_OK) {
+		*result = calloc(1, encoded_size);
+		if (!*result)
+			status = VINE_DATAVINE_RPC_INTERNAL;
+	}
+	if (status == VINE_DATAVINE_RPC_OK) {
+		memcpy(*result, "DVR1", 4);
+		vine_datavine_put_u32(*result + 4, count);
+		size_t offset = 8;
+		for (uint32_t index = 0; index < count; index++) {
+			size_t path_size = strlen(paths[index]);
+			vine_datavine_put_u64(*result + offset, infos[index].data_id);
+			vine_datavine_put_u64(*result + offset + 8, infos[index].size);
+			vine_datavine_put_u32(*result + offset + 16, infos[index].attempt);
+			vine_datavine_put_u16(*result + offset + 20,
+					(uint16_t)path_size);
+			memcpy(*result + offset + 24, infos[index].sha256, 64);
+			memcpy(*result + offset + 88, paths[index], path_size);
+			offset += 88 + path_size;
+		}
+		*result_size = encoded_size;
+	}
+	for (uint32_t index = 0; index < count; index++)
+		free(paths[index]);
+	free(paths);
+	free(infos);
+	free(data_ids);
+	return status;
+}
+
+static uint32_t workflow_capabilities(
+		struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t payload_size,
+		unsigned char **result, size_t *result_size)
+{
+	const char *object_root = vine_datavine_data_controller_object_root(
+			server->data_controller);
+	if (payload_size || !object_root)
+		return VINE_DATAVINE_RPC_INVALID;
+	struct jx *document = jx_objectv(
+			"schema_versions", jx_arrayv(jx_string(VINE_DATAVINE_WORKFLOW_SCHEMA_NAME), jx_string(VINE_DATAVINE_WORKFLOW_DELTA_SCHEMA_NAME), NULL), "executor_kinds", jx_arrayv(jx_string("command"), jx_string("python"), jx_string("taskvine"), NULL), "digest", jx_string("sha1"), "append", jx_string("delta-cas-v1"), "results", jx_string("durable-bytes"), "frontier", jx_boolean(1), "wait_terminal", jx_boolean(1), "result_identity", jx_string("sha256+attempt+producer+codec"), "selective_results", jx_boolean(1), "object_store", jx_string("sharedfs-single-file-sha256-v1"), "object_max_bytes", jx_integer(67108800), "object_root", jx_string(object_root), NULL);
+	char *encoded = document ? jx_print_string(document) : 0;
+	jx_delete(document);
+	if (!encoded)
+		return VINE_DATAVINE_RPC_INTERNAL;
+	*result = (unsigned char *)encoded;
+	*result_size = strlen(encoded);
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t object_put(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size,
+		unsigned char **result, size_t *result_size)
+{
+	if (!server->data_controller || size < 64)
+		return VINE_DATAVINE_RPC_INVALID;
+	char digest[65];
+	memcpy(digest, payload, 64);
+	digest[64] = 0;
+	int deduplicated = 0;
+	if (!vine_datavine_data_controller_put_object(server->data_controller,
+				digest,
+				payload + 64,
+				size - 64,
+				&deduplicated))
+		return VINE_DATAVINE_RPC_REJECTED;
+	*result = malloc(8);
+	if (!*result)
+		return VINE_DATAVINE_RPC_INTERNAL;
+	vine_datavine_put_u32(*result, deduplicated ? 1U : 0U);
+	vine_datavine_put_u32(*result + 4, (uint32_t)(size - 64));
+	*result_size = 8;
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t object_get(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size,
+		unsigned char **result, size_t *result_size)
+{
+	if (!server->data_controller || size != 64)
+		return VINE_DATAVINE_RPC_INVALID;
+	char digest[65];
+	memcpy(digest, payload, 64);
+	digest[64] = 0;
+	if (!vine_datavine_data_controller_get_object(server->data_controller,
+				digest,
+				result,
+				result_size))
+		return VINE_DATAVINE_RPC_NOT_FOUND;
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t object_path(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size,
+		unsigned char **result, size_t *result_size)
+{
+	if (!server->data_controller || size != 64)
+		return VINE_DATAVINE_RPC_INVALID;
+	char digest[65];
+	char path[PATH_MAX];
+	memcpy(digest, payload, 64);
+	digest[64] = 0;
+	if (!vine_datavine_data_controller_object_path(
+				server->data_controller, digest, path, sizeof(path)))
+		return VINE_DATAVINE_RPC_REJECTED;
+	*result_size = strlen(path);
+	*result = malloc(*result_size);
+	if (!*result)
+		return VINE_DATAVINE_RPC_INTERNAL;
+	memcpy(*result, path, *result_size);
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t result_persisted(struct vine_datavine_rpc_server *server,
+		const unsigned char *payload, size_t size)
+{
+	if (!server->data_controller || size < 42)
+		return VINE_DATAVINE_RPC_INVALID;
+	size_t path_size = vine_datavine_get_u16(payload);
+	if (!path_size || size != 42 + path_size || path_size >= PATH_MAX)
+		return VINE_DATAVINE_RPC_INVALID;
+	char path[PATH_MAX];
+	char digest[65];
+	memcpy(path, payload + 42, path_size);
+	path[path_size] = 0;
+	for (size_t index = 0; index < 32; index++)
+		snprintf(digest + index * 2, 3, "%02x", payload[10 + index]);
+	return vine_datavine_data_controller_result_persisted(
+				   server->data_controller, path, vine_datavine_get_u64(payload + 2), digest)
+				   ? VINE_DATAVINE_RPC_OK
+				   : VINE_DATAVINE_RPC_REJECTED;
 }
 
 static uint32_t dispatch_request(struct vine_datavine_rpc_server *server,
@@ -449,26 +706,20 @@ static uint32_t dispatch_request(struct vine_datavine_rpc_server *server,
 		status = workflow_fetch_result(server, payload, payload_size, result, result_size);
 	} else if (opcode == VINE_DATAVINE_RPC_WORKFLOW_RESULT_INFO) {
 		status = workflow_result_info(server, payload, payload_size, result, result_size);
+	} else if (opcode == VINE_DATAVINE_RPC_WORKFLOW_RESULT_PATH) {
+		status = workflow_result_path(server, payload, payload_size, result, result_size);
+	} else if (opcode == VINE_DATAVINE_RPC_WORKFLOW_RESULT_DESCRIPTORS) {
+		status = workflow_result_descriptors(server, payload, payload_size, result, result_size);
+	} else if (opcode == VINE_DATAVINE_RPC_OBJECT_PUT) {
+		status = object_put(server, payload, payload_size, result, result_size);
+	} else if (opcode == VINE_DATAVINE_RPC_OBJECT_GET) {
+		status = object_get(server, payload, payload_size, result, result_size);
+	} else if (opcode == VINE_DATAVINE_RPC_OBJECT_PATH) {
+		status = object_path(server, payload, payload_size, result, result_size);
+	} else if (opcode == VINE_DATAVINE_RPC_RESULT_PERSISTED) {
+		status = result_persisted(server, payload, payload_size);
 	} else if (opcode == VINE_DATAVINE_RPC_WORKFLOW_CAPABILITIES) {
-		static const unsigned char capabilities[] =
-				"{\"schema_versions\":[\"" VINE_DATAVINE_WORKFLOW_SCHEMA_NAME
-				"\",\"" VINE_DATAVINE_WORKFLOW_DELTA_SCHEMA_NAME "\"],"
-				"\"executor_kinds\":[\"command\",\"python\",\"taskvine\"],"
-				"\"digest\":\"sha1\",\"append\":\"delta-cas-v1\","
-				"\"results\":\"durable-bytes\","
-				"\"frontier\":true,"
-				"\"result_identity\":\"sha256+attempt+producer+codec\","
-				"\"selective_results\":true}";
-		if (payload_size) {
-			status = VINE_DATAVINE_RPC_INVALID;
-		} else {
-			*result_size = sizeof(capabilities) - 1;
-			*result = malloc(*result_size);
-			if (*result)
-				memcpy(*result, capabilities, *result_size);
-			else
-				status = VINE_DATAVINE_RPC_INTERNAL;
-		}
+		status = workflow_capabilities(server, payload, payload_size, result, result_size);
 	} else {
 		status = VINE_DATAVINE_RPC_INVALID;
 	}
@@ -484,11 +735,52 @@ static int process_request(struct vine_datavine_rpc_server *server, struct rpc_c
 	unsigned char *result = 0;
 	size_t result_size = 0;
 	if (!connection->authorized) {
-		if (opcode != VINE_DATAVINE_RPC_AUTH || connection->payload_size != server->token_length || memcmp(connection->payload, server->token, server->token_length)) {
+		char object_digest[65];
+		if (opcode == VINE_DATAVINE_RPC_OBJECT_GET &&
+				validate_object_ticket(server, connection->payload, connection->payload_size, object_digest)) {
+			status = object_get(server, (const unsigned char *)object_digest, 64, &result, &result_size);
+		} else if (opcode != VINE_DATAVINE_RPC_AUTH) {
 			status = VINE_DATAVINE_RPC_UNAUTHORIZED;
-		} else {
+		} else if (connection->payload_size == server->token_length &&
+				!CRYPTO_memcmp(connection->payload, server->token, server->token_length)) {
 			connection->authorized = 1;
 			status = VINE_DATAVINE_RPC_OK;
+		} else if (authorize_object(server, connection)) {
+			connection->authorized = 1;
+			status = VINE_DATAVINE_RPC_OK;
+		} else {
+			status = VINE_DATAVINE_RPC_UNAUTHORIZED;
+		}
+	} else if (connection->object_digest[0] &&
+			(opcode != VINE_DATAVINE_RPC_OBJECT_GET ||
+					connection->payload_size != 64 ||
+					CRYPTO_memcmp(connection->payload,
+							connection->object_digest,
+							64))) {
+		status = VINE_DATAVINE_RPC_UNAUTHORIZED;
+	} else if (opcode == VINE_DATAVINE_RPC_WORKFLOW_WAIT_TERMINAL) {
+		char workflow_id[VINE_DATAVINE_WORKFLOW_IDENTIFIER_MAX + 1];
+		struct vine_datavine_workflow_info info;
+		if (!decode_workflow_id(connection->payload, connection->payload_size, 2, 0, workflow_id)) {
+			status = VINE_DATAVINE_RPC_INVALID;
+		} else if (!vine_datavine_workflow_store_describe(
+					   server->workflow_store, workflow_id, &info)) {
+			status = VINE_DATAVINE_RPC_NOT_FOUND;
+		} else if (info.state != VINE_DATAVINE_WORKFLOW_COMPLETED &&
+				info.state != VINE_DATAVINE_WORKFLOW_FAILED &&
+				info.state != VINE_DATAVINE_WORKFLOW_CANCELLED) {
+			connection->waiting_terminal = 1;
+			connection->waiting_opcode = opcode;
+			connection->waiting_request_id = request_id;
+			snprintf(connection->waiting_workflow_id,
+					sizeof(connection->waiting_workflow_id),
+					"%s",
+					workflow_id);
+			return 2;
+		} else if (encode_workflow_info(&info, &result, &result_size)) {
+			status = VINE_DATAVINE_RPC_OK;
+		} else {
+			status = VINE_DATAVINE_RPC_INTERNAL;
 		}
 	} else {
 		status = dispatch_request(server, opcode, connection->payload, connection->payload_size, &result, &result_size);
@@ -500,6 +792,8 @@ static int process_request(struct vine_datavine_rpc_server *server, struct rpc_c
 
 static int connection_read(struct rpc_thread *thread, struct rpc_connection *connection)
 {
+	if (connection->waiting_terminal)
+		return 0;
 	while (connection->header_used < sizeof(connection->header)) {
 		ssize_t count = recv(connection->fd, connection->header + connection->header_used, sizeof(connection->header) - connection->header_used, 0);
 		if (count > 0) {
@@ -533,8 +827,13 @@ static int connection_read(struct rpc_thread *thread, struct rpc_connection *con
 		}
 		return count == 0 ? 0 : errno == EAGAIN || errno == EWOULDBLOCK;
 	}
-	if (!process_request(thread->server, connection)) {
+	int processed = process_request(thread->server, connection);
+	if (!processed) {
 		return 0;
+	}
+	if (processed == 2) {
+		request_clear(connection);
+		return epoll_update(thread->epoll_fd, connection, EPOLLIN | EPOLLRDHUP);
 	}
 	return epoll_update(thread->epoll_fd, connection, EPOLLOUT | EPOLLRDHUP);
 }
@@ -553,16 +852,41 @@ static int connection_write(struct rpc_thread *thread, struct rpc_connection *co
 		}
 		return 0;
 	}
-	free(connection->payload);
+	request_clear(connection);
 	free(connection->response);
-	connection->payload = 0;
 	connection->response = 0;
-	connection->header_used = 0;
-	connection->payload_size = 0;
-	connection->payload_used = 0;
 	connection->response_size = 0;
 	connection->response_used = 0;
 	return epoll_update(thread->epoll_fd, connection, EPOLLIN | EPOLLRDHUP);
+}
+
+static int wake_terminal_waiter(
+		struct rpc_thread *thread, struct rpc_connection *connection)
+{
+	struct vine_datavine_workflow_info info;
+	if (!vine_datavine_workflow_store_describe(thread->server->workflow_store,
+				connection->waiting_workflow_id,
+				&info)) {
+		connection->waiting_terminal = 0;
+		connection->last_activity = time(0);
+		return response_create(connection, connection->waiting_opcode, VINE_DATAVINE_RPC_NOT_FOUND, connection->waiting_request_id, 0, 0) &&
+			   epoll_update(thread->epoll_fd, connection, EPOLLOUT | EPOLLRDHUP);
+	}
+	if (info.state != VINE_DATAVINE_WORKFLOW_COMPLETED &&
+			info.state != VINE_DATAVINE_WORKFLOW_FAILED &&
+			info.state != VINE_DATAVINE_WORKFLOW_CANCELLED)
+		return 1;
+	unsigned char *result = 0;
+	size_t result_size = 0;
+	uint32_t status = encode_workflow_info(&info, &result, &result_size)
+					  ? VINE_DATAVINE_RPC_OK
+					  : VINE_DATAVINE_RPC_INTERNAL;
+	connection->waiting_terminal = 0;
+	connection->last_activity = time(0);
+	int valid = response_create(connection, connection->waiting_opcode, status, connection->waiting_request_id, result, result_size) &&
+			epoll_update(thread->epoll_fd, connection, EPOLLOUT | EPOLLRDHUP);
+	free(result);
+	return valid;
 }
 
 static void accept_connections(struct rpc_thread *thread)
@@ -606,7 +930,7 @@ static void *rpc_thread_main(void *arg)
 	struct rpc_thread *thread = arg;
 	struct epoll_event events[DATAVINE_RPC_EVENTS];
 	while (!atomic_load(&thread->server->stopping)) {
-		int count = epoll_wait(thread->epoll_fd, events, DATAVINE_RPC_EVENTS, 100);
+		int count = epoll_wait(thread->epoll_fd, events, DATAVINE_RPC_EVENTS, 10);
 		for (int i = 0; i < count; i++) {
 			if (!events[i].data.ptr) {
 				accept_connections(thread);
@@ -629,8 +953,13 @@ static void *rpc_thread_main(void *arg)
 		struct rpc_connection *connection = thread->connections;
 		while (connection) {
 			struct rpc_connection *next = connection->next;
-			if (now - connection->last_activity >
-					DATAVINE_RPC_IDLE_SECONDS) {
+			if (connection->waiting_terminal &&
+					!wake_terminal_waiter(thread, connection)) {
+				epoll_ctl(thread->epoll_fd, EPOLL_CTL_DEL, connection->fd, 0);
+				connection_delete(thread, connection);
+			} else if (!connection->waiting_terminal &&
+					now - connection->last_activity >
+							DATAVINE_RPC_IDLE_SECONDS) {
 				epoll_ctl(thread->epoll_fd, EPOLL_CTL_DEL, connection->fd, 0);
 				connection_delete(thread, connection);
 			}
@@ -690,7 +1019,7 @@ struct vine_datavine_rpc_server *vine_datavine_rpc_server_create(
 	server->threads = calloc((size_t)threads, sizeof(*server->threads));
 	server->workflow_store = vine_datavine_workflow_store_open(workflow_journal_path);
 	server->data_controller = vine_datavine_data_controller_open(
-			workflow_journal_path, (size_t)threads);
+			workflow_journal_path, 4, vine_datavine_workflow_store_journal(server->workflow_store));
 	server->listen_fd = listen_socket(host, port, &server->port);
 	if (!server->token || !server->threads || !server->workflow_store ||
 			!server->data_controller ||

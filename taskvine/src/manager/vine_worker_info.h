@@ -35,6 +35,8 @@ struct vine_worker_info {
 	char *version;
 	char *factory_name;
 	char *workerid;
+	uint64_t connection_epoch;
+	int lifecycle_connected_emitted;
 
 	/* Remote address of worker. */
 	char *addrport;

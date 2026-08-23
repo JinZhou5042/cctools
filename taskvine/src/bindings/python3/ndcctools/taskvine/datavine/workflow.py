@@ -12,6 +12,10 @@ import uuid
 
 _WORKFLOW_SCHEMA = "datavine.workflow/v1"
 _WORKFLOW_DELTA_SCHEMA = "datavine.workflow-delta/v1"
+_COMMAND_EXECUTOR_VERSION = "1"
+_PYTHON_SOURCE_VERSION = "source-v1"
+_PYTHON_CALLABLE_VERSION = "callable-v1"
+_TASKVINE_EXECUTOR_VERSION = "builtin-v1"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -56,7 +60,25 @@ class Workflow:
         self._committed_data = 0
         self._committed_requested = set()
         self._python_functions = {}
+        self._python_invocations = {}
+        self._python_literal_bytes = {}
         self._python_function_objects = {}
+        self._installed_objects = {}
+        self._profile = {
+            "python_function_serialize_nanoseconds": 0,
+            "python_value_serialize_nanoseconds": 0,
+            "python_invocation_serialize_nanoseconds": 0,
+            "object_hash_nanoseconds": 0,
+            "object_put_rpc_nanoseconds": 0,
+            "object_sharedfs_nanoseconds": 0,
+            "object_put_requests": 0,
+            "object_put_deduplicated": 0,
+            "object_records": 0,
+            "object_local_deduplicated": 0,
+            "object_put_bytes": 0,
+            "object_put_wall_nanoseconds": 0,
+            "object_put_parallelism": 0,
+        }
 
     def _data_ref(self, codec, origin, content_sha256=None):
         data_id = self._next_data_id
@@ -97,9 +119,12 @@ class Workflow:
 
         import cloudpickle
 
-        return self.inline(
-            cloudpickle.dumps(value), codec=("python/cloudpickle", "3")
+        started = time.perf_counter_ns()
+        payload = cloudpickle.dumps(value)
+        self._profile["python_value_serialize_nanoseconds"] += (
+            time.perf_counter_ns() - started
         )
+        return self.inline(payload, codec=("python/cloudpickle", "3"))
 
     def _task(
         self,
@@ -162,7 +187,11 @@ class Workflow:
             item.argv_token if isinstance(item, DataRef) else str(item)
             for item in argv
         ]
-        executor = {"kind": "command", "version": "1", "argv": encoded_argv}
+        executor = {
+            "kind": "command",
+            "version": _COMMAND_EXECUTOR_VERSION,
+            "argv": encoded_argv,
+        }
         if output_files is not None:
             executor["output_files"] = [str(item) for item in output_files]
         return self._task(
@@ -199,7 +228,7 @@ class Workflow:
         return self._task(
             {
                 "kind": "taskvine",
-                "version": "builtin-v1",
+                "version": _TASKVINE_EXECUTOR_VERSION,
                 "payload_ref": encoded.data_id,
             },
             inputs,
@@ -226,7 +255,7 @@ class Workflow:
         ]
         executor = {
             "kind": "python",
-            "version": "source-v1",
+            "version": _PYTHON_SOURCE_VERSION,
             "payload_ref": payload.data_id,
             "output_files": output_files,
         }
@@ -275,15 +304,36 @@ class Workflow:
                     inputs.append(value)
                 return ("ref", value.data_id)
             if isinstance(value, tuple):
-                return ("tuple", [encode(item) for item in value])
+                return ("tuple", tuple(encode(item) for item in value))
             if isinstance(value, list):
-                return ("list", [encode(item) for item in value])
+                return ("list", tuple(encode(item) for item in value))
             if isinstance(value, dict):
                 return (
                     "dict",
-                    [(encode(key), encode(item)) for key, item in value.items()],
+                    tuple(
+                        (encode(key), encode(item))
+                        for key, item in value.items()
+                    ),
                 )
-            return ("pickle", cloudpickle.dumps(value))
+            literal_key = (
+                (type(value), value)
+                if isinstance(value, (type(None), bool, int, float, str, bytes))
+                else None
+            )
+            payload = (
+                self._python_literal_bytes.get(literal_key)
+                if literal_key is not None else None
+            )
+            if payload is not None:
+                return ("pickle", payload)
+            started = time.perf_counter_ns()
+            payload = cloudpickle.dumps(value)
+            self._profile["python_value_serialize_nanoseconds"] += (
+                time.perf_counter_ns() - started
+            )
+            if literal_key is not None:
+                self._python_literal_bytes[literal_key] = payload
+            return ("pickle", payload)
 
         cached_function = self._python_function_objects.get(id(function))
         if cached_function is not None and cached_function[0] is function:
@@ -293,7 +343,11 @@ class Workflow:
             # cloudpickle snapshot for every task that reuses the same object.
             # Callers that need a later closure/object state must pass a new
             # callable object, which makes the different task semantics explicit.
+            started = time.perf_counter_ns()
             function_bytes = cloudpickle.dumps(function)
+            self._profile["python_function_serialize_nanoseconds"] += (
+                time.perf_counter_ns() - started
+            )
             function_digest = hashlib.sha256(function_bytes).hexdigest()
             function_ref = self._python_functions.get(function_digest)
             if function_ref is None:
@@ -310,24 +364,39 @@ class Workflow:
                 function_ref,
             )
 
-        payload = cloudpickle.dumps(
-            {
-                "args": [encode(value) for value in args],
-                "kwargs": {key: encode(value) for key, value in kwargs.items()},
+        encoded_args = tuple(encode(value) for value in args)
+        encoded_kwargs = tuple(
+            (key, encode(value)) for key, value in kwargs.items()
+        )
+        output_files = tuple(
+            f"datavine-python-output-{index}" for index in range(output_count)
+        )
+        invocation_key = (
+            encoded_args, encoded_kwargs, output_count, output_files
+        )
+        invocation_ref = self._python_invocations.get(invocation_key)
+        if invocation_ref is None:
+            invocation_started = time.perf_counter_ns()
+            payload = cloudpickle.dumps({
+                "args": encoded_args,
+                "kwargs": dict(encoded_kwargs),
                 "output_count": output_count,
-                "output_files": [
-                    f"datavine-python-output-{index}"
-                    for index in range(output_count)
-                ],
-            }
-        )
-        invocation_ref = self.inline(
-            payload, codec=("python/invocation", "1")
-        )
+                "output_files": list(output_files),
+            })
+            self._profile["python_invocation_serialize_nanoseconds"] += (
+                time.perf_counter_ns() - invocation_started
+            )
+            invocation_digest = hashlib.sha256(payload).hexdigest()
+            invocation_ref = self.inline(
+                payload,
+                codec=("python/invocation", "1"),
+                content_sha256=invocation_digest,
+            )
+            self._python_invocations[invocation_key] = invocation_ref
         return self._task(
             {
                 "kind": "python",
-                "version": "callable-v1",
+                "version": _PYTHON_CALLABLE_VERSION,
                 "payload_ref": invocation_ref.data_id,
                 "function_ref": function_ref.data_id,
                 "function_digest": function_digest,
@@ -436,13 +505,121 @@ class Workflow:
                 "runtime does not support executor kinds "
                 f"{sorted(missing)}; no workflow mutation was attempted"
             )
+        return capabilities
+
+    def _externalize(self, client, data_start, capabilities):
+        """Install inline data once, then leave only content identities in IR."""
+
+        if capabilities.get("object_store") != "sharedfs-single-file-sha256-v1":
+            raise RuntimeError(
+                "runtime does not provide the required immutable object store; "
+                "no workflow mutation was attempted"
+            )
+        builtin_payloads = {
+            task["executor"]["payload_ref"]
+            for task in self._tasks
+            if task["executor"]["kind"] == "taskvine"
+        }
+        pending = {}
+        for record in self._data[data_start:]:
+            origin = record["origin"]
+            if origin["kind"] != "inline" or record["data_id"] in builtin_payloads:
+                continue
+            payload = base64.b64decode(origin["base64"], validate=True)
+            hash_started = time.perf_counter_ns()
+            digest = hashlib.sha256(payload).hexdigest()
+            self._profile["object_hash_nanoseconds"] += (
+                time.perf_counter_ns() - hash_started
+            )
+            self._profile["object_records"] += 1
+            object_key = (client.endpoint, digest)
+            installed = self._installed_objects.get(object_key)
+            if installed is not None:
+                self._profile["object_local_deduplicated"] += 1
+                self._externalize_record(record, installed)
+                continue
+            queued = pending.get(object_key)
+            if queued is None:
+                pending[object_key] = [payload, digest, [record]]
+            else:
+                queued[2].append(record)
+                self._profile["object_local_deduplicated"] += 1
+
+        entries = list(pending.values())
+        if entries:
+            parallelism = min(16, len(entries))
+            started = time.perf_counter_ns()
+            installed_objects = client.put_objects(
+                ((payload, digest) for payload, digest, _ in entries),
+                workers=parallelism,
+            )
+            self._profile["object_put_wall_nanoseconds"] += (
+                time.perf_counter_ns() - started
+            )
+            self._profile["object_put_parallelism"] = max(
+                self._profile["object_put_parallelism"], parallelism
+            )
+            for entry, installed in zip(entries, installed_objects):
+                _, digest, records = entry
+                object_key = (client.endpoint, digest)
+                self._installed_objects[object_key] = installed
+                self._profile["object_put_rpc_nanoseconds"] += installed.get(
+                    "rpc_nanoseconds", 0
+                )
+                self._profile["object_sharedfs_nanoseconds"] += installed.get(
+                    "sharedfs_nanoseconds", 0
+                )
+                self._profile["object_put_requests"] += 1
+                self._profile["object_put_deduplicated"] += int(
+                    installed["deduplicated"]
+                )
+                self._profile["object_put_bytes"] += installed["size"]
+                for record in records:
+                    self._externalize_record(record, installed)
+
+    @staticmethod
+    def _externalize_record(record, installed):
+        """Replace one inline record after its immutable object is durable."""
+
+        existing = record.get("content_sha256")
+        if existing is not None and existing != installed["sha256"]:
+            raise RuntimeError(
+                f"DataID {record['data_id']} content identity changed"
+            )
+        record["content_sha256"] = installed["sha256"]
+        record["origin"] = {
+            "kind": "object",
+            "sha256": installed["sha256"],
+        }
+
+    def profile(self):
+        """Return cumulative adaptor/data-ingest metrics for this workflow."""
+
+        profile = dict(self._profile)
+        stages = {
+            "python_serialization": sum(
+                profile[key] for key in (
+                    "python_function_serialize_nanoseconds",
+                    "python_value_serialize_nanoseconds",
+                    "python_invocation_serialize_nanoseconds",
+                )
+            ),
+            "object_hash": profile["object_hash_nanoseconds"],
+            "object_put": profile["object_put_wall_nanoseconds"],
+        }
+        dominant, nanoseconds = max(stages.items(), key=lambda item: item[1])
+        profile["dominant_ingest_stage"] = dominant
+        profile["dominant_ingest_nanoseconds"] = nanoseconds
+        return profile
+
     def _mark_committed(self):
         self._committed_tasks = len(self._tasks)
         self._committed_data = len(self._data)
         self._committed_requested = set(self._requested)
 
     def submit(self, client):
-        self._require_capabilities(client)
+        capabilities = self._require_capabilities(client)
+        self._externalize(client, 0, capabilities)
         info = client.submit_workflow(self._document(copy_records=False))
         self._mark_committed()
         return info
@@ -450,7 +627,8 @@ class Workflow:
     def append(self, client, expected_generation, *, idempotency_key):
         if self.workflow_id is None:
             raise ValueError("append requires an explicit workflow_id")
-        self._require_capabilities(client, delta=True)
+        capabilities = self._require_capabilities(client, delta=True)
+        self._externalize(client, self._committed_data, capabilities)
         document = self._delta_document(
             self._committed_tasks,
             self._committed_data,
@@ -599,6 +777,9 @@ class WorkflowSession:
     def ref(self, data_id, codec=("bytes", "1")):
         return DataRef(int(data_id), tuple(codec))
 
+    def profile(self):
+        return {"workflow_id": self.workflow_id, **self.builder.profile()}
+
     def future(self, data_id, codec=("bytes", "1")):
         return WorkflowFuture(self, self.ref(data_id, codec))
 
@@ -620,6 +801,12 @@ class WorkflowSession:
     def _commit(self, idempotency_key=None):
         key = idempotency_key or (
             f"{self.workflow_id}-g{self.generation + 1}-{uuid.uuid4().hex}"
+        )
+        capabilities = self.builder._require_capabilities(
+            self.client, delta=True
+        )
+        self.builder._externalize(
+            self.client, self.builder._committed_data, capabilities
         )
         document = self.builder.delta_document(
             self.builder._committed_tasks,

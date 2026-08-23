@@ -122,6 +122,10 @@ struct vine_manager {
 	struct hash_table *current_transfer_table;	      /* Maps uuid -> struct transfer_pair */
 	struct itable *task_group_table;		      /* Maps group id -> list vine_task */
 	struct hash_table *workers_idle_disconnecting;	      /* set of workers that were granted a request to idle disconnect, and are in the process of disconnecting. */
+	struct list *worker_event_queue;			      /* Generic lifecycle events for external consumers. */
+	uint64_t next_worker_event_id;
+	uint64_t next_worker_connection_epoch;
+	int worker_events_enabled;
 
 	/* Primary data structures for tracking files. */
 
@@ -252,6 +256,13 @@ struct vine_manager {
 	/* Testing mode parameters */
 	timestamp_t enforce_worker_eviction_interval; /* Enforce worker eviction interval in seconds */
 	timestamp_t time_start_worker_eviction;	      /* Track the time when we start evicting workers */
+
+	/* Optional append-only extension: keep at the end so out-of-tree manager
+	 * objects built against the stable prefix retain their field offsets. */
+	struct list *last_replica_loss_queue;
+	int last_replica_loss_events_enabled;
+	int last_replica_loss_events_suppressed;
+	int last_replica_loss_events_failed;
 };
 
 /*

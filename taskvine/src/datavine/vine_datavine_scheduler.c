@@ -360,6 +360,17 @@ int vine_datavine_scheduler_seal(struct vine_datavine_scheduler *scheduler)
 	if (!scheduler || scheduler->sealed || scheduler->updating || !validate_initial_graph(scheduler)) {
 		return 0;
 	}
+	/* The committed graph lives in slots/edges.  Static workflows never need
+	 * the registration scratch again, and dynamic workflows can allocate a
+	 * right-sized scratch buffer on their next update. */
+	free(scheduler->staged_tasks);
+	scheduler->staged_tasks = 0;
+	scheduler->staged_task_capacity = 0;
+	scheduler->staged_task_count = 0;
+	free(scheduler->staged_parents);
+	scheduler->staged_parents = 0;
+	scheduler->staged_parent_capacity = 0;
+	scheduler->staged_parent_count = 0;
 	scheduler->sealed = 1;
 	scheduler->revision = 1;
 	for (int64_t task_id = 1; task_id <= scheduler->maximum_task_id; task_id++) {
@@ -528,6 +539,52 @@ int vine_datavine_scheduler_mark_pending(struct vine_datavine_scheduler *schedul
 						   : VINE_DATAVINE_TASK_READY;
 	if (!slot->remaining_dependencies)
 		heap_push(scheduler, (uint64_t)task_id);
+	return 1;
+}
+
+enum vine_datavine_task_state vine_datavine_scheduler_task_state(
+		struct vine_datavine_scheduler *scheduler, int64_t task_id)
+{
+	if (!valid_task_id(scheduler, task_id))
+		return 0;
+	return (enum vine_datavine_task_state)scheduler->slots[task_id].state;
+}
+
+int vine_datavine_scheduler_rollback_done(
+		struct vine_datavine_scheduler *scheduler, int64_t task_id)
+{
+	if (!valid_task_id(scheduler, task_id) || !scheduler->sealed ||
+			scheduler->updating ||
+			scheduler->slots[task_id].state != VINE_DATAVINE_TASK_DONE)
+		return 0;
+	struct scheduler_slot *slot = &scheduler->slots[task_id];
+	for (uint64_t edge = slot->first_dependent; edge != NO_EDGE;
+			edge = scheduler->edges[edge].next) {
+		struct scheduler_slot *child =
+				&scheduler->slots[scheduler->edges[edge].child];
+		if (child->state != VINE_DATAVINE_TASK_DONE &&
+				(child->remaining_dependencies == UINT32_MAX ||
+						(child->state == VINE_DATAVINE_TASK_READY &&
+								child->heap_index < 0)))
+			return 0;
+	}
+	slot->state = slot->remaining_dependencies ? VINE_DATAVINE_TASK_WAITING
+						   : VINE_DATAVINE_TASK_READY;
+	if (!slot->remaining_dependencies)
+		heap_push(scheduler, (uint64_t)task_id);
+	scheduler->done_count--;
+	for (uint64_t edge = slot->first_dependent; edge != NO_EDGE;
+			edge = scheduler->edges[edge].next) {
+		struct scheduler_slot *child =
+				&scheduler->slots[scheduler->edges[edge].child];
+		if (child->state == VINE_DATAVINE_TASK_DONE)
+			continue;
+		child->remaining_dependencies++;
+		if (child->state == VINE_DATAVINE_TASK_READY) {
+			heap_remove(scheduler, (uint64_t)child->heap_index);
+			child->state = VINE_DATAVINE_TASK_WAITING;
+		}
+	}
 	return 1;
 }
 

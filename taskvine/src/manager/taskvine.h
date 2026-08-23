@@ -16,6 +16,23 @@ struct vine_manager;
 struct vine_task;
 struct vine_file;
 
+/** Generic worker connection event emitted by the manager. */
+#define VINE_WORKER_EVENT_ID_MAX 256
+
+typedef enum {
+	VINE_WORKER_EVENT_CONNECTED = 1,
+	VINE_WORKER_EVENT_LOST = 2,
+} vine_worker_event_type_t;
+
+struct vine_worker_event {
+	vine_worker_event_type_t type;
+	uint64_t event_id;
+	uint64_t connection_epoch;
+	int disconnect_reason;
+	char worker_id[VINE_WORKER_EVENT_ID_MAX];
+	char hostname[VINE_WORKER_EVENT_ID_MAX];
+};
+
 /** @file taskvine.h The public API for the taskvine distributed application framework.
 A taskvine application consists of a manager process and a larger number of worker
 processes, typically running in a high performance computing cluster, or a cloud facility.
@@ -219,12 +236,14 @@ struct vine_stats {
 							resources. */
 
 	/* BW statistics */
-	int64_t bytes_sent;	/**< Total number of file bytes (not including protocol control msg bytes) sent out to the
-				   workers by the manager. */
-	int64_t bytes_received; /**< Total number of file bytes (not including protocol control msg bytes) received from
-				   the workers by the manager. */
-	double bandwidth;	/**< Average network bandwidth in MB/S observed by the manager when transferring to workers.
-				 */
+	int64_t bytes_sent;	       /**< Total number of file bytes (not including protocol control msg bytes) sent out to the
+					  workers by the manager. */
+	int64_t bytes_received;	       /**< Total number of file bytes (not including protocol control msg bytes) received from
+					  the workers by the manager. */
+	int64_t bytes_url_received;    /**< Bytes workers staged directly from URL-like sources. */
+	timestamp_t time_url_received; /**< Sum of worker-side URL staging time in microseconds. */
+	double bandwidth;	       /**< Average network bandwidth in MB/S observed by the manager when transferring to workers.
+					*/
 
 	/* resources statistics */
 	int capacity_tasks;	    /**< The estimated number of tasks that this manager can effectively support. */
@@ -806,6 +825,13 @@ be delete at the manager's site after it is not needed by the workflow (@ref vin
 struct vine_file *vine_declare_url(
 		struct vine_manager *m, const char *url, vine_cache_level_t cache, vine_file_flags_t flags);
 
+/** Declare a content-addressed URL with an already-known worker cache name.
+This skips URL metadata probing; the worker transfer method must verify the
+immutable content identity. */
+struct vine_file *vine_declare_url_cached(
+		struct vine_manager *m, const char *url, const char *cached_name,
+		vine_cache_level_t cache, vine_file_flags_t flags);
+
 /** Create a file object of a remote file accessible from an xrootd server.
 @param m A manager object
 @param source The URL address of the root file in text form as: "root://XROOTSERVER[:port]//path/to/file"
@@ -1095,6 +1121,31 @@ other local work more frequently than the one-second vine_wait granularity.
 @returns A completed task description, or null if none became available.
 */
 struct vine_task *vine_wait_for_milliseconds(struct vine_manager *m, int timeout);
+
+/** Poll the next worker lifecycle event without blocking.
+@return 1 when an event was returned, 0 when the queue is empty, or -1 for
+invalid arguments.
+*/
+int vine_manager_poll_worker_event(struct vine_manager *m, struct vine_worker_event *event);
+
+/** Enable worker lifecycle event collection. Disabled by default so ordinary
+managers that do not consume the queue pay no allocation cost. */
+int vine_manager_enable_worker_events(struct vine_manager *m);
+
+/** Enable final-replica loss event collection. Disabled by default so ordinary
+managers pay no allocation cost. */
+int vine_manager_enable_last_replica_loss_events(struct vine_manager *m);
+
+/** Poll one final-replica loss event without blocking. The caller owns and
+must free cached_name when 1 is returned. Returns 0 when empty and -1 after an
+allocation failure made the event stream incomplete. */
+int vine_manager_poll_last_replica_loss(struct vine_manager *m,
+		char **cached_name);
+
+/** Undeclare a file without reporting the intentional replica removal as a
+loss event. This has the same ownership semantics as vine_undeclare_file. */
+void vine_undeclare_file_no_loss_event(struct vine_manager *m,
+		struct vine_file *f);
 
 /** Wait for a task with a given task to complete.
 Similar to @ref vine_wait, but guarantees that the returned task has the specified tag.

@@ -2,6 +2,8 @@
 """Single-threaded preloader and per-call fork executor for DataVine Python."""
 
 import argparse
+import array
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -9,8 +11,10 @@ from collections import OrderedDict
 from pathlib import Path
 import select
 import signal
+import socket
 import struct
 import sys
+import threading
 import time
 
 # Preload the serializer before forking. User source imports reuse these pages,
@@ -20,11 +24,146 @@ import cloudpickle
 
 FRAME_LIMIT = 64 * 1024 * 1024
 SOURCE_TICKET = struct.Struct("!4sIQQ")
-CALLABLE_TICKET = struct.Struct("!4sIQQ32s")
-CALLABLE_TICKET_V4 = struct.Struct("!4sIQQ32sI")
+CALLABLE_TICKET_V1 = struct.Struct("!4sIQII32s32s32s")
+PERSIST_KEY_V1 = struct.Struct("!4s32sQI")
 FUNCTION_CACHE_BYTES = 64 * 1024 * 1024
 FUNCTION_CACHE_ENTRIES = 1024
 MANIFEST_NAME = ".datavine-output-manifest"
+PYTHON_TICKET_MAGIC = b"DVP1"
+OUTPUT_MANIFEST_MAGIC = "DVM1"
+
+
+class ObjectPuller:
+    """Resolve immutable content keys from the worker-visible SharedFS store."""
+
+    def __init__(self):
+        root = os.environ.get("DATAVINE_OBJECT_ROOT")
+        self.root = Path(root) if root else None
+
+    def get_digest(self, digest):
+        if self.root is None or len(digest) != 32:
+            raise ValueError("invalid DataVine object key")
+        encoded = digest.hex()
+        value = (self.root / encoded[:2] / encoded[2:4] / encoded).read_bytes()
+        if len(value) > FRAME_LIMIT or hashlib.sha256(value).digest() != digest:
+            raise RuntimeError("DataVine SharedFS object digest mismatch")
+        return value
+
+
+def read_socket_exact(stream, size):
+    chunks = []
+    while size:
+        chunk = stream.recv(size)
+        if not chunk:
+            raise ConnectionError("DataVine connection closed")
+        chunks.append(chunk)
+        size -= len(chunk)
+    return b"".join(chunks)
+
+
+class DurabilityNotifier:
+    """One persistent Worker Data Agent connection for durable publications."""
+
+    REQUEST = struct.Struct("!IHHIQ")
+    RESPONSE = struct.Struct("!IHHIIQ")
+    MAGIC = 0x44564331
+    VERSION = 1
+    AUTH = 1
+    RESULT_PERSISTED = 35
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.stream = None
+        self.endpoint = None
+        self.token = None
+        self.request_id = 0
+
+    def close(self):
+        if self.stream is not None:
+            self.stream.close()
+        self.stream = None
+        self.endpoint = None
+        self.token = None
+
+    def exchange(self, opcode, payload):
+        request_id = self.send_request(opcode, payload)
+        self.read_response(opcode, request_id)
+
+    def send_request(self, opcode, payload):
+        self.request_id += 1
+        request_id = self.request_id
+        self.stream.sendall(self.REQUEST.pack(
+            self.MAGIC, self.VERSION, opcode, len(payload), request_id,
+        ) + payload)
+        return request_id
+
+    def read_response(self, opcode, request_id):
+        header = read_socket_exact(self.stream, self.RESPONSE.size)
+        magic, version, response_opcode, status, size, response_id = (
+            self.RESPONSE.unpack(header)
+        )
+        if size:
+            read_socket_exact(self.stream, size)
+        if (
+            magic != self.MAGIC or version != self.VERSION
+            or response_opcode != opcode or response_id != request_id
+            or status != 0
+        ):
+            raise RuntimeError("DataVine durability notification rejected")
+
+    def connect(self, spec):
+        endpoint = (spec["host"], spec["port"])
+        if (
+            self.stream is not None and self.endpoint == endpoint
+            and self.token == spec["token"]
+        ):
+            return
+        self.close()
+        self.stream = socket.create_connection(endpoint, timeout=30)
+        self.stream.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.endpoint = endpoint
+        self.token = spec["token"]
+        self.exchange(self.AUTH, self.token)
+
+    def notify(self, spec, size, digest):
+        path = spec["path"].encode("utf-8")
+        if not path or len(path) > 65535:
+            raise ValueError("invalid DataVine durable result path")
+        payload = struct.pack("!HQ", len(path), size) + bytes.fromhex(digest) + path
+        deadline = time.monotonic() + 30
+        with self.lock:
+            while True:
+                try:
+                    self.connect(spec)
+                    # A durability notification is complete only after the
+                    # Controller acknowledges it.  In particular, do not
+                    # leave small batches write-only on a persistent socket:
+                    # the peer may have expired an idle connection and a
+                    # first write to that half-closed socket can appear to
+                    # succeed while losing the notification.
+                    self.exchange(self.RESULT_PERSISTED, payload)
+                    return
+                except (ConnectionError, OSError, RuntimeError):
+                    self.close()
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.1)
+
+
+def parse_persistence_context(value):
+    fields = value.split("\n", 3)
+    if len(fields) != 4:
+        raise ValueError("invalid DataVine persistence context")
+    host, port_text, token_hex, root = fields
+    port = int(port_text)
+    token = bytes.fromhex(token_hex)
+    root = Path(root)
+    if (
+        not host or port < 1 or port > 65535 or not token
+        or not root.is_absolute()
+    ):
+        raise ValueError("unsafe DataVine persistence context")
+    return {"host": host, "port": port, "token": token, "root": root}
 
 
 class HashingWriter:
@@ -50,10 +189,14 @@ class HashingWriter:
         return self.stream.fileno()
 
 
-def write_manifest(entries, decode_ns, function_ns, serialize_ns, fsync_ns):
-    payload = "DVM1\n{}\n{}M {} {} {} {}\n".format(
+def write_manifest(
+    entries, pull_ns, decode_ns, function_ns, serialize_ns, fsync_ns
+):
+    payload = "{}\n{}\n{}M {} {} {} {} {}\n".format(
+        OUTPUT_MANIFEST_MAGIC,
         len(entries),
         "".join(f"{size} {digest}\n" for size, digest in entries),
+        pull_ns,
         decode_ns,
         function_ns,
         serialize_ns,
@@ -132,7 +275,8 @@ def send_result(fd, invocation_id, exit_code, worker_pid, payload=b""):
 
 
 def callable_main(
-    data_root, invocation_bytes, function_bytes, retained_outputs, durable_outputs
+    data_root, invocation_bytes, function_bytes, retained_outputs,
+    durable_outputs, output_overrides=None, pull_ns=0,
 ):
     payload = cloudpickle.loads(invocation_bytes)
     output_count = payload["output_count"]
@@ -144,8 +288,18 @@ def callable_main(
     if len(retained_outputs) != output_count or len(durable_outputs) != output_count:
         raise ValueError("Python invocation has invalid output policy")
     output_paths = []
-    for path, retained in zip(output_files, retained_outputs):
+    if output_overrides is None:
+        output_overrides = [None] * output_count
+    if len(output_overrides) != output_count:
+        raise ValueError("Python invocation has invalid output overrides")
+    for path, override, retained in zip(
+        output_files, output_overrides, retained_outputs
+    ):
         target = Path(path)
+        if isinstance(override, dict):
+            durable_target = Path(override["path"])
+            if not durable_target.is_absolute() or not durable_target.name:
+                raise ValueError("Python invocation SharedFS output path is unsafe")
         if target.is_absolute() or ".." in target.parts or target.name != str(target):
             raise ValueError("Python invocation output path is unsafe")
         # TaskVine requires every declared output to exist even when user code
@@ -188,25 +342,119 @@ def callable_main(
         if target is None:
             entries.append((0, "0" * 64))
             continue
-        temporary = target.with_name(target.name + ".part")
+        temporary = target.with_name(f"{target.name}.part-{os.getpid()}")
         with temporary.open("wb") as stream:
             writer = HashingWriter(stream)
             serialize_started = time.monotonic_ns()
             cloudpickle.dump(value, writer)
             serialize_ns += time.monotonic_ns() - serialize_started
-            if durable:
-                fsync_started = time.monotonic_ns()
-                writer.flush()
-                os.fsync(writer.fileno())
-                fsync_ns += time.monotonic_ns() - fsync_started
             entries.append((writer.size, writer.digest.hexdigest()))
         os.replace(temporary, target)
-    write_manifest(entries, decode_ns, function_ns, serialize_ns, fsync_ns)
+    write_manifest(
+        entries, pull_ns, decode_ns, function_ns, serialize_ns, fsync_ns
+    )
+
+
+def persist_one(source, spec, notifier):
+    target = Path(spec["path"])
+    temporary = target.with_name(
+        f"{target.name}.part-persist-{os.getpid()}-{source}"
+    )
+    try:
+        digest = hashlib.sha256()
+        size = 0
+        with temporary.open("wb") as output:
+            while True:
+                chunk = os.read(source, 1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+                digest.update(chunk)
+                size += len(chunk)
+            output.flush()
+            os.fdatasync(output.fileno())
+        os.replace(temporary, target)
+        notifier.notify(spec, size, digest.hexdigest())
+    finally:
+        os.close(source)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def persistence_agent(stream, context):
+    """Persistent Worker Data Agent; bytes never pass through the Manager."""
+    notifier = DurabilityNotifier()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as writers:
+        while True:
+            message, ancillary, _, _ = stream.recvmsg(
+                65536, socket.CMSG_SPACE(array.array("i").itemsize)
+            )
+            if not message:
+                break
+            descriptors = array.array("i")
+            for level, kind, data in ancillary:
+                if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                    descriptors.frombytes(
+                        data[: len(data) - len(data) % descriptors.itemsize]
+                    )
+            if len(descriptors) != 1:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+                continue
+            try:
+                magic, workflow_key, data_id, attempt = (
+                    PERSIST_KEY_V1.unpack(message)
+                )
+                if magic != b"DVE1" or data_id < 1 or attempt < 1:
+                    raise ValueError("invalid DataVine eData key")
+                path = (
+                    context["root"] / workflow_key.hex()
+                    / f"{data_id}.{attempt}.data"
+                )
+                spec = {
+                    "host": context["host"], "port": context["port"],
+                    "token": context["token"], "path": str(path),
+                }
+            except (ValueError, struct.error):
+                os.close(descriptors[0])
+                continue
+            writers.submit(persist_one, descriptors[0], spec, notifier)
+    notifier.close()
+
+
+def start_persistence(stream, sandbox, output_overrides):
+    """Queue lazy writes after opening local outputs, then report completion."""
+    for index, target in enumerate(output_overrides or ()):
+        if not target:
+            continue
+        source = -1
+        try:
+            source = os.open(
+                str(Path(sandbox) / f"datavine-python-output-{index}"),
+                os.O_RDONLY | os.O_CLOEXEC,
+            )
+            descriptors = array.array("i", [source])
+            stream.sendmsg(
+                [target],
+                [(socket.SOL_SOCKET, socket.SCM_RIGHTS, descriptors)],
+            )
+            os.close(source)
+        except OSError:
+            if source >= 0:
+                try:
+                    os.close(source)
+                except OSError:
+                    pass
+            return False
+    return True
 
 
 def child_main(
     sandbox, stdout_path, payload_id, inherited_fds, function_bytes=None,
     invocation_bytes=None, retained_outputs=None, durable_outputs=None,
+    output_overrides=None, pull_ns=0,
 ):
     exit_code = 1
     try:
@@ -235,7 +483,7 @@ def child_main(
         else:
             callable_main(
                 data_root, invocation_bytes, function_bytes,
-                retained_outputs, durable_outputs,
+                retained_outputs, durable_outputs, output_overrides, pull_ns,
             )
         exit_code = 0
     except BaseException:
@@ -270,6 +518,12 @@ def main():
     args = parser.parse_args()
     if args.task_id < 1 or args.worker_pid < 1 or args.function_slots < 1:
         return 2
+    try:
+        persistence_context = parse_persistence_context(
+            os.environ["DATAVINE_PERSIST_CONTEXT_V1"]
+        )
+    except (KeyError, ValueError):
+        return 2
 
     notify_read, notify_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
 
@@ -282,10 +536,30 @@ def main():
 
     signal.signal(signal.SIGCHLD, child_ready)
     send_configuration(args.out_pipe_fd, args.task_id, args.worker_pid)
+    persistence_stream, agent_stream = socket.socketpair(
+        socket.AF_UNIX, socket.SOCK_SEQPACKET
+    )
+    persistence_agent_pid = os.fork()
+    if persistence_agent_pid == 0:
+        persistence_stream.close()
+        for descriptor in (
+            args.in_pipe_fd, args.out_pipe_fd, notify_read, notify_write
+        ):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            persistence_agent(agent_stream, persistence_context)
+        finally:
+            agent_stream.close()
+        os._exit(0)
+    agent_stream.close()
     parent_pid = os.getppid()
     children = {}
     functions = OrderedDict()
     function_cache_bytes = 0
+    object_puller = ObjectPuller()
     state = {"stopping": False}
 
     def stop(signum, frame):
@@ -306,64 +580,78 @@ def main():
                 return 0
             invocation_id, function, sandbox, stdout_path, payload = invocation
             payload_id = 0
+            function_id = 0
             function_bytes = None
             invocation_bytes = None
+            invocation_digest = None
+            pull_ns = 0
             retained_outputs = None
             durable_outputs = None
+            output_overrides = None
             valid = False
             if function == "datavine_python_source" and len(payload) == SOURCE_TICKET.size:
                 magic, reserved, payload_id, wall_seconds = SOURCE_TICKET.unpack(payload)
-                valid = magic == b"DVP1" and reserved == 0 and payload_id > 0
+                valid = magic == PYTHON_TICKET_MAGIC and reserved == 0 and payload_id > 0
             elif (
                 function == "datavine_python_callable"
-                and len(payload) >= CALLABLE_TICKET.size
+                and len(payload) >= 4
             ):
                 magic = payload[:4]
-                if magic == b"DVP4" and len(payload) >= CALLABLE_TICKET_V4.size:
+                if magic == PYTHON_TICKET_MAGIC and len(payload) >= CALLABLE_TICKET_V1.size:
                     (
-                        magic, invocation_size, function_id, wall_seconds,
-                        function_digest, output_count,
-                    ) = CALLABLE_TICKET_V4.unpack(
-                        payload[:CALLABLE_TICKET_V4.size]
+                        magic, reserved, wall_seconds, output_count, attempt,
+                        workflow_key, invocation_digest, function_digest,
+                    ) = CALLABLE_TICKET_V1.unpack(
+                        payload[:CALLABLE_TICKET_V1.size]
                     )
-                    policy_end = CALLABLE_TICKET_V4.size + output_count * 2
-                    valid = output_count > 0 and policy_end <= len(payload)
+                    policy_end = CALLABLE_TICKET_V1.size + output_count * 2
+                    ids_end = policy_end + output_count * 8
+                    valid = (
+                        reserved == 0 and output_count > 0 and attempt > 0
+                        and ids_end == len(payload)
+                    )
                     if valid:
                         retained_outputs = payload[
-                            CALLABLE_TICKET_V4.size:
-                            CALLABLE_TICKET_V4.size + output_count
+                            CALLABLE_TICKET_V1.size:
+                            CALLABLE_TICKET_V1.size + output_count
                         ]
                         durable_outputs = payload[
-                            CALLABLE_TICKET_V4.size + output_count:policy_end
+                            CALLABLE_TICKET_V1.size + output_count:policy_end
                         ]
-                else:
-                    (
-                        magic, invocation_size, function_id, wall_seconds,
-                        function_digest,
-                    ) = CALLABLE_TICKET.unpack(payload[:CALLABLE_TICKET.size])
-                    policy_end = CALLABLE_TICKET.size
-                    valid = magic == b"DVP3"
-                valid = (
-                    valid
-                    and function_id > 0
-                    and invocation_size > 0
-                    and len(payload) == policy_end + invocation_size
-                )
+                        output_overrides = []
+                        for index in range(output_count):
+                            data_id = struct.unpack_from(
+                                "!Q", payload, policy_end + index * 8
+                            )[0]
+                            valid = valid and data_id > 0
+                            output_overrides.append(
+                                PERSIST_KEY_V1.pack(
+                                    b"DVE1", workflow_key, data_id, attempt
+                                ) if durable_outputs[index] else None
+                            )
                 if valid:
-                    invocation_bytes = payload[policy_end:]
-                    if magic == b"DVP3":
-                        invocation = cloudpickle.loads(invocation_bytes)
-                        output_count = invocation.get("output_count", 0)
-                        retained_outputs = bytes([1]) * output_count
-                        durable_outputs = bytes([1]) * output_count
+                    try:
+                        pull_started = time.monotonic_ns()
+                        invocation_bytes = object_puller.get_digest(
+                            invocation_digest
+                        )
+                        pull_ns += time.monotonic_ns() - pull_started
+                    except (OSError, ValueError, RuntimeError):
+                        valid = False
+                    if valid and (
+                        not invocation_bytes or len(invocation_bytes) > FRAME_LIMIT
+                    ):
+                        valid = False
+                if valid:
                     function_bytes = functions.pop(function_digest, None)
                     if function_bytes is None:
                         try:
-                            function_path = (
-                                Path(sandbox) / "datavine/data" / str(function_id)
+                            pull_started = time.monotonic_ns()
+                            function_bytes = object_puller.get_digest(
+                                function_digest
                             )
-                            function_bytes = function_path.read_bytes()
-                        except OSError:
+                            pull_ns += time.monotonic_ns() - pull_started
+                        except (OSError, ValueError, RuntimeError):
                             valid = False
                         if valid and (
                             len(function_bytes) > FUNCTION_CACHE_BYTES
@@ -393,11 +681,14 @@ def main():
             if pid == 0:
                 child_main(
                     sandbox, stdout_path, payload_id,
-                    (args.in_pipe_fd, args.out_pipe_fd, notify_read, notify_write),
+                    (args.in_pipe_fd, args.out_pipe_fd, notify_read, notify_write,
+                     persistence_stream.fileno()),
                     function_bytes,
                     invocation_bytes,
                     retained_outputs,
                     durable_outputs,
+                    output_overrides,
+                    pull_ns,
                 )
             if pid < 0:
                 send_result(args.out_pipe_fd, invocation_id, 3, args.worker_pid)
@@ -411,6 +702,7 @@ def main():
                 "callable": function_bytes is not None,
                 "timed_out": False,
                 "cancelled": False,
+                "output_overrides": output_overrides,
             }
         if notify_read in readable:
             try:
@@ -454,6 +746,12 @@ def main():
                 if len(payload) > FRAME_LIMIT:
                     payload = b"DataVine Python output exceeds 64 MiB"
                     code = 125
+                if code == 0 and child["callable"]:
+                    if not start_persistence(
+                        persistence_stream,
+                        child["sandbox"], child["output_overrides"]
+                    ):
+                        code = 1
                 send_result(
                     args.out_pipe_fd, child["invocation_id"], code,
                     args.worker_pid, payload,
@@ -469,6 +767,11 @@ def main():
         except ChildProcessError:
             break
         children.pop(pid, None)
+    persistence_stream.close()
+    try:
+        os.waitpid(persistence_agent_pid, 0)
+    except ChildProcessError:
+        pass
     return 0
 
 

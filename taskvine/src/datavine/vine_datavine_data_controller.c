@@ -1,13 +1,16 @@
 /* Concurrent file-backed DataVine data controller. */
 
 #include "vine_datavine_data_controller.h"
+#include "vine_datavine_ir.h"
 
 #include "create_dir.h"
 #include "hash_table.h"
 #include "itable.h"
 #include "jx.h"
+#include "stringtools.h"
 #include "taskvine.h"
 #include "vine_datavine_journal.h"
+#include "vine_datavine_object_store.h"
 #include "vine_datavine_protocol.h"
 #include "vine_datavine_workflow_store.h"
 
@@ -15,6 +18,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/sha.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -34,7 +38,17 @@ struct data_result {
 	struct vine_datavine_workflow_result_info info;
 	char *path;
 	struct vine_file *remote_file;
+	struct workflow_losses *losses;
 	int durable;
+	int lost;
+};
+
+struct workflow_losses {
+	uint64_t *data_ids;
+	size_t count;
+	size_t capacity;
+	size_t active_results;
+	size_t peak_results;
 };
 
 struct publication_output {
@@ -42,6 +56,7 @@ struct publication_output {
 	char *path;
 	struct vine_file *remote_file;
 	int remote_only;
+	int direct_durable;
 	char *plain_data;
 	size_t plain_size;
 };
@@ -62,6 +77,7 @@ struct publication_job {
 	size_t count;
 	struct vine_datavine_data_publication *publication;
 	struct timespec queued_at;
+	uint64_t pull_nanoseconds;
 	uint64_t decode_nanoseconds;
 	uint64_t function_nanoseconds;
 	uint64_t serialize_nanoseconds;
@@ -70,13 +86,20 @@ struct publication_job {
 	struct timespec commit_started;
 	struct publication_output *durable;
 	size_t durable_count;
+	int lost;
 	struct publication_job *next;
 };
 
 struct result_installation {
 	struct data_result **pending;
-	char **keys;
+	uint64_t *data_ids;
+	const char *workflow_id;
 	size_t count;
+};
+
+struct persistence_notice {
+	uint64_t size;
+	char sha256[65];
 };
 
 struct vine_datavine_data_controller {
@@ -85,9 +108,17 @@ struct vine_datavine_data_controller {
 	pthread_cond_t queued;
 	pthread_cond_t space;
 	pthread_cond_t prepared;
-	struct hash_table *results;
+	struct hash_table *result_namespaces;
+	struct hash_table *result_files;
+	struct hash_table *workflow_losses;
+	struct hash_table *object_files;
+	struct hash_table *persistence_notices;
+	struct vine_datavine_object_store *object_store;
 	struct vine_datavine_journal *journal;
 	char *root;
+	char *object_host;
+	char *object_token;
+	int object_port;
 	pthread_t *threads;
 	size_t thread_count;
 	size_t queued_count;
@@ -96,6 +127,7 @@ struct vine_datavine_data_controller {
 	struct publication_job *prepared_head;
 	struct publication_job *prepared_tail;
 	int commit_active;
+	int loss_recording_failed;
 	int stopping;
 	int lock_initialized;
 	int queue_lock_initialized;
@@ -103,6 +135,119 @@ struct vine_datavine_data_controller {
 	int space_initialized;
 	int prepared_initialized;
 };
+
+int vine_datavine_data_controller_put_object(
+		struct vine_datavine_data_controller *controller, const char sha256[65],
+		const void *data, size_t size, int *deduplicated)
+{
+	return controller && vine_datavine_object_store_put(
+						 controller->object_store, sha256, data, size, deduplicated);
+}
+
+int vine_datavine_data_controller_get_object(
+		struct vine_datavine_data_controller *controller, const char sha256[65],
+		unsigned char **data, size_t *size)
+{
+	return controller && vine_datavine_object_store_get(
+						 controller->object_store, sha256, data, size);
+}
+
+int vine_datavine_data_controller_object_path(
+		struct vine_datavine_data_controller *controller, const char sha256[65],
+		char *path, size_t path_size)
+{
+	return controller && vine_datavine_object_store_path(
+						 controller->object_store, sha256, path, path_size, 0);
+}
+
+int vine_datavine_data_controller_object_metrics(
+		struct vine_datavine_data_controller *controller,
+		struct vine_datavine_object_store_metrics *metrics)
+{
+	return controller && vine_datavine_object_store_metrics(
+						 controller->object_store, metrics);
+}
+
+int vine_datavine_data_controller_configure_object_service(
+		struct vine_datavine_data_controller *controller,
+		const char *host, int port, const char *token)
+{
+	if (!controller || !host || !host[0] || port < 1 || port > 65535 ||
+			!token || !token[0])
+		return 0;
+	char *host_copy = strdup(host);
+	char *token_copy = strdup(token);
+	if (!host_copy || !token_copy) {
+		free(host_copy);
+		free(token_copy);
+		return 0;
+	}
+	free(controller->object_host);
+	free(controller->object_token);
+	controller->object_host = host_copy;
+	controller->object_token = token_copy;
+	controller->object_port = port;
+	return 1;
+}
+
+const char *vine_datavine_data_controller_object_root(
+		struct vine_datavine_data_controller *controller)
+{
+	return controller
+				   ? vine_datavine_object_store_root(controller->object_store)
+				   : 0;
+}
+
+char *vine_datavine_data_controller_persistence_context(
+		struct vine_datavine_data_controller *controller)
+{
+	if (!controller || !controller->object_host || !controller->object_token ||
+			controller->object_port < 1)
+		return 0;
+	size_t token_size = strlen(controller->object_token);
+	char *token_hex = malloc(token_size * 2 + 1);
+	if (!token_hex)
+		return 0;
+	for (size_t index = 0; index < token_size; index++)
+		snprintf(token_hex + index * 2, 3, "%02x", (unsigned char)controller->object_token[index]);
+	char *context = string_format("%s\n%d\n%s\n%s", controller->object_host, controller->object_port, token_hex, controller->root);
+	free(token_hex);
+	return context;
+}
+
+char *vine_datavine_data_controller_object_ticket(
+		struct vine_datavine_data_controller *controller,
+		const char *sha256)
+{
+	if (!controller || !sha256 || strlen(sha256) != 64)
+		return 0;
+	char path[PATH_MAX];
+	if (!vine_datavine_data_controller_object_path(
+				controller, sha256, path, sizeof(path)))
+		return 0;
+	return string_format("datavine-file://%s", path);
+}
+
+struct vine_file *vine_datavine_data_controller_resolve_object(
+		struct vine_datavine_data_controller *controller,
+		struct vine_manager *manager, const char *sha256)
+{
+	if (!controller || !manager || !sha256)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct vine_file *file = hash_table_lookup(controller->object_files, sha256);
+	if (!file) {
+		char *uri = vine_datavine_data_controller_object_ticket(controller, sha256);
+		char cached_name[96];
+		int named = snprintf(cached_name, sizeof(cached_name), "datavine-sha256-%s", sha256) < (int)sizeof(cached_name);
+		file = uri && named ? vine_declare_url_cached(manager, uri, cached_name, VINE_CACHE_LEVEL_WORKER, 0) : 0;
+		free(uri);
+		if (file && !hash_table_insert(controller->object_files, sha256, file))
+			file = 0;
+	}
+	pthread_mutex_unlock(&controller->lock);
+	return file;
+}
 
 static uint64_t elapsed_nanoseconds(
 		const struct timespec *started, const struct timespec *finished)
@@ -120,16 +265,198 @@ static void data_result_delete(void *value)
 	}
 }
 
-static char *result_key(const char *workflow_id, uint64_t data_id)
+static void result_namespace_delete(void *value)
 {
-	size_t size = strlen(workflow_id) + 32;
-	char *key = malloc(size);
-	if (key)
-		snprintf(key, size, "%s\037%llu", workflow_id, (unsigned long long)data_id);
-	return key;
+	struct itable *results = value;
+	if (results) {
+		itable_clear(results, data_result_delete);
+		itable_delete(results);
+	}
 }
 
-static int workflow_directory(
+static void workflow_losses_delete(void *value)
+{
+	struct workflow_losses *losses = value;
+	if (losses) {
+		free(losses->data_ids);
+		free(losses);
+	}
+}
+
+static struct itable *result_namespace(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, int create)
+{
+	struct itable *results = hash_table_lookup(
+			controller->result_namespaces, workflow_id);
+	if (!results && create) {
+		results = itable_create(0);
+		if (results && !hash_table_insert(controller->result_namespaces,
+						   workflow_id,
+						   results)) {
+			itable_delete(results);
+			results = 0;
+		}
+	}
+	return results;
+}
+
+static struct data_result *result_lookup(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, uint64_t data_id)
+{
+	struct itable *results = result_namespace(controller, workflow_id, 0);
+	return results ? itable_lookup(results, data_id) : 0;
+}
+
+static int result_insert(struct vine_datavine_data_controller *controller,
+		const char *workflow_id, uint64_t data_id, struct data_result *result)
+{
+	struct itable *results = result_namespace(controller, workflow_id, 1);
+	struct workflow_losses *losses = hash_table_lookup(
+			controller->workflow_losses, workflow_id);
+	if (!losses) {
+		losses = calloc(1, sizeof(*losses));
+		if (losses && !hash_table_insert(controller->workflow_losses,
+						  workflow_id,
+						  losses)) {
+			free(losses);
+			losses = 0;
+		}
+	}
+	if (!results || !losses || !itable_insert(results, data_id, result))
+		return 0;
+	result->losses = losses;
+	const char *cached_name = !result->durable && result->remote_file
+						  ? vine_file_cached_name(result->remote_file)
+						  : 0;
+	if (cached_name && !hash_table_insert(controller->result_files,
+					   cached_name,
+					   result)) {
+		itable_remove(results, data_id);
+		result->losses = 0;
+		return 0;
+	}
+	losses->active_results++;
+	if (losses->active_results > losses->peak_results)
+		losses->peak_results = losses->active_results;
+	return 1;
+}
+
+static struct data_result *result_remove(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, uint64_t data_id)
+{
+	struct itable *results = result_namespace(controller, workflow_id, 0);
+	struct data_result *result = results ? itable_remove(results, data_id) : 0;
+	const char *cached_name = result && !result->durable && result->remote_file
+						  ? vine_file_cached_name(result->remote_file)
+						  : 0;
+	if (cached_name)
+		hash_table_remove(controller->result_files, cached_name);
+	if (result && result->losses && result->losses->active_results)
+		result->losses->active_results--;
+	return result;
+}
+
+int vine_datavine_data_controller_last_replica_lost(
+		struct vine_datavine_data_controller *controller,
+		const char *cached_name)
+{
+	if (!controller || !cached_name)
+		return 0;
+	int matched = 0;
+	pthread_mutex_lock(&controller->lock);
+	struct data_result *result = hash_table_lookup(
+			controller->result_files, cached_name);
+	if (result && !result->durable && !result->lost && result->losses) {
+		struct workflow_losses *losses = result->losses;
+		if (losses->count == losses->capacity) {
+			size_t capacity = losses->capacity ? losses->capacity * 2 : 16;
+			uint64_t *data_ids = realloc(losses->data_ids,
+					capacity * sizeof(*data_ids));
+			if (!data_ids) {
+				controller->loss_recording_failed = 1;
+				pthread_mutex_unlock(&controller->lock);
+				return 1;
+			}
+			losses->data_ids = data_ids;
+			losses->capacity = capacity;
+		}
+		losses->data_ids[losses->count++] = result->info.data_id;
+		result->lost = 1;
+		matched = 1;
+	}
+	pthread_mutex_unlock(&controller->lock);
+	pthread_mutex_lock(&controller->queue_lock);
+	for (struct publication_job *job = controller->head; job; job = job->next) {
+		for (size_t index = 0; index < job->count; index++) {
+			struct vine_file *file = job->outputs[index].remote_file;
+			const char *name = file ? vine_file_cached_name(file) : 0;
+			if (name && !strcmp(name, cached_name)) {
+				job->lost = 1;
+				matched = 1;
+				break;
+			}
+		}
+	}
+	if (matched)
+		pthread_cond_broadcast(&controller->queued);
+	pthread_mutex_unlock(&controller->queue_lock);
+	return matched;
+}
+
+int vine_datavine_data_controller_take_workflow_losses(
+		struct vine_datavine_data_controller *controller,
+		struct vine_manager *manager, const char *workflow_id,
+		struct itable *files,
+		uint64_t **data_ids, size_t *count)
+{
+	if (!controller || !manager || !workflow_id || !workflow_id[0] ||
+			!files || !data_ids || !count)
+		return 0;
+	*data_ids = 0;
+	*count = 0;
+	pthread_mutex_lock(&controller->lock);
+	if (controller->loss_recording_failed) {
+		pthread_mutex_unlock(&controller->lock);
+		return 0;
+	}
+	struct workflow_losses *losses = hash_table_lookup(
+			controller->workflow_losses, workflow_id);
+	uint64_t *lost = losses ? losses->data_ids : 0;
+	size_t lost_count = losses ? losses->count : 0;
+	if (losses) {
+		losses->data_ids = 0;
+		losses->count = 0;
+		losses->capacity = 0;
+	}
+	size_t next = 0;
+	for (size_t index = 0; index < lost_count; index++) {
+		struct data_result *removed = result_lookup(
+				controller, workflow_id, lost[index]);
+		if (!removed || !removed->lost)
+			continue;
+		removed = result_remove(controller, workflow_id, lost[index]);
+		if (removed && removed->remote_file) {
+			if (itable_lookup(files, lost[index]) == removed->remote_file)
+				itable_remove(files, lost[index]);
+			vine_undeclare_file_no_loss_event(manager, removed->remote_file);
+		}
+		data_result_delete(removed);
+		lost[next++] = lost[index];
+	}
+	pthread_mutex_unlock(&controller->lock);
+	if (!next) {
+		free(lost);
+		lost = 0;
+	}
+	*data_ids = lost;
+	*count = next;
+	return 1;
+}
+
+static int workflow_directory_path(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id, char path[PATH_MAX])
 {
@@ -141,7 +468,27 @@ static int workflow_directory(
 	if (snprintf(path, PATH_MAX, "%s/%s", controller->root, encoded) >=
 			PATH_MAX)
 		return 0;
-	return create_dir(path, 0700);
+	return 1;
+}
+
+int vine_datavine_data_controller_workflow_key(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, unsigned char key[32])
+{
+	if (!controller || !workflow_id || !workflow_id[0] || !key)
+		return 0;
+	SHA256((const unsigned char *)workflow_id, strlen(workflow_id), key);
+	return 1;
+}
+
+int vine_datavine_data_controller_prepare_workflow(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id)
+{
+	char path[PATH_MAX];
+	return controller && workflow_id && workflow_id[0] &&
+		   workflow_directory_path(controller, workflow_id, path) &&
+		   create_dir(path, 0700);
 }
 
 static int output_path(struct vine_datavine_data_controller *controller,
@@ -149,9 +496,52 @@ static int output_path(struct vine_datavine_data_controller *controller,
 		char path[PATH_MAX])
 {
 	char directory[PATH_MAX];
-	if (!workflow_directory(controller, workflow_id, directory))
+	if (!workflow_directory_path(controller, workflow_id, directory))
 		return 0;
 	return snprintf(path, PATH_MAX, "%s/%llu.%u.data", directory, (unsigned long long)data_id, attempt) < PATH_MAX;
+}
+
+int vine_datavine_data_controller_output_path(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, uint64_t data_id, uint32_t attempt,
+		char *path, size_t path_size)
+{
+	char resolved[PATH_MAX];
+	if (!controller || !workflow_id || !data_id || !attempt || !path ||
+			!output_path(controller, workflow_id, data_id, attempt, resolved) ||
+			strlen(resolved) + 1 > path_size)
+		return 0;
+	memcpy(path, resolved, strlen(resolved) + 1);
+	return 1;
+}
+
+int vine_datavine_data_controller_result_persisted(
+		struct vine_datavine_data_controller *controller,
+		const char *path, uint64_t size, const char sha256[65])
+{
+	if (!controller || !path || !sha256 || strlen(sha256) != 64 ||
+			strncmp(path, controller->root, strlen(controller->root)) ||
+			path[strlen(controller->root)] != '/')
+		return 0;
+	struct persistence_notice *notice = calloc(1, sizeof(*notice));
+	if (!notice)
+		return 0;
+	notice->size = size;
+	memcpy(notice->sha256, sha256, 65);
+	pthread_mutex_lock(&controller->lock);
+	struct persistence_notice *old = hash_table_remove(
+			controller->persistence_notices, path);
+	int inserted = hash_table_insert(controller->persistence_notices, path, notice);
+	pthread_mutex_unlock(&controller->lock);
+	free(old);
+	if (!inserted) {
+		free(notice);
+		return 0;
+	}
+	pthread_mutex_lock(&controller->queue_lock);
+	pthread_cond_broadcast(&controller->queued);
+	pthread_mutex_unlock(&controller->queue_lock);
+	return 1;
 }
 
 static int output_path_in_directory(const char *directory, uint64_t data_id,
@@ -182,8 +572,8 @@ static int write_plain_output(struct publication_output *output)
 			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
 			0600);
 	int valid = fd >= 0 &&
-		    write_all(fd, output->plain_data, output->plain_size) &&
-		    fsync(fd) == 0;
+			write_all(fd, output->plain_data, output->plain_size) &&
+			fsync(fd) == 0;
 	if (fd >= 0 && close(fd))
 		valid = 0;
 	return valid;
@@ -302,12 +692,10 @@ static void installation_delete(struct result_installation *installation)
 {
 	if (!installation)
 		return;
-	for (size_t index = 0; index < installation->count; index++) {
+	for (size_t index = 0; index < installation->count; index++)
 		data_result_delete(installation->pending ? installation->pending[index] : 0);
-		free(installation->keys ? installation->keys[index] : 0);
-	}
 	free(installation->pending);
-	free(installation->keys);
+	free(installation->data_ids);
 	memset(installation, 0, sizeof(*installation));
 }
 
@@ -317,16 +705,13 @@ static int installation_prepare(struct vine_datavine_data_controller *controller
 {
 	memset(installation, 0, sizeof(*installation));
 	installation->pending = calloc(count, sizeof(*installation->pending));
-	installation->keys = calloc(count, sizeof(*installation->keys));
+	installation->data_ids = calloc(count, sizeof(*installation->data_ids));
+	installation->workflow_id = workflow_id;
 	installation->count = count;
-	int valid = installation->pending && installation->keys;
+	int valid = installation->pending && installation->data_ids;
 	for (size_t index = 0; valid && index < count; index++) {
-		installation->keys[index] = result_key(
-				workflow_id, outputs[index].info.data_id);
-		struct data_result *known = 0;
-		if (installation->keys[index])
-			known = hash_table_lookup(controller->results,
-					installation->keys[index]);
+		installation->data_ids[index] = outputs[index].info.data_id;
+		struct data_result *known = result_lookup(controller, workflow_id, installation->data_ids[index]);
 		if (known) {
 			valid = known->info.attempt <= outputs[index].info.attempt;
 			if (!valid)
@@ -334,7 +719,8 @@ static int installation_prepare(struct vine_datavine_data_controller *controller
 			if (known->info.attempt == outputs[index].info.attempt) {
 				valid = !strcmp(known->info.sha256,
 						outputs[index].info.sha256);
-				continue;
+				if (!valid || known->durable)
+					continue;
 			}
 		}
 		installation->pending[index] = calloc(
@@ -345,7 +731,7 @@ static int installation_prepare(struct vine_datavine_data_controller *controller
 			installation->pending[index]->remote_file = outputs[index].remote_file;
 			installation->pending[index]->durable = 1;
 		}
-		valid = installation->keys[index] && installation->pending[index] &&
+		valid = installation->pending[index] &&
 			installation->pending[index]->path;
 	}
 	if (!valid)
@@ -357,19 +743,17 @@ static void installation_apply(struct vine_datavine_data_controller *controller,
 		struct result_installation *installation)
 {
 	for (size_t index = 0; index < installation->count; index++) {
-		struct data_result *known = hash_table_lookup(
-				controller->results, installation->keys[index]);
+		struct data_result *known = result_lookup(controller, installation->workflow_id, installation->data_ids[index]);
 		if (known && installation->pending[index] &&
-				known->info.attempt < installation->pending[index]->info.attempt) {
-			known = hash_table_remove(controller->results,
-					installation->keys[index]);
-			unlink(known->path);
+				(known->info.attempt < installation->pending[index]->info.attempt ||
+						!known->durable)) {
+			known = result_remove(controller, installation->workflow_id, installation->data_ids[index]);
+			if (known->path)
+				unlink(known->path);
 			data_result_delete(known);
 		}
-		char *key = installation->keys[index];
-		if (!hash_table_lookup(controller->results, key)) {
-			if (!hash_table_insert(controller->results, key,
-					installation->pending[index]))
+		if (!result_lookup(controller, installation->workflow_id, installation->data_ids[index])) {
+			if (!result_insert(controller, installation->workflow_id, installation->data_ids[index], installation->pending[index]))
 				abort();
 			installation->pending[index] = 0;
 		}
@@ -404,20 +788,15 @@ static int install_soft_results(struct vine_datavine_data_controller *controller
 {
 	int valid = 1;
 	for (size_t index = 0; valid && index < count; index++) {
-		char *key = result_key(workflow_id, outputs[index].info.data_id);
-		struct data_result *known = key
-							    ? hash_table_lookup(controller->results, key)
-							    : 0;
+		uint64_t data_id = outputs[index].info.data_id;
+		struct data_result *known = result_lookup(controller, workflow_id, data_id);
 		if (known) {
 			valid = known->info.attempt <= outputs[index].info.attempt;
-			if (!valid) {
-				free(key);
+			if (!valid)
 				break;
-			}
 			if (known->info.attempt == outputs[index].info.attempt) {
 				valid = !strcmp(known->info.sha256,
 						outputs[index].info.sha256);
-				free(key);
 				continue;
 			}
 		}
@@ -426,16 +805,15 @@ static int install_soft_results(struct vine_datavine_data_controller *controller
 			result->info = outputs[index].info;
 			result->remote_file = outputs[index].remote_file;
 		}
-		valid = key && result;
+		valid = result != 0;
 		if (valid && known) {
-			known = hash_table_remove(controller->results, key);
+			known = result_remove(controller, workflow_id, data_id);
 			data_result_delete(known);
 		}
-		if (valid && !hash_table_insert(controller->results, key, result))
+		if (valid && !result_insert(controller, workflow_id, data_id, result))
 			abort();
 		if (!valid)
 			data_result_delete(result);
-		free(key);
 	}
 	return valid;
 }
@@ -444,6 +822,8 @@ static int replay_record(void *context, uint16_t opcode,
 		const unsigned char *payload, size_t payload_size)
 {
 	struct vine_datavine_data_controller *controller = context;
+	if (opcode >= 100)
+		return 1;
 	if (payload_size < 4)
 		return 0;
 	uint16_t workflow_size = vine_datavine_get_u16(payload);
@@ -461,14 +841,11 @@ static int replay_record(void *context, uint16_t opcode,
 		for (uint16_t index = 0; index < count; index++) {
 			uint64_t data_id = vine_datavine_get_u64(
 					payload + 4 + workflow_size + (size_t)index * 8);
-			char *key = result_key(workflow_id, data_id);
-			struct data_result *removed = key
-								      ? hash_table_remove(controller->results, key)
-								      : 0;
+			struct data_result *removed = result_remove(
+					controller, workflow_id, data_id);
 			if (removed)
 				unlink(removed->path);
 			data_result_delete(removed);
-			free(key);
 		}
 		return 1;
 	}
@@ -517,8 +894,8 @@ static int replay_record(void *context, uint16_t opcode,
 		offset += version_size;
 		char path[PATH_MAX];
 		outputs[index].path = output_path(controller, workflow_id, info->data_id, info->attempt, path)
-						      ? strdup(path)
-						      : 0;
+							  ? strdup(path)
+							  : 0;
 		valid = outputs[index].path != 0;
 	}
 	valid = valid && offset == payload_size &&
@@ -532,19 +909,28 @@ static int replay_record(void *context, uint16_t opcode,
 
 static int validate_catalog(struct vine_datavine_data_controller *controller)
 {
-	char *key;
-	struct data_result *result;
-	int iterator;
-	HASH_TABLE_ITERATE(controller->results, iterator, key, result)
+	char *workflow_id;
+	struct itable *results;
+	int namespace_iterator;
+	HASH_TABLE_ITERATE(controller->result_namespaces,
+			namespace_iterator,
+			workflow_id,
+			results)
 	{
-		uint64_t size = 0;
-		unsigned char digest[32];
-		char encoded[65];
-		if (!hash_file(result->path, &size, digest))
-			return 0;
-		digest_hex(digest, encoded);
-		if (size != result->info.size || strcmp(encoded, result->info.sha256))
-			return 0;
+		UINT64_T data_id;
+		struct data_result *result;
+		int result_iterator;
+		ITABLE_ITERATE(results, result_iterator, data_id, result)
+		{
+			uint64_t size = 0;
+			unsigned char digest[32];
+			char encoded[65];
+			if (!hash_file(result->path, &size, digest))
+				return 0;
+			digest_hex(digest, encoded);
+			if (size != result->info.size || strcmp(encoded, result->info.sha256))
+				return 0;
+		}
 	}
 	return 1;
 }
@@ -565,14 +951,17 @@ static void publication_finish(
 static int prepare_job(struct vine_datavine_data_controller *controller,
 		struct publication_job *job)
 {
+	if (job->lost)
+		return 0;
 	job->durable = calloc(job->count, sizeof(*job->durable));
 	struct publication_output *soft = calloc(job->count, sizeof(*soft));
 	size_t soft_count = 0;
 	int valid = job->durable && soft;
 	for (size_t index = 0; valid && index < job->count; index++) {
-		if (job->outputs[index].remote_only)
+		if (job->outputs[index].remote_file)
 			soft[soft_count++] = job->outputs[index];
-		else
+		if (!job->outputs[index].remote_only ||
+				job->outputs[index].direct_durable)
 			job->durable[job->durable_count++] = job->outputs[index];
 	}
 	job->metrics.outputs = job->count;
@@ -585,11 +974,21 @@ static int prepare_job(struct vine_datavine_data_controller *controller,
 	}
 	for (size_t index = 0; valid && index < job->durable_count; index++) {
 		struct publication_output *output = &job->durable[index];
-		unsigned char digest[32];
-		valid = write_plain_output(output) &&
-			hash_file(output->path, &output->info.size, digest);
-		if (valid)
-			digest_hex(digest, output->info.sha256);
+		if (output->direct_durable) {
+			pthread_mutex_lock(&controller->lock);
+			struct persistence_notice *notice = hash_table_remove(
+					controller->persistence_notices, output->path);
+			pthread_mutex_unlock(&controller->lock);
+			valid = notice && notice->size == output->info.size &&
+				!strcmp(notice->sha256, output->info.sha256);
+			free(notice);
+		} else {
+			unsigned char digest[32];
+			valid = write_plain_output(output) &&
+				hash_file(output->path, &output->info.size, digest);
+			if (valid)
+				digest_hex(digest, output->info.sha256);
+		}
 	}
 	for (size_t index = 0; index < soft_count; index++)
 		job->metrics.output_bytes += soft[index].info.size;
@@ -601,22 +1000,35 @@ static int prepare_job(struct vine_datavine_data_controller *controller,
 
 static int batch_has_duplicate_results(struct publication_job *jobs)
 {
-	struct hash_table *seen = hash_table_create(0, 0);
-	int duplicate = seen == 0;
+	struct hash_table *namespaces = hash_table_create(0, 0);
+	int duplicate = namespaces == 0;
 	for (struct publication_job *job = jobs; !duplicate && job; job = job->next) {
+		struct itable *seen = hash_table_lookup(namespaces, job->workflow_id);
+		if (!seen) {
+			seen = itable_create(0);
+			if (!seen || !hash_table_insert(namespaces, job->workflow_id, seen)) {
+				itable_delete(seen);
+				duplicate = 1;
+				break;
+			}
+		}
 		for (size_t index = 0; index < job->durable_count; index++) {
-			char *key = result_key(job->workflow_id,
-					job->durable[index].info.data_id);
-			duplicate = !key || hash_table_lookup(seen, key);
-			if (!duplicate && !hash_table_insert(seen, key, (void *)seen))
+			uint64_t data_id = job->durable[index].info.data_id;
+			duplicate = itable_lookup(seen, data_id) != 0;
+			if (!duplicate && !itable_insert(seen, data_id, seen))
 				abort();
-			free(key);
 			if (duplicate)
 				break;
 		}
 	}
-	if (seen)
-		hash_table_delete(seen);
+	if (namespaces) {
+		char *workflow_id;
+		struct itable *seen;
+		int iterator;
+		HASH_TABLE_ITERATE(namespaces, iterator, workflow_id, seen)
+		itable_delete(seen);
+		hash_table_delete(namespaces);
+	}
 	return duplicate;
 }
 
@@ -660,16 +1072,13 @@ static void commit_job_group(struct vine_datavine_data_controller *controller,
 		accepted[accepted_count++] = job;
 	}
 	int committed = allocated && accepted_count;
-	for (size_t index = 0; committed && index < accepted_count; index++) {
-		if (index + 1 < accepted_count)
-			committed = vine_datavine_journal_enqueue(controller->journal,
-					DATA_READY_BATCH, payloads[index], payload_sizes[index]);
-		else
-			committed = vine_datavine_journal_commit(controller->journal,
-					DATA_READY_BATCH, payloads[index], payload_sizes[index]);
-	}
+	for (size_t index = 0; committed && index < accepted_count; index++)
+		committed = vine_datavine_journal_enqueue(controller->journal,
+				DATA_READY_BATCH,
+				payloads[index],
+				payload_sizes[index]);
 	if (committed) {
-		accepted[0]->metrics.journal_commits++;
+		accepted[0]->metrics.journal_records += accepted_count;
 		for (size_t index = 0; index < accepted_count; index++) {
 			installation_apply(controller, &installations[index]);
 			success[index] = 1;
@@ -728,6 +1137,25 @@ static void job_delete(struct publication_job *job)
 	free(job);
 }
 
+static int job_persistence_ready(struct vine_datavine_data_controller *controller,
+		const struct publication_job *job)
+{
+	if (job->lost)
+		return 1;
+	int ready = 1;
+	pthread_mutex_lock(&controller->lock);
+	for (size_t index = 0; index < job->count; index++) {
+		if (job->outputs[index].direct_durable &&
+				!hash_table_lookup(controller->persistence_notices,
+						job->outputs[index].path)) {
+			ready = 0;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&controller->lock);
+	return ready;
+}
+
 static void *data_worker(void *argument)
 {
 	struct vine_datavine_data_controller *controller = argument;
@@ -739,16 +1167,32 @@ static void *data_worker(void *argument)
 			pthread_mutex_unlock(&controller->queue_lock);
 			break;
 		}
-		struct publication_job *job = controller->head;
-		controller->head = job->next;
-		if (!controller->head)
+		struct publication_job **ready_link = &controller->head;
+		if (!controller->stopping) {
+			while (*ready_link &&
+					!job_persistence_ready(controller, *ready_link))
+				ready_link = &(*ready_link)->next;
+		}
+		if (!*ready_link) {
+			pthread_cond_wait(&controller->queued, &controller->queue_lock);
+			pthread_mutex_unlock(&controller->queue_lock);
+			continue;
+		}
+		struct publication_job *job = *ready_link;
+		*ready_link = job->next;
+		if (controller->tail == job) {
 			controller->tail = 0;
+			for (struct publication_job *tail = controller->head; tail;
+					tail = tail->next)
+				controller->tail = tail;
+		}
 		controller->queued_count--;
 		pthread_cond_broadcast(&controller->space);
 		pthread_mutex_unlock(&controller->queue_lock);
 		clock_gettime(CLOCK_MONOTONIC, &job->commit_started);
 		job->metrics.queue_nanoseconds = elapsed_nanoseconds(
 				&job->queued_at, &job->commit_started);
+		job->metrics.pull_nanoseconds = job->pull_nanoseconds;
 		job->metrics.decode_nanoseconds = job->decode_nanoseconds;
 		job->metrics.function_nanoseconds = job->function_nanoseconds;
 		job->metrics.serialize_nanoseconds = job->serialize_nanoseconds;
@@ -768,11 +1212,11 @@ static void *data_worker(void *argument)
 		job->next = 0;
 		if (controller->prepared_tail)
 			controller->prepared_tail->next = job;
-	else
-		controller->prepared_head = job;
-	controller->prepared_tail = job;
-	pthread_cond_signal(&controller->prepared);
-	if (controller->commit_active) {
+		else
+			controller->prepared_head = job;
+		controller->prepared_tail = job;
+		pthread_cond_signal(&controller->prepared);
+		if (controller->commit_active) {
 			pthread_mutex_unlock(&controller->queue_lock);
 			continue;
 		}
@@ -788,7 +1232,8 @@ static void *data_worker(void *argument)
 				}
 				while (!controller->stopping &&
 						pthread_cond_timedwait(&controller->prepared,
-								&controller->queue_lock, &deadline) != ETIMEDOUT) {
+								&controller->queue_lock,
+								&deadline) != ETIMEDOUT) {
 				}
 			}
 			struct publication_job *batch = controller->prepared_head;
@@ -813,9 +1258,10 @@ static void *data_worker(void *argument)
 }
 
 struct vine_datavine_data_controller *vine_datavine_data_controller_open(
-		const char *workflow_journal_path, size_t threads)
+		const char *workflow_journal_path, size_t threads,
+		struct vine_datavine_journal *journal)
 {
-	if (!workflow_journal_path || !workflow_journal_path[0] || !threads)
+	if (!workflow_journal_path || !workflow_journal_path[0] || !journal)
 		return 0;
 	struct vine_datavine_data_controller *controller =
 			calloc(1, sizeof(*controller));
@@ -825,10 +1271,7 @@ struct vine_datavine_data_controller *vine_datavine_data_controller_open(
 	controller->root = malloc(root_size);
 	if (controller->root)
 		snprintf(controller->root, root_size, "%s.data", workflow_journal_path);
-	char catalog[PATH_MAX];
-	int valid = controller->root && create_dir(controller->root, 0700) &&
-		    snprintf(catalog, sizeof(catalog), "%s/catalog", controller->root) <
-				    (int)sizeof(catalog);
+	int valid = controller->root && create_dir(controller->root, 0700);
 	if (!pthread_mutex_init(&controller->lock, 0))
 		controller->lock_initialized = 1;
 	if (controller->lock_initialized &&
@@ -844,11 +1287,21 @@ struct vine_datavine_data_controller *vine_datavine_data_controller_open(
 			!pthread_cond_init(&controller->prepared, 0))
 		controller->prepared_initialized = 1;
 	valid = valid && controller->prepared_initialized;
-	controller->results = hash_table_create(0, 0);
-	controller->journal = valid ? vine_datavine_journal_open(catalog) : 0;
-	controller->threads = calloc(threads, sizeof(*controller->threads));
-	valid = valid && controller->results && controller->journal &&
-		controller->threads &&
+	controller->result_namespaces = hash_table_create(0, 0);
+	controller->result_files = hash_table_create(0, 0);
+	controller->workflow_losses = hash_table_create(0, 0);
+	controller->object_files = hash_table_create(0, 0);
+	controller->persistence_notices = hash_table_create(0, 0);
+	controller->journal = journal;
+	controller->object_store = valid
+						   ? vine_datavine_object_store_open(workflow_journal_path)
+						   : 0;
+	controller->threads = threads ? calloc(threads, sizeof(*controller->threads)) : 0;
+	valid = valid && controller->result_namespaces && controller->result_files &&
+		controller->workflow_losses && controller->object_files &&
+		controller->persistence_notices &&
+		controller->journal && controller->object_store &&
+		(!threads || controller->threads) &&
 		vine_datavine_journal_replay(controller->journal, replay_record, controller) &&
 		validate_catalog(controller);
 	if (!valid) {
@@ -889,14 +1342,33 @@ void vine_datavine_data_controller_close(
 		job_delete(controller->head);
 		controller->head = next;
 	}
-	if (controller->journal)
-		vine_datavine_journal_close(controller->journal);
-	if (controller->results) {
-		hash_table_clear(controller->results, data_result_delete);
-		hash_table_delete(controller->results);
+	vine_datavine_object_store_close(controller->object_store);
+	if (controller->result_files)
+		hash_table_delete(controller->result_files);
+	if (controller->result_namespaces) {
+		hash_table_clear(controller->result_namespaces, result_namespace_delete);
+		hash_table_delete(controller->result_namespaces);
+	}
+	if (controller->workflow_losses) {
+		hash_table_clear(controller->workflow_losses, workflow_losses_delete);
+		hash_table_delete(controller->workflow_losses);
+	}
+	if (controller->object_files)
+		hash_table_delete(controller->object_files);
+	if (controller->persistence_notices) {
+		char *path;
+		void *notice;
+		int iterator;
+		HASH_TABLE_ITERATE(controller->persistence_notices, iterator, path, notice)
+		{
+			free(notice);
+		}
+		hash_table_delete(controller->persistence_notices);
 	}
 	free(controller->threads);
 	free(controller->root);
+	free(controller->object_host);
+	free(controller->object_token);
 	if (controller->prepared_initialized)
 		pthread_cond_destroy(&controller->prepared);
 	if (controller->space_initialized)
@@ -914,21 +1386,22 @@ static int retained_output(struct itable *consumers, struct itable *requested,
 		uint64_t data_id, int retain_all)
 {
 	return retain_all || itable_lookup(consumers, data_id) ||
-	       itable_lookup(requested, data_id);
+		   itable_lookup(requested, data_id);
 }
 
 int vine_datavine_data_controller_bind_outputs(
 		struct vine_datavine_data_controller *controller,
 		struct vine_manager *manager, const char *workflow_id,
-		struct vine_task *physical, struct jx *task, struct itable *files,
+		struct vine_task *physical, struct jx *task, struct jx *executor,
+		struct itable *files,
 		struct itable *consumers,
 		struct itable *requested, uint32_t attempt, int retain_all)
 {
-	struct jx *executor = jx_lookup(task, "executor");
 	struct jx *output_files = jx_lookup(executor, "output_files");
-	struct jx *output_ids = jx_lookup(task, "output_data_ids");
+	struct jx *output_ids = vine_datavine_ir_task_outputs(task);
+	const char *version = jx_lookup_string(executor, "version");
 	int worker_local = !strcmp(jx_lookup_string(executor, "kind"), "python") &&
-			   !strcmp(jx_lookup_string(executor, "version"), "callable-v1");
+			   !strcmp(version, VINE_DATAVINE_PYTHON_CALLABLE_VERSION);
 	if (!output_files)
 		return jx_array_length(output_ids) == 1;
 	if (jx_array_length(output_files) != jx_array_length(output_ids))
@@ -942,9 +1415,9 @@ int vine_datavine_data_controller_bind_outputs(
 		if (!retained_output(consumers, requested, data_id, retain_all))
 			continue;
 		char path[PATH_MAX];
-		int remote_only = worker_local && !itable_lookup(requested, data_id);
+		int remote_only = worker_local;
 		if (!remote_only && !directory_ready) {
-			directory_ready = workflow_directory(controller, workflow_id, directory);
+			directory_ready = workflow_directory_path(controller, workflow_id, directory);
 			if (!directory_ready)
 				return 0;
 		}
@@ -958,7 +1431,7 @@ int vine_datavine_data_controller_bind_outputs(
 							  ->u.string_value;
 		struct vine_file *previous = itable_remove(files, data_id);
 		if (previous)
-			vine_undeclare_file(manager, previous);
+			vine_undeclare_file_no_loss_event(manager, previous);
 		if (!file || !vine_task_add_output(physical, file, remote_name, 0) ||
 				!itable_insert(files, data_id, file))
 			return 0;
@@ -985,23 +1458,25 @@ static struct vine_datavine_data_publication *publication_create(void)
 }
 
 static int fill_output_metadata(struct publication_output *output,
-		struct jx *data_record, struct itable *requested, uint64_t data_id,
+		struct jx *data_record, struct jx *default_codec,
+		struct itable *requested, uint64_t data_id,
 		uint32_t attempt, const char *path)
 {
-	struct jx *origin = data_record ? jx_lookup(data_record, "origin") : 0;
-	struct jx *codec = data_record ? jx_lookup(data_record, "codec") : 0;
+	struct jx *codec = data_record
+					   ? vine_datavine_ir_data_codec(data_record, default_codec)
+					   : 0;
 	const char *codec_name = codec ? jx_lookup_string(codec, "name") : 0;
 	const char *codec_version = codec ? jx_lookup_string(codec, "version") : 0;
-	if (!origin || strcmp(jx_lookup_string(origin, "kind"), "output") ||
+	if (!data_record || !vine_datavine_ir_data_is_output(data_record) ||
 			!codec_name || !codec_version ||
 			strlen(codec_name) >= sizeof(output->info.codec_name) ||
 			strlen(codec_version) >= sizeof(output->info.codec_version))
 		return 0;
 	output->info.data_id = data_id;
 	output->info.attempt = attempt;
-	output->info.producer_task_id = jx_lookup_integer(origin, "task_id");
+	output->info.producer_task_id = vine_datavine_ir_data_producer(data_record);
 	output->info.producer_output_index =
-			(int32_t)jx_lookup_integer(origin, "output_index");
+			vine_datavine_ir_data_output_index(data_record);
 	output->info.requested = itable_lookup(requested, data_id) != 0;
 	snprintf(output->info.codec_name, sizeof(output->info.codec_name), "%s", codec_name);
 	snprintf(output->info.codec_version,
@@ -1014,11 +1489,12 @@ static int fill_output_metadata(struct publication_output *output,
 
 static int parse_output_manifest(const char *manifest,
 		struct publication_output *outputs, size_t count,
-		uint64_t *decode_nanoseconds, uint64_t *function_nanoseconds,
+		uint64_t *pull_nanoseconds, uint64_t *decode_nanoseconds,
+		uint64_t *function_nanoseconds,
 		uint64_t *serialize_nanoseconds,
 		uint64_t *fsync_nanoseconds)
 {
-	if (!manifest || strncmp(manifest, "DVM1\n", 5))
+	if (!manifest || strncmp(manifest, VINE_DATAVINE_OUTPUT_MANIFEST_MAGIC "\n", 5))
 		return 0;
 	char *end = 0;
 	unsigned long declared = strtoul(manifest + 5, &end, 10);
@@ -1041,17 +1517,15 @@ static int parse_output_manifest(const char *manifest,
 	if (!*end)
 		return 1;
 	unsigned long long decode_ns = 0;
+	unsigned long long pull_ns = 0;
 	unsigned long long function_ns = 0;
 	unsigned long long serialize_ns = 0;
 	unsigned long long fsync_ns = 0;
 	char trailing = 0;
-	int fields = sscanf(end, "M %llu %llu %llu %llu\n%c", &decode_ns, &function_ns, &serialize_ns, &fsync_ns, &trailing);
-	if (fields != 4) {
-		decode_ns = 0;
-		fields = sscanf(end, "M %llu %llu %llu\n%c", &function_ns, &serialize_ns, &fsync_ns, &trailing);
-		if (fields != 3)
-			return 0;
-	}
+	int fields = sscanf(end, "M %llu %llu %llu %llu %llu\n%c", &pull_ns, &decode_ns, &function_ns, &serialize_ns, &fsync_ns, &trailing);
+	if (fields != 5)
+		return 0;
+	*pull_nanoseconds = (uint64_t)pull_ns;
 	*decode_nanoseconds = (uint64_t)decode_ns;
 	*function_nanoseconds = (uint64_t)function_ns;
 	*serialize_nanoseconds = (uint64_t)serialize_ns;
@@ -1062,7 +1536,8 @@ static int parse_output_manifest(const char *manifest,
 struct vine_datavine_data_publication *
 vine_datavine_data_controller_publish_async(
 		struct vine_datavine_data_controller *controller,
-		const char *workflow_id, struct jx *task, struct itable *data,
+		const char *workflow_id, struct jx *task, struct jx *executor,
+		struct jx *default_codec, struct itable *data,
 		struct itable *files, struct itable *consumers, struct itable *requested,
 		uint32_t attempt, int retain_all, struct vine_task *completed)
 {
@@ -1071,13 +1546,12 @@ vine_datavine_data_controller_publish_async(
 		return 0;
 	struct vine_datavine_data_publication *publication = publication_create();
 	struct publication_job *job = calloc(1, sizeof(*job));
-	struct jx *output_ids = jx_lookup(task, "output_data_ids");
-	struct jx *output_files = jx_lookup(jx_lookup(task, "executor"),
-			"output_files");
-	struct jx *executor = jx_lookup(task, "executor");
+	struct jx *output_ids = vine_datavine_ir_task_outputs(task);
+	struct jx *output_files = jx_lookup(executor, "output_files");
+	const char *version = jx_lookup_string(executor, "version");
 	int worker_local = output_files &&
 			   !strcmp(jx_lookup_string(executor, "kind"), "python") &&
-			   !strcmp(jx_lookup_string(executor, "version"), "callable-v1");
+			   !strcmp(version, VINE_DATAVINE_PYTHON_CALLABLE_VERSION);
 	const char *plain_output = output_files ? 0 : vine_task_get_stdout(completed);
 	size_t plain_output_size = plain_output ? strlen(plain_output) : 0;
 	int total = jx_array_length(output_ids);
@@ -1088,16 +1562,16 @@ vine_datavine_data_controller_publish_async(
 		return 0;
 	}
 	job->workflow_id = strdup(workflow_id);
-	job->task_id = jx_lookup_integer(task, "task_id");
+	job->task_id = (int64_t)vine_datavine_ir_task_id(task);
 	job->attempt = attempt;
 	job->outputs = calloc((size_t)total, sizeof(*job->outputs));
 	job->publication = publication;
 	struct publication_output *manifest_outputs = worker_local
-								      ? calloc((size_t)total, sizeof(*manifest_outputs))
-								      : 0;
+									  ? calloc((size_t)total, sizeof(*manifest_outputs))
+									  : 0;
 	int valid = job->workflow_id && job->outputs &&
-		    (!worker_local || (manifest_outputs && parse_output_manifest(
-									   vine_task_get_stdout(completed), manifest_outputs, (size_t)total, &job->decode_nanoseconds, &job->function_nanoseconds, &job->serialize_nanoseconds, &job->fsync_nanoseconds)));
+			(!worker_local || (manifest_outputs && parse_output_manifest(
+									   vine_task_get_stdout(completed), manifest_outputs, (size_t)total, &job->pull_nanoseconds, &job->decode_nanoseconds, &job->function_nanoseconds, &job->serialize_nanoseconds, &job->fsync_nanoseconds)));
 	char directory[PATH_MAX];
 	int directory_ready = 0;
 	for (int index = 0; valid && index < total; index++) {
@@ -1109,17 +1583,18 @@ vine_datavine_data_controller_publish_async(
 		char path[PATH_MAX];
 		struct publication_output *output = &job->outputs[job->count++];
 		int durable_worker_output = worker_local &&
-					    itable_lookup(requested, data_id) != 0;
+						itable_lookup(requested, data_id) != 0;
 		if ((!worker_local || durable_worker_output) && !directory_ready)
-			directory_ready = workflow_directory(controller, workflow_id, directory);
+			directory_ready = workflow_directory_path(controller, workflow_id, directory);
 		valid = ((!worker_local || durable_worker_output)
 							? directory_ready && output_path_in_directory(
-											     directory, data_id, attempt, path)
+												 directory, data_id, attempt, path)
 							: 1) &&
-			fill_output_metadata(output, itable_lookup(data, data_id), requested, data_id, attempt, worker_local && !durable_worker_output ? 0 : path);
+			fill_output_metadata(output, itable_lookup(data, data_id), default_codec, requested, data_id, attempt, worker_local && !durable_worker_output ? 0 : path);
 		if (valid && worker_local) {
 			output->info.size = manifest_outputs[index].info.size;
 			memcpy(output->info.sha256, manifest_outputs[index].info.sha256, sizeof(output->info.sha256));
+			output->direct_durable = durable_worker_output;
 			output->remote_file = itable_lookup(files, data_id);
 			valid = output->remote_file != 0;
 			output->remote_only = !durable_worker_output;
@@ -1148,6 +1623,22 @@ vine_datavine_data_controller_publish_async(
 	}
 	if (!job->count) {
 		publication_finish(publication, 1, 0);
+		job_delete(job);
+		return publication;
+	}
+	if (!controller->thread_count) {
+		clock_gettime(CLOCK_MONOTONIC, &job->commit_started);
+		job->metrics.pull_nanoseconds = job->pull_nanoseconds;
+		job->metrics.decode_nanoseconds = job->decode_nanoseconds;
+		job->metrics.function_nanoseconds = job->function_nanoseconds;
+		job->metrics.serialize_nanoseconds = job->serialize_nanoseconds;
+		job->metrics.fsync_nanoseconds = job->fsync_nanoseconds;
+		if (!prepare_job(controller, job))
+			publication_finish(publication, 0, 0);
+		else if (!job->durable_count)
+			finish_job(job, 1);
+		else
+			commit_prepared_jobs(controller, job);
 		job_delete(job);
 		return publication;
 	}
@@ -1230,15 +1721,11 @@ int vine_datavine_data_controller_fetch_result(
 		return 0;
 	*data = 0;
 	*size = 0;
-	char *key = result_key(workflow_id, data_id);
 	pthread_mutex_lock(&controller->lock);
-	struct data_result *result = key
-						     ? hash_table_lookup(controller->results, key)
-						     : 0;
+	struct data_result *result = result_lookup(controller, workflow_id, data_id);
 	char *path = result && result->durable ? strdup(result->path) : 0;
 	uint64_t expected_size = result ? result->info.size : 0;
 	pthread_mutex_unlock(&controller->lock);
-	free(key);
 	if (!path || expected_size > SIZE_MAX) {
 		free(path);
 		return 0;
@@ -1273,16 +1760,60 @@ int vine_datavine_data_controller_result_info(
 {
 	if (!controller || !workflow_id || !data_id || !result)
 		return 0;
-	char *key = result_key(workflow_id, data_id);
 	pthread_mutex_lock(&controller->lock);
-	struct data_result *stored = key
-						     ? hash_table_lookup(controller->results, key)
-						     : 0;
+	struct data_result *stored = result_lookup(controller, workflow_id, data_id);
 	if (stored && stored->durable)
 		*result = stored->info;
 	pthread_mutex_unlock(&controller->lock);
-	free(key);
 	return stored && stored->durable;
+}
+
+int vine_datavine_data_controller_result_path(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, uint64_t data_id,
+		char *path, size_t path_size)
+{
+	if (!controller || !workflow_id || !data_id || !path || !path_size)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct data_result *stored = result_lookup(controller, workflow_id, data_id);
+	int valid = stored && stored->durable && stored->path &&
+			strlen(stored->path) + 1 <= path_size;
+	if (valid)
+		memcpy(path, stored->path, strlen(stored->path) + 1);
+	pthread_mutex_unlock(&controller->lock);
+	return valid;
+}
+
+int vine_datavine_data_controller_result_descriptors(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, const uint64_t *data_ids, size_t count,
+		struct vine_datavine_workflow_result_info *results, char **paths)
+{
+	if (!controller || !workflow_id || !data_ids || !count || !results || !paths)
+		return 0;
+	memset(paths, 0, count * sizeof(*paths));
+	int valid = 1;
+	pthread_mutex_lock(&controller->lock);
+	for (size_t index = 0; valid && index < count; index++) {
+		struct data_result *stored = data_ids[index]
+								 ? result_lookup(controller, workflow_id, data_ids[index])
+								 : 0;
+		valid = stored && stored->durable && stored->path;
+		if (valid) {
+			results[index] = stored->info;
+			paths[index] = strdup(stored->path);
+			valid = paths[index] != 0;
+		}
+	}
+	pthread_mutex_unlock(&controller->lock);
+	if (!valid) {
+		for (size_t index = 0; index < count; index++) {
+			free(paths[index]);
+			paths[index] = 0;
+		}
+	}
+	return valid;
 }
 
 int vine_datavine_data_controller_result_active(
@@ -1291,12 +1822,26 @@ int vine_datavine_data_controller_result_active(
 {
 	if (!controller || !workflow_id || !data_id)
 		return 0;
-	char *key = result_key(workflow_id, data_id);
 	pthread_mutex_lock(&controller->lock);
-	int active = key && hash_table_lookup(controller->results, key);
+	struct data_result *result = result_lookup(controller, workflow_id, data_id);
+	int active = result && !result->lost;
 	pthread_mutex_unlock(&controller->lock);
-	free(key);
 	return active;
+}
+
+int vine_datavine_data_controller_result_counts(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, size_t *active, size_t *peak)
+{
+	if (!controller || !workflow_id || !active || !peak)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct workflow_losses *losses = hash_table_lookup(
+			controller->workflow_losses, workflow_id);
+	*active = losses ? losses->active_results : 0;
+	*peak = losses ? losses->peak_results : 0;
+	pthread_mutex_unlock(&controller->lock);
+	return 1;
 }
 
 struct vine_file *vine_datavine_data_controller_restore_file(
@@ -1306,15 +1851,13 @@ struct vine_file *vine_datavine_data_controller_restore_file(
 {
 	if (!controller || !manager || !workflow_id || !data_id)
 		return 0;
-	char *key = result_key(workflow_id, data_id);
 	pthread_mutex_lock(&controller->lock);
-	struct data_result *stored = key
-						     ? hash_table_lookup(controller->results, key)
-						     : 0;
+	struct data_result *stored = result_lookup(controller, workflow_id, data_id);
+	if (stored && stored->lost)
+		stored = 0;
 	struct vine_file *remote_file = stored ? stored->remote_file : 0;
 	char *path = stored && stored->durable ? strdup(stored->path) : 0;
 	pthread_mutex_unlock(&controller->lock);
-	free(key);
 	struct vine_file *file = remote_file
 						 ? remote_file
 				 : path
@@ -1324,6 +1867,74 @@ struct vine_file *vine_datavine_data_controller_restore_file(
 	return file;
 }
 
+int vine_datavine_data_controller_release_results(
+		struct vine_datavine_data_controller *controller,
+		struct vine_manager *manager, const char *workflow_id,
+		struct itable *files,
+		const uint64_t *data_ids, size_t count)
+{
+	if (!controller || !manager || !workflow_id || !workflow_id[0] ||
+			!files || (count && !data_ids) || count > UINT16_MAX)
+		return 0;
+	if (!count)
+		return 1;
+	uint64_t *drop = malloc(count * sizeof(*drop));
+	uint64_t *durable = malloc(count * sizeof(*durable));
+	if (!drop || !durable) {
+		free(drop);
+		free(durable);
+		return 0;
+	}
+	pthread_mutex_lock(&controller->lock);
+	size_t drop_count = 0;
+	size_t durable_count = 0;
+	for (size_t index = 0; index < count; index++) {
+		struct data_result *result = result_lookup(controller, workflow_id, data_ids[index]);
+		if (!result || result->info.requested)
+			continue;
+		drop[drop_count++] = data_ids[index];
+		if (result->durable)
+			durable[durable_count++] = data_ids[index];
+	}
+	int valid = 1;
+	if (durable_count) {
+		size_t workflow_size = strlen(workflow_id);
+		size_t payload_size = 4 + workflow_size + durable_count * 8;
+		unsigned char *payload = payload_size <= UINT32_MAX
+							 ? malloc(payload_size)
+							 : 0;
+		valid = payload && workflow_size <= UINT16_MAX;
+		if (valid) {
+			vine_datavine_put_u16(payload, (uint16_t)workflow_size);
+			vine_datavine_put_u16(payload + 2, (uint16_t)durable_count);
+			memcpy(payload + 4, workflow_id, workflow_size);
+			for (size_t index = 0; index < durable_count; index++)
+				vine_datavine_put_u64(payload + 4 + workflow_size + index * 8,
+						durable[index]);
+			valid = vine_datavine_journal_commit(controller->journal,
+					DATA_RELEASE_BATCH,
+					payload,
+					payload_size);
+		}
+		free(payload);
+	}
+	for (size_t index = 0; valid && index < drop_count; index++) {
+		struct data_result *removed = result_remove(controller, workflow_id, drop[index]);
+		if (removed && removed->remote_file) {
+			if (itable_lookup(files, drop[index]) == removed->remote_file)
+				itable_remove(files, drop[index]);
+			vine_undeclare_file_no_loss_event(manager, removed->remote_file);
+		}
+		if (removed && removed->path)
+			unlink(removed->path);
+		data_result_delete(removed);
+	}
+	pthread_mutex_unlock(&controller->lock);
+	free(durable);
+	free(drop);
+	return valid;
+}
+
 int vine_datavine_data_controller_finish_workflow(
 		struct vine_datavine_data_controller *controller,
 		struct vine_manager *manager, const char *workflow_id)
@@ -1331,31 +1942,36 @@ int vine_datavine_data_controller_finish_workflow(
 	if (!controller || !manager || !workflow_id || !workflow_id[0])
 		return 0;
 	pthread_mutex_lock(&controller->lock);
-	size_t prefix_size = strlen(workflow_id);
-	size_t capacity = (size_t)hash_table_size(controller->results);
+	struct itable *results = result_namespace(controller, workflow_id, 0);
+	size_t capacity = results ? (size_t)itable_size(results) : 0;
 	uint64_t *drop = capacity ? malloc(capacity * sizeof(*drop)) : 0;
 	uint64_t *durable_drop = capacity
 						 ? malloc(capacity * sizeof(*durable_drop))
 						 : 0;
-	char *key;
+	UINT64_T data_id;
 	struct data_result *result;
 	int iterator;
 	size_t count = 0;
 	size_t durable_count = 0;
 	int valid = !capacity || (drop && durable_drop);
-	HASH_TABLE_ITERATE(controller->results, iterator, key, result)
-	{
-		if (strncmp(key, workflow_id, prefix_size) ||
-				key[prefix_size] != '\037')
-			continue;
-		if (result->remote_file) {
-			vine_undeclare_file(manager, result->remote_file);
-			result->remote_file = 0;
-		}
-		if (valid && !result->info.requested) {
-			drop[count++] = result->info.data_id;
-			if (result->durable)
-				durable_drop[durable_count++] = result->info.data_id;
+	if (results) {
+		ITABLE_ITERATE(results, iterator, data_id, result)
+		{
+			if (result->remote_file) {
+				const char *cached_name = !result->durable
+									  ? vine_file_cached_name(result->remote_file)
+									  : 0;
+				if (cached_name)
+					hash_table_remove(controller->result_files,
+							cached_name);
+				vine_undeclare_file_no_loss_event(manager, result->remote_file);
+				result->remote_file = 0;
+			}
+			if (valid && !result->info.requested) {
+				drop[count++] = result->info.data_id;
+				if (result->durable)
+					durable_drop[durable_count++] = result->info.data_id;
+			}
 		}
 	}
 	if (valid && durable_count) {
@@ -1382,14 +1998,11 @@ int vine_datavine_data_controller_finish_workflow(
 	}
 	if (valid) {
 		for (size_t index = 0; index < count; index++) {
-			char *drop_key = result_key(workflow_id, drop[index]);
-			struct data_result *removed = drop_key
-								      ? hash_table_remove(controller->results, drop_key)
-								      : 0;
+			struct data_result *removed = result_remove(
+					controller, workflow_id, drop[index]);
 			if (removed && removed->path)
 				unlink(removed->path);
 			data_result_delete(removed);
-			free(drop_key);
 		}
 	}
 	free(durable_drop);

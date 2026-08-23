@@ -66,7 +66,11 @@ into a swig function f(data) */
 /* Convert a C array of binary data to Python bytes. */
 %inline %{
 	PyObject *vine_file_contents_as_bytes(struct vine_file *f) {
-		return PyBytes_FromStringAndSize(vine_file_contents(f), vine_file_size(f));
+		const char *contents = vine_file_contents(f);
+		if (!contents) {
+			Py_RETURN_NONE;
+		}
+		return PyBytes_FromStringAndSize(contents, vine_file_size(f));
 	}
 %}
 

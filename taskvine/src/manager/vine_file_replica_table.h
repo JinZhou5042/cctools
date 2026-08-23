@@ -30,6 +30,10 @@ struct vine_file_replica *vine_file_replica_table_get_or_create(struct vine_mana
 
 struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager *q, const char *cachename);
 
+/* Find a ready replica for a manager-initiated getfile.  Unlike peer source
+ * selection, this does not require the worker's peer-transfer port. */
+struct vine_worker_info *vine_file_replica_table_find_worker_for_manager(struct vine_manager *q, const char *cachename);
+
 int vine_file_replica_table_count_replicas( struct vine_manager *q, const char *cachename, vine_file_replica_state_t state );
 
 #endif

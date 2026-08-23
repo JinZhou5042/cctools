@@ -138,6 +138,7 @@ static vine_result_code_t get_stdout(struct vine_manager *q, struct vine_worker_
 static vine_result_code_t get_stdout_long(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
 
 static void find_max_worker(struct vine_manager *q);
+static void emit_worker_event(struct vine_manager *q, struct vine_worker_info *w, vine_worker_event_type_t type, int reason);
 
 // char *hashkey, struct vine_worker_info *w, struct rmsummary *max
 static void update_max_worker(const char *hashkey, void *w, void *max);
@@ -379,6 +380,10 @@ static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_in
 		free(w->workerid);
 		w->workerid = xxstrdup(value);
 		vine_txn_log_write_worker(q, w, 0, 0);
+		if (!w->lifecycle_connected_emitted) {
+			emit_worker_event(q, w, VINE_WORKER_EVENT_CONNECTED, 0);
+			w->lifecycle_connected_emitted = 1;
+		}
 	} else if (string_prefix_is(field, "worker-end-time")) {
 		w->end_time = MAX(0, atoll(value));
 	} else if (string_prefix_is(field, "from-factory")) {
@@ -468,6 +473,10 @@ static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_w
 
 		struct vine_file *f = hash_table_lookup(q->file_table, cachename);
 		if (f) {
+			if (f->type == VINE_URL) {
+				q->stats->bytes_url_received += size;
+				q->stats->time_url_received += transfer_time;
+			}
 			/* We know it exists and how large it is now. */
 			f->state = VINE_FILE_STATE_CREATED;
 			f->size = size;
@@ -1149,6 +1158,24 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w)
 	cleanup_worker_files(q, w);
 }
 
+static void emit_worker_event(struct vine_manager *q, struct vine_worker_info *w, vine_worker_event_type_t type, int reason)
+{
+	if (!q || !w || !q->worker_event_queue || !q->worker_events_enabled)
+		return;
+
+	struct vine_worker_event *event = calloc(1, sizeof(*event));
+	if (!event)
+		return;
+
+	event->type = type;
+	event->event_id = ++q->next_worker_event_id;
+	event->connection_epoch = w->connection_epoch;
+	event->disconnect_reason = reason;
+	snprintf(event->worker_id, sizeof(event->worker_id), "%s", w->workerid ? w->workerid : w->hashkey);
+	snprintf(event->hostname, sizeof(event->hostname), "%s", w->hostname ? w->hostname : "unknown");
+	list_push_tail(q->worker_event_queue, event);
+}
+
 /* Insert into hashtable temp files that may need replication. */
 
 static void recall_worker_lost_temp_files(struct vine_manager *q, struct vine_worker_info *w)
@@ -1181,6 +1208,7 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	if (w->type == VINE_WORKER_TYPE_WORKER) {
 		q->stats->workers_removed++;
+		emit_worker_event(q, w, VINE_WORKER_EVENT_LOST, reason);
 	}
 	vine_txn_log_write_worker(q, w, 1, reason);
 
@@ -1190,7 +1218,6 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 	if (q->transfer_temps_recovery) {
 		recall_worker_lost_temp_files(q, w);
 	}
-
 	cleanup_worker(q, w);
 
 	vine_manager_factory_worker_leave(q, w);
@@ -1666,6 +1693,7 @@ static vine_msg_code_t handle_taskvine(struct vine_manager *q, struct vine_worke
 	w->version = strdup(items[3]);
 
 	w->type = VINE_WORKER_TYPE_WORKER;
+	w->connection_epoch = ++q->next_worker_connection_epoch;
 
 	q->stats->workers_joined++;
 	debug(D_VINE, "%d workers are connected in total now", count_workers(q, VINE_WORKER_TYPE_WORKER));
@@ -4206,6 +4234,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->temp_files_to_replicate = priority_queue_create(0);
 	q->worker_blocklist = hash_table_create(0, 0);
 	q->workers_idle_disconnecting = hash_table_create(0, 0);
+	q->worker_event_queue = list_create();
+	q->last_replica_loss_queue = list_create();
 
 	q->file_table = hash_table_create(0, 0);
 
@@ -4596,6 +4626,10 @@ void vine_delete(struct vine_manager *q)
 	hash_table_delete(q->worker_blocklist);
 
 	hash_table_delete(q->workers_idle_disconnecting);
+	list_clear(q->worker_event_queue, free);
+	list_delete(q->worker_event_queue);
+	list_clear(q->last_replica_loss_queue, free);
+	list_delete(q->last_replica_loss_queue);
 
 	vine_current_transfers_clear(q);
 	hash_table_delete(q->current_transfer_table);
@@ -5216,8 +5250,48 @@ struct vine_task *vine_wait_for_milliseconds(struct vine_manager *q, int timeout
 {
 	if (timeout <= 0)
 		return vine_manager_no_wait(q, NULL, -1);
-	return vine_wait_internal(q, 1, NULL, -1,
-			timestamp_get() + (timestamp_t)timeout * 1000);
+	return vine_wait_internal(q, 1, NULL, -1, timestamp_get() + (timestamp_t)timeout * 1000);
+}
+
+int vine_manager_poll_worker_event(struct vine_manager *q, struct vine_worker_event *event)
+{
+	if (!q || !event)
+		return -1;
+
+	struct vine_worker_event *queued = list_pop_head(q->worker_event_queue);
+	if (!queued)
+		return 0;
+
+	*event = *queued;
+	free(queued);
+	return 1;
+}
+
+int vine_manager_enable_worker_events(struct vine_manager *q)
+{
+	if (!q)
+		return 0;
+	q->worker_events_enabled = 1;
+	return 1;
+}
+
+int vine_manager_enable_last_replica_loss_events(struct vine_manager *q)
+{
+	if (!q || !q->last_replica_loss_queue)
+		return 0;
+	q->last_replica_loss_events_enabled = 1;
+	return 1;
+}
+
+int vine_manager_poll_last_replica_loss(struct vine_manager *q,
+		char **cached_name)
+{
+	if (!q || !cached_name || !q->last_replica_loss_queue)
+		return -1;
+	*cached_name = list_pop_head(q->last_replica_loss_queue);
+	if (*cached_name)
+		return 1;
+	return q->last_replica_loss_events_failed ? -1 : 0;
 }
 
 /*
@@ -6443,13 +6517,13 @@ void vine_accumulate_task(struct vine_manager *q, struct vine_task *t)
 
 	if (t->result == VINE_RESULT_SUCCESS) {
 		q->stats->time_workers_execute_good += t->time_workers_execute_last;
-		q->stats->time_send_good += t->time_when_commit_end - t->time_when_commit_end;
+		q->stats->time_send_good += t->time_when_commit_end - t->time_when_commit_start;
 		q->stats->time_receive_good += t->time_when_done - t->time_when_retrieval;
 		q->stats->tasks_successful++;
 
 		s->tasks_successful++;
 		s->time_workers_execute_good += t->time_workers_execute_last;
-		s->time_send_good += t->time_when_commit_end - t->time_when_commit_end;
+		s->time_send_good += t->time_when_commit_end - t->time_when_commit_start;
 		s->time_receive_good += t->time_when_done - t->time_when_retrieval;
 	} else {
 		q->stats->tasks_failed++;
@@ -6733,6 +6807,16 @@ void vine_undeclare_file(struct vine_manager *m, struct vine_file *f)
 	*/
 }
 
+void vine_undeclare_file_no_loss_event(struct vine_manager *m,
+		struct vine_file *f)
+{
+	if (!m || !f)
+		return;
+	m->last_replica_loss_events_suppressed++;
+	vine_undeclare_file(m, f);
+	m->last_replica_loss_events_suppressed--;
+}
+
 struct vine_file *vine_manager_lookup_file(struct vine_manager *m, const char *cached_name)
 {
 	return hash_table_lookup(m->file_table, cached_name);
@@ -6780,6 +6864,16 @@ struct vine_file *vine_declare_url(struct vine_manager *m, const char *source, v
 {
 	struct vine_file *f = vine_file_url(source, cache, flags);
 	return vine_manager_declare_file(m, f);
+}
+
+struct vine_file *vine_declare_url_cached(struct vine_manager *m,
+		const char *source, const char *cached_name,
+		vine_cache_level_t cache, vine_file_flags_t flags)
+{
+	if (!m || !source || !cached_name || !cached_name[0] || strchr(cached_name, '/'))
+		return 0;
+	struct vine_file *f = vine_file_create(source, cached_name, 0, 0, VINE_URL, 0, cache, flags);
+	return f ? vine_manager_declare_file(m, f) : 0;
 }
 
 struct vine_file *vine_declare_temp(struct vine_manager *m)
@@ -6846,8 +6940,11 @@ EIO    - something more serious went wrong.
 
 const char *vine_fetch_file(struct vine_manager *m, struct vine_file *f)
 {
-	/* If the file should not exist yet, bail out quickly. */
-	if (f->state == VINE_FILE_STATE_PENDING) {
+	/* A TEMP's state can lag an already-announced remote replica.  In
+	 * particular, high fan-in/out workloads may observe the output's
+	 * cache-update before task bookkeeping finishes.  The replica table is
+	 * authoritative for whether a remote fetch can proceed. */
+	if (f->state == VINE_FILE_STATE_PENDING && vine_file_replica_count(m, f) < 1) {
 		errno = ENOENT;
 		return 0;
 	}
@@ -6882,7 +6979,7 @@ const char *vine_fetch_file(struct vine_manager *m, struct vine_file *f)
 	case VINE_MINI_TASK:
 		/* If the file has been materialized remotely, go get it from a worker. */
 		{
-			struct vine_worker_info *w = vine_file_replica_table_find_worker(m, f->cached_name);
+			struct vine_worker_info *w = vine_file_replica_table_find_worker_for_manager(m, f->cached_name);
 			if (w) {
 				vine_manager_get_single_file(m, w, f);
 				if (f->data) {

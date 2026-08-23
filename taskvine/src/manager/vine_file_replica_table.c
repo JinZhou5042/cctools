@@ -77,6 +77,15 @@ struct vine_file_replica *vine_file_replica_table_remove(struct vine_manager *m,
 	if (workers) {
 		set_remove(workers, w);
 		if (set_size(workers) < 1) {
+			if (m->last_replica_loss_events_enabled &&
+					!m->last_replica_loss_events_suppressed &&
+					!m->last_replica_loss_events_failed) {
+				char *event = strdup(cachename);
+				if (event)
+					list_push_tail(m->last_replica_loss_queue, event);
+				else
+					m->last_replica_loss_events_failed = 1;
+			}
 			hash_table_remove(m->file_worker_table, cachename);
 			set_delete(workers);
 		}
@@ -146,6 +155,26 @@ struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager
 	}
 
 	return peer_selected;
+}
+
+struct vine_worker_info *vine_file_replica_table_find_worker_for_manager(struct vine_manager *q, const char *cachename)
+{
+	struct set *workers = hash_table_lookup(q->file_worker_table, cachename);
+	if (!workers) {
+		return 0;
+	}
+
+	struct vine_worker_info *worker;
+	int iteration;
+	SET_ITERATE(workers, iteration, worker)
+	{
+		struct vine_file_replica *replica = hash_table_lookup(worker->current_files, cachename);
+		if (replica && replica->state == VINE_FILE_REPLICA_STATE_READY) {
+			return worker;
+		}
+	}
+
+	return 0;
 }
 
 /*

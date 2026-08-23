@@ -5,9 +5,11 @@
 #include "vine_datavine_workflow.h"
 
 #include <stddef.h>
+#include <signal.h>
 #include <stdint.h>
 
 struct vine_datavine_workflow_store;
+struct vine_datavine_journal;
 struct vine_datavine_workflow_runtime;
 struct vine_datavine_data_controller;
 struct vine_manager;
@@ -35,6 +37,7 @@ enum vine_datavine_workflow_state {
 	VINE_DATAVINE_WORKFLOW_FAILED = 6,
 	VINE_DATAVINE_WORKFLOW_RUNNING_OPEN = 7,
 	VINE_DATAVINE_WORKFLOW_OPEN_QUIESCENT = 8,
+	VINE_DATAVINE_WORKFLOW_STAGED = 9,
 };
 
 enum vine_datavine_workflow_event_type {
@@ -95,6 +98,12 @@ struct vine_datavine_workflow_task_event_record {
 /* Store lifetime. */
 struct vine_datavine_workflow_store *vine_datavine_workflow_store_open(
 		const char *journal_path);
+struct vine_datavine_journal *vine_datavine_workflow_store_journal(
+		struct vine_datavine_workflow_store *store);
+int vine_datavine_workflow_store_recover(
+		struct vine_datavine_workflow_store *store,
+		const char *workflow_id,
+		struct vine_datavine_workflow_error *error);
 void vine_datavine_workflow_store_close(
 		struct vine_datavine_workflow_store *store);
 
@@ -181,6 +190,9 @@ int vine_datavine_workflow_store_record_task_events(
 uint32_t vine_datavine_workflow_store_task_attempts(
 		struct vine_datavine_workflow_store *store,
 		const char *workflow_id, int64_t task_id);
+int vine_datavine_workflow_store_task_attempts_snapshot(
+		struct vine_datavine_workflow_store *store,
+		const char *workflow_id, uint32_t *attempts, size_t count);
 int vine_datavine_workflow_store_completed_task_ids(
 		struct vine_datavine_workflow_store *store,
 		const char *workflow_id, int64_t **task_ids, size_t *count);
@@ -195,6 +207,9 @@ struct vine_datavine_workflow_runtime *vine_datavine_workflow_runtime_start(
 		struct vine_manager *manager,
 		const char *native_executor_path,
 		const char *python_executor_path);
+void vine_datavine_workflow_runtime_run(
+		struct vine_datavine_workflow_runtime *runtime,
+		volatile sig_atomic_t *external_stopping);
 void vine_datavine_workflow_runtime_stop(
 		struct vine_datavine_workflow_runtime *runtime);
 

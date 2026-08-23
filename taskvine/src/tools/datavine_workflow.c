@@ -3,6 +3,7 @@
 #include "vine_datavine_workflow.h"
 #include "vine_datavine_workflow_store.h"
 #include "vine_datavine_rpc.h"
+#include "vine_datavine_data_controller.h"
 
 #include "taskvine.h"
 
@@ -452,8 +453,43 @@ static int serve(int argc, char **argv)
 		fprintf(stderr, "datavine_workflow: invalid port\n");
 		return 2;
 	}
+	char default_profile[PATH_MAX];
+	if (!getenv("DATAVINE_PROFILE_PATH") &&
+			!getenv("DATAVINE_WORKFLOW_METRICS")) {
+		if (snprintf(default_profile, sizeof(default_profile), "%s.profile", argv[2]) >= (int)sizeof(default_profile) ||
+				setenv("DATAVINE_PROFILE_PATH", default_profile, 0) != 0) {
+			fprintf(stderr, "datavine_workflow: could not configure profile path\n");
+			return 1;
+		}
+	}
+	char advertised_host[256];
+	const char *configured_host = getenv("DATAVINE_ADVERTISE_HOST");
+	if (configured_host && configured_host[0]) {
+		if (snprintf(advertised_host, sizeof(advertised_host), "%s", configured_host) >= (int)sizeof(advertised_host)) {
+			fprintf(stderr, "datavine_workflow: advertised host is too long\n");
+			return 2;
+		}
+	} else if (gethostname(advertised_host, sizeof(advertised_host)) != 0) {
+		fprintf(stderr, "datavine_workflow: could not determine hostname\n");
+		return 1;
+	}
+	advertised_host[sizeof(advertised_host) - 1] = 0;
+	/* Metadata RPC and publication are non-blocking control-plane work.  One
+	 * event-loop thread is the default; deployments may opt into more while
+	 * the compatibility path is being retired. */
+	int service_threads = 1;
+	const char *configured_threads = getenv("DATAVINE_SERVICE_THREADS");
+	if (configured_threads && configured_threads[0]) {
+		char *end = 0;
+		long value = strtol(configured_threads, &end, 10);
+		if (!end || *end || value < 1 || value > 256) {
+			fprintf(stderr, "datavine_workflow: invalid DATAVINE_SERVICE_THREADS\n");
+			return 2;
+		}
+		service_threads = (int)value;
+	}
 	struct vine_datavine_rpc_server *server = vine_datavine_rpc_server_create(
-			"127.0.0.1", port, argv[3], 4, argv[2]);
+			"0.0.0.0", port, argv[3], service_threads, argv[2]);
 	if (!server) {
 		fprintf(stderr, "datavine_workflow: could not start native service\n");
 		return 1;
@@ -476,11 +512,20 @@ static int serve(int argc, char **argv)
 		vine_datavine_rpc_server_delete(server);
 		return 1;
 	}
-	struct vine_datavine_workflow_runtime *runtime =
-			vine_datavine_workflow_runtime_start(
-					vine_datavine_rpc_server_workflow_store(server),
+	int object_service_ready =
+			vine_datavine_data_controller_configure_object_service(
 					vine_datavine_rpc_server_data_controller(server),
-					manager, native_executor, python_executor);
+					advertised_host,
+					vine_datavine_rpc_server_port(server),
+					argv[3]);
+	struct vine_datavine_workflow_runtime *runtime = object_service_ready
+									 ? vine_datavine_workflow_runtime_start(
+											   vine_datavine_rpc_server_workflow_store(server),
+											   vine_datavine_rpc_server_data_controller(server),
+											   manager,
+											   native_executor,
+											   python_executor)
+									 : 0;
 	if (!runtime) {
 		fprintf(stderr, "datavine_workflow: could not start native workflow runtime\n");
 		vine_delete(manager);
@@ -489,13 +534,13 @@ static int serve(int argc, char **argv)
 	}
 	signal(SIGINT, stop_service);
 	signal(SIGTERM, stop_service);
-	printf("{\"endpoint\":\"tcp://127.0.0.1:%d\",\"manager_port\":%d,\"pid\":%ld}\n",
+	printf("{\"endpoint\":\"tcp://%s:%d\",\"manager_port\":%d,\"pid\":%ld}\n",
+			advertised_host,
 			vine_datavine_rpc_server_port(server),
 			vine_port(manager),
 			(long)getpid());
 	fflush(stdout);
-	while (!stopping)
-		pause();
+	vine_datavine_workflow_runtime_run(runtime, &stopping);
 	vine_datavine_workflow_runtime_stop(runtime);
 	vine_delete(manager);
 	vine_datavine_rpc_server_delete(server);

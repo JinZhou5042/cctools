@@ -5,6 +5,7 @@ See the file COPYING for details.
 */
 
 #include "vine_cache.h"
+#include "vine_datavine_transfer.h"
 #include "vine_cache_file.h"
 #include "vine_mount.h"
 #include "vine_process.h"
@@ -619,6 +620,9 @@ static int do_transfer(struct vine_cache *c, struct vine_cache_file *f, const ch
 		if (result) {
 			result = do_worker_transfer(c, f, cachename, error_message);
 		}
+	} else if (strncmp(f->source, "datavine://", 11) == 0 ||
+			strncmp(f->source, "datavine-file://", 16) == 0) {
+		result = vine_datavine_transfer_get(f->source, transfer_path, error_message);
 	} else {
 		result = do_curl_transfer(c, f, transfer_path, cache_path, error_message);
 	}

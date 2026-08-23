@@ -12,6 +12,7 @@ See the file COPYING for details.
 #include "jx_canonicalize.h"
 #include "jx_parse.h"
 #include "sha1.h"
+#include "vine_datavine_ir.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -48,12 +49,8 @@ static int lookup_data_record(struct validation *v, uint64_t data_id,
 {
 	struct jx *local = itable_lookup(v->data, data_id);
 	if (local) {
-		struct jx *origin = jx_lookup(local, "origin");
-		const char *kind = origin ? jx_lookup_string(origin, "kind") : 0;
 		if (producer_task_id)
-			*producer_task_id = kind && !strcmp(kind, "output")
-							    ? jx_lookup_integer(origin, "task_id")
-							    : 0;
+			*producer_task_id = vine_datavine_ir_data_producer(local);
 		if (record)
 			*record = local;
 		return 1;
@@ -105,8 +102,8 @@ static int nonempty_string(struct validation *v, struct jx *object,
 		return 0;
 	size_t size = strlen(value->u.string_value);
 	return size && size <= maximum
-			       ? 1
-			       : fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "string length must be between 1 and %zu", maximum);
+				   ? 1
+				   : fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "string length must be between 1 and %zu", maximum);
 }
 
 static int positive_integer(struct validation *v, struct jx *object,
@@ -126,8 +123,8 @@ static int optional_object(struct validation *v, struct jx *object,
 {
 	struct jx *value = jx_lookup(object, key);
 	return !value || jx_istype(value, JX_OBJECT)
-			       ? 1
-			       : fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "field must be an object");
+				   ? 1
+				   : fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "field must be an object");
 }
 
 static int allowed_keys(struct validation *v, struct jx *object,
@@ -180,12 +177,27 @@ static int validate_origin(struct validation *v, struct jx *origin,
 	if (!strcmp(name, "inline")) {
 		static const char *const keys[] = {"kind", "base64", 0};
 		return allowed_keys(v, origin, path, keys) &&
-		       nonempty_string(v, origin, "base64", path, 1048576);
+			   nonempty_string(v, origin, "base64", path, 1048576);
 	}
 	if (!strcmp(name, "uri")) {
 		static const char *const keys[] = {"kind", "uri", 0};
 		return allowed_keys(v, origin, path, keys) &&
-		       nonempty_string(v, origin, "uri", path, 4096);
+			   nonempty_string(v, origin, "uri", path, 4096);
+	}
+	if (!strcmp(name, "object")) {
+		static const char *const keys[] = {"kind", "sha256", 0};
+		if (!allowed_keys(v, origin, path, keys) ||
+				!nonempty_string(v, origin, "sha256", path, 64) ||
+				strlen(jx_lookup_string(origin, "sha256")) != 64)
+			return 0;
+		for (const char *cursor = jx_lookup_string(origin, "sha256");
+				*cursor;
+				cursor++) {
+			if (!((*cursor >= '0' && *cursor <= '9') ||
+						(*cursor >= 'a' && *cursor <= 'f')))
+				return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "object sha256 must be lowercase hexadecimal");
+		}
+		return 1;
 	}
 	if (!strcmp(name, "output")) {
 		static const char *const keys[] = {"kind", "task_id", "output_index", 0};
@@ -201,7 +213,20 @@ static int validate_origin(struct validation *v, struct jx *origin,
 	return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "unsupported origin kind");
 }
 
-static int validate_data(struct validation *v, struct jx *array)
+static int validate_data_defaults(struct validation *v, struct jx *defaults)
+{
+	static const char *const keys[] = {"codec", 0};
+	if (!defaults)
+		return 1;
+	if (!jx_istype(defaults, JX_OBJECT) ||
+			!allowed_keys(v, defaults, "$.data_defaults", keys))
+		return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, "$.data_defaults", "data_defaults must be an object");
+	struct jx *codec = jx_lookup(defaults, "codec");
+	return !codec || validate_codec(v, codec, "$.data_defaults.codec");
+}
+
+static int validate_data(struct validation *v, struct jx *array,
+		struct jx *defaults)
 {
 	static const char *const keys[] = {"data_id", "codec", "origin", "content_sha256", 0};
 	uint64_t previous = 0;
@@ -211,23 +236,41 @@ static int validate_data(struct validation *v, struct jx *array)
 	while ((item = jx_iterate_array(array, &iterator))) {
 		char path[128];
 		snprintf(path, sizeof(path), "$.data[%llu]", (unsigned long long)index);
-		if (!jx_istype(item, JX_OBJECT))
+		int compact = vine_datavine_ir_data_compact(item);
+		if (compact) {
+			if (jx_array_length(item) != 3 ||
+					!jx_istype(jx_array_index(item, 0), JX_INTEGER) ||
+					!jx_istype(jx_array_index(item, 1), JX_INTEGER) ||
+					!jx_istype(jx_array_index(item, 2), JX_INTEGER) ||
+					jx_array_index(item, 0)->u.integer_value < 1 ||
+					jx_array_index(item, 1)->u.integer_value < 1 ||
+					jx_array_index(item, 2)->u.integer_value < 0)
+				return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "compact data must be [data_id, task_id, output_index]");
+			if (!defaults || !jx_lookup(defaults, "codec"))
+				return fail(v, VINE_DATAVINE_WORKFLOW_REQUIRED, path, "compact data requires data_defaults.codec");
+		} else if (!jx_istype(item, JX_OBJECT))
 			return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "data record must be an object");
-		if (!allowed_keys(v, item, path, keys))
+		if (!compact && !allowed_keys(v, item, path, keys))
 			return 0;
-		uint64_t data_id = 0;
-		if (!positive_integer(v, item, "data_id", path, &data_id, 0))
+		uint64_t data_id = vine_datavine_ir_data_id(item);
+		if (!data_id)
 			return 0;
 		if (data_id <= previous || (v->delta &&
 							   data_id <= v->existing_maximum_data_id))
 			return fail(v, VINE_DATAVINE_WORKFLOW_DUPLICATE, path, "data records must have unique ascending data_id values");
 		previous = data_id;
-		struct jx *codec = required(v, item, "codec", JX_OBJECT, path);
-		struct jx *origin = required(v, item, "origin", JX_OBJECT, path);
-		if (!codec || !origin || !validate_codec(v, codec, path) ||
-				!validate_origin(v, origin, path, data_id))
+		struct jx *inline_codec = compact ? 0 : jx_lookup(item, "codec");
+		struct jx *codec = inline_codec ? inline_codec
+				   : defaults	? jx_lookup(defaults, "codec")
+						: 0;
+		struct jx *origin = compact ? 0 : required(v, item, "origin", JX_OBJECT, path);
+		if (!codec)
+			return fail(v, VINE_DATAVINE_WORKFLOW_REQUIRED, path, "data requires codec or data_defaults.codec");
+		if ((!compact && !origin) || (inline_codec && !validate_codec(v, codec, path)) ||
+				(!compact &&
+						!validate_origin(v, origin, path, data_id)))
 			return 0;
-		struct jx *hash = jx_lookup(item, "content_sha256");
+		struct jx *hash = compact ? 0 : jx_lookup(item, "content_sha256");
 		if (hash) {
 			if (!jx_istype(hash, JX_STRING) || strlen(hash->u.string_value) != 64)
 				return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "invalid content_sha256");
@@ -237,6 +280,10 @@ static int validate_data(struct validation *v, struct jx *array)
 					return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "invalid content_sha256");
 			}
 		}
+		if (!compact && !strcmp(jx_lookup_string(origin, "kind"), "object") &&
+				(!hash || strcmp(hash->u.string_value,
+							  jx_lookup_string(origin, "sha256"))))
+			return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "object origin must match content_sha256");
 		if (!itable_insert(v->data, data_id, item))
 			return fail(v, VINE_DATAVINE_WORKFLOW_DUPLICATE, path, "duplicate data_id");
 		index++;
@@ -252,8 +299,8 @@ static int validate_output_files(struct validation *v, struct jx *files,
 {
 	if (!files)
 		return required
-				       ? fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "executor requires output_files")
-				       : 1;
+					   ? fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "executor requires output_files")
+					   : 1;
 	if (!jx_istype(files, JX_ARRAY) || !files->u.items)
 		return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "output_files must be a nonempty array");
 	struct jx *item;
@@ -279,6 +326,8 @@ static int validate_executor(struct validation *v, struct jx *executor,
 		return 0;
 	const char *kind = jx_lookup_string(executor, "kind");
 	if (!strcmp(kind, "command")) {
+		if (strcmp(jx_lookup_string(executor, "version"), VINE_DATAVINE_COMMAND_EXECUTOR_VERSION))
+			return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "command executor version must be 1");
 		struct jx *argv = required(v, executor, "argv", JX_ARRAY, path);
 		if (!argv || !argv->u.items)
 			return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "command argv must not be empty");
@@ -293,13 +342,16 @@ static int validate_executor(struct validation *v, struct jx *executor,
 			return 0;
 	} else if (!strcmp(kind, "python") || !strcmp(kind, "taskvine")) {
 		const char *version = !strcmp(kind, "python")
-						      ? jx_lookup_string(executor, "version")
-						      : 0;
+							  ? jx_lookup_string(executor, "version")
+							  : 0;
 		struct jx *output_files = jx_lookup(executor, "output_files");
 		if (!strcmp(kind, "taskvine") && output_files)
 			return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "output_files is not valid for taskvine executors");
+		if (!strcmp(kind, "python") && strcmp(version, VINE_DATAVINE_PYTHON_CALLABLE_VERSION) &&
+				strcmp(version, VINE_DATAVINE_PYTHON_SOURCE_VERSION))
+			return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "python executor version must be callable-v1 or source-v1");
 		if (!strcmp(kind, "python") &&
-				!validate_output_files(v, output_files, path, strcmp(version, "callable-v1") == 0 || strcmp(version, "source-v1") == 0))
+				!validate_output_files(v, output_files, path, 1))
 			return 0;
 		uint64_t payload_ref = 0;
 		struct jx *payload = 0;
@@ -310,7 +362,7 @@ static int validate_executor(struct validation *v, struct jx *executor,
 		if (!strcmp(kind, "python")) {
 			struct jx *function_ref_value = jx_lookup(executor, "function_ref");
 			struct jx *function_digest_value = jx_lookup(executor, "function_digest");
-			if (!strcmp(version, "callable-v1")) {
+			if (!strcmp(version, VINE_DATAVINE_PYTHON_CALLABLE_VERSION)) {
 				uint64_t function_ref = 0;
 				int64_t producer = 0;
 				if (!positive_integer(v, executor, "function_ref", path, &function_ref, 0) ||
@@ -321,18 +373,17 @@ static int validate_executor(struct validation *v, struct jx *executor,
 					return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "callable function_digest must be SHA-256 hex");
 				for (const char *cursor = function_digest_value->u.string_value; *cursor; cursor++) {
 					if (!((*cursor >= '0' && *cursor <= '9') ||
-							    (*cursor >= 'a' && *cursor <= 'f')))
+								(*cursor >= 'a' && *cursor <= 'f')))
 						return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "callable function_digest must be lowercase SHA-256 hex");
 				}
-				if (payload_producer > 0 ||
-						(payload && strcmp(jx_lookup_string(jx_lookup(payload, "origin"), "kind"), "inline")))
-					return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "callable invocation payload must be inline data");
+				if (payload_producer > 0)
+					return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "callable invocation payload must be external or inline data");
 			} else if (function_ref_value || function_digest_value) {
-				return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "function registration requires python callable-v1");
+				return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "function registration requires a Python callable executor");
 			}
 		}
 		if (!strcmp(kind, "taskvine")) {
-			if (strcmp(jx_lookup_string(executor, "version"), "builtin-v1"))
+			if (strcmp(jx_lookup_string(executor, "version"), VINE_DATAVINE_TASKVINE_EXECUTOR_VERSION))
 				return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "taskvine executor version must be builtin-v1");
 			/* An accepted payload was validated in its original transaction. */
 			if (!payload)
@@ -346,9 +397,9 @@ static int validate_executor(struct validation *v, struct jx *executor,
 			size_t payload_size = 0;
 			const char *bytes = buffer_tolstring(&decoded, &payload_size);
 			int valid_payload = decode_status == 0 && payload_size >= 5 &&
-					    !memcmp(bytes, "DVB1", 4) &&
-					    (((unsigned char)bytes[4] == 1 && payload_size == 5) ||
-							    (unsigned char)bytes[4] == 2);
+						!memcmp(bytes, "DVB1", 4) &&
+						(((unsigned char)bytes[4] == 1 && payload_size == 5) ||
+								(unsigned char)bytes[4] == 2);
 			buffer_free(&decoded);
 			if (!valid_payload)
 				return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "invalid taskvine builtin payload");
@@ -379,7 +430,7 @@ static int validate_resources(struct validation *v, struct jx *resources,
 	for (size_t i = 0; keys[i]; i++) {
 		struct jx *value = jx_lookup(resources, keys[i]);
 		if (value && (!jx_istype(value, JX_INTEGER) ||
-					     value->u.integer_value < ((!strcmp(keys[i], "cores") || !strcmp(keys[i], "wall_time_seconds")) ? 1 : 0)))
+						 value->u.integer_value < ((!strcmp(keys[i], "cores") || !strcmp(keys[i], "wall_time_seconds")) ? 1 : 0)))
 			return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "invalid resource value");
 	}
 	return 1;
@@ -422,7 +473,37 @@ static int validate_retry(struct validation *v, struct jx *retry,
 	return 1;
 }
 
-static int validate_tasks(struct validation *v, struct jx *array)
+static int validate_task_defaults(struct validation *v, struct jx *defaults)
+{
+	static const char *const keys[] = {"executor", "resources", "retry", "priority", 0};
+	if (!defaults)
+		return 1;
+	if (!jx_istype(defaults, JX_OBJECT) ||
+			!allowed_keys(v, defaults, "$.task_defaults", keys))
+		return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, "$.task_defaults", "task_defaults must be an object");
+	struct jx *executor = jx_lookup(defaults, "executor");
+	struct jx *resources = jx_lookup(defaults, "resources");
+	struct jx *retry = jx_lookup(defaults, "retry");
+	struct jx *priority = jx_lookup(defaults, "priority");
+	return (!executor || (jx_istype(executor, JX_OBJECT) &&
+						 validate_executor(v, executor, "$.task_defaults.executor"))) &&
+		   (!resources || validate_resources(v, resources, "$.task_defaults.resources")) &&
+		   (!retry || validate_retry(v, retry, "$.task_defaults.retry")) &&
+		   (!priority || jx_istype(priority, JX_INTEGER));
+}
+
+static struct jx *task_setting(struct jx *task, struct jx *defaults,
+		const char *name)
+{
+	struct jx *value = vine_datavine_ir_task_compact(task)
+					   ? 0
+					   : jx_lookup(task, name);
+	return value ? value : defaults ? jx_lookup(defaults, name)
+					: 0;
+}
+
+static int validate_tasks(struct validation *v, struct jx *array,
+		struct jx *defaults)
 {
 	static const char *const keys[] = {"task_id", "executor", "inputs", "output_data_ids", "resources", "retry", "priority", "labels", 0};
 	uint64_t previous = 0;
@@ -432,44 +513,62 @@ static int validate_tasks(struct validation *v, struct jx *array)
 	while ((item = jx_iterate_array(array, &iterator))) {
 		char path[128];
 		snprintf(path, sizeof(path), "$.tasks[%llu]", (unsigned long long)index);
-		if (!jx_istype(item, JX_OBJECT))
+		int compact = vine_datavine_ir_task_compact(item);
+		if (compact) {
+			if (jx_array_length(item) != 3 ||
+					!jx_istype(jx_array_index(item, 0), JX_INTEGER) ||
+					jx_array_index(item, 0)->u.integer_value < 1 ||
+					!jx_istype(jx_array_index(item, 1), JX_ARRAY) ||
+					!jx_istype(jx_array_index(item, 2), JX_ARRAY))
+				return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "compact task must be [task_id, input_data_ids, output_data_ids]");
+		} else if (!jx_istype(item, JX_OBJECT))
 			return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "task record must be an object");
-		if (!allowed_keys(v, item, path, keys))
+		if (!compact && !allowed_keys(v, item, path, keys))
 			return 0;
-		uint64_t task_id = 0;
-		if (!positive_integer(v, item, "task_id", path, &task_id, 0))
+		uint64_t task_id = vine_datavine_ir_task_id(item);
+		if (!task_id)
 			return 0;
 		if (task_id <= previous || (v->delta &&
 							   task_id <= v->existing_maximum_task_id))
 			return fail(v, VINE_DATAVINE_WORKFLOW_DUPLICATE, path, "task records must have unique ascending task_id values");
 		previous = task_id;
-		struct jx *executor = required(v, item, "executor", JX_OBJECT, path);
-		struct jx *inputs = required(v, item, "inputs", JX_ARRAY, path);
-		struct jx *outputs = required(v, item, "output_data_ids", JX_ARRAY, path);
+		struct jx *inline_executor = compact ? 0 : jx_lookup(item, "executor");
+		struct jx *executor = task_setting(item, defaults, "executor");
+		struct jx *inputs = compact ? vine_datavine_ir_task_inputs(item)
+						: required(v, item, "inputs", JX_ARRAY, path);
+		struct jx *outputs = compact ? vine_datavine_ir_task_outputs(item)
+						 : required(v, item, "output_data_ids", JX_ARRAY, path);
 		char executor_path[160];
 		snprintf(executor_path, sizeof(executor_path), "%s.executor", path);
-		if (!executor || !inputs || !outputs || !validate_executor(v, executor, executor_path))
+		if (!executor)
+			return fail(v, VINE_DATAVINE_WORKFLOW_REQUIRED, executor_path, "task requires executor or task_defaults.executor");
+		if (!jx_istype(executor, JX_OBJECT) || !inputs || !outputs ||
+				(inline_executor && !validate_executor(v, executor, executor_path)))
 			return 0;
 		uint64_t expected_position = 0;
 		struct jx *input;
 		void *input_iterator = 0;
 		while ((input = jx_iterate_array(inputs, &input_iterator))) {
-			static const char *const input_keys[] = {"position", "name", "data_id", 0};
-			if (!jx_istype(input, JX_OBJECT) || !allowed_keys(v, input, path, input_keys))
-				return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "invalid input binding");
-			struct jx *position = jx_lookup(input, "position");
-			struct jx *name = jx_lookup(input, "name");
-			if (!!position == !!name)
-				return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "input requires exactly one position or name");
-			if (position && (!jx_istype(position, JX_INTEGER) || position->u.integer_value != (int64_t)expected_position++))
-				return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "positional inputs must be contiguous and ordered");
-			if (name && (!jx_istype(name, JX_STRING) || !name->u.string_value[0] || strlen(name->u.string_value) > 256))
-				return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "invalid input name");
-			uint64_t data_id = 0;
+			if (compact) {
+				if (!jx_istype(input, JX_INTEGER) || input->u.integer_value < 1)
+					return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "compact inputs must be positive DataIDs");
+			} else {
+				static const char *const input_keys[] = {"position", "name", "data_id", 0};
+				if (!jx_istype(input, JX_OBJECT) || !allowed_keys(v, input, path, input_keys))
+					return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "invalid input binding");
+				struct jx *position = jx_lookup(input, "position");
+				struct jx *name = jx_lookup(input, "name");
+				if (!!position == !!name)
+					return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "input requires exactly one position or name");
+				if (position && (!jx_istype(position, JX_INTEGER) || position->u.integer_value != (int64_t)expected_position++))
+					return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "positional inputs must be contiguous and ordered");
+				if (name && (!jx_istype(name, JX_STRING) || !name->u.string_value[0] || strlen(name->u.string_value) > 256))
+					return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "invalid input name");
+			}
+			uint64_t data_id = vine_datavine_ir_input_data_id(input);
 			struct jx *data = 0;
 			int64_t producer = 0;
-			if (!positive_integer(v, input, "data_id", path, &data_id, 0) ||
-					!lookup_data_record(v, data_id, &data, &producer))
+			if (!data_id || !lookup_data_record(v, data_id, &data, &producer))
 				return fail(v, VINE_DATAVINE_WORKFLOW_REFERENCE, path, "input data_id is unknown");
 			if (producer > 0) {
 				if ((uint64_t)producer >= task_id ||
@@ -491,10 +590,9 @@ static int validate_tasks(struct validation *v, struct jx *array)
 			struct jx *data = itable_lookup(v->data, data_id);
 			if (!data)
 				return fail(v, VINE_DATAVINE_WORKFLOW_REFERENCE, path, "output data_id is unknown");
-			struct jx *origin = jx_lookup(data, "origin");
-			if (strcmp(jx_lookup_string(origin, "kind"), "output") ||
-					(uint64_t)jx_lookup_integer(origin, "task_id") != task_id ||
-					(uint64_t)jx_lookup_integer(origin, "output_index") != output_index)
+			if (!vine_datavine_ir_data_is_output(data) ||
+					(uint64_t)vine_datavine_ir_data_producer(data) != task_id ||
+					(uint64_t)vine_datavine_ir_data_output_index(data) != output_index)
 				return fail(v, VINE_DATAVINE_WORKFLOW_REFERENCE, path, "output origin does not match task slot");
 			if (!itable_insert(v->produced, data_id, item))
 				return fail(v, VINE_DATAVINE_WORKFLOW_DUPLICATE, path, "output DataID is produced more than once");
@@ -504,10 +602,10 @@ static int validate_tasks(struct validation *v, struct jx *array)
 		if ((output_files && jx_array_length(output_files) != (int)output_index) ||
 				(!output_files && output_index != 1))
 			return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "output_files must align with output_data_ids; plain stdout supports one output");
-		struct jx *resources = jx_lookup(item, "resources");
-		struct jx *retry = jx_lookup(item, "retry");
-		struct jx *labels = jx_lookup(item, "labels");
-		struct jx *priority = jx_lookup(item, "priority");
+		struct jx *resources = compact ? 0 : jx_lookup(item, "resources");
+		struct jx *retry = compact ? 0 : jx_lookup(item, "retry");
+		struct jx *labels = compact ? 0 : jx_lookup(item, "labels");
+		struct jx *priority = compact ? 0 : jx_lookup(item, "priority");
 		if ((resources && !validate_resources(v, resources, path)) ||
 				(retry && !validate_retry(v, retry, path)) ||
 				(labels && !validate_string_map(v, labels, path)) ||
@@ -527,8 +625,7 @@ static int validate_tasks(struct validation *v, struct jx *array)
 	int data_iterator;
 	ITABLE_ITERATE(v->data, data_iterator, data_id, record)
 	{
-		struct jx *origin = jx_lookup(record, "origin");
-		if (!strcmp(jx_lookup_string(origin, "kind"), "output") && !itable_lookup(v->produced, data_id))
+		if (vine_datavine_ir_data_is_output(record) && !itable_lookup(v->produced, data_id))
 			return fail(v, VINE_DATAVINE_WORKFLOW_REFERENCE, "$.data", "output data record has no matching task output");
 	}
 	return 1;
@@ -560,7 +657,7 @@ static int validate_requested(struct validation *v, struct jx *array)
 static int validate_document(struct validation *v, struct jx *root,
 		struct vine_datavine_workflow_summary *summary)
 {
-	static const char *const keys[] = {"schema", "workflow_id", "idempotency_key", "mode", "tasks", "data", "requested_outputs", "policy", "metadata", 0};
+	static const char *const keys[] = {"schema", "workflow_id", "idempotency_key", "mode", "task_defaults", "data_defaults", "tasks", "data", "requested_outputs", "policy", "metadata", 0};
 	if (!jx_istype(root, JX_OBJECT))
 		return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, "$", "workflow must be an object");
 	if (!allowed_keys(v, root, "$", keys))
@@ -579,11 +676,14 @@ static int validate_document(struct validation *v, struct jx *root,
 	if (!nonempty_string(v, root, "mode", "$.mode", 16))
 		return 0;
 	const char *mode = jx_lookup_string(root, "mode");
-	if (strcmp(mode, "sealed") && strcmp(mode, "streaming"))
-		return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, "$.mode", "mode must be sealed or streaming");
+	if (strcmp(mode, "sealed") && strcmp(mode, "streaming") &&
+			strcmp(mode, "staged"))
+		return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, "$.mode", "mode must be sealed, streaming, or staged");
 	struct jx *tasks = required(v, root, "tasks", JX_ARRAY, "$.tasks");
 	struct jx *data = required(v, root, "data", JX_ARRAY, "$.data");
 	struct jx *requested = required(v, root, "requested_outputs", JX_ARRAY, "$.requested_outputs");
+	struct jx *defaults = jx_lookup(root, "task_defaults");
+	struct jx *data_defaults = jx_lookup(root, "data_defaults");
 	if (!tasks || !data || !requested || !optional_object(v, root, "policy", "$.policy") ||
 			!optional_object(v, root, "metadata", "$.metadata"))
 		return 0;
@@ -605,14 +705,17 @@ static int validate_document(struct validation *v, struct jx *root,
 		if (maximum_edges)
 			v->maximum_edges = (uint64_t)maximum_edges->u.integer_value;
 	}
-	if (!validate_data(v, data) || !validate_tasks(v, tasks) || !validate_requested(v, requested))
+	if (!validate_data_defaults(v, data_defaults) ||
+			!validate_data(v, data, data_defaults) ||
+			!validate_task_defaults(v, defaults) ||
+			!validate_tasks(v, tasks, defaults) || !validate_requested(v, requested))
 		return 0;
 	if (summary) {
 		summary->tasks = v->task_count;
 		summary->data = v->data_count;
 		summary->edges = v->edge_count;
 		summary->requested_outputs = v->requested_count;
-		summary->streaming = !strcmp(mode, "streaming");
+		summary->streaming = strcmp(mode, "sealed") != 0;
 	}
 	return 1;
 }
@@ -620,7 +723,7 @@ static int validate_document(struct validation *v, struct jx *root,
 static int validate_delta_document(struct validation *v, struct jx *root,
 		struct vine_datavine_workflow_summary *summary)
 {
-	static const char *const keys[] = {"schema", "workflow_id", "idempotency_key", "tasks", "data", "requested_outputs", "metadata", 0};
+	static const char *const keys[] = {"schema", "workflow_id", "idempotency_key", "task_defaults", "data_defaults", "tasks", "data", "requested_outputs", "metadata", 0};
 	if (!jx_istype(root, JX_OBJECT))
 		return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, "$", "workflow delta must be an object");
 	if (!allowed_keys(v, root, "$", keys) ||
@@ -635,11 +738,16 @@ static int validate_delta_document(struct validation *v, struct jx *root,
 	struct jx *tasks = required(v, root, "tasks", JX_ARRAY, "$.tasks");
 	struct jx *data = required(v, root, "data", JX_ARRAY, "$.data");
 	struct jx *requested = required(v, root, "requested_outputs", JX_ARRAY, "$.requested_outputs");
+	struct jx *defaults = jx_lookup(root, "task_defaults");
+	struct jx *data_defaults = jx_lookup(root, "data_defaults");
 	if (!tasks || !data || !requested || !tasks->u.items)
 		return tasks && data && requested
-				       ? fail(v, VINE_DATAVINE_WORKFLOW_VALUE, "$.tasks", "workflow delta must add at least one task")
-				       : 0;
-	if (!validate_data(v, data) || !validate_tasks(v, tasks) ||
+					   ? fail(v, VINE_DATAVINE_WORKFLOW_VALUE, "$.tasks", "workflow delta must add at least one task")
+					   : 0;
+	if (!validate_data_defaults(v, data_defaults) ||
+			!validate_data(v, data, data_defaults) ||
+			!validate_task_defaults(v, defaults) ||
+			!validate_tasks(v, tasks, defaults) ||
 			!validate_requested(v, requested))
 		return 0;
 	if (v->existing_tasks + v->task_count > v->maximum_tasks)
@@ -684,8 +792,8 @@ static int validate_root(struct jx *root, struct validation *v,
 	v->data = itable_create(0);
 	v->produced = itable_create(0);
 	int valid = v->tasks && v->data && v->produced &&
-		    (v->delta ? validate_delta_document(v, root, summary)
-			      : validate_document(v, root, summary));
+			(v->delta ? validate_delta_document(v, root, summary)
+				  : validate_document(v, root, summary));
 	if (!v->tasks || !v->data || !v->produced)
 		valid = fail(v, VINE_DATAVINE_WORKFLOW_LIMIT, "$", "could not allocate validation indices");
 	if (valid)

@@ -6,7 +6,9 @@ LOCAL_CCFLAGS += -I ../manager
 
 SOURCES = \
 	vine_datavine_data_controller.c \
+	vine_datavine_ir.c \
 	vine_datavine_journal.c \
+	vine_datavine_object_store.c \
 	vine_datavine_scheduler.c \
 	vine_datavine_workflow.c \
 	vine_datavine_workflow_store.c \
