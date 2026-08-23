@@ -173,6 +173,26 @@ def main():
                 "datavine.workflow-delta/v1",
             ]
             assert "taskvine" in capabilities["executor_kinds"]
+            assert capabilities["object_store"] == "sharedfs-single-file-sha256-v1"
+
+            object_payload = b"shared immutable python argument"
+
+            def put_shared_object(_):
+                contender = WorkflowClient(endpoint, token)
+                return contender.put_object(object_payload)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+                object_results = list(pool.map(put_shared_object, range(64)))
+            object_digest = object_results[0]["sha256"]
+            assert all(result["sha256"] == object_digest for result in object_results)
+            assert sum(not result["deduplicated"] for result in object_results) == 1
+            assert client.get_object(object_digest) == object_payload
+            try:
+                client.request(30, b"0" * 64 + object_payload)
+            except WorkflowClientError:
+                pass
+            else:
+                raise AssertionError("object store accepted a false content identity")
             info = client.describe_workflow("detached-workflow")
             assert info["state"] in {"open", "running_open", "open_quiescent"}
             assert info["generation"] == 1
@@ -249,6 +269,7 @@ def main():
         service, endpoint = start_service(executable, journal, token)
         try:
             client = WorkflowClient(endpoint, token)
+            assert client.get_object(object_digest) == object_payload
             info = client.describe_workflow("detached-workflow")
             assert info["generation"] == 2 and info["tasks"] == 1
             info = client.seal_workflow("detached-workflow", 2)
@@ -265,6 +286,7 @@ def main():
         "submitter-exit=1 restart=1 generation-cas-race=single-winner "
         "truncated-tail=recovered corrupt-checksum=reject events=3 "
         "expired-cursor=fail-closed oversized-frame=reject connections<=1024"
+        " object-store=atomic-deduplicated-persistent"
     )
 
 

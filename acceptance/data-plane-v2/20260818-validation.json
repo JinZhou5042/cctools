@@ -1,0 +1,91 @@
+{
+  "artifact_type": "datavine-data-plane-v2-validation",
+  "date": "2026-08-18",
+  "head_before_changes": "be6c51e874d1156ac145fef97a010eca7224bab6",
+  "regression": {
+    "passed": 13,
+    "report": "acceptance/data-plane-v2/regression.json",
+    "total": 13
+  },
+  "experiments": [
+    {
+      "cores": 4,
+      "input_bytes": 4194304,
+      "name": "shared-content-dedup",
+      "object_records": 4,
+      "tasks": 64,
+      "unique_puts": 3,
+      "worker_cache_pulls": 1,
+      "worker_executor_object_pull": true
+    },
+    {
+      "data_records": 1000002,
+      "elapsed_seconds": 22.249302,
+      "invocation_cloudpickle_nanoseconds": 13659,
+      "maximum_rss_kib": 1982464,
+      "name": "million-repeated-edata",
+      "tasks": 1000000,
+      "tasks_per_second": 44945.2
+    },
+    {
+      "cores": 8,
+      "dominant_stage": "scheduler_delay",
+      "name": "immediate-return-control",
+      "runtime_seconds": 0.689839,
+      "tasks": 256
+    },
+    {
+      "client_object_hash_seconds": 0.222733,
+      "client_object_put_rpc_seconds": 0.577207,
+      "cores": 8,
+      "dominant_stage": "data_stage_in",
+      "name": "unique-input-io",
+      "runtime_seconds": 0.345110,
+      "tasks": 16,
+      "url_stage_in_bytes": 67109008,
+      "url_stage_in_seconds": 1.001044,
+      "worker_direct_pulls": 16
+    },
+    {
+      "cores": 8,
+      "cpu_milliseconds_per_task": 50,
+      "dominant_stage": "python_function",
+      "name": "fixed-cpu",
+      "python_function_cpu_seconds": 3.213059,
+      "runtime_seconds": 0.678257,
+      "tasks": 64
+    },
+    {
+      "cores": 1024,
+      "datavine_seconds": 9.875811,
+      "name": "parallel-fetch-large-output-confirmation",
+      "output_bytes_each": 33554432,
+      "paired_repetitions": 3,
+      "requested_outputs": 128,
+      "taskvine_seconds": 7.744816,
+      "total_requested_bytes": 4294967296
+    },
+    {
+      "artifact": "acceptance/1024-core-workflows/data-plane-v2-current-final-20260818/compact-summary.json",
+      "artifact_sha256": "54d2bf42189bc924662db59e61b30e3b4849765cb3a5b45ea9414e1dafd054e5",
+      "cases": 49,
+      "cores": 1024,
+      "datavine_faster": 5,
+      "datavine_slower": 23,
+      "inconclusive": 21,
+      "measured_backend_runs": 980,
+      "name": "current-code-full-workflow-campaign",
+      "paired_repetitions": 10,
+      "status": "PASS",
+      "warmup_backend_runs": 98,
+      "workers": 64,
+      "cores_per_worker": 16
+    }
+  ],
+  "security": {
+    "base64_in_workflow_ir": false,
+    "content_verified_on_put_and_pull": true,
+    "workflow_token_in_journal": false,
+    "worker_ticket_scope": "one-sha256-object-get"
+  }
+}

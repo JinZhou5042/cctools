@@ -37,11 +37,13 @@ worker = source / "worker"
 native = source / "datavine"
 assert native.is_dir()
 assert not list(manager.glob("vine_datavine_*"))
-assert len(list(native.glob("vine_datavine_*.c"))) == 7
-assert len(list(native.glob("vine_datavine_*.h"))) == 7
+assert len(list(native.glob("vine_datavine_*.c"))) == 9
+assert len(list(native.glob("vine_datavine_*.h"))) == 9
 assert not list(native.glob("vine_datavine_index.*"))
 assert not list(native.glob("vine_datavine_directory.*"))
 protocol = (native / "vine_datavine_protocol.h").read_text()
+assert "VINE_DATAVINE_RPC_WORKFLOW_RESULT_DESCRIPTORS" in protocol
+assert "VINE_DATAVINE_RPC_WORKFLOW_WAIT_TERMINAL" in protocol
 for removed in (
     "ALLOCATE_BATCH",
     "REPORT_REPLICA",
@@ -51,9 +53,24 @@ for removed in (
     "working_directory",
 ):
     assert removed not in protocol, removed
-for core_file in (*manager.glob("*.c"), *manager.glob("*.h"),
-                  *worker.glob("*.c"), *worker.glob("*.h")):
+assert "workflow_result_descriptors" in adaptor_source
+assert "wait_workflow" in adaptor_source
+worker_data_plane = {
+    worker / "vine_datavine_transfer.c",
+    worker / "vine_datavine_transfer.h",
+    worker / "vine_cache.c",
+}
+for core_file in (
+    *manager.glob("*.c"), *manager.glob("*.h"),
+    *(path for path in worker.glob("*.c") if path not in worker_data_plane),
+    *(path for path in worker.glob("*.h") if path not in worker_data_plane),
+):
     assert "datavine" not in core_file.read_text().lower(), core_file
+worker_transfer_source = (worker / "vine_datavine_transfer.c").read_text()
+assert "VINE_DATAVINE_RPC_OBJECT_GET" in worker_transfer_source
+assert "EVP_DigestUpdate" in worker_transfer_source
+for forbidden in ("scheduler", "workflow_store", "data_controller"):
+    assert forbidden not in worker_transfer_source, forbidden
 
 taskvine_members = subprocess.check_output(
     ("ar", "t", manager / "libtaskvine.a"), text=True
@@ -62,7 +79,7 @@ datavine_members = subprocess.check_output(
     ("ar", "t", native / "libdatavine.a"), text=True
 ).splitlines()
 assert not any("datavine" in member for member in taskvine_members)
-assert len(datavine_members) == 7
+assert len(datavine_members) == 9
 assert all(member.startswith("vine_datavine_") for member in datavine_members)
 
 runtime_source = (native / "vine_datavine_workflow_runtime.c").read_text()
@@ -87,6 +104,10 @@ assert "vine_fetch_file" not in runtime_source
 python_executor = (source / "tools/datavine_python_executor").read_text()
 assert "HashingWriter" in python_executor
 assert "DVM1" in python_executor
+assert "DVP1" in python_executor
+for removed in ("DVM2", "DVP2", "DVP3", "DVP4", "DVP5", "DVP6", "DVP7", "DVP8", "DVP9", "urllib.parse"):
+    assert removed not in python_executor, removed
+assert "class ObjectPuller" in python_executor
 assert "base64" not in python_executor
 
 swig = (source / "bindings/python3/taskvine.i").read_text().lower()

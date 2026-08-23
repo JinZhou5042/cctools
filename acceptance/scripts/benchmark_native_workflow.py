@@ -117,17 +117,8 @@ def workflow_document(tasks, executor, command_argv):
             if executor == "builtin"
             else {"kind": "command", "version": "1", "argv": command_argv}
         )
-        records.append({
-            "task_id": ordinal,
-            "executor": executor_record,
-            "inputs": [],
-            "output_data_ids": [ordinal],
-        })
-        data.append({
-            "data_id": ordinal,
-            "codec": {"name": "bytes", "version": "1"},
-            "origin": {"kind": "output", "task_id": ordinal, "output_index": 0},
-        })
+        records.append([ordinal, [], [ordinal]])
+        data.append([ordinal, ordinal, 0])
     if executor == "builtin":
         data.append({
             "data_id": payload_id,
@@ -145,6 +136,8 @@ def workflow_document(tasks, executor, command_argv):
             f"{hashlib.sha256(json.dumps(command_argv).encode()).hexdigest()[:12]}"
         ),
         "mode": "sealed",
+        "task_defaults": {"executor": executor_record},
+        "data_defaults": {"codec": {"name": "bytes", "version": "1"}},
         "tasks": records,
         "data": data,
         "requested_outputs": [tasks],
@@ -188,22 +181,15 @@ def workflow_delta(initial, start, stop, tasks, executor, command_argv):
             if executor == "builtin"
             else {"kind": "command", "version": "1", "argv": command_argv}
         )
-        records.append({
-            "task_id": ordinal,
-            "executor": executor_record,
-            "inputs": [],
-            "output_data_ids": [output_id],
-        })
-        data.append({
-            "data_id": output_id,
-            "codec": {"name": "bytes", "version": "1"},
-            "origin": {"kind": "output", "task_id": ordinal, "output_index": 0},
-        })
+        records.append([ordinal, [], [output_id]])
+        data.append([output_id, ordinal, 0])
     final_output = tasks + 1 if executor == "builtin" else tasks
     return {
         "schema": "datavine.workflow-delta/v1",
         "workflow_id": initial["workflow_id"],
         "idempotency_key": f"{initial['workflow_id']}-tasks-{start}-{stop - 1}",
+        "task_defaults": {"executor": executor_record},
+        "data_defaults": {"codec": {"name": "bytes", "version": "1"}},
         "tasks": records,
         "data": data,
         "requested_outputs": [final_output] if stop > tasks else [],
@@ -323,6 +309,12 @@ def main():
             build_started = time.monotonic()
             document = streaming_initial(args.tasks, args.executor, command_argv)
             build_seconds = time.monotonic() - build_started
+            initial_payload_bytes = len(json.dumps(
+                document,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode())
             client = WorkflowClient(contact["endpoint"], token)
             started = time.monotonic()
             initial_submit_started = time.monotonic()
@@ -331,6 +323,7 @@ def main():
             generation = submitted["generation"]
             transaction_count = 0
             maximum_delta_bytes = 0
+            total_delta_bytes = 0
             delta_build_seconds = 0
             delta_encode_seconds = 0
             append_rpc_seconds = 0
@@ -353,6 +346,7 @@ def main():
                     maximum_delta_bytes,
                     len(encoded_delta),
                 )
+                total_delta_bytes += len(encoded_delta)
                 append_started = time.monotonic()
                 submitted = client.append_workflow(
                     document["workflow_id"], generation, encoded_delta
@@ -423,7 +417,12 @@ def main():
                 "seal_seconds": seal_seconds,
                 "registration_transactions": transaction_count,
                 "chunk_tasks": args.chunk_tasks,
+                "initial_payload_bytes": initial_payload_bytes,
                 "maximum_delta_bytes": maximum_delta_bytes,
+                "total_delta_payload_bytes": total_delta_bytes,
+                "total_workflow_payload_bytes": (
+                    initial_payload_bytes + total_delta_bytes
+                ),
                 "run_seconds": run_seconds,
                 "runtime_tasks_per_second": runtime_rate,
                 "tasks_per_second": args.tasks / elapsed,

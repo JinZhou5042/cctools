@@ -225,6 +225,8 @@ def main():
                 "state"
             ] == "completed"
             loss_events = event_types(client, worker_loss_id)
+            # The Manager reports FORSAKEN once; the DataVine scheduler owns
+            # the single logical retry and records it explicitly.
             assert loss_events == [
                 "accepted",
                 "started",
@@ -297,7 +299,7 @@ def main():
 
     print(
         "DataVine native lifecycle PASS retries=2 cancel-running=1 "
-        "worker-loss=retry owner-restart=1 checkpoint-resume=1 "
+        "worker-loss=scheduler-retry owner-restart=1 checkpoint-resume=1 "
         "resumable-events=1"
     )
 

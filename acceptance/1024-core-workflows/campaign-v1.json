@@ -1,0 +1,47 @@
+{
+  "artifact_type": "datavine-taskvine-1024-core-campaign",
+  "schema_version": 1,
+  "resource_contract": {
+    "total_cores": 1024,
+    "workers": 64,
+    "cores_per_worker": 16,
+    "cores_per_task": 1,
+    "batch_type": "condor",
+    "exact_admission": true
+  },
+  "statistics": {
+    "warmup_repetitions": 1,
+    "screening_repetitions": 3,
+    "final_repetitions": 10,
+    "bootstrap_resamples": 10000,
+    "confidence": 0.95,
+    "regression_upper_bound": 1.0,
+    "cpu_equality_relative_tolerance": 0.05
+  },
+  "axes": {
+    "target_cpu_ms": [0, 1, 10, 100, 1000, 10000],
+    "payload_bytes": [0, 1024, 65536, 1048576, 33554432],
+    "indegree": [0, 1, 4, 16, 64],
+    "outdegree": [0, 1, 4, 16, 64, 1024]
+  },
+  "phases": {
+    "admission": true,
+    "cpu": true,
+    "data": true,
+    "degree": true,
+    "topology": true,
+    "interaction": true,
+    "confirmation": true
+  },
+  "base_case": {
+    "width": 1024,
+    "depth": 4,
+    "target_cpu_ms": 10,
+    "payload_bytes": 1024,
+    "indegree": 1,
+    "outdegree": 1
+  },
+  "large_payload_width": 128,
+  "backend_contracts": ["TV-native", "DV-native"],
+  "backend_orders": ["TV-native-first", "DV-native-first"]
+}

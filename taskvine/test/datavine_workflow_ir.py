@@ -77,10 +77,17 @@ def main():
     assert reference_response["valid"] is False
     assert reference_response["error"] == "reference"
 
+    legacy_callable = copy.deepcopy(callable_document)
+    legacy_callable["tasks"][0]["executor"]["version"] = "callable-v2"
+    legacy_response = native_validate(legacy_callable)
+    assert legacy_response["valid"] is False
+    assert legacy_response["error"] == "value"
+
     print(
         "DataVine Workflow IR v1 native golden-fixture PASS "
         f"({len(fixtures['valid'])} valid, "
-        f"{len(fixtures['invalid'])} invalid, callable-register=1)"
+        f"{len(fixtures['invalid'])} invalid, callable-register=1, "
+        "legacy-version-rejected=1)"
     )
 
 

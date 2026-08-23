@@ -199,8 +199,13 @@ def main():
             assert replaced.result(timeout=30) == 77
             time.sleep(0.2)
             python_processes = python_descendants(worker.pid)
-            assert len(python_processes) == 1, python_processes
-            assert b"datavine_python_executor" in python_processes[0]
+            # One fork preloader plus one persistent Worker Data Agent.  The
+            # agent replaces one persistence process per requested output.
+            assert len(python_processes) == 2, python_processes
+            assert all(
+                b"datavine_python_executor" in process
+                for process in python_processes
+            )
             attached.seal()
             assert wait_terminal(replacement, workflow_id)["state"] == "completed"
             try:
@@ -277,14 +282,14 @@ def main():
             )
             cancel_session.submit(sleep_return, 30.0, "never")
             child_deadline = time.monotonic() + 20
-            while len(python_descendants(worker.pid)) < 2:
+            while len(python_descendants(worker.pid)) < 3:
                 if time.monotonic() >= child_deadline:
                     raise AssertionError("fork child did not start before cancellation")
                 time.sleep(0.05)
             cancel_session.cancel()
             assert wait_terminal(replacement, "fork-cancel")["state"] == "cancelled"
             cleanup_deadline = time.monotonic() + 3
-            while len(python_descendants(worker.pid)) != 1:
+            while len(python_descendants(worker.pid)) != 2:
                 if time.monotonic() >= cleanup_deadline:
                     raise AssertionError(python_descendants(worker.pid))
                 time.sleep(0.05)
@@ -304,7 +309,7 @@ def main():
             else:
                 raise AssertionError("wall-time task unexpectedly succeeded")
             assert wait_terminal(replacement, "fork-wall-time")["state"] == "failed"
-            assert len(python_descendants(worker.pid)) == 1
+            assert len(python_descendants(worker.pid)) == 2
 
             slow_session = WorkflowSession.create(
                 replacement, "lane-slow", maximum_tasks=2, maximum_edges=1,
@@ -347,6 +352,9 @@ def main():
             stdout, stderr = service.communicate(timeout=20)
             if service.returncode != 0:
                 raise AssertionError((service.returncode, stdout, stderr))
+        profile_path = Path(root) / "journal.profile"
+        assert profile_path.is_file()
+        assert "dominant_stage=" in profile_path.read_text()
 
     # An unrequested callable intermediate lives only in worker cache. A
     # service restart must recompute its producer, not claim completion from a
@@ -433,6 +441,7 @@ def main():
         "callable-register-once=1 "
         "fork-cancel=1 wall-time-kill=1 "
         "runtime-lanes=parallel "
+        "default-profile=1 "
         "sparse-frontier-attach=1 terminal-attach=reject resource-default-core=1"
     )
 

@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cctools.readthedocs.io/datavine/scientific-workflow-artifact-v1.schema.json",
+  "title": "DataVine scientific workflow benchmark artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_type",
+    "schema_version",
+    "status",
+    "scope",
+    "created_at",
+    "environment",
+    "workload",
+    "contracts",
+    "runs",
+    "gates"
+  ],
+  "properties": {
+    "artifact_type": {
+      "const": "datavine-scientific-workflow-benchmark"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "status": {
+      "enum": ["PASS", "FAIL"]
+    },
+    "scope": {
+      "enum": [
+        "self-test",
+        "local-pilot",
+        "local-scale",
+        "cluster-pilot",
+        "reserved-node"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "commit",
+        "python",
+        "platform",
+        "hostname",
+        "python_user_site_enabled"
+      ],
+      "properties": {
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "python": {"type": "string", "minLength": 1},
+        "platform": {"type": "string", "minLength": 1},
+        "hostname": {"type": "string", "minLength": 1},
+        "python_user_site_enabled": {"type": "boolean"},
+        "workers": {"type": "integer", "minimum": 1},
+        "cores_per_worker": {"type": "integer", "minimum": 1},
+        "batch_type": {"type": "string", "minLength": 1},
+        "backend_order": {"type": "array", "items": {"type": "string"}},
+        "generator_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sampler_calibration_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "configuration", "logical_tasks", "requested_bytes"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "configuration": {"type": "object"},
+        "logical_tasks": {"type": "integer", "minimum": 1},
+        "logical_edges": {"type": "integer", "minimum": 0},
+        "logical_input_bytes": {"type": "integer", "minimum": 0},
+        "logical_intermediate_bytes": {"type": "integer", "minimum": 0},
+        "requested_bytes": {"type": "integer", "minimum": 0},
+        "placement_lower_bound_bytes": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "contracts": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["TV-native", "DV-native", "TV-durable-sink"]
+      }
+    },
+    "runs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/run"}
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": {"type": "boolean"},
+      "required": [
+        "artifact_schema",
+        "input_manifest",
+        "exact_results",
+        "exact_task_counts",
+        "resource_accounting",
+        "cleanup"
+      ]
+    },
+    "limitations": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "$defs": {
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logical", "submitted", "completed", "failed", "retried"],
+      "properties": {
+        "logical": {"type": "integer", "minimum": 0},
+        "submitted": {"type": "integer", "minimum": 0},
+        "completed": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "retried": {"type": "integer", "minimum": 0}
+      }
+    },
+    "timings": {
+      "type": "object",
+      "additionalProperties": {"type": "number", "minimum": 0},
+      "required": ["build_seconds", "execute_seconds", "fetch_seconds", "total_seconds"]
+    },
+    "results": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "requested_bytes"],
+      "properties": {
+        "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "requested_bytes": {"type": "integer", "minimum": 0},
+        "record_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "useful_cpu_seconds",
+        "peak_rss_bytes",
+        "manager_bytes_sent",
+        "manager_bytes_received"
+      ],
+      "properties": {
+        "useful_cpu_seconds": {"type": "number", "minimum": 0},
+        "peak_rss_bytes": {"type": "integer", "minimum": 0},
+        "manager_bytes_sent": {"type": ["integer", "null"], "minimum": 0},
+        "manager_bytes_received": {"type": ["integer", "null"], "minimum": 0},
+        "network_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "process_read_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "process_write_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "worker_write_amplification": {"type": ["number", "null"], "minimum": 0},
+        "network_amplification": {"type": ["number", "null"], "minimum": 0},
+        "controller_amplification": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "repetition",
+        "status",
+        "counts",
+        "timings",
+        "results",
+        "metrics"
+      ],
+      "properties": {
+        "contract": {
+          "enum": ["TV-native", "DV-native", "TV-durable-sink"]
+        },
+        "repetition": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["PASS", "FAIL"]},
+        "counts": {"$ref": "#/$defs/counts"},
+        "timings": {"$ref": "#/$defs/timings"},
+        "results": {"$ref": "#/$defs/results"},
+        "metrics": {"$ref": "#/$defs/metrics"},
+        "error": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

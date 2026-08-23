@@ -1,0 +1,157 @@
+{
+  "valid": [
+    {
+      "name": "sealed-command-chain",
+      "digest": "51c21c319241ac51e316eece2870a4f2e2b7640b",
+      "document": {
+        "schema": "datavine.workflow/v1",
+        "workflow_id": "fixture-command-chain",
+        "idempotency_key": "fixture-command-chain-v1",
+        "mode": "sealed",
+        "data": [
+          {
+            "data_id": 1,
+            "codec": {"name": "text/utf-8", "version": "1"},
+            "origin": {"kind": "inline", "base64": "aGVsbG8="}
+          },
+          {
+            "data_id": 2,
+            "codec": {"name": "text/utf-8", "version": "1"},
+            "origin": {"kind": "output", "task_id": 1, "output_index": 0}
+          },
+          {
+            "data_id": 3,
+            "codec": {"name": "text/utf-8", "version": "1"},
+            "origin": {"kind": "output", "task_id": 2, "output_index": 0}
+          }
+        ],
+        "tasks": [
+          {
+            "task_id": 1,
+            "executor": {"kind": "command", "version": "1", "argv": ["/bin/cat", "{{data:1}}"]},
+            "inputs": [{"position": 0, "data_id": 1}],
+            "output_data_ids": [2],
+            "resources": {"cores": 1},
+            "retry": {"maximum_attempts": 2}
+          },
+          {
+            "task_id": 2,
+            "executor": {"kind": "command", "version": "1", "argv": ["/usr/bin/sed", "y/abcdefghijklmnopqrstuvwxyz/ABCDEFGHIJKLMNOPQRSTUVWXYZ/", "{{data:2}}"]},
+            "inputs": [{"position": 0, "data_id": 2}],
+            "output_data_ids": [3]
+          }
+        ],
+        "requested_outputs": [3],
+        "policy": {"maximum_tasks": 2, "maximum_edges": 1},
+        "metadata": {"suite": "cross-language"}
+      }
+    },
+    {
+      "name": "streaming-empty",
+      "digest": "ce883f6adf94033a2d306e1e59be4b1d38f06009",
+      "document": {
+        "schema": "datavine.workflow/v1",
+        "idempotency_key": "fixture-streaming-empty-v1",
+        "mode": "streaming",
+        "tasks": [],
+        "data": [],
+        "requested_outputs": [],
+        "policy": {"maximum_tasks": 100, "maximum_edges": 100}
+      }
+    },
+    {
+      "name": "sealed-task-defaults",
+      "digest": "031a860f206a3aeea9f33e3ff05b7be5aed136ce",
+      "document": {
+        "schema": "datavine.workflow/v1",
+        "workflow_id": "fixture-task-defaults",
+        "idempotency_key": "fixture-task-defaults-v1",
+        "mode": "sealed",
+        "task_defaults": {
+          "executor": {"kind": "command", "version": "1", "argv": ["/bin/cat", "{{data:1}}"]},
+          "resources": {"cores": 1},
+          "retry": {"maximum_attempts": 2}
+        },
+        "data_defaults": {"codec": {"name": "text/utf-8", "version": "1"}},
+        "data": [
+          {"data_id": 1, "origin": {"kind": "inline", "base64": "aGVsbG8="}},
+          [2, 1, 0]
+        ],
+        "tasks": [
+          [1, [1], [2]]
+        ],
+        "requested_outputs": [2],
+        "policy": {"maximum_tasks": 1, "maximum_edges": 0}
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "unknown-top-level-field",
+      "error": "schema",
+      "path": "$.language",
+      "document": {
+        "schema": "datavine.workflow/v1",
+        "idempotency_key": "invalid-unknown",
+        "mode": "sealed",
+        "tasks": [],
+        "data": [],
+        "requested_outputs": [],
+        "language": "python"
+      }
+    },
+    {
+      "name": "duplicate-data-id",
+      "error": "duplicate",
+      "path": "$.data[1]",
+      "document": {
+        "schema": "datavine.workflow/v1",
+        "idempotency_key": "invalid-duplicate",
+        "mode": "sealed",
+        "data": [
+          {"data_id": 1, "codec": {"name": "bytes", "version": "1"}, "origin": {"kind": "inline", "base64": "YQ=="}},
+          {"data_id": 1, "codec": {"name": "bytes", "version": "1"}, "origin": {"kind": "inline", "base64": "Yg=="}}
+        ],
+        "tasks": [],
+        "requested_outputs": []
+      }
+    },
+    {
+      "name": "forward-dependency",
+      "error": "reference",
+      "path": "$.tasks[0]",
+      "document": {
+        "schema": "datavine.workflow/v1",
+        "idempotency_key": "invalid-forward",
+        "mode": "sealed",
+        "data": [
+          {"data_id": 1, "codec": {"name": "bytes", "version": "1"}, "origin": {"kind": "output", "task_id": 2, "output_index": 0}},
+          {"data_id": 2, "codec": {"name": "bytes", "version": "1"}, "origin": {"kind": "output", "task_id": 1, "output_index": 0}},
+          {"data_id": 3, "codec": {"name": "bytes", "version": "1"}, "origin": {"kind": "output", "task_id": 2, "output_index": 0}}
+        ],
+        "tasks": [
+          {"task_id": 1, "executor": {"kind": "command", "version": "1", "argv": ["true"]}, "inputs": [{"position": 0, "data_id": 1}], "output_data_ids": [2]},
+          {"task_id": 2, "executor": {"kind": "command", "version": "1", "argv": ["true"]}, "inputs": [], "output_data_ids": [3]}
+        ],
+        "requested_outputs": [3]
+      }
+    },
+    {
+      "name": "unknown-python-payload",
+      "error": "reference",
+      "path": "$.tasks[0].executor",
+      "document": {
+        "schema": "datavine.workflow/v1",
+        "idempotency_key": "invalid-payload",
+        "mode": "sealed",
+        "data": [
+          {"data_id": 1, "codec": {"name": "python/cloudpickle", "version": "3"}, "origin": {"kind": "output", "task_id": 1, "output_index": 0}}
+        ],
+        "tasks": [
+          {"task_id": 1, "executor": {"kind": "python", "version": "source-v1", "payload_ref": 99, "output_files": ["result"]}, "inputs": [], "output_data_ids": [1]}
+        ],
+        "requested_outputs": [1]
+      }
+    }
+  ]
+}

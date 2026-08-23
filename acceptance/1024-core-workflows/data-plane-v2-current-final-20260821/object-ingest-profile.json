@@ -1,0 +1,50 @@
+{
+  "artifact_type": "datavine-object-ingest-profile",
+  "objects": 4096,
+  "payload_bytes": 256,
+  "runs": [
+    {
+      "cold": {
+        "bytes": 1048576,
+        "deduplicated": 0,
+        "objects": 4096,
+        "objects_per_second": 83.4080697298638,
+        "rpc_seconds_aggregate": 2.300429489,
+        "seconds": 49.10795817797771,
+        "sharedfs_seconds_aggregate": 43.034544224
+      },
+      "warm": {
+        "bytes": 1048576,
+        "deduplicated": 4096,
+        "objects": 4096,
+        "objects_per_second": 779.9759091293356,
+        "rpc_seconds_aggregate": 0.425934932,
+        "seconds": 5.2514442459796555,
+        "sharedfs_seconds_aggregate": 2.813883237
+      },
+      "writers": 1
+    },
+    {
+      "cold": {
+        "bytes": 1048576,
+        "deduplicated": 0,
+        "objects": 4096,
+        "objects_per_second": 752.9261568408913,
+        "rpc_seconds_aggregate": 5.594325727,
+        "seconds": 5.440108518989291,
+        "sharedfs_seconds_aggregate": 73.660373525
+      },
+      "warm": {
+        "bytes": 1048576,
+        "deduplicated": 4096,
+        "objects": 4096,
+        "objects_per_second": 3162.239778848087,
+        "rpc_seconds_aggregate": 4.025243846,
+        "seconds": 1.2952844459796324,
+        "sharedfs_seconds_aggregate": 5.460563039
+      },
+      "writers": 16
+    }
+  ],
+  "schema_version": 1
+}

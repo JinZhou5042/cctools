@@ -3,8 +3,11 @@
 
 import argparse
 import contextlib
+import ctypes
+import gc
 import hashlib
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import platform
@@ -13,10 +16,13 @@ import socket
 import statistics
 import subprocess
 import sys
-import threading
 import time
 
 import cloudpickle
+
+
+POOL_LIFETIME_SECONDS = 24 * 60 * 60
+WORKER_IDLE_SECONDS = POOL_LIFETIME_SECONDS - 60
 import ndcctools.taskvine as vine
 from ndcctools.taskvine.datavine.workflow import Workflow, WorkflowSession
 from ndcctools.taskvine.datavine.workflow_client import WorkflowClient
@@ -70,6 +76,54 @@ def work_unit(task_key, iterations, seed, output_bytes, *parents):
     }
 
 
+def timed_work_unit(task_key, target_cpu_ms, seed, output_bytes, *parents):
+    """Deterministic result with an in-worker, process-CPU-time workload.
+
+    Unlike the historical iteration calibration, this makes the requested CPU
+    duration independent of submit-host and worker clock speed.  A zero target
+    does not enter the CPU loop and is the campaign's immediate-return control.
+    The result digest deliberately excludes the realized loop count so equal
+    semantics remain byte-verifiable across different worker processors.
+    """
+
+    target_ns = max(0, round(float(target_cpu_ms) * 1_000_000))
+    state = int(seed) & MASK64
+    cpu_by_task = {}
+    parent_digests = []
+    for parent in parents:
+        if not isinstance(parent, dict):
+            raise TypeError(f"{task_key}: parent is not a workflow value")
+        parent_digests.append(parent["digest"])
+        state ^= int(parent["digest"][:16], 16)
+        cpu_by_task.update(parent["cpu_by_task"])
+    loop_started = time.process_time_ns()
+    ordinal = 0
+    while time.process_time_ns() - loop_started < target_ns:
+        state ^= (state << 13) & MASK64
+        state ^= state >> 7
+        state ^= (state << 17) & MASK64
+        state = (state + ordinal) & MASK64
+        ordinal += 1
+    kernel_cpu_ns = time.process_time_ns() - loop_started
+    # The requested duration changes cost, not scientific content.
+    digest = hashlib.sha256(
+        ("|".join(parent_digests) + f"|{task_key}|{int(seed) & MASK64}").encode()
+    ).hexdigest()
+    size = int(output_bytes)
+    payload = (bytes.fromhex(digest) * ((size + 31) // 32))[:size]
+    # This field is the controlled useful-work interval only.  Parent decode,
+    # digest construction and payload allocation are backend overhead and must
+    # remain visible in wall time, not contaminate the CPU-equality gate.
+    cpu_by_task[str(task_key)] = kernel_cpu_ns
+    return {
+        "digest": digest,
+        "payload": payload,
+        "cpu_by_task": cpu_by_task,
+        "timed_iterations": ordinal,
+        "target_cpu_ms": float(target_cpu_ms),
+    }
+
+
 def split_unit(task_key, iterations, seed, output_bytes, *parents):
     return tuple(
         work_unit(
@@ -96,6 +150,28 @@ def canonical(values):
             "payload_sha256": hashlib.sha256(value["payload"]).hexdigest(),
         })
     return result, cpu_by_task
+
+
+def release_process_heap():
+    """Collect unreachable objects and return free glibc arenas to the OS."""
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    rss_before = int(Path("/proc/self/statm").read_text().split()[1]) * page_size
+    collected = gc.collect()
+    trimmed = False
+    try:
+        malloc_trim = ctypes.CDLL(None).malloc_trim
+        malloc_trim.argtypes = [ctypes.c_size_t]
+        malloc_trim.restype = ctypes.c_int
+        trimmed = bool(malloc_trim(0))
+    except (AttributeError, OSError):
+        pass
+    rss_after = int(Path("/proc/self/statm").read_text().split()[1]) * page_size
+    return {
+        "objects_collected": collected,
+        "malloc_trim": trimmed,
+        "rss_before_bytes": rss_before,
+        "rss_after_bytes": rss_after,
+    }
 
 
 def node(key, duration_ms, *, parents=(), output_bytes=64, seed=1,
@@ -268,6 +344,11 @@ def execute_locally(spec):
         elif item["kind"] == "select":
             value = select_unit(item["index"], item["key"], item["iterations"],
                                 item["seed"], item["output_bytes"], parents[0])
+        elif item["kind"] == "timed":
+            value = timed_work_unit(
+                item["key"], item["iterations"], item["seed"],
+                item["output_bytes"], *parents
+            )
         else:
             value = work_unit(item["key"], item["iterations"], item["seed"],
                               item["output_bytes"], *parents)
@@ -277,19 +358,27 @@ def execute_locally(spec):
 
 
 def process_tree(root_pids):
-    pids = {int(pid) for pid in root_pids if pid}
-    changed = True
-    while changed:
-        changed = False
-        for stat in Path("/proc").glob("[0-9]*/stat"):
+    """Read only the measured roots' kernel-maintained child lists."""
+
+    pids = set()
+    pending = [int(pid) for pid in root_pids if pid]
+    while pending:
+        pid = pending.pop()
+        if pid in pids:
+            continue
+        pids.add(pid)
+        try:
+            task_ids = os.listdir(f"/proc/{pid}/task")
+        except OSError:
+            continue
+        for task_id in task_ids:
             try:
-                fields = stat.read_text().split(") ", 1)[1].split()
-                pid, parent = int(stat.parent.name), int(fields[1])
-            except (OSError, IndexError, ValueError):
+                children = Path(
+                    f"/proc/{pid}/task/{task_id}/children"
+                ).read_text().split()
+            except OSError:
                 continue
-            if parent in pids and pid not in pids:
-                pids.add(pid)
-                changed = True
+            pending.extend(int(child) for child in children)
     return pids
 
 
@@ -310,31 +399,73 @@ def sample_processes(root_pids):
             "cpu_ticks": cpu_ticks}
 
 
+def _peak_sampler_process(root_pids, interval, stop, connection):
+    peak = sample_processes(root_pids)
+    samples = 1
+    sample_seconds = 0.0
+    max_sample_seconds = 0.0
+    connection.send(("ready", None))
+    while not stop.wait(interval):
+        started = time.monotonic()
+        current = sample_processes(root_pids)
+        elapsed = time.monotonic() - started
+        samples += 1
+        sample_seconds += elapsed
+        max_sample_seconds = max(max_sample_seconds, elapsed)
+        peak = {key: max(peak[key], current[key]) for key in peak}
+    current = sample_processes(root_pids)
+    peak = {key: max(peak[key], current[key]) for key in peak}
+    peak.update({
+        "sampler_samples": samples,
+        "sampler_seconds": sample_seconds,
+        "sampler_max_seconds": max_sample_seconds,
+    })
+    connection.send(("result", peak))
+    connection.close()
+
+
 class PeakSampler:
-    def __init__(self, root_pids, interval=0.05):
+    """Sample resource peaks out of process so client GIL timing stays clean."""
+
+    def __init__(self, root_pids, interval=0.2):
         self.root_pids = tuple(root_pids)
         self.interval = float(interval)
-        self.peak = sample_processes(self.root_pids)
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def _run(self):
-        while not self._stop.wait(self.interval):
-            current = sample_processes(self.root_pids)
-            self.peak = {
-                key: max(self.peak[key], current[key]) for key in self.peak
-            }
+        context = multiprocessing.get_context("spawn")
+        self._stop = context.Event()
+        self._parent, child = context.Pipe(duplex=False)
+        self._process = context.Process(
+            target=_peak_sampler_process,
+            args=(self.root_pids, self.interval, self._stop, child),
+            daemon=True,
+        )
+        self._result = None
 
     def start(self):
-        self._thread.start()
+        self._process.start()
+        if not self._parent.poll(30):
+            self._process.terminate()
+            self._process.join(5)
+            raise RuntimeError("peak sampler failed to start")
+        kind, _ = self._parent.recv()
+        if kind != "ready":
+            raise RuntimeError("peak sampler sent an invalid ready message")
         return self
 
     def stop(self):
+        if self._result is not None:
+            return dict(self._result)
         self._stop.set()
-        self._thread.join()
-        current = sample_processes(self.root_pids)
-        self.peak = {key: max(self.peak[key], current[key]) for key in self.peak}
-        return self.peak
+        if not self._parent.poll(30):
+            self._process.terminate()
+            self._process.join(5)
+            raise RuntimeError("peak sampler failed to stop")
+        kind, peak = self._parent.recv()
+        self._process.join(5)
+        self._parent.close()
+        if kind != "result" or self._process.exitcode:
+            raise RuntimeError("peak sampler exited without a valid result")
+        self._result = peak
+        return dict(self._result)
 
 
 def taskvine_stats(manager):
@@ -344,6 +475,7 @@ def taskvine_stats(manager):
         "tasks_submitted", "tasks_done", "tasks_successful", "tasks_failed",
         "bytes_sent", "bytes_received", "time_workers_execute_good",
         "time_send_good", "time_receive_good", "time_scheduling",
+        "workers_removed",
     )
     return {name: int(getattr(stats, name)) for name in names}
 
@@ -352,7 +484,7 @@ def difference(after, before):
     return {key: after[key] - before[key] for key in before}
 
 
-def wait_taskvine_pool(manager, factory, workers, cores, timeout=900):
+def wait_taskvine_pool(manager, factory, workers, cores, timeout=3600):
     """Drive the Python Manager until the exact resident pool is connected."""
 
     deadline = time.monotonic() + timeout
@@ -385,8 +517,8 @@ def start_resident_factory(root, manager_port, workers, cores, worker_binary,
         "--max-workers", str(workers),
         "--workers-per-cycle", str(workers),
         "--factory-period", "1",
-        "--factory-timeout", "1800",
-        "--timeout", "1740",
+        "--factory-timeout", str(POOL_LIFETIME_SECONDS),
+        "--timeout", str(WORKER_IDLE_SECONDS),
         "--cores", str(cores),
         "--memory", "2048",
         "--disk", "4096",
@@ -441,14 +573,8 @@ def runtime_stages(log_path, workflow_id):
 
 
 def wait_datavine(client, workflow_id, roots, timeout=900):
-    deadline = time.monotonic() + timeout
-    while True:
-        state = client.describe_workflow(workflow_id)
-        if state["state"] in {"completed", "failed", "cancelled"}:
-            return state, None
-        if time.monotonic() >= deadline:
-            raise TimeoutError(state)
-        time.sleep(0.02)
+    del roots
+    return client.wait_workflow(workflow_id, timeout=timeout), None
 
 
 def start_datavine(repository, root, workers, cores, batch_type):
@@ -473,7 +599,7 @@ def start_datavine(repository, root, workers, cores, batch_type):
     )
     inventory = wait_workers(repository / "taskvine/src/tools/vine_status",
                              contact["manager_port"], workers, cores, factory,
-                             timeout=900)
+                             timeout=3600)
     client = WorkflowClient(contact["endpoint"], "sc-workflow-comparison")
     warmup = Workflow("sc-datavine-warmup-v1", workflow_id="sc-datavine-warmup",
                       maximum_tasks=1, maximum_edges=0)
@@ -484,7 +610,7 @@ def start_datavine(repository, root, workers, cores, batch_type):
         raise RuntimeError(state)
     cloudpickle.loads(client.fetch_workflow_result(warmup.workflow_id, output.data_id))
     return (service, service_log, service_log_path, factory, factory_log,
-            command, client, inventory)
+            command, client, inventory, int(contact["manager_port"]))
 
 
 class DataVinePool:
@@ -495,7 +621,7 @@ class DataVinePool:
         )
         (self.service, self.service_log, self.service_log_path, self.factory,
          self.factory_log, self.factory_command, self.client,
-         self.inventory) = values
+         self.inventory, self.manager_port) = values
         self.workers = workers
         self.cores = cores
         self.batch_type = batch_type
@@ -517,9 +643,12 @@ def run_datavine(pool, root, name, spec, repetition):
     service_log_path = pool.service_log_path
     factory_command = pool.factory_command
     try:
+        client.rpc_profile(reset=True)
         workflow_id = f"sc-{name}-dv-r{repetition}"
         sampler = PeakSampler((os.getpid(), service.pid, factory.pid)).start()
         started = time.monotonic()
+        built = started
+        ingest_profile = None
         if spec.get("mode") == "dynamic":
             session = WorkflowSession.create(
                 client, workflow_id, maximum_tasks=spec["steps"], maximum_edges=0,
@@ -528,9 +657,12 @@ def run_datavine(pool, root, name, spec, repetition):
             submitted = time.monotonic()
             values = []
             seed = 1
+            dynamic_function = (
+                timed_work_unit if spec.get("kind") == "timed" else work_unit
+            )
             for index in range(spec["steps"]):
                 future = session.submit(
-                    work_unit, f"dynamic-{index}", spec["iterations"], seed,
+                    dynamic_function, f"dynamic-{index}", spec["iterations"], seed,
                     spec["output_bytes"], idempotency_key=f"{workflow_id}-{index}",
                 )
                 value = future.result()
@@ -538,6 +670,7 @@ def run_datavine(pool, root, name, spec, repetition):
                 seed = int(value["digest"][:16], 16)
             session.seal()
             completed = time.monotonic()
+            terminal = completed
             canonical_values, cpu_by_task = canonical((values[-1],))
             logical_tasks = spec["steps"]
         else:
@@ -564,6 +697,11 @@ def run_datavine(pool, root, name, spec, repetition):
                         select_unit, item["index"], item["key"], item["iterations"],
                         item["seed"], item["output_bytes"], *parents,
                     )
+                elif item["kind"] == "timed":
+                    value = builder.python_callable(
+                        timed_work_unit, item["key"], item["iterations"],
+                        item["seed"], item["output_bytes"], *parents,
+                    )
                 else:
                     value = builder.python_callable(
                         work_unit, item["key"], item["iterations"], item["seed"],
@@ -572,15 +710,20 @@ def run_datavine(pool, root, name, spec, repetition):
                 references[item["key"]] = value
             sink_refs = [references[key] for key in spec["sinks"]]
             builder.request(*sink_refs)
+            built = time.monotonic()
             builder.submit(client)
             submitted = time.monotonic()
+            ingest_profile = builder.profile()
             state, _ = wait_datavine(
                 client, workflow_id, (service.pid, factory.pid)
             )
             if state["state"] != "completed":
                 raise RuntimeError(state)
-            values = [cloudpickle.loads(client.fetch_workflow_result(
-                workflow_id, reference.data_id)) for reference in sink_refs]
+            terminal = time.monotonic()
+            serialized = client.fetch_workflow_results(
+                workflow_id, (reference.data_id for reference in sink_refs)
+            )
+            values = [cloudpickle.loads(value) for value in serialized]
             completed = time.monotonic()
             canonical_values, cpu_by_task = canonical(values)
             logical_tasks = len(spec["nodes"])
@@ -589,9 +732,13 @@ def run_datavine(pool, root, name, spec, repetition):
         counts = physical_counts(service_log_path, workflow_id)
         stages = runtime_stages(service_log_path, workflow_id)
         expected_counts = {"submissions": logical_tasks, "completions": logical_tasks}
-        if counts != expected_counts:
+        # A removed worker can legitimately create additional physical attempts.
+        # The campaign driver invalidates that entire measured pair, so preserve
+        # the diagnostic result instead of aborting before it can do so.
+        if (counts != expected_counts and
+                not stages.get("manager_workers_removed", 0)):
             raise RuntimeError({"expected": expected_counts, "physical": counts})
-        return {
+        result = {
             "backend": "datavine",
             "status": "PASS",
             "workflow": name,
@@ -600,7 +747,12 @@ def run_datavine(pool, root, name, spec, repetition):
             "physical_tasks": counts,
             "runtime_stages": stages,
             "build_submit_seconds": submitted - started,
+            "workflow_build_seconds": built - started,
+            "workflow_submit_seconds": submitted - built,
+            "ingest_profile": ingest_profile,
             "post_submit_seconds": completed - submitted,
+            "terminal_wait_seconds": terminal - submitted,
+            "fetch_seconds": completed - terminal,
             "total_seconds": completed - started,
             "tasks_per_second": logical_tasks / (completed - started),
             "useful_cpu_seconds": sum(cpu_by_task.values()) / 1e9,
@@ -611,7 +763,23 @@ def run_datavine(pool, root, name, spec, repetition):
                 "workers": len(pool.inventory),
                 "cores_per_worker": pool.cores,
             },
+            "rpc_profile": client.rpc_profile(reset=True),
         }
+        if "values" in locals():
+            values.clear()
+        cleanup_started = time.monotonic()
+        if "sink_refs" in locals():
+            sink_refs.clear()
+        if "references" in locals():
+            references.clear()
+        if "builder" in locals():
+            del builder
+        heap = release_process_heap()
+        result["client_cleanup"] = {
+            "seconds": time.monotonic() - cleanup_started,
+            **heap,
+        }
+        return result
     except Exception:
         if "sampler" in locals():
             sampler.stop()
@@ -633,7 +801,7 @@ def start_taskvine(repository, root, workers, cores, batch_type):
     executor = vine.FuturesExecutor(port=0, factory=False)
     library_name = "sc-workflow-functions"
     library = executor.manager.create_library_from_functions(
-        library_name, work_unit, split_unit, select_unit,
+        library_name, work_unit, timed_work_unit, split_unit, select_unit,
         add_env=False, exec_mode="fork",
     )
     library.set_cores(cores)
@@ -652,10 +820,10 @@ def start_taskvine(repository, root, workers, cores, batch_type):
     factory.max_workers = workers
     factory.workers_per_cycle = workers
     factory.cores = cores
-    factory.memory = 1024
+    factory.memory = 2048
     factory.disk = 4096
-    factory.timeout = 840
-    factory.factory_timeout = 900
+    factory.timeout = WORKER_IDLE_SECONDS
+    factory.factory_timeout = POOL_LIFETIME_SECONDS
     factory.start()
     inventory = wait_taskvine_pool(executor.manager, factory, workers, cores)
     warmup = executor.future_funcall(library_name, "work_unit", "warmup", 1000, 1, 0)
@@ -676,10 +844,108 @@ class TaskVinePool:
         self.workers = workers
         self.cores = cores
         self.batch_type = batch_type
+        self.manager_port = int(self.executor.manager.port)
 
     def close(self):
         self.factory.stop()
         self.executor.manager.__del__()
+
+
+def cleanup_taskvine_futures(executor, run_futures):
+    """Release one measured DAG without adding cleanup to its wall time."""
+    started = time.monotonic()
+    manager = executor.manager
+    table_before = len(manager._task_table)
+    executor_table_before = len(executor.task_table)
+    drained = 0
+    empty_polls = 0
+    drain_started = time.monotonic()
+    while not manager.empty():
+        task = manager.wait(1)
+        if task is None:
+            empty_polls += 1
+            if empty_polls >= 5:
+                raise RuntimeError({
+                    "taskvine_cleanup_stalled": True,
+                    "task_table_entries": len(manager._task_table),
+                })
+            continue
+        empty_polls = 0
+        drained += 1
+    drain_seconds = time.monotonic() - drain_started
+    files_undeclared = 0
+    run_tasks = []
+    run_files = []
+    detach_started = time.monotonic()
+    for future in run_futures:
+        task = getattr(future, "_task", None)
+        if task is not None:
+            run_tasks.append(task)
+            for attribute in ("_input_file", "_output_file"):
+                file = getattr(task, attribute, None)
+                if file is not None:
+                    run_files.append(file)
+                    setattr(task, attribute, None)
+            task._saved_output = None
+            task._future = None
+        future._task = None
+        future._result = None
+    detach_seconds = time.monotonic() - detach_started
+
+    # FuturesExecutor keeps every submitted task in a lifetime registry.  A
+    # completed task still owns C-side mount references to its declared files,
+    # so merely undeclaring those files leaves fetched buffers (potentially
+    # gigabytes) alive.  Remove exactly this run's tasks and release their C
+    # task objects after the manager has returned all of them.
+    run_task_ids = {id(task) for task in run_tasks}
+    executor.task_table[:] = [
+        task for task in executor.task_table if id(task) not in run_task_ids
+    ]
+    tasks_released = 0
+    release_started = time.monotonic()
+    # Consumers own mounts of producer outputs.  Release in reverse submission
+    # order so high-indegree consumer mounts disappear before producer files.
+    for task in reversed(run_tasks):
+        task.__del__()
+        if task._task is not None:
+            raise RuntimeError("TaskVine task release left a live C task")
+        tasks_released += 1
+    task_release_seconds = time.monotonic() - release_started
+    run_tasks.clear()
+    undeclare_started = time.monotonic()
+    seen_files = set()
+    for file in run_files:
+        identity = id(file)
+        if identity in seen_files:
+            continue
+        seen_files.add(identity)
+        manager.undeclare_file(file)
+        files_undeclared += 1
+    run_files.clear()
+    undeclare_seconds = time.monotonic() - undeclare_started
+    heap = release_process_heap()
+    table_after = len(manager._task_table)
+    if table_after:
+        raise RuntimeError({
+            "taskvine_cleanup_retained_tasks": table_after,
+            "task_table_before": table_before,
+            "tasks_drained": drained,
+        })
+    return {
+        "seconds": time.monotonic() - started,
+        "drain_seconds": drain_seconds,
+        "detach_seconds": detach_seconds,
+        "task_release_seconds": task_release_seconds,
+        "undeclare_seconds": undeclare_seconds,
+        "task_table_before": table_before,
+        "task_table_after": table_after,
+        "tasks_drained": drained,
+        "files_undeclared": files_undeclared,
+        "tasks_released": tasks_released,
+        "executor_task_table_before": executor_table_before,
+        "executor_task_table_after": len(executor.task_table),
+        **heap,
+    }
 
 
 def run_taskvine(pool, root, name, spec, repetition):
@@ -687,6 +953,7 @@ def run_taskvine(pool, root, name, spec, repetition):
     executor = pool.executor
     factory = pool.factory
     library = pool.library
+    run_futures = []
     try:
         baseline = taskvine_stats(executor.manager)
         sampler = PeakSampler((os.getpid(), factory._factory_proc.pid)).start()
@@ -695,18 +962,23 @@ def run_taskvine(pool, root, name, spec, repetition):
             values = []
             seed = 1
             submitted = started
+            dynamic_function = (
+                "timed_work_unit" if spec.get("kind") == "timed" else "work_unit"
+            )
             for index in range(spec["steps"]):
                 task = executor.future_funcall(
-                    library, "work_unit", f"dynamic-{index}",
+                    library, dynamic_function, f"dynamic-{index}",
                     spec["iterations"], seed, spec["output_bytes"],
                 )
                 task.set_cores(1)
                 future = executor.submit(task)
+                run_futures.append(future)
                 submitted = time.monotonic()
                 value = future.result()
                 values.append(value)
                 seed = int(value["digest"][:16], 16)
             completed = time.monotonic()
+            terminal = completed
             canonical_values, cpu_by_task = canonical((values[-1],))
             logical_tasks = spec["steps"]
         else:
@@ -715,6 +987,7 @@ def run_taskvine(pool, root, name, spec, repetition):
                 parents = [futures[key] for key in item["parents"]]
                 function = {
                     "work": "work_unit",
+                    "timed": "timed_work_unit",
                     "split": "split_unit",
                     "select": "select_unit",
                 }[item["kind"]]
@@ -725,23 +998,59 @@ def run_taskvine(pool, root, name, spec, repetition):
                 task = executor.future_funcall(library, function, *arguments)
                 task.set_cores(1)
                 futures[item["key"]] = executor.submit(task)
+                run_futures.append(futures[item["key"]])
             submitted = time.monotonic()
             sinks = [futures[key] for key in spec["sinks"]]
             outcome = vine.futures.wait(sinks, timeout=900)
             if outcome.not_done:
                 raise TimeoutError(f"{len(outcome.not_done)} sinks remain")
-            values = [future.result() for future in sinks]
+            terminal = time.monotonic()
+            values = []
+            for sink_key, future in zip(spec["sinks"], sinks):
+                try:
+                    values.append(future.result())
+                except Exception as error:
+                    output_file = future._task._output_file
+                    raw = b""
+                    raw_error = None
+                    try:
+                        raw = output_file.contents()
+                    except Exception as inspect_error:
+                        raw_error = repr(inspect_error)
+                    diagnostic = {
+                        "sink_key": sink_key,
+                        "task_id": future._task.id,
+                        "task_result": future._task.result,
+                        "task_exit_code": future._task.exit_code,
+                        "output_type": output_file.type(),
+                        "output_cached_name": vine.cvine.vine_file_cached_name(
+                            output_file._file
+                        ),
+                        "output_size": len(output_file),
+                        "raw_size": len(raw),
+                        "raw_sha256": hashlib.sha256(raw).hexdigest(),
+                        "raw_prefix_hex": raw[:64].hex(),
+                        "raw_error": raw_error,
+                        "exception": repr(error),
+                    }
+                    (root / "taskvine-result-corruption.json").write_text(
+                        json.dumps(diagnostic, indent=2, sort_keys=True) + "\n"
+                    )
+                    raise RuntimeError({
+                        "taskvine_result_corruption": diagnostic,
+                    }) from error
             completed = time.monotonic()
             canonical_values, cpu_by_task = canonical(values)
             logical_tasks = len(spec["nodes"])
         peak = sampler.stop()
         counts = difference(taskvine_stats(executor.manager), baseline)
-        if (counts["tasks_submitted"] != logical_tasks or
+        if ((counts["tasks_submitted"] != logical_tasks or
                 counts["tasks_done"] != logical_tasks or
                 counts["tasks_successful"] != logical_tasks or
-                counts["tasks_failed"] != 0):
+                counts["tasks_failed"] != 0) and
+                not counts["workers_removed"]):
             raise RuntimeError({"logical_tasks": logical_tasks, "stats": counts})
-        return {
+        result = {
             "backend": "taskvine",
             "status": "PASS",
             "workflow": name,
@@ -753,6 +1062,8 @@ def run_taskvine(pool, root, name, spec, repetition):
             },
             "build_submit_seconds": submitted - started,
             "post_submit_seconds": completed - submitted,
+            "terminal_wait_seconds": terminal - submitted,
+            "fetch_seconds": completed - terminal,
             "total_seconds": completed - started,
             "tasks_per_second": logical_tasks / (completed - started),
             "useful_cpu_seconds": sum(cpu_by_task.values()) / 1e9,
@@ -764,6 +1075,12 @@ def run_taskvine(pool, root, name, spec, repetition):
                 "cores_per_worker": pool.cores,
             },
         }
+        if "values" in locals():
+            values.clear()
+        result["client_cleanup"] = cleanup_taskvine_futures(
+            executor, run_futures
+        )
+        return result
     except Exception:
         if "sampler" in locals():
             sampler.stop()

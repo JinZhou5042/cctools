@@ -87,37 +87,29 @@ def main():
         "workflow_id": "native-command-chain",
         "idempotency_key": "native-command-chain-v1",
         "mode": "sealed",
+        "task_defaults": {
+            "executor": {
+                "kind": "command",
+                "version": "1",
+                "argv": ["/bin/cat", "{{data:1}}"],
+            },
+            "resources": {"cores": 1},
+            "retry": {"maximum_attempts": 2},
+        },
+        "data_defaults": {"codec": {"name": "text/utf-8", "version": "1"}},
         "data": [
             {
                 "data_id": 1,
-                "codec": {"name": "text/utf-8", "version": "1"},
                 "origin": {
                     "kind": "inline",
                     "base64": base64.b64encode(b"hello native runtime\n").decode(),
                 },
             },
-            {
-                "data_id": 2,
-                "codec": {"name": "text/utf-8", "version": "1"},
-                "origin": {"kind": "output", "task_id": 10, "output_index": 0},
-            },
-            {
-                "data_id": 3,
-                "codec": {"name": "text/utf-8", "version": "1"},
-                "origin": {"kind": "output", "task_id": 20, "output_index": 0},
-            },
+            [2, 10, 0],
+            [3, 20, 0],
         ],
         "tasks": [
-            {
-                "task_id": 10,
-                "executor": {
-                    "kind": "command",
-                    "version": "1",
-                    "argv": ["/bin/cat", "{{data:1}}"],
-                },
-                "inputs": [{"position": 0, "data_id": 1}],
-                "output_data_ids": [2],
-            },
+            [10, [1], [2]],
             {
                 "task_id": 20,
                 "executor": {
@@ -562,7 +554,7 @@ def main():
             assert restarted.returncode == 0, (restarted.returncode, stdout, stderr)
 
         assert (root / "native.journal").stat().st_size < 1024 * 1024
-        assert (root / "native.journal.data/catalog").stat().st_size < 128 * 1024
+        assert not (root / "native.journal.data/catalog").exists()
         result_files = list((root / "native.journal.data").rglob("*.data"))
         largest = max(result_files, key=lambda path: path.stat().st_size)
         assert largest.stat().st_size >= 2 * 1024 * 1024
