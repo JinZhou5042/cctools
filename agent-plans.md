@@ -1,6 +1,6 @@
 # DataVine active implementation plan
 
-Updated: 2026-08-11
+Updated: 2026-08-23
 
 Design filter for every change, in order: **lightweight, efficient, high
 performance, maintainable**. A feature that duplicates authority, adds an
@@ -11,6 +11,30 @@ This is the active engineering contract. Historical decisions, experiments,
 and completed phase narratives are preserved verbatim in
 `agent-plans-history-20260810.md`. Current evidence belongs in `progress.md`
 and `acceptance/`; do not grow this file into another execution log.
+
+The production static IR is complete and accepted. Compact task/data records, shared
+defaults, producer-completion readiness, pending-publication loss handling,
+and the 4x16 scale/recovery gates are documented in `STATIC_IR_V2.md`. Dynamic
+workflow optimization remains deliberately deferred to the next phase.
+
+The production protocol is frozen at one v1 contract. The active callable path
+is object-backed `callable-v1` with `DVP1` tickets and `DVM1` manifests; older
+callable ticket and manifest parsers are removed. See `DATAVINE_PRODUCTION.md`.
+
+The fixed 1024-core comparison is complete and PASS. The next measured
+optimization order is now evidence-driven:
+
+1. add parallel/streaming multi-DataID result reads; the remaining 32 MiB
+   broadcast regression is 0.109 s and directly explained by 0.121 s fetch
+   excess;
+2. keep one WorkflowSession Runtime lane resident across append/result cycles;
+   the current 8-step dynamic case enters the Runtime 9 times;
+3. preserve the current high-degree bulk graph path, where DataVine is already
+   significantly faster, and add a cold-manager versus long-lived-manager
+   diagnostic for TaskVine scheduling growth;
+4. run the real scientific workload suite only after its independent remote
+   byte-attribution gates pass. Synthetic fixed-core evidence must not be
+   relabeled as an application result.
 
 ## 1. Mission and boundary
 
@@ -77,7 +101,8 @@ partial cleanup.
 - Delta schema: `datavine.workflow-delta/v1`.
 - IDs are positive integers; workflow/idempotency identifiers are at most 256
   bytes; identifier arrays are canonicalized by ID.
-- Executors and codecs are independently versioned.
+- DataVine executors use the single production v1 values in
+  `DATAVINE_PRODUCTION.md`; external codec formats retain their own versions.
 - Unknown required schema, executor, codec, field type, or out-of-bound graph
   must fail before mutation.
 - Append is immutable and guarded by `expected_generation` CAS.
@@ -92,10 +117,11 @@ state to survive client failure.
 Capabilities must be checked before mutation. RPC frames, connections, event
 retention, payloads, tasks, edges, and result sizes remain bounded.
 
-### Compatibility
+### Production compatibility
 
 - Never renumber an existing journal opcode or RPC opcode.
-- Old payload-bearing result records remain replay-only. New workflow-journal
+- Historical payload-bearing records within the production v1 journal remain
+  replay-only. New workflow-journal
   writes never contain result bytes; Data Controller metadata has its own
   journal and immutable result files.
 - A truncated final journal record is recoverable by truncation to the last
@@ -190,14 +216,14 @@ The authoritative commands and latest artifacts are listed in `progress.md`.
 
 ## 10. Current architecture/performance execution
 
-The 2026-08-10 round below is retained as historical evidence; its DVP2 result
+The 2026-08-10 round below is retained as historical evidence; its old result
 path and performance artifacts were superseded on 2026-08-11:
 
 - [x] Remove the grouped-noop physical-task shortcut and restore one logical
   task per TaskVine lease, resource request, retry, and completion.
-- [x] Remove duplicate callable output files; transport DVP2 results once and
+- [x] Remove duplicate callable output files; transport callable results once and
   materialize only retained downstream buffers.
-- [x] Remove the redundant DVP3 payload ID, unused scheduler state, and unused
+- [x] Remove the redundant ticket payload ID, unused scheduler state, and unused
   public delta-validation wrapper.
 - [x] Route service runtime information into self-cleaning temporary paths.
 - [x] Delete historical acceptance snapshots, duplicate reports, stale test
@@ -217,7 +243,7 @@ path and performance artifacts were superseded on 2026-08-11:
 - [x] Pass strict 1M and packed-environment workflow gates.
 - [x] Refresh acceptance artifacts and verified handoff hashes.
 - [x] Move Python callable execution to a persistent preloader plus isolated
-  fork children with bounded DVP1/DVP2/DVP3 transport.
+  fork children with bounded framed transport.
 - [x] Split Python callable registration from invocation: one content-addressed
   callable per builder, compact per-task calls, and a bounded raw-byte executor
   cache that never deserializes user code in the parent.
@@ -237,7 +263,7 @@ The 2026-08-11 result-plane redesign is the active gate:
   files, SHA-256 identity, a private metadata journal, recovery, retention, GC,
   direct fetch, and ordinary TaskVine file restoration.
 - [x] Make Python fork children write cloudpickle output files directly.
-- [x] Delete DVP2/base64/stdout result parsing and remove the workflow store's
+- [x] Delete historical base64/stdout result parsing and remove the workflow store's
   current result-writer API; retain old payload records as replay-only reads.
 - [x] Queue result publication asynchronously so Runtime keeps harvesting and
   dispatching while Data Controller threads hash and commit completed outputs.
@@ -262,7 +288,7 @@ The 2026-08-11 result-plane redesign is the active gate:
   files retained in worker cache and peer-transferred by TaskVine; only
   requested public values use Data-Controller-owned output paths.
 - [x] Stream SHA-256 during the sole cloudpickle write and return only a compact
-  DVM1 size/hash manifest; retain zero base64 or result parsing in Runtime.
+  production DVM1 size/hash manifest; retain zero base64 or result parsing in Runtime.
 - [x] Preserve dynamic quiescence by reusing active temp files in the same
   service lifetime, and recompute producers after service restart when their
   non-durable worker-local outputs are gone.
@@ -310,7 +336,8 @@ The 2026-08-11 result-plane redesign is the active gate:
   Preserve post-durability visibility and replay; add no agent, RPC, or
   TaskVine Core logic. Final wide median records 16 barriers for 320 durable
   outputs.
-- [x] Add compact DVP4 retained/durable output policy with DVP3 compatibility.
+- [x] Add compact retained/durable output policy. The production freeze removes
+  historical ticket compatibility.
   Skip unconsumed output serialization and recomputable VINE_TEMP/manifest
   fsync while preserving requested-output fsync; focused contract PASS.
 - [x] Cache one callable snapshot per Workflow object identity and avoid the
@@ -333,10 +360,16 @@ The 2026-08-11 result-plane redesign is the active gate:
   scaling; equal-sink versus native TaskVine contracts; remote byte/resource
   accounting; fault recovery; paired statistics; and explicit promotion gates.
   See `SC_SCIENTIFIC_WORKFLOW_BENCHMARK_PLAN.md`.
-- [ ] Implement the suite foundation: versioned artifact schema,
-  deterministic non-sparse data generator, remote resource/byte sampler and
-  HEP-S three-contract driver. Do not launch a large campaign until transfer
-  accounting is calibrated and the local exactness/storage gates pass.
+- [x] Implement and locally validate the suite foundation: versioned artifact
+  schema, deterministic non-sparse/cloudpickle shard generator with corruption
+  verification, Linux process/network/disk sampler with known-byte calibration,
+  and HEP-S TV-native/DV-native/TV-durable-sink driver. The retained 1x1 pilot
+  passed 6/6 runs at 19/19 physical tasks with one exact digest; full regression
+  passed 11/11 using the hash-verified Go binary.
+- [ ] Integrate sampler snapshots with actual producer/consumer worker identity
+  and per-worker transfer attribution, then implement CAL-small cold/warm/
+  peer-required gates. Do not launch 10x16 or make a performance claim until
+  those byte-accounting gates pass.
 
 ## 11. Ordered next work
 
@@ -396,8 +429,8 @@ Campaign outcome (2026-08-10):
   large-input, peer, and SharedFS cases.
 - Add a combined child/worker/source/publication/preloader fault matrix and
   retain exact DataID/attempt/result evidence.
-- Cross-version migration beyond the explicitly retained v1 journal records is
-  OPEN and requires a versioned migration tool before any incompatible change.
+- Historical protocol migration is outside the frozen production-v1 scope;
+  removed executor, ticket and manifest generations fail closed.
 - Security beyond token authentication (TLS, rotation, authorization domains)
   remains OPEN.
 

@@ -1,8 +1,105 @@
 # DataVine current checkpoint
 
-Updated: 2026-08-11
+Updated: 2026-08-23
+
+## Current checkpoint — production v1 freeze (2026-08-23)
+
+All active DataVine-owned boundaries now use one production v1 contract.
+The source, tests, documentation and retained evidence are frozen by annotated
+Git tag `datavine-production-v1-20260823`.
+Python callable execution is object-backed `callable-v1` with a `DVP1` worker
+ticket and `DVM1` output manifest. Historical callable tickets and manifest
+parsers were removed rather than retained as a second execution path. The
+authoritative boundary table and compatibility policy are in
+`DATAVINE_PRODUCTION.md`.
+
+The post-freeze source regression is 13/13 PASS, including IR validation,
+Python callable execution, output retention, data-plane object pulls, notebook
+fork lifecycle, dynamic workflows, Shell, Go and the scientific foundation.
+The retained report is `acceptance/production-v1-regression-20260823.json`.
+
+## Current checkpoint — production static IR (2026-08-23)
+
+Static workflows now use optional `task_defaults` and `data_defaults` plus
+compact task and produced-data records. One logical task remains one physical
+TaskVine task per attempt; graph-registration deltas are transport framing, not
+task batching. Scheduler readiness is exclusively producer-task completion.
+The Runtime marks that producer complete only after physical success and
+successful output publication, so a lost last replica during publication
+causes the producer to retry without releasing downstream tasks.
+
+The fresh 4-worker x 16-core gates pass at one million independent tasks and at
+100,000 real Python tasks with one million input references and one million
+logical outputs. On the latter identical graph, compact IR reduced workflow
+payload 87.80%, graph-load time 84.38% (6.40x), and load RSS 65.57% versus the
+full-object IR baseline. A separate live-loss gate removed four workers and
+validated minimal producer/descendant recomputation with exact sink results.
+
+The design, record forms, ownership rules, reproduction commands, measurements,
+artifact paths, and explicit OPEN boundaries are in `STATIC_IR_V2.md`. The
+machine-readable delivery index is
+`/project01/ndcms/jzhou24/datavine-benchmarks/static-ir-v2-delivery-20260823.json`.
+
+## Current checkpoint — production decoupled data plane (2026-08-18)
+
+The input data path is now decoupled from scheduling. Workflow IR and the
+scheduler retain logical DataIDs and content identities only. The native Data
+Controller owns the persistent SHA-256 object store, current location
+resolution, digest-scoped worker tickets, stable TaskVine file identities,
+publication, recovery, and lifecycle. Workers actively pull `datavine://`
+objects, stream them into cache, and verify SHA-256 before installation.
+
+Python emits production callable-v1/DVP1, serializes functions and structurally identical
+invocations once, hashes remaining immutable bytes, and suppresses duplicate
+PUTs. Function and invocation objects are not TaskVine inputs: the persistent
+worker-local executor pulls them directly over a reused, digest-scoped
+connection. The Controller independently verifies and atomically deduplicates
+every object. The durable IR contains neither payload base64, service address,
+worker ticket, nor workflow token. One-object-per-file v1 advertises its
+67,108,800-byte limit; chunking remains an isolated future object-store
+extension.
+
+Final validation passed 13/13 repository contracts. A 64-task shared 4 MiB
+test produced four object records, three unique PUTs, one local deduplication,
+one ordinary worker-cache pull, and direct executor object pulls. A one-million
+repeated-eData build produced 1,000,002 Data records in 22.249 s (44,945.2
+tasks/s) while serializing the invocation once. Orthogonal eight-core runs
+reported `scheduler_delay` for 256 immediate tasks, `data_stage_in` for 16
+unique 4 MiB inputs, and `python_function` for 64 tasks at 50 ms fixed CPU
+each. Every service writes a default journal-adjacent profile including direct
+executor pull time.
+
+The exact contract, limitations, final measurements, complete regression
+report, and checksums are retained in `DATAVINE_DATA_PLANE_V2.md` and
+`acceptance/data-plane-v2/`.
 
 ## Outcome
+
+The post-upgrade fixed 1024-core DataVine-versus-TaskVine campaign is **PASS**.
+It used two exact 64-worker x 16-core resident pools, 49 workflow cases, 98
+accepted warmup backend runs and 980 accepted measured backend runs. Ten paired
+repetitions, exact result hashes and physical-task counts, zero churn in every
+accepted measurement and complete regression attribution all pass. Twenty-eight
+runs overlapping explicit Condor eviction were retained as invalidated evidence
+and excluded. Paired 95% intervals classify 46 cases as DataVine-faster, 2 as
+DataVine-slower and 1 as inconclusive.
+
+Representative throughput is 208.9 versus 111.5 tasks/s for 4096 immediate
+tasks, 71.6 versus 62.3 tasks/s at fixed 10 s CPU, and 232.8 versus 119.4
+tasks/s for fan-in 16 (DataVine versus TaskVine). The 32 MiB requested-output
+case now favors DataVine, 11.224 s versus 13.008 s. The two confirmed
+regressions are bounded and fully attributed: 32 MiB broadcast is 1.371 s
+versus 1.262 s because DataVine result fetch adds 0.121335 s of direct
+critical-path excess; eight-step serial dynamic append is 1.007 s versus 0.186
+s because it enters the Runtime nine times. The improvement interfaces are
+parallel/streaming multi-DataID reads and a resident WorkflowSession runtime
+lane, respectively.
+
+Fresh one-object-per-file SharedFS profiling gives 83.4 cold objects/s with one
+writer and 752.9 objects/s with 16 bounded writers for 4096 distinct 256-byte
+objects; warm deduplicated throughput is 3162.2 objects/s. The durable compact
+campaign, generated report, CSV and ingest profile are under
+`acceptance/1024-core-workflows/data-plane-v2-current-final-20260821/`.
 
 The supported single-service, language-neutral dynamic-workflow architecture
 is internally consistent and passes its current source gates. C is the sole
@@ -14,30 +111,30 @@ retry, and completion. Scale gates now fail unless the native runtime reports
 exactly one physical submission and completion for every logical task.
 
 The result plane is now separate from the control plane. Python callables write
-cloudpickle once while streaming SHA-256 and return only a compact DVM1
-manifest. Non-requested intermediates are TaskVine temporary files: they stay
-in worker cache and move peer-to-peer. Requested public values alone use
-Data-Controller-owned output paths and durable metadata. The four-thread Data
-Controller validates and commits them; Runtime never reads result payloads or
-parses result metadata. The Data Controller reads only the compact DVM1
-size/hash manifest from TaskVine stdout. The workflow journal receives no new
-result payloads; its old result records are replay-only compatibility.
+cloudpickle once while streaming SHA-256 and return only compact metadata.
+Producer completion reaches the scheduler after required output publication.
+The worker Data Agent first
+announces local availability for peer-first consumption, then lazily persists
+the same object to its hash-derived SharedFS path and sends
+`RESULT_PERSISTED`. Runtime and Controller memory never carry result payloads;
+the shared journal contains metadata only. The Controller owns location,
+persistence, pruning, GC and permanent-loss recovery, while the TaskVine
+manager alone owns running-task loss and resubmission.
 
 ## Cleanup and semantic fixes
 
 - Deleted the grouped-noop executor path, physical groups, projected results,
   projection metrics, and its executor operation.
-- Removed DVP2/base64/stdout result transport. Callable and source executors
+- Removed the historical base64/stdout result transport. Callable and source executors
   write direct output files; ordinary TaskVine transfer or SharedFS moves those
   files without routing payload bytes through Runtime.
-- Replaced manager-side persistence of every retained callable output with a
-  hybrid native path: `VINE_TEMP` plus peer transfer for intermediates, ordinary
-  TaskVine output transfer only for requested values. No new worker daemon or
-  data protocol was added.
+- Replaced manager-side persistence with worker-local availability followed by
+  asynchronous Data-Agent-to-SharedFS durability. Requested and intermediate
+  bytes no longer route through Runtime or Controller memory.
 - Added fail-closed restart semantics: completed producers are recovered only
   when their retained outputs are still active or durable; lost worker-local
   values cause producer recomputation.
-- Reduced DVP3 tickets from 64 to 56 fixed bytes by deleting the redundant
+- Reduced the previous tickets from 64 to 56 fixed bytes by deleting the redundant
   payload ID.
 - Removed an unused scheduler enum and unused public JSON delta-validation
   wrapper; the parsed validator remains internal to the store.
@@ -123,22 +220,23 @@ Artifacts:
 Promoted package:
 
 - active: `/users/jzhou24/graph_optimization/factories/datavine.tar.gz`
-- active SHA-256: `9c1c8372c3cbc4baf43317257408213d07867938c6e0f767fb1009f018c8b9ca`
-- output-heavy rollback: `datavine.worker-local-candidate-20260811.tar.gz`,
-  SHA-256 `67c202c328b38f59d5da68a68ade5a05abdc076bdb1b57f49f15ad00a5b6f0bf`
-- rollback hard link: `datavine.deep-review-20260810.tar.gz`
-- rollback SHA-256: `8933446d6583ada6f8d23033012eb618f700b7b1a25b102a93c13661ca19c9e9`
+- active production-v1 SHA-256:
+  `6019adc524f86bf4d14b984e8a6f07928cf08964ec2a6a19031e36829f50adcd`
+- production-v1 candidate hard link:
+  `datavine.production-v1-candidate-20260823.tar.gz`
+- immediate rollback: `datavine.pre-production-v1-rollback-20260823.tar.gz`,
+  SHA-256 `32e1361324df69be2db88258565f3ad393d2eb16ff9228e99387b895d9abba6d`
 - Go adaptor: `datavine_workflow_go-20260811`, SHA-256
   `9a52d76a35474cc8e7f5da5b26633428c0f929753ef218d9e7aaa7e9d5ddffd4`
 
 `poncho_package_run` imported cloudpickle 3.1.2 and the DataVine API;
 package-local hashes matched the installed `datavine_workflow`,
 `datavine_executor`, `datavine_python_executor`, and `vine_worker`. Packed
-1x2x10k completed exactly with 75.3 MB peak RSS, 45 FDs, and six processes.
-
-After the output-heavy 9/9, packed, and crossed-order gates, the new candidate
-was promoted atomically. The active-path smoke completed exactly 10,000/10,000
-at 3,370 Runtime tasks/s and 74.8 MB peak RSS.
+candidate and promoted active-path 1x2x10k runs both completed exactly at
+10,000/10,000. The active path reached 3,820.6 Runtime tasks/s, 50.1 MB peak
+RSS, 42 FDs and six processes. Evidence is retained in
+`acceptance/production-v1-packed-1x2x10k-20260823.json` and
+`acceptance/production-v1-active-1x2x10k-20260823.json`.
 
 ## Reproduction
 
@@ -245,10 +343,11 @@ there is still one Controller owner with no new service, RPC, or TaskVine Core
 logic. In the final 10x16 n=5 wide run, 320 durable outputs required a median
 16 journal barriers rather than one synchronous barrier per output.
 
-The compact DVP4 Python ticket also carries retained/durable output policy.
+The production Python ticket also carries retained/durable output policy.
 Unconsumed outputs are not serialized, recomputable `VINE_TEMP` outputs and
 the worker-local DVM1 manifest are not fsynced, and requested outputs keep
-their durability fsync. DVP3 tickets remain readable. A focused executable
+their durability fsync. Historical tickets are not part of the production
+contract. A focused executable
 contract passes `retained=2 skipped=1 remote-fsync=0 durable-fsync=1`.
 Repeated use of one callable object now fixes and reuses one cloudpickle
 snapshot per Workflow: a 480-task profile performs one function dump and
@@ -345,3 +444,48 @@ See `SC_WORKFLOW_COMPARISON_REPORT.md` for exact medians, methodology, threats,
 raw artifact paths, reproduction commands, and remaining SC publication gates.
 These opportunistic heterogeneous-cluster results are a pilot, not a final
 causal hardware claim.
+
+## Current checkpoint — scientific workflow foundation (2026-08-17)
+
+The first staged scientific-workflow implementation slice is now locally
+executable. It adds a strict v1 raw artifact schema, deterministic non-sparse
+raw/cloudpickle shard generation and verification, Linux process/network/disk
+sampling with known-byte calibration, and an HEP scan/calibrate/tree-reduce
+driver with explicit `TV-native`, `DV-native`, and `TV-durable-sink` contracts.
+The runtime and Data Controller implementation were not changed.
+
+The repository test
+`taskvine/test/TR_datavine_scientific_workflow_foundation.sh` passes deterministic
+double generation, full shard hashes, allocation checks, deliberate corruption
+failure, 2 MiB resource calibration, three backend contracts, 11/11 physical
+task counts, exact cross-backend digest, and process/partial-file cleanup.
+
+The retained acceptance pilot used eight 1 MiB shards, fan-in four, 64 bins,
+one local Worker/core, and two repetitions per contract. All six runs passed
+19/19 exact logical/submitted/completed counts and produced digest
+`6513a1363c2490c06c54ca304e913c2c0640e5d1525bd16e9a124d5c3ccfcea5`.
+The generator dataset identity is
+`9707452643482f701b4e1b8b531405beca1e84d8c3d835fd5a198afe053e7a3e`.
+The 8 MiB sampler calibration passed with process-write/payload 1.0 and
+loopback RX/TX payload ratios 1.001353. Raw retained evidence is under
+`acceptance/scientific-workflows/`.
+
+Validation commands:
+
+```sh
+make -C taskvine/src/datavine -B -j8
+make -C taskvine/src/tools datavine_workflow datavine_executor -B -j8
+make -C taskvine/src/bindings/python3 -B -j8
+PYTHONNOUSERSITE=1 bash taskvine/test/TR_datavine_scientific_workflow_foundation.sh run
+PYTHONNOUSERSITE=1 DATAVINE_GO_BINARY=/users/jzhou24/graph_optimization/factories/datavine_workflow_go-20260811 bash acceptance/scripts/run_regression.sh
+```
+
+The first regression attempt passed 10/11 and failed only because neither the
+Go binary variable nor a compiler was supplied. The retained Go binary matched
+`acceptance/current-handoff.sha256`; the complete rerun then passed 11/11.
+This local pilot is not performance evidence: per-worker producer/consumer
+identity and byte deltas are still null, TaskVine Futures combine terminal wait
+and fetch timing, and TaskVine shard decode is inside the kernel while DataVine
+decode is an executor stage. End-to-end includes both decode paths, but useful
+CPU is not directly comparable. CAL-small, 10x16 and reserved-node runs remain
+OPEN.

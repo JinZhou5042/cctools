@@ -10,6 +10,8 @@
 !makeflow/test/json/*.json
 !poncho/src/test.json
 !resource_monitor/src/file_watch_example.json
+!/taskvine/src/manager/datavine_workflow_v1.schema.json
+!/taskvine/test/datavine_workflow_ir_fixtures.json
 *.o
 *.swp
 cctools.test.log
@@ -34,6 +36,15 @@ cctools.lint.out
 !/acceptance/worker-local-data-plane-*.json
 !/acceptance/go-adaptor-*.json
 !/acceptance/output-heavy-stage-*.json
+!/acceptance/scientific-workflows/
+!/acceptance/scientific-workflows/*.json
+!/acceptance/1024-core-workflows/
+!/acceptance/1024-core-workflows/*.json
+!/DATAVINE_TASKVINE_1024_CORE_BENCHMARK.md
+!/STATIC_IR_V2.md
+!/DATAVINE_PRODUCTION.md
+!/acceptance/production-v1-*.json
+!/acceptance/production-v1.sha256
 /acceptance/sc-workflow-*/
 /vine-run-info/
 **/vine-run-info/

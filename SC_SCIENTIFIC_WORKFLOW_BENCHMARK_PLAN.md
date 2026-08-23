@@ -1,7 +1,7 @@
 # Data-intensive scientific workflow benchmark plan
 
-Date: 2026-08-11
-Status: **DESIGN COMPLETE; IMPLEMENTATION AND RESERVED-NODE RUNS OPEN**
+Date: 2026-08-18
+Status: **SYNTHETIC 1024-CORE CAMPAIGN PASS; LOCAL SCIENTIFIC FOUNDATION PASS; REAL-APPLICATION DISTRIBUTED ATTRIBUTION OPEN**
 
 ## Objective
 
@@ -16,6 +16,13 @@ faster. Both systems execute the same physical TaskVine work. The question is
 whether DataVine reduces orchestration and repeated data movement enough to
 offset its workflow-service and requested-result durability costs at scientific
 scale.
+
+The fixed 1024-core synthetic campaign is now complete and supplies calibrated
+CPU, payload, degree, topology and lifecycle boundaries. It does not complete
+this real-application plan. In particular, requested-result fetch and tiny
+dynamic control are confirmed DataVine bottlenecks, while high-degree static
+graphs are an advantage. HEP, calibration, genomics, climate and adaptive
+claims still require the workload-specific byte/placement gates below.
 
 ## Systems and semantic contracts
 
@@ -332,3 +339,29 @@ trusted. Climate, adaptive and fault campaigns follow in that order.
 7. Reserve homogeneous nodes and execute the paired Stage 2 matrix.
 8. Only after confidence intervals and all correctness/storage gates pass,
    update performance claims or prioritize the next measured bottleneck.
+
+## Implementation checkpoint — 2026-08-17
+
+The local foundation is implemented and executable:
+
+- `schema.json` defines the strict versioned raw-run contract;
+- `generate_scientific_data.py` creates deterministic non-sparse raw or
+  streaming cloudpickle-byte shards, records stored/logical hashes and refuses
+  overwrite; verification detects corruption and sparse allocation;
+- `sample_remote_resources.py` captures Linux process-tree, network, disk and
+  filesystem counters locally or through an explicit SSH host, and its 8 MiB
+  calibration measured 1.0x process writes and 1.001353x loopback bytes;
+- `compare_scientific_workflows.py` runs one HEP scan/calibrate/tree-reduce
+  graph through TV-native, DV-native and TV-durable-sink with exact digest and
+  logical/physical-count enforcement;
+- `TR_datavine_scientific_workflow_foundation.sh` exercises deterministic
+  regeneration, corruption fail-closed, sampler calibration, all three
+  contracts and cleanup as part of the 11/11 source regression.
+
+The retained 1x1 acceptance pilot used eight 1 MiB shards, 19 logical/physical
+tasks, two repetitions per contract and six exact backend runs. All runs
+produced digest
+`6513a1363c2490c06c54ca304e913c2c0640e5d1525bd16e9a124d5c3ccfcea5`.
+This is a correctness/accounting foundation only. Per-worker producer/consumer
+identity, network/disk deltas, placement lower bounds, CAL-small, 10x16 and
+reserved-node performance remain OPEN.

@@ -28,7 +28,7 @@ cost of service RPC, durable workflow generations, journaling, and result fetch.
 The data-size experiment rejects a simple “data-aware is always faster”
 hypothesis. DataVine is 0.58x at 32 MiB reusable-root output and 0.42x on a wide
 multi-output workload. For the latter, median native runtime is 4.091 s, of
-which 3.896 s is publication. The then-current DVP2/base64/stdout and durable journal
+which 3.896 s is publication. The then-current base64/stdout and durable journal
 path copies large retained values and is the clearest optimization target.
 
 That result path was first replaced by direct executor output files and then by
@@ -99,8 +99,8 @@ The next source round removed the measured serialization and durability hot
 spots without changing the ownership model. Concurrent Controller
 publications now use the existing journal enqueue/commit interface with a
 bounded 1 ms coalescing leader. Durable results become visible only after the
-shared barrier. A compact DVP4 ticket lets the Python child skip unconsumed
-outputs and fsync only requested outputs; DVP3 remains compatible. Reused
+shared barrier. A compact ticket lets the Python child skip unconsumed
+outputs and fsync only requested outputs. Reused
 callable objects are cloudpickled once per Workflow.
 
 The exact 10x16 n=5 follow-up passed all 20 backend runs. The 32 MiB reuse
@@ -311,7 +311,7 @@ zero failed tasks, and identical requested result hashes. Successful totals are:
 The first 160-wide multi-output experiment failed with `publish_failed`. The
 failure was reproducible and was not excluded as an outlier. The executor's
 `send_frame()` used one `os.writev()` call and assumed that a legal partial pipe
-write had sent the entire frame. Large concurrent DVP2 frames could therefore
+write had sent the entire frame. Large concurrent result frames could therefore
 be truncated. The implementation now loops until length, delimiter, and payload
 bytes are fully written. A regression forces writes of at most seven bytes and
 asserts byte-exact reconstruction. The affected native execution contract and
