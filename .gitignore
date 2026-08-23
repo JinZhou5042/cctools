@@ -41,11 +41,16 @@ cctools.lint.out
 !/acceptance/1024-core-workflows/
 !/acceptance/1024-core-workflows/*.json
 !/DATAVINE_TASKVINE_1024_CORE_BENCHMARK.md
+!/DATAVINE_DATA_PLANE_V2.md
 !/STATIC_IR_V2.md
 !/DATAVINE_PRODUCTION.md
 !/acceptance/production-v1-*.json
 !/acceptance/production-v1.sha256
 /acceptance/sc-workflow-*/
+!/acceptance/sc-workflow-worker-local-final-20260811-10x16-n5/
+!/acceptance/sc-workflow-worker-local-final-20260811-10x16-n5/summary.json
+!/acceptance/sc-workflow-worker-local-hybrid-20260811-10x16-n5/
+!/acceptance/sc-workflow-worker-local-hybrid-20260811-10x16-n5/summary.json
 /vine-run-info/
 **/vine-run-info/
 /taskvine/src/tools/datavine_directory_test
