@@ -48,8 +48,10 @@ cctools.lint.out
 !/acceptance/production-v1.sha256
 /acceptance/sc-workflow-*/
 !/acceptance/sc-workflow-worker-local-final-20260811-10x16-n5/
+/acceptance/sc-workflow-worker-local-final-20260811-10x16-n5/*
 !/acceptance/sc-workflow-worker-local-final-20260811-10x16-n5/summary.json
 !/acceptance/sc-workflow-worker-local-hybrid-20260811-10x16-n5/
+/acceptance/sc-workflow-worker-local-hybrid-20260811-10x16-n5/*
 !/acceptance/sc-workflow-worker-local-hybrid-20260811-10x16-n5/summary.json
 /vine-run-info/
 **/vine-run-info/
