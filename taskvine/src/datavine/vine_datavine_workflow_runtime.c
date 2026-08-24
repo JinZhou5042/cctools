@@ -342,7 +342,56 @@ static struct vine_task *create_python_ticket(struct jx *task,
 	vine_datavine_put_u64(ticket + 8, payload_id);
 	vine_datavine_put_u64(ticket + 16, wall_seconds);
 	const char *version = jx_lookup_string(executor, "version");
-	if (!strcmp(version, VINE_DATAVINE_PYTHON_CALLABLE_VERSION)) {
+	if (!strcmp(version, VINE_DATAVINE_PYTHON_SOURCE_VERSION)) {
+		struct jx *outputs = vine_datavine_ir_task_outputs(task);
+		struct jx *output_files = jx_lookup(executor, "output_files");
+		size_t output_count = (size_t)jx_array_length(outputs);
+		int indexed_outputs = output_files &&
+			jx_array_length(output_files) == (int)output_count;
+		for (size_t index = 0; indexed_outputs && index < output_count; index++) {
+			char expected[64];
+			snprintf(expected, sizeof(expected), "datavine-python-output-%zu", index);
+			indexed_outputs = !strcmp(
+				jx_array_index(output_files, (int)index)->u.string_value,
+				expected);
+		}
+		/* The extended source ticket enables the same Worker-local output and
+		 * direct-durability path as callable-v1. Keep the original 24-byte
+		 * ticket for custom output names so existing source executors remain
+		 * wire compatible. */
+		if (indexed_outputs) {
+			const size_t fixed_size = 64;
+			if (!output_count || output_count > UINT32_MAX ||
+					output_count > (SIZE_MAX - fixed_size) / 10)
+				return 0;
+			ticket_size = fixed_size + output_count * 10;
+			ticket = calloc(1, ticket_size);
+			if (!ticket)
+				return 0;
+			memcpy(ticket, VINE_DATAVINE_PYTHON_TICKET_MAGIC, 4);
+			vine_datavine_put_u64(ticket + 8, payload_id);
+			vine_datavine_put_u64(ticket + 16, wall_seconds);
+			vine_datavine_put_u32(ticket + 24, (uint32_t)output_count);
+			vine_datavine_put_u32(ticket + 28, attempt);
+			if (!vine_datavine_data_controller_workflow_key(
+					data_controller, workflow_id, ticket + 32)) {
+				free(ticket);
+				return 0;
+			}
+			for (size_t index = 0; index < output_count; index++) {
+				uint64_t data_id = (uint64_t)jx_array_index(outputs, (int)index)
+							   ->u.integer_value;
+				ticket[fixed_size + index] = retain_all ||
+					itable_lookup(consumers, data_id) ||
+					itable_lookup(requested, data_id);
+				ticket[fixed_size + output_count + index] =
+					itable_lookup(requested, data_id) != 0;
+				vine_datavine_put_u64(
+					ticket + fixed_size + output_count * 2 + index * 8,
+					data_id);
+			}
+		}
+	} else if (!strcmp(version, VINE_DATAVINE_PYTHON_CALLABLE_VERSION)) {
 		uint64_t function_ref = (uint64_t)jx_lookup_integer(executor, "function_ref");
 		const char *digest = jx_lookup_string(executor, "function_digest");
 		struct jx *payload_record = itable_lookup(data, payload_id);

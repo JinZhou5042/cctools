@@ -1401,7 +1401,21 @@ int vine_datavine_data_controller_bind_outputs(
 	struct jx *output_ids = vine_datavine_ir_task_outputs(task);
 	const char *version = jx_lookup_string(executor, "version");
 	int worker_local = !strcmp(jx_lookup_string(executor, "kind"), "python") &&
-			   !strcmp(version, VINE_DATAVINE_PYTHON_CALLABLE_VERSION);
+			!jx_lookup(executor, "environment") &&
+			(!strcmp(version, VINE_DATAVINE_PYTHON_CALLABLE_VERSION) ||
+			 !strcmp(version, VINE_DATAVINE_PYTHON_SOURCE_VERSION));
+	if (worker_local && !strcmp(version, VINE_DATAVINE_PYTHON_SOURCE_VERSION)) {
+		for (int index = 0;
+				output_files && index < jx_array_length(output_files);
+				index++) {
+			char expected[64];
+			snprintf(expected, sizeof(expected),
+					"datavine-python-output-%d", index);
+			if (strcmp(jx_array_index(output_files, index)->u.string_value,
+					expected))
+				worker_local = 0;
+		}
+	}
 	if (!output_files)
 		return jx_array_length(output_ids) == 1;
 	if (jx_array_length(output_files) != jx_array_length(output_ids))
@@ -1551,7 +1565,19 @@ vine_datavine_data_controller_publish_async(
 	const char *version = jx_lookup_string(executor, "version");
 	int worker_local = output_files &&
 			   !strcmp(jx_lookup_string(executor, "kind"), "python") &&
-			   !strcmp(version, VINE_DATAVINE_PYTHON_CALLABLE_VERSION);
+			   !jx_lookup(executor, "environment") &&
+			   (!strcmp(version, VINE_DATAVINE_PYTHON_CALLABLE_VERSION) ||
+				!strcmp(version, VINE_DATAVINE_PYTHON_SOURCE_VERSION));
+	if (worker_local && !strcmp(version, VINE_DATAVINE_PYTHON_SOURCE_VERSION)) {
+		for (int index = 0; index < jx_array_length(output_files); index++) {
+			char expected[64];
+			snprintf(expected, sizeof(expected),
+					"datavine-python-output-%d", index);
+			if (strcmp(jx_array_index(output_files, index)->u.string_value,
+					expected))
+				worker_local = 0;
+		}
+	}
 	const char *plain_output = output_files ? 0 : vine_task_get_stdout(completed);
 	size_t plain_output_size = plain_output ? strlen(plain_output) : 0;
 	int total = jx_array_length(output_ids);

@@ -489,3 +489,53 @@ and fetch timing, and TaskVine shard decode is inside the kernel while DataVine
 decode is an executor stage. End-to-end includes both decode paths, but useful
 CPU is not directly comparable. CAL-small, 10x16 and reserved-node runs remain
 OPEN.
+
+## Current checkpoint — million-task data-intensive benchmark (2026-08-23)
+
+Branch `benchmark/data-intensive-million-file` now contains the executable
+workload contract, resumable 128-part dataset generator, DataVine runner,
+TaskVine FunctionCall-fork runner, fail-closed paired comparator, tests, and
+`DATAVINE_DATA_INTENSIVE_BENCHMARK.md`. The frozen acceptance contract is
+1,048,576 tasks, 10,485,760 workflow payload files, 1.039871 TiB stored
+artifacts, 3.696121 TiB logical data path, and exactly 128 workers x 16 cores.
+
+The workload contract test passes exact task/file/data/edge/byte counts,
+regular graph degree, random-pread kernel execution, deterministic output,
+non-sparse generation, completed-file resume, partial-file resume, and
+deliberate corruption rejection. Directly affected module-boundary,
+Python-output-policy, workflow-execution, workflow-lifecycle, and data-plane-v2
+tests also pass.
+
+The first pilot exposed that `source-v1` retained outputs still returned
+through the Manager. Indexed `source-v1` outputs now use an extended `DVP1`
+ticket, `DVM1` manifest, worker-local temporary file, and direct requested
+output persistence. The legacy 24-byte ticket remains for custom output names,
+and executors with an environment override retain their non-fork path. In the
+accepted 256-task 1x1 DataVine pilot, all 256 outputs were worker-local, only
+32 requested C outputs were durable, and Manager task-output payload bytes
+were zero.
+
+Canonical paired pilot artifacts are:
+
+- DataVine: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/datavine-local-1x1-final/summary.json`
+- TaskVine: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/taskvine-local-1x1-semantic/summary.json`
+- Comparison: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/comparison-pilot-final.json`
+
+Both backends passed 256/256 exact physical counts with matching sampled C
+SHA-256 values. The paired pilot reports TaskVine 48.97 s versus DataVine
+26.21 s (1.87x) and 97.00% fewer Manager data-plane bytes. Its scope is
+explicitly `pilot`; it is not the full performance claim.
+
+The full source dataset is being generated under
+`/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823`.
+Condor cluster 15830 owns the original 128 parts and cluster 15831 owns three
+resume jobs after evictions. Part manifests are atomic, and job arguments are
+resume-safe. OPEN gates are all 128 manifests, full dataset hashing, scale
+calibration, and five alternating exact 128x16 backend pairs.
+
+Separately, 19 superseded DataVine factory tarballs totaling about 15 GB moved
+to `/project01/ndcms/jzhou24/datavine-benchmarks/factory-package-archive-20260823`.
+Original paths are symlinks, so historical checksum references remain usable.
+The active production package, its hard-linked production-v1 candidate, the
+rollback package, the Go binary, and all non-DataVine packages were left in
+place. `/users` utilization fell from approximately 99-100% to 76-80%.

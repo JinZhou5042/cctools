@@ -1,0 +1,20 @@
+universe = vanilla
+executable = $(python_bin)
+arguments = $(repository)/acceptance/scripts/generate_data_intensive_dataset.py --acceptance generate-part --root $(dataset_root) --part $(Process) --parts 128 --resume
+
+should_transfer_files = NO
+getenv = False
+environment = "PYTHONNOUSERSITE=1"
+
+request_cpus = 1
+request_memory = 1024MB
+request_disk = 2GB
+
+output = $(run_root)/logs/part-$(Process).out
+error = $(run_root)/logs/part-$(Process).err
+log = $(run_root)/generator.condor.log
+
+on_exit_remove = (ExitBySignal == False) && (ExitCode == 0)
+max_retries = 2
+
+queue 128

@@ -54,6 +54,25 @@ def main():
         assert manifest[3] == f"0 {'0' * 64}"
         assert manifest[5].startswith("M 0 "), manifest[5]
         assert calls == [], calls
+
+        # source-v1 uses the same manifest contract for indexed outputs, but
+        # hashes already-written files instead of serializing Python values.
+        (root_path / "datavine-python-output-0").write_bytes(b"source-zero")
+        (root_path / "datavine-python-output-2").write_bytes(b"source-two")
+        previous = module.os.getcwd()
+        module.os.chdir(root)
+        try:
+            module.source_manifest(bytes((1, 0, 1)), 1234)
+        finally:
+            module.os.chdir(previous)
+        source_lines = (root_path / module.MANIFEST_NAME).read_text().splitlines()
+        assert source_lines[0:2] == ["DVM1", "3"]
+        assert source_lines[2].startswith("11 "), source_lines
+        assert source_lines[3] == f"0 {'0' * 64}"
+        assert source_lines[4].startswith("10 "), source_lines
+        assert source_lines[5] == "M 0 0 1234 0 0", source_lines
+        with (root_path / "datavine-python-output-0").open("wb") as stream:
+            cloudpickle.dump(40, stream)
         source = module.os.open(
             str(root_path / "datavine-python-output-0"), module.os.O_RDONLY
         )

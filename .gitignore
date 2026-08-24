@@ -36,6 +36,7 @@ cctools.lint.out
 !/acceptance/worker-local-data-plane-*.json
 !/acceptance/go-adaptor-*.json
 !/acceptance/output-heavy-stage-*.json
+!/acceptance/data-intensive-large-scale-*.json
 !/acceptance/scientific-workflows/
 !/acceptance/scientific-workflows/*.json
 !/acceptance/1024-core-workflows/
@@ -44,6 +45,7 @@ cctools.lint.out
 !/DATAVINE_DATA_PLANE_V2.md
 !/STATIC_IR_V2.md
 !/DATAVINE_PRODUCTION.md
+!/DATAVINE_DATA_INTENSIVE_BENCHMARK.md
 !/acceptance/production-v1-*.json
 !/acceptance/production-v1.sha256
 /acceptance/sc-workflow-*/

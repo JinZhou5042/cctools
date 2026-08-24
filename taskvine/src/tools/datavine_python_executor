@@ -24,6 +24,7 @@ import cloudpickle
 
 FRAME_LIMIT = 64 * 1024 * 1024
 SOURCE_TICKET = struct.Struct("!4sIQQ")
+SOURCE_TICKET_V2 = struct.Struct("!4sIQQII32s")
 CALLABLE_TICKET_V1 = struct.Struct("!4sIQII32s32s32s")
 PERSIST_KEY_V1 = struct.Struct("!4s32sQI")
 FUNCTION_CACHE_BYTES = 64 * 1024 * 1024
@@ -355,6 +356,28 @@ def callable_main(
     )
 
 
+def source_manifest(retained_outputs, function_ns):
+    """Describe indexed source-v1 outputs without copying their payloads."""
+
+    entries = []
+    for index, retained in enumerate(retained_outputs):
+        if not retained:
+            entries.append((0, "0" * 64))
+            continue
+        path = Path(f"datavine-python-output-{index}")
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as stream:
+            while True:
+                block = stream.read(1024 * 1024)
+                if not block:
+                    break
+                digest.update(block)
+                size += len(block)
+        entries.append((size, digest.hexdigest()))
+    write_manifest(entries, 0, 0, function_ns, 0, 0)
+
+
 def persist_one(source, spec, notifier):
     target = Path(spec["path"])
     temporary = target.with_name(
@@ -479,7 +502,11 @@ def child_main(
             source_path = data_root / str(payload_id)
             source = source_path.read_text(encoding="utf-8")
             namespace = {"__name__": "__main__", "__file__": str(source_path)}
+            function_started = time.monotonic_ns()
             exec(compile(source, str(source_path), "exec"), namespace, namespace)
+            function_ns = time.monotonic_ns() - function_started
+            if retained_outputs is not None:
+                source_manifest(retained_outputs, function_ns)
         else:
             callable_main(
                 data_root, invocation_bytes, function_bytes,
@@ -593,6 +620,40 @@ def main():
                 magic, reserved, payload_id, wall_seconds = SOURCE_TICKET.unpack(payload)
                 valid = magic == PYTHON_TICKET_MAGIC and reserved == 0 and payload_id > 0
             elif (
+                function == "datavine_python_source"
+                and len(payload) >= SOURCE_TICKET_V2.size
+            ):
+                (
+                    magic, reserved, payload_id, wall_seconds, output_count,
+                    attempt, workflow_key,
+                ) = SOURCE_TICKET_V2.unpack(payload[:SOURCE_TICKET_V2.size])
+                policy_end = SOURCE_TICKET_V2.size + output_count * 2
+                ids_end = policy_end + output_count * 8
+                valid = (
+                    magic == PYTHON_TICKET_MAGIC and reserved == 0
+                    and payload_id > 0 and output_count > 0 and attempt > 0
+                    and ids_end == len(payload)
+                )
+                if valid:
+                    retained_outputs = payload[
+                        SOURCE_TICKET_V2.size:
+                        SOURCE_TICKET_V2.size + output_count
+                    ]
+                    durable_outputs = payload[
+                        SOURCE_TICKET_V2.size + output_count:policy_end
+                    ]
+                    output_overrides = []
+                    for index in range(output_count):
+                        data_id = struct.unpack_from(
+                            "!Q", payload, policy_end + index * 8
+                        )[0]
+                        valid = valid and data_id > 0
+                        output_overrides.append(
+                            PERSIST_KEY_V1.pack(
+                                b"DVE1", workflow_key, data_id, attempt
+                            ) if durable_outputs[index] else None
+                        )
+            elif (
                 function == "datavine_python_callable"
                 and len(payload) >= 4
             ):
@@ -699,7 +760,7 @@ def main():
                 "sandbox": sandbox,
                 "stdout": str(Path(sandbox) / stdout_path),
                 "manifest": str(Path(sandbox) / MANIFEST_NAME),
-                "callable": function_bytes is not None,
+                "manifest_output": retained_outputs is not None,
                 "timed_out": False,
                 "cancelled": False,
                 "output_overrides": output_overrides,
@@ -736,7 +797,7 @@ def main():
                 try:
                     payload_path = (
                         child["manifest"]
-                        if code == 0 and child["callable"]
+                        if code == 0 and child["manifest_output"]
                         else child["stdout"]
                     )
                     payload = Path(payload_path).read_bytes()
@@ -746,7 +807,7 @@ def main():
                 if len(payload) > FRAME_LIMIT:
                     payload = b"DataVine Python output exceeds 64 MiB"
                     code = 125
-                if code == 0 and child["callable"]:
+                if code == 0 and child["manifest_output"]:
                     if not start_persistence(
                         persistence_stream,
                         child["sandbox"], child["output_overrides"]

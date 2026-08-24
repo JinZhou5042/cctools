@@ -1,0 +1,82 @@
+{
+  "artifact_type": "datavine-data-intensive-pilot-v1",
+  "status": "PASS",
+  "scope": "local-pilot",
+  "created_at": "2026-08-23",
+  "full_acceptance_contract_sha256": "796255d97815b1dca6ed192931f04d8c97ee086bdfad49b532a14bedddc45ee0",
+  "pilot_contract_sha256": "851f7869c99b6fe7ebe18d4389d0416f2dcc493eeb7f3c50fc4e4c1acdb54059",
+  "pilot": {
+    "cohorts": 1,
+    "scale": 1,
+    "workers": 1,
+    "cores_per_worker": 1,
+    "logical_tasks": 256,
+    "source_files": 2304,
+    "output_files": 256,
+    "scheduler_edges": 1440,
+    "source_bytes": 1163520
+  },
+  "datavine": {
+    "status": "PASS",
+    "physical_submissions": 256,
+    "physical_completions": 256,
+    "execution_seconds": 26.208952739005326,
+    "graph_load_seconds": 10.15034884900524,
+    "dominant_stage": "data_stage_in",
+    "dominant_stage_seconds": 73.554249,
+    "url_stage_in_bytes": 1163520,
+    "manager_bytes_sent": 40004,
+    "manager_bytes_received": 0,
+    "task_bytes_received": 0,
+    "publication_outputs": 256,
+    "publication_remote_outputs": 256,
+    "publication_durable_outputs": 32,
+    "recovery_cache_active": 224,
+    "recovery_cache_peak": 224,
+    "recovery_cache_limit": 32768,
+    "recovery_cache_evictions": 0,
+    "workers_removed": 0,
+    "summary_path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/datavine-local-1x1-final/summary.json",
+    "summary_sha256": "4e5a7f539029f9ab5fccb2775e92a0a7c7ac38b694e7918abdcf3a93212738a1"
+  },
+  "taskvine": {
+    "status": "PASS",
+    "physical_submissions": 256,
+    "physical_completions": 256,
+    "execution_seconds": 48.97387554300076,
+    "graph_load_seconds": 8.427623019997554,
+    "manager_bytes_sent": 1201798,
+    "manager_bytes_received": 131072,
+    "workers_removed": 0,
+    "summary_path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/taskvine-local-1x1-semantic/summary.json",
+    "summary_sha256": "e49c1ba36e7fdd1f636a286dd24fee6140ede3d9a47cc735109bf18cea3974d9"
+  },
+  "comparison": {
+    "status": "PASS",
+    "scope": "pilot",
+    "sampled_result_hashes_equal": true,
+    "sampled_results": 16,
+    "speedup_taskvine_over_datavine": 1.8685933784036959,
+    "manager_byte_reduction_fraction": 0.9699865703331908,
+    "summary_path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/comparison-pilot-final.json",
+    "summary_sha256": "7e9721265dc9210b5f437ff61af10aa1f2b6bb22b08129ef3bb8f9160c42d8dc"
+  },
+  "gates": {
+    "exact_counts": true,
+    "result_hashes_equal": true,
+    "data_path_is_runtime_bottleneck": true,
+    "all_outputs_worker_local": true,
+    "durable_outputs_only_requested": true,
+    "manager_output_payload_bypass": true,
+    "exact_sharedfs_source_bytes": true,
+    "gc_pressure_accounted": true,
+    "parallelism_observed": true,
+    "advantage_observed_in_pilot": true
+  },
+  "open": [
+    "128 full dataset part manifests and full hash",
+    "worker-scale calibration",
+    "five alternating exact 128-worker x 16-core pairs",
+    "production-scope comparison gate"
+  ]
+}

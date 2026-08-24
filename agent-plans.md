@@ -21,6 +21,40 @@ The production protocol is frozen at one v1 contract. The active callable path
 is object-backed `callable-v1` with `DVP1` tickets and `DVM1` manifests; older
 callable ticket and manifest parsers are removed. See `DATAVINE_PRODUCTION.md`.
 
+## Active data-intensive benchmark campaign (2026-08-23)
+
+The implementation is on branch `benchmark/data-intensive-million-file`; the
+production tag `datavine-production-v1-20260823` remains unchanged. The frozen
+full workload is documented in `DATAVINE_DATA_INTENSIVE_BENCHMARK.md` and has
+contract SHA-256
+`796255d97815b1dca6ed192931f04d8c97ee086bdfad49b532a14bedddc45ee0`:
+1,048,576 tasks, 10,485,760 workflow files, 1.039871 TiB stored artifacts,
+3.696121 TiB logical data path, and exactly 128 workers x 16 cores.
+
+Current PASS evidence:
+
+- topology/generator/kernel contract test: exact counts and bytes, regular
+  A degree 20, B degree 1, deterministic non-sparse generation, corruption
+  rejection, real random `pread`, and 2 ms to 5 s process-CPU work;
+- `source-v1` now uses the worker-local output manifest/direct-durability path
+  for indexed output names, while retaining the old 24-byte source ticket for
+  custom output-name compatibility;
+- local 1x1 paired mechanism pilot: DataVine and TaskVine both 256/256 physical
+  tasks, all gates PASS, sampled C result SHA-256 values equal; the canonical
+  machine-compared pair is TaskVine 48.97 s versus DataVine 26.21 s (1.87x)
+  with 97.00% fewer manager data-plane bytes. This is pilot evidence, not a production
+  performance claim;
+- 19 superseded DataVine factory packages (about 15 GB) were moved to the
+  recoverable `/project01/ndcms/jzhou24/datavine-benchmarks/factory-package-archive-20260823`
+  archive with original-path symlinks. Active production and rollback packages
+  were not moved.
+
+OPEN: complete and fully hash 128 dataset parts, calibrate worker scale, run
+five alternating TaskVine/DataVine pairs at exact 128x16, and pass the
+comparison claim gate. As of this update, Condor cluster 15830 is generating
+the full source dataset; restart arguments are resume-safe. Do not report the
+pilot ratio as the full DataVine advantage.
+
 The fixed 1024-core comparison is complete and PASS. The next measured
 optimization order is now evidence-driven:
 
