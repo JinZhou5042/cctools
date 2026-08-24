@@ -1,0 +1,48 @@
+{
+  "artifact_type": "datavine-runtime-v2-local-acceptance",
+  "date": "2026-08-24",
+  "source_commit": "0158aafe6",
+  "status": "PASS_WITH_OPEN_SCALE_GATE",
+  "gates": {
+    "build_without_warnings": true,
+    "datavine_regression": "17/17 PASS",
+    "manager_module_boundary": true,
+    "ordinary_taskvine_single_worker": true,
+    "factories_pkl_remaining": 0,
+    "parametric_evaluator": true,
+    "parametric_native_runtime_integration": false,
+    "full_128x16_execution": false
+  },
+  "regression": {
+    "report_sha256": "5fda4a582ebeb029fe98f766ef13c70a9dd8a4e6b61583c85bb7c0859d58dd01",
+    "tests": [
+      "TR_datavine_1024_benchmark_contract.sh",
+      "TR_datavine_agent_protocol.sh",
+      "TR_datavine_data_intensive_workload.sh",
+      "TR_datavine_data_plane_v2.sh",
+      "TR_datavine_dynamic_workflow.sh",
+      "TR_datavine_go_workflow.sh",
+      "TR_datavine_module_boundaries.sh",
+      "TR_datavine_notebook_workflow.sh",
+      "TR_datavine_parametric_ir.sh",
+      "TR_datavine_python_output_policy.sh",
+      "TR_datavine_replica_table.sh",
+      "TR_datavine_scientific_workflow_foundation.sh",
+      "TR_datavine_shell_workflow.sh",
+      "TR_datavine_workflow_execution.sh",
+      "TR_datavine_workflow_ir.sh",
+      "TR_datavine_workflow_lifecycle.sh",
+      "TR_datavine_workflow_service.sh"
+    ]
+  },
+  "parametric_ir": {
+    "expanded_tasks": 1048576,
+    "expanded_files": 10485760,
+    "descriptor_bytes": 1344,
+    "explicit_lower_bound_bytes": 214958104,
+    "minimum_registration_reduction": 159939.06547619047,
+    "full_scale_task_samples": 4096,
+    "small_cohort_inverse_validation": "exhaustive"
+  },
+  "claim_boundary": "Runtime v2 is locally accepted. The evaluator is not yet admitted or materialized by the native Runtime, so the exact 128x16 campaign and full-scale performance advantage remain OPEN."
+}
