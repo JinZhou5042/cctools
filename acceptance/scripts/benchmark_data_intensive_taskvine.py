@@ -9,8 +9,10 @@ import os
 from pathlib import Path
 import platform
 import resource
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 import ndcctools.taskvine as vine
@@ -201,6 +203,10 @@ def main():
     sink_root.mkdir()
     repository = Path(__file__).resolve().parents[2]
     manager = factory = factory_log = load_peak = execute_peak = None
+    runtime_info_root = Path(tempfile.mkdtemp(
+        prefix="taskvine-data-intensive-run-info-", dir="/tmp"
+    ))
+    run_succeeded = False
     started = time.monotonic()
     completed = failed = 0
     a_files = []
@@ -209,7 +215,10 @@ def main():
     try:
         previous = Path.cwd()
         os.chdir(output)
-        manager = vine.Manager(port=0)
+        # Runtime diagnostics are control-plane data.  Full-scale debug,
+        # taskgraph, and transaction streams reached 4 GiB by 44k tasks and
+        # stalled manager-worker traffic when written beside the NFS workload.
+        manager = vine.Manager(port=0, run_info_path=str(runtime_info_root))
         manager.set_name(f"taskvine-data-intensive-{int(time.time())}")
         library_name = "taskvine-data-intensive-functions"
         library = manager.create_library_from_functions(
@@ -403,10 +412,12 @@ def main():
                 "maximum_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
                 "commit": subprocess.run(("git", "rev-parse", "HEAD"), cwd=repository, text=True, stdout=subprocess.PIPE, check=True).stdout.strip(),
                 "attempt_schedule_depth": schedule_depth,
+                "runtime_info_storage": "node-local-temporary",
             },
         }
         atomic_json(output / "summary.json", result)
         atomic_json(output / "parallelism.json", samples)
+        run_succeeded = result["status"] == "PASS"
         print(json.dumps({"status": result["status"], "output": str(output), "gates": gates}, sort_keys=True), flush=True)
         os.chdir(previous)
         return 0 if result["status"] == "PASS" else 1
@@ -414,6 +425,7 @@ def main():
         atomic_json(output / "failure.json", {
             "status": "FAIL", "error_type": type(error).__name__,
             "detail": str(error), "elapsed_seconds": time.monotonic() - started,
+            "runtime_info_root": str(runtime_info_root),
         })
         raise
     finally:
@@ -434,7 +446,10 @@ def main():
         if factory_log is not None:
             factory_log.close()
         if manager is not None:
-            manager.__del__()
+            manager._free()
+            manager = None
+        if run_succeeded:
+            shutil.rmtree(runtime_info_root, ignore_errors=True)
 
 
 if __name__ == "__main__":

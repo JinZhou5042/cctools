@@ -10,8 +10,10 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -336,10 +338,18 @@ def main():
     service_log_path = output / "service.log"
     factory_log_path = output / "factory.log"
     service_log = service_log_path.open("w")
+    runtime_info_root = Path(tempfile.mkdtemp(
+        prefix="datavine-data-intensive-run-info-", dir="/tmp"
+    ))
+    run_succeeded = False
     service = subprocess.Popen(
         (str(repository / "taskvine/src/tools/datavine_workflow"), "serve", str(output / "journal"), "data-intensive-benchmark"),
         stdout=subprocess.PIPE, stderr=service_log, text=True, start_new_session=True,
-        env=dict(os.environ, DATAVINE_WORKFLOW_METRICS="1", DATAVINE_RUNTIME_INFO_PATH=str(output / "run-info")),
+        env=dict(
+            os.environ,
+            DATAVINE_WORKFLOW_METRICS="1",
+            DATAVINE_RUNTIME_INFO_PATH=str(runtime_info_root),
+        ),
     )
     factory = factory_log = client = sampler = peak = None
     workflow_id = f"data-intensive-c{args.cohorts}-s{args.scale}-{int(time.time())}"
@@ -476,9 +486,11 @@ def main():
                 "python": sys.version,
                 "commit": subprocess.run(("git", "rev-parse", "HEAD"), cwd=repository, text=True, stdout=subprocess.PIPE, check=True).stdout.strip(),
                 "code_digests": code_digests,
+                "runtime_info_storage": "node-local-temporary",
             },
         }
         atomic_json(output / "summary.json", result)
+        run_succeeded = result["status"] == "PASS"
         print(json.dumps({"status": result["status"], "output": str(output), "gates": gates}, sort_keys=True), flush=True)
         return 0 if result["status"] == "PASS" else 1
     except BaseException as error:
@@ -489,6 +501,7 @@ def main():
             "error_type": type(error).__name__,
             "detail": str(error),
             "elapsed_seconds": time.monotonic() - started,
+            "runtime_info_root": str(runtime_info_root),
         })
         raise
     finally:
@@ -506,6 +519,8 @@ def main():
         # generic 30-second service timeout and leaking the tail of the pool.
         terminate_group(factory, timeout=300)
         terminate_group(service)
+        if run_succeeded:
+            shutil.rmtree(runtime_info_root, ignore_errors=True)
         if factory_log is not None:
             factory_log.close()
         service_log.close()

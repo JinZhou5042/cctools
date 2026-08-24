@@ -85,10 +85,14 @@ def main():
     assert 'manager.tune("attempt-schedule-depth", schedule_depth)' in taskvine_runner
     assert "schedule_depth = max(100, args.workers)" in taskvine_runner
     assert "terminate_group(factory, timeout=300)" in taskvine_runner
+    assert "run_info_path=str(runtime_info_root)" in taskvine_runner
+    assert '"runtime_info_storage": "node-local-temporary"' in taskvine_runner
     datavine_runner = (
         scripts / "benchmark_data_intensive_datavine.py"
     ).read_text()
     assert "terminate_group(factory, timeout=300)" in datavine_runner
+    assert "DATAVINE_RUNTIME_INFO_PATH=str(runtime_info_root)" in datavine_runner
+    assert '"runtime_info_storage": "node-local-temporary"' in datavine_runner
 
     # One smallest cohort has exactly the same regular graph invariants.
     small = Workload(cohorts=1, scale=1, size_profile="tiny")

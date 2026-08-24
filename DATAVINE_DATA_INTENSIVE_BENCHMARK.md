@@ -261,3 +261,19 @@ removed worker.  It was stopped immediately because it could no longer pass
 the exact-pool, no-removal, and all-success gates.  Factory shutdown removed
 all 128 Condor jobs.  This attempt is diagnostic only and is indexed by
 `acceptance/data-intensive-large-scale-worker-loss-diagnostic-20260824.json`.
+
+A repeated loss investigation found the control-plane source.  By roughly 44k
+completed tasks, TaskVine had synchronously written 1,937,468,956 debug bytes,
+1,945,624,576 taskgraph bytes, and 469,999,982 transaction bytes to the same NFS
+used by the workload.  The two worker removals were immediately preceded by
+`Failed to read from worker` in that manager stream.  This 4.35 GB runtime-info
+path is not workload data and polluted both manager responsiveness and the
+intended shared-filesystem measurement.
+
+Both full runners now place TaskVine runtime-info on node-local `/tmp` scratch.
+SharedFS source reads, the DataVine durable journal, requested C results,
+parallelism samples, summaries, and hashes remain durable at the documented
+campaign root.  A successful runner removes its local diagnostics after the
+summary is installed; a failure records the local path for diagnosis.  The raw
+shared-run-info attempt is indexed by
+`acceptance/data-intensive-large-scale-shared-run-info-diagnostic-20260824.json`.

@@ -630,3 +630,20 @@ The recoverable run directory is
 `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/campaign-diagnostic-worker-loss-20260824`
 and the compact record is
 `acceptance/data-intensive-large-scale-worker-loss-diagnostic-20260824.json`.
+
+A repeated run localized those losses to the control-plane runtime-info path.
+At roughly 44k completed tasks, NFS already held 1,937,468,956 debug bytes,
+1,945,624,576 taskgraph bytes, 469,999,982 transaction bytes, and 1,628,679
+performance bytes.  The two removals were immediately preceded by manager
+`Failed to read from worker` records while it processed the same high-rate
+cache-update/unlink stream.  This is not source/intermediate/result data and
+therefore polluted the intended data-plane measurement.
+
+TaskVine and DataVine full runners now direct underlying runtime-info to
+node-local `/tmp`.  Dataset reads, DataVine journal durability, requested C
+outputs, samples, summaries, and hashes remain on shared campaign storage.
+Successful runs remove the temporary logs; failures record their local path.
+The stopped shared-log run is recoverable under
+`/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/campaign-diagnostic-shared-run-info-20260824`
+and compact evidence is in
+`acceptance/data-intensive-large-scale-shared-run-info-diagnostic-20260824.json`.

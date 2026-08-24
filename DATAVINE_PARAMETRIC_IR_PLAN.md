@@ -113,6 +113,12 @@ copied atomically to durable campaign storage.  A paired diagnostic will retain
 the current shared-filesystem log placement to quantify how much synchronous
 transaction logging amplifies graph-load and execution I/O.
 
+That diagnostic is now available: at roughly 44k completed tasks, debug,
+taskgraph, transaction, and performance streams totaled 4,354,722,193 bytes on
+NFS and coincided with repeated manager read failures from workers.  The
+benchmark isolation change is implemented in the runners; parametric IR and
+batched journaling remain OPEN architectural work.
+
 ## Complexity target
 
 | Concern | Current explicit path | Parametric target |

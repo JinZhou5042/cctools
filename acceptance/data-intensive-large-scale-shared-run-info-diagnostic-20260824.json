@@ -1,0 +1,37 @@
+{
+  "accepted_for_performance_claim": false,
+  "contract_sha256": "796255d97815b1dca6ed192931f04d8c97ee086bdfad49b532a14bedddc45ee0",
+  "diagnosis": "TaskVine runtime debug, taskgraph, and transaction logs were written synchronously to the same NFS filesystem as the benchmark. The resulting multi-GiB control-plane stream accompanied repeated manager read failures and worker removal, so it polluted the intended data-plane measurement.",
+  "diagnostic_root": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/campaign-diagnostic-shared-run-info-20260824",
+  "environment": {
+    "commit": "17899051c0f1193ab615ce3b932285c52ce37b84",
+    "cores_per_worker": 16,
+    "workers": 128
+  },
+  "observed_log_bytes": {
+    "debug": 1937468956,
+    "performance": 1628679,
+    "taskgraph": 1945624576,
+    "total": 4354722193,
+    "transactions": 469999982
+  },
+  "observed_worker_failures": [
+    {
+      "host": "d32cepyc158.crc.nd.edu",
+      "manager_log": "Failed to read from worker",
+      "time": "2026-08-24T13:33:44-04:00"
+    },
+    {
+      "host": "d32cepyc152.crc.nd.edu",
+      "manager_log": "Failed to read from worker",
+      "time": "2026-08-24T13:42:18-04:00"
+    }
+  ],
+  "resolution": "Place TaskVine and DataVine runtime-info streams on node-local /tmp scratch. SharedFS source reads, the DataVine durable journal, requested C outputs, summaries, samples, and hashes remain on campaign storage.",
+  "schema": "datavine.data-intensive-shared-run-info-diagnostic/v1",
+  "shutdown": {
+    "condor_jobs_remaining": 0,
+    "factory_log_reported_all_workers_removed": true
+  },
+  "status": "DIAGNOSTIC"
+}
