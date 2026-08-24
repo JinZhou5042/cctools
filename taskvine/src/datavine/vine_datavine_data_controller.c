@@ -84,6 +84,9 @@ struct publication_job {
 	uint64_t function_nanoseconds;
 	uint64_t serialize_nanoseconds;
 	uint64_t fsync_nanoseconds;
+	uint64_t task_reports;
+	uint64_t task_reported_read_bytes;
+	uint64_t task_reported_cpu_milliseconds;
 	struct vine_datavine_data_publication_metrics metrics;
 	struct timespec commit_started;
 	struct publication_output *durable;
@@ -1871,6 +1874,10 @@ static void *data_worker(void *argument)
 		job->metrics.function_nanoseconds = job->function_nanoseconds;
 		job->metrics.serialize_nanoseconds = job->serialize_nanoseconds;
 		job->metrics.fsync_nanoseconds = job->fsync_nanoseconds;
+		job->metrics.task_reports = job->task_reports;
+		job->metrics.task_reported_read_bytes = job->task_reported_read_bytes;
+		job->metrics.task_reported_cpu_milliseconds =
+				job->task_reported_cpu_milliseconds;
 		if (!prepare_job(controller, job)) {
 			finish_job(job, 0);
 			job_delete(job);
@@ -2189,7 +2196,9 @@ static int parse_output_manifest(const char *manifest,
 		uint64_t *pull_nanoseconds, uint64_t *decode_nanoseconds,
 		uint64_t *function_nanoseconds,
 		uint64_t *serialize_nanoseconds,
-		uint64_t *fsync_nanoseconds)
+		uint64_t *fsync_nanoseconds, uint64_t *task_reports,
+		uint64_t *task_reported_read_bytes,
+		uint64_t *task_reported_cpu_milliseconds)
 {
 	if (!manifest || strncmp(manifest, VINE_DATAVINE_OUTPUT_MANIFEST_MAGIC "\n", 5))
 		return 0;
@@ -2218,15 +2227,67 @@ static int parse_output_manifest(const char *manifest,
 	unsigned long long function_ns = 0;
 	unsigned long long serialize_ns = 0;
 	unsigned long long fsync_ns = 0;
+	int consumed = 0;
 	char trailing = 0;
-	int fields = sscanf(end, "M %llu %llu %llu %llu %llu\n%c", &pull_ns, &decode_ns, &function_ns, &serialize_ns, &fsync_ns, &trailing);
+	int fields = sscanf(end, "M %llu %llu %llu %llu %llu\n%n", &pull_ns,
+			&decode_ns, &function_ns, &serialize_ns, &fsync_ns, &consumed);
 	if (fields != 5)
 		return 0;
+	end += consumed;
+	if (*end) {
+		unsigned long long read_bytes = 0;
+		unsigned long long cpu_ms = 0;
+		fields = sscanf(end, "R %llu %llu\n%c", &read_bytes, &cpu_ms,
+				&trailing);
+		if (fields != 2)
+			return 0;
+		*task_reports = 1;
+		*task_reported_read_bytes = (uint64_t)read_bytes;
+		*task_reported_cpu_milliseconds = (uint64_t)cpu_ms;
+	}
 	*pull_nanoseconds = (uint64_t)pull_ns;
 	*decode_nanoseconds = (uint64_t)decode_ns;
 	*function_nanoseconds = (uint64_t)function_ns;
 	*serialize_nanoseconds = (uint64_t)serialize_ns;
 	*fsync_nanoseconds = (uint64_t)fsync_ns;
+	return 1;
+}
+
+int vine_datavine_data_controller_task_metrics(
+		struct vine_datavine_data_controller *controller,
+		struct vine_task *completed,
+		struct vine_datavine_data_publication_metrics *metrics)
+{
+	if (!controller || !completed || !metrics)
+		return 0;
+	memset(metrics, 0, sizeof(*metrics));
+	const char *manifest = vine_task_get_stdout(completed);
+	if (!manifest || strncmp(manifest,
+			VINE_DATAVINE_OUTPUT_MANIFEST_MAGIC "\n", 5))
+		return 0;
+	const char *timing = strstr(manifest, "\nM ");
+	const char *report = timing ? strstr(timing + 1, "\nR ") : 0;
+	unsigned long long pull = 0;
+	unsigned long long decode = 0;
+	unsigned long long function = 0;
+	unsigned long long serialize = 0;
+	unsigned long long fsync = 0;
+	unsigned long long read_bytes = 0;
+	unsigned long long cpu_milliseconds = 0;
+	if (!timing || !report || sscanf(timing + 1,
+			"M %llu %llu %llu %llu %llu", &pull, &decode, &function,
+			&serialize, &fsync) != 5 ||
+			sscanf(report + 1, "R %llu %llu", &read_bytes,
+					&cpu_milliseconds) != 2)
+		return 0;
+	metrics->pull_nanoseconds = (uint64_t)pull;
+	metrics->decode_nanoseconds = (uint64_t)decode;
+	metrics->function_nanoseconds = (uint64_t)function;
+	metrics->serialize_nanoseconds = (uint64_t)serialize;
+	metrics->fsync_nanoseconds = (uint64_t)fsync;
+	metrics->task_reports = 1;
+	metrics->task_reported_read_bytes = (uint64_t)read_bytes;
+	metrics->task_reported_cpu_milliseconds = (uint64_t)cpu_milliseconds;
 	return 1;
 }
 
@@ -2280,7 +2341,15 @@ vine_datavine_data_controller_publish_async(
 									  : 0;
 	int valid = job->workflow_id && job->outputs &&
 			(!worker_local || (manifest_outputs && parse_output_manifest(
-									   vine_task_get_stdout(completed), manifest_outputs, (size_t)total, &job->pull_nanoseconds, &job->decode_nanoseconds, &job->function_nanoseconds, &job->serialize_nanoseconds, &job->fsync_nanoseconds)));
+									   vine_task_get_stdout(completed), manifest_outputs,
+									   (size_t)total, &job->pull_nanoseconds,
+									   &job->decode_nanoseconds,
+									   &job->function_nanoseconds,
+									   &job->serialize_nanoseconds,
+									   &job->fsync_nanoseconds,
+									   &job->task_reports,
+									   &job->task_reported_read_bytes,
+									   &job->task_reported_cpu_milliseconds)));
 	char directory[PATH_MAX];
 	int directory_ready = 0;
 	for (int index = 0; valid && index < total; index++) {
@@ -2342,6 +2411,10 @@ vine_datavine_data_controller_publish_async(
 		job->metrics.function_nanoseconds = job->function_nanoseconds;
 		job->metrics.serialize_nanoseconds = job->serialize_nanoseconds;
 		job->metrics.fsync_nanoseconds = job->fsync_nanoseconds;
+		job->metrics.task_reports = job->task_reports;
+		job->metrics.task_reported_read_bytes = job->task_reported_read_bytes;
+		job->metrics.task_reported_cpu_milliseconds =
+				job->task_reported_cpu_milliseconds;
 		if (!prepare_job(controller, job))
 			publication_finish(publication, 0, 0);
 		else if (!job->durable_count)

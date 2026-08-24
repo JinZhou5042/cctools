@@ -63,7 +63,18 @@ struct vine_datavine_data_publication_metrics {
 	uint64_t durable_outputs;
 	uint64_t output_bytes;
 	uint64_t journal_records;
+	uint64_t task_reports;
+	uint64_t task_reported_read_bytes;
+	uint64_t task_reported_cpu_milliseconds;
 };
+
+/* Decode Worker Data Agent task telemetry inside the Controller boundary.
+ * The workflow runtime receives only numeric counters and never reads the
+ * data manifest carried by a physical TaskVine completion. */
+int vine_datavine_data_controller_task_metrics(
+		struct vine_datavine_data_controller *controller,
+		struct vine_task *completed,
+		struct vine_datavine_data_publication_metrics *metrics);
 
 struct vine_datavine_data_controller *vine_datavine_data_controller_open(
 		const char *workflow_journal_path, size_t threads,

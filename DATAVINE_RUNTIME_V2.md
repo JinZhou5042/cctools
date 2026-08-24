@@ -1,6 +1,6 @@
 # DataVine Runtime v2: decoupled task and data planes
 
-Status: **LOCAL RUNTIME PASS; FULL PARAMETRIC EXECUTION AND 128x16 CAMPAIGN OPEN**
+Status: **LOCAL NATIVE RUNTIME PASS; EXACT 128x16 CAMPAIGN OPEN**
 
 Updated: 2026-08-24
 
@@ -181,9 +181,14 @@ scientific workflow foundation, and the new parametric evaluator. Ordinary
 TaskVine `TR_vine_single` is also PASS after the generic frame change.
 
 The full benchmark descriptor expands to exactly 1,048,576 tasks and
-10,485,760 files but serializes to 1,344 bytes. The evaluator matched 4,096
-sampled full-scale tasks and exhaustively proved both inverse mappings on a
-complete small cohort; its registration reduction is at least 159,939x even
-against an unrealistically compact eight-byte-per-entry explicit lower bound.
-This evaluator is not yet wired into Runtime frontier materialization, so the
-million-task 128x16 execution remains OPEN and must not be reported as PASS.
+10,485,760 files but serializes to 1,344 bytes. It is wired into Store,
+Scheduler, and Runtime with a 4,096-task materialization window. Full native
+graph setup takes about 2.59 seconds and 172 MiB maximum RSS; its exhaustive
+topology digest matches the independent explicit Workload oracle. A current
+local E2E passed 256/256 physical executions, exact Worker-reported reads,
+requested-only durability, Manager payload bypass, parallelism, and GC gates.
+A crash/restart test killed the owner and all workers, restarted from the same
+journal with empty caches, and completed via bounded physical replay without
+rolling logical Scheduler DONE backward. The exact million-task 128x16
+execution remains OPEN and must not be reported as PASS until its artifact is
+complete.

@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
 
+import base64
 import collections
+import hashlib
 import json
 from pathlib import Path
 import random
+import struct
+import subprocess
 import sys
+import tempfile
 
 repository = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repository / "acceptance/scripts"))
-from data_intensive_parametric_ir import ParametricWorkload, descriptor
-from data_intensive_workload import Workload, canonical_json, full_workload
+from data_intensive_parametric_ir import ParametricWorkload
+from data_intensive_workload import (
+    SIZE_PROFILES, Workload, canonical_json, full_workload, stage_source,
+)
+
+
+native_profile = repository / "taskvine/src/tools/datavine_parametric_test"
+native_validator = repository / "taskvine/src/tools/datavine_workflow"
 
 
 def check(workload):
@@ -36,6 +47,68 @@ def check(workload):
     return document
 
 
+def runtime_document(workload, dataset=Path("/dataset")):
+    profile = SIZE_PROFILES[workload.size_profile]
+    payloads = [
+        stage_source(stage, profile[f"{stage.lower()}_output"]).encode()
+        for stage in "ABC"
+    ]
+    return {
+        "schema": "datavine.workflow/v1",
+        "workflow_id": "parametric-native-test",
+        "idempotency_key": "parametric-native-test-v1",
+        "mode": "sealed",
+        "tasks": [],
+        "data": [
+            {
+                "data_id": index + 1,
+                "codec": {"name": "bytes", "version": "1"},
+                "origin": {
+                    "kind": "inline",
+                    "base64": base64.b64encode(payload).decode(),
+                },
+            }
+            for index, payload in enumerate(payloads)
+        ],
+        "requested_outputs": [],
+        "policy": {
+            "maximum_tasks": workload.tasks,
+            "maximum_edges": workload.scheduler_edges,
+        },
+        "parametric": {
+            "kind": "data-intensive-v1",
+            "seed": 20260823,
+            "dataset_root": dataset.resolve().as_uri(),
+            "cohorts": workload.cohorts,
+            "scale": workload.scale,
+            "size_profile": workload.size_profile,
+            "contract_sha256": workload.contract()["contract_sha256"],
+        },
+    }
+
+
+def topology_digest(workload):
+    digest = hashlib.sha256()
+    family = ParametricWorkload(workload, Path("/dataset"))
+    for task_id in range(1, workload.tasks + 1):
+        task = family.task(task_id)
+        stage = "ABC".index(task["stage"]) + 1
+        digest.update(struct.pack(">QBQ", task_id, stage, len(task["inputs"])))
+        for value in task["inputs"]:
+            digest.update(struct.pack(">Q", value))
+        digest.update(struct.pack(">Q", task["output"]))
+    return digest.hexdigest()
+
+
+def run_native(mode, path, *arguments):
+    completed = subprocess.run(
+        (str(native_profile), mode, str(path), *map(str, arguments)),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
+
+
 small = Workload(1, 1, "tiny")
 small_family = ParametricWorkload(small, Path("/dataset"))
 a_inverse = collections.Counter()
@@ -58,16 +131,53 @@ full = full_workload()
 document = check(full)
 payload = canonical_json(document)
 # Even an impossible lower bound of eight bytes per expanded task/data/input
-# entry is enough to prove the registration reduction without allocating it.
+# entry proves the registration reduction without allocating that graph.
 explicit_lower_bound = 8 * (full.tasks + full.data_records + full.input_references)
 assert len(payload) < 16_384
 assert explicit_lower_bound / len(payload) >= 100
 assert document["counts"]["tasks"] == 1_048_576
 assert document["counts"]["workflow_files"] == 10_485_760
+
+with tempfile.TemporaryDirectory(prefix="datavine-parametric-native-") as root:
+    root = Path(root)
+    small_path = root / "small.json"
+    full_path = root / "full.json"
+    small_path.write_bytes(canonical_json(runtime_document(small)))
+    full_path.write_bytes(canonical_json(runtime_document(full)))
+    validated = subprocess.run(
+        (str(native_validator), "validate", str(full_path)),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    assert validated.returncode == 0, validated.stderr
+    native_summary = json.loads(validated.stdout)
+    assert native_summary["tasks"] == full.tasks
+    assert native_summary["data"] == full.data_records
+    assert native_summary["edges"] == full.scheduler_edges
+    assert native_summary["requested_outputs"] == full.c_tasks
+    small_topology_digest = topology_digest(small)
+    assert run_native("digest", small_path)["topology_sha256"] == small_topology_digest
+    profile = run_native("profile", full_path)
+    assert profile["tasks"] == 1_048_576
+    assert profile["edges"] == 5_898_240
+    assert profile["build_nanoseconds"] <= 60_000_000_000
+    assert profile["max_rss_kib"] < 4 * 1024 * 1024
+    invalid = runtime_document(small)
+    invalid["policy"]["maximum_edges"] -= 1
+    rejected = subprocess.run(
+        (str(native_validator), "validate", "-"),
+        input=canonical_json(invalid), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert rejected.returncode == 1
+    assert json.loads(rejected.stdout)["valid"] is False
+
 print(json.dumps({
     "status": "PASS", "descriptor_bytes": len(payload),
     "explicit_lower_bound_bytes": explicit_lower_bound,
     "minimum_reduction": explicit_lower_bound / len(payload),
     "tasks": full.tasks, "files": full.workflow_files,
     "sampled_tasks": 4096, "inverse_small_graph": "exhaustive",
+    "native_full_build_nanoseconds": profile["build_nanoseconds"],
+    "native_full_max_rss_kib": profile["max_rss_kib"],
+    "native_small_topology_sha256": small_topology_digest,
 }, sort_keys=True))

@@ -9,7 +9,9 @@ Status: **FIXED 1024-CORE CAMPAIGN PASS; SCIENTIFIC FOUNDATION LOCAL PASS; REAL-
 | Gate | State | Current evidence |
 |---|---|---|
 | One native authority | PASS | C Runtime owns control; C Data Controller exclusively owns result files, metadata, hashes, fetch, retention, and GC |
-| Runtime v2 Manager boundary | LOCAL PASS | Manager transports only a generic opaque auxiliary payload; DataVine inputs/outputs create no Manager vine_file/cache-update/unlink state; direct Worker Agent protocol and module scan pass |
+| Runtime v2 Manager boundary | LOCAL PASS | Manager transports only a generic opaque auxiliary payload; DataVine inputs/outputs create no Manager vine_file/cache-update/unlink state; manifest and task-data telemetry are parsed only by Controller; direct Worker Agent protocol and module scan pass |
+| Native parametric execution | LOCAL PASS | exact full topology builds in about 2.59 s / 172 MiB with matching exhaustive oracle digest; bounded 4,096-task views; 256/256 local physical E2E and owner-plus-worker restart recovery pass |
+| Data-intensive exact 128x16 | OPEN | 1,048,576-task / 10,485,760-file production run has not yet produced a terminal accepted artifact |
 | Completion/data admission decoupling | LOCAL PASS | physical success marks Scheduler DONE immediately; child dispatch does not wait for DATA_READY or requested-result persistence |
 | Worker replica state machine | LOCAL PASS | chunked DataID table, indexed sessions, HMAC HELLO, digest/generation checks, reconnect advertisement, session loss, idempotent GC ACK, and independent physical replay |
 | Parametric family evaluator | PASS / RUNTIME OPEN | 1,344-byte full descriptor; exact 1,048,576 tasks and 10,485,760 files; 4,096 full samples plus exhaustive small-cohort inverse equivalence; native frontier execution not integrated |

@@ -9,6 +9,7 @@ SOURCES = \
 	vine_datavine_ir.c \
 	vine_datavine_journal.c \
 	vine_datavine_object_store.c \
+	vine_datavine_parametric.c \
 	vine_datavine_replica_table.c \
 	vine_datavine_scheduler.c \
 	vine_datavine_workflow.c \

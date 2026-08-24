@@ -2,7 +2,7 @@
 
 Updated: 2026-08-24
 
-Status: **EVALUATOR PASS — native Runtime frontier integration and full run OPEN**
+Status: **NATIVE RUNTIME PASS — exact 128x16 full run OPEN**
 
 ## Why this phase exists
 
@@ -81,6 +81,36 @@ entries become on the order of hundreds of family and cohort descriptors.
 
 ## Native execution model
 
+### Implemented milestone
+
+The production runtime now accepts an optional sealed `parametric` record with
+kind `data-intensive-v1`. Admission is strict and side-effect free: the three
+inline callable payloads, seed, scale, cohort count, file origin, exact policy
+limits, and checked expanded counts must agree before Store mutation. The
+ordinary explicit `datavine.workflow/v1` representation remains available and
+unchanged.
+
+The native evaluator builds the existing packed Scheduler directly, without
+creating a million JX task records or ten million JX Data records. For the
+frozen full graph it expands 1,048,576 TaskIDs and 5,898,240 dependency edges
+in about 2.59 seconds with about 172 MiB maximum RSS. A full exhaustive native
+topology digest equals the independent Python Workload oracle digest
+`331d538bebd47fa15b20443ca757a605bc4f6230a2319d2d7e384a07e96ae6c8`.
+
+Runtime materialization is bounded to 4,096 transient task views. Source URIs,
+input DataIDs, producer IDs, consumer counts, executor records, and requested
+outputs are synthesized only for a task entering that window and destroyed at
+physical completion. Worker task/data completion remains decoupled and one
+logical task still produces one physical TaskVine task per attempt. Completion
+journal records use batches of up to 256.
+
+This milestone deliberately reuses the existing packed Scheduler edge arrays,
+so current native graph memory is still O(edges), not the final
+O(families + task-state bitmap) target described below. That remaining
+optimization is no longer a prerequisite for this benchmark: measured setup is
+already far below the 60-second and 4-GiB acceptance limits. It remains useful
+future work for substantially larger or denser workflows.
+
 ### Compile once
 
 The workflow store parses each family into a packed native descriptor.  The
@@ -140,8 +170,10 @@ transaction logging amplifies graph-load and execution I/O.
 That diagnostic is now available: at roughly 44k completed tasks, debug,
 taskgraph, transaction, and performance streams totaled 4,354,722,193 bytes on
 NFS and coincided with repeated manager read failures from workers.  The
-benchmark isolation change is implemented in the runners; parametric IR and
-batched journaling remain OPEN architectural work.
+benchmark isolation change is implemented in the runners. Native parametric
+admission, bounded materialization, completion batching, and Worker-Controller
+data ownership are implemented; bitmap checkpoints and formula-backed
+dependency traversal remain later optimizations.
 
 ## Complexity target
 
@@ -181,13 +213,17 @@ sublinear number of independent task executions.
 7. Rerun the full million-task/ten-million-file pair and preserve both
    execution-only and end-to-end comparisons.
 
-Steps 2 and the inverse-mapping portion of step 3 now have executable evidence
-in `acceptance/scripts/data_intensive_parametric_ir.py` and
-`taskvine/test/datavine_parametric_ir.py`. The full descriptor is 1,344 bytes,
-full-scale sampled expansion matches the explicit oracle, and a complete small
-cohort passes exhaustive forward/inverse equivalence. Runtime/store admission,
-packed scheduler state, and bounded frontier materialization remain the next
-required step; the evaluator alone is not an execution claim.
+Steps 2 through 4 and the hot-path completion batching in step 5 now have
+executable evidence in `acceptance/scripts/data_intensive_parametric_ir.py`,
+`taskvine/test/datavine_parametric_ir.py`, and the native runtime. The full
+descriptor is 1,344 bytes; small exhaustive and full exhaustive topology
+digests match the independent explicit oracle. A current-code local E2E
+completed 256/256 independent physical tasks through a 12,105-byte registration
+with every correctness, Worker Agent, Manager-bypass, actual-read-byte,
+parallelism, and GC gate true. An owner-and-all-worker SIGKILL test resumed the
+same journal with empty worker caches, replayed the missing producer closure
+without rolling logical DONE backward, and completed with exact requested
+results. The exact 128x16 execution remains the only benchmark-scale OPEN gate.
 
 ## Acceptance gates
 
@@ -213,5 +249,6 @@ The optimization is not complete until all of these pass:
   terminal state or fails closed before mutation;
 - execution-only, graph-load, and end-to-end timings are reported separately.
 
-Until these gates pass, parametric IR remains an OPEN design and the existing
-production v1 implementation remains authoritative.
+Native parametric execution is implemented and locally accepted. Until the
+exact full campaign passes, its scale/performance claim remains OPEN and the
+existing production v1 path remains the comparison authority.

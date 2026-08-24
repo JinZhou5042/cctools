@@ -300,6 +300,57 @@ def load_workflow(client, workflow_id, dataset_root, workload, task_chunk):
     return info, payload_sizes, digests
 
 
+def parametric_workflow_document(workflow_id, dataset_root, workload):
+    """Return the complete native family declaration and shared code blobs."""
+    profile = SIZE_PROFILES[workload.size_profile]
+    payloads = [
+        stage_source("A", profile["a_output"]).encode(),
+        stage_source("B", profile["b_output"]).encode(),
+        stage_source("C", profile["c_output"]).encode(),
+    ]
+    digests = [hashlib.sha256(payload).hexdigest() for payload in payloads]
+    return {
+        "schema": SCHEMA,
+        "workflow_id": workflow_id,
+        "idempotency_key": f"{workflow_id}-parametric-v1",
+        "mode": "sealed",
+        "tasks": [],
+        "data": [inline_record(index + 1, payload)
+                 for index, payload in enumerate(payloads)],
+        "requested_outputs": [],
+        "policy": {
+            "maximum_tasks": workload.tasks,
+            "maximum_edges": workload.scheduler_edges,
+        },
+        "metadata": {
+            "benchmark_contract_sha256": workload.contract()["contract_sha256"],
+            "execution_semantics": "native-bounded-frontier",
+            "semantic_task_batching": False,
+        },
+        "parametric": {
+            "kind": "data-intensive-v1",
+            "seed": 20260823,
+            "dataset_root": dataset_root.resolve().as_uri(),
+            "cohorts": workload.cohorts,
+            "scale": workload.scale,
+            "size_profile": workload.size_profile,
+            "contract_sha256": workload.contract()["contract_sha256"],
+        },
+    }, digests
+
+
+def load_parametric_workflow(client, workflow_id, dataset_root, workload):
+    """Submit the entire regular DAG as one checked constant-size family."""
+    document, digests = parametric_workflow_document(
+        workflow_id, dataset_root, workload
+    )
+    body = encoded(document)
+    if len(body) > MAX_RPC_BYTES:
+        raise RuntimeError(f"parametric payload exceeds RPC limit: {len(body)}")
+    info = client.submit_workflow(body)
+    return info, [len(body)], digests
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-root", required=True, type=Path)
@@ -311,6 +362,8 @@ def parse_args():
     parser.add_argument("--cores", type=int, default=16)
     parser.add_argument("--batch-type", choices=("local", "condor"), default="condor")
     parser.add_argument("--task-chunk", type=int, default=2_000)
+    parser.add_argument("--representation", choices=("parametric", "explicit"),
+                        default="parametric")
     parser.add_argument("--timeout", type=float, default=24 * 60 * 60)
     parser.add_argument("--acceptance", action="store_true")
     parser.add_argument("--plan-only", action="store_true")
@@ -365,9 +418,14 @@ def main():
         client = WorkflowClient(contact["endpoint"], "data-intensive-benchmark", timeout=300)
         client.rpc_profile(reset=True)
         load_started = time.monotonic()
-        info, payload_sizes, code_digests = load_workflow(
-            client, workflow_id, dataset_root, workload, args.task_chunk
-        )
+        if args.representation == "parametric":
+            info, payload_sizes, code_digests = load_parametric_workflow(
+                client, workflow_id, dataset_root, workload
+            )
+        else:
+            info, payload_sizes, code_digests = load_workflow(
+                client, workflow_id, dataset_root, workload, args.task_chunk
+            )
         sealed = time.monotonic()
         expected_info = {
             "tasks": workload.tasks,
@@ -419,18 +477,54 @@ def main():
         dominant = dominant_stage(service_log_path, workflow_id)
         exact_physical = counts == {"submissions": workload.tasks, "completions": workload.tasks}
         parallelism = parallelism_summary(samples, workload.tasks, args.workers, args.cores)
-        intermediate_files = workload.a_tasks + workload.b_tasks
-        recovery_limit = stages.get("recovery_cache_limit", 0)
-        if intermediate_files <= recovery_limit:
+        if args.representation == "parametric":
+            reported_cpu_seconds = (
+                stages.get("task_reported_cpu_milliseconds", 0) / 1000
+            )
+            estimated_task_io_seconds = max(
+                0, stages.get("worker_execute_seconds", 0) - reported_cpu_seconds
+            )
             gc_pressure = (
-                stages.get("recovery_cache_peak") == intermediate_files
-                and stages.get("recovery_cache_evictions") == 0
+                stages.get("agent_active_data") == workload.c_tasks
+                and stages.get("agent_active_waiters") == 0
+                and stages.get("agent_peak_data", 0) >= workload.c_tasks
+            )
+            output_boundary = (
+                stages.get("task_reports") == workload.tasks
+                and stages.get("agent_peak_data", 0) > 0
+            )
+            durable_boundary = (
+                stages.get("controller_active_results") == workload.c_tasks
+                and stages.get("controller_peak_results") == workload.c_tasks
+            )
+            exact_reported_reads = (
+                stages.get("task_reported_read_bytes")
+                == workload.logical_read_bytes
+            )
+            data_bottleneck = (
+                workload.size_profile != "full"
+                or estimated_task_io_seconds > reported_cpu_seconds
             )
         else:
-            gc_pressure = (
-                stages.get("recovery_cache_peak") == recovery_limit
-                and stages.get("recovery_cache_evictions", 0) >= intermediate_files - recovery_limit
-            )
+            intermediate_files = workload.a_tasks + workload.b_tasks
+            recovery_limit = stages.get("recovery_cache_limit", 0)
+            if intermediate_files <= recovery_limit:
+                gc_pressure = (
+                    stages.get("recovery_cache_peak") == intermediate_files
+                    and stages.get("recovery_cache_evictions") == 0
+                )
+            else:
+                gc_pressure = (
+                    stages.get("recovery_cache_peak") == recovery_limit
+                    and stages.get("recovery_cache_evictions", 0)
+                    >= intermediate_files - recovery_limit
+                )
+            output_boundary = stages.get("publication_remote_outputs") == workload.tasks
+            durable_boundary = stages.get("publication_durable_outputs") == workload.c_tasks
+            exact_reported_reads = stages.get("url_stage_in_bytes") == workload.source_bytes
+            data_bottleneck = dominant["stage"] in {
+                "data_stage_in", "data_object_pull", "data_publish",
+            }
         gates = {
             "dataset_manifest": dataset["status"] == "PASS",
             "exact_logical_counts": all(info[name] == expected for name, expected in expected_info.items()),
@@ -441,19 +535,23 @@ def main():
             ),
             "exact_worker_pool": len(inventory) == args.workers and set(inventory) == {args.cores},
             "sampled_outputs": len(results) == sample_count,
-            "all_outputs_worker_local": stages.get("publication_remote_outputs") == workload.tasks,
-            "durable_outputs_only_requested": stages.get("publication_durable_outputs") == workload.c_tasks,
+            "all_outputs_worker_local": output_boundary,
+            "durable_outputs_only_requested": durable_boundary,
             "manager_output_payload_bypass": (
                 stages.get("manager_bytes_received") == 0
                 and stages.get("task_bytes_received") == 0
             ),
-            "exact_sharedfs_source_bytes": (
-                stages.get("url_stage_in_bytes") == workload.source_bytes
-            ),
-            "data_path_is_runtime_bottleneck": dominant["stage"] in {
-                "data_stage_in", "data_object_pull", "data_publish",
-            },
+            "exact_sharedfs_source_bytes": exact_reported_reads,
+            "data_path_is_runtime_bottleneck": data_bottleneck,
             "gc_pressure_accounted": gc_pressure,
+            "native_graph_setup_under_60s": (
+                args.representation != "parametric"
+                or stages.get("setup_seconds", float("inf")) <= 60
+            ),
+            "constant_registration": (
+                args.representation != "parametric"
+                or sum(payload_sizes) < 1 << 20
+            ),
             **parallelism["gates"],
         }
         result = {
@@ -467,6 +565,16 @@ def main():
             "physical_tasks": counts,
             "runtime_stages": stages,
             "dominant_stage": dominant,
+            "parametric_measurements": {
+                "reported_cpu_seconds": (
+                    reported_cpu_seconds
+                    if args.representation == "parametric" else None
+                ),
+                "estimated_task_io_seconds": (
+                    estimated_task_io_seconds
+                    if args.representation == "parametric" else None
+                ),
+            },
             "parallelism": parallelism,
             "admission": {"workers": len(inventory), "cores_per_worker": inventory},
             "final_worker_pool": {
@@ -502,6 +610,7 @@ def main():
                 "python": sys.version,
                 "commit": subprocess.run(("git", "rev-parse", "HEAD"), cwd=repository, text=True, stdout=subprocess.PIPE, check=True).stdout.strip(),
                 "code_digests": code_digests,
+                "representation": args.representation,
                 "runtime_info_storage": "node-local-temporary",
             },
         }

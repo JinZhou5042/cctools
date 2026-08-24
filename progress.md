@@ -22,10 +22,16 @@ to `/tmp/datavine-runtime-v2-regression-r2.json` during this checkout and is
 ephemeral; source tests are the durable reproduction mechanism.
 
 The full data-intensive parametric descriptor is 1,344 bytes and expands to
-exactly 1,048,576 tasks and 10,485,760 files. Full-scale sampled task expansion
-and exhaustive small-cohort inverse dependencies pass. Native Runtime frontier
-materialization and the exact 128x16 execution are still OPEN, so no full-scale
-performance advantage is claimed from this checkpoint.
+exactly 1,048,576 tasks and 10,485,760 files. Native Store/Scheduler/Runtime
+integration is complete: full graph construction takes about 2.59 seconds and
+172 MiB RSS, the exhaustive topology digest matches the independent Python
+oracle, and Runtime retains at most a 4,096-task materialization window. A
+current-code 4x4 E2E passed all gates with 256/256 independent physical tasks,
+exact reported reads, requested-only durability, zero Manager output payload,
+and final Worker Agent GC state. Owner plus all workers were also SIGKILLed and
+successfully recovered from the same journal with empty caches without rolling
+logical DONE backward. The exact 128x16 execution is still OPEN, so no
+full-scale performance advantage is claimed from this checkpoint.
 
 ## Current checkpoint — production v1 freeze (2026-08-23)
 

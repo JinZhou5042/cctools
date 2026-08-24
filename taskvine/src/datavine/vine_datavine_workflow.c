@@ -13,6 +13,7 @@ See the file COPYING for details.
 #include "jx_parse.h"
 #include "sha1.h"
 #include "vine_datavine_ir.h"
+#include "vine_datavine_parametric.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -657,7 +658,7 @@ static int validate_requested(struct validation *v, struct jx *array)
 static int validate_document(struct validation *v, struct jx *root,
 		struct vine_datavine_workflow_summary *summary)
 {
-	static const char *const keys[] = {"schema", "workflow_id", "idempotency_key", "mode", "task_defaults", "data_defaults", "tasks", "data", "requested_outputs", "policy", "metadata", 0};
+	static const char *const keys[] = {"schema", "workflow_id", "idempotency_key", "mode", "task_defaults", "data_defaults", "tasks", "data", "requested_outputs", "policy", "metadata", "parametric", 0};
 	if (!jx_istype(root, JX_OBJECT))
 		return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, "$", "workflow must be an object");
 	if (!allowed_keys(v, root, "$", keys))
@@ -710,13 +711,24 @@ static int validate_document(struct validation *v, struct jx *root,
 			!validate_task_defaults(v, defaults) ||
 			!validate_tasks(v, tasks, defaults) || !validate_requested(v, requested))
 		return 0;
-	if (summary) {
-		summary->tasks = v->task_count;
-		summary->data = v->data_count;
-		summary->edges = v->edge_count;
-		summary->requested_outputs = v->requested_count;
-		summary->streaming = strcmp(mode, "sealed") != 0;
+	struct vine_datavine_parametric *parametric = 0;
+	if (vine_datavine_parametric_present(root)) {
+		parametric = vine_datavine_parametric_parse(root, v->error);
+		if (!parametric)
+			return 0;
 	}
+	if (summary) {
+		if (parametric) {
+			vine_datavine_parametric_summary(parametric, summary);
+		} else {
+			summary->tasks = v->task_count;
+			summary->data = v->data_count;
+			summary->edges = v->edge_count;
+			summary->requested_outputs = v->requested_count;
+			summary->streaming = strcmp(mode, "sealed") != 0;
+		}
+	}
+	vine_datavine_parametric_delete(parametric);
 	return 1;
 }
 

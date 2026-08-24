@@ -11,6 +11,7 @@ See the file COPYING for details.
 #include "jx_parse.h"
 #include "vine_datavine_journal.h"
 #include "vine_datavine_ir.h"
+#include "vine_datavine_parametric.h"
 #include "vine_datavine_protocol.h"
 
 #include <openssl/sha.h>
@@ -62,6 +63,7 @@ struct stored_workflow {
 	struct itable *completed_tasks;
 	struct itable *output_metadata;
 	struct itable *data_producers;
+	struct vine_datavine_parametric *parametric;
 	uint64_t maximum_tasks;
 	uint64_t maximum_edges;
 	uint64_t maximum_task_id;
@@ -168,6 +170,7 @@ static void workflow_delete(void *value)
 		itable_delete(workflow->completed_tasks);
 	if (workflow->data_producers)
 		itable_delete(workflow->data_producers);
+	vine_datavine_parametric_delete(workflow->parametric);
 	invalidate_result_metadata_index(workflow);
 	free(workflow);
 }
@@ -216,6 +219,16 @@ static int update_graph_indices(struct stored_workflow *workflow,
 		struct jx *root, int initial)
 {
 	if (initial) {
+		if (vine_datavine_parametric_present(root)) {
+			workflow->parametric = vine_datavine_parametric_parse(root, 0);
+			if (!workflow->parametric)
+				return 0;
+			workflow->maximum_tasks = workflow->parametric->tasks;
+			workflow->maximum_edges = workflow->parametric->scheduler_edges;
+			workflow->maximum_task_id = workflow->parametric->tasks;
+			workflow->maximum_data_id = workflow->parametric->c_data_first +
+					workflow->parametric->c_tasks - 1;
+		}
 		struct jx *policy = jx_lookup(root, "policy");
 		struct jx *maximum_tasks = policy ? jx_lookup(policy,
 									"maximum_tasks")
@@ -223,10 +236,14 @@ static int update_graph_indices(struct stored_workflow *workflow,
 		struct jx *maximum_edges = policy ? jx_lookup(policy,
 									"maximum_edges")
 						  : 0;
-		workflow->maximum_tasks = maximum_tasks
+		workflow->maximum_tasks = workflow->parametric
+					? workflow->maximum_tasks
+					: maximum_tasks
 							  ? (uint64_t)maximum_tasks->u.integer_value
 							  : UINT64_C(10000000);
-		workflow->maximum_edges = maximum_edges
+		workflow->maximum_edges = workflow->parametric
+					? workflow->maximum_edges
+					: maximum_edges
 							  ? (uint64_t)maximum_edges->u.integer_value
 							  : UINT64_C(100000000);
 	}

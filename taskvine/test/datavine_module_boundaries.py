@@ -37,8 +37,23 @@ worker = source / "worker"
 native = source / "datavine"
 assert native.is_dir()
 assert not list(manager.glob("vine_datavine_*"))
-assert len(list(native.glob("vine_datavine_*.c"))) == 10
-assert len(list(native.glob("vine_datavine_*.h"))) == 10
+expected_native_sources = {
+    "vine_datavine_data_controller",
+    "vine_datavine_ir",
+    "vine_datavine_journal",
+    "vine_datavine_object_store",
+    "vine_datavine_parametric",
+    "vine_datavine_replica_table",
+    "vine_datavine_rpc",
+    "vine_datavine_scheduler",
+    "vine_datavine_workflow",
+    "vine_datavine_workflow_runtime",
+    "vine_datavine_workflow_store",
+}
+assert {path.stem for path in native.glob("vine_datavine_*.c")} == expected_native_sources
+expected_native_headers = expected_native_sources - {"vine_datavine_workflow_runtime"}
+expected_native_headers.add("vine_datavine_protocol")
+assert {path.stem for path in native.glob("vine_datavine_*.h")} == expected_native_headers
 assert not list(native.glob("vine_datavine_index.*"))
 assert not list(native.glob("vine_datavine_directory.*"))
 protocol = (native / "vine_datavine_protocol.h").read_text()
@@ -109,7 +124,7 @@ datavine_members = subprocess.check_output(
     ("ar", "t", native / "libdatavine.a"), text=True
 ).splitlines()
 assert not any("datavine" in member for member in taskvine_members)
-assert len(datavine_members) == 10
+assert {Path(member).stem for member in datavine_members} == expected_native_sources
 assert all(member.startswith("vine_datavine_") for member in datavine_members)
 
 runtime_source = (native / "vine_datavine_workflow_runtime.c").read_text()

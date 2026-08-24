@@ -46,9 +46,12 @@ admission decoupling; session loss, reconnect advertisement, independent
 physical replay, requested-result persistence, and generation-checked GC. The
 17/17 DataVine regression and ordinary TaskVine single-worker smoke pass.
 
-The constant-size parametric evaluator and inverse mappings also pass, but
-native Store/Runtime frontier integration and the exact 128x16 full campaign
-remain OPEN. Do not treat evaluator equivalence as physical execution evidence.
+The constant-size parametric representation is now integrated through native
+admission, Store, packed Scheduler construction, bounded Runtime
+materialization, Worker Agent telemetry, completion batching, and bounded
+recovery replay. Full graph setup is about 2.59 seconds / 172 MiB and a local
+256-task E2E passes every runtime gate. The exact 128x16 full campaign remains
+OPEN; do not promote local or evaluator evidence into a full-scale claim.
 
 ## Active data-intensive benchmark campaign (2026-08-23)
 
@@ -115,13 +118,14 @@ physical completion, >=90% central active cores, and exact final-pool recovery.
 The replacement full pair remains OPEN.  Compact evidence is
 `acceptance/data-intensive-large-scale-condor-churn-diagnostic-20260824.json`.
 
-After the pair, implement the parametric IR in this order: checked family
-evaluator, inverse dependency mappings, bounded task materialization and
-packed state, batched bitmap journal/checkpoints, then generation-checked
-cache-update/unlink vectors and family/index FunctionCall arguments.  The
-targets are <=60 s graph load, <4 GiB pre-execution RSS, >=100x smaller
-registration payload, and no per-task argument inode while retaining one
-independent physical execution per logical task attempt.
+The parametric path now has a checked family evaluator, native packed graph,
+bounded task materialization, completion batches, direct generation-checked
+Worker Agent/Controller metadata and GC, and compact family/index tickets. It
+meets the <=60 s graph-load, <4 GiB graph RSS, >=100x registration-reduction,
+and no Manager-owned per-task data-file targets while retaining one independent
+physical execution per logical attempt. Formula-backed dependency traversal
+and bitmap checkpoints remain later memory/durability optimizations, not hidden
+prerequisites for the current campaign.
 
 The fixed 1024-core comparison is complete and PASS. The next measured
 optimization order is now evidence-driven:

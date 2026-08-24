@@ -191,7 +191,8 @@ class HashingWriter:
 
 
 def write_manifest(
-    entries, pull_ns, decode_ns, function_ns, serialize_ns, fsync_ns
+    entries, pull_ns, decode_ns, function_ns, serialize_ns, fsync_ns,
+    task_report=None,
 ):
     payload = "{}\n{}\n{}M {} {} {} {} {}\n".format(
         OUTPUT_MANIFEST_MAGIC,
@@ -202,7 +203,11 @@ def write_manifest(
         function_ns,
         serialize_ns,
         fsync_ns,
-    ).encode("ascii")
+    )
+    if task_report is not None:
+        read_bytes, cpu_ms = task_report
+        payload += f"R {int(read_bytes)} {int(cpu_ms)}\n"
+    payload = payload.encode("ascii")
     temporary = Path(MANIFEST_NAME + ".part")
     with temporary.open("wb") as stream:
         stream.write(payload)
@@ -356,7 +361,7 @@ def callable_main(
     )
 
 
-def source_manifest(retained_outputs, function_ns):
+def source_manifest(retained_outputs, function_ns, task_report=None):
     """Describe indexed source-v1 outputs without copying their payloads."""
 
     entries = []
@@ -375,7 +380,7 @@ def source_manifest(retained_outputs, function_ns):
                 digest.update(block)
                 size += len(block)
         entries.append((size, digest.hexdigest()))
-    write_manifest(entries, 0, 0, function_ns, 0, 0)
+    write_manifest(entries, 0, 0, function_ns, 0, 0, task_report)
 
 
 def persist_one(source, spec, notifier):
@@ -506,7 +511,12 @@ def child_main(
             exec(compile(source, str(source_path), "exec"), namespace, namespace)
             function_ns = time.monotonic_ns() - function_started
             if retained_outputs is not None:
-                source_manifest(retained_outputs, function_ns)
+                report = None
+                if isinstance(namespace.get("read_bytes"), int) and isinstance(
+                    namespace.get("cpu_ms"), int
+                ):
+                    report = (namespace["read_bytes"], namespace["cpu_ms"])
+                source_manifest(retained_outputs, function_ns, report)
         else:
             callable_main(
                 data_root, invocation_bytes, function_bytes,
