@@ -83,6 +83,7 @@ manager_port=$(sed -n 's/.*"manager_port":\([0-9]*\).*/\1/p' "$root/contact.json
 [ -n "$manager_port" ]
 
 "$worker_binary" --cores=1 --memory=256 --disk=256 --idle-timeout=15 \
+	-d all -o "$root/worker.debug" \
 	localhost "$manager_port" >"$root/worker.out" 2>"$root/worker.err" &
 worker_pid=$!
 
@@ -142,6 +143,10 @@ wait_completed shell-diamond
 	>"$root/diamond-result.json"
 grep -q '"base64":"U0VFRA=="' "$root/diamond-branch.json"
 grep -q '"base64":"U0VFRGJyYW5jaFNFRUQ="' "$root/diamond-result.json"
+if grep -Fq "cache: transferring file://$root/artifact" "$root/worker.debug"; then
+	echo "SharedFS file URI was copied through worker cache" >&2
+	exit 1
+fi
 if "$cli" workflow result "$endpoint" "$token" shell-diamond 2 \
 	>"$root/pruned.json" 2>"$root/pruned.err"; then
 	echo "non-requested Shell intermediate was not pruned" >&2

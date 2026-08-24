@@ -4,6 +4,17 @@ Updated: 2026-08-24
 
 ## Current checkpoint — Runtime v2 local acceptance (2026-08-24)
 
+The first native full-scale launch reached exact 128x16 admission and held all
+2,048 slots, but exposed a Worker source-ingest multiplier: every one-use
+`file:///` origin forked curl and made a redundant cache copy. With ten blocked
+curl processes per worker, the final 120-second window completed only about
+2.76 tasks/s and could not fit the 24-hour worker lifetime. The run was stopped
+at 430 sampled completions and remains a FAIL diagnostic. Worker Data Agent now
+directly links local SharedFS origins into the sandbox; real task reads,
+intermediate peer movement, and GC are unchanged. Post-change 17/17 regression,
+traditional TaskVine smoke, and all-gate tiny E2E pass; a replacement exact
+128x16 run is required.
+
 Runtime v2 now separates compute completion from data admission. TaskVine
 Manager owns physical dispatch/completion and transports only a generic opaque
 auxiliary frame. DataVine Scheduler marks a successful physical task DONE and

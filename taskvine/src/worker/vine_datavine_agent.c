@@ -659,6 +659,21 @@ static int prepare_uri(struct vine_process *process,
 		struct agent_workflow *workflow, uint64_t data_id,
 		const char *uri, size_t uri_size)
 {
+	/* A local SharedFS origin is already directly addressable by every worker.
+	 * Link it into the task sandbox instead of forking curl and copying it into
+	 * worker cache first.  The task still performs the real source read; this
+	 * removes only a duplicate read/write and one process per source file.  URI
+	 * escaping retains the generic transfer path so it is decoded correctly. */
+	if (uri_size >= 8 && !memcmp(uri, "file:///", 8) &&
+			!memchr(uri, '%', uri_size)) {
+		size_t path_size = uri_size - 7;
+		char path[4096];
+		if (path_size >= sizeof(path))
+			return -1;
+		memcpy(path, uri + 7, path_size);
+		path[path_size] = 0;
+		return sandbox_link(process, data_id, path) ? 1 : -1;
+	}
 	struct local_object *local = local_get(workflow, data_id, 1);
 	if (!local)
 		return -1;

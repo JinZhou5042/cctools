@@ -33,6 +33,12 @@ DataVine task-output payload bytes through Manager = 0
 The traditional TaskVine file path remains available and unchanged for
 ordinary TaskVine tasks and is the performance baseline.
 
+For an unescaped local `file:///` immutable origin, Worker Data Agent links the
+SharedFS path directly into the sandbox. It does not fork a transfer process or
+copy the object into worker cache. The executor still reads the source bytes
+from SharedFS, while generated inputs continue to use generation-checked local
+or peer replicas. Escaped and remote URIs retain the generic transfer path.
+
 ## Independent progress
 
 Task and data events are concurrent and unordered:

@@ -104,6 +104,24 @@ physical completion. Worker task/data completion remains decoupled and one
 logical task still produces one physical TaskVine task per attempt. Completion
 journal records use batches of up to 256.
 
+The first exact 128x16 execution of this milestone exposed a separate Worker
+source-ingest multiplier. Although all 128 workers and 2,048 slots remained
+admitted, each of the 9,437,184 `file:///` sources launched a curl transfer and
+was copied into worker cache before the task read it. Ten simultaneous curl
+processes per worker were observed blocked in SharedFS I/O; the stable rate was
+only about 2.7 tasks/s and could not finish within the 24-hour worker lifetime.
+That run was stopped and retained as a diagnostic, not acceptance evidence.
+
+Worker Data Agent now recognizes unescaped local `file:///` origins and links
+the SharedFS path directly into the task sandbox. The task still performs the
+same deterministic random read of every source byte; only the redundant
+712.8-GiB cache copy and 9.4 million curl process launches disappear. Escaped
+or non-local URIs retain the generic transfer path. The Shell workflow test
+asserts that a SharedFS file source is not transferred into worker cache, the
+complete 17/17 regression passes, and the tiny data-intensive E2E improved
+from 16.54 seconds to 11.37 seconds while retaining every exact byte and
+correctness gate.
+
 This milestone deliberately reuses the existing packed Scheduler edge arrays,
 so current native graph memory is still O(edges), not the final
 O(families + task-state bitmap) target described below. That remaining

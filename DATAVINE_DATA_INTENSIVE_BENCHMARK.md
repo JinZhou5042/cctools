@@ -232,6 +232,22 @@ production performance claim.
 
 ## Current evidence
 
+The first native-parametric full launch reached exact 128x16 admission and
+held 2,048 active slots for every central sample, proving that constant-size
+registration and bounded materialization removed the earlier construction
+bottleneck. It then exposed a Worker source-ingest implementation multiplier:
+each local `file:///` source forked curl and was copied into cache before the
+task read it. The last 120 seconds sustained about 2.76 tasks/s, which could
+not complete within the 24-hour worker lifetime, so the run was deliberately
+stopped at 430 sampler-visible completions. It is FAIL diagnostic evidence,
+not a benchmark result.
+
+Worker Data Agent now links unescaped local SharedFS sources directly into the
+sandbox. This removes 9.4 million curl forks and a redundant 712.8-GiB copy,
+without changing the task kernel's actual random reads, the exact reported
+source-byte gate, intermediate peer movement, or GC. The replacement full run
+remains OPEN.
+
 The 1 x 1 tiny-profile mechanism pilot is PASS for both backends with 256/256
 logical/physical tasks and matching sampled output hashes. Its single paired
 execution measured 27.01 s for TaskVine and 26.21 s for DataVine (1.03x) with
