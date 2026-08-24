@@ -8,6 +8,34 @@ import statistics
 import sys
 
 
+REQUIRED_GATES = {
+    "datavine": {
+        "dataset_manifest", "exact_logical_counts", "exact_physical_counts",
+        "no_removed_workers", "exact_worker_pool", "sampled_outputs",
+        "all_outputs_worker_local", "durable_outputs_only_requested",
+        "manager_output_payload_bypass", "exact_sharedfs_source_bytes",
+        "data_path_is_runtime_bottleneck", "gc_pressure_accounted",
+        "central_window_observed", "ready_parallelism", "active_parallelism",
+    },
+    "taskvine": {
+        "dataset_manifest", "exact_logical_tasks",
+        "exact_physical_submissions", "exact_physical_completions",
+        "all_tasks_successful", "no_removed_workers", "exact_worker_pool",
+        "sampled_outputs", "central_window_observed", "ready_parallelism",
+        "active_parallelism",
+    },
+}
+
+
+def gates_pass(value, backend):
+    gates = value.get("gates")
+    return (
+        isinstance(gates, dict)
+        and REQUIRED_GATES[backend].issubset(gates)
+        and all(gates[name] is True for name in REQUIRED_GATES[backend])
+    )
+
+
 def load(path):
     path = path / "summary.json" if path.is_dir() else path
     return path, json.loads(path.read_text())
@@ -30,9 +58,9 @@ def main():
         tv_path, tv = load(tv_arg)
         contract = dv.get("contract", {})
         pair_errors = []
-        if dv.get("status") != "PASS" or not all(dv.get("gates", {}).values()):
+        if dv.get("status") != "PASS" or not gates_pass(dv, "datavine"):
             pair_errors.append("DataVine run is not fully PASS")
-        if tv.get("status") != "PASS" or not all(tv.get("gates", {}).values()):
+        if tv.get("status") != "PASS" or not gates_pass(tv, "taskvine"):
             pair_errors.append("TaskVine run is not fully PASS")
         if contract.get("contract_sha256") != tv.get("contract", {}).get("contract_sha256"):
             pair_errors.append("contract digest mismatch")

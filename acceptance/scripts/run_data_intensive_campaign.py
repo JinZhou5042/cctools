@@ -11,6 +11,7 @@ import subprocess
 import sys
 
 from data_intensive_workload import Workload, assert_full_contract
+from compare_data_intensive_runs import gates_pass
 
 
 SCHEMA = "datavine.data-intensive-campaign/v1"
@@ -23,12 +24,12 @@ def atomic_json(path, value):
     os.replace(temporary, path)
 
 
-def accepted_summary(path, contract_sha256):
+def accepted_summary(path, contract_sha256, backend):
     try:
         value = json.loads(path.read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         return None
-    if value.get("status") != "PASS" or not all(value.get("gates", {}).values()):
+    if value.get("status") != "PASS" or not gates_pass(value, backend):
         return None
     if value.get("contract", {}).get("contract_sha256") != contract_sha256:
         return None
@@ -139,7 +140,9 @@ def main():
             raise RuntimeError("repository changed during campaign")
         output = run_root / f"{backend}-r{repetition}"
         summary_path = output / "summary.json"
-        summary = accepted_summary(summary_path, contract["contract_sha256"])
+        summary = accepted_summary(
+            summary_path, contract["contract_sha256"], backend
+        )
         if summary is not None:
             outcome = "resumed-pass"
         else:
@@ -164,7 +167,9 @@ def main():
                 state["error"] = f"{type(error).__name__}: {error}"
                 atomic_json(state_path, state)
                 raise
-            summary = accepted_summary(summary_path, contract["contract_sha256"])
+            summary = accepted_summary(
+                summary_path, contract["contract_sha256"], backend
+            )
             if summary is None:
                 raise RuntimeError(f"runner exited without an accepted summary: {output}")
             outcome = "executed-pass"
