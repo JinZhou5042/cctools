@@ -362,6 +362,7 @@ def parse_args():
     verify.add_argument("--parts", type=int, default=DEFAULT_PARTS)
     verify.add_argument("--full-hash", action="store_true")
     verify.add_argument("--output", type=Path)
+    verify.add_argument("--output-root", type=Path)
     dataset = subparsers.add_parser("assemble")
     dataset.add_argument("--root", required=True, type=Path)
     dataset.add_argument("--parts", type=int, default=DEFAULT_PARTS)
@@ -387,11 +388,16 @@ def main():
             args.chunk_bytes, args.resume,
         )
     elif args.command == "verify-part":
+        if args.output and args.output_root:
+            raise ValueError("use only one of --output and --output-root")
         result = verification_artifact(
             args.root.resolve(), workload, args.part, args.parts, args.full_hash
         )
-        if args.output:
-            atomic_json(args.output.resolve(), result)
+        output = args.output
+        if args.output_root:
+            output = args.output_root / f"part-{args.part:03d}.json"
+        if output:
+            atomic_json(output.resolve(), result)
     else:
         result = assemble(
             args.root.resolve(), workload, args.parts, args.full_hash,

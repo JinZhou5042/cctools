@@ -142,8 +142,8 @@ def main():
             subprocess.run(
                 common + (
                     "verify-part", "--root", root, "--part", str(part),
-                    "--parts", "2", "--full-hash", "--output",
-                    verification_root / f"part-{part:03d}.json",
+                    "--parts", "2", "--full-hash", "--output-root",
+                    verification_root,
                 ),
                 check=True, stdout=subprocess.PIPE, text=True,
             )

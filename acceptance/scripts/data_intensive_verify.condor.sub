@@ -1,6 +1,6 @@
 universe = vanilla
 executable = $(python_bin)
-arguments = $(repository)/acceptance/scripts/generate_data_intensive_dataset.py --acceptance verify-part --root $(dataset_root) --part $(Process) --parts 128 --full-hash --output $(verification_root)/part-$(Process).json
+arguments = $(repository)/acceptance/scripts/generate_data_intensive_dataset.py --acceptance verify-part --root $(dataset_root) --part $(Process) --parts 128 --full-hash --output-root $(verification_root)
 
 should_transfer_files = NO
 getenv = False
