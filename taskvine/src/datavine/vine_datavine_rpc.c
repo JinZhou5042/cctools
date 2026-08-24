@@ -6,6 +6,7 @@ See the file COPYING for details.
 
 #include "vine_datavine_rpc.h"
 #include "vine_datavine_data_controller.h"
+#include "vine_datavine_replica_table.h"
 #include "vine_datavine_workflow_store.h"
 #include "jx.h"
 #include "jx_print.h"
@@ -52,6 +53,11 @@ struct rpc_connection {
 	uint16_t waiting_opcode;
 	uint64_t waiting_request_id;
 	char waiting_workflow_id[VINE_DATAVINE_WORKFLOW_IDENTIFIER_MAX + 1];
+	int agent;
+	uint64_t agent_workflow_slot;
+	uint32_t agent_worker_slot;
+	uint64_t agent_session_epoch;
+	uint64_t agent_sequence;
 	struct rpc_connection *next;
 };
 
@@ -167,11 +173,264 @@ static void connection_delete(struct rpc_thread *thread, struct rpc_connection *
 	if (*cursor) {
 		*cursor = connection->next;
 	}
+	if (connection->agent)
+		vine_datavine_data_controller_agent_session_lost(
+				thread->server->data_controller,
+				connection->agent_workflow_slot,
+				connection->agent_worker_slot,
+				connection->agent_session_epoch);
 	close(connection->fd);
 	atomic_fetch_sub(&thread->server->active_connections, 1);
 	free(connection->payload);
 	free(connection->response);
 	free(connection);
+}
+
+static int agent_header(
+		struct rpc_connection *connection, const unsigned char *payload,
+		size_t payload_size, size_t record_size, uint32_t *count)
+{
+	if (!connection->agent || payload_size < VINE_DATAVINE_AGENT_BATCH_HEADER)
+		return 0;
+	uint32_t records = vine_datavine_get_u32(payload + 32);
+	if (!records || records > VINE_DATAVINE_AGENT_MAX_BATCH ||
+			vine_datavine_get_u64(payload) !=
+				connection->agent_workflow_slot ||
+			vine_datavine_get_u32(payload + 8) !=
+				connection->agent_worker_slot ||
+			vine_datavine_get_u32(payload + 12) ||
+			vine_datavine_get_u64(payload + 16) !=
+				connection->agent_session_epoch ||
+			vine_datavine_get_u32(payload + 36) ||
+			records > (SIZE_MAX - VINE_DATAVINE_AGENT_BATCH_HEADER) /
+				record_size ||
+			payload_size != VINE_DATAVINE_AGENT_BATCH_HEADER +
+				(size_t)records * record_size)
+		return 0;
+	*count = records;
+	return 1;
+}
+
+static uint32_t agent_hello(struct vine_datavine_rpc_server *server,
+		struct rpc_connection *connection, const unsigned char *payload,
+		size_t payload_size, unsigned char **result, size_t *result_size)
+{
+	if (connection->agent || payload_size != VINE_DATAVINE_AGENT_HELLO_SIZE ||
+			memcmp(payload, VINE_DATAVINE_AGENT_HELLO_MAGIC, 4) ||
+			vine_datavine_get_u32(payload + 36) == UINT32_MAX ||
+			!vine_datavine_get_u64(payload + 40) ||
+			!vine_datavine_get_u16(payload + 48) ||
+			!vine_datavine_get_u16(payload + 50) ||
+			vine_datavine_get_u16(payload + 50) >=
+				VINE_DATAVINE_AGENT_HOST_MAX ||
+			vine_datavine_get_u32(payload + 116))
+		return VINE_DATAVINE_RPC_INVALID;
+	uint64_t workflow_slot = 0;
+	uint32_t worker_slot = vine_datavine_get_u32(payload + 36);
+	uint64_t session_epoch = vine_datavine_get_u64(payload + 40);
+	uint16_t host_size = vine_datavine_get_u16(payload + 50);
+	char host[VINE_DATAVINE_AGENT_HOST_MAX];
+	memcpy(host, payload + 52, host_size);
+	host[host_size] = 0;
+	if (!vine_datavine_data_controller_agent_hello(server->data_controller,
+			payload + 4, &worker_slot, session_epoch, host,
+			vine_datavine_get_u16(payload + 48), &workflow_slot))
+		return VINE_DATAVINE_RPC_REJECTED;
+	*result = calloc(1, 16);
+	if (!*result)
+		return VINE_DATAVINE_RPC_INTERNAL;
+	vine_datavine_put_u64(*result, workflow_slot);
+	vine_datavine_put_u32(*result + 8, worker_slot);
+	*result_size = 16;
+	connection->agent = 1;
+	connection->agent_workflow_slot = workflow_slot;
+	connection->agent_worker_slot = worker_slot;
+	connection->agent_session_epoch = session_epoch;
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t agent_data_ready(struct vine_datavine_rpc_server *server,
+		struct rpc_connection *connection, const unsigned char *payload,
+		size_t payload_size)
+{
+	uint32_t count = 0;
+	if (!agent_header(connection, payload, payload_size,
+			VINE_DATAVINE_AGENT_PUBLISH_RECORD, &count))
+		return VINE_DATAVINE_RPC_INVALID;
+	uint64_t sequence = vine_datavine_get_u64(payload + 24);
+	if (!sequence)
+		return VINE_DATAVINE_RPC_INVALID;
+	if (sequence <= connection->agent_sequence)
+		return VINE_DATAVINE_RPC_OK;
+	struct vine_datavine_publish_record records[VINE_DATAVINE_AGENT_MAX_BATCH];
+	for (uint32_t index = 0; index < count; index++) {
+		const unsigned char *record = payload +
+			VINE_DATAVINE_AGENT_BATCH_HEADER +
+			(size_t)index * VINE_DATAVINE_AGENT_PUBLISH_RECORD;
+		uint64_t data_id = vine_datavine_get_u64(record);
+		uint32_t generation = vine_datavine_get_u32(record + 8);
+		uint32_t flags = vine_datavine_get_u32(record + 12);
+		uint64_t size = vine_datavine_get_u64(record + 16);
+		uint64_t object_token = vine_datavine_get_u64(record + 24);
+		if (!data_id || !generation || !object_token || flags & ~UINT32_C(1))
+			return VINE_DATAVINE_RPC_REJECTED;
+		records[index].data_id = data_id;
+		records[index].generation = generation;
+		records[index].size = size;
+		records[index].object_token = object_token;
+		records[index].requested = flags & 1;
+		memcpy(records[index].digest, record + 32, 32);
+	}
+	if (!vine_datavine_data_controller_agent_publish_batch(
+			server->data_controller, connection->agent_workflow_slot,
+			records, count, connection->agent_worker_slot,
+			connection->agent_session_epoch))
+		return VINE_DATAVINE_RPC_REJECTED;
+	connection->agent_sequence = sequence;
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t agent_resolve(struct vine_datavine_rpc_server *server,
+		struct rpc_connection *connection, const unsigned char *payload,
+		size_t payload_size, unsigned char **result, size_t *result_size)
+{
+	uint32_t count = 0;
+	if (!agent_header(connection, payload, payload_size,
+			VINE_DATAVINE_AGENT_RESOLVE_RECORD, &count))
+		return VINE_DATAVINE_RPC_INVALID;
+	*result_size = (size_t)count * VINE_DATAVINE_AGENT_RESOLVE_REPLY;
+	*result = calloc(1, *result_size);
+	if (!*result)
+		return VINE_DATAVINE_RPC_INTERNAL;
+	for (uint32_t index = 0; index < count; index++) {
+		const unsigned char *record = payload +
+			VINE_DATAVINE_AGENT_BATCH_HEADER +
+			(size_t)index * VINE_DATAVINE_AGENT_RESOLVE_RECORD;
+		unsigned char *reply = *result +
+			(size_t)index * VINE_DATAVINE_AGENT_RESOLVE_REPLY;
+		uint64_t data_id = vine_datavine_get_u64(record);
+		uint32_t generation = vine_datavine_get_u32(record + 8);
+		if (!data_id || vine_datavine_get_u32(record + 12)) {
+			free(*result);
+			*result = 0;
+			*result_size = 0;
+			return VINE_DATAVINE_RPC_INVALID;
+		}
+		struct vine_datavine_agent_replica replica;
+		size_t replica_count = 0;
+		uint64_t size = 0;
+		unsigned char digest[32] = {0};
+		int persisted = 0;
+		enum vine_datavine_agent_resolve_status status =
+			vine_datavine_data_controller_agent_resolve(
+				server->data_controller,
+				connection->agent_workflow_slot, data_id, generation,
+				&replica, 1, &replica_count, &size, digest, &persisted);
+		vine_datavine_put_u32(reply, (uint32_t)status);
+		vine_datavine_put_u32(reply + 4,
+			replica_count ? replica.generation : generation);
+		vine_datavine_put_u64(reply + 8, data_id);
+		vine_datavine_put_u64(reply + 16, size);
+		memcpy(reply + 24, digest, sizeof(digest));
+		if (replica_count) {
+			vine_datavine_put_u32(reply + 56, replica.worker_slot);
+			vine_datavine_put_u32(reply + 60, persisted ? 1 : 0);
+			vine_datavine_put_u64(reply + 64, replica.session_epoch);
+			vine_datavine_put_u64(reply + 72, replica.object_token);
+			size_t host_size = strlen(replica.host);
+			if (!host_size || host_size >= VINE_DATAVINE_AGENT_HOST_MAX ||
+					!replica.port) {
+				free(*result);
+				*result = 0;
+				*result_size = 0;
+				return VINE_DATAVINE_RPC_INTERNAL;
+			}
+			vine_datavine_put_u16(reply + 80, replica.port);
+			vine_datavine_put_u16(reply + 82, (uint16_t)host_size);
+			memcpy(reply + 84, replica.host, host_size);
+		}
+	}
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t agent_data_fault(struct vine_datavine_rpc_server *server,
+		struct rpc_connection *connection, const unsigned char *payload,
+		size_t payload_size)
+{
+	uint32_t count = 0;
+	if (!agent_header(connection, payload, payload_size,
+			VINE_DATAVINE_AGENT_FAULT_RECORD, &count))
+		return VINE_DATAVINE_RPC_INVALID;
+	uint64_t sequence = vine_datavine_get_u64(payload + 24);
+	if (!sequence)
+		return VINE_DATAVINE_RPC_INVALID;
+	if (sequence <= connection->agent_sequence)
+		return VINE_DATAVINE_RPC_OK;
+	for (uint32_t index = 0; index < count; index++) {
+		const unsigned char *record = payload +
+			VINE_DATAVINE_AGENT_BATCH_HEADER +
+			(size_t)index * VINE_DATAVINE_AGENT_FAULT_RECORD;
+		uint64_t data_id = vine_datavine_get_u64(record);
+		uint32_t generation = vine_datavine_get_u32(record + 8);
+		uint64_t object_token = vine_datavine_get_u64(record + 16);
+		if (!data_id || !generation || vine_datavine_get_u32(record + 12) ||
+				!object_token ||
+				!vine_datavine_data_controller_agent_fault(
+					server->data_controller,
+					connection->agent_workflow_slot, data_id, generation,
+					connection->agent_worker_slot,
+					connection->agent_session_epoch, object_token))
+			return VINE_DATAVINE_RPC_REJECTED;
+	}
+	connection->agent_sequence = sequence;
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t agent_heartbeat(struct vine_datavine_rpc_server *server,
+		struct rpc_connection *connection, const unsigned char *payload,
+		size_t payload_size, unsigned char **result, size_t *result_size)
+{
+	if (payload_size != 8)
+		return VINE_DATAVINE_RPC_INVALID;
+	struct vine_datavine_agent_release releases[VINE_DATAVINE_AGENT_MAX_BATCH];
+	size_t count = 0;
+	if (!vine_datavine_data_controller_agent_take_releases(
+			server->data_controller, connection->agent_workflow_slot,
+			connection->agent_worker_slot, connection->agent_session_epoch,
+			vine_datavine_get_u64(payload), releases,
+			VINE_DATAVINE_AGENT_MAX_BATCH, &count))
+		return VINE_DATAVINE_RPC_REJECTED;
+	*result_size = 16 + count * VINE_DATAVINE_AGENT_RELEASE_RECORD;
+	*result = calloc(1, *result_size);
+	if (!*result)
+		return VINE_DATAVINE_RPC_INTERNAL;
+	if (count)
+		vine_datavine_put_u64(*result, releases[count - 1].sequence);
+	vine_datavine_put_u32(*result + 8, (uint32_t)count);
+	for (size_t index = 0; index < count; index++) {
+		unsigned char *record = *result + 16 +
+				index * VINE_DATAVINE_AGENT_RELEASE_RECORD;
+		vine_datavine_put_u64(record, releases[index].data_id);
+		vine_datavine_put_u32(record + 8, releases[index].generation);
+		vine_datavine_put_u32(record + 12, 0);
+		vine_datavine_put_u64(record + 16, releases[index].object_token);
+	}
+	return VINE_DATAVINE_RPC_OK;
+}
+
+static uint32_t agent_persisted(struct vine_datavine_rpc_server *server,
+		struct rpc_connection *connection, const unsigned char *payload,
+		size_t payload_size)
+{
+	if (payload_size != 56 || !vine_datavine_get_u64(payload) ||
+			!vine_datavine_get_u32(payload + 8) ||
+			vine_datavine_get_u32(payload + 12))
+		return VINE_DATAVINE_RPC_INVALID;
+	return vine_datavine_data_controller_agent_persisted(
+			server->data_controller, connection->agent_workflow_slot,
+			vine_datavine_get_u64(payload), vine_datavine_get_u32(payload + 8),
+			vine_datavine_get_u64(payload + 16), payload + 24)
+			? VINE_DATAVINE_RPC_OK : VINE_DATAVINE_RPC_REJECTED;
 }
 
 static int epoll_update(int epoll_fd, struct rpc_connection *connection, uint32_t events)
@@ -736,7 +995,12 @@ static int process_request(struct vine_datavine_rpc_server *server, struct rpc_c
 	size_t result_size = 0;
 	if (!connection->authorized) {
 		char object_digest[65];
-		if (opcode == VINE_DATAVINE_RPC_OBJECT_GET &&
+		if (opcode == VINE_DATAVINE_RPC_AGENT_HELLO) {
+			status = agent_hello(server, connection, connection->payload,
+					connection->payload_size, &result, &result_size);
+			if (status == VINE_DATAVINE_RPC_OK)
+				connection->authorized = 1;
+		} else if (opcode == VINE_DATAVINE_RPC_OBJECT_GET &&
 				validate_object_ticket(server, connection->payload, connection->payload_size, object_digest)) {
 			status = object_get(server, (const unsigned char *)object_digest, 64, &result, &result_size);
 		} else if (opcode != VINE_DATAVINE_RPC_AUTH) {
@@ -758,6 +1022,35 @@ static int process_request(struct vine_datavine_rpc_server *server, struct rpc_c
 							connection->object_digest,
 							64))) {
 		status = VINE_DATAVINE_RPC_UNAUTHORIZED;
+	} else if (opcode == VINE_DATAVINE_RPC_AGENT_HELLO) {
+		status = agent_hello(server, connection, connection->payload,
+				connection->payload_size, &result, &result_size);
+	} else if (connection->agent &&
+			opcode == VINE_DATAVINE_RPC_AGENT_DATA_READY) {
+		status = agent_data_ready(server, connection, connection->payload,
+				connection->payload_size);
+	} else if (connection->agent &&
+			opcode == VINE_DATAVINE_RPC_AGENT_RESOLVE) {
+		status = agent_resolve(server, connection, connection->payload,
+				connection->payload_size, &result, &result_size);
+	} else if (connection->agent &&
+			opcode == VINE_DATAVINE_RPC_AGENT_DATA_FAULT) {
+		status = agent_data_fault(server, connection, connection->payload,
+				connection->payload_size);
+	} else if (connection->agent &&
+			opcode == VINE_DATAVINE_RPC_AGENT_HEARTBEAT &&
+			connection->payload_size == 8) {
+		status = agent_heartbeat(server, connection, connection->payload,
+				connection->payload_size, &result, &result_size);
+	} else if (connection->agent &&
+			opcode == VINE_DATAVINE_RPC_AGENT_PERSISTED) {
+		status = agent_persisted(server, connection, connection->payload,
+				connection->payload_size);
+	} else if (connection->agent) {
+		status = VINE_DATAVINE_RPC_INVALID;
+	} else if (opcode >= VINE_DATAVINE_RPC_AGENT_HELLO &&
+			opcode <= VINE_DATAVINE_RPC_AGENT_PERSISTED) {
+		status = VINE_DATAVINE_RPC_REJECTED;
 	} else if (opcode == VINE_DATAVINE_RPC_WORKFLOW_WAIT_TERMINAL) {
 		char workflow_id[VINE_DATAVINE_WORKFLOW_IDENTIFIER_MAX + 1];
 		struct vine_datavine_workflow_info info;
@@ -908,6 +1201,7 @@ static void accept_connections(struct rpc_thread *thread)
 		}
 		int enabled = 1;
 		setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
+		setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &enabled, sizeof(enabled));
 		struct rpc_connection *connection = calloc(1, sizeof(*connection));
 		if (!connection) {
 			atomic_fetch_sub(&thread->server->active_connections, 1);
@@ -957,7 +1251,7 @@ static void *rpc_thread_main(void *arg)
 					!wake_terminal_waiter(thread, connection)) {
 				epoll_ctl(thread->epoll_fd, EPOLL_CTL_DEL, connection->fd, 0);
 				connection_delete(thread, connection);
-			} else if (!connection->waiting_terminal &&
+			} else if (!connection->waiting_terminal && !connection->agent &&
 					now - connection->last_activity >
 							DATAVINE_RPC_IDLE_SECONDS) {
 				epoll_ctl(thread->epoll_fd, EPOLL_CTL_DEL, connection->fd, 0);

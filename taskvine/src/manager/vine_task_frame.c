@@ -56,6 +56,10 @@ int vine_task_frame_build(buffer_t *frame, struct vine_manager *manager,
 			FRAME_PUT(task->function_input, task->function_input_length);
 		}
 	}
+	if (task->auxiliary_payload_length) {
+		FRAME_PRINTF("auxiliary_payload %zu\n", task->auxiliary_payload_length);
+		FRAME_PUT(task->auxiliary_payload, task->auxiliary_payload_length);
+	}
 
 	if (task->provides_library) {
 		FRAME_PRINTF("provides_library %s\n", task->provides_library);

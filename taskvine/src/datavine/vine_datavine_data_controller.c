@@ -12,6 +12,7 @@
 #include "vine_datavine_journal.h"
 #include "vine_datavine_object_store.h"
 #include "vine_datavine_protocol.h"
+#include "vine_datavine_replica_table.h"
 #include "vine_datavine_workflow_store.h"
 
 #include <errno.h>
@@ -19,6 +20,7 @@
 #include <limits.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/crypto.h>
 #include <openssl/sha.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -102,6 +104,39 @@ struct persistence_notice {
 	char sha256[65];
 };
 
+struct agent_namespace {
+	char *workflow_id;
+	unsigned char workflow_key[32];
+	uint64_t workflow_slot;
+	struct vine_datavine_replica_table *replicas;
+	struct agent_endpoint *endpoints;
+	size_t endpoint_capacity;
+	uint32_t next_worker_slot;
+	struct itable *result_metadata;
+};
+
+struct agent_result_metadata {
+	struct vine_datavine_workflow_result_info info;
+};
+
+struct agent_endpoint {
+	char host[VINE_DATAVINE_AGENT_HOST_MAX];
+	uint16_t port;
+	struct vine_datavine_agent_release *releases;
+	size_t release_count;
+	size_t release_capacity;
+	uint64_t next_release_sequence;
+};
+
+struct agent_release_context {
+	struct agent_namespace *namespace;
+	int valid;
+};
+
+static void agent_queue_release(uint64_t released_data_id,
+		uint32_t released_generation,
+		const struct vine_datavine_replica_view *replica, void *argument);
+
 struct vine_datavine_data_controller {
 	pthread_mutex_t lock;
 	pthread_mutex_t queue_lock;
@@ -113,6 +148,8 @@ struct vine_datavine_data_controller {
 	struct hash_table *workflow_losses;
 	struct hash_table *object_files;
 	struct hash_table *persistence_notices;
+	struct hash_table *agent_workflows;
+	struct itable *agent_slots;
 	struct vine_datavine_object_store *object_store;
 	struct vine_datavine_journal *journal;
 	char *root;
@@ -135,6 +172,108 @@ struct vine_datavine_data_controller {
 	int space_initialized;
 	int prepared_initialized;
 };
+
+static void agent_namespace_delete(void *value)
+{
+	struct agent_namespace *namespace = value;
+	if (!namespace)
+		return;
+	vine_datavine_replica_table_delete(namespace->replicas);
+	if (namespace->result_metadata) {
+		uint64_t data_id;
+		void *metadata;
+		int iterator;
+		ITABLE_ITERATE(namespace->result_metadata, iterator, data_id, metadata)
+		{
+			free(metadata);
+		}
+		itable_delete(namespace->result_metadata);
+	}
+	for (size_t index = 0; index < namespace->endpoint_capacity; index++)
+		free(namespace->endpoints[index].releases);
+	free(namespace->endpoints);
+	free(namespace->workflow_id);
+	free(namespace);
+}
+
+static int agent_endpoint_reserve(struct agent_namespace *namespace,
+		uint32_t worker_slot)
+{
+	if (worker_slot < namespace->endpoint_capacity)
+		return 1;
+	size_t capacity = namespace->endpoint_capacity ?
+			namespace->endpoint_capacity : 16;
+	while (capacity <= worker_slot) {
+		if (capacity > SIZE_MAX / 2)
+			return 0;
+		capacity *= 2;
+	}
+	struct agent_endpoint *next = realloc(namespace->endpoints,
+			capacity * sizeof(*next));
+	if (!next)
+		return 0;
+	memset(next + namespace->endpoint_capacity, 0,
+			(capacity - namespace->endpoint_capacity) * sizeof(*next));
+	namespace->endpoints = next;
+	namespace->endpoint_capacity = capacity;
+	return 1;
+}
+
+static uint64_t workflow_slot_from_key(const unsigned char key[32])
+{
+	uint64_t slot = vine_datavine_get_u64(key);
+	return slot ? slot : UINT64_C(1);
+}
+
+static struct agent_namespace *agent_namespace_lookup(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot)
+{
+	return controller && controller->agent_slots && workflow_slot
+			   ? itable_lookup(controller->agent_slots, workflow_slot)
+			   : 0;
+}
+
+static struct agent_namespace *agent_namespace_prepare(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id)
+{
+	struct agent_namespace *namespace = hash_table_lookup(
+			controller->agent_workflows, workflow_id);
+	if (namespace)
+		return namespace;
+	namespace = calloc(1, sizeof(*namespace));
+	if (!namespace)
+		return 0;
+	namespace->workflow_id = strdup(workflow_id);
+	unsigned int key_size = 0;
+	if (!controller->object_token || !HMAC(EVP_sha256(),
+			controller->object_token, (int)strlen(controller->object_token),
+			(const unsigned char *)workflow_id, strlen(workflow_id),
+			namespace->workflow_key, &key_size) || key_size != 32) {
+		agent_namespace_delete(namespace);
+		return 0;
+	}
+	namespace->workflow_slot = workflow_slot_from_key(namespace->workflow_key);
+	namespace->replicas = vine_datavine_replica_table_create();
+	namespace->result_metadata = itable_create(0);
+	struct agent_namespace *collision = itable_lookup(
+			controller->agent_slots, namespace->workflow_slot);
+	if (!namespace->workflow_id || !namespace->replicas ||
+			!namespace->result_metadata ||
+			collision ||
+			!hash_table_insert(controller->agent_workflows, workflow_id,
+				namespace) ||
+			(!collision && !itable_insert(controller->agent_slots,
+				namespace->workflow_slot, namespace))) {
+		if (hash_table_lookup(controller->agent_workflows, workflow_id) ==
+				namespace)
+			hash_table_remove(controller->agent_workflows, workflow_id);
+		agent_namespace_delete(namespace);
+		return 0;
+	}
+	return namespace;
+}
 
 int vine_datavine_data_controller_put_object(
 		struct vine_datavine_data_controller *controller, const char sha256[65],
@@ -228,6 +367,20 @@ char *vine_datavine_data_controller_object_ticket(
 	return string_format("datavine-file://%s", path);
 }
 
+int vine_datavine_data_controller_agent_endpoint(
+		struct vine_datavine_data_controller *controller, char host[64],
+		uint16_t *port)
+{
+	if (!controller || !host || !port || !controller->object_host ||
+			!controller->object_host[0] ||
+			strlen(controller->object_host) >= 64 ||
+			controller->object_port < 1 || controller->object_port > UINT16_MAX)
+		return 0;
+	snprintf(host, 64, "%s", controller->object_host);
+	*port = (uint16_t)controller->object_port;
+	return 1;
+}
+
 struct vine_file *vine_datavine_data_controller_resolve_object(
 		struct vine_datavine_data_controller *controller,
 		struct vine_manager *manager, const char *sha256)
@@ -283,6 +436,49 @@ static void workflow_losses_delete(void *value)
 	}
 }
 
+static struct workflow_losses *workflow_losses_get(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, int create)
+{
+	struct workflow_losses *losses = hash_table_lookup(
+			controller->workflow_losses, workflow_id);
+	if (!losses && create) {
+		losses = calloc(1, sizeof(*losses));
+		if (losses && !hash_table_insert(controller->workflow_losses,
+					  workflow_id, losses)) {
+			free(losses);
+			losses = 0;
+		}
+	}
+	return losses;
+}
+
+static int workflow_loss_append(struct vine_datavine_data_controller *controller,
+		const char *workflow_id, uint64_t data_id)
+{
+	struct workflow_losses *losses = workflow_losses_get(
+			controller, workflow_id, 1);
+	if (!losses)
+		return 0;
+	for (size_t index = 0; index < losses->count; index++) {
+		if (losses->data_ids[index] == data_id)
+			return 1;
+	}
+	if (losses->count == losses->capacity) {
+		size_t capacity = losses->capacity ? losses->capacity * 2 : 16;
+		if (capacity > SIZE_MAX / sizeof(*losses->data_ids))
+			return 0;
+		uint64_t *data_ids = realloc(losses->data_ids,
+				capacity * sizeof(*data_ids));
+		if (!data_ids)
+			return 0;
+		losses->data_ids = data_ids;
+		losses->capacity = capacity;
+	}
+	losses->data_ids[losses->count++] = data_id;
+	return 1;
+}
+
 static struct itable *result_namespace(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id, int create)
@@ -313,17 +509,8 @@ static int result_insert(struct vine_datavine_data_controller *controller,
 		const char *workflow_id, uint64_t data_id, struct data_result *result)
 {
 	struct itable *results = result_namespace(controller, workflow_id, 1);
-	struct workflow_losses *losses = hash_table_lookup(
-			controller->workflow_losses, workflow_id);
-	if (!losses) {
-		losses = calloc(1, sizeof(*losses));
-		if (losses && !hash_table_insert(controller->workflow_losses,
-						  workflow_id,
-						  losses)) {
-			free(losses);
-			losses = 0;
-		}
-	}
+	struct workflow_losses *losses = workflow_losses_get(
+			controller, workflow_id, 1);
 	if (!results || !losses || !itable_insert(results, data_id, result))
 		return 0;
 	result->losses = losses;
@@ -477,8 +664,14 @@ int vine_datavine_data_controller_workflow_key(
 {
 	if (!controller || !workflow_id || !workflow_id[0] || !key)
 		return 0;
-	SHA256((const unsigned char *)workflow_id, strlen(workflow_id), key);
-	return 1;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = hash_table_lookup(
+			controller->agent_workflows, workflow_id);
+	int valid = namespace != 0;
+	if (valid)
+		memcpy(key, namespace->workflow_key, sizeof(namespace->workflow_key));
+	pthread_mutex_unlock(&controller->lock);
+	return valid;
 }
 
 int vine_datavine_data_controller_prepare_workflow(
@@ -486,9 +679,445 @@ int vine_datavine_data_controller_prepare_workflow(
 		const char *workflow_id)
 {
 	char path[PATH_MAX];
-	return controller && workflow_id && workflow_id[0] &&
-		   workflow_directory_path(controller, workflow_id, path) &&
-		   create_dir(path, 0700);
+	if (!controller || !workflow_id || !workflow_id[0] ||
+			!workflow_directory_path(controller, workflow_id, path) ||
+			!create_dir(path, 0700))
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	int valid = agent_namespace_prepare(controller, workflow_id) != 0;
+	pthread_mutex_unlock(&controller->lock);
+	return valid;
+}
+
+struct agent_loss_context {
+	struct vine_datavine_data_controller *controller;
+	struct agent_namespace *namespace;
+};
+
+static void agent_last_replica_lost(
+		uint64_t data_id, uint32_t generation, void *argument)
+{
+	(void)generation;
+	struct agent_loss_context *context = argument;
+	if (!workflow_loss_append(context->controller,
+			context->namespace->workflow_id, data_id))
+		context->controller->loss_recording_failed = 1;
+}
+
+int vine_datavine_data_controller_agent_hello(
+		struct vine_datavine_data_controller *controller,
+		const unsigned char workflow_key[32], uint32_t *worker_slot,
+		uint64_t session_epoch, const char *host, uint16_t port,
+		uint64_t *workflow_slot)
+{
+	if (!controller || !workflow_key || !worker_slot || !session_epoch ||
+			!host || !host[0] || strlen(host) >= VINE_DATAVINE_AGENT_HOST_MAX ||
+			!port || !workflow_slot)
+		return 0;
+	uint64_t slot = workflow_slot_from_key(workflow_key);
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = agent_namespace_lookup(controller, slot);
+	uint32_t assigned = *worker_slot;
+	if (namespace && !assigned) {
+		assigned = ++namespace->next_worker_slot;
+		if (!assigned)
+			assigned = ++namespace->next_worker_slot;
+	} else if (namespace && assigned > namespace->next_worker_slot) {
+		namespace->next_worker_slot = assigned;
+	}
+	int valid = namespace && assigned &&
+		!CRYPTO_memcmp(namespace->workflow_key, workflow_key,
+			sizeof(namespace->workflow_key)) &&
+		agent_endpoint_reserve(namespace, assigned) &&
+		vine_datavine_replica_table_session_open(
+			namespace->replicas, assigned, session_epoch);
+	if (valid) {
+		snprintf(namespace->endpoints[assigned].host,
+				sizeof(namespace->endpoints[assigned].host), "%s", host);
+		namespace->endpoints[assigned].port = port;
+	}
+	pthread_mutex_unlock(&controller->lock);
+	if (valid) {
+		*worker_slot = assigned;
+		*workflow_slot = slot;
+	}
+	return valid;
+}
+
+int vine_datavine_data_controller_agent_expect(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, uint64_t data_id, uint32_t *generation,
+		int requested)
+{
+	if (!controller || !workflow_id || !workflow_id[0] || !data_id ||
+			!generation || !*generation)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = hash_table_lookup(
+			controller->agent_workflows, workflow_id);
+	int valid = namespace && vine_datavine_replica_table_expect(
+			namespace->replicas, data_id, generation, requested);
+	pthread_mutex_unlock(&controller->lock);
+	return valid;
+}
+
+int vine_datavine_data_controller_agent_expect_result(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, uint64_t data_id, uint32_t generation,
+		int64_t producer_task_id, int32_t producer_output_index,
+		const char *codec_name, const char *codec_version)
+{
+	if (!controller || !workflow_id || !workflow_id[0] || !data_id ||
+			!generation || producer_task_id < 1 || producer_output_index < 0 ||
+			!codec_name || !codec_version ||
+			strlen(codec_name) >=
+				sizeof(((struct vine_datavine_workflow_result_info *)0)->codec_name) ||
+			strlen(codec_version) >=
+				sizeof(((struct vine_datavine_workflow_result_info *)0)->codec_version))
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = hash_table_lookup(
+			controller->agent_workflows, workflow_id);
+	struct agent_result_metadata *known = namespace
+			? itable_lookup(namespace->result_metadata, data_id) : 0;
+	int valid = namespace != 0;
+	if (valid && known) {
+		valid = known->info.producer_task_id == producer_task_id &&
+				known->info.producer_output_index == producer_output_index &&
+				!strcmp(known->info.codec_name, codec_name) &&
+				!strcmp(known->info.codec_version, codec_version);
+		/* A failed physical attempt may have registered this durable result
+		 * before it ran.  No payload was admitted, so the next attempt replaces
+		 * only the generation in place. */
+		if (valid)
+			known->info.attempt = generation;
+	} else if (valid) {
+		known = calloc(1, sizeof(*known));
+		if (known) {
+			known->info.data_id = data_id;
+			known->info.attempt = generation;
+			known->info.producer_task_id = producer_task_id;
+			known->info.producer_output_index = producer_output_index;
+			known->info.requested = 1;
+			snprintf(known->info.codec_name, sizeof(known->info.codec_name),
+					"%s", codec_name);
+			snprintf(known->info.codec_version,
+					sizeof(known->info.codec_version), "%s", codec_version);
+		}
+		valid = known && itable_insert(namespace->result_metadata,
+				data_id, known);
+		if (!valid)
+			free(known);
+	}
+	pthread_mutex_unlock(&controller->lock);
+	return valid;
+}
+
+int vine_datavine_data_controller_agent_session_lost(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot, uint32_t worker_slot,
+		uint64_t session_epoch)
+{
+	if (!controller || !workflow_slot || !session_epoch)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = agent_namespace_lookup(
+			controller, workflow_slot);
+	struct agent_loss_context context = {controller, namespace};
+	int valid = namespace && vine_datavine_replica_table_session_lost(
+			namespace->replicas, worker_slot, session_epoch,
+			agent_last_replica_lost, 0, &context);
+	pthread_mutex_unlock(&controller->lock);
+	return valid;
+}
+
+int vine_datavine_data_controller_agent_publish(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot, uint64_t data_id, uint32_t generation,
+		uint64_t size, const unsigned char digest[32], uint32_t worker_slot,
+		uint64_t session_epoch, uint64_t object_token, int requested)
+{
+	if (!controller || !workflow_slot || !data_id || !generation || !digest)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = agent_namespace_lookup(
+			controller, workflow_slot);
+	int valid = namespace && vine_datavine_replica_table_publish(
+			namespace->replicas, data_id, generation, size, digest,
+			worker_slot, session_epoch, object_token, requested, 0, 0);
+	pthread_mutex_unlock(&controller->lock);
+	return valid;
+}
+
+int vine_datavine_data_controller_agent_publish_batch(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot,
+		const struct vine_datavine_publish_record *records, size_t count,
+		uint32_t worker_slot, uint64_t session_epoch)
+{
+	if (!controller || !workflow_slot || !records || !count)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = agent_namespace_lookup(
+			controller, workflow_slot);
+	int valid = namespace && vine_datavine_replica_table_publish_batch(
+			namespace->replicas, records, count, worker_slot, session_epoch,
+			0, 0);
+	/* A consumer can finish and retire its input before the producing worker's
+	 * deliberately asynchronous DATA_READY reaches us.  The table accepts that
+	 * exact late generation as a tombstone; return a release so it cannot leak
+	 * in the worker cache. */
+	if (valid) {
+		struct agent_release_context context = {namespace, 1};
+		for (size_t index = 0; index < count; index++) {
+			enum vine_datavine_resolve_status status =
+					vine_datavine_replica_table_resolve(namespace->replicas,
+						records[index].data_id, records[index].generation,
+						0, 0, 0, 0, 0, 0);
+			if (status == VINE_DATAVINE_RESOLVE_DEAD) {
+				struct vine_datavine_replica_view replica = {
+						.worker_slot = worker_slot,
+						.session_epoch = session_epoch,
+						.object_token = records[index].object_token,
+						.generation = records[index].generation,
+				};
+				agent_queue_release(records[index].data_id,
+						records[index].generation, &replica, &context);
+			}
+		}
+		valid = context.valid;
+	}
+	pthread_mutex_unlock(&controller->lock);
+	return valid;
+}
+
+enum vine_datavine_agent_resolve_status
+vine_datavine_data_controller_agent_resolve(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot, uint64_t data_id, uint32_t generation,
+		struct vine_datavine_agent_replica *replicas, size_t capacity,
+		size_t *count, uint64_t *size, unsigned char digest[32],
+		int *persisted)
+{
+	if (!controller || !workflow_slot || !data_id)
+		return VINE_DATAVINE_AGENT_UNKNOWN;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = agent_namespace_lookup(
+			controller, workflow_slot);
+	struct vine_datavine_replica_view local_views[16];
+	struct vine_datavine_replica_view *views = capacity <= 16
+			? local_views
+			: calloc(capacity, sizeof(*views));
+	enum vine_datavine_resolve_status status = namespace
+			&& views
+			? vine_datavine_replica_table_resolve(namespace->replicas,
+				  data_id, generation, views, capacity,
+				  count, size, digest, persisted)
+			: VINE_DATAVINE_RESOLVE_UNKNOWN;
+	if (namespace && status == VINE_DATAVINE_RESOLVE_AVAILABLE &&
+			replicas && count) {
+		for (size_t index = 0; index < *count; index++) {
+			replicas[index].worker_slot = views[index].worker_slot;
+			replicas[index].session_epoch = views[index].session_epoch;
+			replicas[index].object_token = views[index].object_token;
+			replicas[index].generation = views[index].generation;
+			uint32_t worker = views[index].worker_slot;
+			if (worker >= namespace->endpoint_capacity ||
+					!namespace->endpoints[worker].port) {
+				status = VINE_DATAVINE_RESOLVE_PENDING;
+				*count = 0;
+				break;
+			}
+			snprintf(replicas[index].host, sizeof(replicas[index].host),
+					"%s", namespace->endpoints[worker].host);
+			replicas[index].port = namespace->endpoints[worker].port;
+		}
+	}
+	if (views != local_views)
+		free(views);
+	pthread_mutex_unlock(&controller->lock);
+	return (enum vine_datavine_agent_resolve_status)status;
+}
+
+int vine_datavine_data_controller_agent_wait(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot, uint64_t data_id, uint32_t generation,
+		uint32_t worker_slot, uint64_t session_epoch, uint64_t request_id,
+		uint32_t item_index)
+{
+	if (!controller || !workflow_slot || !data_id || !request_id)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = agent_namespace_lookup(
+			controller, workflow_slot);
+	int valid = namespace && vine_datavine_replica_table_wait(
+			namespace->replicas, data_id, generation, worker_slot,
+			session_epoch, request_id, item_index);
+	pthread_mutex_unlock(&controller->lock);
+	return valid;
+}
+
+int vine_datavine_data_controller_agent_fault(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot, uint64_t data_id, uint32_t generation,
+		uint32_t worker_slot, uint64_t session_epoch, uint64_t object_token)
+{
+	if (!controller || !workflow_slot || !data_id || !generation)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = agent_namespace_lookup(
+			controller, workflow_slot);
+	struct agent_loss_context context = {controller, namespace};
+	int valid = namespace && vine_datavine_replica_table_fault(
+			namespace->replicas, data_id, generation, worker_slot,
+			session_epoch, object_token, agent_last_replica_lost, &context);
+	pthread_mutex_unlock(&controller->lock);
+	return valid;
+}
+
+static void agent_queue_release(uint64_t released_data_id,
+		uint32_t released_generation,
+		const struct vine_datavine_replica_view *replica, void *argument)
+{
+	struct agent_release_context *context = argument;
+	if (!context->namespace ||
+			replica->worker_slot >= context->namespace->endpoint_capacity) {
+		context->valid = 0;
+		return;
+	}
+	struct agent_endpoint *endpoint =
+			&context->namespace->endpoints[replica->worker_slot];
+	if (endpoint->release_count == endpoint->release_capacity) {
+		size_t capacity = endpoint->release_capacity ?
+				endpoint->release_capacity * 2 : 256;
+		void *next = realloc(endpoint->releases,
+				capacity * sizeof(*endpoint->releases));
+		if (!next) {
+			context->valid = 0;
+			return;
+		}
+		endpoint->releases = next;
+		endpoint->release_capacity = capacity;
+	}
+	uint64_t sequence = ++endpoint->next_release_sequence;
+	if (!sequence)
+		sequence = ++endpoint->next_release_sequence;
+	endpoint->releases[endpoint->release_count++] =
+			(struct vine_datavine_agent_release){
+					.sequence = sequence,
+					.data_id = released_data_id,
+					.object_token = replica->object_token,
+					.generation = released_generation,
+			};
+}
+
+int vine_datavine_data_controller_agent_mark_dead(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot, uint64_t data_id, uint32_t generation)
+{
+	if (!controller || !workflow_slot || !data_id)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = agent_namespace_lookup(
+			controller, workflow_slot);
+	struct agent_release_context context = {namespace, 1};
+	enum vine_datavine_resolve_status before = namespace
+			? vine_datavine_replica_table_resolve(namespace->replicas, data_id,
+					generation, 0, 0, 0, 0, 0, 0)
+			: VINE_DATAVINE_RESOLVE_UNKNOWN;
+	int valid = namespace && vine_datavine_replica_table_mark_dead(
+			namespace->replicas, data_id, generation, agent_queue_release, 0,
+			&context) && context.valid;
+	if (!valid && getenv("DATAVINE_WORKFLOW_METRICS"))
+		fprintf(stderr,
+				"datavine controller mark_dead_failed slot=%llu data=%llu generation=%u namespace=%d before=%d release_valid=%d\n",
+				(unsigned long long)workflow_slot,
+				(unsigned long long)data_id, generation, namespace != 0,
+				(int)before, context.valid);
+	pthread_mutex_unlock(&controller->lock);
+	return valid;
+}
+
+int vine_datavine_data_controller_agent_take_releases(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot, uint32_t worker_slot,
+		uint64_t session_epoch, uint64_t acknowledged_sequence,
+		struct vine_datavine_agent_release *releases, size_t capacity,
+		size_t *count)
+{
+	if (count)
+		*count = 0;
+	if (!controller || !workflow_slot || !session_epoch || !releases ||
+			!capacity || !count)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = agent_namespace_lookup(
+			controller, workflow_slot);
+	int valid = namespace && worker_slot < namespace->endpoint_capacity &&
+			vine_datavine_replica_table_session_active(namespace->replicas,
+					worker_slot, session_epoch);
+	struct agent_endpoint *endpoint = valid
+			? &namespace->endpoints[worker_slot] : 0;
+	if (valid) {
+		size_t acknowledged = 0;
+		while (acknowledged < endpoint->release_count &&
+				endpoint->releases[acknowledged].sequence <=
+					acknowledged_sequence)
+			acknowledged++;
+		if (acknowledged) {
+			memmove(endpoint->releases,
+					endpoint->releases + acknowledged,
+					(endpoint->release_count - acknowledged) *
+						sizeof(*endpoint->releases));
+			endpoint->release_count -= acknowledged;
+		}
+		*count = endpoint->release_count < capacity
+				? endpoint->release_count : capacity;
+		memcpy(releases, endpoint->releases,
+				*count * sizeof(*releases));
+	}
+	pthread_mutex_unlock(&controller->lock);
+	return valid;
+}
+
+int vine_datavine_data_controller_agent_stats(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot, struct vine_datavine_agent_stats *stats)
+{
+	if (!controller || !workflow_slot || !stats)
+		return 0;
+	struct vine_datavine_replica_stats internal;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = agent_namespace_lookup(
+			controller, workflow_slot);
+	int valid = namespace && vine_datavine_replica_table_stats(
+			namespace->replicas, &internal);
+	pthread_mutex_unlock(&controller->lock);
+	if (valid) {
+		stats->active_data = internal.active_data;
+		stats->active_replicas = internal.active_replicas;
+		stats->active_waiters = internal.active_waiters;
+		stats->active_sessions = internal.active_sessions;
+		stats->peak_data = internal.peak_data;
+		stats->peak_replicas = internal.peak_replicas;
+		stats->peak_waiters = internal.peak_waiters;
+	}
+	return valid;
+}
+
+int vine_datavine_data_controller_agent_check(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot)
+{
+	if (!controller || !workflow_slot)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = agent_namespace_lookup(
+			controller, workflow_slot);
+	int valid = namespace && vine_datavine_replica_table_check(
+			namespace->replicas);
+	pthread_mutex_unlock(&controller->lock);
+	return valid;
 }
 
 static int output_path(struct vine_datavine_data_controller *controller,
@@ -779,6 +1408,51 @@ static int install_results(struct vine_datavine_data_controller *controller,
 	if (valid)
 		installation_apply(controller, &installation);
 	installation_delete(&installation);
+	return valid;
+}
+
+int vine_datavine_data_controller_agent_persisted(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot, uint64_t data_id, uint32_t generation,
+		uint64_t size, const unsigned char digest[32])
+{
+	if (!controller || !workflow_slot || !data_id || !generation || !digest)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = agent_namespace_lookup(
+			controller, workflow_slot);
+	struct agent_result_metadata *metadata = namespace
+			? itable_lookup(namespace->result_metadata, data_id) : 0;
+	struct vine_datavine_replica_view replica;
+	size_t replica_count = 0;
+	uint64_t expected_size = 0;
+	unsigned char expected_digest[32];
+	enum vine_datavine_resolve_status status = namespace
+			? vine_datavine_replica_table_resolve(namespace->replicas, data_id,
+					generation, &replica, 1, &replica_count, &expected_size,
+					expected_digest, 0)
+			: VINE_DATAVINE_RESOLVE_UNKNOWN;
+	char path[PATH_MAX];
+	struct stat info;
+	int valid = metadata && metadata->info.attempt == generation &&
+			status == VINE_DATAVINE_RESOLVE_AVAILABLE && replica_count &&
+			expected_size == size && !memcmp(expected_digest, digest, 32) &&
+			output_path(controller, namespace->workflow_id, data_id,
+					generation, path) && !stat(path, &info) &&
+			S_ISREG(info.st_mode) && (uint64_t)info.st_size == size;
+	struct publication_output output;
+	memset(&output, 0, sizeof(output));
+	if (valid) {
+		output.info = metadata->info;
+		output.info.size = size;
+		digest_hex(digest, output.info.sha256);
+		output.path = path;
+		valid = install_results(controller, namespace->workflow_id,
+				&output, 1, 0) &&
+			vine_datavine_replica_table_set_persisted(
+					namespace->replicas, data_id, generation);
+	}
+	pthread_mutex_unlock(&controller->lock);
 	return valid;
 }
 
@@ -1292,6 +1966,8 @@ struct vine_datavine_data_controller *vine_datavine_data_controller_open(
 	controller->workflow_losses = hash_table_create(0, 0);
 	controller->object_files = hash_table_create(0, 0);
 	controller->persistence_notices = hash_table_create(0, 0);
+	controller->agent_workflows = hash_table_create(0, 0);
+	controller->agent_slots = itable_create(0);
 	controller->journal = journal;
 	controller->object_store = valid
 						   ? vine_datavine_object_store_open(workflow_journal_path)
@@ -1300,6 +1976,7 @@ struct vine_datavine_data_controller *vine_datavine_data_controller_open(
 	valid = valid && controller->result_namespaces && controller->result_files &&
 		controller->workflow_losses && controller->object_files &&
 		controller->persistence_notices &&
+		controller->agent_workflows && controller->agent_slots &&
 		controller->journal && controller->object_store &&
 		(!threads || controller->threads) &&
 		vine_datavine_journal_replay(controller->journal, replay_record, controller) &&
@@ -1364,6 +2041,12 @@ void vine_datavine_data_controller_close(
 			free(notice);
 		}
 		hash_table_delete(controller->persistence_notices);
+	}
+	if (controller->agent_slots)
+		itable_delete(controller->agent_slots);
+	if (controller->agent_workflows) {
+		hash_table_clear(controller->agent_workflows, agent_namespace_delete);
+		hash_table_delete(controller->agent_workflows);
 	}
 	free(controller->threads);
 	free(controller->root);

@@ -15,6 +15,7 @@
 
 #include <limits.h>
 #include <pthread.h>
+#include <openssl/sha.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -39,6 +40,12 @@ static uint64_t elapsed_nanoseconds(
 struct retained_root {
 	struct jx *root;
 	struct retained_root *next;
+};
+
+struct physical_attempt {
+	int64_t logical_id;
+	uint32_t attempt;
+	int recovery;
 };
 
 struct task_defaults_range {
@@ -66,6 +73,7 @@ struct pending_publication {
 	uint32_t attempt;
 	uint32_t maximum_attempts;
 	int32_t task_result;
+	int logical_finished;
 	struct pending_publication *next;
 };
 
@@ -246,6 +254,7 @@ static void cancel_running_tasks(struct vine_datavine_workflow_runtime *runtime,
 				pthread_mutex_lock(&runtime->routing_lock);
 				itable_remove(runtime->completion_owners, physical_id);
 				pthread_mutex_unlock(&runtime->routing_lock);
+				free(logical_value);
 			}
 			return;
 		}
@@ -255,8 +264,8 @@ static void cancel_running_tasks(struct vine_datavine_workflow_runtime *runtime,
 		itable_remove(runtime->completion_owners,
 				(uint64_t)vine_task_get_id(cancelled));
 		pthread_mutex_unlock(&runtime->routing_lock);
-		itable_remove(physical_to_logical,
-				(uint64_t)vine_task_get_id(cancelled));
+		free(itable_remove(physical_to_logical,
+				(uint64_t)vine_task_get_id(cancelled)));
 		vine_task_delete(cancelled);
 		running--;
 	}
@@ -384,8 +393,8 @@ static struct vine_task *create_python_ticket(struct jx *task,
 				ticket[fixed_size + index] = retain_all ||
 					itable_lookup(consumers, data_id) ||
 					itable_lookup(requested, data_id);
-				ticket[fixed_size + output_count + index] =
-					itable_lookup(requested, data_id) != 0;
+				/* Runtime v2 persistence is owned by the Worker Data Agent. */
+				ticket[fixed_size + output_count + index] = 0;
 				vine_datavine_put_u64(
 					ticket + fixed_size + output_count * 2 + index * 8,
 					data_id);
@@ -448,8 +457,7 @@ static struct vine_task *create_python_ticket(struct jx *task,
 							   ->u.integer_value;
 			ticket[fixed_size + index] = retain_all ||
 							 itable_lookup(consumers, data_id) || itable_lookup(requested, data_id);
-			ticket[fixed_size + output_count + index] =
-					itable_lookup(requested, data_id) != 0;
+			ticket[fixed_size + output_count + index] = 0;
 			vine_datavine_put_u64(ticket + fixed_size + output_count * 2 +
 								  index * 8,
 					data_id);
@@ -524,7 +532,7 @@ static int prepare_origin(struct vine_datavine_data_controller *data_controller,
 	return file && itable_insert(files, data_id, file);
 }
 
-static int prepare_origins(
+static int __attribute__((unused)) prepare_origins(
 		struct vine_datavine_data_controller *data_controller,
 		struct vine_manager *manager, struct itable *data,
 		struct jx *default_codec, struct itable *files)
@@ -540,7 +548,7 @@ static int prepare_origins(
 	return 1;
 }
 
-static int prepare_delta_inputs(struct vine_datavine_workflow_runtime *runtime,
+static int __attribute__((unused)) prepare_delta_inputs(struct vine_datavine_workflow_runtime *runtime,
 		const char *workflow_id, struct jx *root, struct itable *data,
 		struct itable *files)
 {
@@ -607,7 +615,7 @@ static int prepare_delta_inputs(struct vine_datavine_workflow_runtime *runtime,
 	return 1;
 }
 
-static int restore_outputs(struct vine_datavine_workflow_runtime *runtime,
+static int __attribute__((unused)) restore_outputs(struct vine_datavine_workflow_runtime *runtime,
 		const char *workflow_id, struct itable *data, struct itable *files,
 		struct itable *consumers)
 {
@@ -667,6 +675,22 @@ static int output_available(struct vine_datavine_workflow_runtime *runtime,
 				   runtime->data_controller, workflow_id, data_id) ||
 		   vine_datavine_workflow_store_legacy_result_info(
 				   runtime->store, workflow_id, data_id, &info);
+}
+
+static int requested_results_ready(
+		struct vine_datavine_workflow_runtime *runtime,
+		const char *workflow_id, struct itable *requested)
+{
+	uint64_t data_id;
+	void *value;
+	int iterator;
+	ITABLE_ITERATE(requested, iterator, data_id, value)
+	{
+		if (!vine_datavine_data_controller_result_active(
+				runtime->data_controller, workflow_id, data_id))
+			return 0;
+	}
+	return 1;
 }
 
 static int pending_consumer_increment(struct itable *pending, uint64_t data_id)
@@ -939,13 +963,11 @@ static int apply_workflow_losses(
 			}
 		}
 	}
-	int valid = record_recovery_invalidations(runtime, workflow_id, recovery_queue, tail, attempts, event_nanoseconds);
-	for (size_t index = 0; valid && index < tail; index++) {
-		uint64_t task_id = recovery_queue[index];
-		struct jx *task = itable_lookup(tasks, task_id);
-		valid = adjust_task_pending_inputs(task, pending_consumers, 1) &&
-			vine_datavine_scheduler_rollback_done(scheduler, (int64_t)task_id);
-	}
+	/* Logical DONE is immutable: data recovery is a separate physical replay.
+	 * The Scheduler is deliberately untouched, so children already released by
+	 * task completion never wait for Controller publication or recovery. */
+	int valid = record_recovery_invalidations(runtime, workflow_id,
+			recovery_queue, tail, attempts, event_nanoseconds);
 	if (valid)
 		*invalidated_count = tail;
 	return valid;
@@ -1184,6 +1206,282 @@ static struct jx *task_configuration(struct task_defaults_index *index,
 	return 0;
 }
 
+struct task_spec_input {
+	uint64_t data_id;
+	struct jx *record;
+};
+
+static char *task_spec_origin_uri(
+		struct vine_datavine_data_controller *controller, struct jx *record)
+{
+	struct jx *origin = record ? vine_datavine_ir_data_origin(record) : 0;
+	const char *kind = origin ? jx_lookup_string(origin, "kind") : 0;
+	if (!kind)
+		return 0;
+	if (!strcmp(kind, "uri"))
+		return strdup(jx_lookup_string(origin, "uri"));
+	if (!strcmp(kind, "object"))
+		return vine_datavine_data_controller_object_ticket(controller,
+				jx_lookup_string(origin, "sha256"));
+	if (strcmp(kind, "inline"))
+		return 0;
+	buffer_t decoded;
+	buffer_init(&decoded);
+	char *ticket = 0;
+	if (b64_decode(jx_lookup_string(origin, "base64"), &decoded) == 0) {
+		size_t size = 0;
+		const char *bytes = buffer_tolstring(&decoded, &size);
+		unsigned char digest[32];
+		char encoded[65];
+		static const char hexadecimal[] = "0123456789abcdef";
+		SHA256((const unsigned char *)bytes, size, digest);
+		for (size_t index = 0; index < 32; index++) {
+			encoded[index * 2] = hexadecimal[digest[index] >> 4];
+			encoded[index * 2 + 1] = hexadecimal[digest[index] & 15];
+		}
+		encoded[64] = 0;
+		int deduplicated = 0;
+		if (vine_datavine_data_controller_put_object(controller, encoded,
+				bytes, size, &deduplicated))
+			ticket = vine_datavine_data_controller_object_ticket(
+					controller, encoded);
+	}
+	buffer_free(&decoded);
+	return ticket;
+}
+
+static int task_spec_input_add(struct task_spec_input *inputs, size_t *count,
+		size_t capacity, uint64_t data_id, struct itable *data)
+{
+	if (!data_id)
+		return 0;
+	for (size_t index = 0; index < *count; index++)
+		if (inputs[index].data_id == data_id)
+			return 1;
+	if (*count >= capacity)
+		return 0;
+	struct jx *record = data_record(data, data_id);
+	if (!record)
+		return 0;
+	inputs[*count].data_id = data_id;
+	inputs[*count].record = record;
+	(*count)++;
+	return 1;
+}
+
+static int attach_worker_data_spec(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, struct vine_task *physical, struct jx *task,
+		struct jx *executor, struct jx *default_codec, struct itable *data,
+		struct itable *consumers,
+		struct itable *requested, uint32_t attempt, int retain_all)
+{
+	struct jx *task_inputs = vine_datavine_ir_task_inputs(task);
+	size_t capacity = (size_t)jx_array_length(task_inputs) + 1;
+	struct task_spec_input *inputs = calloc(capacity ? capacity : 1,
+			sizeof(*inputs));
+	if (!inputs)
+		return 0;
+	size_t input_count = 0;
+	const char *kind = jx_lookup_string(executor, "kind");
+	const char *version = jx_lookup_string(executor, "version");
+	if (!strcmp(kind, "python") &&
+			strcmp(version, VINE_DATAVINE_PYTHON_CALLABLE_VERSION) &&
+			!task_spec_input_add(inputs, &input_count, capacity,
+					(uint64_t)jx_lookup_integer(executor, "payload_ref"), data)) {
+		free(inputs);
+		return 0;
+	}
+	struct jx *input;
+	void *iterator = 0;
+	while ((input = jx_iterate_array(task_inputs, &iterator))) {
+		if (!task_spec_input_add(inputs, &input_count, capacity,
+				vine_datavine_ir_input_data_id(input), data)) {
+			free(inputs);
+			return 0;
+		}
+	}
+	struct jx *outputs = vine_datavine_ir_task_outputs(task);
+	size_t output_count = (size_t)jx_array_length(outputs);
+	if (!output_count || input_count > UINT32_MAX || output_count > UINT32_MAX) {
+		free(inputs);
+		return 0;
+	}
+	buffer_t strings;
+	buffer_init(&strings);
+	unsigned char *input_records = calloc(input_count ? input_count : 1,
+			VINE_DATAVINE_TASK_SPEC_INPUT);
+	unsigned char *output_records = calloc(output_count,
+			VINE_DATAVINE_TASK_SPEC_OUTPUT);
+	int valid = input_records && output_records;
+	for (size_t index = 0; valid && index < input_count; index++) {
+		unsigned char *record = input_records +
+				index * VINE_DATAVINE_TASK_SPEC_INPUT;
+		vine_datavine_put_u64(record, inputs[index].data_id);
+		if (vine_datavine_ir_data_is_output(inputs[index].record)) {
+			char durable_path[PATH_MAX];
+			struct vine_datavine_workflow_result_info result_info;
+			if (vine_datavine_data_controller_result_path(controller,
+					workflow_id, inputs[index].data_id, durable_path,
+					sizeof(durable_path)) &&
+					vine_datavine_data_controller_result_info(controller,
+						workflow_id, inputs[index].data_id, &result_info)) {
+				size_t path_size = strlen(durable_path);
+				char *uri = malloc(path_size + 8);
+				if (uri)
+					snprintf(uri, path_size + 8, "file://%s", durable_path);
+				size_t uri_size = uri ? strlen(uri) : 0;
+				size_t current_size = 0;
+				buffer_tolstring(&strings, &current_size);
+				valid = uri && uri_size <= UINT32_MAX &&
+						current_size <= UINT32_MAX &&
+						buffer_putlstring(&strings, uri, uri_size) >= 0;
+				if (valid) {
+					vine_datavine_put_u32(record + 8, result_info.attempt);
+					vine_datavine_put_u32(record + 12,
+							VINE_DATAVINE_TASK_INPUT_URI);
+					vine_datavine_put_u32(record + 16,
+							(uint32_t)current_size);
+					vine_datavine_put_u32(record + 20,
+							(uint32_t)uri_size);
+				}
+				free(uri);
+			} else {
+				vine_datavine_put_u32(record + 12,
+						VINE_DATAVINE_TASK_INPUT_GENERATED);
+			}
+			continue;
+		}
+		char *uri = task_spec_origin_uri(controller, inputs[index].record);
+		size_t uri_size = uri ? strlen(uri) : 0;
+		size_t current_size = 0;
+		buffer_tolstring(&strings, &current_size);
+		valid = uri && uri_size && uri_size <= UINT32_MAX &&
+				current_size <= UINT32_MAX &&
+				buffer_putlstring(&strings, uri, uri_size) >= 0;
+		if (valid) {
+			vine_datavine_put_u32(record + 12,
+					(uintptr_t)itable_lookup(consumers, inputs[index].data_id) == 1
+							? VINE_DATAVINE_TASK_INPUT_URI_EPHEMERAL
+							: VINE_DATAVINE_TASK_INPUT_URI);
+			vine_datavine_put_u32(record + 16, (uint32_t)current_size);
+			vine_datavine_put_u32(record + 20, (uint32_t)uri_size);
+		}
+		free(uri);
+	}
+	struct jx *output_files = jx_lookup(executor, "output_files");
+	if (valid && output_files &&
+			(size_t)jx_array_length(output_files) != output_count)
+		valid = 0;
+	for (size_t index = 0; valid && index < output_count; index++) {
+		unsigned char *record = output_records +
+				index * VINE_DATAVINE_TASK_SPEC_OUTPUT;
+		uint64_t data_id = (uint64_t)jx_array_index(outputs, (int)index)
+				->u.integer_value;
+		uint32_t generation = attempt;
+		valid = data_id && vine_datavine_data_controller_agent_expect(
+				controller, workflow_id, data_id, &generation,
+				itable_lookup(requested, data_id) != 0);
+		const char *name = output_files
+				? jx_array_index(output_files, (int)index)->u.string_value
+				: ".taskvine.stdout";
+		size_t name_size = name ? strlen(name) : 0;
+		size_t current_size = 0;
+		buffer_tolstring(&strings, &current_size);
+		valid = valid && name_size && name_size <= UINT32_MAX &&
+				current_size <= UINT32_MAX &&
+				buffer_putlstring(&strings, name, name_size) >= 0;
+		if (valid) {
+			uint32_t flags = (retain_all || itable_lookup(consumers, data_id) ||
+					itable_lookup(requested, data_id))
+					? VINE_DATAVINE_TASK_OUTPUT_RETAIN : 0;
+			if (itable_lookup(requested, data_id))
+				flags |= VINE_DATAVINE_TASK_OUTPUT_REQUESTED;
+			vine_datavine_put_u64(record, data_id);
+			vine_datavine_put_u32(record + 8, generation);
+			vine_datavine_put_u32(record + 12, flags);
+			vine_datavine_put_u32(record + 16, (uint32_t)current_size);
+			vine_datavine_put_u32(record + 20, (uint32_t)name_size);
+			if (flags & VINE_DATAVINE_TASK_OUTPUT_REQUESTED) {
+				struct jx *data_item = data_record(data, data_id);
+				struct jx *codec = data_item
+						? vine_datavine_ir_data_codec(data_item, default_codec) : 0;
+				const char *codec_name = codec
+						? jx_lookup_string(codec, "name") : 0;
+				const char *codec_version = codec
+						? jx_lookup_string(codec, "version") : 0;
+				char durable_path[PATH_MAX];
+				valid = codec_name && codec_version &&
+						vine_datavine_data_controller_agent_expect_result(
+								controller, workflow_id, data_id, generation,
+								(int64_t)vine_datavine_ir_task_id(task),
+								(int32_t)index, codec_name, codec_version) &&
+						vine_datavine_data_controller_output_path(controller,
+								workflow_id, data_id, generation, durable_path,
+								sizeof(durable_path));
+				size_t path_size = valid ? strlen(durable_path) : 0;
+				buffer_tolstring(&strings, &current_size);
+				valid = valid && path_size && path_size <= UINT32_MAX &&
+						current_size <= UINT32_MAX &&
+						buffer_putlstring(&strings, durable_path,
+								path_size) >= 0;
+				if (valid) {
+					vine_datavine_put_u32(record + 24,
+							(uint32_t)current_size);
+					vine_datavine_put_u32(record + 28,
+							(uint32_t)path_size);
+				}
+			}
+		}
+	}
+	unsigned char key[32];
+	char host[VINE_DATAVINE_AGENT_HOST_MAX];
+	uint16_t port = 0;
+	size_t strings_size = 0;
+	const char *string_bytes = buffer_tolstring(&strings, &strings_size);
+	size_t records_size = input_count * VINE_DATAVINE_TASK_SPEC_INPUT +
+			output_count * VINE_DATAVINE_TASK_SPEC_OUTPUT;
+	valid = valid && strings_size <= UINT32_MAX &&
+			records_size <= SIZE_MAX - VINE_DATAVINE_TASK_SPEC_HEADER &&
+			strings_size <= SIZE_MAX - VINE_DATAVINE_TASK_SPEC_HEADER - records_size &&
+			vine_datavine_data_controller_workflow_key(controller,
+					workflow_id, key) &&
+			vine_datavine_data_controller_agent_endpoint(controller, host, &port);
+	size_t spec_size = VINE_DATAVINE_TASK_SPEC_HEADER + records_size +
+			strings_size;
+	unsigned char *spec = valid ? calloc(1, spec_size) : 0;
+	if (spec) {
+		memcpy(spec, VINE_DATAVINE_TASK_SPEC_MAGIC, 4);
+		vine_datavine_put_u16(spec + 4, 2);
+		memcpy(spec + 8, key, 32);
+		uint64_t workflow_slot = vine_datavine_get_u64(key);
+		vine_datavine_put_u64(spec + 40, workflow_slot ? workflow_slot : 1);
+		vine_datavine_put_u16(spec + 48, port);
+		size_t host_size = strlen(host);
+		vine_datavine_put_u16(spec + 50, (uint16_t)host_size);
+		memcpy(spec + 52, host, host_size);
+		vine_datavine_put_u32(spec + 116, (uint32_t)input_count);
+		vine_datavine_put_u32(spec + 120, (uint32_t)output_count);
+		vine_datavine_put_u32(spec + 124, (uint32_t)strings_size);
+		memcpy(spec + VINE_DATAVINE_TASK_SPEC_HEADER, input_records,
+				input_count * VINE_DATAVINE_TASK_SPEC_INPUT);
+		memcpy(spec + VINE_DATAVINE_TASK_SPEC_HEADER +
+				input_count * VINE_DATAVINE_TASK_SPEC_INPUT,
+				output_records,
+				output_count * VINE_DATAVINE_TASK_SPEC_OUTPUT);
+		memcpy(spec + VINE_DATAVINE_TASK_SPEC_HEADER + records_size,
+				string_bytes, strings_size);
+		vine_task_set_auxiliary_payload(physical, spec, spec_size);
+	}
+	int attached = spec != 0;
+	free(spec);
+	free(output_records);
+	free(input_records);
+	buffer_free(&strings);
+	free(inputs);
+	return attached;
+}
+
 static struct vine_task *materialize(struct vine_manager *manager,
 		struct vine_datavine_data_controller *data_controller,
 		const char *workflow_id, struct jx *task, struct itable *data,
@@ -1191,6 +1489,8 @@ static struct vine_task *materialize(struct vine_manager *manager,
 		struct itable *requested, struct task_defaults_index *defaults,
 		uint32_t attempt, int retain_all)
 {
+	(void)manager;
+	(void)files;
 	struct jx *executor = task_configuration(defaults, task, "executor");
 	struct jx *resources = task_configuration(defaults, task, "resources");
 	struct jx *priority = task_configuration(defaults, task, "priority");
@@ -1200,6 +1500,19 @@ static struct vine_task *materialize(struct vine_manager *manager,
 	if (strcmp(kind, "command") && strcmp(kind, "python") &&
 			strcmp(kind, "taskvine"))
 		return 0;
+	/* Register output generations with the independent Data Controller before
+	 * the physical task can publish. This is a local metadata mutation, not an
+	 * output-admission gate: child readiness still follows task completion. */
+	struct jx *expected_outputs = vine_datavine_ir_task_outputs(task);
+	for (int index = 0; index < jx_array_length(expected_outputs); index++) {
+		uint64_t data_id = (uint64_t)jx_array_index(
+				expected_outputs, index)->u.integer_value;
+		uint32_t generation = attempt;
+		if (!vine_datavine_data_controller_agent_expect(data_controller,
+				workflow_id, data_id, &generation,
+				itable_lookup(requested, data_id) != 0))
+			return 0;
+	}
 	buffer_t command;
 	buffer_init(&command);
 	void *iterator = 0;
@@ -1275,41 +1588,14 @@ static struct vine_task *materialize(struct vine_manager *manager,
 		vine_task_set_function_input(physical, input, input_size);
 	}
 	buffer_free(&function_input);
-	struct itable *mounted = itable_create(0);
-	if (!mounted) {
-		vine_task_delete(physical);
-		return 0;
-	}
 	/* Return FORSAKEN exactly once.  The DataVine Scheduler owns resubmission;
 	 * the Manager owns only worker detection and task reclamation. */
 	vine_task_set_max_forsaken(physical, 0);
-	if (!strcmp(kind, "python")) {
-		uint64_t payload_id = (uint64_t)jx_lookup_integer(executor, "payload_ref");
-		const char *version = jx_lookup_string(executor, "version");
-		if (strcmp(version, VINE_DATAVINE_PYTHON_CALLABLE_VERSION)) {
-			struct vine_file *payload = itable_lookup(files, payload_id);
-			char path[64];
-			if (!payload || !vine_task_add_input(physical, payload, data_path(payload_id, path), 0)) {
-				itable_delete(mounted);
-				vine_task_delete(physical);
-				return 0;
-			}
-			itable_insert(mounted, payload_id, payload);
-		}
-	}
 	struct jx *input;
 	iterator = 0;
 	while ((input = jx_iterate_array(vine_datavine_ir_task_inputs(task), &iterator))) {
 		uint64_t data_id = vine_datavine_ir_input_data_id(input);
-		struct vine_file *file = itable_lookup(files, data_id);
 		char path[64];
-		if (!file || (!itable_lookup(mounted, data_id) &&
-						 !vine_task_add_input(physical, file, data_path(data_id, path), 0))) {
-			itable_delete(mounted);
-			vine_task_delete(physical);
-			return 0;
-		}
-		itable_insert(mounted, data_id, file);
 		if (!python_fork) {
 			data_path(data_id, path);
 			char variable[64];
@@ -1317,8 +1603,9 @@ static struct vine_task *materialize(struct vine_manager *manager,
 			vine_task_set_env_var(physical, variable, path);
 		}
 	}
-	if (!vine_datavine_data_controller_bind_outputs(data_controller, manager, workflow_id, physical, task, executor, files, consumers, requested, attempt, retain_all)) {
-		itable_delete(mounted);
+	if (!attach_worker_data_spec(data_controller, workflow_id, physical, task,
+			executor, task_default_codec(defaults, task), data, consumers,
+			requested, attempt, retain_all)) {
 		vine_task_delete(physical);
 		return 0;
 	}
@@ -1354,7 +1641,6 @@ static struct vine_task *materialize(struct vine_manager *manager,
 		while ((name = jx_iterate_keys(environment, &environment_iterator)))
 			vine_task_set_env_var(physical, name, jx_lookup_string(environment, name));
 	}
-	itable_delete(mounted);
 	return physical;
 }
 
@@ -1365,7 +1651,7 @@ static int maximum_attempts(struct task_defaults_index *defaults,
 	return retry ? (int)jx_lookup_integer(retry, "maximum_attempts") : 1;
 }
 
-static struct vine_datavine_data_publication *publish_task_outputs(
+static __attribute__((unused)) struct vine_datavine_data_publication *publish_task_outputs(
 		struct vine_datavine_workflow_runtime *runtime,
 		const char *workflow_id, struct jx *task, struct jx *executor,
 		struct jx *default_codec,
@@ -1381,7 +1667,7 @@ static struct vine_datavine_data_publication *publish_task_outputs(
 			runtime->data_controller, workflow_id, task, executor, default_codec, data, files, consumers, requested, attempt, retain_all, completed);
 }
 
-static int restore_published_outputs(
+static int __attribute__((unused)) restore_published_outputs(
 		struct vine_datavine_workflow_runtime *runtime,
 		const char *workflow_id, struct jx *task, struct itable *files,
 		struct itable *pending_consumers)
@@ -1478,7 +1764,7 @@ static int recovery_cache_retain(
 	return valid;
 }
 
-static int cache_inactive_task_inputs(
+static int __attribute__((unused)) cache_inactive_task_inputs(
 		struct vine_datavine_workflow_runtime *runtime,
 		const char *workflow_id, struct recovery_result_cache *cache,
 		struct jx *task, struct itable *data, struct itable *files,
@@ -1520,9 +1806,8 @@ static int finish_logical_attempt(
 		uint32_t maximum_attempt_count, int successful,
 		uint64_t *completion_event_nanoseconds)
 {
-	if (successful)
-		successful = restore_published_outputs(
-				runtime, workflow_id, task, files, pending_consumers);
+	(void)recovery_cache;
+	(void)files;
 	int valid = logical_id > 0 && task;
 	struct vine_datavine_workflow_task_event_record event = {
 			.task_id = logical_id,
@@ -1533,8 +1818,36 @@ static int finish_logical_attempt(
 		event.type = VINE_DATAVINE_WORKFLOW_TASK_COMPLETED;
 		event.result = 0;
 		valid &= vine_datavine_scheduler_mark_done(scheduler, logical_id) &&
-			 adjust_task_pending_inputs(task, pending_consumers, 0) &&
-			 cache_inactive_task_inputs(runtime, workflow_id, recovery_cache, task, data, files, pending_consumers, requested);
+			 adjust_task_pending_inputs(task, pending_consumers, 0);
+		unsigned char workflow_key[32];
+		uint64_t workflow_slot = 0;
+		if (valid && vine_datavine_data_controller_workflow_key(
+				runtime->data_controller, workflow_id, workflow_key)) {
+			workflow_slot = vine_datavine_get_u64(workflow_key);
+			if (!workflow_slot)
+				workflow_slot = 1;
+		} else {
+			valid = 0;
+		}
+		struct jx *input;
+		void *iterator = 0;
+		while (valid && (input = jx_iterate_array(
+					vine_datavine_ir_task_inputs(task), &iterator))) {
+			uint64_t data_id = vine_datavine_ir_input_data_id(input);
+			uint64_t producer = 0;
+			if (!itable_lookup(pending_consumers, data_id) &&
+					!itable_lookup(requested, data_id) &&
+					output_producer(data, data_id, &producer)) {
+				int released = vine_datavine_data_controller_agent_mark_dead(
+						runtime->data_controller, workflow_slot, data_id, 0);
+				if (!released && getenv("DATAVINE_WORKFLOW_METRICS"))
+					fprintf(stderr,
+							"datavine workflow %s release_failed data=%llu consumer=%lld\n",
+							workflow_id, (unsigned long long)data_id,
+							(long long)logical_id);
+				valid &= released;
+			}
+		}
 	} else if (valid &&
 			(task_result == -(int32_t)VINE_RESULT_FORSAKEN ||
 					attempt < maximum_attempt_count)) {
@@ -1608,12 +1921,21 @@ static int drain_publications(
 			publication_stages->output_bytes += metrics.output_bytes;
 			publication_stages->journal_records += metrics.journal_records;
 		}
-		valid = finish_logical_attempt(runtime, workflow_id, scheduler, recovery_cache, data, files, pending_consumers, requested, pending->task, pending->logical_id, pending->attempt, pending->task_result, pending->maximum_attempts, published, completion_event_nanoseconds);
+		if (pending->logical_finished)
+			valid = published;
+		else
+			valid = finish_logical_attempt(runtime, workflow_id, scheduler,
+					recovery_cache, data, files, pending_consumers, requested,
+					pending->task, pending->logical_id, pending->attempt,
+					pending->task_result, pending->maximum_attempts, published,
+					completion_event_nanoseconds);
 		vine_datavine_data_publication_delete(pending->publication);
 		*link = pending->next;
+		int logical_finished = pending->logical_finished;
 		free(pending);
 		(*publishing)--;
-		(*completed_count)++;
+		if (!logical_finished)
+			(*completed_count)++;
 		block_one = 0;
 	}
 	return valid;
@@ -1750,16 +2072,8 @@ static int execution_resources_create(struct execution_resources *resources,
 					(uint64_t)record->u.integer_value,
 					record);
 	}
-	if (valid) {
-		manager_lane_lock(runtime);
-		struct jx *data_defaults = jx_lookup(root, "data_defaults");
-		struct jx *default_codec = data_defaults
-							   ? jx_lookup(data_defaults, "codec")
-							   : 0;
-		valid = prepare_origins(runtime->data_controller, runtime->manager, resources->data, default_codec, resources->files) &&
-			restore_outputs(runtime, workflow_id, resources->data, resources->files, resources->consumers);
-		pthread_mutex_unlock(&runtime->manager_lock);
-	}
+	/* Source and generated DataIDs are resolved by the Worker Data Agent.
+	 * Creating Manager vine_file objects here is a v2 boundary violation. */
 	valid = valid && restore_completed_tasks(runtime, workflow_id, &resources->recovered_tasks) &&
 		build_scheduler(root, resources->data, resources->tasks, &resources->scheduler);
 	if (valid) {
@@ -1889,8 +2203,6 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			if (valid)
 				valid = task_defaults_index_add(&resources.task_defaults,
 						delta_root);
-			if (valid)
-				valid = prepare_delta_inputs(runtime, workflow_id, delta_root, data, files);
 			if (!valid) {
 				if (delta_root)
 					jx_delete(delta_root);
@@ -1943,6 +2255,42 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			if (valid && lost_count) {
 				size_t invalidated = 0;
 				valid = apply_workflow_losses(runtime, workflow_id, lost_data_ids, lost_count, data, tasks, pending_consumers, requested, &resources.recovery_cache, scheduler, attempts, maximum_task_id, resources.recovery_marks, resources.recovery_queue, &resources.recovery_epoch, &completion_event_nanoseconds, &invalidated);
+				/* Ancestors were appended after their consumers. Submit in reverse
+				 * so their data is normally available first; a child dispatched
+				 * early still waits in its Worker Agent without consuming cores. */
+				if (valid && invalidated) {
+					manager_lane_lock(runtime);
+					for (size_t index = invalidated; valid && index > 0; index--) {
+						uint64_t task_id = resources.recovery_queue[index - 1];
+						struct jx *task = itable_lookup(tasks, task_id);
+						uint32_t attempt = attempts[task_id] + 1;
+						struct vine_task *physical = materialize(runtime->manager,
+								runtime->data_controller, workflow_id, task, data,
+								files, pending_consumers, requested,
+								&resources.task_defaults, attempt, 1);
+						struct physical_attempt *mapping = physical
+								? calloc(1, sizeof(*mapping)) : 0;
+						if (mapping) {
+							mapping->logical_id = (int64_t)task_id;
+							mapping->attempt = attempt;
+							mapping->recovery = 1;
+						}
+						int physical_id = mapping
+								? runtime_submit_locked(runtime, physical, mailbox) : -1;
+						valid = physical_id > 0 && itable_insert(
+								physical_to_logical, (uint64_t)physical_id, mapping);
+						if (valid) {
+							attempts[task_id] = attempt;
+							running++;
+							physical_submissions++;
+						} else {
+							free(mapping);
+							if (physical_id < 1 && physical)
+								vine_task_delete(physical);
+						}
+					}
+					pthread_mutex_unlock(&runtime->manager_lock);
+				}
 				recovery_epochs++;
 				recovery_lost_data += lost_count;
 				recovery_invalidated_tasks += invalidated;
@@ -1961,7 +2309,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				&manager_lock_started, &manager_lock_finished);
 		struct vine_datavine_workflow_task_event_record submission_events[DATAVINE_WORKFLOW_SUBMISSION_WINDOW];
 		size_t submission_event_count = 0;
-		while (running + publishing < DATAVINE_WORKFLOW_SUBMISSION_WINDOW &&
+		while (running < DATAVINE_WORKFLOW_SUBMISSION_WINDOW &&
 				(logical_id = vine_datavine_scheduler_take(scheduler)) > 0) {
 			struct jx *task = itable_lookup(tasks, (uint64_t)logical_id);
 			struct timespec stage_started;
@@ -1991,12 +2339,19 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			int physical_id = runtime_submit_locked(runtime, physical, mailbox);
 			clock_gettime(CLOCK_MONOTONIC, &stage_finished);
 			submit_nanoseconds += elapsed_nanoseconds(&stage_started, &stage_finished);
-			if (physical_id < 1 || !itable_insert(physical_to_logical,
-								   (uint64_t)physical_id,
-								   (void *)(uintptr_t)logical_id)) {
+			struct physical_attempt *mapping = physical_id > 0
+					? calloc(1, sizeof(*mapping)) : 0;
+			if (mapping) {
+				mapping->logical_id = logical_id;
+				mapping->attempt = attempts[logical_id] + 1;
+			}
+			if (physical_id < 1 || !mapping || !itable_insert(physical_to_logical,
+								   (uint64_t)physical_id, mapping)) {
 				if (report_metrics)
 					fprintf(stderr, "datavine workflow %s submit_failed task=%lld physical=%d\n", workflow_id, (long long)logical_id, physical_id);
-				vine_task_delete(physical);
+				free(mapping);
+				if (physical_id < 1)
+					vine_task_delete(physical);
 				valid = 0;
 				break;
 			}
@@ -2026,6 +2381,10 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			valid = valid && recorded;
 		}
 		if (!publishing && vine_datavine_scheduler_complete(scheduler)) {
+			if (!requested_results_ready(runtime, workflow_id, requested)) {
+				usleep(1000);
+				continue;
+			}
 			if (workflow_info.state == VINE_DATAVINE_WORKFLOW_RUNNING)
 				break;
 			if (workflow_info.state == VINE_DATAVINE_WORKFLOW_RUNNING_OPEN) {
@@ -2078,8 +2437,10 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			pthread_mutex_lock(&runtime->routing_lock);
 			itable_remove(runtime->completion_owners, (uint64_t)physical_id);
 			pthread_mutex_unlock(&runtime->routing_lock);
-			int64_t completed_logical_id = (int64_t)(uintptr_t)itable_remove(
+			struct physical_attempt *mapping = itable_remove(
 					physical_to_logical, (uint64_t)physical_id);
+			int64_t completed_logical_id = mapping ? mapping->logical_id : 0;
+			int recovery_attempt = mapping && mapping->recovery;
 			running--;
 			physical_completions++;
 			int physical_success = completed_logical_id > 0 &&
@@ -2100,40 +2461,26 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			struct jx *task = task_valid
 							  ? itable_lookup(tasks, (uint64_t)completed_logical_id)
 							  : 0;
-			uint32_t attempt = task_valid ? attempts[completed_logical_id] : 0;
-			if (physical_success) {
-				struct pending_publication *pending = calloc(1, sizeof(*pending));
-				struct timespec publication_started;
-				struct timespec publication_finished;
-				clock_gettime(CLOCK_MONOTONIC, &publication_started);
-				struct jx *executor = task_valid
-									  ? task_configuration(&resources.task_defaults, task, "executor")
-									  : 0;
+			uint32_t attempt = mapping ? mapping->attempt : 0;
+			if (physical_success && recovery_attempt) {
+				/* Worker commit already installed and asynchronously advertised
+				 * the replacement generation. Logical state stays DONE. */
+				task_valid = 1;
+			} else if (physical_success) {
 				uint32_t attempt_limit = task_valid
 									 ? (uint32_t)maximum_attempts(
 											   &resources.task_defaults, task)
 									 : 1;
-				struct vine_datavine_data_publication *publication =
-						pending ? publish_task_outputs(runtime, workflow_id, task, executor, task_default_codec(&resources.task_defaults, task), data, files, pending_consumers, requested, completed, attempt, workflow_info.state != VINE_DATAVINE_WORKFLOW_RUNNING)
-							: 0;
-				clock_gettime(CLOCK_MONOTONIC, &publication_finished);
-				publication_stages.prepare_nanoseconds += elapsed_nanoseconds(
-						&publication_started, &publication_finished);
-				if (publication) {
-					pending->publication = publication;
-					pending->task = task;
-					pending->logical_id = completed_logical_id;
-					pending->attempt = attempt;
-					pending->maximum_attempts = attempt_limit;
-					pending->task_result = task_result;
-					pending->next = pending_publications;
-					pending_publications = pending;
-					publishing++;
-				} else {
-					free(pending);
-					task_valid = finish_logical_attempt(runtime, workflow_id, scheduler, &resources.recovery_cache, data, files, pending_consumers, requested, task, completed_logical_id, attempt, task_result, attempt_limit, 0, &completion_event_nanoseconds);
-					uncheckpointed_completions += completed_logical_id > 0;
-				}
+				task_valid = finish_logical_attempt(runtime, workflow_id,
+						scheduler, &resources.recovery_cache, data, files,
+						pending_consumers, requested, task,
+						completed_logical_id, attempt, task_result,
+						attempt_limit, 1, &completion_event_nanoseconds);
+				uncheckpointed_completions += completed_logical_id > 0;
+			} else if (recovery_attempt) {
+				/* A replay failure is explicit and fail closed. A later loss event
+				 * may enqueue another replay, but it must not mutate Scheduler DONE. */
+				task_valid = 0;
 			} else {
 				uint32_t attempt_limit = task_valid
 									 ? (uint32_t)maximum_attempts(
@@ -2142,6 +2489,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				task_valid = finish_logical_attempt(runtime, workflow_id, scheduler, &resources.recovery_cache, data, files, pending_consumers, requested, task, completed_logical_id, attempt, task_result, attempt_limit, 0, &completion_event_nanoseconds);
 				uncheckpointed_completions += completed_logical_id > 0;
 			}
+			free(mapping);
 			vine_task_delete(completed);
 			valid &= task_valid;
 			if (valid && uncheckpointed_completions >=

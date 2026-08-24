@@ -37,8 +37,8 @@ worker = source / "worker"
 native = source / "datavine"
 assert native.is_dir()
 assert not list(manager.glob("vine_datavine_*"))
-assert len(list(native.glob("vine_datavine_*.c"))) == 9
-assert len(list(native.glob("vine_datavine_*.h"))) == 9
+assert len(list(native.glob("vine_datavine_*.c"))) == 10
+assert len(list(native.glob("vine_datavine_*.h"))) == 10
 assert not list(native.glob("vine_datavine_index.*"))
 assert not list(native.glob("vine_datavine_directory.*"))
 protocol = (native / "vine_datavine_protocol.h").read_text()
@@ -58,7 +58,10 @@ assert "wait_workflow" in adaptor_source
 worker_data_plane = {
     worker / "vine_datavine_transfer.c",
     worker / "vine_datavine_transfer.h",
+    worker / "vine_datavine_agent.c",
+    worker / "vine_datavine_agent.h",
     worker / "vine_cache.c",
+    worker / "vine_worker.c",
 }
 for core_file in (
     *manager.glob("*.c"), *manager.glob("*.h"),
@@ -71,6 +74,33 @@ assert "VINE_DATAVINE_RPC_OBJECT_GET" in worker_transfer_source
 assert "EVP_DigestUpdate" in worker_transfer_source
 for forbidden in ("scheduler", "workflow_store", "data_controller"):
     assert forbidden not in worker_transfer_source, forbidden
+worker_agent_source = (worker / "vine_datavine_agent.c").read_text()
+assert "VINE_DATAVINE_RPC_AGENT_DATA_READY" in worker_agent_source
+assert "VINE_DATAVINE_RPC_AGENT_RESOLVE" in worker_agent_source
+assert "VINE_DATAVINE_RPC_AGENT_HEARTBEAT" in worker_agent_source
+for forbidden in (
+    "vine_manager_send",
+    "vine_manager_cache_update",
+    "vine_manager_cache_invalid",
+    "vine_task_add_input",
+    "vine_task_add_output",
+):
+    assert forbidden not in worker_agent_source, forbidden
+
+# The Manager carries one generic opaque extension frame.  It does not know
+# DataIDs, replicas, cache transitions, hashes, paths, GC, or Controller RPCs.
+manager_core = "\n".join(
+    path.read_text() for path in (*manager.glob("*.c"), *manager.glob("*.h"))
+)
+assert "auxiliary_payload" in manager_core
+for forbidden in (
+    "datavine",
+    "object_token",
+    "agent_data_ready",
+    "agent_resolve",
+    "agent_heartbeat",
+):
+    assert forbidden not in manager_core.lower(), forbidden
 
 taskvine_members = subprocess.check_output(
     ("ar", "t", manager / "libtaskvine.a"), text=True
@@ -79,7 +109,7 @@ datavine_members = subprocess.check_output(
     ("ar", "t", native / "libdatavine.a"), text=True
 ).splitlines()
 assert not any("datavine" in member for member in taskvine_members)
-assert len(datavine_members) == 9
+assert len(datavine_members) == 10
 assert all(member.startswith("vine_datavine_") for member in datavine_members)
 
 runtime_source = (native / "vine_datavine_workflow_runtime.c").read_text()

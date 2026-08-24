@@ -525,6 +525,11 @@ static vine_result_code_t vine_manager_put_task_streaming(
 			link_putlstring(w->link, t->function_input, t->function_input_length, time(0) + q->short_timeout);
 		}
 	}
+	if (t->auxiliary_payload_length) {
+		vine_manager_send(q, w, "auxiliary_payload %zu\n", t->auxiliary_payload_length);
+		link_putlstring(w->link, t->auxiliary_payload, t->auxiliary_payload_length,
+				time(0) + q->short_timeout);
+	}
 
 	if (t->provides_library) {
 		vine_manager_send(q, w, "provides_library %s\n", t->provides_library);

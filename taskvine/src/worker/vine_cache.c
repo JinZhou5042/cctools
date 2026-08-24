@@ -45,6 +45,11 @@ struct vine_cache {
 	int max_transfer_procs;
 };
 
+static int cache_name_is_datavine(const char *cachename)
+{
+	return cachename && !strncmp(cachename, "datavine-v2-", 12);
+}
+
 static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager);
 
 /*
@@ -124,7 +129,8 @@ void vine_cache_scan(struct vine_cache *c, struct link *manager)
 	int iteration;
 	HASH_TABLE_ITERATE(c->table, iteration, cachename, f)
 	{
-		vine_worker_send_cache_update(manager, cachename, f);
+		if (!cache_name_is_datavine(cachename))
+			vine_worker_send_cache_update(manager, cachename, f);
 	}
 }
 
@@ -297,7 +303,8 @@ int vine_cache_add_file(
 		vine_cache_file_save_metadata(f, meta_path);
 
 		/* Inform the manager that we now have the file */
-		vine_worker_send_cache_update(manager, cachename, f);
+		if (manager && !cache_name_is_datavine(cachename))
+			vine_worker_send_cache_update(manager, cachename, f);
 
 		result = 1;
 	} else {
@@ -423,7 +430,8 @@ int vine_cache_remove(struct vine_cache *c, const char *cachename, struct link *
 	 * Other states except PENDING have already sent messages, either cache-update or cache-invalid,
 	 * so we only send cache-invalid for transfers in PENDING state. */
 
-	if (f->status == VINE_CACHE_STATUS_PENDING) {
+	if (manager && !cache_name_is_datavine(cachename) &&
+			f->status == VINE_CACHE_STATUS_PENDING) {
 		char *msg = string_format("File '%s' removed in PENDING state.", cachename);
 		vine_worker_send_cache_invalid(manager, cachename, msg);
 		free(msg);
@@ -858,7 +866,7 @@ static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_fil
 	/* Finally send a cache update message one way or the other. */
 	/* Note that manager could be null if we are in a shutdown situation. */
 
-	if (manager) {
+	if (manager && !cache_name_is_datavine(cachename)) {
 		if (f->status == VINE_CACHE_STATUS_READY) {
 			/* a positive cache-update message was sent by vine_cache_add_file */
 		} else {

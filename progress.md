@@ -1,6 +1,31 @@
 # DataVine current checkpoint
 
-Updated: 2026-08-23
+Updated: 2026-08-24
+
+## Current checkpoint — Runtime v2 local acceptance (2026-08-24)
+
+Runtime v2 now separates compute completion from data admission. TaskVine
+Manager owns physical dispatch/completion and transports only a generic opaque
+auxiliary frame. DataVine Scheduler marks a successful physical task DONE and
+releases children immediately. Worker Data Agent and Controller independently
+own DataID resolve, replica sessions, peer movement, persistence, failure, and
+generation-checked GC; DataVine cache transitions and output payloads do not
+enter the Manager data plane. This supersedes the older publication-gated
+readiness description below, which remains historical production-v1 context.
+
+The local source/build gate is PASS with 17/17 DataVine tests plus ordinary
+TaskVine `TR_vine_single`. It covers HMAC Worker HELLO, atomic batch admission,
+digest conflict rejection, late-publication tombstones, reconnect inventory,
+Owner restart, Worker loss, direct durable results, dynamic append, Shell,
+Notebook, Go, and the scientific foundation. The regression report was written
+to `/tmp/datavine-runtime-v2-regression-r2.json` during this checkout and is
+ephemeral; source tests are the durable reproduction mechanism.
+
+The full data-intensive parametric descriptor is 1,344 bytes and expands to
+exactly 1,048,576 tasks and 10,485,760 files. Full-scale sampled task expansion
+and exhaustive small-cohort inverse dependencies pass. Native Runtime frontier
+materialization and the exact 128x16 execution are still OPEN, so no full-scale
+performance advantage is claimed from this checkpoint.
 
 ## Current checkpoint — production v1 freeze (2026-08-23)
 

@@ -6,6 +6,8 @@ See the file COPYING for details.
 
 #include "vine_cache.h"
 #include "vine_cache_file.h"
+#include "vine_datavine_agent.h"
+#include "vine_datavine_protocol.h"
 #include "vine_catalog.h"
 #include "vine_file.h"
 #include "vine_manager.h"
@@ -709,6 +711,11 @@ Should maintain parallel structure to start_process() above.
 static void reap_process(struct vine_process *p, struct link *manager)
 {
 	p->execution_end = timestamp_get();
+	/* Output admission is local and precedes TASK_FINISHED. Controller
+	 * publication is deliberately deferred until after Manager completion. */
+	if (p->task->auxiliary_payload_length && p->result == VINE_RESULT_SUCCESS &&
+			p->exit_code == 0 && !vine_datavine_agent_commit(p))
+		p->result |= VINE_RESULT_OUTPUT_MISSING;
 
 	cores_allocated -= p->task->resources_requested->cores;
 	memory_allocated -= p->task->resources_requested->memory;
@@ -970,6 +977,19 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			}
 			vine_task_set_function_input(task, input, n);
 			free(input);
+		} else if (sscanf(line, "auxiliary_payload %" PRId64, &n) == 1) {
+			if (n <= 0 || n > VINE_DATAVINE_RPC_MAX_PAYLOAD) {
+				vine_task_delete(task);
+				return 0;
+			}
+			char *spec = malloc((size_t)n);
+			if (!spec || link_read(manager, spec, n, stoptime) != n) {
+				free(spec);
+				vine_task_delete(task);
+				return 0;
+			}
+			vine_task_set_auxiliary_payload(task, spec, (size_t)n);
+			free(spec);
 		} else if (sscanf(line, "provides_library %s", library_name) == 1) {
 			vine_task_set_library_provided(task, library_name);
 		} else if (sscanf(line, "function_slots %" PRId64, &n) == 1) {
@@ -1534,6 +1554,19 @@ Return true if this process is ready to run at this moment, and match to a libra
 
 static int process_ready_to_run_now(struct vine_process *p, struct vine_cache *cache, struct link *manager)
 {
+	if (!p->auxiliary_prepared && !p->auxiliary_failed) {
+		enum vine_datavine_agent_prepare_status status =
+				vine_datavine_agent_prepare(p);
+		if (status == VINE_DATAVINE_AGENT_FAILED)
+			p->auxiliary_failed = 1;
+		else if (status == VINE_DATAVINE_AGENT_READY ||
+				status == VINE_DATAVINE_AGENT_NOT_TASK)
+			p->auxiliary_prepared = 1;
+		else
+			return 0;
+	}
+	if (p->auxiliary_failed)
+		return 0;
 	if (!task_resources_fit_now(p->task))
 		return 0;
 
@@ -1584,6 +1617,11 @@ Return true if this process can run eventually, supposing that other processes w
 
 static int process_can_run_eventually(struct vine_process *p, struct vine_cache *cache, struct link *manager)
 {
+	if (p->auxiliary_failed) {
+		debug(D_VINE, "task %d has an invalid or failed DataVine input",
+				p->task->task_id);
+		return 0;
+	}
 	if (!task_resources_fit_eventually(p->task)) {
 		debug(D_VINE, "task %d does not fit the total resources", p->task->task_id);
 		return 0;
@@ -1950,6 +1988,9 @@ static void vine_worker_serve_manager(struct link *manager)
 			if (itable_size(procs_complete) > 0) {
 				send_complete_tasks(manager);
 			}
+			/* Manager completion and logical child release happen first. Replica
+			 * metadata then advances independently on the Controller channel. */
+			vine_datavine_agent_progress();
 			if (task_event > 0) {
 				send_stats_update(manager);
 			}
@@ -2057,6 +2098,23 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	if (!vine_transfer_server_start(cache_manager, options->transfer_port_min, options->transfer_port_max)) {
 		fprintf(stderr, "vine_worker: unable to bind transfer port (check --transfer-port or cluster permissions)\n");
 	}
+	if (vine_transfer_server_running()) {
+		char transfer_host[VINE_DATAVINE_AGENT_HOST_MAX];
+		char ignored_address[LINK_ADDRESS_MAX];
+		int transfer_port = 0;
+		vine_transfer_server_address(ignored_address, &transfer_port);
+		if (options->reported_transfer_port > 0)
+			transfer_port = options->reported_transfer_port;
+		if (options->reported_transfer_host)
+			snprintf(transfer_host, sizeof(transfer_host), "%s",
+					options->reported_transfer_host);
+		else if (!domain_name_cache_guess(transfer_host))
+			transfer_host[0] = 0;
+		if (!vine_datavine_agent_initialize(cache_manager, transfer_host,
+				(uint16_t)transfer_port))
+			debug(D_VINE | D_NOTICE,
+					"Worker Data Agent unavailable; ordinary TaskVine remains active");
+	}
 
 	measure_worker_resources();
 
@@ -2077,6 +2135,7 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	/* Do these in the opposite order of setup: */
 
 	/* Stop the transfer server from serving the cache directory. */
+	vine_datavine_agent_shutdown();
 	vine_transfer_server_stop();
 
 	/* Remove all cached files of workflow or less. */

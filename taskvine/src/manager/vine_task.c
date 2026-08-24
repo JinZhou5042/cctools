@@ -220,6 +220,9 @@ struct vine_task *vine_task_copy(const struct vine_task *task)
 		vine_task_set_tag(new, task->tag);
 	if (task->category)
 		vine_task_set_category(new, task->category);
+	if (task->auxiliary_payload_length)
+		vine_task_set_auxiliary_payload(new, task->auxiliary_payload,
+				task->auxiliary_payload_length);
 
 	if (task->monitor_output_directory) {
 		vine_task_set_monitor_output(new, task->monitor_output_directory);
@@ -270,6 +273,21 @@ void vine_task_set_command(struct vine_task *t, const char *cmd)
 	if (t->command_line)
 		free(t->command_line);
 	t->command_line = xxstrdup(cmd);
+}
+
+void vine_task_set_auxiliary_payload(struct vine_task *t, const void *buffer,
+		size_t size)
+{
+	if (!t)
+		return;
+	free(t->auxiliary_payload);
+	t->auxiliary_payload = 0;
+	t->auxiliary_payload_length = 0;
+	if (buffer && size) {
+		t->auxiliary_payload = xxmalloc(size);
+		memcpy(t->auxiliary_payload, buffer, size);
+		t->auxiliary_payload_length = size;
+	}
 }
 
 void vine_task_set_library_required(struct vine_task *t, const char *library_name)
@@ -750,6 +768,7 @@ void vine_task_delete(struct vine_task *t)
 
 	free(t->needs_library);
 	vine_function_call_task_delete(t);
+	free(t->auxiliary_payload);
 	free(t->provides_library);
 
 	free(t->monitor_output_directory);

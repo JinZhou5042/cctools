@@ -66,6 +66,10 @@ struct vine_task {
 	char *needs_library;  /**< If this is a FunctionTask, the name of the library used */
 	char *function_input; /**< Serialized inline function invocation. */
 	size_t function_input_length;
+	/* Opaque worker-side extension payload.  The manager transports but never
+	 * interprets it; ordinary TaskVine tasks leave it empty. */
+	char *auxiliary_payload;
+	size_t auxiliary_payload_length;
 	char *provides_library;			   /**< If this is a LibraryTask, the name of the library provided. */
 	int function_slots_requested;		   /**< If this is a LibraryTask, the number of function slots requested by the user. -1 causes the number of slots to match the number of cores. */
 	vine_task_func_exec_mode_t func_exec_mode; /**< If this a LibraryTask, the execution mode of its functions. */
@@ -158,6 +162,9 @@ struct vine_task {
 };
 
 void vine_task_delete(struct vine_task *t);
+
+void vine_task_set_auxiliary_payload(struct vine_task *t, const void *buffer,
+		size_t size);
 /* Add a reference to an existing task object, return the same object. */
 struct vine_task *vine_task_addref(struct vine_task *t);
 

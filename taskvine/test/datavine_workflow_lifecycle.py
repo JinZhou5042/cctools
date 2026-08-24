@@ -273,7 +273,8 @@ def main():
             assert wait_state(client, restart_id, {"completed", "failed"})[
                 "state"
             ] == "completed"
-            assert event_types(client, restart_id) == [
+            restart_events = event_types(client, restart_id)
+            assert restart_events == [
                 "accepted",
                 "started",
                 "task_submitted",
@@ -281,17 +282,24 @@ def main():
                 "task_submitted",
                 "recovered",
                 "started",
+                "task_retry",
+                "task_submitted",
+                "task_completed",
                 "task_submitted",
                 "task_completed",
                 "completed",
-            ]
+            ], restart_events
             events = client.watch_workflow(restart_id)
             submitted_ids = [
                 event["task_id"]
                 for event in events
                 if event["type"] == "task_submitted"
             ]
-            assert submitted_ids == [1, 2, 2], submitted_ids
+            # Data 1 was intentionally non-durable.  Killing both owner and
+            # worker removes its final replica, so recovery replays producer 1
+            # and then its in-flight descendant 2.  Requested data 2 remains
+            # durable after the replay.
+            assert submitted_ids == [1, 2, 1, 2], submitted_ids
             assert client.fetch_workflow_result(restart_id, 2) == b"checkpoint"
         finally:
             stop(worker)

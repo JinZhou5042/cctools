@@ -1,6 +1,6 @@
 # DataVine acceptance matrix
 
-Updated: 2026-08-23
+Updated: 2026-08-24
 
 Status: **FIXED 1024-CORE CAMPAIGN PASS; SCIENTIFIC FOUNDATION LOCAL PASS; REAL-APPLICATION DISTRIBUTED ATTRIBUTION OPEN**
 
@@ -9,6 +9,10 @@ Status: **FIXED 1024-CORE CAMPAIGN PASS; SCIENTIFIC FOUNDATION LOCAL PASS; REAL-
 | Gate | State | Current evidence |
 |---|---|---|
 | One native authority | PASS | C Runtime owns control; C Data Controller exclusively owns result files, metadata, hashes, fetch, retention, and GC |
+| Runtime v2 Manager boundary | LOCAL PASS | Manager transports only a generic opaque auxiliary payload; DataVine inputs/outputs create no Manager vine_file/cache-update/unlink state; direct Worker Agent protocol and module scan pass |
+| Completion/data admission decoupling | LOCAL PASS | physical success marks Scheduler DONE immediately; child dispatch does not wait for DATA_READY or requested-result persistence |
+| Worker replica state machine | LOCAL PASS | chunked DataID table, indexed sessions, HMAC HELLO, digest/generation checks, reconnect advertisement, session loss, idempotent GC ACK, and independent physical replay |
+| Parametric family evaluator | PASS / RUNTIME OPEN | 1,344-byte full descriptor; exact 1,048,576 tasks and 10,485,760 files; 4,096 full samples plus exhaustive small-cohort inverse equivalence; native frontier execution not integrated |
 | Production v1 contract | PASS | Annotated tag `datavine-production-v1-20260823` freezes one fail-closed production v1; historical callable ticket and manifest parsers are removed; post-freeze regression is 13/13 |
 | Decoupled input data plane | PASS | IR/scheduler retain only DataIDs and SHA-256 identities; Data Controller resolves locations; workers pull and verify digest-scoped objects into stable cache identities |
 | Serialization deduplication | PASS | callable and repeated invocation bytes serialize once; 1,000,000 repeated calls build at 44,945 tasks/s with 1,000,002 Data records |
@@ -19,12 +23,12 @@ Status: **FIXED 1024-CORE CAMPAIGN PASS; SCIENTIFIC FOUNDATION LOCAL PASS; REAL-
 | Python lifecycle | PASS | preloaded single-threaded parent, independent fork children, process-group cancel/wall-time cleanup |
 | Logical/physical identity | PASS | one logical task creates one physical TaskVine task; no noop grouping path remains |
 | Static compact IR | PASS | task/data defaults plus compact records; full records remain compatible; shared native accessors preserve one C graph owner |
-| Producer completion readiness | PASS | Scheduler uses producer DONE only; Runtime commits DONE after physical success and output publication, with no second data-ready protocol |
+| Producer completion readiness | PASS | Scheduler uses physical producer completion only; DATA_READY and persistence are independent Worker-to-Controller progress |
 | Multi-output callable | PASS | direct cloudpickle output files are atomically published as one metadata batch |
 | Live result | PASS | a requested DataID is fetchable immediately after its task commit while downstream work is still running |
 | Payload isolation | PASS | 2 MiB result stays in immutable Data Controller storage; workflow journal remains under 1 MiB |
 | Corruption | PASS | modified result file makes service restart fail closed |
-| Regression | PASS | 13/13 contracts pass, including the production data plane, the 1024-core benchmark contract, scientific foundation, and hash-verified Go adaptor |
+| Regression | PASS | 17/17 contracts pass, including direct agent protocol, replica table, parametric evaluator, production data plane, scientific foundation, and hash-verified Go adaptor; ordinary TaskVine single-worker smoke also passes |
 
 ## Scale and CPU
 

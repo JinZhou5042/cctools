@@ -2,7 +2,7 @@
 
 Updated: 2026-08-24
 
-Status: **DESIGN — motivated by a live full-scale diagnostic; not yet implemented**
+Status: **EVALUATOR PASS — native Runtime frontier integration and full run OPEN**
 
 ## Why this phase exists
 
@@ -108,9 +108,11 @@ immutable cohort/family blob plus a compact task-index vector.  They must not
 be staged as one filesystem inode per task.  Workers should expand the same
 checked family formula locally for the selected index.
 
-Cache updates and GC need a bounded batch protocol.  A worker may report a
-vector of `(DataID, size, generation, state)` transitions in one frame, and the
-manager may return a vector/range of disposable DataIDs in one command.  Batch
+Cache updates and GC need a bounded batch protocol.  A Worker Data Agent may
+report a vector of `(DataID, size, generation, state)` transitions directly to
+the Data Controller in one frame, and the Controller may return a vector/range
+of disposable DataIDs in one command. The TaskVine Manager is not part of this
+protocol and retains no DataVine file or replica state. Batch
 application is generation-checked and idempotent, so reconnect/replay cannot
 delete a newer replica.  This changes message count, not logical file identity
 or the point at which each file becomes collectable.
@@ -151,7 +153,8 @@ batched journaling remain OPEN architectural work.
 | Source path objects | O(source files) | O(active task inputs) |
 | Completion journal writes | one fine-grained stream | bounded batches + bitmap checkpoints |
 | FunctionCall arguments | one staging inode per task | family blob + bounded index vectors |
-| Cache update / unlink traffic | messages per file | generation-checked vectors/ranges |
+| Manager cache update / unlink traffic | messages per file | zero for DataVine data |
+| Controller replica / release traffic | not independent | generation-checked vectors/ranges |
 | Physical executions/completions | O(tasks) | O(tasks), unchanged |
 
 The last row is a hard lower bound.  The goal is orders-of-magnitude reduction
@@ -173,10 +176,18 @@ sublinear number of independent task executions.
    graph-load RSS independently from execution RSS.
 5. Add batched transition journaling and atomic bitmap checkpoints, followed by
    truncation, restart, worker-loss, and publication-loss recovery tests.
-6. Add generation-checked cache-update and GC vectors, plus family/index
+6. Add direct Worker-Controller generation-checked replica and GC vectors, plus family/index
    FunctionCall argument transport with no per-task staging inode.
 7. Rerun the full million-task/ten-million-file pair and preserve both
    execution-only and end-to-end comparisons.
+
+Steps 2 and the inverse-mapping portion of step 3 now have executable evidence
+in `acceptance/scripts/data_intensive_parametric_ir.py` and
+`taskvine/test/datavine_parametric_ir.py`. The full descriptor is 1,344 bytes,
+full-scale sampled expansion matches the explicit oracle, and a complete small
+cohort passes exhaustive forward/inverse equivalence. Runtime/store admission,
+packed scheduler state, and bounded frontier materialization remain the next
+required step; the evaluator alone is not an execution claim.
 
 ## Acceptance gates
 

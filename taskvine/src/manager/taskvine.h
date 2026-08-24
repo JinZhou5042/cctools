@@ -347,6 +347,9 @@ void vine_task_set_function_slots(struct vine_task *t, int nslots);
 
 /** Set a serialized function invocation carried in the task frame. */
 void vine_task_set_function_input(struct vine_task *t, const char *buffer, size_t size);
+/** Attach an opaque Worker Data Agent capability. Ordinary TaskVine tasks do
+ * not use this field and retain the existing file-transfer behavior. */
+void vine_task_set_auxiliary_payload(struct vine_task *t, const void *buffer, size_t size);
 
 /** Set the execution mode of functions inside a library.
 A mode can either be "fork" where the library forks and executes functions, or

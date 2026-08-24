@@ -21,6 +21,35 @@ The production protocol is frozen at one v1 contract. The active callable path
 is object-backed `callable-v1` with `DVP1` tickets and `DVM1` manifests; older
 callable ticket and manifest parsers are removed. See `DATAVINE_PRODUCTION.md`.
 
+## Active Runtime v2 upgrade (2026-08-24)
+
+The million-file campaign exposed that the current DataVine result path still
+uses Manager-owned `vine_file` objects for worker-local intermediates. That is
+now classified as a hybrid implementation rather than the intended DataVine
+boundary. `DATAVINE_RUNTIME_V2.md` is the authoritative replacement contract.
+
+Runtime v2 has two independent progress paths: physical task completion goes
+to the Manager and immediately releases Scheduler dependencies; worker data
+registration, resolve, movement, persistence, and GC go directly between the
+Worker Data Agent and Data Controller. Scheduler dispatch never waits for
+Controller admission. A child may wait in a bounded worker prefetch queue, but
+does not start an executor child until every input resolves.
+
+Traditional TaskVine file management remains unchanged and available as the
+baseline. DataVine v2 must have zero Manager `vine_file`, cache-update, unlink,
+and task-output payload activity. Generation-checked batching belongs on the
+Worker Data Agent / Controller connection, not on the Manager connection.
+
+Completed locally: compact replica/session/waiter arenas; direct Worker Agent
+protocol and local object table; Manager input/output removal; completion/data
+admission decoupling; session loss, reconnect advertisement, independent
+physical replay, requested-result persistence, and generation-checked GC. The
+17/17 DataVine regression and ordinary TaskVine single-worker smoke pass.
+
+The constant-size parametric evaluator and inverse mappings also pass, but
+native Store/Runtime frontier integration and the exact 128x16 full campaign
+remain OPEN. Do not treat evaluator equivalence as physical execution evidence.
+
 ## Active data-intensive benchmark campaign (2026-08-23)
 
 The implementation is on branch `benchmark/data-intensive-million-file`; the
