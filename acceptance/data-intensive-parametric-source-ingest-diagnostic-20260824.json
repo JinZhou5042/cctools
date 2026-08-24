@@ -27,7 +27,9 @@
     "accepted_as_benchmark_result": false
   },
   "resolution": {
-    "commit": "e5c7b801071ad19b83b9de53e760c7ba8ded32ca",
+	"commit": "e5c7b801071ad19b83b9de53e760c7ba8ded32ca",
+	"status": "SUPERSEDED_AFTER_FULL_SCALE_DIAGNOSTIC",
+	"superseded_by": "00e3e20220cbe918583116c0b901159c3a3b29bc",
     "behavior": "Worker Data Agent directly links unescaped local file URI origins into the task sandbox",
     "preserved": [
       "task performs the real random SharedFS reads",

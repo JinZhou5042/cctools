@@ -1,0 +1,71 @@
+{
+  "artifact_type": "datavine-data-intensive-diagnostic",
+  "schema": "datavine.acceptance/v1",
+  "date": "2026-08-24",
+  "status": "FAIL",
+  "claim": "diagnostic-only",
+  "source_commit": "a8e83fe56",
+  "workflow_id": "data-intensive-c64-s64-1787612462",
+  "experiment": "direct SharedFS symlink for one-use local file URI inputs",
+  "observation": {
+    "workers": 128,
+    "cores_per_worker": 16,
+    "minimum_workers": 128,
+    "minimum_central_active_cores": 2048,
+    "parallelism_samples": 124,
+    "sampler_visible_completions_at_stop": 77,
+    "final_30_second_tasks_per_second": 1.6165154931019623,
+    "final_60_second_tasks_per_second": 1.10167421754036,
+    "final_120_second_tasks_per_second": 0.6422821529954803,
+    "root_cause": "task random preads executed directly against SharedFS"
+  },
+  "stop": {
+    "reason": "fail-fast because direct random SharedFS IO was slower than sequential staging",
+    "operator_interrupt": true,
+    "condor_jobs_after_cleanup": 0,
+    "accepted_as_benchmark_result": false
+  },
+  "resolution": {
+    "commit": "00e3e20220cbe918583116c0b901159c3a3b29bc",
+    "behavior": "sequential in-process copy of each one-use local source directly into its task sandbox",
+    "removed": [
+      "one curl process per source file",
+      "worker-cache record for a one-use source",
+      "random SharedFS task reads"
+    ],
+    "preserved": [
+      "one exact sequential SharedFS read of every source byte",
+      "local random task reads",
+      "generic cache transfer for shared or remote URIs",
+      "generated-data peer movement and GC"
+    ],
+    "regression": "PASS 17/17",
+    "traditional_taskvine_TR_vine_single": "PASS",
+    "tiny_e2e": {
+      "status": "PASS",
+      "physical_submissions": 256,
+      "physical_completions": 256,
+      "task_reported_read_bytes": 6734080,
+      "total_seconds": 10.912922007002635,
+      "all_gates": true
+    }
+  },
+  "evidence": [
+    {
+      "path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/datavine-native-parametric-r4-a8e83fe56/parallelism.jsonl",
+      "sha256": "495bdff6a9235840af7a6342518f473b984c9c8210bfa3fd2b8d8a3ad64e03a5"
+    },
+    {
+      "path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/datavine-native-parametric-r4-a8e83fe56/failure.json",
+      "sha256": "9ae9677ae4fba3d58b67368e921ce4cc74cea0e4f3880b9ea1146e9da97f5d25"
+    },
+    {
+      "path": "/tmp/datavine-sharedfs-sandbox-copy-regression-20260824.json",
+      "sha256": "6bd3b922a0c82de4e474072c389d79a7c28e4f3694a539b91f87b91b18c9f715"
+    },
+    {
+      "path": "/tmp/datavine-parametric-e2e-run-v8/summary.json",
+      "sha256": "4cbc9ea21adf9d929fa6f98968010bd477a18b62dda52942611b91acbda2e424"
+    }
+  ]
+}
