@@ -1,0 +1,67 @@
+{
+  "artifact_type": "datavine-data-intensive-diagnostic",
+  "schema": "datavine.acceptance/v1",
+  "date": "2026-08-24",
+  "status": "FAIL",
+  "claim": "diagnostic-only",
+  "source_commit": "fb2755f10",
+  "workflow_id": "data-intensive-c64-s64-1787611869",
+  "fault": "one curl process and redundant worker-cache copy per local SharedFS source",
+  "observation": {
+    "workers": 128,
+    "cores_per_worker": 16,
+    "minimum_workers": 128,
+    "minimum_central_active_cores": 2048,
+    "parallelism_samples": 215,
+    "sampler_visible_completions_at_stop": 430,
+    "final_30_second_tasks_per_second": 2.735815885987923,
+    "final_60_second_tasks_per_second": 3.1082531906559234,
+    "final_120_second_tasks_per_second": 2.7581354971676566,
+    "observed_transfer_processes_per_worker": 10,
+    "projected_runtime_exceeds_worker_lifetime": true
+  },
+  "stop": {
+    "reason": "fail-fast because projected runtime exceeded the 24-hour worker lifetime",
+    "operator_interrupt": true,
+    "condor_jobs_after_cleanup": 0,
+    "accepted_as_benchmark_result": false
+  },
+  "resolution": {
+    "commit": "e5c7b801071ad19b83b9de53e760c7ba8ded32ca",
+    "behavior": "Worker Data Agent directly links unescaped local file URI origins into the task sandbox",
+    "preserved": [
+      "task performs the real random SharedFS reads",
+      "exact task-reported source-byte gate",
+      "generated-data peer movement",
+      "generation-checked garbage collection",
+      "generic transfer path for escaped or remote URIs"
+    ],
+    "regression": "PASS 17/17",
+    "traditional_taskvine_TR_vine_single": "PASS",
+    "tiny_e2e": {
+      "status": "PASS",
+      "physical_submissions": 256,
+      "physical_completions": 256,
+      "total_seconds": 10.590229809982702,
+      "all_gates": true
+    }
+  },
+  "evidence": [
+    {
+      "path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/datavine-native-parametric-r3-fb2755f10/parallelism.jsonl",
+      "sha256": "54deca88d320fb0c0d5cbf7697c8ddf38271b065622916f82b672b25b0cb64ce"
+    },
+    {
+      "path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/datavine-native-parametric-r3-fb2755f10/failure.json",
+      "sha256": "5c098cd05329c4c0e6c77b4f802ca3dcf2fae88fcb193dbe9bc5a55301f17c85"
+    },
+    {
+      "path": "/tmp/datavine-sharedfs-direct-regression-20260824.json",
+      "sha256": "1385dbabb6fc9168c2d683e74c8f07c77d7866d408e85f1571fbeeea06615547"
+    },
+    {
+      "path": "/tmp/datavine-parametric-e2e-run-v7/summary.json",
+      "sha256": "91563412ff3ad196715422713102654e96b7ad108e342ed1b434826bb1121123"
+    }
+  ]
+}
