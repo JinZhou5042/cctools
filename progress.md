@@ -647,3 +647,33 @@ The stopped shared-log run is recoverable under
 `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/campaign-diagnostic-shared-run-info-20260824`
 and compact evidence is in
 `acceptance/data-intensive-large-scale-shared-run-info-diagnostic-20260824.json`.
+
+## Current checkpoint — Condor churn semantics and per-task inode amplification (2026-08-24)
+
+The first full attempt after runtime-info isolation completed the entire
+explicit graph, admitted exactly 128 workers x 16 cores, and began execution.
+Graph construction created exactly 1,048,576 separate 51-byte staging argument
+files in addition to the 1.83 GB taskgraph stream; Manager RSS was about
+20,535,708 KiB near execution.  This confirms that per-task filesystem objects,
+not source payload reads, are another major graph-load/cleanup multiplier.
+
+At 14:13:01, 14:13:43, and 14:16:48 UTC, manager `Failed to read from worker`
+events matched HTCondor eviction events for clusters 16827, 16856, and 16781
+to the second.  The largest evicted process used 469 MiB of a requested 2 GiB
+and 245,998 KiB of a requested 4 GiB disk, and each job was rematched.  This
+distinguishes site-scheduler churn from the earlier shared-NFS logging
+interference and from task failure.  The operator stopped the run after the
+runner reported 10,000 completions (the final manager sample contained 10,436
+successful completions, three failed attempts, and zero exhausted attempts),
+so it remains diagnostic and cannot support a performance claim.
+
+The corrected acceptance contract no longer requires an opportunistic Condor
+job to be never evicted over a multi-hour run.  It requires exact 128x16
+admission and final recovery, explicit churn/failed-attempt counts, zero
+exhausted attempts, exact logical and physical successful completions, and the
+existing >=1,844-active-core central-window gate.  Both runners and the paired
+comparator implement this rule.  The raw diagnostic is retained under
+`/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/campaign-diagnostic-condor-evictions-20260824`;
+compact evidence is
+`acceptance/data-intensive-large-scale-condor-churn-diagnostic-20260824.json`.
+The replacement one-pair full-scale campaign remains OPEN.

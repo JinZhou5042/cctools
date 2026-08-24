@@ -26,6 +26,16 @@ window gate.  The raw, non-PASS evidence is indexed by
 The scheduling-width defect has a narrow benchmark fix.  The graph-ingestion
 cost needs an architectural fix.
 
+A later node-local-log attempt isolated two additional multipliers.  The
+explicit FunctionCall path generated one 51-byte staging argument file for
+every logical task, so graph construction created another 1,048,576 inodes
+before execution.  During execution, each short task produced per-file cache
+updates and a long sequence of manager-to-worker `unlink` commands.  These are
+not unavoidable consequences of one-task/one-execution semantics: family-level
+arguments, batched cache-state messages, and batch unlink/GC commands can
+preserve task identity while removing most control messages and filesystem
+operations.
+
 ## Boundary and invariant
 
 The target is not semantic task batching.  One logical task must still become
@@ -93,6 +103,18 @@ Logical state uses packed bitmaps and narrow counters:
   recoverable;
 - no permanent per-edge allocation when a checked inverse family exists.
 
+FunctionCall arguments for a materialization window should be encoded in one
+immutable cohort/family blob plus a compact task-index vector.  They must not
+be staged as one filesystem inode per task.  Workers should expand the same
+checked family formula locally for the selected index.
+
+Cache updates and GC need a bounded batch protocol.  A worker may report a
+vector of `(DataID, size, generation, state)` transitions in one frame, and the
+manager may return a vector/range of disposable DataIDs in one command.  Batch
+application is generation-checked and idempotent, so reconnect/replay cannot
+delete a newer replica.  This changes message count, not logical file identity
+or the point at which each file becomes collectable.
+
 Completing an A task generates its 20 B consumers from the inverse formula and
 increments their eight-input counters.  Completing a B task identifies its one
 C consumer and increments that five-input counter.  This preserves exact
@@ -128,6 +150,8 @@ batched journaling remain OPEN architectural work.
 | Resident physical task objects | O(all tasks) before execution | O(active ready window) |
 | Source path objects | O(source files) | O(active task inputs) |
 | Completion journal writes | one fine-grained stream | bounded batches + bitmap checkpoints |
+| FunctionCall arguments | one staging inode per task | family blob + bounded index vectors |
+| Cache update / unlink traffic | messages per file | generation-checked vectors/ranges |
 | Physical executions/completions | O(tasks) | O(tasks), unchanged |
 
 The last row is a hard lower bound.  The goal is orders-of-magnitude reduction
@@ -137,7 +161,9 @@ sublinear number of independent task executions.
 ## Delivery sequence
 
 1. Keep the current production v1 behavior and land the 128-worker scheduling
-   width fix with a real 128x16 gate.
+   width fix with a real 128x16 admission, central-parallelism, and final-pool
+   recovery gate.  Record opportunistic Condor churn separately from logical
+   task failure.
 2. Specify the family schema and implement a side-effect-free native evaluator
    with expansion equivalence tests against explicit IR on small randomized
    graphs.
@@ -147,7 +173,9 @@ sublinear number of independent task executions.
    graph-load RSS independently from execution RSS.
 5. Add batched transition journaling and atomic bitmap checkpoints, followed by
    truncation, restart, worker-loss, and publication-loss recovery tests.
-6. Rerun the full million-task/ten-million-file pair and preserve both
+6. Add generation-checked cache-update and GC vectors, plus family/index
+   FunctionCall argument transport with no per-task staging inode.
+7. Rerun the full million-task/ten-million-file pair and preserve both
    execution-only and end-to-end comparisons.
 
 ## Acceptance gates
@@ -164,8 +192,9 @@ The optimization is not complete until all of these pass:
   remains below 4 GiB on the acceptance manager;
 - resident materialized tasks remain within the configured window plus a
   documented bounded recovery allowance;
-- the 128x16 central window uses at least 1,844 active cores with no removed
-  workers;
+- the 128x16 central window uses at least 1,844 active cores; worker removals
+  and failed attempts are explicit, no attempt is exhausted, and the exact
+  pool is restored before acceptance;
 - task results, retry/recovery behavior, durable-output count, worker-local
   output policy, source bytes, movement, and GC accounting match the explicit
   graph;

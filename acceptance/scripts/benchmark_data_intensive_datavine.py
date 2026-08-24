@@ -165,7 +165,10 @@ def parallelism_summary(samples, tasks, workers, cores):
     ]
     ready_running = [item.get("tasks_waiting", 0) + item.get("tasks_running", 0) for item in central]
     active = [item.get("active_cores", 0) for item in central]
-    required_ready = min(32_768, max(1, tasks // 8))
+    # At the inclusive 90%-complete edge, at most 10% of a workflow can still
+    # be ready/running.  Cap the small-pilot threshold at that mathematical
+    # maximum; the full contract still requires the intended 32,768 tasks.
+    required_ready = min(32_768, max(1, tasks // 10))
     required_active = math.ceil(workers * cores * 0.90)
     return {
         "samples": len(samples),
@@ -405,12 +408,16 @@ def main():
         if any(len(value) != expected_result_bytes for value in results):
             raise AssertionError("sampled result size mismatch")
         fetched = time.monotonic()
+        final_inventory = wait_scale_workers(
+            repository / "taskvine/src/tools/vine_status", contact["manager_port"],
+            args.workers, args.cores, factory, timeout=min(args.timeout, 300),
+        )
+        recovered = time.monotonic()
         service_log.flush()
         counts = physical_counts(service_log_path, workflow_id)
         stages = runtime_stages(service_log_path, workflow_id)
         dominant = dominant_stage(service_log_path, workflow_id)
         exact_physical = counts == {"submissions": workload.tasks, "completions": workload.tasks}
-        no_removed_workers = stages.get("manager_workers_removed", 0) == 0
         parallelism = parallelism_summary(samples, workload.tasks, args.workers, args.cores)
         intermediate_files = workload.a_tasks + workload.b_tasks
         recovery_limit = stages.get("recovery_cache_limit", 0)
@@ -428,7 +435,10 @@ def main():
             "dataset_manifest": dataset["status"] == "PASS",
             "exact_logical_counts": all(info[name] == expected for name, expected in expected_info.items()),
             "exact_physical_counts": exact_physical,
-            "no_removed_workers": no_removed_workers,
+            "worker_churn_recovered": (
+                len(final_inventory) == args.workers
+                and set(final_inventory) == {args.cores}
+            ),
             "exact_worker_pool": len(inventory) == args.workers and set(inventory) == {args.cores},
             "sampled_outputs": len(results) == sample_count,
             "all_outputs_worker_local": stages.get("publication_remote_outputs") == workload.tasks,
@@ -459,6 +469,11 @@ def main():
             "dominant_stage": dominant,
             "parallelism": parallelism,
             "admission": {"workers": len(inventory), "cores_per_worker": inventory},
+            "final_worker_pool": {
+                "workers": len(final_inventory),
+                "cores_per_worker": final_inventory,
+                "manager_workers_removed": stages.get("manager_workers_removed", 0),
+            },
             "transport": {
                 "delta_payloads": len(payload_sizes) - 1,
                 "maximum_payload_bytes": max(payload_sizes),
@@ -470,6 +485,7 @@ def main():
                 "worker_admission_seconds": admitted - sealed,
                 "execution_seconds": terminal - admitted,
                 "result_validation_seconds": fetched - terminal,
+                "worker_pool_recovery_seconds": recovered - fetched,
                 "total_seconds": fetched - started,
                 "tasks_per_second": workload.tasks / (terminal - admitted),
             },

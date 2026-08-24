@@ -473,9 +473,10 @@ def taskvine_stats(manager):
     stats = manager.stats
     names = (
         "tasks_submitted", "tasks_done", "tasks_successful", "tasks_failed",
+        "tasks_exhausted_attempts",
         "bytes_sent", "bytes_received", "time_workers_execute_good",
         "time_send_good", "time_receive_good", "time_scheduling",
-        "workers_removed",
+        "workers_joined", "workers_removed", "workers_lost",
     )
     return {name: int(getattr(stats, name)) for name in names}
 

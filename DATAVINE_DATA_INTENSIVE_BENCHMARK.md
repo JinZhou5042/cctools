@@ -185,7 +185,10 @@ A DataVine run is invalid unless all of these hold:
 
 - workflow, physical submissions, and physical completions are exactly
   1,048,576;
-- the resident pool is exactly 128 x 16 and no worker is removed;
+- the resident pool is exactly 128 x 16 at admission and is restored to exactly
+  128 x 16 before acceptance after any scheduler churn;
+- worker removals and failed attempts are reported explicitly, no task exhausts
+  its attempts, and all 1,048,576 logical tasks complete successfully;
 - between 5% and 90% completion, READY + RUNNING never falls below 32,768 and
   active cores never fall below 90% of 2,048;
 - all 1,048,576 retained outputs use the worker-local/peer path;
@@ -197,8 +200,13 @@ A DataVine run is invalid unless all of these hold:
   required eviction from the 917,504 intermediates;
 - sampled result sizes and SHA-256 values match TaskVine.
 
-The TaskVine baseline uses the same exact-pool, no-worker-removal, READY +
-RUNNING, and 90%-active-core gates. Its sampler records at one-second cadence,
+The TaskVine baseline uses the same exact admission/recovery-pool, logical
+success, READY + RUNNING, and 90%-active-core gates. CRC's Condor pool is
+opportunistic, so a healthy worker job may be evicted and restarted on another
+host.  Such churn is not silently treated as success: removals, lost workers,
+and failed attempts remain in the artifact, retries must not be exhausted, the
+central parallelism gate must remain satisfied, and the exact 128 x 16 pool
+must be restored at the end. Its sampler records at one-second cadence,
 so evidence size is proportional to run time rather than the million-task
 count. It declares the 9,437,184 source inputs with TaskVine's native
 `declare_url` and canonical `file:///project01/...` URIs. Thus both backends
@@ -277,3 +285,17 @@ campaign root.  A successful runner removes its local diagnostics after the
 summary is installed; a failure records the local path for diagnosis.  The raw
 shared-run-info attempt is indexed by
 `acceptance/data-intensive-large-scale-shared-run-info-diagnostic-20260824.json`.
+
+The first full run with node-local runtime-info completed the full explicit
+graph and admitted 128 workers / 2,048 cores.  It also quantified two more
+control-plane costs: TaskVine created 1,048,576 individual staging argument
+files and retained roughly 20 GiB of manager RSS before execution.  At 10,436
+manager completions, three `Failed to read from worker` events matched three
+HTCondor `Job was evicted` events to the second.  The evicted jobs used at most
+469 MiB of their requested 2 GiB memory and 245,998 KiB of their requested
+4 GiB disk, then were immediately rematched, ruling out benchmark resource
+exhaustion.  The former zero-removal gate was therefore a site-scheduler gate,
+not a DataVine correctness gate.  The run remains non-PASS because it was
+stopped after that gate became impossible; its exact evidence and corrected
+churn-aware acceptance semantics are indexed by
+`acceptance/data-intensive-large-scale-condor-churn-diagnostic-20260824.json`.

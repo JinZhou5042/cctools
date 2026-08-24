@@ -11,7 +11,7 @@ import sys
 REQUIRED_GATES = {
     "datavine": {
         "dataset_manifest", "exact_logical_counts", "exact_physical_counts",
-        "no_removed_workers", "exact_worker_pool", "sampled_outputs",
+        "worker_churn_recovered", "exact_worker_pool", "sampled_outputs",
         "all_outputs_worker_local", "durable_outputs_only_requested",
         "manager_output_payload_bypass", "exact_sharedfs_source_bytes",
         "data_path_is_runtime_bottleneck", "gc_pressure_accounted",
@@ -20,7 +20,7 @@ REQUIRED_GATES = {
     "taskvine": {
         "dataset_manifest", "exact_logical_tasks",
         "exact_physical_submissions", "exact_physical_completions",
-        "all_tasks_successful", "no_removed_workers", "exact_worker_pool",
+        "all_tasks_successful", "worker_churn_recovered", "exact_worker_pool",
         "sampled_outputs", "sharedfs_source_transport", "source_inputs_task_scoped",
         "central_window_observed", "ready_parallelism", "active_parallelism",
     },

@@ -1,6 +1,6 @@
 # DataVine active implementation plan
 
-Updated: 2026-08-23
+Updated: 2026-08-24
 
 Design filter for every change, in order: **lightweight, efficient, high
 performance, maintainable**. A feature that duplicates authority, adds an
@@ -74,6 +74,25 @@ only 100 of 128 FunctionCall libraries.  The scheduling-depth fix and the
 parametric/lazy IR response are documented in
 `DATAVINE_PARAMETRIC_IR_PLAN.md`.  Do not report the stopped run or pilot ratio
 as the full DataVine advantage.
+
+The scheduling-width fix and node-local runtime-info isolation are now live.
+The latest full attempt built all 1,048,576 tasks, created 1,048,576 per-task
+staging argument files, admitted 128x16, and completed 10,436 tasks before the
+operator stopped it.  Three manager worker-read failures match three
+HTCondor eviction events to the second; the jobs were well inside memory/disk
+requests and were rematched.  Acceptance therefore records opportunistic
+churn but requires exact admission, zero exhausted attempts, exact logical and
+physical completion, >=90% central active cores, and exact final-pool recovery.
+The replacement full pair remains OPEN.  Compact evidence is
+`acceptance/data-intensive-large-scale-condor-churn-diagnostic-20260824.json`.
+
+After the pair, implement the parametric IR in this order: checked family
+evaluator, inverse dependency mappings, bounded task materialization and
+packed state, batched bitmap journal/checkpoints, then generation-checked
+cache-update/unlink vectors and family/index FunctionCall arguments.  The
+targets are <=60 s graph load, <4 GiB pre-execution RSS, >=100x smaller
+registration payload, and no per-task argument inode while retaining one
+independent physical execution per logical task attempt.
 
 The fixed 1024-core comparison is complete and PASS. The next measured
 optimization order is now evidence-driven:

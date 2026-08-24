@@ -87,12 +87,23 @@ def main():
     assert "terminate_group(factory, timeout=300)" in taskvine_runner
     assert "run_info_path=str(runtime_info_root)" in taskvine_runner
     assert '"runtime_info_storage": "node-local-temporary"' in taskvine_runner
+    assert '"worker_churn_recovered"' in taskvine_runner
+    assert 'stats["tasks_exhausted_attempts"] == 0' in taskvine_runner
+    assert "required_ready = min(32_768, max(1, tasks // 10))" in taskvine_runner
+    assert '"no_removed_workers"' not in taskvine_runner
     datavine_runner = (
         scripts / "benchmark_data_intensive_datavine.py"
     ).read_text()
     assert "terminate_group(factory, timeout=300)" in datavine_runner
     assert "DATAVINE_RUNTIME_INFO_PATH=str(runtime_info_root)" in datavine_runner
     assert '"runtime_info_storage": "node-local-temporary"' in datavine_runner
+    assert '"worker_churn_recovered"' in datavine_runner
+    assert "required_ready = min(32_768, max(1, tasks // 10))" in datavine_runner
+    assert '"no_removed_workers"' not in datavine_runner
+
+    comparator = (scripts / "compare_data_intensive_runs.py").read_text()
+    assert '"worker_churn_recovered"' in comparator
+    assert '"no_removed_workers"' not in comparator
 
     # One smallest cohort has exactly the same regular graph invariants.
     small = Workload(cohorts=1, scale=1, size_profile="tiny")
