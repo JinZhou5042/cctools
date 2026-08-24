@@ -1695,7 +1695,7 @@ static int attach_worker_data_spec(
 				if (valid) {
 					vine_datavine_put_u32(record + 8, result_info.attempt);
 					vine_datavine_put_u32(record + 12,
-							VINE_DATAVINE_TASK_INPUT_URI);
+							VINE_DATAVINE_TASK_INPUT_LOCAL_FILE);
 					vine_datavine_put_u32(record + 16,
 							(uint32_t)current_size);
 					vine_datavine_put_u32(record + 20,
@@ -1716,10 +1716,14 @@ static int attach_worker_data_spec(
 				current_size <= UINT32_MAX &&
 				buffer_putlstring(&strings, uri, uri_size) >= 0;
 		if (valid) {
-			vine_datavine_put_u32(record + 12,
-					(uintptr_t)itable_lookup(consumers, inputs[index].data_id) == 1
-							? VINE_DATAVINE_TASK_INPUT_URI_EPHEMERAL
-							: VINE_DATAVINE_TASK_INPUT_URI);
+			uint32_t input_kind = uri_size >= 8 &&
+					!memcmp(uri, "file:///", 8) && !memchr(uri, '%', uri_size)
+					? VINE_DATAVINE_TASK_INPUT_LOCAL_FILE
+					: (uintptr_t)itable_lookup(consumers,
+							inputs[index].data_id) == 1
+						? VINE_DATAVINE_TASK_INPUT_URI_EPHEMERAL
+						: VINE_DATAVINE_TASK_INPUT_URI;
+			vine_datavine_put_u32(record + 12, input_kind);
 			vine_datavine_put_u32(record + 16, (uint32_t)current_size);
 			vine_datavine_put_u32(record + 20, (uint32_t)uri_size);
 		}

@@ -46,6 +46,11 @@ cache-transfer path, while generated inputs continue to use generation-checked
 local or peer replicas. This URI-local rule does not depend on a separate
 consumer-count hint.
 
+Runtime encodes this decision explicitly as the fixed-width task-spec input
+kind `LOCAL_FILE`; Worker does not infer it from consumer counts or cache
+behavior. Generic `URI`, ephemeral `URI`, and generated-replica inputs remain
+separate protocol kinds.
+
 ## Independent progress
 
 Task and data events are concurrent and unordered:

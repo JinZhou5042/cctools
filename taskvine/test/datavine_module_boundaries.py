@@ -59,6 +59,7 @@ assert not list(native.glob("vine_datavine_directory.*"))
 protocol = (native / "vine_datavine_protocol.h").read_text()
 assert "VINE_DATAVINE_RPC_WORKFLOW_RESULT_DESCRIPTORS" in protocol
 assert "VINE_DATAVINE_RPC_WORKFLOW_WAIT_TERMINAL" in protocol
+assert "VINE_DATAVINE_TASK_INPUT_LOCAL_FILE" in protocol
 for removed in (
     "ALLOCATE_BATCH",
     "REPORT_REPLICA",

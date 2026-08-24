@@ -695,27 +695,32 @@ static int prepare_generated(struct vine_process *process,
 	return resolve_one(workflow, data_id, generation, local) == 2 ? 0 : -1;
 }
 
-static int prepare_uri(struct vine_process *process,
-		struct agent_workflow *workflow, uint64_t data_id,
+static int prepare_local_file(struct vine_process *process, uint64_t data_id,
 		const char *uri, size_t uri_size)
 {
 	/* A SharedFS source needs a local sequential stage before the task's random
 	 * reads, but not a cache record or one curl process per file. Copy it
 	 * atomically into the sandbox in this Worker Data Agent process. URI identity
 	 * is sufficient; correctness must not depend on a separate consumer hint. */
-	if (uri_size >= 8 && !memcmp(uri, "file:///", 8) &&
-			!memchr(uri, '%', uri_size)) {
-		size_t path_size = uri_size - 7;
-		char path[4096];
-		if (path_size >= sizeof(path))
-			return -1;
-		memcpy(path, uri + 7, path_size);
-		path[path_size] = 0;
-		int copied = sandbox_copy(process, data_id, path);
-		/* Distinguish a fresh copy so the caller can yield after its time budget
-		 * while still grouping fast small files into one event-loop turn. */
-		return copied == 2 ? 1 : copied == 1 ? 2 : -1;
-	}
+	if (uri_size < 8 || memcmp(uri, "file:///", 8) ||
+			memchr(uri, '%', uri_size))
+		return -1;
+	size_t path_size = uri_size - 7;
+	char path[4096];
+	if (path_size >= sizeof(path))
+		return -1;
+	memcpy(path, uri + 7, path_size);
+	path[path_size] = 0;
+	int copied = sandbox_copy(process, data_id, path);
+	/* Distinguish a fresh copy so the caller can yield after its time budget
+	 * while still grouping fast small files into one event-loop turn. */
+	return copied == 2 ? 1 : copied == 1 ? 2 : -1;
+}
+
+static int prepare_uri(struct vine_process *process,
+		struct agent_workflow *workflow, uint64_t data_id,
+		const char *uri, size_t uri_size)
+{
 	struct local_object *local = local_get(workflow, data_id, 1);
 	if (!local)
 		return -1;
@@ -810,6 +815,10 @@ enum vine_datavine_agent_prepare_status vine_datavine_agent_prepare(
 			return VINE_DATAVINE_AGENT_FAILED;
 		if (kind == VINE_DATAVINE_TASK_INPUT_GENERATED && !offset && !length) {
 			ready = prepare_generated(process, workflow, data_id, generation);
+		} else if (kind == VINE_DATAVINE_TASK_INPUT_LOCAL_FILE) {
+			const char *uri = 0;
+			if (string_field(&spec, offset, length, &uri))
+				ready = prepare_local_file(process, data_id, uri, length);
 		} else if (kind == VINE_DATAVINE_TASK_INPUT_URI ||
 				kind == VINE_DATAVINE_TASK_INPUT_URI_EPHEMERAL) {
 			const char *uri = 0;

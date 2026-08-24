@@ -127,6 +127,10 @@ Shell workflow test asserts that a one-use SharedFS source is not transferred
 into worker cache; the complete regression and tiny data-intensive E2E must
 remain PASS.
 
+The Runtime-to-Worker task spec carries local SharedFS input policy explicitly
+as `LOCAL_FILE`. This avoids the failed implicit approach in which the Worker
+had to infer staging policy from a consumer-count hint or URI side effect.
+
 This milestone deliberately reuses the existing packed Scheduler edge arrays,
 so current native graph memory is still O(edges), not the final
 O(families + task-state bitmap) target described below. That remaining

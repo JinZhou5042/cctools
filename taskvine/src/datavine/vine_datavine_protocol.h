@@ -67,6 +67,7 @@ enum vine_datavine_task_input_kind {
 	VINE_DATAVINE_TASK_INPUT_GENERATED = 0,
 	VINE_DATAVINE_TASK_INPUT_URI = 1,
 	VINE_DATAVINE_TASK_INPUT_URI_EPHEMERAL = 2,
+	VINE_DATAVINE_TASK_INPUT_LOCAL_FILE = 3,
 };
 
 enum vine_datavine_task_output_flags {
