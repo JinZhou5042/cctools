@@ -520,16 +520,24 @@ were zero.
 Canonical paired pilot artifacts are:
 
 - DataVine: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/datavine-local-1x1-final/summary.json`
-- TaskVine: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/taskvine-local-1x1-parallelism-final/summary.json`
-- Comparison: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/comparison-pilot-parallelism-final.json`
+- TaskVine: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/taskvine-local-1x1-sharedfs-final/summary.json`
+- Comparison: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/comparison-pilot-sharedfs-final.json`
 
 Both backends passed 256/256 exact physical counts with matching sampled C
-SHA-256 values. The paired pilot reports TaskVine 37.98 s versus DataVine
-26.21 s (1.45x) and 97.00% fewer Manager data-plane bytes. TaskVine's
-one-second sampler observed 21 central-window samples, all at the required
+SHA-256 values. The fair SharedFS-source pilot reports TaskVine 27.32 s versus
+DataVine 26.21 s (1.04x) and 76.38% fewer Manager data-plane bytes. TaskVine's
+one-second sampler observed 15 central-window samples, all at the required
 one active core; the full runner uses the same 90% active-core gate as
 DataVine without retaining one record per task. Its scope is
 explicitly `pilot`; it is not the full performance claim.
+
+The first full TaskVine graph-load attempt exposed an unfair baseline setting:
+with local-file declarations, TaskVine individually statted every
+source and relayed source payload through the Manager while DataVine used
+SharedFS. That pre-execution attempt was stopped and retained under
+`campaign-diagnostic-manager-source-20260823`; no task had executed. The final
+runner uses TaskVine's native canonical file-URL source transport so manager-byte and
+execution differences isolate intermediate/result movement and GC behavior.
 
 The full source dataset was generated under
 `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823`.

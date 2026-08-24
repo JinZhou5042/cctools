@@ -21,8 +21,8 @@ REQUIRED_GATES = {
         "dataset_manifest", "exact_logical_tasks",
         "exact_physical_submissions", "exact_physical_completions",
         "all_tasks_successful", "no_removed_workers", "exact_worker_pool",
-        "sampled_outputs", "central_window_observed", "ready_parallelism",
-        "active_parallelism",
+        "sampled_outputs", "sharedfs_source_transport",
+        "central_window_observed", "ready_parallelism", "active_parallelism",
     },
 }
 

@@ -43,26 +43,27 @@
     "status": "PASS",
     "physical_submissions": 256,
     "physical_completions": 256,
-    "execution_seconds": 37.98324735600181,
-    "graph_load_seconds": 4.7674065719984355,
-    "manager_bytes_sent": 1201798,
+    "execution_seconds": 27.315211123001063,
+    "graph_load_seconds": 1.3139742929997738,
+    "manager_bytes_sent": 38278,
     "manager_bytes_received": 131072,
     "workers_removed": 0,
-    "parallelism_central_samples": 21,
+    "parallelism_central_samples": 15,
     "parallelism_minimum_active_cores": 1,
     "parallelism_required_active_cores": 1,
-    "summary_path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/taskvine-local-1x1-parallelism-final/summary.json",
-    "summary_sha256": "99c7c0cf6b291866426dbbebcdcbf6e3789663bb668db7cbeb0d2317dca32769"
+    "source_transport": "taskvine-file-url-shared-filesystem",
+    "summary_path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/taskvine-local-1x1-sharedfs-final/summary.json",
+    "summary_sha256": "a4383f7ada44c2f933a61557867d8a11b0dc1e6c1cd13fd88b68dfef90cc3d2c"
   },
   "comparison": {
     "status": "PASS",
     "scope": "pilot",
     "sampled_result_hashes_equal": true,
     "sampled_results": 16,
-    "speedup_taskvine_over_datavine": 1.4492470467724359,
-    "manager_byte_reduction_fraction": 0.9699865703331908,
-    "summary_path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/comparison-pilot-parallelism-final.json",
-    "summary_sha256": "7b9b6fe26d03ddef84be1abb841833e78c5407065a53225feb3d7a5745161eff"
+    "speedup_taskvine_over_datavine": 1.0422091792454322,
+    "manager_byte_reduction_fraction": 0.7637791555949218,
+    "summary_path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/comparison-pilot-sharedfs-final.json",
+    "summary_sha256": "d5574564dc2f4f4821ec6bbdcf4df8b6db112738d7437385d0b9f1a8374ae3af"
   },
   "gates": {
     "exact_counts": true,

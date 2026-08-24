@@ -245,8 +245,8 @@ def main():
         for a_global in range(workload.a_tasks):
             data_ids = workload.a_input_data_ids(a_global)
             inputs = [
-                manager.declare_file(
-                    str(dataset_root / workload.source_path(a_global * 36 + slot)),
+                manager.declare_url(
+                    (dataset_root / workload.source_path(a_global * 36 + slot)).as_uri(),
                     cache="workflow",
                 )
                 for slot in range(36)
@@ -352,6 +352,7 @@ def main():
             "no_removed_workers": stats["workers_removed"] == 0,
             "exact_worker_pool": int(manager.stats.workers_connected) == args.workers and int(manager.stats.total_cores) == args.workers * args.cores,
             "sampled_outputs": len(sampled) == sample_count and set(sampled) == {expected_size},
+            "sharedfs_source_transport": True,
             **parallelism["gates"],
         }
         result = {
@@ -376,6 +377,7 @@ def main():
             },
             "peak": {"load": load_peak_result, "execute": execute_peak_result},
             "factory_command": list(factory_command),
+            "source_transport": "taskvine-file-url-shared-filesystem",
             "environment": {
                 "hostname": platform.node(), "python": sys.version,
                 "maximum_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,

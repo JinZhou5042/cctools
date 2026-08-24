@@ -43,9 +43,14 @@ Current PASS evidence:
   custom output-name compatibility;
 - local 1x1 paired mechanism pilot: DataVine and TaskVine both 256/256 physical
   tasks, all gates PASS, sampled C result SHA-256 values equal; the canonical
-  machine-compared pair is TaskVine 37.98 s versus DataVine 26.21 s (1.45x)
-  with 97.00% fewer manager data-plane bytes. This is pilot evidence, not a production
+  machine-compared SharedFS-source pair is TaskVine 27.32 s versus DataVine
+  26.21 s (1.04x) with 76.38% fewer manager data-plane bytes. This is pilot evidence, not a production
   performance claim;
+- the production comparison configures TaskVine's native `declare_url` with
+  canonical SharedFS file URIs, matching DataVine's SharedFS
+  source transport. The earlier manager-relayed pilot and the stopped
+  pre-execution full graph load are diagnostic only and
+  cannot support the final manager-byte claim;
 - 19 superseded DataVine factory packages (about 15 GB) were moved to the
   recoverable `/project01/ndcms/jzhou24/datavine-benchmarks/factory-package-archive-20260823`
   archive with original-path symlinks. Active production and rollback packages
