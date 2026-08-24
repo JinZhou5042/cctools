@@ -41,7 +41,7 @@ Current PASS evidence:
   custom output-name compatibility;
 - local 1x1 paired mechanism pilot: DataVine and TaskVine both 256/256 physical
   tasks, all gates PASS, sampled C result SHA-256 values equal; the canonical
-  machine-compared pair is TaskVine 48.97 s versus DataVine 26.21 s (1.87x)
+  machine-compared pair is TaskVine 37.98 s versus DataVine 26.21 s (1.45x)
   with 97.00% fewer manager data-plane bytes. This is pilot evidence, not a production
   performance claim;
 - 19 superseded DataVine factory packages (about 15 GB) were moved to the

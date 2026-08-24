@@ -175,7 +175,7 @@ production performance claim.
 
 The 1 x 1 tiny-profile mechanism pilot is PASS for both backends with 256/256
 logical/physical tasks and matching sampled output hashes. Its single paired
-execution measured 48.97 s for TaskVine and 26.21 s for DataVine (1.87x) with
+execution measured 37.98 s for TaskVine and 26.21 s for DataVine (1.45x) with
 97.00% fewer manager data-plane bytes, while DataVine reported zero manager task-output payload bytes and only 32 requested
 durable outputs. This is useful mechanism evidence only. The full 128 x 16,
 five-pair performance result remains OPEN until its dataset and runs complete.

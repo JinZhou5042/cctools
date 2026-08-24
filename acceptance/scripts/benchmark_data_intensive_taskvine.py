@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -153,6 +154,32 @@ def add_inputs(task, files, data_ids):
         task.add_input(file, f"datavine/data/{data_id}")
 
 
+def parallelism_summary(samples, tasks, workers, cores):
+    central = [
+        item for item in samples
+        if 0.05 * tasks <= item.get("tasks_complete", -1) <= 0.90 * tasks
+    ]
+    ready_running = [item.get("tasks_waiting", 0) + item.get("tasks_running", 0) for item in central]
+    active = [item.get("active_cores", 0) for item in central]
+    required_ready = min(32_768, max(1, tasks // 8))
+    required_active = math.ceil(workers * cores * 0.90)
+    return {
+        "samples": len(samples),
+        "central_samples": len(central),
+        "minimum_ready_plus_running": min(ready_running) if ready_running else None,
+        "maximum_ready_plus_running": max(ready_running) if ready_running else None,
+        "minimum_active_cores": min(active) if active else None,
+        "maximum_active_cores": max(active) if active else None,
+        "required_ready_plus_running": required_ready,
+        "required_active_cores": required_active,
+        "gates": {
+            "central_window_observed": bool(central),
+            "ready_parallelism": bool(ready_running) and min(ready_running) >= required_ready,
+            "active_parallelism": bool(active) and min(active) >= required_active,
+        },
+    }
+
+
 def main():
     args = parse_args()
     workload = Workload(args.cohorts, args.scale, args.size_profile)
@@ -273,21 +300,25 @@ def main():
             raise AssertionError("task executed during static graph load")
         execute_peak = PeakSampler((os.getpid(), factory.pid)).start()
         samples = []
+        next_sample = time.monotonic()
         execution_deadline = time.monotonic() + args.timeout
         while completed < workload.tasks:
             if time.monotonic() >= execution_deadline:
                 raise TimeoutError(f"{workload.tasks - completed} tasks remain")
             task = manager.wait(1)
             manager._refresh_stats()
-            samples.append({
-                "monotonic_seconds": time.monotonic(),
-                "tasks_waiting": int(manager.stats.tasks_waiting),
-                "tasks_running": int(manager.stats.tasks_running),
-                "tasks_complete": int(manager.stats.tasks_done) - baseline["tasks_done"],
-                "workers": int(manager.stats.workers_connected),
-                "total_cores": int(manager.stats.total_cores),
-                "active_cores": int(manager.stats.committed_cores),
-            })
+            now = time.monotonic()
+            if now >= next_sample:
+                samples.append({
+                    "monotonic_seconds": now,
+                    "tasks_waiting": int(manager.stats.tasks_waiting),
+                    "tasks_running": int(manager.stats.tasks_running),
+                    "tasks_complete": int(manager.stats.tasks_done) - baseline["tasks_done"],
+                    "workers": int(manager.stats.workers_connected),
+                    "total_cores": int(manager.stats.total_cores),
+                    "active_cores": int(manager.stats.committed_cores),
+                })
+                next_sample = now + 1.0
             if task is None:
                 continue
             if not task.successful():
@@ -311,6 +342,7 @@ def main():
         expected_size = profile["c_output"]
         sampled = [path.stat().st_size for path in sample_paths]
         sampled_hashes = [hashlib.sha256(path.read_bytes()).hexdigest() for path in sample_paths]
+        parallelism = parallelism_summary(samples, workload.tasks, args.workers, args.cores)
         gates = {
             "dataset_manifest": dataset["status"] == "PASS",
             "exact_logical_tasks": completed == workload.tasks,
@@ -320,6 +352,7 @@ def main():
             "no_removed_workers": stats["workers_removed"] == 0,
             "exact_worker_pool": int(manager.stats.workers_connected) == args.workers and int(manager.stats.total_cores) == args.workers * args.cores,
             "sampled_outputs": len(sampled) == sample_count and set(sampled) == {expected_size},
+            **parallelism["gates"],
         }
         result = {
             "schema": "datavine.data-intensive-taskvine-run/v1",
@@ -333,7 +366,7 @@ def main():
                 "bytes_each": expected_size,
                 "sha256": sampled_hashes,
             },
-            "parallelism_samples": samples,
+            "parallelism": parallelism,
             "timing": {
                 "worker_admission_seconds": admitted - started,
                 "graph_load_seconds": loaded - load_started,

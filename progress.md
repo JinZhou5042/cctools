@@ -518,12 +518,15 @@ were zero.
 Canonical paired pilot artifacts are:
 
 - DataVine: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/datavine-local-1x1-final/summary.json`
-- TaskVine: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/taskvine-local-1x1-semantic/summary.json`
-- Comparison: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/comparison-pilot-final.json`
+- TaskVine: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/taskvine-local-1x1-parallelism-final/summary.json`
+- Comparison: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/comparison-pilot-parallelism-final.json`
 
 Both backends passed 256/256 exact physical counts with matching sampled C
-SHA-256 values. The paired pilot reports TaskVine 48.97 s versus DataVine
-26.21 s (1.87x) and 97.00% fewer Manager data-plane bytes. Its scope is
+SHA-256 values. The paired pilot reports TaskVine 37.98 s versus DataVine
+26.21 s (1.45x) and 97.00% fewer Manager data-plane bytes. TaskVine's
+one-second sampler observed 21 central-window samples, all at the required
+one active core; the full runner uses the same 90% active-core gate as
+DataVine without retaining one record per task. Its scope is
 explicitly `pilot`; it is not the full performance claim.
 
 The full source dataset is being generated under
