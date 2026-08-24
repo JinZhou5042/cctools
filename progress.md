@@ -9,11 +9,12 @@ The first native full-scale launch reached exact 128x16 admission and held all
 `file:///` origin forked curl and made a redundant cache copy. With ten blocked
 curl processes per worker, the final 120-second window completed only about
 2.76 tasks/s and could not fit the 24-hour worker lifetime. The run was stopped
-at 430 sampled completions and remains a FAIL diagnostic. Worker Data Agent now
-directly links local SharedFS origins into the sandbox; real task reads,
-intermediate peer movement, and GC are unchanged. Post-change 17/17 regression,
-traditional TaskVine smoke, and all-gate tiny E2E pass; a replacement exact
-128x16 run is required.
+at 430 sampled completions and remains a FAIL diagnostic. A direct-symlink
+follow-up made random task reads hit SharedFS and was slower. Worker Data Agent
+now performs an in-process sequential copy of each one-use local source
+directly into its task sandbox, with no curl process or cache record. Real
+source bytes, intermediate peer movement, and GC are unchanged. A replacement
+exact 128x16 run is required after the revised regression gates pass.
 
 Runtime v2 now separates compute completion from data admission. TaskVine
 Manager owns physical dispatch/completion and transports only a generic opaque

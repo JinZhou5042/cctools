@@ -529,6 +529,44 @@ static int sandbox_link(struct vine_process *process, uint64_t data_id,
 	return symlink(cache_path, target) == 0;
 }
 
+static int sandbox_copy(struct vine_process *process, uint64_t data_id,
+		const char *source)
+{
+	char directory[4096];
+	char target[4096];
+	char temporary[4096];
+	if (snprintf(directory, sizeof(directory), "%s/datavine/data",
+			process->sandbox) >= (int)sizeof(directory) ||
+			snprintf(target, sizeof(target), "%s/%llu", directory,
+					(unsigned long long)data_id) >= (int)sizeof(target) ||
+			snprintf(temporary, sizeof(temporary), "%s.part.%ld", target,
+					(long)getpid()) >= (int)sizeof(temporary) ||
+			!create_dir(directory, 0700))
+		return 0;
+	if (!access(target, R_OK))
+		return 1;
+	int input = open(source, O_RDONLY | O_CLOEXEC);
+	int output = input >= 0 ? open(temporary,
+			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
+	int valid = output >= 0;
+	unsigned char buffer[1 << 16];
+	while (valid) {
+		ssize_t count = read(input, buffer, sizeof(buffer));
+		if (!count)
+			break;
+		valid = count > 0 && full_write(output, buffer, (size_t)count) == count;
+	}
+	if (input >= 0 && close(input))
+		valid = 0;
+	if (output >= 0 && close(output))
+		valid = 0;
+	if (valid && rename(temporary, target))
+		valid = 0;
+	if (!valid)
+		unlink(temporary);
+	return valid;
+}
+
 static int safe_output_name(const char *name, size_t length)
 {
 	if (!length || name[0] == '/' || name[length - 1] == '/' ||
@@ -657,14 +695,12 @@ static int prepare_generated(struct vine_process *process,
 
 static int prepare_uri(struct vine_process *process,
 		struct agent_workflow *workflow, uint64_t data_id,
-		const char *uri, size_t uri_size)
+		const char *uri, size_t uri_size, int ephemeral)
 {
-	/* A local SharedFS origin is already directly addressable by every worker.
-	 * Link it into the task sandbox instead of forking curl and copying it into
-	 * worker cache first.  The task still performs the real source read; this
-	 * removes only a duplicate read/write and one process per source file.  URI
-	 * escaping retains the generic transfer path so it is decoded correctly. */
-	if (uri_size >= 8 && !memcmp(uri, "file:///", 8) &&
+	/* A one-use SharedFS source needs a local sequential stage before the task's
+	 * random reads, but not a cache record or one curl process per file. Copy it
+	 * atomically into the sandbox in this Worker Data Agent process. */
+	if (ephemeral && uri_size >= 8 && !memcmp(uri, "file:///", 8) &&
 			!memchr(uri, '%', uri_size)) {
 		size_t path_size = uri_size - 7;
 		char path[4096];
@@ -672,7 +708,7 @@ static int prepare_uri(struct vine_process *process,
 			return -1;
 		memcpy(path, uri + 7, path_size);
 		path[path_size] = 0;
-		return sandbox_link(process, data_id, path) ? 1 : -1;
+		return sandbox_copy(process, data_id, path) ? 1 : -1;
 	}
 	struct local_object *local = local_get(workflow, data_id, 1);
 	if (!local)
@@ -771,7 +807,8 @@ enum vine_datavine_agent_prepare_status vine_datavine_agent_prepare(
 				kind == VINE_DATAVINE_TASK_INPUT_URI_EPHEMERAL) {
 			const char *uri = 0;
 			if (string_field(&spec, offset, length, &uri))
-				ready = prepare_uri(process, workflow, data_id, uri, length);
+				ready = prepare_uri(process, workflow, data_id, uri, length,
+						kind == VINE_DATAVINE_TASK_INPUT_URI_EPHEMERAL);
 		}
 		if (ready < 0)
 			return VINE_DATAVINE_AGENT_FAILED;

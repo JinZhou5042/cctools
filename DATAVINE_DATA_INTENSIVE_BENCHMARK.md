@@ -242,11 +242,13 @@ not complete within the 24-hour worker lifetime, so the run was deliberately
 stopped at 430 sampler-visible completions. It is FAIL diagnostic evidence,
 not a benchmark result.
 
-Worker Data Agent now links unescaped local SharedFS sources directly into the
-sandbox. This removes 9.4 million curl forks and a redundant 712.8-GiB copy,
-without changing the task kernel's actual random reads, the exact reported
-source-byte gate, intermediate peer movement, or GC. The replacement full run
-remains OPEN.
+A direct-symlink follow-up made the task's random preads hit SharedFS and was
+slower, so it too was stopped as diagnostic evidence. Worker Data Agent now
+does an in-process sequential copy of each one-use local source directly into
+the sandbox. This removes 9.4 million curl forks and the redundant cache copy,
+while preserving exactly one 712.8-GiB SharedFS read, local random task reads,
+the exact reported source-byte gate, intermediate peer movement, and GC. The
+replacement full run remains OPEN.
 
 The 1 x 1 tiny-profile mechanism pilot is PASS for both backends with 256/256
 logical/physical tasks and matching sampled output hashes. Its single paired

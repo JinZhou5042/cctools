@@ -112,15 +112,16 @@ processes per worker were observed blocked in SharedFS I/O; the stable rate was
 only about 2.7 tasks/s and could not finish within the 24-hour worker lifetime.
 That run was stopped and retained as a diagnostic, not acceptance evidence.
 
-Worker Data Agent now recognizes unescaped local `file:///` origins and links
-the SharedFS path directly into the task sandbox. The task still performs the
-same deterministic random read of every source byte; only the redundant
-712.8-GiB cache copy and 9.4 million curl process launches disappear. Escaped
-or non-local URIs retain the generic transfer path. The Shell workflow test
-asserts that a SharedFS file source is not transferred into worker cache, the
-complete 17/17 regression passes, and the tiny data-intensive E2E improved
-from 16.54 seconds to 11.37 seconds while retaining every exact byte and
-correctness gate.
+A direct-symlink experiment removed the copy but made the task's random preads
+hit SharedFS, reducing rather than improving full-scale throughput. The final
+path recognizes one-use, unescaped local `file:///` origins and performs one
+in-process sequential copy directly into the task sandbox. The task then does
+its random reads locally. This preserves exactly one 712.8-GiB SharedFS read
+while removing the redundant worker-cache object and 9.4 million curl process
+launches. Shared or remote URIs retain the generic cache-transfer path. The
+Shell workflow test asserts that a one-use SharedFS source is not transferred
+into worker cache; the complete regression and tiny data-intensive E2E must
+remain PASS.
 
 This milestone deliberately reuses the existing packed Scheduler edge arrays,
 so current native graph memory is still O(edges), not the final
