@@ -51,11 +51,14 @@ Current PASS evidence:
   archive with original-path symlinks. Active production and rollback packages
   were not moved.
 
-OPEN: complete and fully hash 128 dataset parts, calibrate worker scale, run
-five alternating TaskVine/DataVine pairs at exact 128x16, and pass the
-comparison claim gate. As of this update, Condor cluster 15830 is generating
-the full source dataset; restart arguments are resume-safe. Do not report the
-pilot ratio as the full DataVine advantage.
+The generation gate is PASS: all 128 atomic part manifests bind exactly
+9,437,184 source files and 765,393,371,136 logical/allocated bytes to the
+frozen contract. Condor cluster 15870 is independently rereading and hashing
+all 712.8 GiB as 128 verification parts.
+
+OPEN: complete and assemble all 128 full-hash proofs, run five alternating
+TaskVine/DataVine pairs at exact 128x16, and pass the comparison claim gate.
+Do not report the pilot ratio as the full DataVine advantage.
 
 The fixed 1024-core comparison is complete and PASS. The next measured
 optimization order is now evidence-driven:

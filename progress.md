@@ -531,12 +531,15 @@ one active core; the full runner uses the same 90% active-core gate as
 DataVine without retaining one record per task. Its scope is
 explicitly `pilot`; it is not the full performance claim.
 
-The full source dataset is being generated under
+The full source dataset was generated under
 `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823`.
 Condor cluster 15830 owns the original 128 parts and cluster 15831 owns three
 resume jobs after evictions. Part manifests are atomic, and job arguments are
-resume-safe. OPEN gates are all 128 manifests, full dataset hashing, scale
-calibration, and five alternating exact 128x16 backend pairs.
+resume-safe. The generation gate is PASS at 128/128 manifests, 9,437,184
+files, and 765,393,371,136 logical/allocated bytes with exact contract and
+manifest digests. Cluster 15870 is performing an independent 128-way reread
+and full hash. OPEN gates are all 128 hash proofs, final dataset assembly, and
+five alternating exact 128x16 backend pairs.
 
 Separately, 19 superseded DataVine factory tarballs totaling about 15 GB moved
 to `/project01/ndcms/jzhou24/datavine-benchmarks/factory-package-archive-20260823`.
