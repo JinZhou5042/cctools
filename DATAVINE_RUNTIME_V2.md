@@ -33,12 +33,13 @@ DataVine task-output payload bytes through Manager = 0
 The traditional TaskVine file path remains available and unchanged for
 ordinary TaskVine tasks and is the performance baseline.
 
-For a one-use, unescaped local `file:///` immutable origin, Worker Data Agent
+For an unescaped local `file:///` immutable origin, Worker Data Agent
 performs an atomic sequential copy directly into the sandbox. It does not fork
 a transfer process or create a worker-cache record; the executor's random reads
 then remain local. Shared and remote URIs retain the generic cache-transfer
 path, while generated inputs continue to use generation-checked local or peer
-replicas.
+replicas. This URI-local rule does not depend on a separate consumer-count
+hint.
 
 ## Independent progress
 

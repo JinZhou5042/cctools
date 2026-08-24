@@ -114,11 +114,11 @@ That run was stopped and retained as a diagnostic, not acceptance evidence.
 
 A direct-symlink experiment removed the copy but made the task's random preads
 hit SharedFS, reducing rather than improving full-scale throughput. The final
-path recognizes one-use, unescaped local `file:///` origins and performs one
+path recognizes unescaped local `file:///` origins and performs one
 in-process sequential copy directly into the task sandbox. The task then does
 its random reads locally. This preserves exactly one 712.8-GiB SharedFS read
 while removing the redundant worker-cache object and 9.4 million curl process
-launches. Shared or remote URIs retain the generic cache-transfer path. The
+launches. Remote or escaped URIs retain the generic cache-transfer path. The
 Shell workflow test asserts that a one-use SharedFS source is not transferred
 into worker cache; the complete regression and tiny data-intensive E2E must
 remain PASS.

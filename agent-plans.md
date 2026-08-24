@@ -132,10 +132,10 @@ The first full native launch isolated one remaining one-use-source overhead:
 cache copy before the real task read. Exact 128x16 admission passed, but the
 roughly 2.7-task/s source-stage rate would exceed the worker lifetime. Worker
 The direct-symlink experiment made random task reads hit SharedFS and was
-slower. Worker Data Agent now sequentially copies each one-use local source
+slower. Worker Data Agent now sequentially copies each local SharedFS source
 directly into its sandbox without a curl process or cache record, then leaves
 random reads local. Preserve the generic cache-transfer path for shared or
-remote URIs and do not weaken the exact task-reported source-byte gate.
+remote or escaped URIs and do not weaken the exact task-reported source-byte gate.
 
 The fixed 1024-core comparison is complete and PASS. The next measured
 optimization order is now evidence-driven:

@@ -11,7 +11,7 @@ curl processes per worker, the final 120-second window completed only about
 2.76 tasks/s and could not fit the 24-hour worker lifetime. The run was stopped
 at 430 sampled completions and remains a FAIL diagnostic. A direct-symlink
 follow-up made random task reads hit SharedFS and was slower. Worker Data Agent
-now performs an in-process sequential copy of each one-use local source
+now performs an in-process sequential copy of each local SharedFS source
 directly into its task sandbox, with no curl process or cache record. Real
 source bytes, intermediate peer movement, and GC are unchanged. A replacement
 exact 128x16 run is required after the revised regression gates pass.

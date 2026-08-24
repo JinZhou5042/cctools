@@ -695,12 +695,13 @@ static int prepare_generated(struct vine_process *process,
 
 static int prepare_uri(struct vine_process *process,
 		struct agent_workflow *workflow, uint64_t data_id,
-		const char *uri, size_t uri_size, int ephemeral)
+		const char *uri, size_t uri_size)
 {
-	/* A one-use SharedFS source needs a local sequential stage before the task's
-	 * random reads, but not a cache record or one curl process per file. Copy it
-	 * atomically into the sandbox in this Worker Data Agent process. */
-	if (ephemeral && uri_size >= 8 && !memcmp(uri, "file:///", 8) &&
+	/* A SharedFS source needs a local sequential stage before the task's random
+	 * reads, but not a cache record or one curl process per file. Copy it
+	 * atomically into the sandbox in this Worker Data Agent process. URI identity
+	 * is sufficient; correctness must not depend on a separate consumer hint. */
+	if (uri_size >= 8 && !memcmp(uri, "file:///", 8) &&
 			!memchr(uri, '%', uri_size)) {
 		size_t path_size = uri_size - 7;
 		char path[4096];
@@ -807,8 +808,7 @@ enum vine_datavine_agent_prepare_status vine_datavine_agent_prepare(
 				kind == VINE_DATAVINE_TASK_INPUT_URI_EPHEMERAL) {
 			const char *uri = 0;
 			if (string_field(&spec, offset, length, &uri))
-				ready = prepare_uri(process, workflow, data_id, uri, length,
-						kind == VINE_DATAVINE_TASK_INPUT_URI_EPHEMERAL);
+				ready = prepare_uri(process, workflow, data_id, uri, length);
 		}
 		if (ready < 0)
 			return VINE_DATAVINE_AGENT_FAILED;

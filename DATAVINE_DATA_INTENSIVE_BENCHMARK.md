@@ -244,7 +244,7 @@ not a benchmark result.
 
 A direct-symlink follow-up made the task's random preads hit SharedFS and was
 slower, so it too was stopped as diagnostic evidence. Worker Data Agent now
-does an in-process sequential copy of each one-use local source directly into
+does an in-process sequential copy of each local source directly into
 the sandbox. This removes 9.4 million curl forks and the redundant cache copy,
 while preserving exactly one 712.8-GiB SharedFS read, local random task reads,
 the exact reported source-byte gate, intermediate peer movement, and GC. The
