@@ -50,6 +50,23 @@ def main():
     assert sizes["stored_artifacts"] == 1_143_350_493_184, sizes
     assert sizes["stored_artifacts"] < sizes["limit"]
 
+    campaign = subprocess.run(
+        (
+            sys.executable, scripts / "run_data_intensive_campaign.py",
+            "--acceptance", "--dataset-root", "/not-used",
+            "--run-root", "/not-used", "--plan-only",
+        ),
+        check=True, stdout=subprocess.PIPE, text=True,
+    )
+    campaign_plan = json.loads(campaign.stdout)
+    assert campaign_plan["schedule"] == [
+        [1, "taskvine"], [1, "datavine"],
+        [2, "datavine"], [2, "taskvine"],
+        [3, "taskvine"], [3, "datavine"],
+        [4, "datavine"], [4, "taskvine"],
+        [5, "taskvine"], [5, "datavine"],
+    ]
+
     # One smallest cohort has exactly the same regular graph invariants.
     small = Workload(cohorts=1, scale=1, size_profile="tiny")
     a_degree = collections.Counter()

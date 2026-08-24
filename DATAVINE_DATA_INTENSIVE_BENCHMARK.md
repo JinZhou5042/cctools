@@ -148,7 +148,15 @@ $PY acceptance/scripts/benchmark_data_intensive_datavine.py \
 
 Run the backends sequentially, in alternating order across repetitions, so they
 do not contend with each other. Five successful pairs are required for a
-production claim. Compare them with:
+production claim. The resumable campaign driver freezes the commit and dataset
+digest, alternates backend order, and records an atomic state file:
+
+```sh
+$PY acceptance/scripts/run_data_intensive_campaign.py --acceptance \
+  --dataset-root "$RUN/dataset" --run-root "$RUN/campaign"
+```
+
+The equivalent manual comparison command is:
 
 ```sh
 $PY acceptance/scripts/compare_data_intensive_runs.py \
