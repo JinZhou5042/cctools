@@ -618,3 +618,15 @@ serially removing 128 Condor jobs.  Both full runners now give factory cleanup
 five minutes; service processes retain the 30-second default.  The two tail
 jobs from the diagnostic placement run were already marked for exact removal
 by owner and factory `Iwd` and were not reused as evidence.
+
+The next full attempt used the corrected 128-depth runner and sealed the entire
+million-task graph.  It admitted exactly 128x16, then lost one worker during
+the first 4,690 completed tasks.  The observed state was 127 connected workers,
+2,032 active cores, one failed attempt, and one removed worker.  Because those
+facts permanently violate the all-success, no-removal, and exact-pool gates,
+the run was stopped rather than allowed to produce a misleading comparison.
+All 128 Condor jobs were removed through the extended graceful factory path.
+The recoverable run directory is
+`/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/campaign-diagnostic-worker-loss-20260824`
+and the compact record is
+`acceptance/data-intensive-large-scale-worker-loss-diagnostic-20260824.json`.

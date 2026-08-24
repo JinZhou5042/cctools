@@ -253,3 +253,11 @@ The placement run also showed that a 30-second generic process-shutdown grace
 period can kill `vine_factory` while it is serially removing a 128-job Condor
 pool.  Both full runners now allow five minutes for graceful factory cleanup;
 this changes no measured execution interval.
+
+A later full attempt on the corrected runner admitted all 128 workers but lost
+one worker during the first 4,690 completed tasks.  The manager snapshot showed
+127 connected workers, 2,032 active cores, one failed task attempt, and one
+removed worker.  It was stopped immediately because it could no longer pass
+the exact-pool, no-removal, and all-success gates.  Factory shutdown removed
+all 128 Condor jobs.  This attempt is diagnostic only and is indexed by
+`acceptance/data-intensive-large-scale-worker-loss-diagnostic-20260824.json`.
