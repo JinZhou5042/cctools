@@ -1908,6 +1908,8 @@ static void vine_worker_serve_manager(struct link *manager)
 		int wait_msec = library_functions_running()
 						? 1
 						: 5000;
+		if (vine_datavine_agent_waiting())
+			wait_msec = 1;
 
 		if (sigchld_received_flag) {
 			wait_msec = 0;

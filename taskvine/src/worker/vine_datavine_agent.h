@@ -21,5 +21,6 @@ enum vine_datavine_agent_prepare_status vine_datavine_agent_prepare(
 		struct vine_process *process);
 int vine_datavine_agent_commit(struct vine_process *process);
 void vine_datavine_agent_progress(void);
+int vine_datavine_agent_waiting(void);
 
 #endif

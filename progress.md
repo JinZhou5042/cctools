@@ -13,7 +13,11 @@ at 430 sampled completions and remains a FAIL diagnostic. A direct-symlink
 follow-up made random task reads hit SharedFS and was slower. Worker Data Agent
 now performs an in-process sequential copy of each local SharedFS source
 directly into its task sandbox, with no curl process or cache record. Real
-source bytes, intermediate peer movement, and GC are unchanged. A replacement
+source bytes, intermediate peer movement, and GC are unchanged. The initial
+synchronous loop starved worker heartbeats when it copied all 36 inputs in one
+turn; the corrected loop groups fast files within a 25-ms budget and returns
+`WAIT_DATA` after crossing it. A consumed Worker Agent hint also reduces the
+next poll timeout from 5 seconds to 1 ms while data waits remain. A replacement
 exact 128x16 run is required after the revised regression gates pass.
 
 Runtime v2 now separates compute completion from data admission. TaskVine

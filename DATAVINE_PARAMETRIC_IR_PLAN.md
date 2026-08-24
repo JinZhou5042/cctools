@@ -118,7 +118,11 @@ path recognizes unescaped local `file:///` origins and performs one
 in-process sequential copy directly into the task sandbox. The task then does
 its random reads locally. This preserves exactly one 712.8-GiB SharedFS read
 while removing the redundant worker-cache object and 9.4 million curl process
-launches. Remote or escaped URIs retain the generic cache-transfer path. The
+launches. One task-preparation turn has a 25-ms copy budget and returns
+`WAIT_DATA` after crossing it, grouping fast small files while bounding
+heartbeat latency under SharedFS pressure. A consumed Worker Agent hint reduces
+the next poll timeout from 5 seconds to 1 ms while any DataVine task waits for
+data. Remote or escaped URIs retain the generic cache-transfer path. The
 Shell workflow test asserts that a one-use SharedFS source is not transferred
 into worker cache; the complete regression and tiny data-intensive E2E must
 remain PASS.

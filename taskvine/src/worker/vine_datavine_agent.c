@@ -34,6 +34,7 @@
 #define LOCAL_REQUESTED 8U
 #define LOCAL_GENERATED 16U
 #define LOCAL_MIN_CAPACITY 1024U
+#define LOCAL_PREPARE_BUDGET_US 25000U
 
 struct local_object {
 	uint64_t data_id;
@@ -90,6 +91,7 @@ static uint16_t agent_transfer_port;
 static struct agent_workflow *agent_workflows;
 static struct persistence_job *persistence_head;
 static struct persistence_job *persistence_tail;
+static int agent_waiting_data;
 
 static uint64_t mix64(uint64_t value)
 {
@@ -544,7 +546,7 @@ static int sandbox_copy(struct vine_process *process, uint64_t data_id,
 			!create_dir(directory, 0700))
 		return 0;
 	if (!access(target, R_OK))
-		return 1;
+		return 2;
 	int input = open(source, O_RDONLY | O_CLOEXEC);
 	int output = input >= 0 ? open(temporary,
 			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
@@ -564,7 +566,7 @@ static int sandbox_copy(struct vine_process *process, uint64_t data_id,
 		valid = 0;
 	if (!valid)
 		unlink(temporary);
-	return valid;
+	return valid ? 1 : 0;
 }
 
 static int safe_output_name(const char *name, size_t length)
@@ -709,7 +711,10 @@ static int prepare_uri(struct vine_process *process,
 			return -1;
 		memcpy(path, uri + 7, path_size);
 		path[path_size] = 0;
-		return sandbox_copy(process, data_id, path) ? 1 : -1;
+		int copied = sandbox_copy(process, data_id, path);
+		/* Distinguish a fresh copy so the caller can yield after its time budget
+		 * while still grouping fast small files into one event-loop turn. */
+		return copied == 2 ? 1 : copied == 1 ? 2 : -1;
 	}
 	struct local_object *local = local_get(workflow, data_id, 1);
 	if (!local)
@@ -791,6 +796,7 @@ enum vine_datavine_agent_prepare_status vine_datavine_agent_prepare(
 	struct agent_workflow *workflow = workflow_get(&spec);
 	if (!workflow)
 		return VINE_DATAVINE_AGENT_FAILED;
+	timestamp_t prepare_started = timestamp_get();
 	for (uint32_t index = 0; index < spec.input_count; index++) {
 		const unsigned char *record = spec.inputs +
 				(size_t)index * VINE_DATAVINE_TASK_SPEC_INPUT;
@@ -812,8 +818,15 @@ enum vine_datavine_agent_prepare_status vine_datavine_agent_prepare(
 		}
 		if (ready < 0)
 			return VINE_DATAVINE_AGENT_FAILED;
-		if (!ready)
+		if (!ready) {
+			agent_waiting_data = 1;
 			return VINE_DATAVINE_AGENT_WAIT;
+		}
+		if (ready == 2 &&
+				timestamp_get() - prepare_started >= LOCAL_PREPARE_BUDGET_US) {
+			agent_waiting_data = 1;
+			return VINE_DATAVINE_AGENT_WAIT;
+		}
 	}
 	return VINE_DATAVINE_AGENT_READY;
 }
@@ -1024,6 +1037,13 @@ void vine_datavine_agent_progress(void)
 			workflow = workflow->next)
 		workflow_progress(workflow);
 	persistence_progress();
+}
+
+int vine_datavine_agent_waiting(void)
+{
+	int waiting = agent_waiting_data;
+	agent_waiting_data = 0;
+	return waiting;
 }
 
 void vine_datavine_agent_shutdown(void)

@@ -36,10 +36,15 @@ ordinary TaskVine tasks and is the performance baseline.
 For an unescaped local `file:///` immutable origin, Worker Data Agent
 performs an atomic sequential copy directly into the sandbox. It does not fork
 a transfer process or create a worker-cache record; the executor's random reads
-then remain local. Shared and remote URIs retain the generic cache-transfer
-path, while generated inputs continue to use generation-checked local or peer
-replicas. This URI-local rule does not depend on a separate consumer-count
-hint.
+then remain local. Each task-preparation turn has a 25-ms copy budget and
+returns to `WAIT_DATA` after crossing it, so fast small files are grouped while
+SharedFS latency cannot starve heartbeats or task completion processing.
+The Worker consumes and resets one `waiting_data` hint per event-loop turn,
+reducing the next poll timeout from 5 seconds to 1 ms without changing ordinary
+TaskVine task state. Escaped and remote URIs retain the generic
+cache-transfer path, while generated inputs continue to use generation-checked
+local or peer replicas. This URI-local rule does not depend on a separate
+consumer-count hint.
 
 ## Independent progress
 
