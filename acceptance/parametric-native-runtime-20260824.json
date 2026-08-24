@@ -1,0 +1,81 @@
+{
+  "artifact_type": "datavine-parametric-native-runtime-acceptance",
+  "schema": "datavine.acceptance/v1",
+  "date": "2026-08-24",
+  "commit": "1de254e153927d5472e5a1cf2d91803b78e10cba",
+  "status": "LOCAL_PASS",
+  "full_128x16_campaign": "OPEN",
+  "contract": {
+    "tasks": 1048576,
+    "workflow_files": 10485760,
+    "data_records_including_code": 10485763,
+    "scheduler_edges": 5898240,
+    "workers": 128,
+    "cores_per_worker": 16,
+    "stored_artifact_bytes": 1143350493184,
+    "stored_byte_limit": 2199023255552
+  },
+  "native_graph": {
+    "status": "PASS",
+    "document_bytes": 11969,
+    "build_nanoseconds": 2546543910,
+    "maximum_rss_kib": 172428,
+    "first_ready_task_id": 1,
+    "topology_sha256": "331d538bebd47fa15b20443ca757a605bc4f6230a2319d2d7e384a07e96ae6c8",
+    "independent_python_oracle_sha256": "331d538bebd47fa15b20443ca757a605bc4f6230a2319d2d7e384a07e96ae6c8"
+  },
+  "local_e2e": {
+    "status": "PASS",
+    "workers": 4,
+    "cores_per_worker": 4,
+    "logical_tasks": 256,
+    "physical_submissions": 256,
+    "physical_completions": 256,
+    "task_reports": 256,
+    "task_reported_read_bytes": 6734080,
+    "manager_output_bytes_received": 0,
+    "requested_durable_outputs": 32,
+    "registration_payload_bytes": 12105,
+    "all_gates": true
+  },
+  "crash_recovery": {
+    "status": "PASS",
+    "fault": "SIGKILL owner service and all workers while running",
+    "restart": "same journal with empty worker caches",
+    "final_state": "completed",
+    "logical_done_rollback": false,
+    "recovery_physical_submissions": 256,
+    "recovery_physical_completions": 256,
+    "forsaken_retries": 0,
+    "sampled_requested_result_sizes": [4096, 4096]
+  },
+  "regression": {
+    "status": "PASS",
+    "tests": 17,
+    "passed": 17,
+    "traditional_taskvine_TR_vine_single": "PASS"
+  },
+  "ephemeral_evidence": [
+    {
+      "path": "/tmp/datavine-parametric-runtime-regression-final-20260824.json",
+      "sha256": "32ade5eb2f4aaccdadf9a4e36c2f358c20b5eaded9b4de47d2967b7dd6d8c611"
+    },
+    {
+      "path": "/tmp/datavine-parametric-e2e-run-v6/summary.json",
+      "sha256": "eeeefadeb08b3d4af3935f88ff0d03be26d04a50793bafe8c7c9448bc0f6a05d"
+    },
+    {
+      "path": "/tmp/datavine-parametric-restart-v4/summary.json",
+      "sha256": "c776f8da62f83d0a4adb130ec2267cfb41cda22d54f24e4b1103d479ba66a14d"
+    },
+    {
+      "path": "/tmp/datavine-parametric-native-profile-final.json",
+      "sha256": "857150d011706ec244ec9ebbf13c704651b1cd321a92b99df1fc2ec194de6d93"
+    },
+    {
+      "path": "/tmp/datavine-parametric-native-digest-final.json",
+      "sha256": "a549e7bef49d504eae5fc98838204efc1cf532330cb578207e40de6f95c2b2a8"
+    }
+  ],
+  "claim_boundary": "Native parametric execution and local failure recovery pass. No full-scale performance advantage is claimed until the exact 128x16 million-task run reaches a terminal accepted artifact."
+}
