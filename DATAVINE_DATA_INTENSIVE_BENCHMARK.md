@@ -104,14 +104,26 @@ condor_submit \
   acceptance/scripts/data_intensive_dataset.condor.sub
 ```
 
-After all 128 part manifests exist, perform the metadata gate first. A full hash
-gate rereads 712.8 GiB and should be reserved for the final accepted dataset.
+After all 128 part manifests exist, perform the metadata gate first. The final
+full-hash gate rereads 712.8 GiB with 128 independent Condor verifiers. Each
+atomic verification artifact is bound to the current part-manifest digest;
+the final assembler verifies all 128 artifact digests before accepting them.
 
 ```sh
 $PY acceptance/scripts/generate_data_intensive_dataset.py \
   --acceptance assemble --root "$RUN/dataset" --parts 128
-$PY acceptance/scripts/generate_data_intensive_dataset.py \
-  --acceptance assemble --root "$RUN/dataset" --parts 128 --full-hash
+
+mkdir -p "$RUN/full-hash-parts"
+condor_submit \
+  repository=/users/jzhou24/cctools_repo/datavine \
+  python_bin="$PY" dataset_root="$RUN/dataset" run_root="$RUN" \
+  verification_root="$RUN/full-hash-parts" \
+  acceptance/scripts/data_intensive_verify.condor.sub
+
+# Run only after all 128 full-hash artifacts exist.
+$PY acceptance/scripts/generate_data_intensive_dataset.py --acceptance assemble \
+  --root "$RUN/dataset" --parts 128 --full-hash \
+  --verification-root "$RUN/full-hash-parts"
 ```
 
 ## Running the pair

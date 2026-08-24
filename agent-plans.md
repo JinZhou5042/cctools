@@ -35,7 +35,9 @@ Current PASS evidence:
 
 - topology/generator/kernel contract test: exact counts and bytes, regular
   A degree 20, B degree 1, deterministic non-sparse generation, corruption
-  rejection, real random `pread`, and 2 ms to 5 s process-CPU work;
+  rejection, real random `pread`, and 2 ms to 5 s process-CPU work. Full-hash
+  validation has 128 independent Condor parts whose signed summaries bind to
+  the current generator part manifests before final assembly;
 - `source-v1` now uses the worker-local output manifest/direct-durability path
   for indexed output names, while retaining the old 24-byte source ticket for
   custom output-name compatibility;

@@ -14,6 +14,7 @@ from data_intensive_workload import Workload, assert_full_contract, canonical_js
 
 
 PART_SCHEMA = "datavine.data-intensive-dataset-part/v1"
+VERIFICATION_SCHEMA = "datavine.data-intensive-dataset-verification-part/v1"
 DATASET_SCHEMA = "datavine.data-intensive-dataset/v1"
 GENERATOR = "shake256-files/v1"
 DEFAULT_PARTS = 128
@@ -223,8 +224,94 @@ def verify_part(root, workload, part, parts, full_hash):
     }
 
 
-def assemble(root, workload, parts, full_hash):
-    results = [verify_part(root, workload, part, parts, full_hash) for part in range(parts)]
+def verification_artifact(root, workload, part, parts, full_hash):
+    result = verify_part(root, workload, part, parts, full_hash)
+    try:
+        part_manifest = json.loads(part_manifest_path(root, part).read_text())
+        part_manifest_sha256 = part_manifest.get("manifest_sha256")
+    except (FileNotFoundError, json.JSONDecodeError):
+        part_manifest_sha256 = None
+    artifact = {
+        "schema": VERIFICATION_SCHEMA,
+        "contract_sha256": workload.contract()["contract_sha256"],
+        "parts": parts,
+        "part_manifest_sha256": part_manifest_sha256,
+        "verified_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        **result,
+    }
+    artifact["verification_sha256"] = digest_without(
+        artifact, "verification_sha256"
+    )
+    return artifact
+
+
+def load_verification(root, verification_root, workload, part, parts, full_hash):
+    path = verification_root / f"part-{part:03d}.json"
+    errors = []
+    try:
+        artifact = json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError) as error:
+        return {
+            "status": "FAIL", "part": part, "source_files": 0,
+            "logical_bytes": 0, "allocated_bytes": 0,
+            "full_hash": bool(full_hash), "errors": [str(error)],
+        }
+    expected = {
+        "schema": VERIFICATION_SCHEMA,
+        "contract_sha256": workload.contract()["contract_sha256"],
+        "part": part,
+        "parts": parts,
+        "status": "PASS",
+    }
+    for name, value in expected.items():
+        if artifact.get(name) != value:
+            errors.append(f"verification {name} mismatch")
+    if full_hash and not artifact.get("full_hash"):
+        errors.append("verification did not hash file contents")
+    if artifact.get("verification_sha256") != digest_without(
+            artifact, "verification_sha256"):
+        errors.append("verification artifact digest mismatch")
+    try:
+        current_part = json.loads(part_manifest_path(root, part).read_text())
+        current_part_sha256 = current_part.get("manifest_sha256")
+    except (FileNotFoundError, json.JSONDecodeError) as error:
+        errors.append(f"current part manifest unavailable: {error}")
+        current_part_sha256 = None
+    if artifact.get("part_manifest_sha256") != current_part_sha256:
+        errors.append("verification is not bound to current part manifest")
+    _, expected_count, expected_bytes, _ = expected_part(
+        workload, part, parts
+    )
+    if artifact.get("source_files") != expected_count:
+        errors.append("verification source_files mismatch")
+    if artifact.get("logical_bytes") != expected_bytes:
+        errors.append("verification logical_bytes mismatch")
+    errors.extend(artifact.get("errors", []))
+    result = dict(artifact)
+    result["status"] = "PASS" if not errors else "FAIL"
+    result["errors"] = errors
+    return result
+
+
+def atomic_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".part")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    os.replace(temporary, path)
+
+
+def assemble(root, workload, parts, full_hash, verification_root=None):
+    if verification_root is None:
+        results = [verify_part(root, workload, part, parts, full_hash) for part in range(parts)]
+        verification_mode = "direct"
+    else:
+        results = [
+            load_verification(
+                root, verification_root, workload, part, parts, full_hash
+            )
+            for part in range(parts)
+        ]
+        verification_mode = "part-artifacts"
     errors = [f"part {item['part']}: {error}" for item in results for error in item["errors"]]
     source_files = sum(item.get("source_files", 0) for item in results if item["status"] == "PASS")
     logical_bytes = sum(item.get("logical_bytes", 0) for item in results if item["status"] == "PASS")
@@ -237,6 +324,7 @@ def assemble(root, workload, parts, full_hash):
         "source_files": source_files,
         "logical_bytes": logical_bytes,
         "full_hash": bool(full_hash),
+        "verification_mode": verification_mode,
         "errors": errors,
     }
     gates = {
@@ -249,9 +337,7 @@ def assemble(root, workload, parts, full_hash):
         manifest["status"] = "FAIL"
     manifest["manifest_sha256"] = digest_without(manifest, "manifest_sha256")
     output = root / "dataset-manifest.json"
-    temporary = output.with_suffix(".json.part")
-    temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, output)
+    atomic_json(output, manifest)
     return manifest
 
 
@@ -275,10 +361,12 @@ def parse_args():
     verify.add_argument("--part", required=True, type=int)
     verify.add_argument("--parts", type=int, default=DEFAULT_PARTS)
     verify.add_argument("--full-hash", action="store_true")
+    verify.add_argument("--output", type=Path)
     dataset = subparsers.add_parser("assemble")
     dataset.add_argument("--root", required=True, type=Path)
     dataset.add_argument("--parts", type=int, default=DEFAULT_PARTS)
     dataset.add_argument("--full-hash", action="store_true")
+    dataset.add_argument("--verification-root", type=Path)
     return parser.parse_args()
 
 
@@ -299,9 +387,16 @@ def main():
             args.chunk_bytes, args.resume,
         )
     elif args.command == "verify-part":
-        result = verify_part(args.root.resolve(), workload, args.part, args.parts, args.full_hash)
+        result = verification_artifact(
+            args.root.resolve(), workload, args.part, args.parts, args.full_hash
+        )
+        if args.output:
+            atomic_json(args.output.resolve(), result)
     else:
-        result = assemble(args.root.resolve(), workload, args.parts, args.full_hash)
+        result = assemble(
+            args.root.resolve(), workload, args.parts, args.full_hash,
+            args.verification_root.resolve() if args.verification_root else None,
+        )
     print(json.dumps(result, indent=2, sort_keys=True))
     if result.get("status") == "FAIL":
         return 1

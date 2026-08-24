@@ -137,8 +137,21 @@ def main():
             for offset in range(0, 64, 16)
         )
         assert len(digest) == 32
+        verification_root = root / "full-hash-parts"
+        for part in range(2):
+            subprocess.run(
+                common + (
+                    "verify-part", "--root", root, "--part", str(part),
+                    "--parts", "2", "--full-hash", "--output",
+                    verification_root / f"part-{part:03d}.json",
+                ),
+                check=True, stdout=subprocess.PIPE, text=True,
+            )
         completed = subprocess.run(
-            common + ("assemble", "--root", root, "--parts", "2", "--full-hash"),
+            common + (
+                "assemble", "--root", root, "--parts", "2", "--full-hash",
+                "--verification-root", verification_root,
+            ),
             check=True,
             stdout=subprocess.PIPE,
             text=True,
@@ -147,7 +160,24 @@ def main():
         assert manifest["status"] == "PASS", manifest
         assert all(manifest["gates"].values()), manifest
         assert manifest["source_files"] == 2_304, manifest
+        assert manifest["verification_mode"] == "part-artifacts", manifest
         assert not list(root.rglob("*.part"))
+
+        # A verifier artifact is accepted only while its own digest and its
+        # binding to the current generator part manifest both remain intact.
+        verification = verification_root / "part-000.json"
+        altered = json.loads(verification.read_text())
+        altered["logical_bytes"] += 1
+        verification.write_text(json.dumps(altered))
+        rejected = subprocess.run(
+            common + (
+                "assemble", "--root", root, "--parts", "2", "--full-hash",
+                "--verification-root", verification_root,
+            ),
+            stdout=subprocess.PIPE, text=True,
+        )
+        assert rejected.returncode == 1, rejected
+        assert "verification artifact digest mismatch" in rejected.stdout
 
         corrupt = root / small.source_path(0)
         with corrupt.open("r+b") as stream:

@@ -502,7 +502,9 @@ artifacts, 3.696121 TiB logical data path, and exactly 128 workers x 16 cores.
 The workload contract test passes exact task/file/data/edge/byte counts,
 regular graph degree, random-pread kernel execution, deterministic output,
 non-sparse generation, completed-file resume, partial-file resume, and
-deliberate corruption rejection. Directly affected module-boundary,
+deliberate corruption rejection. Full-hash verification can run as 128 Condor
+parts; final assembly validates each verification digest and its binding to
+the current generator part manifest. Directly affected module-boundary,
 Python-output-policy, workflow-execution, workflow-lifecycle, and data-plane-v2
 tests also pass.
 
