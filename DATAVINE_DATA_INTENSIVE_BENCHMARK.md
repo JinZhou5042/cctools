@@ -160,10 +160,16 @@ A DataVine run is invalid unless all of these hold:
 - all 1,048,576 retained outputs use the worker-local/peer path;
 - exactly 131,072 requested C outputs are durable;
 - task output payload bytes bypass the manager;
-- SharedFS source-stage bytes equal source bytes plus the three code payloads;
+- SharedFS source-stage bytes equal the 712.8 GiB source dataset exactly; the
+  three shared code payloads are inline IR records and do not enter that count;
 - the 16,384-entry recovery cache reaches its limit and accounts for every
   required eviction from the 917,504 intermediates;
 - sampled result sizes and SHA-256 values match TaskVine.
+
+The TaskVine baseline uses the same exact-pool, no-worker-removal, READY +
+RUNNING, and 90%-active-core gates. Its sampler records at one-second cadence,
+so evidence size is proportional to run time rather than the million-task
+count.
 
 The comparison reports a DataVine advantage only when all five full pairs pass,
 the median TaskVine/DataVine execution-time ratio is above one, and manager
