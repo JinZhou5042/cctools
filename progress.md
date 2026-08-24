@@ -520,12 +520,12 @@ were zero.
 Canonical paired pilot artifacts are:
 
 - DataVine: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/datavine-local-1x1-final/summary.json`
-- TaskVine: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/taskvine-local-1x1-sharedfs-final/summary.json`
-- Comparison: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/comparison-pilot-sharedfs-final.json`
+- TaskVine: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/taskvine-local-1x1-sharedfs-sealed-final/summary.json`
+- Comparison: `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/comparison-pilot-sharedfs-sealed-final.json`
 
 Both backends passed 256/256 exact physical counts with matching sampled C
-SHA-256 values. The fair SharedFS-source pilot reports TaskVine 27.32 s versus
-DataVine 26.21 s (1.04x) and 76.38% fewer Manager data-plane bytes. TaskVine's
+SHA-256 values. The fair sealed SharedFS-source pilot reports TaskVine 27.10 s versus
+DataVine 26.21 s (1.03x) and 76.38% fewer Manager data-plane bytes. TaskVine's
 one-second sampler observed 15 central-window samples, all at the required
 one active core; the full runner uses the same 90% active-core gate as
 DataVine without retaining one record per task. Its scope is
@@ -538,6 +538,10 @@ SharedFS. That pre-execution attempt was stopped and retained under
 `campaign-diagnostic-manager-source-20260823`; no task had executed. The final
 runner uses TaskVine's native canonical file-URL source transport so manager-byte and
 execution differences isolate intermediate/result movement and GC behavior.
+The next scale probe showed that admitting workers before a long static graph
+load can starve Manager keepalives. The final runner now builds the sealed graph
+before starting the factory and uses an unreachable `wait-for-workers=129`
+gate during admission; scheduling opens only after exact 128x16 observation.
 
 The full source dataset was generated under
 `/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823`.

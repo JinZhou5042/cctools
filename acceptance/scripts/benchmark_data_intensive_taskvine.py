@@ -217,29 +217,8 @@ def main():
         )
         library.set_cores(args.cores)
         manager.install_library(library)
-        factory, factory_log, factory_command = start_resident_factory(
-            output / "factory-state", manager.port, args.workers, args.cores,
-            repository / "taskvine/src/worker/vine_worker", output / "factory.log",
-            args.batch_type,
-        )
-        deadline = time.monotonic() + min(args.timeout, 3600)
-        while True:
-            if time.monotonic() >= deadline:
-                raise TimeoutError("did not admit exact TaskVine worker pool")
-            if factory.poll() is not None:
-                raise RuntimeError(f"vine_factory exited with {factory.returncode}")
-            unexpected = manager.wait(1)
-            if unexpected is not None:
-                raise AssertionError(("task completed before graph load", unexpected.id))
-            manager._refresh_stats()
-            if (
-                int(manager.stats.workers_connected) == args.workers
-                and int(manager.stats.total_cores) == args.workers * args.cores
-            ):
-                break
-        admitted = time.monotonic()
         baseline = taskvine_stats(manager)
-        load_peak = PeakSampler((os.getpid(), factory.pid)).start()
+        load_peak = PeakSampler((os.getpid(),)).start()
         load_started = time.monotonic()
         profile = SIZE_PROFILES[workload.size_profile]
         for a_global in range(workload.a_tasks):
@@ -296,8 +275,36 @@ def main():
         if len(manager._task_table) != workload.tasks:
             raise AssertionError(("manager task table", len(manager._task_table), workload.tasks))
         manager._refresh_stats()
-        if int(manager.stats.tasks_done) != baseline["tasks_done"]:
+        if int(manager.stats.tasks_done) != 0:
             raise AssertionError("task executed during static graph load")
+        # Keep scheduling closed while the exact resident pool connects. Using
+        # workers+1 makes the threshold deliberately unreachable until this
+        # driver observes 128x16 and opens the gate explicitly.
+        if manager.tune("wait-for-workers", args.workers + 1) != 0:
+            raise RuntimeError("TaskVine worker-admission scheduling gate is unavailable")
+        factory, factory_log, factory_command = start_resident_factory(
+            output / "factory-state", manager.port, args.workers, args.cores,
+            repository / "taskvine/src/worker/vine_worker", output / "factory.log",
+            args.batch_type,
+        )
+        deadline = time.monotonic() + min(args.timeout, 3600)
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("did not admit exact TaskVine worker pool")
+            if factory.poll() is not None:
+                raise RuntimeError(f"vine_factory exited with {factory.returncode}")
+            unexpected = manager.wait(1)
+            if unexpected is not None:
+                raise AssertionError(("task completed before exact pool admission", unexpected.id))
+            manager._refresh_stats()
+            if (
+                int(manager.stats.workers_connected) == args.workers
+                and int(manager.stats.total_cores) == args.workers * args.cores
+            ):
+                break
+        if manager.tune("wait-for-workers", 0) != 0:
+            raise RuntimeError("could not open TaskVine scheduling gate")
+        admitted = time.monotonic()
         execute_peak = PeakSampler((os.getpid(), factory.pid)).start()
         samples = []
         next_sample = time.monotonic()
@@ -369,7 +376,7 @@ def main():
             },
             "parallelism": parallelism,
             "timing": {
-                "worker_admission_seconds": admitted - started,
+                "worker_admission_seconds": admitted - loaded,
                 "graph_load_seconds": loaded - load_started,
                 "execution_seconds": terminal - loaded,
                 "total_seconds": terminal - started,
