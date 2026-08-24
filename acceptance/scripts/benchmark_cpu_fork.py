@@ -72,12 +72,18 @@ def calibrate(target_ms):
     return iterations
 
 
-def terminate_group(process):
+def terminate_group(process, timeout=30):
+    """Ask a process group to clean up, then enforce a bounded shutdown.
+
+    A Condor vine_factory removes one submitted job at a time.  Large resident
+    pools can legitimately need longer than the default service-process grace
+    period, so callers that own such a factory may provide a larger timeout.
+    """
     if process is None or process.poll() is not None:
         return
     try:
         os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=30)
+        process.wait(timeout=timeout)
     except (ProcessLookupError, subprocess.TimeoutExpired):
         try:
             os.killpg(process.pid, signal.SIGKILL)

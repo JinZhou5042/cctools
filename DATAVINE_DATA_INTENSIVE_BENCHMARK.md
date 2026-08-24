@@ -156,6 +156,17 @@ $PY acceptance/scripts/run_data_intensive_campaign.py --acceptance \
   --dataset-root "$RUN/dataset" --run-root "$RUN/campaign"
 ```
 
+For the requested single full-scale diagnostic pair, use an explicit
+repetition count.  A successful comparison is labeled
+`full-scale-single-pair`; it is full-contract evidence but not a five-pair
+production statistics claim:
+
+```sh
+$PY acceptance/scripts/run_data_intensive_campaign.py --acceptance \
+  --repetitions 1 --dataset-root "$RUN/dataset" \
+  --run-root "$RUN/campaign"
+```
+
 The equivalent manual comparison command is:
 
 ```sh
@@ -200,7 +211,10 @@ and provide the intended movement and GC pressure.
 It also seals the complete graph before starting the factory. During admission,
 an unreachable `wait-for-workers=129` scheduling threshold keeps execution
 closed until the driver observes exactly 128 workers and 2,048 cores, then the
-driver opens scheduling and starts the execution timer.
+driver opens scheduling and starts the execution timer.  The manager scheduling
+depth is set to at least 128 so the first lazy FunctionCall-library placement
+pass covers the complete worker pool; the default depth of 100 was observed to
+strand 28 workers and is invalid for this benchmark.
 
 The comparison reports a DataVine advantage only when all five full pairs pass,
 the median TaskVine/DataVine execution-time ratio is above one, and manager
@@ -216,3 +230,26 @@ execution measured 27.01 s for TaskVine and 26.21 s for DataVine (1.03x) with
 76.38% fewer manager data-plane bytes, while DataVine reported zero manager task-output payload bytes and only 32 requested
 durable outputs. This is useful mechanism evidence only. The full 128 x 16,
 five-pair performance result remains OPEN until its dataset and runs complete.
+
+The first full TaskVine attempt is retained as a non-PASS control-plane
+diagnostic.  While loading 1,007,504 tasks, the manager reached 20,101,136 KiB
+RSS and generated 6,290,751,488 bytes of filesystem writes without reading any
+source payload.  At execution it connected all 128 workers but the default
+100-task scheduling pass populated only 100 FunctionCall libraries, capping
+activity at 1,600 cores.  The run was stopped at 30,000 successful tasks because
+it could not satisfy the 1,844-active-core gate.  Exact snapshots and the
+recoverable directory are recorded in
+`acceptance/data-intensive-large-scale-control-plane-diagnostic-20260824.json`.
+The architectural response is specified in `DATAVINE_PARAMETRIC_IR_PLAN.md`.
+
+The scheduling-depth correction has a real 128x16 PASS gate rather than only a
+source inspection.  A 512-task / 5,120-file C2-S1 workload admitted all 128
+workers, completed 512/512 physical tasks with no failure or removed worker,
+and recorded 185 central-window samples whose minimum and maximum active-core
+counts were both 2,048.  Its accepted summary SHA-256 is
+`a9297d6ea2d3831829b54c90a8435f3980c63a93eb05858a6bee1dd028df1bb9`; the
+compact pointer is `acceptance/data-intensive-large-scale-placement-20260824.json`.
+The placement run also showed that a 30-second generic process-shutdown grace
+period can kill `vine_factory` while it is serially removing a 128-job Condor
+pool.  Both full runners now allow five minutes for graceful factory cleanup;
+this changes no measured execution interval.

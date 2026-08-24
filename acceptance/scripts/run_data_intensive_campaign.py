@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run or resume the five-pair data-intensive acceptance campaign."""
+"""Run or resume a paired full-scale data-intensive campaign."""
 
 import argparse
 import datetime
@@ -71,8 +71,8 @@ def parse_args():
     args = parser.parse_args()
     if min(args.repetitions, args.workers, args.cores) < 1:
         parser.error("repetitions, workers, and cores must be positive")
-    if args.acceptance and (args.repetitions, args.workers, args.cores) != (5, 128, 16):
-        parser.error("acceptance requires five pairs at exactly 128 workers x 16 cores")
+    if args.acceptance and (args.workers, args.cores) != (128, 16):
+        parser.error("acceptance requires exactly 128 workers x 16 cores")
     return args
 
 
@@ -202,10 +202,15 @@ def main():
     ))
     completed = subprocess.run(command, cwd=repository)
     result = json.loads(comparison.read_text())
+    expected_scope = (
+        "production-128x16" if args.repetitions >= 5
+        else "full-scale-single-pair" if args.repetitions == 1
+        else "full-scale-multi-pair"
+    )
     comparison_pass = (
         completed.returncode == 0
         and result.get("status") == "PASS"
-        and result.get("scope") == "production-128x16"
+        and result.get("scope") == expected_scope
     )
     state["status"] = "PASS" if comparison_pass else "FAIL"
     state["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()

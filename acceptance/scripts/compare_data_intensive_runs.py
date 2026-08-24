@@ -108,9 +108,10 @@ def main():
         for item in pairs
     )
     repetition_gate = repetitions >= args.minimum_repetitions
-    production_scope = full_contract and repetition_gate and not errors
-    if not args.allow_pilot and not production_scope:
-        errors.append("production claim requires full contract and minimum repetitions")
+    full_scale_scope = full_contract and repetition_gate and not errors
+    production_scope = full_scale_scope and repetitions >= 5
+    if not args.allow_pilot and not full_scale_scope:
+        errors.append("full-scale claim requires full contract and requested minimum repetitions")
     speedups = [item["speedup_taskvine_over_datavine"] for item in pairs if item["status"] == "PASS"]
     reductions = [item["manager_byte_reduction_fraction"] for item in pairs if item["status"] == "PASS"]
     gates = {
@@ -124,10 +125,18 @@ def main():
     if args.allow_pilot:
         claim_gates.pop("full_contract")
         claim_gates.pop("minimum_repetitions")
+    if production_scope:
+        scope = "production-128x16"
+    elif full_scale_scope and repetitions == 1:
+        scope = "full-scale-single-pair"
+    elif full_scale_scope:
+        scope = "full-scale-multi-pair"
+    else:
+        scope = "pilot"
     result = {
         "schema": "datavine.data-intensive-comparison/v1",
         "status": "PASS" if not errors and all(claim_gates.values()) else "FAIL",
-        "scope": "production-128x16" if production_scope else "pilot",
+        "scope": scope,
         "repetitions": repetitions,
         "required_repetitions": args.minimum_repetitions,
         "gates": gates,

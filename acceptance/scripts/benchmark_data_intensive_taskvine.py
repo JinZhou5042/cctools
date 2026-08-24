@@ -217,6 +217,17 @@ def main():
         )
         library.set_cores(args.cores)
         manager.install_library(library)
+        # The manager dispatches at most attempt-schedule-depth ready tasks in
+        # one scheduling pass.  Function libraries are installed lazily on the
+        # workers selected by that first pass.  The default depth is 100, so a
+        # 128-worker pool otherwise starts exactly 100 library instances and
+        # deterministic tie ordering can keep refilling those same workers.
+        # Cover the complete admitted pool in the first pass.  This does not
+        # batch logical tasks: all 1,048,576 calls remain independent physical
+        # TaskVine submissions and completions.
+        schedule_depth = max(100, args.workers)
+        if manager.tune("attempt-schedule-depth", schedule_depth) != 0:
+            raise RuntimeError("TaskVine scheduling-depth tune is unavailable")
         baseline = taskvine_stats(manager)
         load_peak = PeakSampler((os.getpid(),)).start()
         load_started = time.monotonic()
@@ -391,6 +402,7 @@ def main():
                 "hostname": platform.node(), "python": sys.version,
                 "maximum_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
                 "commit": subprocess.run(("git", "rev-parse", "HEAD"), cwd=repository, text=True, stdout=subprocess.PIPE, check=True).stdout.strip(),
+                "attempt_schedule_depth": schedule_depth,
             },
         }
         atomic_json(output / "summary.json", result)
@@ -415,7 +427,10 @@ def main():
                 execute_peak.stop()
             except (EOFError, RuntimeError):
                 pass
-        terminate_group(factory)
+        # vine_factory removes 128 Condor jobs serially during SIGTERM cleanup;
+        # allow that graceful path to finish instead of killing it after the
+        # generic 30-second service timeout and leaking the tail of the pool.
+        terminate_group(factory, timeout=300)
         if factory_log is not None:
             factory_log.close()
         if manager is not None:

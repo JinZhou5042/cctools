@@ -501,7 +501,10 @@ def main():
                 pass
         if client is not None:
             client.close()
-        terminate_group(factory)
+        # vine_factory removes 128 Condor jobs serially during SIGTERM cleanup;
+        # allow that graceful path to finish instead of killing it after the
+        # generic 30-second service timeout and leaking the tail of the pool.
+        terminate_group(factory, timeout=300)
         terminate_group(service)
         if factory_log is not None:
             factory_log.close()

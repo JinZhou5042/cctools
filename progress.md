@@ -568,3 +568,53 @@ Original paths are symlinks, so historical checksum references remain usable.
 The active production package, its hard-linked production-v1 candidate, the
 rollback package, the Go binary, and all non-DataVine packages were left in
 place. `/users` utilization fell from approximately 99-100% to 76-80%.
+
+## Current checkpoint — full-scale control-plane diagnostic (2026-08-24)
+
+The first final-contract TaskVine run sealed all 1,048,576 tasks and admitted
+exactly 128 Condor workers x 16 cores.  It exposed two independent scale
+limits before it could become performance evidence.
+
+During graph load, Python/TaskVine expanded 9,437,184 source declarations and
+15,335,424 input bindings one object at a time.  At 1,007,504 loaded tasks the
+Manager used 20,101,136 KiB RSS, had read zero source payload bytes, and had
+already generated 6,290,751,488 bytes of filesystem writes through 3,270,731
+write calls.  This is a control-plane graph/catalog bottleneck, not worker
+payload execution.
+
+After admission, the default `attempt-schedule-depth=100` caused lazy
+FunctionCall library placement on exactly 100 workers.  All 128 workers stayed
+connected with no failures or removals, but only 1,600/2,048 cores were active
+and 28 workers remained idle while more than one million tasks were ready.
+The run was intentionally stopped at 30,000 successful tasks because the
+central-window gate requires at least 1,844 active cores and could not pass.
+No `summary.json` or PASS result was produced.  The recoverable diagnostic is
+under
+`/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/campaign-diagnostic-attempt-depth-100-20260824`,
+and the compact evidence record is
+`acceptance/data-intensive-large-scale-control-plane-diagnostic-20260824.json`.
+
+The TaskVine baseline now sets scheduling depth to at least the requested
+worker count so the first dispatch pass covers all 128 workers.  The campaign
+and comparator also support an explicit one-pair full-scale scope without
+mislabeling it as a five-pair production statistics result.  The user-requested
+next run is one complete pair.  The proposed orders-of-magnitude control-plane
+reduction—parametric source/task/dependency families, checked inverse mappings,
+bounded lazy physical-task materialization, packed task state, and batched
+bitmap journaling—is specified in `DATAVINE_PARAMETRIC_IR_PLAN.md` and remains
+OPEN until its gates pass.
+
+The narrow scheduling correction then passed a real 128x16 placement gate on
+a 512-task / 5,120-file C2-S1 workload.  It completed 512/512 physical tasks,
+lost or removed no worker, and produced 185 central-window samples with
+minimum and maximum active cores both exactly 2,048 (required: 1,844).  The
+summary SHA-256 is
+`a9297d6ea2d3831829b54c90a8435f3980c63a93eb05858a6bee1dd028df1bb9` and its
+compact repository artifact is
+`acceptance/data-intensive-large-scale-placement-20260824.json`.
+The placement cleanup exposed a separate lifecycle issue: the generic
+30-second process-group grace period could SIGKILL `vine_factory` while it was
+serially removing 128 Condor jobs.  Both full runners now give factory cleanup
+five minutes; service processes retain the 30-second default.  The two tail
+jobs from the diagnostic placement run were already marked for exact removal
+by owner and factory `Iwd` and were not reused as evidence.

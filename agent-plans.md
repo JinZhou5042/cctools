@@ -65,8 +65,15 @@ frozen contract. Condor cluster 15870 independently reread and hashed all
 712.8 GiB as 128/128 PASS verification parts. Final manifest SHA-256 is
 `3a391fea1ff1251015689e640e897c06aafc8e5a3a4a6aea6055ba8d541b5b71`.
 
-OPEN: run five alternating TaskVine/DataVine pairs at exact 128x16 and pass the comparison claim gate.
-Do not report the pilot ratio as the full DataVine advantage.
+OPEN: the user requested one complete TaskVine/DataVine pair at exact 128x16
+before implementing the next optimization.  Report it as
+`full-scale-single-pair`, not as the five-pair production statistics claim.
+The first full attempt is diagnostic only: explicit graph ingestion reached
+about 20 GiB Manager RSS and the default 100-task scheduling pass populated
+only 100 of 128 FunctionCall libraries.  The scheduling-depth fix and the
+parametric/lazy IR response are documented in
+`DATAVINE_PARAMETRIC_IR_PLAN.md`.  Do not report the stopped run or pilot ratio
+as the full DataVine advantage.
 
 The fixed 1024-core comparison is complete and PASS. The next measured
 optimization order is now evidence-driven:

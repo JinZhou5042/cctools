@@ -66,6 +66,29 @@ def main():
         [4, "datavine"], [4, "taskvine"],
         [5, "taskvine"], [5, "datavine"],
     ]
+    single_pair = subprocess.run(
+        (
+            sys.executable, scripts / "run_data_intensive_campaign.py",
+            "--acceptance", "--repetitions", "1",
+            "--dataset-root", "/not-used", "--run-root", "/not-used",
+            "--plan-only",
+        ),
+        check=True, stdout=subprocess.PIPE, text=True,
+    )
+    assert json.loads(single_pair.stdout)["schedule"] == [
+        [1, "taskvine"], [1, "datavine"],
+    ]
+
+    taskvine_runner = (
+        scripts / "benchmark_data_intensive_taskvine.py"
+    ).read_text()
+    assert 'manager.tune("attempt-schedule-depth", schedule_depth)' in taskvine_runner
+    assert "schedule_depth = max(100, args.workers)" in taskvine_runner
+    assert "terminate_group(factory, timeout=300)" in taskvine_runner
+    datavine_runner = (
+        scripts / "benchmark_data_intensive_datavine.py"
+    ).read_text()
+    assert "terminate_group(factory, timeout=300)" in datavine_runner
 
     # One smallest cohort has exactly the same regular graph invariants.
     small = Workload(cohorts=1, scale=1, size_profile="tiny")
