@@ -51,13 +51,13 @@ Current PASS evidence:
   archive with original-path symlinks. Active production and rollback packages
   were not moved.
 
-The generation gate is PASS: all 128 atomic part manifests bind exactly
+The full dataset gate is PASS: all 128 atomic part manifests bind exactly
 9,437,184 source files and 765,393,371,136 logical/allocated bytes to the
-frozen contract. Condor cluster 15870 is independently rereading and hashing
-all 712.8 GiB as 128 verification parts.
+frozen contract. Condor cluster 15870 independently reread and hashed all
+712.8 GiB as 128/128 PASS verification parts. Final manifest SHA-256 is
+`3a391fea1ff1251015689e640e897c06aafc8e5a3a4a6aea6055ba8d541b5b71`.
 
-OPEN: complete and assemble all 128 full-hash proofs, run five alternating
-TaskVine/DataVine pairs at exact 128x16, and pass the comparison claim gate.
+OPEN: run five alternating TaskVine/DataVine pairs at exact 128x16 and pass the comparison claim gate.
 Do not report the pilot ratio as the full DataVine advantage.
 
 The fixed 1024-core comparison is complete and PASS. The next measured

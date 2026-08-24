@@ -537,9 +537,14 @@ Condor cluster 15830 owns the original 128 parts and cluster 15831 owns three
 resume jobs after evictions. Part manifests are atomic, and job arguments are
 resume-safe. The generation gate is PASS at 128/128 manifests, 9,437,184
 files, and 765,393,371,136 logical/allocated bytes with exact contract and
-manifest digests. Cluster 15870 is performing an independent 128-way reread
-and full hash. OPEN gates are all 128 hash proofs, final dataset assembly, and
-five alternating exact 128x16 backend pairs.
+manifest digests. Cluster 15870 independently reread all 712.8 GiB and produced
+128/128 bound, digest-checked, full-hash PASS proofs. The final dataset manifest
+is PASS with file SHA-256
+`3a391fea1ff1251015689e640e897c06aafc8e5a3a4a6aea6055ba8d541b5b71`;
+compact evidence is in
+`acceptance/data-intensive-large-scale-dataset-20260823.json`. The remaining
+OPEN gate is five alternating exact 128x16 backend pairs and their production
+comparison.
 
 Separately, 19 superseded DataVine factory tarballs totaling about 15 GB moved
 to `/project01/ndcms/jzhou24/datavine-benchmarks/factory-package-archive-20260823`.
