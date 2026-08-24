@@ -226,7 +226,7 @@ def main():
             inputs = [
                 manager.declare_url(
                     (dataset_root / workload.source_path(a_global * 36 + slot)).as_uri(),
-                    cache="workflow",
+                    cache=False,
                 )
                 for slot in range(36)
             ]
@@ -313,9 +313,9 @@ def main():
             if time.monotonic() >= execution_deadline:
                 raise TimeoutError(f"{workload.tasks - completed} tasks remain")
             task = manager.wait(1)
-            manager._refresh_stats()
             now = time.monotonic()
             if now >= next_sample:
+                manager._refresh_stats()
                 samples.append({
                     "monotonic_seconds": now,
                     "tasks_waiting": int(manager.stats.tasks_waiting),
@@ -360,6 +360,7 @@ def main():
             "exact_worker_pool": int(manager.stats.workers_connected) == args.workers and int(manager.stats.total_cores) == args.workers * args.cores,
             "sampled_outputs": len(sampled) == sample_count and set(sampled) == {expected_size},
             "sharedfs_source_transport": True,
+            "source_inputs_task_scoped": True,
             **parallelism["gates"],
         }
         result = {
@@ -385,6 +386,7 @@ def main():
             "peak": {"load": load_peak_result, "execute": execute_peak_result},
             "factory_command": list(factory_command),
             "source_transport": "taskvine-file-url-shared-filesystem",
+            "source_cache": "task",
             "environment": {
                 "hostname": platform.node(), "python": sys.version,
                 "maximum_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
@@ -404,9 +406,15 @@ def main():
         raise
     finally:
         if load_peak is not None:
-            load_peak.stop()
+            try:
+                load_peak.stop()
+            except (EOFError, RuntimeError):
+                pass
         if execute_peak is not None:
-            execute_peak.stop()
+            try:
+                execute_peak.stop()
+            except (EOFError, RuntimeError):
+                pass
         terminate_group(factory)
         if factory_log is not None:
             factory_log.close()

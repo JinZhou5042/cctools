@@ -43,8 +43,8 @@
     "status": "PASS",
     "physical_submissions": 256,
     "physical_completions": 256,
-    "execution_seconds": 27.102230317999783,
-    "graph_load_seconds": 1.662224106999929,
+    "execution_seconds": 27.01426427399565,
+    "graph_load_seconds": 1.7780758260050789,
     "manager_bytes_sent": 38278,
     "manager_bytes_received": 131072,
     "workers_removed": 0,
@@ -52,18 +52,19 @@
     "parallelism_minimum_active_cores": 1,
     "parallelism_required_active_cores": 1,
     "source_transport": "taskvine-file-url-shared-filesystem",
-    "summary_path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/taskvine-local-1x1-sharedfs-sealed-final/summary.json",
-    "summary_sha256": "05877b01a407e5080a95a68fff7a3b6c31b1f235778f93e336fa1b8400bc85b2"
+    "source_cache": "task",
+    "summary_path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/taskvine-local-1x1-sharedfs-taskcache-sealed-final/summary.json",
+    "summary_sha256": "aba437da854f8fb6e106ad5e65ac613645eddc68a59bc5dec7bc774d34185dda"
   },
   "comparison": {
     "status": "PASS",
     "scope": "pilot",
     "sampled_result_hashes_equal": true,
     "sampled_results": 16,
-    "speedup_taskvine_over_datavine": 1.0340829176919015,
+    "speedup_taskvine_over_datavine": 1.0307265819817295,
     "manager_byte_reduction_fraction": 0.7637791555949218,
-    "summary_path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/comparison-pilot-sharedfs-sealed-final.json",
-    "summary_sha256": "883d7da52bfe9f233f8cfb8b0800a6a7efe42339225c80736b2dc62f56649855"
+    "summary_path": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/pilot-c1-s1-ir3-20260823/comparison-pilot-sharedfs-taskcache-sealed-final.json",
+    "summary_sha256": "2acde319323f3527f51537995792a1dc38c58e2fa7b54ea5d7cb696db739d433"
   },
   "gates": {
     "exact_counts": true,

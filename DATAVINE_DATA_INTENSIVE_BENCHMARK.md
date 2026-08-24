@@ -193,6 +193,10 @@ count. It declares the 9,437,184 source inputs with TaskVine's native
 `declare_url` and canonical `file:///project01/...` URIs. Thus both backends
 read source data from the same SharedFS path; manager-byte differences measure downstream
 intermediate/result movement rather than an avoidable baseline source relay.
+Source URLs use task-scoped cache because each is consumed exactly once. This
+prevents 712.8 GiB of one-use inputs from accumulating against the 512 GiB
+aggregate worker scratch budget; A/B temporary outputs remain workflow-scoped
+and provide the intended movement and GC pressure.
 It also seals the complete graph before starting the factory. During admission,
 an unreachable `wait-for-workers=129` scheduling threshold keeps execution
 closed until the driver observes exactly 128 workers and 2,048 cores, then the
@@ -208,7 +212,7 @@ production performance claim.
 
 The 1 x 1 tiny-profile mechanism pilot is PASS for both backends with 256/256
 logical/physical tasks and matching sampled output hashes. Its single paired
-execution measured 27.10 s for TaskVine and 26.21 s for DataVine (1.03x) with
+execution measured 27.01 s for TaskVine and 26.21 s for DataVine (1.03x) with
 76.38% fewer manager data-plane bytes, while DataVine reported zero manager task-output payload bytes and only 32 requested
 durable outputs. This is useful mechanism evidence only. The full 128 x 16,
 five-pair performance result remains OPEN until its dataset and runs complete.
