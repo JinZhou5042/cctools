@@ -147,6 +147,25 @@ assert "vine_declare_temp" in controller_source
 assert "vine_fetch_file" not in controller_source
 assert "vine_fetch_file" not in runtime_source
 
+# A loss closure can contain both a generated value and one of its ancestors.
+# Every queued output must be made Controller-PENDING before the bounded replay
+# window dispatches any member; queue order is only a performance preference.
+assert runtime_source.count("parametric_recovery_arm(") == 3
+loss_arm = runtime_source.index(
+    "valid = parametric_recovery_arm(runtime, workflow_id, resources,"
+)
+loss_return = runtime_source.index("\n\treturn valid;", loss_arm)
+assert loss_arm < loss_return
+restart_arm = runtime_source.index(
+    "valid = parametric_recovery_arm(runtime, workflow_id,\n"
+    "\t\t\t\t\t\t\t&resources, recovery_first,"
+)
+first_replay_submit = runtime_source.index(
+    "while (valid && resources.parametric &&\n"
+    "\t\t\t\trunning < VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW"
+)
+assert restart_arm < first_replay_submit
+
 python_executor = (source / "tools/datavine_python_executor").read_text()
 assert "HashingWriter" in python_executor
 assert "DVM1" in python_executor

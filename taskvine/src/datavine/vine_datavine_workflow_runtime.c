@@ -1192,6 +1192,39 @@ static int parametric_recovery_queue_append(
 	return 1;
 }
 
+/* Make the complete recovery closure visible to Worker Data Agents before any
+ * member enters the bounded physical submission window. A disconnected Worker
+ * can lose both a consumer output and one of its ancestor inputs in the same
+ * event. The loss callback order is not topological, so reversing the queue is
+ * only a dispatch preference: it cannot be used as a correctness barrier.
+ *
+ * DATA_RECOVERY changes an unavailable output from DEAD to PENDING. Children
+ * can therefore wait without consuming an executor core while an ancestor is
+ * still outside the recovery window. Scheduler state remains DONE throughout;
+ * only the Controller's data state is changed here. */
+static int parametric_recovery_arm(
+		struct vine_datavine_workflow_runtime *runtime,
+		const char *workflow_id, struct execution_resources *resources,
+		size_t first, size_t count)
+{
+	if (!runtime || !workflow_id || !resources ||
+			first > resources->recovery_tail ||
+			count > resources->recovery_tail - first)
+		return 0;
+	uint64_t inputs[VINE_DATAVINE_PARAMETRIC_SOURCE_INPUTS];
+	for (size_t index = 0; index < count; index++) {
+		uint64_t task_id = resources->recovery_queue[first + index];
+		size_t input_count = 0;
+		uint64_t output = 0;
+		if (!parametric_task_inputs(resources->parametric, task_id, inputs,
+				&input_count, &output) ||
+				!vine_datavine_data_controller_agent_set_recovery(
+					runtime->data_controller, workflow_id, output, 1))
+			return 0;
+	}
+	return 1;
+}
+
 static int apply_parametric_losses(
 		struct vine_datavine_workflow_runtime *runtime, const char *workflow_id,
 		const uint64_t *lost_data_ids, size_t lost_count,
@@ -1277,6 +1310,8 @@ static int apply_parametric_losses(
 		}
 		resources->recovery_tail = tail;
 		*invalidated_count = tail - *invalidated_first;
+		valid = parametric_recovery_arm(runtime, workflow_id, resources,
+				*invalidated_first, *invalidated_count);
 	}
 	return valid;
 }
@@ -2985,6 +3020,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			if (valid && recovered_size)
 				valid = vine_datavine_scheduler_rebuild(scheduler, recovered, recovered_size);
 			if (valid && resources.parametric && invalidated_count) {
+				size_t recovery_first = resources.recovery_tail;
 				for (size_t index = invalidated_count; valid && index > 0; index--) {
 					uint64_t task_id = invalidated[index - 1];
 					valid = task_id > 0 && task_id <= maximum_task_id &&
@@ -2998,6 +3034,10 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 									PARAMETRIC_RECOVERY_QUEUED;
 					}
 				}
+				if (valid)
+					valid = parametric_recovery_arm(runtime, workflow_id,
+							&resources, recovery_first,
+							resources.recovery_tail - recovery_first);
 			}
 			free(invalidated);
 			recovered_applied = 1;
