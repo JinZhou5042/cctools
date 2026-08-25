@@ -65,14 +65,18 @@ def parse_args():
     parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--workers", type=int, default=128)
     parser.add_argument("--cores", type=int, default=16)
+    parser.add_argument("--memory", type=int, default=4096)
     parser.add_argument("--timeout", type=float, default=24 * 60 * 60)
     parser.add_argument("--acceptance", action="store_true")
     parser.add_argument("--plan-only", action="store_true")
     args = parser.parse_args()
-    if min(args.repetitions, args.workers, args.cores) < 1:
-        parser.error("repetitions, workers, and cores must be positive")
-    if args.acceptance and (args.workers, args.cores) != (128, 16):
-        parser.error("acceptance requires exactly 128 workers x 16 cores")
+    if min(args.repetitions, args.workers, args.cores, args.memory) < 1:
+        parser.error("repetitions and worker resources must be positive")
+    if args.acceptance and (args.workers, args.cores, args.memory) != (
+            128, 16, 4096):
+        parser.error(
+            "acceptance requires exactly 128 workers x 16 cores with 4096 MiB each"
+        )
     return args
 
 
@@ -87,6 +91,7 @@ def main():
             "status": "PASS", "contract": contract,
             "schedule": campaign_schedule,
             "workers": args.workers, "cores": args.cores,
+            "memory_mib_per_worker": args.memory,
         }, indent=2, sort_keys=True))
         return 0
     if not clean_repository(repository):
@@ -118,13 +123,17 @@ def main():
         "dataset_manifest_sha256": dataset["manifest_sha256"],
         "workers": args.workers,
         "cores_per_worker": args.cores,
+        "memory_mib_per_worker": args.memory,
         "repetitions": args.repetitions,
         "schedule": [list(item) for item in campaign_schedule],
         "runs": [],
     }
     if state_path.exists():
         previous = json.loads(state_path.read_text())
-        immutable = ("commit", "contract_sha256", "dataset_manifest_sha256", "workers", "cores_per_worker", "repetitions")
+        immutable = (
+            "commit", "contract_sha256", "dataset_manifest_sha256", "workers",
+            "cores_per_worker", "memory_mib_per_worker", "repetitions",
+        )
         if any(previous.get(key) != state.get(key) for key in immutable):
             raise RuntimeError("existing campaign state does not match this invocation")
         state["started_at"] = previous.get("started_at", state["started_at"])
@@ -152,6 +161,7 @@ def main():
                 sys.executable, str(runners[backend]), "--acceptance",
                 "--dataset-root", str(dataset_root), "--output-dir", str(output),
                 "--workers", str(args.workers), "--cores", str(args.cores),
+                "--memory", str(args.memory),
                 "--batch-type", "condor", "--timeout", str(args.timeout),
             )
             state["current"] = {

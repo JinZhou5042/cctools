@@ -91,6 +91,9 @@ def main():
     assert 'stats["tasks_exhausted_attempts"] == 0' in taskvine_runner
     assert "required_ready = min(32_768, max(1, tasks // 10))" in taskvine_runner
     assert '"no_removed_workers"' not in taskvine_runner
+    assert 'default=4096' in taskvine_runner
+    assert 'memory_mib=args.memory' in taskvine_runner
+    assert '"memory_mib_per_worker": args.memory' in taskvine_runner
     datavine_runner = (
         scripts / "benchmark_data_intensive_datavine.py"
     ).read_text()
@@ -108,6 +111,9 @@ def main():
     assert 'int(match.group("result")) == 72' in datavine_runner
     assert 'required_active_fraction = 0.90' in datavine_runner
     assert '"no_removed_workers"' not in datavine_runner
+    assert 'default=4096' in datavine_runner
+    assert 'memory_mib=args.memory' in datavine_runner
+    assert '"memory_mib_per_worker": args.memory' in datavine_runner
 
     workflow_store_header = (
         repository / "taskvine/src/datavine/vine_datavine_workflow_store.h"
@@ -133,6 +139,7 @@ def main():
     comparator = (scripts / "compare_data_intensive_runs.py").read_text()
     assert '"worker_churn_recovered"' in comparator
     assert '"no_removed_workers"' not in comparator
+    assert '"worker resource contract mismatch"' in comparator
     assert 'required_active_fraction = 0.90' in taskvine_runner
 
     # One smallest cohort has exactly the same regular graph invariants.

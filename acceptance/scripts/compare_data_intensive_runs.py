@@ -64,6 +64,9 @@ def main():
             pair_errors.append("TaskVine run is not fully PASS")
         if contract.get("contract_sha256") != tv.get("contract", {}).get("contract_sha256"):
             pair_errors.append("contract digest mismatch")
+        resources_equal = dv.get("resources") == tv.get("resources")
+        if not resources_equal:
+            pair_errors.append("worker resource contract mismatch")
         hashes_equal = dv.get("sampled_results", {}).get("sha256") == tv.get("sampled_results", {}).get("sha256")
         if not hashes_equal:
             pair_errors.append("sampled result digest mismatch")
@@ -91,6 +94,8 @@ def main():
             "tasks": contract.get("counts", {}).get("tasks"),
             "workflow_files": contract.get("counts", {}).get("workflow_files"),
             "result_hashes_equal": hashes_equal,
+            "worker_resources_equal": resources_equal,
+            "worker_resources": dv.get("resources"),
             "datavine_execution_seconds": dv_seconds,
             "taskvine_execution_seconds": tv_seconds,
             "speedup_taskvine_over_datavine": tv_seconds / dv_seconds if dv_seconds else None,

@@ -392,6 +392,8 @@ def parse_args():
     parser.add_argument("--size-profile", choices=("tiny", "full"), default="full")
     parser.add_argument("--workers", type=int, default=128)
     parser.add_argument("--cores", type=int, default=16)
+    parser.add_argument("--memory", type=int, default=4096,
+                        help="memory in MiB requested and advertised per worker")
     parser.add_argument("--batch-type", choices=("local", "condor"), default="condor")
     parser.add_argument("--task-chunk", type=int, default=2_000)
     parser.add_argument("--representation", choices=("parametric", "explicit"),
@@ -400,7 +402,8 @@ def parse_args():
     parser.add_argument("--acceptance", action="store_true")
     parser.add_argument("--plan-only", action="store_true")
     args = parser.parse_args()
-    if min(args.cohorts, args.scale, args.workers, args.cores, args.task_chunk) < 1:
+    if min(args.cohorts, args.scale, args.workers, args.cores, args.memory,
+           args.task_chunk) < 1:
         parser.error("numeric workload arguments must be positive")
     return args
 
@@ -411,8 +414,12 @@ def main():
     contract = workload.contract()
     if args.acceptance:
         assert_full_contract(workload)
-        if (args.workers, args.cores, args.batch_type) != (128, 16, "condor"):
-            raise ValueError("acceptance requires exactly 128 Condor workers x 16 cores")
+        if (args.workers, args.cores, args.memory, args.batch_type) != (
+                128, 16, 4096, "condor"):
+            raise ValueError(
+                "acceptance requires exactly 128 Condor workers x 16 cores "
+                "with 4096 MiB each"
+            )
     if args.plan_only:
         print(json.dumps({"status": "PASS", "contract": contract, "execution": vars(args)}, indent=2, sort_keys=True, default=str))
         return 0
@@ -475,6 +482,7 @@ def main():
         factory, factory_log, factory_command = start_resident_factory(
             output / "factory-state", contact["manager_port"], args.workers, args.cores,
             repository / "taskvine/src/worker/vine_worker", factory_log_path, args.batch_type,
+            memory_mib=args.memory,
         )
         inventory = wait_scale_workers(
             repository / "taskvine/src/tools/vine_status", contact["manager_port"],
@@ -625,6 +633,11 @@ def main():
                 ),
             },
             "parallelism": parallelism,
+            "resources": {
+                "workers": args.workers,
+                "cores_per_worker": args.cores,
+                "memory_mib_per_worker": args.memory,
+            },
             "admission": {"workers": len(inventory), "cores_per_worker": inventory},
             "final_worker_pool": {
                 "workers": len(final_inventory),

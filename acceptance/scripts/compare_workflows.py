@@ -507,7 +507,7 @@ def wait_taskvine_pool(manager, factory, workers, cores, timeout=3600):
 
 
 def start_resident_factory(root, manager_port, workers, cores, worker_binary,
-                           log_path, batch_type):
+                           log_path, batch_type, memory_mib=2048):
     root.mkdir(parents=True, exist_ok=True)
     log = log_path.open("w")
     manager_host = "localhost" if batch_type == "local" else socket.getfqdn()
@@ -521,7 +521,7 @@ def start_resident_factory(root, manager_port, workers, cores, worker_binary,
         "--factory-timeout", str(POOL_LIFETIME_SECONDS),
         "--timeout", str(WORKER_IDLE_SECONDS),
         "--cores", str(cores),
-        "--memory", "2048",
+        "--memory", str(memory_mib),
         "--disk", "4096",
         "--worker-binary", str(worker_binary),
         "--scratch-dir", str(root / "factory"),
