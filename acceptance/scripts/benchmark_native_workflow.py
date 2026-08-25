@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -196,12 +197,12 @@ def workflow_delta(initial, start, stop, tasks, executor, command_argv):
     }
 
 
-def terminate_group(process):
+def terminate_group(process, timeout=30):
     if process is None or process.poll() is not None:
         return
     try:
         os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=30)
+        process.wait(timeout=timeout)
     except (ProcessLookupError, subprocess.TimeoutExpired):
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -214,6 +215,14 @@ def main():
     parser.add_argument("--tasks", type=int, required=True)
     parser.add_argument("--workers", type=int, required=True)
     parser.add_argument("--cores", type=int, required=True)
+    parser.add_argument("--memory", type=int, default=2048,
+                        help="memory in MiB requested per worker")
+    parser.add_argument("--disk", type=int, default=4096,
+                        help="disk in MiB requested per worker")
+    parser.add_argument("--batch-type", choices=("local", "condor"),
+                        default="local")
+    parser.add_argument("--registration", choices=("streaming", "sealed"),
+                        default="streaming")
     parser.add_argument("--executor", choices=("builtin", "command"), default="builtin")
     parser.add_argument(
         "--command-argv-json",
@@ -240,8 +249,9 @@ def main():
     )
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    if min(args.tasks, args.workers, args.cores, args.chunk_tasks) < 1:
-        parser.error("tasks, workers, cores, and chunk-tasks must be positive")
+    if min(args.tasks, args.workers, args.cores, args.memory, args.disk,
+           args.chunk_tasks) < 1:
+        parser.error("task and worker resource arguments must be positive")
     try:
         command_argv = json.loads(args.command_argv_json)
     except json.JSONDecodeError as error:
@@ -278,13 +288,19 @@ def main():
         factory = None
         try:
             contact = json.loads(service.stdout.readline())
+            manager_host = (
+                "localhost" if args.batch_type == "local" else socket.getfqdn()
+            )
             factory_command = (
-                "vine_factory", "--batch-type", "local", "--min-workers", str(args.workers),
+                "vine_factory", "--batch-type", args.batch_type,
+                "--min-workers", str(args.workers),
                 "--max-workers", str(args.workers), "--workers-per-cycle", str(args.workers),
                 "--factory-period", "1", "--factory-timeout", str(round(args.workflow_timeout + 120)),
                 "--cores", str(args.cores), "--timeout", str(round(args.workflow_timeout + 60)),
+                "--memory", str(args.memory), "--disk", str(args.disk),
+                "--worker-binary", str(repository / "taskvine/src/worker/vine_worker"),
                 "--scratch-dir", str(root / "factory"), "--parent-death",
-                "localhost", str(contact["manager_port"]),
+                manager_host, str(contact["manager_port"]),
             )
             if args.poncho_env:
                 factory_command = (
@@ -307,7 +323,11 @@ def main():
             )
             worker_wait = time.monotonic() - gate_started
             build_started = time.monotonic()
-            document = streaming_initial(args.tasks, args.executor, command_argv)
+            document = (
+                workflow_document(args.tasks, args.executor, command_argv)
+                if args.registration == "sealed"
+                else streaming_initial(args.tasks, args.executor, command_argv)
+            )
             build_seconds = time.monotonic() - build_started
             initial_payload_bytes = len(json.dumps(
                 document,
@@ -327,36 +347,39 @@ def main():
             delta_build_seconds = 0
             delta_encode_seconds = 0
             append_rpc_seconds = 0
-            for start in range(1, args.tasks + 1, args.chunk_tasks):
-                stop = min(args.tasks + 1, start + args.chunk_tasks)
-                delta_started = time.monotonic()
-                delta = workflow_delta(
-                    document, start, stop, args.tasks, args.executor, command_argv
-                )
-                delta_build_seconds += time.monotonic() - delta_started
-                encode_started = time.monotonic()
-                encoded_delta = json.dumps(
-                    delta,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                ).encode()
-                delta_encode_seconds += time.monotonic() - encode_started
-                maximum_delta_bytes = max(
-                    maximum_delta_bytes,
-                    len(encoded_delta),
-                )
-                total_delta_bytes += len(encoded_delta)
-                append_started = time.monotonic()
-                submitted = client.append_workflow(
-                    document["workflow_id"], generation, encoded_delta
-                )
-                append_rpc_seconds += time.monotonic() - append_started
-                generation = submitted["generation"]
-                transaction_count += 1
-            seal_started = time.monotonic()
-            submitted = client.seal_workflow(document["workflow_id"], generation)
-            seal_seconds = time.monotonic() - seal_started
+            if args.registration == "streaming":
+                for start in range(1, args.tasks + 1, args.chunk_tasks):
+                    stop = min(args.tasks + 1, start + args.chunk_tasks)
+                    delta_started = time.monotonic()
+                    delta = workflow_delta(
+                        document, start, stop, args.tasks, args.executor, command_argv
+                    )
+                    delta_build_seconds += time.monotonic() - delta_started
+                    encode_started = time.monotonic()
+                    encoded_delta = json.dumps(
+                        delta,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode()
+                    delta_encode_seconds += time.monotonic() - encode_started
+                    maximum_delta_bytes = max(
+                        maximum_delta_bytes,
+                        len(encoded_delta),
+                    )
+                    total_delta_bytes += len(encoded_delta)
+                    append_started = time.monotonic()
+                    submitted = client.append_workflow(
+                        document["workflow_id"], generation, encoded_delta
+                    )
+                    append_rpc_seconds += time.monotonic() - append_started
+                    generation = submitted["generation"]
+                    transaction_count += 1
+                seal_started = time.monotonic()
+                submitted = client.seal_workflow(document["workflow_id"], generation)
+                seal_seconds = time.monotonic() - seal_started
+            else:
+                seal_seconds = 0.0
             submitted_at = time.monotonic()
             peak = sample((service.pid, factory.pid))
             deadline = started + args.workflow_timeout
@@ -371,7 +394,11 @@ def main():
                 time.sleep(0.25)
             elapsed = time.monotonic() - started
             run_seconds = time.monotonic() - submitted_at
-            result_data_id = args.tasks + 1 if args.executor == "builtin" else args.tasks
+            result_data_id = (
+                args.tasks + 1
+                if args.executor == "builtin" and args.registration == "streaming"
+                else args.tasks
+            )
             result = client.fetch_workflow_result(
                 document["workflow_id"], result_data_id
             )
@@ -390,7 +417,7 @@ def main():
                     "task identity violation: expected one physical TaskVine "
                     f"execution per logical task, got {physical_tasks}"
                 )
-            runtime_rate = args.tasks / run_seconds
+            runtime_rate = args.tasks / elapsed
             if runtime_rate < args.minimum_runtime_tasks_per_second:
                 raise RuntimeError(
                     f"runtime throughput {runtime_rate:.3f} below "
@@ -405,6 +432,10 @@ def main():
                 "physical_tasks": physical_tasks,
                 "workers": args.workers,
                 "cores_per_worker": args.cores,
+                "memory_mib_per_worker": args.memory,
+                "disk_mib_per_worker": args.disk,
+                "batch_type": args.batch_type,
+                "registration": args.registration,
                 "worker_inventory": len(inventory),
                 "worker_wait_seconds": worker_wait,
                 "workflow_build_seconds": build_seconds,
@@ -426,6 +457,9 @@ def main():
                 "run_seconds": run_seconds,
                 "runtime_tasks_per_second": runtime_rate,
                 "tasks_per_second": args.tasks / elapsed,
+                "post_registration_tasks_per_second": (
+                    args.tasks / run_seconds if run_seconds > 0 else None
+                ),
                 "workflow": state,
                 "submitted": submitted,
                 "exact_result_bytes": len(result),
@@ -438,7 +472,8 @@ def main():
             output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
             print(json.dumps(evidence, sort_keys=True))
         finally:
-            terminate_group(factory)
+            # Condor factory removes a large pool serially during shutdown.
+            terminate_group(factory, timeout=300)
             terminate_group(service)
             factory_log.close()
             service_log.close()
