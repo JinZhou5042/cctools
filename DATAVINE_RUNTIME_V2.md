@@ -258,6 +258,28 @@ specifically covers recovery coalescing, stale publication, authoritative
 Controller admission, and the distinction between transport uncertainty and
 an exact source fault.
 
+A later mixed-stage disconnect exposed two bounded-closure rules that the
+double-disconnect gate had not stressed. First, Controller must mark every
+unavailable output in the complete transitive replay closure `RECOVERY` before
+any member is dispatched; otherwise a child can observe an ancestor as `DEAD`
+instead of `PENDING`. Second, replay dispatch itself must be topological. Loss
+callback order is arbitrary, and reversing that order can let waiting consumers
+fill the bounded reserve and exclude their own producers. The fixed parametric
+family is partitioned A -> B -> C in one O(n), constant-space pass, and the
+entire ordered slice is armed before dispatch. This changes only Controller
+data state and Runtime physical bookkeeping: Scheduler `DONE` remains immutable
+and Manager still sees only opaque TaskVine tasks.
+
+The targeted 8,192-task shared-filesystem gate removed a Worker with mixed A/B
+data resident and completed 8,192 logical tasks + 488 recovery replays + 8
+disconnect retries with exact 8,688/8,688 physical conservation. It recorded
+zero recovery failure, zero admission timeout, zero non-infrastructure failure,
+and restored all four Workers. The generic benchmark status was `FAIL` solely
+on active-parallelism sampling while the deliberately removed Worker awaited a
+replacement, so the artifact is recovery correctness evidence, not performance
+evidence. Its path and hash are recorded in `progress.md` and
+`acceptance/runtime-v2-recovery-state-20260825.json`.
+
 The full benchmark descriptor expands to exactly 1,048,576 tasks and
 10,485,760 files but serializes to 1,344 bytes. It is wired into Store,
 Scheduler, and Runtime with a 4,096-task materialization window. Full native

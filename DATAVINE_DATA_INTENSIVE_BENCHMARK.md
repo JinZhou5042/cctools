@@ -295,6 +295,19 @@ bounded 128-task Manager turns, and `FORSAKEN` uses a separate bounded
 infrastructure retry. The lifecycle gate explicitly kills a worker with
 `maximum_attempts: 1` and requires successful recovery.
 
+The strict-timing r24 attempt reached exact 128x16 admission and sustained the
+intended high parallelism, but a later Worker loss exposed recovery-closure
+ordering rather than a performance result. A consumer replay could precede an
+unavailable ancestor in the bounded recovery reserve: initially the child saw
+`DEAD` and retried; after the whole closure was made Controller-`PENDING`, an
+arbitrary reversed loss order could still let waiting children exclude their
+producers. Runtime now partitions every fixed-family replay slice A -> B -> C
+in O(n), constant auxiliary space and arms the whole slice before dispatch.
+A shared-filesystem 8,192-task injection gate completed exact
+`8192 + 488 + 8 = 8688` physical conservation with zero recovery failure,
+zero admission timeout, and full pool restoration. r24 is excluded from all
+performance claims; the injected run is recovery evidence only.
+
 The 1 x 1 tiny-profile mechanism pilot is PASS for both backends with 256/256
 logical/physical tasks and matching sampled output hashes. Its single paired
 execution measured 27.01 s for TaskVine and 26.21 s for DataVine (1.03x) with

@@ -6,7 +6,9 @@
   "implementation_commits": [
     "592c8be86",
     "91593ca3f",
-    "50d492d5f"
+    "50d492d5f",
+    "7b307ab74",
+    "1337a5f8f"
   ],
   "boundary": {
     "manager": "worker resources, physical dispatch, physical completion, opaque auxiliary payload only",
@@ -44,6 +46,26 @@
     "recovery_admission_timeouts": 0,
     "final_workers": 4,
     "physical_conservation": "8192 + 1096 + 7 = 9295"
+  },
+  "bounded_recovery_closure_gate": {
+    "run": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/recovery-closure-gate-c4s8-r4-1337a5f8f-20260825",
+    "summary_sha256": "98644ba3cb53ea04f6695a31d63a102304a5ce2e5a987c508a5d61d1e273b976",
+    "status": "PASS_RECOVERY",
+    "logical_tasks": 8192,
+    "physical_submissions": 8688,
+    "physical_completions": 8688,
+    "recovery_replays": 488,
+    "recovery_task_reports": 488,
+    "infrastructure_retries": 8,
+    "non_infrastructure_failures": 0,
+    "worker_disconnects": 1,
+    "recovery_epochs": 1,
+    "recovery_admission_timeouts": 0,
+    "recovery_failures": 0,
+    "final_workers": 4,
+    "physical_conservation": "8192 + 488 + 8 = 8688",
+    "injection": "one 8-core Worker removed after 1988 physical completions with mixed A/B data resident",
+    "overall_runner_status": "FAIL only because the deliberately delayed replacement reduced the central active-core sample fraction; every correctness, data, GC, count, output, and final-pool gate passed"
   },
   "verification": {
     "recovery_regression": {

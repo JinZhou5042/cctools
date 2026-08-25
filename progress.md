@@ -816,3 +816,40 @@ could omit native setup and early tasks. r23 was stopped before admission and
 is diagnostic only. The corrected r24 timer starts before submission, includes
 native setup, and uses the 24-hour admission timeout. r21-r23 and all earlier
 interrupted artifacts remain excluded from the performance claim.
+
+## Current checkpoint — bounded recovery closure ordering (2026-08-25)
+
+The r24 execution then exposed a scale-only recovery ordering bug after a
+Worker disconnect. One completed B producer was dispatched for replay before
+one of its lost A inputs had entered the bounded recovery reserve. Because the
+Controller still described that retired input as `DEAD`, Worker Agents rejected
+the B replay before executor start and it exhausted infrastructure retries.
+The first correction arms the entire transitive recovery closure in the Data
+Controller before any physical replay: unavailable ancestors therefore resolve
+as `PENDING`, while Scheduler state remains `DONE` and Manager remains unaware
+of DataIDs.
+
+That correction made a second bounded-window hazard visible in an injected
+loss gate. Arbitrary Controller loss-callback order can interleave independently
+lost consumers and ancestors; simple queue reversal is not a topological sort.
+Waiting consumers could fill the replay reserve and exclude their producers.
+The fixed parametric family already assigns all A TaskIDs before B and all B
+before C, so Runtime now partitions each new recovery slice A -> B -> C in
+O(n) time and constant auxiliary space, then arms the complete slice before
+dispatch. No sort, edge expansion, Manager lookup, or Scheduler rollback is
+required.
+
+The shared-filesystem injection run at
+`/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/recovery-closure-gate-c4s8-r4-1337a5f8f-20260825`
+removed one 8-core Worker after 1,988 physical completions with mixed A/B data
+resident. It terminated with exact conservation: 8,192 logical tasks + 488
+replays + 8 disconnect retries = 8,688 submissions = 8,688 completions. All
+488 replays published, recovery failures and admission timeouts were zero,
+non-infrastructure failures were zero, all results and GC/count gates passed,
+and the pool returned to four Workers. Its summary SHA-256 is
+`98644ba3cb53ea04f6695a31d63a102304a5ce2e5a987c508a5d61d1e273b976`.
+The generic runner status is `FAIL` only because the deliberately delayed
+replacement reduced the central active-core fraction; this artifact is a
+recovery-correctness gate, not performance evidence. Post-fix regression is
+17/17 PASS. The exact 128x16 performance comparison remains OPEN pending the
+terminal DataVine and TaskVine artifacts.
