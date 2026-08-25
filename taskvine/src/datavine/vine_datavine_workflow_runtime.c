@@ -1192,6 +1192,44 @@ static int parametric_recovery_queue_append(
 	return 1;
 }
 
+/* The fixed parametric family assigns all A TaskIDs before B, and all B before
+ * C. Partition one recovery slice by stage in linear time and constant space.
+ * Ordering within a stage is irrelevant because dependencies cross stages
+ * only. This is a correctness requirement for a bounded replay window: if
+ * waiting consumers fill the reserve ahead of their producers, no producer can
+ * enter and the system deadlocks even though every DataID correctly says
+ * PENDING. */
+static int parametric_recovery_order(
+		struct execution_resources *resources, size_t first, size_t count)
+{
+	if (!resources || !resources->parametric ||
+			first > resources->recovery_tail ||
+			count > resources->recovery_tail - first)
+		return 0;
+	size_t a_end = first;
+	size_t current = first;
+	size_t c_begin = first + count;
+	uint64_t a_last = resources->parametric->a_tasks;
+	uint64_t b_last = a_last + resources->parametric->b_tasks;
+	while (current < c_begin) {
+		uint64_t task_id = resources->recovery_queue[current];
+		if (!task_id || task_id > resources->maximum_task_id)
+			return 0;
+		if (task_id <= a_last) {
+			uint64_t swap = resources->recovery_queue[a_end];
+			resources->recovery_queue[a_end++] = task_id;
+			resources->recovery_queue[current++] = swap;
+		} else if (task_id <= b_last) {
+			current++;
+		} else {
+			uint64_t swap = resources->recovery_queue[--c_begin];
+			resources->recovery_queue[c_begin] = task_id;
+			resources->recovery_queue[current] = swap;
+		}
+	}
+	return 1;
+}
+
 /* Make the complete recovery closure visible to Worker Data Agents before any
  * member enters the bounded physical submission window. A disconnected Worker
  * can lose both a consumer output and one of its ancestor inputs in the same
@@ -1295,23 +1333,12 @@ static int apply_parametric_losses(
 		}
 	}
 	if (valid) {
-		/* The traversal discovers consumers before their missing ancestors.
-		 * Submit this new slice in reverse so producers enter recovery slots
-		 * before tasks that would only wait for those producers' data. */
-		for (size_t left = *invalidated_first, right = tail;
-				left < right;) {
-			right--;
-			if (left >= right)
-				break;
-			uint64_t swap = resources->recovery_queue[left];
-			resources->recovery_queue[left] = resources->recovery_queue[right];
-			resources->recovery_queue[right] = swap;
-			left++;
-		}
 		resources->recovery_tail = tail;
 		*invalidated_count = tail - *invalidated_first;
-		valid = parametric_recovery_arm(runtime, workflow_id, resources,
-				*invalidated_first, *invalidated_count);
+		valid = parametric_recovery_order(resources, *invalidated_first,
+				*invalidated_count) &&
+			parametric_recovery_arm(runtime, workflow_id, resources,
+					*invalidated_first, *invalidated_count);
 	}
 	return valid;
 }
@@ -3021,8 +3048,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				valid = vine_datavine_scheduler_rebuild(scheduler, recovered, recovered_size);
 			if (valid && resources.parametric && invalidated_count) {
 				size_t recovery_first = resources.recovery_tail;
-				for (size_t index = invalidated_count; valid && index > 0; index--) {
-					uint64_t task_id = invalidated[index - 1];
+				for (size_t index = 0; valid && index < invalidated_count; index++) {
+					uint64_t task_id = invalidated[index];
 					valid = task_id > 0 && task_id <= maximum_task_id &&
 							resources.recovery_state[task_id] ==
 									PARAMETRIC_RECOVERY_NONE;
@@ -3034,10 +3061,14 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 									PARAMETRIC_RECOVERY_QUEUED;
 					}
 				}
-				if (valid)
-					valid = parametric_recovery_arm(runtime, workflow_id,
-							&resources, recovery_first,
-							resources.recovery_tail - recovery_first);
+				if (valid) {
+					size_t recovery_count =
+							resources.recovery_tail - recovery_first;
+					valid = parametric_recovery_order(&resources,
+							recovery_first, recovery_count) &&
+						parametric_recovery_arm(runtime, workflow_id,
+							&resources, recovery_first, recovery_count);
+				}
 			}
 			free(invalidated);
 			recovered_applied = 1;

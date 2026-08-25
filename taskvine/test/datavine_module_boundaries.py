@@ -149,22 +149,25 @@ assert "vine_fetch_file" not in runtime_source
 
 # A loss closure can contain both a generated value and one of its ancestors.
 # Every queued output must be made Controller-PENDING before the bounded replay
-# window dispatches any member; queue order is only a performance preference.
+# window dispatches any member, and producers must precede consumers so waiting
+# children cannot fill that bounded window and exclude their own producers.
 assert runtime_source.count("parametric_recovery_arm(") == 3
-loss_arm = runtime_source.index(
-    "valid = parametric_recovery_arm(runtime, workflow_id, resources,"
+assert runtime_source.count("parametric_recovery_order(") == 3
+loss_begin = runtime_source.index("static int apply_parametric_losses(")
+loss_end = runtime_source.index("static int parametric_recovery_begin(")
+loss_path = runtime_source[loss_begin:loss_end]
+assert loss_path.index("parametric_recovery_order(") < loss_path.index(
+    "parametric_recovery_arm("
 )
-loss_return = runtime_source.index("\n\treturn valid;", loss_arm)
-assert loss_arm < loss_return
-restart_arm = runtime_source.index(
-    "valid = parametric_recovery_arm(runtime, workflow_id,\n"
-    "\t\t\t\t\t\t\t&resources, recovery_first,"
-)
+restart_begin = runtime_source.index("if (!recovered_applied) {")
 first_replay_submit = runtime_source.index(
     "while (valid && resources.parametric &&\n"
     "\t\t\t\trunning < VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW"
 )
-assert restart_arm < first_replay_submit
+restart_path = runtime_source[restart_begin:first_replay_submit]
+assert restart_path.index("parametric_recovery_order(") < restart_path.index(
+    "parametric_recovery_arm("
+)
 
 python_executor = (source / "tools/datavine_python_executor").read_text()
 assert "HashingWriter" in python_executor
