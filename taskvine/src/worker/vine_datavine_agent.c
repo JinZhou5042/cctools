@@ -756,7 +756,16 @@ static int retry_origin_fetch(struct local_object *local, const char *name)
 	vine_cache_remove(agent_cache, name, 0);
 	local->flags = 0;
 	if (local->fetch_failures >= LOCAL_ORIGIN_RETRY_ATTEMPTS) {
-		local->fetch_retry_after = 0;
+		/* Fail this physical placement once, but do not permanently poison the
+		 * Worker for every later task using the same durable origin.  Manager is
+		 * intentionally unaware of DataIDs and may select this Worker again.  A
+		 * capped cooldown gives the origin or local cache time to recover before
+		 * the next physical placement starts a fresh bounded retry cycle. */
+		agent_diagnostic_failure("origin-retry-exhausted",
+				local->data_id, name, 0);
+		local->fetch_failures = 0;
+		local->fetch_retry_after = timestamp_get() +
+				LOCAL_PEER_RETRY_MAX_US;
 		return -1;
 	}
 	schedule_fetch_retry(local);

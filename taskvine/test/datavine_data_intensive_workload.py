@@ -176,6 +176,11 @@ def main():
     assert "local->generation > generation" in agent_runtime
     assert "LOCAL_ORIGIN_RETRY_ATTEMPTS 8U" in agent_runtime
     assert "retry_origin_fetch" in agent_runtime
+    assert 'agent_diagnostic_failure("origin-retry-exhausted"' in agent_runtime
+    assert "local->fetch_failures = 0" in agent_runtime[
+        agent_runtime.index("static int retry_origin_fetch"):
+        agent_runtime.index("static void report_fault")
+    ]
     origin_prepare = agent_runtime[
         agent_runtime.index("static int prepare_uri("):
         agent_runtime.index("int vine_datavine_agent_initialize(")
