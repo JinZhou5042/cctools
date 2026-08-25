@@ -32,11 +32,19 @@
     "physical_completions_observed": 2336,
     "failed_inputs": 0
   },
+  "control_plane_followup": {
+    "artifact": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/datavine-native-parametric-r10-48253979d",
+    "workers_observed_before_starvation": 113,
+    "physical_completions_observed": 82745,
+    "forsaken_tasks": 13,
+    "cause": "4096-task materialization window was also used as one manager-lock batch",
+    "fix": "retain 4096 in flight but bound submit and completion batches to 128; retry FORSAKEN as infrastructure reclamation outside the application attempt budget"
+  },
   "gates": {
     "sharedfs_probe_zero_failures": true,
     "datavine_regression_17_of_17": true,
     "scientific_foundation_exact_counts": true,
     "ordinary_taskvine_single_worker": true
   },
-  "regression_report": "/tmp/datavine-eintr-regression-20260824-r3.json"
+  "regression_report": "/tmp/datavine-infra-retry-regression-20260824.json"
 }

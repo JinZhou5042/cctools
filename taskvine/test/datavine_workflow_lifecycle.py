@@ -206,7 +206,9 @@ def main():
                         f": > '{loss_marker}'; sleep 60; "
                         "else printf recovered-after-worker-loss; fi",
                     ],
-                    attempts=2,
+                    # Infrastructure reclamation is retried independently of
+                    # the single application-attempt budget.
+                    attempts=1,
                 )
             )
             deadline = time.monotonic() + 10
@@ -226,7 +228,8 @@ def main():
             ] == "completed"
             loss_events = event_types(client, worker_loss_id)
             # The Manager reports FORSAKEN once; the DataVine scheduler owns
-            # the single logical retry and records it explicitly.
+            # the infrastructure retry and records it explicitly without
+            # consuming an application retry.
             assert loss_events == [
                 "accepted",
                 "started",

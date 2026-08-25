@@ -43,6 +43,13 @@ Synchronous source reads retry `EINTR`: dense FunctionCall `SIGCHLD` delivery
 is normal worker activity and must never be interpreted as permanent data
 loss. Non-retryable copy failures retain an operation-specific errno, with
 diagnostics bounded per worker so one bad origin cannot create a log storm.
+
+The in-flight window and event-loop batch are deliberately distinct. Runtime
+may retain 4,096 physical tasks, but creates/submits and drains at most 128 per
+Manager-lane turn so connection acceptance, heartbeats, and status traffic are
+not starved by graph materialization. `FORSAKEN` denotes infrastructure
+reclamation and is resubmitted with a separate 64-attempt safety bound; it does
+not consume `maximum_attempts`, which remains the application-failure policy.
 The Worker consumes and resets one `waiting_data` hint per event-loop turn,
 reducing the next poll timeout from 5 seconds to 1 ms without changing ordinary
 TaskVine task state. Escaped and remote URIs retain the generic

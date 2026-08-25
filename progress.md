@@ -33,6 +33,18 @@ also synchronized before the final 17/17 regression and ordinary TaskVine
 smoke passed. Evidence is retained in
 `acceptance/data-intensive-parametric-eintr-diagnostic-20260824.json`.
 
+The next 128x16 attempt proved the EINTR repair under scale: it passed 82,745
+physical completions before any failure. It then exposed Manager-lane
+starvation because the 4,096-task in-flight bound was also used as one
+materialize-and-submit lock batch. Worker admission advanced only from 85 to
+113 between factory samples, status connections timed out, and 13 tasks were
+eventually reclaimed as `FORSAKEN`. Runtime now keeps the 4,096-task window but
+limits each Manager-lock submission and completion batch to 128. `FORSAKEN` is
+now a separately bounded infrastructure retry (maximum 64 physical attempts)
+that does not consume the workflow's application retry budget; ordinary task
+failure semantics remain unchanged. The lifecycle worker-loss test now proves
+recovery with `maximum_attempts: 1`.
+
 Runtime v2 now separates compute completion from data admission. TaskVine
 Manager owns physical dispatch/completion and transports only a generic opaque
 auxiliary frame. DataVine Scheduler marks a successful physical task DONE and

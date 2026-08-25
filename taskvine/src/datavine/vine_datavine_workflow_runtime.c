@@ -27,7 +27,9 @@
 #include <unistd.h>
 
 #define DATAVINE_WORKFLOW_SUBMISSION_WINDOW 4096
+#define DATAVINE_WORKFLOW_EVENT_BATCH 128
 #define DATAVINE_WORKFLOW_CHECKPOINT_COMPLETIONS 4096
+#define DATAVINE_WORKFLOW_INFRASTRUCTURE_ATTEMPTS 64
 #define DATAVINE_WORKFLOW_RUNTIME_LANES 2
 #define DATAVINE_WORKFLOW_RECOVERY_CACHE_RESULTS 16384
 
@@ -2817,10 +2819,12 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 		clock_gettime(CLOCK_MONOTONIC, &manager_lock_finished);
 		manager_lock_nanoseconds += elapsed_nanoseconds(
 				&manager_lock_started, &manager_lock_finished);
-		struct vine_datavine_workflow_task_event_record submission_events[DATAVINE_WORKFLOW_SUBMISSION_WINDOW];
+		struct vine_datavine_workflow_task_event_record
+				submission_events[DATAVINE_WORKFLOW_EVENT_BATCH];
 		size_t submission_event_count = 0;
 		while (valid && resources.parametric &&
 				running < DATAVINE_WORKFLOW_SUBMISSION_WINDOW &&
+				submission_event_count < DATAVINE_WORKFLOW_EVENT_BATCH &&
 				resources.recovery_head < resources.recovery_tail) {
 			uint64_t task_id = resources.recovery_queue[resources.recovery_head++];
 			uint32_t attempt = attempts[task_id] + 1;
@@ -2873,6 +2877,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				resources.recovery_head == resources.recovery_tail)
 			resources.recovery_head = resources.recovery_tail = 0;
 		while (running < DATAVINE_WORKFLOW_SUBMISSION_WINDOW &&
+				submission_event_count < DATAVINE_WORKFLOW_EVENT_BATCH &&
 				(logical_id = vine_datavine_scheduler_take(scheduler)) > 0) {
 			struct jx *task = resources.parametric ? 0
 					: itable_lookup(tasks, (uint64_t)logical_id);
@@ -2989,7 +2994,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			continue;
 		int drained_completions = 0;
 		struct vine_datavine_workflow_task_event_record
-				parametric_completion_events[256];
+				parametric_completion_events[DATAVINE_WORKFLOW_EVENT_BATCH];
 		size_t parametric_completion_event_count = 0;
 		do {
 			int physical_id = vine_task_get_id(completed);
@@ -3077,27 +3082,32 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 							attempt_limit, 1, &completion_event_nanoseconds);
 				}
 				uncheckpointed_completions += completed_logical_id > 0;
-			} else if (recovery_attempt &&
-					task_result == -(int32_t)VINE_RESULT_FORSAKEN && attempt < 64) {
+			} else if (task_result == -(int32_t)VINE_RESULT_FORSAKEN &&
+					attempt < DATAVINE_WORKFLOW_INFRASTRUCTURE_ATTEMPTS) {
 				/* A freshly connected Worker can reject a FunctionCall before its
-				 * library process becomes READY. This is infrastructure churn, not
-				 * a failed replay. Keep logical DONE immutable and submit another
-				 * independently journaled recovery generation. */
+				 * library process becomes READY, or lose it during connection churn.
+				 * FORSAKEN is infrastructure reclamation, not an application failure:
+				 * do not consume the workflow retry budget. A recovery keeps logical
+				 * DONE immutable; an ordinary task remains RUNNING. */
 				uint32_t next_attempt = attempt + 1;
 				struct parametric_task_view *retry_view = 0;
+				int retry_retain_all = recovery_attempt ||
+					workflow_info.state != VINE_DATAVINE_WORKFLOW_RUNNING;
 				struct vine_task *retry = resources.parametric
 						? materialize_parametric(runtime, workflow_id, &resources,
-								(uint64_t)completed_logical_id, next_attempt, 1,
+								(uint64_t)completed_logical_id, next_attempt,
+								retry_retain_all,
 								&retry_view)
 						: materialize(runtime->manager, runtime->data_controller,
 								workflow_id, task, data, files, pending_consumers,
-								requested, &resources.task_defaults, next_attempt, 1);
+								requested, &resources.task_defaults, next_attempt,
+								retry_retain_all);
 				struct physical_attempt *retry_mapping = retry
 						? calloc(1, sizeof(*retry_mapping)) : 0;
 				if (retry_mapping) {
 					retry_mapping->logical_id = completed_logical_id;
 					retry_mapping->attempt = next_attempt;
-					retry_mapping->recovery = 1;
+					retry_mapping->recovery = recovery_attempt;
 					retry_mapping->parametric_view = retry_view;
 				}
 				manager_lane_lock(runtime);
@@ -3172,7 +3182,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				uncheckpointed_completions = 0;
 			}
 			drained_completions++;
-			completed = valid && drained_completions < 256
+			completed = valid &&
+					drained_completions < DATAVINE_WORKFLOW_EVENT_BATCH
 							? runtime_wait(runtime, mailbox, 0)
 							: 0;
 		} while (completed);

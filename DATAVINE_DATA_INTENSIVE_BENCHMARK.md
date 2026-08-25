@@ -265,6 +265,16 @@ regressions and ordinary TaskVine also pass. The diagnostic artifact is
 terminal exact 128x16 acceptance remains OPEN until its summary passes every
 gate.
 
+The following exact-pool attempt validated 82,745 successful completions and
+zero source-copy failures, then isolated control-plane starvation: Runtime held
+the Manager lock while filling all 4,096 in-flight task views, delaying worker
+acceptance and heartbeat/status service. Thirteen tasks were reclaimed as
+`FORSAKEN`; because the benchmark application retry budget is one, the old
+Runtime incorrectly failed the workflow. The 4,096 window is now filled in
+bounded 128-task Manager turns, and `FORSAKEN` uses a separate bounded
+infrastructure retry. The lifecycle gate explicitly kills a worker with
+`maximum_attempts: 1` and requires successful recovery.
+
 The 1 x 1 tiny-profile mechanism pilot is PASS for both backends with 256/256
 logical/physical tasks and matching sampled output hashes. Its single paired
 execution measured 27.01 s for TaskVine and 26.21 s for DataVine (1.03x) with
