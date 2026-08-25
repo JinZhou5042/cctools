@@ -1160,7 +1160,7 @@ static int prepare_recovered_parametric(
 	return valid;
 }
 
-static int parametric_recovery_queue_compact(
+static int recovery_queue_compact(
 		struct execution_resources *resources)
 {
 	if (!resources || resources->recovery_head > resources->recovery_tail)
@@ -1177,19 +1177,30 @@ static int parametric_recovery_queue_compact(
 	return 1;
 }
 
-static int parametric_recovery_queue_append(
+static int recovery_queue_append(
 		struct execution_resources *resources, uint64_t task_id)
 {
 	if (!resources || !task_id || task_id > resources->maximum_task_id)
 		return 0;
 	size_t capacity = (size_t)resources->maximum_task_id + 1;
 	if (resources->recovery_tail >= capacity &&
-			!parametric_recovery_queue_compact(resources))
+			!recovery_queue_compact(resources))
 		return 0;
 	if (resources->recovery_tail >= capacity)
 		return 0;
 	resources->recovery_queue[resources->recovery_tail++] = task_id;
 	return 1;
+}
+
+static void recovery_queue_reverse(
+		uint64_t *queue, size_t first, size_t last)
+{
+	while (queue && first + 1 < last) {
+		last--;
+		uint64_t swap = queue[first];
+		queue[first++] = queue[last];
+		queue[last] = swap;
+	}
 }
 
 /* The fixed parametric family assigns all A TaskIDs before B, and all B before
@@ -1269,7 +1280,7 @@ static int apply_parametric_losses(
 		struct execution_resources *resources, size_t *invalidated_first,
 		size_t *invalidated_count)
 {
-	if (!parametric_recovery_queue_compact(resources))
+	if (!recovery_queue_compact(resources))
 		return 0;
 	*invalidated_first = resources->recovery_tail;
 	*invalidated_count = 0;
@@ -1296,7 +1307,7 @@ static int apply_parametric_losses(
 						PARAMETRIC_RECOVERY_NONE &&
 				vine_datavine_scheduler_task_state(resources->scheduler,
 						(int64_t)producer) == VINE_DATAVINE_TASK_DONE) {
-			valid = parametric_recovery_queue_append(resources, producer);
+			valid = recovery_queue_append(resources, producer);
 			if (valid) {
 				tail = resources->recovery_tail;
 				resources->recovery_marks[producer] = mark;
@@ -1322,7 +1333,7 @@ static int apply_parametric_losses(
 					!output_available(runtime, workflow_id, inputs[index]) &&
 					vine_datavine_scheduler_task_state(resources->scheduler,
 							(int64_t)producer) == VINE_DATAVINE_TASK_DONE) {
-				valid = parametric_recovery_queue_append(resources, producer);
+				valid = recovery_queue_append(resources, producer);
 				if (valid) {
 					tail = resources->recovery_tail;
 					resources->recovery_marks[producer] = mark;
@@ -1446,16 +1457,28 @@ static int record_recovery_invalidations(
 					.result = -(int32_t)VINE_RESULT_OUTPUT_MISSING,
 			};
 			valid = records[index].attempt > 0;
-			if (!valid)
+			if (!valid) {
+				if (getenv("DATAVINE_WORKFLOW_METRICS"))
+					fprintf(stderr,
+							"datavine workflow %s recovery_event_invalid "
+							"logical_id=%llu attempt=0\n",
+							workflow_id, (unsigned long long)task_id);
 				break;
+			}
 		}
 		struct timespec started;
 		struct timespec finished;
 		clock_gettime(CLOCK_MONOTONIC, &started);
 		if (valid) {
-			struct vine_datavine_workflow_error error;
+			struct vine_datavine_workflow_error error = {0};
 			valid = vine_datavine_workflow_store_record_task_events(
 					runtime->store, workflow_id, records, batch, &error);
+			if (!valid && getenv("DATAVINE_WORKFLOW_METRICS"))
+				fprintf(stderr,
+						"datavine workflow %s recovery_event_failed "
+						"count=%zu code=%d path=%s detail=%s\n",
+						workflow_id, batch, error.code, error.path,
+						error.message);
 		}
 		clock_gettime(CLOCK_MONOTONIC, &finished);
 		*event_nanoseconds += elapsed_nanoseconds(&started, &finished);
@@ -1465,9 +1488,59 @@ static int record_recovery_invalidations(
 	return valid;
 }
 
-static int parametric_recovery_poll_admissions(
+/* A loss moves each affected output generation to DEAD in the Controller.
+ * Explicit-IR replay must make the complete closure PENDING before any member
+ * is materialized: materialize() only registers the next generation and must
+ * not silently resurrect DEAD data. Scheduler state remains DONE throughout;
+ * this is exclusively a Controller data-state transition. */
+static int explicit_recovery_arm(
+		struct vine_datavine_workflow_runtime *runtime,
+		const char *workflow_id, struct itable *tasks,
+		const uint64_t *task_ids, size_t count)
+{
+	if (!runtime || !workflow_id || !tasks || (count && !task_ids))
+		return 0;
+	for (size_t index = 0; index < count; index++) {
+		struct jx *task = itable_lookup(tasks, task_ids[index]);
+		struct jx *outputs = task ? vine_datavine_ir_task_outputs(task) : 0;
+		if (!outputs)
+			return 0;
+		for (int output_index = 0; output_index < jx_array_length(outputs);
+				output_index++) {
+			struct jx *output = jx_array_index(outputs, output_index);
+			uint64_t data_id = output && jx_istype(output, JX_INTEGER)
+					? (uint64_t)output->u.integer_value : 0;
+			if (!data_id ||
+					!vine_datavine_data_controller_agent_set_recovery(
+						runtime->data_controller, workflow_id, data_id, 1))
+				return 0;
+		}
+	}
+	return 1;
+}
+
+static int explicit_recovery_outputs_ready(
+		struct vine_datavine_workflow_runtime *runtime,
+		const char *workflow_id, struct itable *tasks, uint64_t task_id)
+{
+	struct jx *task = tasks ? itable_lookup(tasks, task_id) : 0;
+	struct jx *outputs = task ? vine_datavine_ir_task_outputs(task) : 0;
+	if (!runtime || !workflow_id || !outputs)
+		return 0;
+	for (int index = 0; index < jx_array_length(outputs); index++) {
+		struct jx *output = jx_array_index(outputs, index);
+		uint64_t data_id = output && jx_istype(output, JX_INTEGER)
+				? (uint64_t)output->u.integer_value : 0;
+		if (!data_id || !output_available(runtime, workflow_id, data_id))
+			return 0;
+	}
+	return 1;
+}
+
+static int recovery_poll_admissions(
 		struct vine_datavine_workflow_runtime *runtime,
 		const char *workflow_id, struct execution_resources *resources,
+		struct itable *tasks,
 		const uint32_t *attempts, uint64_t *event_nanoseconds,
 		uint64_t *admission_timeouts)
 {
@@ -1489,13 +1562,45 @@ static int parametric_recovery_poll_admissions(
 		if (resources->recovery_state[task_id] !=
 				PARAMETRIC_RECOVERY_AWAIT_ADMISSION)
 			continue;
-		uint64_t inputs[VINE_DATAVINE_PARAMETRIC_SOURCE_INPUTS];
-		size_t input_count = 0;
 		uint64_t output = 0;
-		if (!parametric_task_inputs(resources->parametric, task_id, inputs,
-				&input_count, &output))
-			return 0;
-		if (output_available(runtime, workflow_id, output)) {
+		int ready = 0;
+		if (resources->parametric) {
+			uint64_t inputs[VINE_DATAVINE_PARAMETRIC_SOURCE_INPUTS];
+			size_t input_count = 0;
+			if (!parametric_task_inputs(resources->parametric, task_id, inputs,
+					&input_count, &output))
+				return 0;
+			ready = output_available(runtime, workflow_id, output);
+		} else {
+			ready = explicit_recovery_outputs_ready(runtime, workflow_id,
+					tasks, task_id);
+		}
+		if (ready) {
+			struct vine_datavine_workflow_task_event_record event = {
+					.type = VINE_DATAVINE_WORKFLOW_TASK_COMPLETED,
+					.task_id = (int64_t)task_id,
+					.attempt = attempts[task_id],
+			};
+			struct vine_datavine_workflow_error error = {0};
+			struct timespec event_started;
+			struct timespec event_finished;
+			clock_gettime(CLOCK_MONOTONIC, &event_started);
+			int recorded = vine_datavine_workflow_store_record_task_events(
+					runtime->store, workflow_id, &event, 1, &error);
+			clock_gettime(CLOCK_MONOTONIC, &event_finished);
+			*event_nanoseconds += elapsed_nanoseconds(&event_started,
+					&event_finished);
+			if (!recorded) {
+				if (getenv("DATAVINE_WORKFLOW_METRICS"))
+					fprintf(stderr,
+							"datavine workflow %s recovery_complete_event_failed "
+							"logical_id=%llu attempt=%u code=%d path=%s "
+							"detail=%s\n",
+							workflow_id, (unsigned long long)task_id,
+							attempts[task_id], error.code, error.path,
+							error.message);
+				return 0;
+			}
 			resources->recovery_state[task_id] = PARAMETRIC_RECOVERY_NONE;
 			resources->recovery_admission_started[task_id] = 0;
 			resources->recovery_awaiting_admission--;
@@ -1506,7 +1611,7 @@ static int parametric_recovery_poll_admissions(
 				DATAVINE_WORKFLOW_RECOVERY_ADMISSION_TIMEOUT_US)
 			continue;
 		if (attempts[task_id] >= DATAVINE_WORKFLOW_INFRASTRUCTURE_ATTEMPTS ||
-				!parametric_recovery_queue_append(resources, task_id))
+				!recovery_queue_append(resources, task_id))
 			return 0;
 		resources->recovery_state[task_id] = PARAMETRIC_RECOVERY_QUEUED;
 		resources->recovery_admission_started[task_id] = 0;
@@ -1538,22 +1643,25 @@ static int apply_workflow_losses(
 		size_t lost_count, struct itable *data, struct itable *tasks,
 		struct itable *pending_consumers,
 		struct itable *requested, struct recovery_result_cache *recovery_cache,
-		struct vine_datavine_scheduler *scheduler,
-		const uint32_t *attempts, uint64_t maximum_task_id,
-		uint32_t *recovery_marks, uint64_t *recovery_queue,
-		uint32_t *recovery_epoch,
-		uint64_t *event_nanoseconds, size_t *invalidated_count)
+		struct execution_resources *resources, uint64_t *event_nanoseconds,
+		size_t *invalidated_first, size_t *invalidated_count)
 {
+	*invalidated_first = 0;
 	*invalidated_count = 0;
-	if (!recovery_marks || !recovery_queue || !recovery_epoch)
+	if (!resources || !resources->recovery_marks ||
+			!resources->recovery_queue || !resources->recovery_state ||
+			!recovery_queue_compact(resources))
 		return 0;
-	uint32_t mark = ++*recovery_epoch;
+	size_t first = resources->recovery_tail;
+	size_t head = first;
+	uint32_t mark = ++resources->recovery_epoch;
 	if (!mark) {
-		memset(recovery_marks, 0, ((size_t)maximum_task_id + 1) * sizeof(*recovery_marks));
-		mark = ++*recovery_epoch;
+		memset(resources->recovery_marks, 0,
+				((size_t)resources->maximum_task_id + 1) *
+					sizeof(*resources->recovery_marks));
+		mark = ++resources->recovery_epoch;
 	}
-	size_t head = 0;
-	size_t tail = 0;
+	int valid = 1;
 	for (size_t index = 0; index < lost_count; index++) {
 		uint64_t data_id = lost_data_ids[index];
 		/* The Controller removed the dead handle only if it had not already
@@ -1564,15 +1672,21 @@ static int apply_workflow_losses(
 			continue;
 		uint64_t producer = 0;
 		if (output_producer(data, data_id, &producer) &&
-				producer <= maximum_task_id && recovery_marks[producer] != mark &&
-				vine_datavine_scheduler_task_state(scheduler, (int64_t)producer) ==
+				producer <= resources->maximum_task_id &&
+				resources->recovery_marks[producer] != mark &&
+				resources->recovery_state[producer] == PARAMETRIC_RECOVERY_NONE &&
+				vine_datavine_scheduler_task_state(resources->scheduler,
+						(int64_t)producer) ==
 						VINE_DATAVINE_TASK_DONE) {
-			recovery_queue[tail++] = producer;
-			recovery_marks[producer] = mark;
+			valid = recovery_queue_append(resources, producer);
+			if (!valid)
+				break;
+			resources->recovery_marks[producer] = mark;
+			resources->recovery_state[producer] = PARAMETRIC_RECOVERY_QUEUED;
 		}
 	}
-	while (head < tail) {
-		uint64_t task_id = recovery_queue[head++];
+	while (valid && head < resources->recovery_tail) {
+		uint64_t task_id = resources->recovery_queue[head++];
 		struct jx *task = itable_lookup(tasks, task_id);
 		if (!task)
 			return 0;
@@ -1582,23 +1696,51 @@ static int apply_workflow_losses(
 			uint64_t data_id = vine_datavine_ir_input_data_id(input);
 			uint64_t producer = 0;
 			if (output_producer(data, data_id, &producer) &&
-					producer <= maximum_task_id &&
-					recovery_marks[producer] != mark &&
+					producer <= resources->maximum_task_id &&
+					resources->recovery_marks[producer] != mark &&
+					resources->recovery_state[producer] ==
+							PARAMETRIC_RECOVERY_NONE &&
 					!output_available(runtime, workflow_id, data_id) &&
-					vine_datavine_scheduler_task_state(scheduler,
+					vine_datavine_scheduler_task_state(resources->scheduler,
 							(int64_t)producer) == VINE_DATAVINE_TASK_DONE) {
-				recovery_queue[tail++] = producer;
-				recovery_marks[producer] = mark;
+				valid = recovery_queue_append(resources, producer);
+				if (valid) {
+					resources->recovery_marks[producer] = mark;
+					resources->recovery_state[producer] =
+							PARAMETRIC_RECOVERY_QUEUED;
+				}
 			}
+		}
+	}
+	size_t count = resources->recovery_tail - first;
+	/* Breadth-first discovery is consumer-to-ancestor. Reverse only this new
+	 * slice so it can be merged behind an already active producer-first queue. */
+	if (valid) {
+		recovery_queue_reverse(resources->recovery_queue, first,
+				resources->recovery_tail);
+		/* A nested loss must preempt older queued consumers whose newly lost
+		 * inputs would otherwise occupy the replay window ahead of producers. */
+		if (first && count) {
+			recovery_queue_reverse(resources->recovery_queue, 0, first);
+			recovery_queue_reverse(resources->recovery_queue, first,
+					resources->recovery_tail);
+			recovery_queue_reverse(resources->recovery_queue, 0,
+					resources->recovery_tail);
+			first = 0;
 		}
 	}
 	/* Logical DONE is immutable: data recovery is a separate physical replay.
 	 * The Scheduler is deliberately untouched, so children already released by
 	 * task completion never wait for Controller publication or recovery. */
-	int valid = record_recovery_invalidations(runtime, workflow_id,
-			recovery_queue, tail, attempts, event_nanoseconds);
-	if (valid)
-		*invalidated_count = tail;
+	valid = valid && explicit_recovery_arm(runtime, workflow_id, tasks,
+			resources->recovery_queue + first, count) &&
+		record_recovery_invalidations(runtime, workflow_id,
+			resources->recovery_queue + first, count, resources->attempts,
+			event_nanoseconds);
+	if (valid) {
+		*invalidated_first = first;
+		*invalidated_count = count;
+	}
 	return valid;
 }
 
@@ -2869,28 +3011,26 @@ static int execution_resources_create(struct execution_resources *resources,
 							? malloc(((size_t)resources->maximum_task_id + 1) *
 									  sizeof(*resources->recovery_queue))
 							: 0;
-	resources->recovery_state = valid && resources->parametric
+	resources->recovery_state = valid
 			? calloc((size_t)resources->maximum_task_id + 1,
 					sizeof(*resources->recovery_state))
 			: 0;
-	resources->recovery_admission_started = valid && resources->parametric
+	resources->recovery_admission_started = valid
 			? calloc((size_t)resources->maximum_task_id + 1,
 					sizeof(*resources->recovery_admission_started))
 			: 0;
-	resources->recovery_active = valid && resources->parametric
+	resources->recovery_active = valid
 			? calloc((size_t)resources->maximum_task_id + 1,
 					sizeof(*resources->recovery_active))
 			: 0;
-	resources->recovery_active_tasks = valid && resources->parametric
+	resources->recovery_active_tasks = valid
 			? malloc(((size_t)resources->maximum_task_id + 1) *
 					sizeof(*resources->recovery_active_tasks))
 			: 0;
 	valid = valid && resources->attempts && resources->recovery_marks &&
-		resources->recovery_queue;
-	if (resources->parametric)
-		valid = valid && resources->recovery_state &&
-			resources->recovery_admission_started &&
-			resources->recovery_active && resources->recovery_active_tasks;
+		resources->recovery_queue && resources->recovery_state &&
+		resources->recovery_admission_started && resources->recovery_active &&
+		resources->recovery_active_tasks;
 	resources->parametric_remaining = valid && resources->parametric
 			? calloc((size_t)resources->maximum_task_id + 1,
 					sizeof(*resources->parametric_remaining))
@@ -3054,7 +3194,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 							resources.recovery_state[task_id] ==
 									PARAMETRIC_RECOVERY_NONE;
 					if (valid) {
-						valid = parametric_recovery_queue_append(
+						valid = recovery_queue_append(
 								&resources, task_id);
 						if (valid)
 							resources.recovery_state[task_id] =
@@ -3085,6 +3225,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			valid = vine_datavine_data_controller_take_workflow_losses(
 					runtime->data_controller, runtime->manager, workflow_id, files, &lost_data_ids, &lost_count);
 			pthread_mutex_unlock(&runtime->manager_lock);
+			if (!valid)
+				failure_stage = "recovery_take_losses";
 			if (valid && lost_count) {
 				size_t invalidated = 0;
 				size_t invalidated_first = 0;
@@ -3094,59 +3236,20 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 								&invalidated)
 						: apply_workflow_losses(runtime, workflow_id, lost_data_ids,
 								lost_count, data, tasks, pending_consumers, requested,
-								&resources.recovery_cache, scheduler, attempts,
-								maximum_task_id, resources.recovery_marks,
-								resources.recovery_queue, &resources.recovery_epoch,
-								&completion_event_nanoseconds, &invalidated);
+								&resources.recovery_cache, &resources,
+								&completion_event_nanoseconds, &invalidated_first,
+								&invalidated);
+				if (!valid)
+					failure_stage = resources.parametric
+							? "recovery_prepare_parametric"
+							: "recovery_prepare_explicit";
 				if (valid && resources.parametric && invalidated)
 					valid = record_recovery_invalidations(runtime, workflow_id,
 							resources.recovery_queue + invalidated_first,
 							invalidated, attempts,
 							&completion_event_nanoseconds);
-				/* Ancestors were appended after their consumers. Submit in reverse
-				 * so their data is normally available first; a child dispatched
-				 * early still waits in its Worker Agent without consuming cores. */
-				if (valid && invalidated && !resources.parametric) {
-					manager_lane_lock(runtime);
-					for (size_t index = invalidated; valid && index > 0; index--) {
-						uint64_t task_id = resources.recovery_queue[index - 1];
-						uint32_t attempt = attempts[task_id] + 1;
-						struct parametric_task_view *parametric_view = 0;
-						struct vine_task *physical = resources.parametric
-								? materialize_parametric(runtime, workflow_id, &resources,
-										task_id, attempt, 1, &parametric_view)
-								: materialize(runtime->manager,
-										runtime->data_controller, workflow_id,
-										itable_lookup(tasks, task_id), data, files,
-										pending_consumers, resources.origin_tickets,
-										requested,
-										&resources.task_defaults, attempt, 1);
-						struct physical_attempt *mapping = physical
-								? calloc(1, sizeof(*mapping)) : 0;
-						if (mapping) {
-							mapping->logical_id = (int64_t)task_id;
-							mapping->attempt = attempt;
-							mapping->recovery = 1;
-							mapping->parametric_view = parametric_view;
-						}
-						int physical_id = mapping
-								? runtime_submit_locked(runtime, physical, mailbox) : -1;
-						valid = physical_id > 0 && itable_insert(
-								physical_to_logical, (uint64_t)physical_id, mapping);
-						if (valid) {
-							attempts[task_id] = attempt;
-							running++;
-							physical_submissions++;
-						} else {
-							physical_attempt_delete(mapping);
-							if (!mapping)
-								parametric_task_view_delete(parametric_view);
-							if (physical_id < 1 && physical)
-								vine_task_delete(physical);
-						}
-					}
-					pthread_mutex_unlock(&runtime->manager_lock);
-				}
+				if (!valid && resources.parametric)
+					failure_stage = "recovery_event";
 				recovery_epochs++;
 				recovery_lost_data += lost_count;
 				recovery_invalidated_tasks += invalidated;
@@ -3155,9 +3258,9 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 		}
 		if (!valid)
 			break;
-		if (resources.parametric) {
-			valid = parametric_recovery_poll_admissions(runtime, workflow_id,
-					&resources, attempts, &completion_event_nanoseconds,
+		if (resources.recovery_awaiting_admission) {
+			valid = recovery_poll_admissions(runtime, workflow_id,
+					&resources, tasks, attempts, &completion_event_nanoseconds,
 					&recovery_admission_timeouts);
 			if (!valid) {
 				failure_stage = "recovery_admission";
@@ -3185,6 +3288,16 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				}
 			}
 		}
+		if (!resources.parametric && resources.recovery_active_count &&
+				!recovery_inflight && !resources.recovery_awaiting_admission &&
+				resources.recovery_head == resources.recovery_tail) {
+			for (size_t index = 0; index < resources.recovery_active_count;
+					index++)
+				resources.recovery_active[
+						resources.recovery_active_tasks[index]] = 0;
+			resources.recovery_active_count = 0;
+			resources.recovery_admission_cursor = 0;
+		}
 		int64_t logical_id;
 		struct timespec manager_lock_started;
 		struct timespec manager_lock_finished;
@@ -3196,7 +3309,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 		struct vine_datavine_workflow_task_event_record
 				submission_events[DATAVINE_WORKFLOW_EVENT_BATCH];
 		size_t submission_event_count = 0;
-		while (valid && resources.parametric &&
+		while (valid && resources.recovery_head < resources.recovery_tail &&
 				running < VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW +
 					VINE_DATAVINE_WORKFLOW_RECOVERY_RESERVE &&
 				submission_event_count < DATAVINE_WORKFLOW_EVENT_BATCH &&
@@ -3212,13 +3325,18 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			struct timespec stage_started;
 			struct timespec stage_finished;
 			clock_gettime(CLOCK_MONOTONIC, &stage_started);
-			if (valid)
+			if (valid && resources.parametric)
 				valid = parametric_recovery_begin(runtime, workflow_id, &resources,
 						task_id);
-			struct vine_task *physical = valid
-					? materialize_parametric(runtime, workflow_id, &resources,
-						task_id, attempt, 1, &parametric_view)
-					: 0;
+			struct vine_task *physical = !valid ? 0
+					: resources.parametric
+						? materialize_parametric(runtime, workflow_id, &resources,
+								task_id, attempt, 1, &parametric_view)
+						: materialize(runtime->manager,
+								runtime->data_controller, workflow_id,
+								itable_lookup(tasks, task_id), data, files,
+								pending_consumers, resources.origin_tickets,
+								requested, &resources.task_defaults, attempt, 1);
 			/* Recovery producers must pass consumers already queued behind the
 			 * missing generation. */
 			if (physical)
@@ -3246,6 +3364,14 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				attempts[task_id] = attempt;
 				resources.recovery_state[task_id] =
 						PARAMETRIC_RECOVERY_RUNNING;
+				if (!resources.parametric && !resources.recovery_active[task_id]) {
+					valid = resources.recovery_active_count <= maximum_task_id;
+					if (valid) {
+						resources.recovery_active[task_id] = 1;
+						resources.recovery_active_tasks[
+								resources.recovery_active_count++] = task_id;
+					}
+				}
 				running++;
 				recovery_inflight++;
 				physical_submissions++;
@@ -3266,10 +3392,12 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 					vine_task_delete(physical);
 			}
 		}
-		if (resources.parametric &&
-				resources.recovery_head == resources.recovery_tail)
+		if (resources.recovery_head == resources.recovery_tail)
 			resources.recovery_head = resources.recovery_tail = 0;
-		while (running < VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW &&
+		while ((resources.parametric ||
+				(!recovery_inflight && !resources.recovery_awaiting_admission &&
+				 resources.recovery_head == resources.recovery_tail)) &&
+				running < VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW &&
 				submission_event_count < DATAVINE_WORKFLOW_EVENT_BATCH &&
 				(logical_id = vine_datavine_scheduler_take(scheduler)) > 0) {
 			struct jx *task = resources.parametric ? 0
@@ -3376,7 +3504,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			break;
 		}
 		if (!running) {
-			if (resources.parametric && resources.recovery_active_count) {
+			if (resources.recovery_active_count) {
 				/* Worker publication is intentionally ordered after Manager task
 				 * completion. Poll admission and the short recovery-quiescence grace
 				 * without occupying Manager lanes or rolling logical DONE backward. */
@@ -3466,27 +3594,16 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			if (physical_success && recovery_attempt) {
 				/* Worker commit already installed and asynchronously advertised
 				 * the replacement generation. Logical state stays DONE, while the
-				 * recovery state remains deduplicated until Controller admission. */
-				task_valid = !resources.parametric ||
-					(resources.recovery_state[completed_logical_id] ==
-							PARAMETRIC_RECOVERY_RUNNING);
-				if (task_valid && resources.parametric) {
-					uint64_t inputs[VINE_DATAVINE_PARAMETRIC_SOURCE_INPUTS];
-					size_t input_count = 0;
-					uint64_t output = 0;
-					task_valid = parametric_task_inputs(resources.parametric,
-							(uint64_t)completed_logical_id, inputs,
-							&input_count, &output);
-					if (task_valid && output_available(runtime, workflow_id, output)) {
-						resources.recovery_state[completed_logical_id] =
-								PARAMETRIC_RECOVERY_NONE;
-					} else if (task_valid) {
-						resources.recovery_state[completed_logical_id] =
-								PARAMETRIC_RECOVERY_AWAIT_ADMISSION;
-						resources.recovery_admission_started[completed_logical_id] =
-								timestamp_get();
-						resources.recovery_awaiting_admission++;
-					}
+				 * recovery state remains deduplicated until Controller admission.
+				 * The COMPLETED recovery event is recorded by admission polling. */
+				task_valid = resources.recovery_state[completed_logical_id] ==
+						PARAMETRIC_RECOVERY_RUNNING;
+				if (task_valid) {
+					resources.recovery_state[completed_logical_id] =
+							PARAMETRIC_RECOVERY_AWAIT_ADMISSION;
+					resources.recovery_admission_started[completed_logical_id] =
+							timestamp_get();
+					resources.recovery_awaiting_admission++;
 				}
 			} else if (physical_success) {
 				uint32_t attempt_limit = task_valid
@@ -3507,7 +3624,49 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 							attempt_limit, 1, &completion_event_nanoseconds);
 				}
 				uncheckpointed_completions += completed_logical_id > 0;
-			} else if ((task_result == -(int32_t)VINE_RESULT_FORSAKEN ||
+			} else if (!resources.parametric && recovery_attempt &&
+					(task_result == -(int32_t)VINE_RESULT_FORSAKEN ||
+					 task_result == -(int32_t)VINE_RESULT_OUTPUT_TRANSFER_ERROR ||
+					 task_result == -(int32_t)VINE_RESULT_OUTPUT_MISSING) &&
+					attempt < DATAVINE_WORKFLOW_INFRASTRUCTURE_ATTEMPTS) {
+				/* Queue failed explicit replay behind the next producer-first loss
+				 * slice instead of redispatching it against stale input generations. */
+				uint64_t retry_logical_id = (uint64_t)completed_logical_id;
+				task_valid = explicit_recovery_arm(runtime, workflow_id, tasks,
+						&retry_logical_id, 1) &&
+					resources.recovery_state[retry_logical_id] ==
+							PARAMETRIC_RECOVERY_RUNNING;
+				if (task_valid) {
+					resources.recovery_state[retry_logical_id] =
+							PARAMETRIC_RECOVERY_QUEUED;
+					task_valid = recovery_queue_append(&resources,
+							retry_logical_id);
+				}
+				struct vine_datavine_workflow_task_event_record event = {
+						.type = VINE_DATAVINE_WORKFLOW_TASK_RETRY,
+						.task_id = completed_logical_id,
+						.attempt = attempt,
+						.result = task_result,
+				};
+				struct vine_datavine_workflow_error event_error = {0};
+				if (task_valid)
+					task_valid = vine_datavine_workflow_store_record_task_events(
+							runtime->store, workflow_id, &event, 1,
+							&event_error);
+				if (!task_valid) {
+					failure_stage = "recovery_requeue";
+					if (report_metrics)
+						fprintf(stderr,
+								"datavine workflow %s recovery_requeue_failed "
+								"logical_id=%lld attempt=%u code=%d path=%s "
+								"detail=%s\n",
+								workflow_id, (long long)completed_logical_id,
+								attempt, event_error.code, event_error.path,
+								event_error.message);
+				}
+			} else if (!(!resources.parametric && !recovery_attempt &&
+					task_result == -(int32_t)VINE_RESULT_FORSAKEN) &&
+					(task_result == -(int32_t)VINE_RESULT_FORSAKEN ||
 					task_result == -(int32_t)VINE_RESULT_OUTPUT_TRANSFER_ERROR ||
 					(recovery_attempt &&
 					 task_result == -(int32_t)VINE_RESULT_OUTPUT_MISSING)) &&
@@ -3519,8 +3678,12 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				 * so a missing replay output is also retried as transient Worker state;
 				 * ordinary missing output remains an application failure. None of these
 				 * consume the workflow retry budget. A recovery keeps logical DONE
-				 * immutable; an ordinary task remains RUNNING. */
+				 * immutable; an ordinary task remains RUNNING. An explicit ordinary
+				 * FORSAKEN task instead takes finish_logical_attempt() below, which
+				 * returns it to Scheduler PENDING so Controller losses are applied
+				 * before its inputs are rematerialized. */
 				uint32_t next_attempt = attempt + 1;
+				uint64_t retry_logical_id = (uint64_t)completed_logical_id;
 				struct parametric_task_view *retry_view = 0;
 				int retry_retain_all = recovery_attempt ||
 					workflow_info.state != VINE_DATAVINE_WORKFLOW_RUNNING;
@@ -3528,16 +3691,20 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				 * Manager. Keep that operation in the same narrow Manager lane as
 				 * submit, just like the ordinary submission path. */
 				manager_lane_lock(runtime);
-				struct vine_task *retry = resources.parametric
+				if (recovery_attempt && !resources.parametric)
+					task_valid = explicit_recovery_arm(runtime, workflow_id,
+							tasks, &retry_logical_id, 1);
+				struct vine_task *retry = task_valid && resources.parametric
 						? materialize_parametric(runtime, workflow_id, &resources,
 								(uint64_t)completed_logical_id, next_attempt,
 								retry_retain_all,
 								&retry_view)
-						: materialize(runtime->manager, runtime->data_controller,
+						: task_valid ? materialize(runtime->manager,
+								runtime->data_controller,
 								workflow_id, task, data, files, pending_consumers,
 								resources.origin_tickets, requested,
 								&resources.task_defaults, next_attempt,
-								retry_retain_all);
+								retry_retain_all) : 0;
 				struct physical_attempt *retry_mapping = retry
 						? calloc(1, sizeof(*retry_mapping)) : 0;
 				if (retry_mapping) {
@@ -3598,9 +3765,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				}
 			} else if (recovery_attempt) {
 				/* Non-transient replay failures are explicit and fail closed. */
-				if (resources.parametric)
-					resources.recovery_state[completed_logical_id] =
-							PARAMETRIC_RECOVERY_NONE;
+				resources.recovery_state[completed_logical_id] =
+						PARAMETRIC_RECOVERY_NONE;
 				failure_stage = "recovery_task";
 				task_valid = 0;
 			} else {

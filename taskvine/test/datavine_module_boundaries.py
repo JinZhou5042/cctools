@@ -153,6 +153,13 @@ assert "vine_fetch_file" not in runtime_source
 # children cannot fill that bounded window and exclude their own producers.
 assert runtime_source.count("parametric_recovery_arm(") == 3
 assert runtime_source.count("parametric_recovery_order(") == 3
+assert runtime_source.count("explicit_recovery_arm(") == 4
+explicit_loss_begin = runtime_source.index("static int apply_workflow_losses(")
+explicit_loss_end = runtime_source.index("static int build_scheduler(")
+explicit_loss_path = runtime_source[explicit_loss_begin:explicit_loss_end]
+assert explicit_loss_path.index("explicit_recovery_arm(") < explicit_loss_path.index(
+    "record_recovery_invalidations("
+)
 loss_begin = runtime_source.index("static int apply_parametric_losses(")
 loss_end = runtime_source.index("static int parametric_recovery_begin(")
 loss_path = runtime_source[loss_begin:loss_end]
@@ -161,13 +168,34 @@ assert loss_path.index("parametric_recovery_order(") < loss_path.index(
 )
 restart_begin = runtime_source.index("if (!recovered_applied) {")
 first_replay_submit = runtime_source.index(
-    "while (valid && resources.parametric &&\n"
+    "while (valid && resources.recovery_head < resources.recovery_tail &&\n"
     "\t\t\t\trunning < VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW"
 )
 restart_path = runtime_source[restart_begin:first_replay_submit]
 assert restart_path.index("parametric_recovery_order(") < restart_path.index(
     "parametric_recovery_arm("
 )
+bounded_replay = runtime_source[first_replay_submit : runtime_source.index(
+    "while ((resources.parametric ||", first_replay_submit
+)]
+assert "resources.parametric\n\t\t\t\t\t\t? materialize_parametric(" in bounded_replay
+assert ": materialize(runtime->manager," in bounded_replay
+assert "vine_task_set_priority(physical, 1e12)" in bounded_replay
+assert "resources->recovery_state = valid\n" in runtime_source
+assert "if (data_losses != observed_data_losses &&" not in runtime_source
+assert "recovery_queue_compact(resources)" in explicit_loss_path
+assert explicit_loss_path.count("recovery_queue_reverse(") == 4
+assert "failure_stage = \"recovery_requeue\"" in runtime_source
+assert (
+    "(!recovery_inflight && !resources.recovery_awaiting_admission &&\n"
+    "\t\t\t\t resources.recovery_head == resources.recovery_tail)"
+) in runtime_source
+assert "static int recovery_poll_admissions(" in runtime_source
+assert "The COMPLETED recovery event is recorded by admission polling." in runtime_source
+assert (
+    "!resources.parametric && !recovery_attempt &&\n"
+    "\t\t\t\t\ttask_result == -(int32_t)VINE_RESULT_FORSAKEN)"
+) in runtime_source
 
 python_executor = (source / "tools/datavine_python_executor").read_text()
 assert "HashingWriter" in python_executor
