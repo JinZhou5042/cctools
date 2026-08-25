@@ -1,0 +1,59 @@
+{
+  "artifact_type": "datavine-explicit-ordinary-recovery-acceptance",
+  "benchmark_gate_status": "FAIL_OUT_OF_SCOPE_SCALE_GATES",
+  "benchmark_summary": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/datavine-explicit-ordinary-c4s8-w8x8-admission-final-20260825/summary.json",
+  "benchmark_summary_sha256": "66ad7a17c8fcfff432736e6bea6010508f084b922e71304c2dbdfbd04b280abf",
+  "configuration": {
+    "cores_per_worker": 8,
+    "logical_tasks": 8192,
+    "representation": "explicit",
+    "source_files": 73728,
+    "workers": 8
+  },
+  "correctness_gates": {
+    "exact_logical_counts": true,
+    "exact_physical_counts": true,
+    "manager_output_payload_bypass": true,
+    "sampled_outputs": true,
+    "worker_churn_recovered": true
+  },
+  "excluded_large_scale_gates": [
+    "128 workers x 16 cores",
+    "10 million workflow files",
+    "data path is the dominant runtime stage",
+    "full-scale GC pressure"
+  ],
+  "physical": {
+    "completions": 10015,
+    "forsaken": 8,
+    "non_infrastructure_failures": 0,
+    "submissions": 10015
+  },
+  "provenance": {
+    "captured_from_precommit_worktree": true,
+    "committed_unchanged_as": "6a49e2a5a",
+    "embedded_base_commit": "c6b580056cf84b1e8a081902328d13a61ad3f751"
+  },
+  "recovery": {
+    "admission_timeouts": 0,
+    "epochs": 1,
+    "invalidated_tasks": 1815,
+    "lost_data_ids": 428,
+    "manager_workers_removed": 1
+  },
+  "regression": {
+    "commit": "6a49e2a5a7467c4a383e07190660f93aa7284e7e",
+    "passed": 17,
+    "report": "/tmp/datavine-explicit-admission-clean-6a49e2a5a-regression-r2-20260825.json",
+    "report_sha256": "dbacf847702619a491dd48bd3b747f91b9b654d8b6bf896c010666524baa09be",
+    "status": "PASS",
+    "tests": 17
+  },
+  "status": "PASS",
+  "timing": {
+    "execution_seconds": 363.5761261479929,
+    "graph_load_seconds": 53.882224417990074,
+    "tasks_per_second": 22.531732451171624
+  },
+  "workflow_state": "completed"
+}
