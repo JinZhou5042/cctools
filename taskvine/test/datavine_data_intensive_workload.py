@@ -114,6 +114,7 @@ def main():
     assert 'default=4096' in datavine_runner
     assert 'memory_mib=args.memory' in datavine_runner
     assert '"memory_mib_per_worker": args.memory' in datavine_runner
+    assert '"recovery_output_missing"' in datavine_runner
 
     workflow_store_header = (
         repository / "taskvine/src/datavine/vine_datavine_workflow_store.h"
@@ -126,6 +127,9 @@ def main():
     assert "VINE_DATAVINE_WORKFLOW_RECOVERY_RESERVE" in workflow_runtime
     assert "vine_task_set_priority(physical, 1e12)" in workflow_runtime
     assert "VINE_RESULT_OUTPUT_TRANSFER_ERROR" in workflow_runtime
+    assert "recovery_attempt &&" in workflow_runtime
+    assert "VINE_RESULT_OUTPUT_MISSING" in workflow_runtime
+    assert 'failure_stage = "recovery_task"' in workflow_runtime
     assert "parametric_recovery_begin" in workflow_runtime
     assert "parametric_recovery_finish" in workflow_runtime
     assert "resources->recovery_queue[right]" in workflow_runtime
@@ -135,6 +139,10 @@ def main():
     ).read_text()
     assert "VINE_DATAVINE_AGENT_COMMIT_IO_FAILED" in worker_runtime
     assert "VINE_RESULT_OUTPUT_TRANSFER_ERROR" in worker_runtime
+    agent_runtime = (
+        repository / "taskvine/src/worker/vine_datavine_agent.c"
+    ).read_text()
+    assert "local->generation > generation" in agent_runtime
 
     comparator = (scripts / "compare_data_intensive_runs.py").read_text()
     assert '"worker_churn_recovered"' in comparator

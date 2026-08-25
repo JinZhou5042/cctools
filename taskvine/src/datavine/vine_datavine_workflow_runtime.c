@@ -3199,11 +3199,11 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			if (report_metrics && !physical_success)
 				fprintf(stderr,
 						"datavine workflow %s task_failed logical_id=%lld "
-						"result=%d exit_code=%d\n",
+						"result=%d exit_code=%d recovery=%d\n",
 						workflow_id,
 						(long long)completed_logical_id,
 						vine_task_get_result(completed),
-						vine_task_get_exit_code(completed));
+						vine_task_get_exit_code(completed), recovery_attempt);
 			int task_valid = completed_logical_id > 0 && recovery_accounted;
 			struct jx *task = task_valid
 							  ? (resources.parametric
@@ -3238,13 +3238,18 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				}
 				uncheckpointed_completions += completed_logical_id > 0;
 			} else if ((task_result == -(int32_t)VINE_RESULT_FORSAKEN ||
-					task_result == -(int32_t)VINE_RESULT_OUTPUT_TRANSFER_ERROR) &&
+					task_result == -(int32_t)VINE_RESULT_OUTPUT_TRANSFER_ERROR ||
+					(recovery_attempt &&
+					 task_result == -(int32_t)VINE_RESULT_OUTPUT_MISSING)) &&
 					attempt < DATAVINE_WORKFLOW_INFRASTRUCTURE_ATTEMPTS) {
 				/* A freshly connected Worker can reject a FunctionCall before its
 				 * library process becomes READY, or lose it during connection churn.
-				 * FORSAKEN and Worker-Agent output I/O failure are infrastructure,
-				 * do not consume the workflow retry budget. A recovery keeps logical
-				 * DONE immutable; an ordinary task remains RUNNING. */
+				 * FORSAKEN and Worker-Agent output I/O failure are infrastructure.
+				 * A deterministic recovery task has already produced its output once,
+				 * so a missing replay output is also retried as transient Worker state;
+				 * ordinary missing output remains an application failure. None of these
+				 * consume the workflow retry budget. A recovery keeps logical DONE
+				 * immutable; an ordinary task remains RUNNING. */
 				uint32_t next_attempt = attempt + 1;
 				struct parametric_task_view *retry_view = 0;
 				int retry_retain_all = recovery_attempt ||
@@ -3325,6 +3330,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				/* Non-transient replay failures are explicit and fail closed. */
 				if (resources.parametric)
 					resources.recovery_pending[completed_logical_id] = 0;
+				failure_stage = "recovery_task";
 				task_valid = 0;
 			} else {
 				uint32_t attempt_limit = task_valid

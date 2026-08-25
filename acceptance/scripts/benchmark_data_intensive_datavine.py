@@ -200,7 +200,8 @@ def parallelism_summary(samples, tasks, workers, cores, physical_window):
 def physical_failure_counts(log_path, workflow_id):
     prefix = f"datavine workflow {workflow_id} task_failed "
     result_pattern = re.compile(r"\bresult=(?P<result>-?[0-9]+)\b")
-    total = forsaken = output_transfer = 0
+    recovery_pattern = re.compile(r"\brecovery=(?P<recovery>[01])\b")
+    total = forsaken = output_transfer = recovery_output_missing = 0
     for line in log_path.read_text().splitlines():
         if not line.startswith(prefix):
             continue
@@ -210,12 +211,19 @@ def physical_failure_counts(log_path, workflow_id):
             forsaken += 1
         if match and int(match.group("result")) == 72:
             output_transfer += 1
+        recovery = recovery_pattern.search(line)
+        if (match and int(match.group("result")) == 2 and recovery
+                and int(recovery.group("recovery")) == 1):
+            recovery_output_missing += 1
     return {
         "total": total,
         "forsaken": forsaken,
         "output_transfer": output_transfer,
-        "infrastructure": forsaken + output_transfer,
-        "non_infrastructure": total - forsaken - output_transfer,
+        "recovery_output_missing": recovery_output_missing,
+        "infrastructure": forsaken + output_transfer + recovery_output_missing,
+        "non_infrastructure": (
+            total - forsaken - output_transfer - recovery_output_missing
+        ),
     }
 
 

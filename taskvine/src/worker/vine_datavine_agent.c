@@ -1026,8 +1026,22 @@ enum vine_datavine_agent_commit_status vine_datavine_agent_commit(
 		struct local_object *local = local_get(workflow, data_id, 1);
 		if (!local)
 			return VINE_DATAVINE_AGENT_COMMIT_IO_FAILED;
+		if ((local->flags & LOCAL_READY) && local->generation != generation) {
+			/* Controller generations are authoritative. Recovery may land on a
+			 * Worker that still has an unadmitted older generation after its last
+			 * advertised replica was lost. Replace that stale local object; never
+			 * let a delayed task overwrite a newer generation. */
+			if (local->generation > generation)
+				return VINE_DATAVINE_AGENT_COMMIT_INVALID;
+			char stale[128];
+			if (!cache_name(stale, workflow->workflow_slot, data_id,
+					local->generation, local->object_token))
+				return VINE_DATAVINE_AGENT_COMMIT_INVALID;
+			vine_cache_remove(agent_cache, stale, 0);
+			local->flags = 0;
+		}
 		if (local->flags & LOCAL_READY) {
-			if (local->generation != generation || local->size != size ||
+			if (local->size != size ||
 					memcmp(local->digest, digest, 32))
 				return 0;
 			unlink(path);
