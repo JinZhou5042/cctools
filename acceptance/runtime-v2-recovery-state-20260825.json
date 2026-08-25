@@ -8,7 +8,8 @@
     "91593ca3f",
     "50d492d5f",
     "7b307ab74",
-    "1337a5f8f"
+    "1337a5f8f",
+    "a4183a448"
   ],
   "boundary": {
     "manager": "worker resources, physical dispatch, physical completion, opaque auxiliary payload only",
@@ -67,6 +68,27 @@
     "injection": "one 8-core Worker removed after 1988 physical completions with mixed A/B data resident",
     "overall_runner_status": "FAIL only because the deliberately delayed replacement reduced the central active-core sample fraction; every correctness, data, GC, count, output, and final-pool gate passed"
   },
+  "bounded_origin_replacement_gate": {
+    "run": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/origin-retry-gate-c4s8-w8x8-a4183a448-20260825",
+    "summary_sha256": "5ac151db62c71c327398ed06dff7a8cccf1b211b07cd172ef2106f1c914202e5",
+    "status": "PASS_RECOVERY",
+    "logical_tasks": 8192,
+    "normal_task_reports": 8192,
+    "physical_submissions": 9167,
+    "physical_completions": 9167,
+    "recovery_replays": 943,
+    "recovery_task_reports": 943,
+    "infrastructure_retries": 32,
+    "non_infrastructure_failures": 0,
+    "worker_disconnects": 4,
+    "recovery_epochs": 1,
+    "recovery_admission_timeouts": 0,
+    "recovery_failures": 0,
+    "final_workers": 8,
+    "physical_conservation": "8192 + 943 + 32 = 9167",
+    "injection": "four of eight 8-core Workers removed after 1772 physical completions",
+    "overall_runner_status": "FAIL only because the deliberate half-pool interval reduced the central active-core sample fraction; every correctness, data, GC, count, output, ready-frontier, and final-pool gate passed"
+  },
   "verification": {
     "recovery_regression": {
       "path": "/tmp/datavine-recovery-state-regression-r6-20260825.json",
@@ -87,6 +109,12 @@
       "passed": 17,
       "tests": 17,
       "go_binary_sha256": "9a52d76a35474cc8e7f5da5b26633428c0f929753ef218d9e7aaa7e9d5ddffd4"
+    },
+    "origin_retry_regression": {
+      "path": "/tmp/datavine-origin-retry-regression-20260825.json",
+      "status": "PASS",
+      "passed": 17,
+      "tests": 17
     },
     "admit_before_seal_e2e": {
       "path": "/tmp/datavine-admit-before-seal-c1-s1-r1-20260825/summary.json",

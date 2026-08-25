@@ -308,6 +308,23 @@ A shared-filesystem 8,192-task injection gate completed exact
 zero admission timeout, and full pool restoration. r24 is excluded from all
 performance claims; the injected run is recovery evidence only.
 
+The next exact-pool diagnostic, r25, reached 2,048 active cores before repeated
+site churn exposed a replacement-Worker origin-cache loop. At the intentional
+stop it had 704,941 submissions, 698,909 completions, 236 removed Workers,
+174,578 successful recovery reports, and 492 recovery-admission timeouts; its
+late completion rate was no longer a valid performance measurement. Worker
+origin fetch now discards an exact failed local cache entry and performs at
+most eight local retries with 100-ms to 1.6-s backoff before task replacement.
+
+The validating C4-S8 shared-filesystem gate removed four of eight Workers after
+1,772 completions. It terminated with 8,192 normal reports, 943 recovery
+reports, 32 disconnect retries, exact 9,167/9,167 physical conservation, zero
+recovery failure or admission timeout, and full pool restoration. All
+correctness/data/GC/output/ready-frontier gates passed; only the deliberately
+invalid active-core performance gate failed. Its summary SHA-256 is
+`5ac151db62c71c327398ed06dff7a8cccf1b211b07cd172ef2106f1c914202e5`.
+The exact r26 128x16 run remains OPEN until terminal.
+
 The 1 x 1 tiny-profile mechanism pilot is PASS for both backends with 256/256
 logical/physical tasks and matching sampled output hashes. Its single paired
 execution measured 27.01 s for TaskVine and 26.21 s for DataVine (1.03x) with

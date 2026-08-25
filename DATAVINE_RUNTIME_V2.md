@@ -292,3 +292,15 @@ journal with empty caches, and completed via bounded physical replay without
 rolling logical Scheduler DONE backward. The exact million-task 128x16
 execution remains OPEN and must not be reported as PASS until its artifact is
 complete.
+
+A subsequent full-scale replacement wave exposed a distinct Worker-local
+origin state: a failed code-object cache transfer could remain
+`LOCAL_FETCHING`, causing immediate physical resubmission and recovery replay
+thrash. Origin acquisition now has one bounded transition: delete only the
+failed local cache entry, clear local fetch state, and retry eight times with
+100-ms to 1.6-s exponential backoff before allowing Manager to place the task
+elsewhere. It never changes Controller replica truth. An 8-Worker injection
+gate removed half the pool and terminated with exact `8192 + 943 + 32 = 9167`
+physical conservation, zero recovery admission timeout, zero recovery failure,
+and complete pool restoration. Its performance-only active-core gate is
+intentionally false during the half-pool interval; it is recovery evidence.

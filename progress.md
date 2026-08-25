@@ -853,3 +853,40 @@ replacement reduced the central active-core fraction; this artifact is a
 recovery-correctness gate, not performance evidence. Post-fix regression is
 17/17 PASS. The exact 128x16 performance comparison remains OPEN pending the
 terminal DataVine and TaskVine artifacts.
+
+## Current checkpoint — bounded origin recovery under replacement churn (2026-08-25)
+
+The r25 exact-pool run reached all 128 Workers and 2,048 active cores, but a
+batch of site evictions exposed a Worker-local cache state bug. A replacement
+Worker could leave a failed shared code-object transfer in `LOCAL_FETCHING` and
+immediately return the task to Manager. At the diagnostic stop r25 had 704,941
+physical submissions, 698,909 completions, 236 removed Workers, 1,409 recovery
+epochs, 532,104 invalidated producers, 174,578 successful recovery reports,
+and 492 recovery-admission timeouts. The completion rate had fallen from
+hundreds per second to single digits while all 2,048 cores remained assigned.
+This is replay-thrash diagnostic evidence and is excluded from performance
+claims. Its recoverable path is
+`/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/datavine-native-parametric-r25-185c0d8bb-20260825`.
+
+Worker Data Agent now owns one bounded origin-fetch transition. A failed cache
+record, failed transfer creation, or failed sandbox link removes that exact
+local cache entry and retries on the same Worker at 100 ms through 1.6 s, for
+at most eight retries. Only exhaustion returns the physical task to Manager
+for placement elsewhere. This does not revoke a Controller replica, does not
+change Scheduler state, and introduces no DataID knowledge into Manager.
+
+The replacement-churn gate under
+`/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/origin-retry-gate-c4s8-w8x8-a4183a448-20260825`
+removed four of eight 8-core Workers after 1,772 physical completions. It
+completed exact conservation: 8,192 logical tasks + 943 successful recovery
+reports + 32 disconnect retries = 9,167 submissions = 9,167 completions. It
+recorded zero recovery failure, zero admission timeout, zero
+non-infrastructure failure, no duplicate normal task report, and restored the
+complete 8-Worker pool. Summary SHA-256 is
+`5ac151db62c71c327398ed06dff7a8cccf1b211b07cd172ef2106f1c914202e5`.
+The generic status is `FAIL` only because the deliberate half-pool interval
+failed the performance-only active-core sampling gate; every correctness,
+data, GC, count, output, ready-frontier, and final-pool gate passed. Post-fix
+regression is 17/17 PASS and ordinary `TR_vine_single` remains PASS. The r26
+exact 128x16 terminal measurement is running; it remains OPEN until its signed
+summary exists.
