@@ -468,6 +468,18 @@ def main():
         if physical_window < args.workers * args.cores:
             raise RuntimeError("runtime physical submission window is too small")
         client.rpc_profile(reset=True)
+        factory_started = time.monotonic()
+        factory, factory_log, factory_command = start_resident_factory(
+            output / "factory-state", contact["manager_port"], args.workers, args.cores,
+            repository / "taskvine/src/worker/vine_worker", factory_log_path, args.batch_type,
+            memory_mib=args.memory,
+        )
+        inventory = wait_scale_workers(
+            repository / "taskvine/src/tools/vine_status", contact["manager_port"],
+            args.workers, args.cores, factory, timeout=3600,
+        )
+        admitted = time.monotonic()
+        peak = PeakSampler((os.getpid(), service.pid, factory.pid)).start()
         load_started = time.monotonic()
         if args.representation == "parametric":
             info, payload_sizes, code_digests = load_parametric_workflow(
@@ -487,17 +499,6 @@ def main():
         for name, expected in expected_info.items():
             if info.get(name) != expected:
                 raise AssertionError((name, info.get(name), expected))
-        factory, factory_log, factory_command = start_resident_factory(
-            output / "factory-state", contact["manager_port"], args.workers, args.cores,
-            repository / "taskvine/src/worker/vine_worker", factory_log_path, args.batch_type,
-            memory_mib=args.memory,
-        )
-        inventory = wait_scale_workers(
-            repository / "taskvine/src/tools/vine_status", contact["manager_port"],
-            args.workers, args.cores, factory, timeout=3600,
-        )
-        admitted = time.monotonic()
-        peak = PeakSampler((os.getpid(), service.pid, factory.pid)).start()
         sampler = ParallelismSampler(
             repository / "taskvine/src/tools/vine_status", contact["manager_port"],
             output / "parallelism.jsonl",
@@ -661,12 +662,12 @@ def main():
             },
             "timing": {
                 "graph_load_seconds": sealed - load_started,
-                "worker_admission_seconds": admitted - sealed,
-                "execution_seconds": terminal - admitted,
+                "worker_admission_seconds": admitted - factory_started,
+                "execution_seconds": terminal - sealed,
                 "result_validation_seconds": fetched - terminal,
                 "worker_pool_recovery_seconds": recovered - fetched,
                 "total_seconds": fetched - started,
-                "tasks_per_second": workload.tasks / (terminal - admitted),
+                "tasks_per_second": workload.tasks / (terminal - sealed),
             },
             "sampled_results": {
                 "count": len(results),

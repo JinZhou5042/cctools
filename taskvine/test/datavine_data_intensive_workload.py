@@ -115,6 +115,14 @@ def main():
     assert 'memory_mib=args.memory' in datavine_runner
     assert '"memory_mib_per_worker": args.memory' in datavine_runner
     assert '"recovery_output_missing"' in datavine_runner
+    load_call = "info, payload_sizes, code_digests = load_parametric_workflow("
+    assert datavine_runner.index("start_resident_factory(") < datavine_runner.index(
+        load_call
+    )
+    assert datavine_runner.index("wait_scale_workers(") < datavine_runner.index(
+        load_call
+    )
+    assert '"execution_seconds": terminal - sealed' in datavine_runner
 
     workflow_store_header = (
         repository / "taskvine/src/datavine/vine_datavine_workflow_store.h"
