@@ -153,7 +153,10 @@ def main():
     assert 'failure_stage = "recovery_task"' in workflow_runtime
     assert "parametric_recovery_begin" in workflow_runtime
     assert "parametric_recovery_finish" in workflow_runtime
-    assert "resources->recovery_queue[right]" in workflow_runtime
+    assert "parametric_recovery_order" in workflow_runtime
+    assert "parametric_recovery_arm" in workflow_runtime
+    assert "uint64_t a_last = resources->parametric->a_tasks" in workflow_runtime
+    assert "uint64_t b_last = a_last + resources->parametric->b_tasks" in workflow_runtime
 
     worker_runtime = (
         repository / "taskvine/src/worker/vine_worker.c"
