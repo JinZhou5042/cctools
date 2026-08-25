@@ -1,0 +1,51 @@
+{
+  "artifact_type": "datavine-data-intensive-origin-poison-diagnostic",
+  "schema": "datavine.acceptance/v1",
+  "date": "2026-08-25",
+  "status": "FAIL_DIAGNOSTIC",
+  "run": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/datavine-native-parametric-r26-a4183a448-20260825",
+  "implementation_commit": "a4183a448",
+  "workflow_id": "data-intensive-c64-s64-1787663540",
+  "contract": {
+    "logical_tasks": 1048576,
+    "workflow_files": 10485760,
+    "workers": 128,
+    "cores_per_worker": 16
+  },
+  "terminal": {
+    "workflow_state": "failed",
+    "failure_stage": "recovery_task",
+    "physical_submissions": 599488,
+    "physical_completions": 595393,
+    "normal_task_reports": 491427,
+    "recovery_task_reports": 85682,
+    "normal_forsaken": 182,
+    "recovery_forsaken": 18102,
+    "recovery_epochs": 4424,
+    "recovery_lost_data": 236416,
+    "recovery_invalidated_tasks": 85665,
+    "recovery_admission_timeouts": 497,
+    "manager_workers_removed_before_terminal": 26,
+    "active_workers_at_terminal": 127
+  },
+  "failure_distribution": {
+    "logical_recovery_tasks_with_forsaken": 676,
+    "maximum_forsaken_for_one_logical_task": 63,
+    "maximum_task_logical_id": 310766,
+    "affected_stage": "B"
+  },
+  "cause": "After eight durable-origin retries, Worker Agent returned one physical failure but retained fetch_failures at the terminal value. Because Manager intentionally has no DataID placement state, later B tasks could return to the same permanently poisoned replacement Worker and fail immediately until the 64-attempt infrastructure bound was exhausted.",
+  "correction": {
+    "commit": "a018c2973",
+    "behavior": "The exhausted physical placement still fails once, then the Worker-local object enters a 1.6-second cooldown and resets its bounded retry cycle. Controller replica truth and Scheduler DONE are unchanged.",
+    "regression": {
+      "path": "/tmp/datavine-origin-cooldown-regression-20260825.json",
+      "sha256": "45e0bc1e4e0c72a28642add918480f0e2bcf5a4ef37c4420ddd40563a9b99286",
+      "status": "PASS",
+      "passed": 17,
+      "tests": 17
+    },
+    "ordinary_taskvine_smoke": "PASS"
+  },
+  "claim_boundary": "r26 is failure diagnosis only and is excluded from performance comparison. TaskVine baseline was correctly not started by the PASS-only supervisor."
+}
