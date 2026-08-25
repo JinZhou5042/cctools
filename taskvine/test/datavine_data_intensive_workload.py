@@ -120,6 +120,9 @@ def main():
     assert "VINE_DATAVINE_WORKFLOW_RECOVERY_RESERVE" in workflow_runtime
     assert "vine_task_set_priority(physical, 1e12)" in workflow_runtime
     assert "VINE_RESULT_OUTPUT_TRANSFER_ERROR" in workflow_runtime
+    assert "parametric_recovery_begin" in workflow_runtime
+    assert "parametric_recovery_finish" in workflow_runtime
+    assert "resources->recovery_queue[right]" in workflow_runtime
 
     worker_runtime = (
         repository / "taskvine/src/worker/vine_worker.c"

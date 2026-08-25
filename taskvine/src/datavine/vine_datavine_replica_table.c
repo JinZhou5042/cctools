@@ -723,12 +723,16 @@ int vine_datavine_replica_table_set_recovery(
 		uint32_t generation, int active)
 {
 	struct data_record *data = data_get(table, data_id);
-	if (!data || !(data->flags & DATA_LIVE) ||
+	if (!data ||
 			(data->generation && generation && data->generation != generation))
 		return 0;
 	if (active) {
-		if (data->flags & DATA_RECOVERY)
-			return 0;
+		if (!(data->flags & DATA_LIVE)) {
+			data->flags |= DATA_LIVE;
+			table->stats.active_data++;
+			if (table->stats.active_data > table->stats.peak_data)
+				table->stats.peak_data = table->stats.active_data;
+		}
 		data->flags |= DATA_RECOVERY;
 	} else {
 		data->flags &= ~DATA_RECOVERY;
@@ -747,7 +751,7 @@ int vine_datavine_replica_table_mark_dead(
 		return 0;
 	if (!(data->flags & DATA_LIVE))
 		return 1;
-	data->flags &= ~DATA_LIVE;
+	data->flags &= ~(DATA_LIVE | DATA_RECOVERY);
 	while (data->replica_head) {
 		uint32_t index = data->replica_head;
 		struct replica_record copy = table->replicas[index];

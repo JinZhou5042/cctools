@@ -150,6 +150,9 @@ struct execution_resources {
 	uint32_t *recovery_marks;
 	uint64_t *recovery_queue;
 	uint8_t *recovery_pending;
+	uint8_t *recovery_active;
+	uint64_t *recovery_active_tasks;
+	size_t recovery_active_count;
 	size_t recovery_head;
 	size_t recovery_tail;
 	uint32_t recovery_epoch;
@@ -1200,9 +1203,83 @@ static int apply_parametric_losses(
 		}
 	}
 	if (valid) {
+		/* The traversal discovers consumers before their missing ancestors.
+		 * Submit this new slice in reverse so producers enter recovery slots
+		 * before tasks that would only wait for those producers' data. */
+		for (size_t left = *invalidated_first, right = tail;
+				left < right;) {
+			right--;
+			if (left >= right)
+				break;
+			uint64_t swap = resources->recovery_queue[left];
+			resources->recovery_queue[left] = resources->recovery_queue[right];
+			resources->recovery_queue[right] = swap;
+			left++;
+		}
 		resources->recovery_tail = tail;
 		*invalidated_count = tail - *invalidated_first;
 	}
+	return valid;
+}
+
+static int parametric_recovery_begin(
+		struct vine_datavine_workflow_runtime *runtime,
+		const char *workflow_id, struct execution_resources *resources,
+		uint64_t task_id)
+{
+	if (!runtime || !workflow_id || !resources || !task_id ||
+			task_id > resources->maximum_task_id)
+		return 0;
+	if (resources->recovery_active[task_id])
+		return 1;
+	uint64_t inputs[VINE_DATAVINE_PARAMETRIC_SOURCE_INPUTS];
+	size_t input_count = 0;
+	uint64_t output = 0;
+	if (!parametric_task_inputs(resources->parametric, task_id, inputs,
+			&input_count, &output) ||
+			!vine_datavine_data_controller_agent_set_recovery(
+				runtime->data_controller, workflow_id, output, 1))
+		return 0;
+	resources->recovery_active[task_id] = 1;
+	resources->recovery_active_tasks[resources->recovery_active_count++] =
+			task_id;
+	return 1;
+}
+
+static int parametric_recovery_finish(
+		struct vine_datavine_workflow_runtime *runtime,
+		const char *workflow_id, struct execution_resources *resources)
+{
+	unsigned char workflow_key[32];
+	if (!vine_datavine_data_controller_workflow_key(
+			runtime->data_controller, workflow_id, workflow_key))
+		return 0;
+	uint64_t workflow_slot = vine_datavine_get_u64(workflow_key);
+	if (!workflow_slot)
+		workflow_slot = 1;
+	int valid = 1;
+	for (size_t index = 0; valid && index < resources->recovery_active_count;
+			index++) {
+		uint64_t task_id = resources->recovery_active_tasks[index];
+		uint64_t inputs[VINE_DATAVINE_PARAMETRIC_SOURCE_INPUTS];
+		size_t input_count = 0;
+		uint64_t output = 0;
+		valid = task_id && task_id <= resources->maximum_task_id &&
+				resources->recovery_active[task_id] &&
+				!resources->recovery_pending[task_id] &&
+				parametric_task_inputs(resources->parametric, task_id, inputs,
+					&input_count, &output);
+		if (valid && parametric_output_needed(resources, task_id, output))
+			valid = vine_datavine_data_controller_agent_set_recovery(
+					runtime->data_controller, workflow_id, output, 0);
+		else if (valid)
+			valid = vine_datavine_data_controller_agent_mark_dead(
+					runtime->data_controller, workflow_slot, output, 0);
+		if (valid)
+			resources->recovery_active[task_id] = 0;
+	}
+	if (valid)
+		resources->recovery_active_count = 0;
 	return valid;
 }
 
@@ -2447,6 +2524,8 @@ static void execution_resources_delete(struct execution_resources *resources)
 	free(resources->recovery_marks);
 	free(resources->recovery_queue);
 	free(resources->recovery_pending);
+	free(resources->recovery_active);
+	free(resources->recovery_active_tasks);
 	free(resources->recovery_cache.entries);
 	free(resources->parametric_remaining);
 	vine_datavine_parametric_delete(resources->parametric);
@@ -2599,10 +2678,19 @@ static int execution_resources_create(struct execution_resources *resources,
 			? calloc((size_t)resources->maximum_task_id + 1,
 					sizeof(*resources->recovery_pending))
 			: 0;
+	resources->recovery_active = valid && resources->parametric
+			? calloc((size_t)resources->maximum_task_id + 1,
+					sizeof(*resources->recovery_active))
+			: 0;
+	resources->recovery_active_tasks = valid && resources->parametric
+			? malloc(((size_t)resources->maximum_task_id + 1) *
+					sizeof(*resources->recovery_active_tasks))
+			: 0;
 	valid = valid && resources->attempts && resources->recovery_marks &&
 		resources->recovery_queue;
 	if (resources->parametric)
-		valid = valid && resources->recovery_pending;
+		valid = valid && resources->recovery_pending &&
+			resources->recovery_active && resources->recovery_active_tasks;
 	resources->parametric_remaining = valid && resources->parametric
 			? calloc((size_t)resources->maximum_task_id + 1,
 					sizeof(*resources->parametric_remaining))
@@ -2685,6 +2773,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 	uint64_t recovery_epochs = 0;
 	uint64_t recovery_lost_data = 0;
 	uint64_t recovery_invalidated_tasks = 0;
+	uint64_t recovery_inflight = 0;
 	uint64_t observed_data_losses = UINT64_MAX;
 	int quiescent = 0;
 	int recovered_applied = 0;
@@ -2851,6 +2940,15 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 		}
 		if (!valid)
 			break;
+		if (resources.parametric && !recovery_inflight &&
+				resources.recovery_head == resources.recovery_tail &&
+				resources.recovery_active_count) {
+			valid = parametric_recovery_finish(runtime, workflow_id, &resources);
+			if (!valid) {
+				failure_stage = "recovery_finish";
+				break;
+			}
+		}
 		int64_t logical_id;
 		struct timespec manager_lock_started;
 		struct timespec manager_lock_finished;
@@ -2873,9 +2971,12 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			struct timespec stage_started;
 			struct timespec stage_finished;
 			clock_gettime(CLOCK_MONOTONIC, &stage_started);
-			struct vine_task *physical = materialize_parametric(runtime,
-					workflow_id, &resources, task_id, attempt, 1,
-					&parametric_view);
+			valid = parametric_recovery_begin(runtime, workflow_id, &resources,
+					task_id);
+			struct vine_task *physical = valid
+					? materialize_parametric(runtime, workflow_id, &resources,
+						task_id, attempt, 1, &parametric_view)
+					: 0;
 			/* Recovery producers must pass consumers already queued behind the
 			 * missing generation. */
 			if (physical)
@@ -2902,6 +3003,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			if (valid) {
 				attempts[task_id] = attempt;
 				running++;
+				recovery_inflight++;
 				physical_submissions++;
 				submission_events[submission_event_count++] =
 						(struct vine_datavine_workflow_task_event_record){
@@ -2910,6 +3012,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 								.attempt = attempt,
 						};
 			} else {
+				failure_stage = physical ? "recovery_submit"
+						: "recovery_materialize";
 				resources.recovery_pending[task_id] = 0;
 				physical_attempt_delete(mapping);
 				if (!mapping)
@@ -3067,6 +3171,9 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			int64_t completed_logical_id = mapping ? mapping->logical_id : 0;
 			int recovery_attempt = mapping && mapping->recovery;
 			running--;
+			int recovery_accounted = !recovery_attempt || recovery_inflight > 0;
+			if (recovery_attempt && recovery_inflight)
+				recovery_inflight--;
 			physical_completions++;
 			int physical_success = completed_logical_id > 0 &&
 						   vine_task_get_result(completed) == VINE_RESULT_SUCCESS &&
@@ -3097,7 +3204,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 						(long long)completed_logical_id,
 						vine_task_get_result(completed),
 						vine_task_get_exit_code(completed));
-			int task_valid = completed_logical_id > 0;
+			int task_valid = completed_logical_id > 0 && recovery_accounted;
 			struct jx *task = task_valid
 							  ? (resources.parametric
 										? mapping->parametric_view->task
@@ -3173,6 +3280,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				if (task_valid) {
 					attempts[completed_logical_id] = next_attempt;
 					running++;
+					if (recovery_attempt)
+						recovery_inflight++;
 					physical_submissions++;
 					struct vine_datavine_workflow_task_event_record retry_events[] = {
 							{.type = VINE_DATAVINE_WORKFLOW_TASK_RETRY,

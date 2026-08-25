@@ -138,7 +138,34 @@ int main(void)
 	assert(vine_datavine_replica_table_resolve(table, 42, 7, views, 4,
 			&count, 0, 0, 0) == VINE_DATAVINE_RESOLVE_DEAD);
 
+	/* Recovery may temporarily resurrect an intermediate that logical GC
+	 * retired, replace its empty generation, and retire it again. */
 	struct vine_datavine_replica_stats stats;
+	assert(vine_datavine_replica_table_stats(table, &stats));
+	uint64_t active_before_recovery = stats.active_data;
+	generation = 7;
+	assert(vine_datavine_replica_table_expect(table, 8000001, &generation, 0));
+	assert(vine_datavine_replica_table_publish(table, 8000001, 7, 32, digest,
+			2, 202, 8001, 0, 0, 0));
+	assert(vine_datavine_replica_table_mark_dead(
+			table, 8000001, 7, 0, 0, 0));
+	assert(vine_datavine_replica_table_set_recovery(table, 8000001, 0, 1));
+	assert(vine_datavine_replica_table_set_recovery(table, 8000001, 0, 1));
+	assert(vine_datavine_replica_table_stats(table, &stats));
+	assert(stats.active_data == active_before_recovery + 1);
+	assert(vine_datavine_replica_table_resolve(table, 8000001, 0, views, 4,
+			&count, 0, 0, 0) == VINE_DATAVINE_RESOLVE_PENDING);
+	generation = 8;
+	assert(vine_datavine_replica_table_expect(table, 8000001, &generation, 0));
+	assert(generation == 8);
+	assert(vine_datavine_replica_table_publish(table, 8000001, 8, 32, digest,
+			2, 202, 8002, 0, 0, 0));
+	assert(vine_datavine_replica_table_set_recovery(table, 8000001, 0, 0));
+	assert(vine_datavine_replica_table_mark_dead(
+			table, 8000001, 8, 0, 0, 0));
+	assert(vine_datavine_replica_table_stats(table, &stats));
+	assert(stats.active_data == active_before_recovery);
+
 	assert(vine_datavine_replica_table_stats(table, &stats));
 	assert(stats.active_sessions == 2);
 	assert(stats.active_replicas == 1);
