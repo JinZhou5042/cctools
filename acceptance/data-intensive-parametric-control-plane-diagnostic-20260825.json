@@ -1,0 +1,99 @@
+{
+  "artifact_type": "datavine-data-intensive-parametric-control-plane-diagnostic",
+  "schema": "datavine.acceptance/v1",
+  "date": "2026-08-25",
+  "status": "PASS_DIAGNOSTIC",
+  "claim_boundary": "The interrupted full runs identify scale bottlenecks and the local gates verify their corrections. This artifact is not a terminal full-scale performance result.",
+  "immutable_origin_metadata": {
+    "source_commit": "3601f1315a5171f40bf9e5b14bf60c6702e7c46e",
+    "run": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/datavine-native-parametric-r13-retry-lane",
+    "observed": {
+      "condor_workers_running": 128,
+      "workers_admitted": 0,
+      "pending_tcp_connections": 34,
+      "blocked_operation": "mkdir on journal.objects content-addressed payload path",
+      "blocked_logical_task_id": 18752
+    },
+    "cause": "Every materialized task decoded, hashed, and registered the same inline stage payload again. The deduplicated object-store path still issued shared-filesystem mkdir/stat metadata RPCs while Runtime owned the Manager lane.",
+    "correction_commit": "4eb6a3dc5",
+    "correction": "Cache one immutable object ticket per workflow DataID; the full workload now performs three object registrations rather than one per task."
+  },
+  "sparse_library_iteration": {
+    "source_commit": "4eb6a3dc5",
+    "run": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/datavine-native-parametric-r14-4eb6a3dc5",
+    "observed": {
+      "tasks_complete_at_stop": 272032,
+      "forsaken_attempts": 48,
+      "workers": 128,
+      "active_cores": 2048,
+      "manager_service_rss_kib": 1165472,
+      "manager_main_thread_cpu_percent": 85.3,
+      "sample_sparse_iteration_cursor": 696831,
+      "libraries_per_worker": 1,
+      "b_stage_tasks_per_second_range": [27, 65]
+    },
+    "cause": "Worker current_libraries used global physical task IDs as sparse keys. Scheduling paths iterated that table to find one library and count credits, making each decision O(max_physical_task_id) and total scheduling cost trend quadratic.",
+    "correction_commit": "23a4d084f",
+    "correction": "Retain the sparse table for direct task-ID lookup and maintain a dense per-worker library list for all iterations, reducing those paths to O(libraries_per_worker)."
+  },
+  "acceptance_gate_corrections": {
+    "commit": "bc39b4ed6",
+    "physical_parallelism": "Use the Runtime-advertised bounded physical submission window instead of requiring 32768 Manager-visible tasks from a 4096-view Runtime.",
+    "worker_churn": "Require submissions equals completions equals logical tasks plus infrastructure retries plus recovery replays, successful normal task reports equals logical tasks, and non-infrastructure failures equals zero."
+  },
+  "peer_transfer_and_recovery_head_of_line": {
+    "source_commit": "bc39b4ed6",
+    "run": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/datavine-native-parametric-r15-bc39b4ed6",
+    "observed": {
+      "tasks_complete_at_stop": 265675,
+      "workers_at_stop": 127,
+      "b_stage_tasks_per_second_after_265500": 0.527,
+      "physical_submission_window": 4096,
+      "service_run_seconds": 1517.845494,
+      "manager_scheduling_seconds": 1027.103098,
+      "recovery_epochs": 0,
+      "recovery_lost_data": 0
+    },
+    "cause": "A consumer resolved a peer replica and the source Worker disconnected before transfer completion. The Worker Agent left the local object in FETCHING instead of faulting and resolving again. Controller queued agent-side last-replica losses, but Runtime watched only a separate Manager-side counter. With 4096 consumers occupying the physical window, no producer replay could enter even after loss delivery.",
+    "correction_commit": "7d150d977",
+    "correction": "Report the exact source worker/session/token tuple, make duplicate fault reports idempotent, deliver one Controller-owned loss event stream to Runtime, keep 2048 recovery slots above the ordinary 4096 window, and prioritize recovery producers. A saturated Manager now avoids rebuilding scheduling heaps and empty replication queues."
+  },
+  "clean_local_gate": {
+    "run": "/tmp/datavine-fault-gate-c4-s8-run-r4-clean-20260825",
+    "status": "PASS",
+    "logical_tasks": 8192,
+    "physical_submissions": 8192,
+    "physical_completions": 8192,
+    "task_reports": 8192,
+    "task_reported_read_bytes": 215490560,
+    "failures": 0,
+    "workers": 4,
+    "cores": 8,
+    "maximum_ready_plus_running": 4100
+  },
+  "worker_disconnect_fault_gate": {
+    "run": "/tmp/datavine-fault-gate-c4-s8-run-r5-loss-20260825",
+    "status": "PASS_DIAGNOSTIC",
+    "injection": "SIGTERM one of four 2-core Workers at 2070 physical completions",
+    "logical_state": "completed",
+    "logical_tasks": 8192,
+    "lost_data": 505,
+    "recovery_replays": 543,
+    "forsaken_attempts": 2,
+    "physical_submissions": 8737,
+    "physical_completions": 8737,
+    "physical_conservation": "8192 + 543 + 2 = 8737",
+    "normal_task_reports": 8192,
+    "normal_task_reported_read_bytes": 215490560,
+    "recovery_task_reports": 543,
+    "maximum_ready_plus_running": 4638,
+    "worker_pool": "4 -> 3 -> 4",
+    "note": "The raw performance summary is FAIL only because the deliberate loss makes the uninterrupted 8-of-8 active-core gate false; every correctness, recovery, data-path, and physical-conservation gate passes."
+  },
+  "verification": {
+    "datavine_regression": "17/17 PASS",
+    "traditional_taskvine_TR_vine_single": "PASS",
+    "direct_agent_protocol": "PASS, including exact and idempotent remote faults",
+    "factory_pkl_files_remaining": 0
+  }
+}
