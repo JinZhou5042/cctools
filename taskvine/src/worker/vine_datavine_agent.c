@@ -92,6 +92,20 @@ static struct agent_workflow *agent_workflows;
 static struct persistence_job *persistence_head;
 static struct persistence_job *persistence_tail;
 static int agent_waiting_data;
+static unsigned int agent_diagnostic_failures;
+
+static void agent_diagnostic_failure(const char *operation, uint64_t data_id,
+		const char *path, int error)
+{
+	/* Failure diagnostics are deliberately bounded: one broken origin may be
+	 * referenced by thousands of waiting tasks on the same worker. */
+	if (agent_diagnostic_failures++ >= 32)
+		return;
+	debug(D_NOTICE,
+			"DataVine Worker Agent %s failed for data %llu path %s: %s",
+			operation, (unsigned long long)data_id, path ? path : "-",
+			error ? strerror(error) : "invalid task specification");
+}
 
 static uint64_t mix64(uint64_t value)
 {
@@ -542,30 +556,68 @@ static int sandbox_copy(struct vine_process *process, uint64_t data_id,
 			snprintf(target, sizeof(target), "%s/%llu", directory,
 					(unsigned long long)data_id) >= (int)sizeof(target) ||
 			snprintf(temporary, sizeof(temporary), "%s.part.%ld", target,
-					(long)getpid()) >= (int)sizeof(temporary) ||
-			!create_dir(directory, 0700))
+					(long)getpid()) >= (int)sizeof(temporary)) {
+		agent_diagnostic_failure("construct-path", data_id, source,
+				ENAMETOOLONG);
 		return 0;
+	}
+	if (!create_dir(directory, 0700)) {
+		int error = errno;
+		agent_diagnostic_failure("create-sandbox", data_id, directory, error);
+		return 0;
+	}
 	if (!access(target, R_OK))
 		return 2;
 	int input = open(source, O_RDONLY | O_CLOEXEC);
-	int output = input >= 0 ? open(temporary,
-			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
+	if (input < 0) {
+		int error = errno;
+		agent_diagnostic_failure("open-source", data_id, source, error);
+		return 0;
+	}
+	int output = open(temporary,
+			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	if (output < 0) {
+		int error = errno;
+		close(input);
+		agent_diagnostic_failure("open-sandbox", data_id, temporary, error);
+		return 0;
+	}
 	int valid = output >= 0;
+	int error = 0;
 	unsigned char buffer[1 << 16];
 	while (valid) {
 		ssize_t count = read(input, buffer, sizeof(buffer));
 		if (!count)
 			break;
-		valid = count > 0 && full_write(output, buffer, (size_t)count) == count;
+		if (count < 0 && errno == EINTR)
+			continue;
+		if (count < 0) {
+			error = errno;
+			valid = 0;
+			break;
+		}
+		if (full_write(output, buffer, (size_t)count) != count) {
+			error = errno ? errno : EIO;
+			valid = 0;
+		}
 	}
-	if (input >= 0 && close(input))
+	if (close(input)) {
+		error = errno;
 		valid = 0;
-	if (output >= 0 && close(output))
+	}
+	if (close(output)) {
+		error = errno;
 		valid = 0;
-	if (valid && rename(temporary, target))
+	}
+	if (valid && rename(temporary, target)) {
+		error = errno;
 		valid = 0;
+	}
 	if (!valid)
 		unlink(temporary);
+	if (!valid)
+		agent_diagnostic_failure("copy-source", data_id, source,
+				error ? error : EIO);
 	return valid ? 1 : 0;
 }
 
@@ -796,11 +848,19 @@ enum vine_datavine_agent_prepare_status vine_datavine_agent_prepare(
 	int parsed = spec_parse(process, &spec);
 	if (!parsed)
 		return VINE_DATAVINE_AGENT_NOT_TASK;
-	if (parsed < 0 || !agent_cache)
+	if (parsed < 0) {
+		agent_diagnostic_failure("parse-task-spec", 0, 0, 0);
 		return VINE_DATAVINE_AGENT_FAILED;
+	}
+	if (!agent_cache) {
+		agent_diagnostic_failure("initialize-cache", 0, 0, 0);
+		return VINE_DATAVINE_AGENT_FAILED;
+	}
 	struct agent_workflow *workflow = workflow_get(&spec);
-	if (!workflow)
+	if (!workflow) {
+		agent_diagnostic_failure("open-workflow", 0, spec.controller_host, 0);
 		return VINE_DATAVINE_AGENT_FAILED;
+	}
 	timestamp_t prepare_started = timestamp_get();
 	for (uint32_t index = 0; index < spec.input_count; index++) {
 		const unsigned char *record = spec.inputs +
@@ -811,8 +871,10 @@ enum vine_datavine_agent_prepare_status vine_datavine_agent_prepare(
 		uint32_t offset = vine_datavine_get_u32(record + 16);
 		uint32_t length = vine_datavine_get_u32(record + 20);
 		int ready = -1;
-		if (!data_id)
+		if (!data_id) {
+			agent_diagnostic_failure("empty-data-id", 0, 0, 0);
 			return VINE_DATAVINE_AGENT_FAILED;
+		}
 		if (kind == VINE_DATAVINE_TASK_INPUT_GENERATED && !offset && !length) {
 			ready = prepare_generated(process, workflow, data_id, generation);
 		} else if (kind == VINE_DATAVINE_TASK_INPUT_LOCAL_FILE) {
@@ -825,8 +887,10 @@ enum vine_datavine_agent_prepare_status vine_datavine_agent_prepare(
 			if (string_field(&spec, offset, length, &uri))
 				ready = prepare_uri(process, workflow, data_id, uri, length);
 		}
-		if (ready < 0)
+		if (ready < 0) {
+			agent_diagnostic_failure("prepare-input", data_id, 0, 0);
 			return VINE_DATAVINE_AGENT_FAILED;
+		}
 		if (!ready) {
 			agent_waiting_data = 1;
 			return VINE_DATAVINE_AGENT_WAIT;

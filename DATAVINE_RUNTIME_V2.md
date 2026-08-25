@@ -39,6 +39,10 @@ a transfer process or create a worker-cache record; the executor's random reads
 then remain local. Each task-preparation turn has a 25-ms copy budget and
 returns to `WAIT_DATA` after crossing it, so fast small files are grouped while
 SharedFS latency cannot starve heartbeats or task completion processing.
+Synchronous source reads retry `EINTR`: dense FunctionCall `SIGCHLD` delivery
+is normal worker activity and must never be interpreted as permanent data
+loss. Non-retryable copy failures retain an operation-specific errno, with
+diagnostics bounded per worker so one bad origin cannot create a log storm.
 The Worker consumes and resets one `waiting_data` hint per event-loop turn,
 reducing the next poll timeout from 5 seconds to 1 ms without changing ordinary
 TaskVine task state. Escaped and remote URIs retain the generic

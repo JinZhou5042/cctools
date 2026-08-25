@@ -250,6 +250,21 @@ while preserving exactly one 712.8-GiB SharedFS read, local random task reads,
 the exact reported source-byte gate, intermediate peer movement, and GC. The
 replacement full run remains OPEN.
 
+The first explicit-`LOCAL_FILE` 128x16 replacement attempt then found a
+signal-interruption bug rather than an architecture-boundary failure. Each
+Worker performs short synchronous SharedFS reads before core allocation, while
+FunctionCall child exits deliver `SIGCHLD` to the same event-loop process. The
+copy loop treated `read(2) == -1` with `errno == EINTR` as permanent input
+loss. At full concurrency this synchronized into 10,371 `FORSAKEN`
+completions, zero successful task reports, and service fail-closed shutdown.
+The Worker Data Agent now retries interrupted reads and emits bounded,
+stage-specific errno diagnostics. A post-fix 16-worker x 16-core Condor probe
+completed 2,336 physical tasks with zero input failures; 17/17 DataVine
+regressions and ordinary TaskVine also pass. The diagnostic artifact is
+`acceptance/data-intensive-parametric-eintr-diagnostic-20260824.json`; the
+terminal exact 128x16 acceptance remains OPEN until its summary passes every
+gate.
+
 The 1 x 1 tiny-profile mechanism pilot is PASS for both backends with 256/256
 logical/physical tasks and matching sampled output hashes. Its single paired
 execution measured 27.01 s for TaskVine and 26.21 s for DataVine (1.03x) with

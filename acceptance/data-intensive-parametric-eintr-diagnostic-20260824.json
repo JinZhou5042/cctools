@@ -1,0 +1,42 @@
+{
+  "schema": "datavine.data-intensive-diagnostic/v1",
+  "status": "PASS",
+  "date": "2026-08-24",
+  "scope": "SharedFS local-source preparation under FunctionCall SIGCHLD load",
+  "failed_full_attempt": {
+    "artifact": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/datavine-native-parametric-r9-d5a1a7969",
+    "workers": 128,
+    "cores_per_worker": 16,
+    "physical_submissions": 14467,
+    "physical_completions": 10371,
+    "successful_task_reports": 0,
+    "result": "FORSAKEN",
+    "manager_output_bytes_received": 0
+  },
+  "cause": {
+    "operation": "Worker Data Agent sequential SharedFS read",
+    "trigger": "SIGCHLD from dense FunctionCall completion",
+    "old_behavior": "read returning EINTR was treated as permanent data failure",
+    "effect": "waiting tasks were FORSAKEN before core allocation"
+  },
+  "fix": {
+    "behavior": "retry interrupted reads and retain bounded stage-specific errno diagnostics",
+    "diagnostic_limit_per_worker": 32,
+    "manager_boundary_changed": false,
+    "traditional_taskvine_path_changed": false
+  },
+  "post_fix_probe": {
+    "artifact": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/full-v1-20260823/datavine-condor-debug16.ldyn0l",
+    "workers": 16,
+    "cores_per_worker": 16,
+    "physical_completions_observed": 2336,
+    "failed_inputs": 0
+  },
+  "gates": {
+    "sharedfs_probe_zero_failures": true,
+    "datavine_regression_17_of_17": true,
+    "scientific_foundation_exact_counts": true,
+    "ordinary_taskvine_single_worker": true
+  },
+  "regression_report": "/tmp/datavine-eintr-regression-20260824-r3.json"
+}

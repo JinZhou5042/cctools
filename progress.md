@@ -20,6 +20,19 @@ turn; the corrected loop groups fast files within a 25-ms budget and returns
 next poll timeout from 5 seconds to 1 ms while data waits remain. A replacement
 exact 128x16 run is required after the revised regression gates pass.
 
+A later explicit-`LOCAL_FILE` 128x16 attempt exposed a second scale-only
+failure. Dense FunctionCall completion delivered `SIGCHLD` while the Worker
+Data Agent was synchronously reading SharedFS sources; `read(2)` returned
+`EINTR`, and the old loop incorrectly converted that retryable interruption
+into permanent input loss and `FORSAKEN`. The attempt submitted 14,467 physical
+tasks, completed 10,371 as `FORSAKEN`, and emitted zero successful task reports.
+The copy loop now retries `EINTR`, preserves the failing operation and errno,
+and limits failure diagnostics to 32 per worker. A 16x16 Condor probe then
+completed 2,336 tasks with zero failed inputs. The installed/runtime binary was
+also synchronized before the final 17/17 regression and ordinary TaskVine
+smoke passed. Evidence is retained in
+`acceptance/data-intensive-parametric-eintr-diagnostic-20260824.json`.
+
 Runtime v2 now separates compute completion from data admission. TaskVine
 Manager owns physical dispatch/completion and transports only a generic opaque
 auxiliary frame. DataVine Scheduler marks a successful physical task DONE and
@@ -34,7 +47,7 @@ TaskVine `TR_vine_single`. It covers HMAC Worker HELLO, atomic batch admission,
 digest conflict rejection, late-publication tombstones, reconnect inventory,
 Owner restart, Worker loss, direct durable results, dynamic append, Shell,
 Notebook, Go, and the scientific foundation. The regression report was written
-to `/tmp/datavine-runtime-v2-regression-r2.json` during this checkout and is
+to `/tmp/datavine-eintr-regression-20260824-r3.json` during this checkout and is
 ephemeral; source tests are the durable reproduction mechanism.
 
 The full data-intensive parametric descriptor is 1,344 bytes and expands to
