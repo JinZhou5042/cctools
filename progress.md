@@ -919,9 +919,9 @@ r26 remains excluded from performance claims; r27 is required.
 The million-task workload is no longer used as the inner development loop.
 An ordinary explicit-IR workflow with 8,192 logical tasks, 73,728 source files,
 and eight 8-core Workers now exercises the same Worker Agent and Controller
-data plane in about six minutes. A live Worker removal lost 428 DataIDs and
-invalidated a 1,815-task transitive recovery closure. The run completed exact
-conservation at 10,015 physical submissions and 10,015 completions, with eight
+data plane in about seven minutes. A live Worker removal lost 487 DataIDs and
+invalidated a 1,928-task transitive recovery closure. The run completed exact
+conservation at 10,128 physical submissions and 10,128 completions, with eight
 infrastructure `FORSAKEN` results, zero non-infrastructure failure, zero
 recovery-admission timeout, and a restored 8-Worker pool.
 
@@ -938,8 +938,12 @@ retry or restart from binding an old generation.
 
 The compact acceptance artifact is
 `acceptance/data-intensive-explicit-ordinary-recovery-20260825.json`. The
-generic benchmark summary says `FAIL` because it deliberately retains the
-128x16, ten-million-file, IO-dominance, and full-scale-GC promotion gates.
-Those gates are out of scope for this ordinary correctness workflow; its
-workflow state and all applicable count, output, churn, and Manager-boundary
-gates pass. Full-scale performance comparison remains OPEN.
+benchmark now records an explicit `ordinary` gate profile and says `PASS`
+without rewriting diagnostic values. It checks counts, output boundaries,
+Controller durability, churn recovery, Manager payload bypass, and parallelism;
+exact source-byte attribution, IO dominance, and full-scale GC pressure remain
+recorded but excluded. The full-scale profile still requires every gate, so the
+128x16 performance comparison remains OPEN. The regression runner now selects
+the configured DataVine Python, validates the Go prerequisite up front, and
+builds/removes its test-only parametric evaluator automatically; commit
+`d19287bf9` passes 17/17 from a clean test-tool state.

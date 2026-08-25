@@ -12,7 +12,7 @@ Status: **FIXED 1024-CORE CAMPAIGN PASS; SCIENTIFIC FOUNDATION LOCAL PASS; REAL-
 | Runtime v2 Manager boundary | LOCAL PASS | Manager transports only a generic opaque auxiliary payload; DataVine inputs/outputs create no Manager vine_file/cache-update/unlink state; manifest and task-data telemetry are parsed only by Controller; direct Worker Agent protocol and module scan pass |
 | Native parametric execution | DISTRIBUTED RECOVERY PASS / FULL PERF OPEN | exact full topology builds in about 2.59 s / 172 MiB with matching exhaustive oracle digest; bounded 4,096-task views; replacement-churn gate removed half of 8 Workers and completed exact 8,192 logical + 943 replay + 32 disconnect tasks with zero recovery timeout |
 | Data-intensive exact 128x16 | OPEN | r26 sustained 2,048 cores but failed after 595,393 physical completions when replacement Workers retained an exhausted origin retry state; bounded cooldown/reset is regression-clean and r27 is required |
-| Data-intensive ordinary explicit recovery | PASS | 8,192 logical tasks on 8x8 completed 10,015/10,015 physical attempts after one Worker loss; 428 lost DataIDs caused 1,815 producer-first replays with zero admission timeout and exact pool restoration |
+| Data-intensive ordinary explicit recovery | PASS | ordinary-profile artifact from clean commit `d19287bf9`: 8,192 logical tasks on 8x8 completed 10,128/10,128 physical attempts after one Worker loss; 487 lost DataIDs caused 1,928 producer-first replays with zero admission timeout and exact pool restoration |
 | Completion/data admission decoupling | LOCAL PASS | physical success marks Scheduler DONE immediately; child dispatch does not wait for DATA_READY or requested-result persistence |
 | Worker replica state machine | DISTRIBUTED PASS | chunked DataID table, indexed sessions, HMAC HELLO, digest/generation checks, reconnect advertisement, exact replica faults, idempotent GC ACK, coalesced replay, whole-closure Controller arming, O(n) A/B/C replay ordering, and bounded local origin retry; three 8,192-task disconnect gates have exact physical conservation and zero admission timeout |
 | Parametric family evaluator | PASS | 1,344-byte full descriptor; exact 1,048,576 tasks and 10,485,760 files; 4,096 full samples plus exhaustive small-cohort inverse equivalence; native bounded-frontier execution and distributed replay are integrated |
@@ -31,7 +31,7 @@ Status: **FIXED 1024-CORE CAMPAIGN PASS; SCIENTIFIC FOUNDATION LOCAL PASS; REAL-
 | Live result | PASS | a requested DataID is fetchable immediately after its task commit while downstream work is still running |
 | Payload isolation | PASS | 2 MiB result stays in immutable Data Controller storage; workflow journal remains under 1 MiB |
 | Corruption | PASS | modified result file makes service restart fail closed |
-| Regression | PASS | 17/17 contracts pass, including direct agent protocol, replica table, parametric evaluator, production data plane, scientific foundation, and hash-verified Go adaptor; ordinary TaskVine single-worker smoke also passes |
+| Regression | PASS | 17/17 contracts pass from clean test-tool state; runner selects configured DataVine Python, fails fast on Go prerequisites, and builds/removes the test-only parametric evaluator automatically |
 
 ## Scale and CPU
 

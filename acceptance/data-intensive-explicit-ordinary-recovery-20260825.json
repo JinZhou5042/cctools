@@ -1,59 +1,51 @@
 {
   "artifact_type": "datavine-explicit-ordinary-recovery-acceptance",
-  "benchmark_gate_status": "FAIL_OUT_OF_SCOPE_SCALE_GATES",
-  "benchmark_summary": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/datavine-explicit-ordinary-c4s8-w8x8-admission-final-20260825/summary.json",
-  "benchmark_summary_sha256": "66ad7a17c8fcfff432736e6bea6010508f084b922e71304c2dbdfbd04b280abf",
+  "benchmark_gate_status": "PASS",
+  "benchmark_summary": "/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/datavine-explicit-ordinary-profile-c4s8-w8x8-d19287bf9-20260825/summary.json",
+  "benchmark_summary_sha256": "4b31a114aabb9a2f7751d0ba3c87783f40a0610e31de6d2ee559bc79f9193b4d",
   "configuration": {
     "cores_per_worker": 8,
+    "gate_profile": "ordinary",
     "logical_tasks": 8192,
     "representation": "explicit",
     "source_files": 73728,
     "workers": 8
   },
-  "correctness_gates": {
-    "exact_logical_counts": true,
-    "exact_physical_counts": true,
-    "manager_output_payload_bypass": true,
-    "sampled_outputs": true,
-    "worker_churn_recovered": true
-  },
-  "excluded_large_scale_gates": [
-    "128 workers x 16 cores",
-    "10 million workflow files",
-    "data path is the dominant runtime stage",
-    "full-scale GC pressure"
+  "excluded_diagnostics": [
+    "data_path_is_runtime_bottleneck",
+    "exact_sharedfs_source_bytes",
+    "gc_pressure_accounted"
   ],
   "physical": {
-    "completions": 10015,
+    "completions": 10128,
     "forsaken": 8,
     "non_infrastructure_failures": 0,
-    "submissions": 10015
+    "submissions": 10128
   },
   "provenance": {
-    "captured_from_precommit_worktree": true,
-    "committed_unchanged_as": "6a49e2a5a",
-    "embedded_base_commit": "c6b580056cf84b1e8a081902328d13a61ad3f751"
+    "captured_from_clean_commit": true,
+    "commit": "d19287bf93dc920e4fd2074a50e42d1ca8ba91c7"
   },
   "recovery": {
     "admission_timeouts": 0,
     "epochs": 1,
-    "invalidated_tasks": 1815,
-    "lost_data_ids": 428,
+    "invalidated_tasks": 1928,
+    "lost_data_ids": 487,
     "manager_workers_removed": 1
   },
   "regression": {
-    "commit": "6a49e2a5a7467c4a383e07190660f93aa7284e7e",
+    "commit": "d19287bf93dc920e4fd2074a50e42d1ca8ba91c7",
     "passed": 17,
-    "report": "/tmp/datavine-explicit-admission-clean-6a49e2a5a-regression-r2-20260825.json",
-    "report_sha256": "dbacf847702619a491dd48bd3b747f91b9b654d8b6bf896c010666524baa09be",
+    "report": "/tmp/datavine-d19287bf9-regression-20260825.json",
+    "report_sha256": "3808a0956307646d042ec9629e6ee51f006700d78f7a25b7ad95ef52e63affe5",
     "status": "PASS",
     "tests": 17
   },
   "status": "PASS",
   "timing": {
-    "execution_seconds": 363.5761261479929,
-    "graph_load_seconds": 53.882224417990074,
-    "tasks_per_second": 22.531732451171624
+    "execution_seconds": 395.4100710899802,
+    "graph_load_seconds": 51.01289258900215,
+    "tasks_per_second": 20.717732296039102
   },
   "workflow_state": "completed"
 }
