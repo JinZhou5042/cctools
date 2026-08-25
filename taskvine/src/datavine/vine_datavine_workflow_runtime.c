@@ -143,6 +143,8 @@ struct execution_resources {
 	struct itable *pending_consumers;
 	struct itable *requested;
 	struct itable *physical_to_logical;
+	/* One immutable ticket per inline/object DataID. */
+	struct itable *origin_tickets;
 	struct vine_datavine_scheduler *scheduler;
 	buffer_t recovered_tasks;
 	uint32_t *attempts;
@@ -1570,7 +1572,8 @@ struct task_spec_input {
 };
 
 static char *task_spec_origin_uri(
-		struct vine_datavine_data_controller *controller, struct jx *record)
+		struct vine_datavine_data_controller *controller, uint64_t data_id,
+		struct jx *record, struct itable *origin_tickets)
 {
 	struct jx *origin = record ? vine_datavine_ir_data_origin(record) : 0;
 	const char *kind = origin ? jx_lookup_string(origin, "kind") : 0;
@@ -1578,9 +1581,22 @@ static char *task_spec_origin_uri(
 		return 0;
 	if (!strcmp(kind, "uri"))
 		return strdup(jx_lookup_string(origin, "uri"));
-	if (!strcmp(kind, "object"))
-		return vine_datavine_data_controller_object_ticket(controller,
+	char *cached = origin_tickets
+			? itable_lookup(origin_tickets, data_id) : 0;
+	if (cached)
+		return strdup(cached);
+	if (!strcmp(kind, "object")) {
+		char *ticket = vine_datavine_data_controller_object_ticket(controller,
 				jx_lookup_string(origin, "sha256"));
+		char *retained = ticket && origin_tickets ? strdup(ticket) : 0;
+		if (ticket && origin_tickets &&
+				(!retained || !itable_insert(origin_tickets, data_id, retained))) {
+			free(retained);
+			free(ticket);
+			return 0;
+		}
+		return ticket;
+	}
 	if (strcmp(kind, "inline"))
 		return 0;
 	buffer_t decoded;
@@ -1605,6 +1621,13 @@ static char *task_spec_origin_uri(
 					controller, encoded);
 	}
 	buffer_free(&decoded);
+	char *retained = ticket && origin_tickets ? strdup(ticket) : 0;
+	if (ticket && origin_tickets &&
+			(!retained || !itable_insert(origin_tickets, data_id, retained))) {
+		free(retained);
+		free(ticket);
+		return 0;
+	}
 	return ticket;
 }
 
@@ -1631,7 +1654,7 @@ static int attach_worker_data_spec(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id, struct vine_task *physical, struct jx *task,
 		struct jx *executor, struct jx *default_codec, struct itable *data,
-		struct itable *consumers,
+		struct itable *consumers, struct itable *origin_tickets,
 		struct itable *requested, uint32_t attempt, int retain_all)
 {
 	struct jx *task_inputs = vine_datavine_ir_task_inputs(task);
@@ -1710,7 +1733,8 @@ static int attach_worker_data_spec(
 			}
 			continue;
 		}
-		char *uri = task_spec_origin_uri(controller, inputs[index].record);
+		char *uri = task_spec_origin_uri(controller, inputs[index].data_id,
+				inputs[index].record, origin_tickets);
 		size_t uri_size = uri ? strlen(uri) : 0;
 		size_t current_size = 0;
 		buffer_tolstring(&strings, &current_size);
@@ -1848,6 +1872,7 @@ static struct vine_task *materialize(struct vine_manager *manager,
 		struct vine_datavine_data_controller *data_controller,
 		const char *workflow_id, struct jx *task, struct itable *data,
 		struct itable *files, struct itable *consumers,
+		struct itable *origin_tickets,
 		struct itable *requested, struct task_defaults_index *defaults,
 		uint32_t attempt, int retain_all)
 {
@@ -1967,7 +1992,7 @@ static struct vine_task *materialize(struct vine_manager *manager,
 	}
 	if (!attach_worker_data_spec(data_controller, workflow_id, physical, task,
 			executor, task_default_codec(defaults, task), data, consumers,
-			requested, attempt, retain_all)) {
+			origin_tickets, requested, attempt, retain_all)) {
 		vine_task_delete(physical);
 		return 0;
 	}
@@ -2019,7 +2044,8 @@ static struct vine_task *materialize_parametric(
 		return 0;
 	struct vine_task *physical = materialize(runtime->manager,
 			runtime->data_controller, workflow_id, view->task, view->data,
-			resources->files, view->consumers, view->requested,
+			resources->files, view->consumers, resources->origin_tickets,
+			view->requested,
 			&resources->task_defaults, attempt, retain_all);
 	if (!physical) {
 		parametric_task_view_delete(view);
@@ -2433,6 +2459,16 @@ static void execution_resources_delete(struct execution_resources *resources)
 		vine_datavine_scheduler_delete(resources->scheduler);
 	if (resources->physical_to_logical)
 		itable_delete(resources->physical_to_logical);
+	if (resources->origin_tickets) {
+		uint64_t data_id;
+		void *ticket;
+		int iterator;
+		ITABLE_ITERATE(resources->origin_tickets, iterator, data_id, ticket)
+		{
+			free(ticket);
+		}
+		itable_delete(resources->origin_tickets);
+	}
 	if (resources->files)
 		itable_delete(resources->files);
 	if (resources->consumers)
@@ -2474,6 +2510,7 @@ static int execution_resources_create(struct execution_resources *resources,
 	resources->pending_consumers = itable_create(0);
 	resources->requested = itable_create(0);
 	resources->physical_to_logical = itable_create(0);
+	resources->origin_tickets = itable_create(0);
 	resources->recovery_cache.limit = configured_recovery_cache_limit();
 	resources->recovery_cache.members = itable_create(0);
 	resources->recovery_cache.entries = resources->recovery_cache.limit
@@ -2482,7 +2519,8 @@ static int execution_resources_create(struct execution_resources *resources,
 								: 0;
 	valid = valid && resources->data && resources->tasks && resources->files &&
 		resources->consumers && resources->pending_consumers && resources->requested &&
-		resources->physical_to_logical && resources->recovery_cache.members &&
+		resources->physical_to_logical && resources->origin_tickets &&
+		resources->recovery_cache.members &&
 		(!resources->recovery_cache.limit || resources->recovery_cache.entries);
 	if (valid && !resources->parametric) {
 		struct jx *record;
@@ -2651,6 +2689,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 	uint64_t observed_data_losses = UINT64_MAX;
 	int quiescent = 0;
 	int recovered_applied = 0;
+	const char *failure_stage = 0;
 	while (valid && !runtime_stopping(runtime)) {
 		valid = drain_publications(runtime, workflow_id, scheduler, &resources.recovery_cache, data, files, pending_consumers, requested, &pending_publications, &publishing, 0, &uncheckpointed_completions, &publish_nanoseconds, &publication_stages, &completion_event_nanoseconds);
 		if (!valid)
@@ -2775,7 +2814,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 								: materialize(runtime->manager,
 										runtime->data_controller, workflow_id,
 										itable_lookup(tasks, task_id), data, files,
-										pending_consumers, requested,
+										pending_consumers, resources.origin_tickets,
+										requested,
 										&resources.task_defaults, attempt, 1);
 						struct physical_attempt *mapping = physical
 								? calloc(1, sizeof(*mapping)) : 0;
@@ -2892,7 +2932,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 							&parametric_view)
 					: materialize(runtime->manager, runtime->data_controller,
 							workflow_id, task, data, files, pending_consumers,
-							requested, &resources.task_defaults,
+							resources.origin_tickets, requested,
+							&resources.task_defaults,
 							attempts[logical_id] + 1,
 							workflow_info.state != VINE_DATAVINE_WORKFLOW_RUNNING);
 			clock_gettime(CLOCK_MONOTONIC, &stage_finished);
@@ -3093,6 +3134,10 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				struct parametric_task_view *retry_view = 0;
 				int retry_retain_all = recovery_attempt ||
 					workflow_info.state != VINE_DATAVINE_WORKFLOW_RUNNING;
+				/* materialize() registers Worker-Agent data handles with the
+				 * Manager. Keep that operation in the same narrow Manager lane as
+				 * submit, just like the ordinary submission path. */
+				manager_lane_lock(runtime);
 				struct vine_task *retry = resources.parametric
 						? materialize_parametric(runtime, workflow_id, &resources,
 								(uint64_t)completed_logical_id, next_attempt,
@@ -3100,7 +3145,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 								&retry_view)
 						: materialize(runtime->manager, runtime->data_controller,
 								workflow_id, task, data, files, pending_consumers,
-								requested, &resources.task_defaults, next_attempt,
+								resources.origin_tickets, requested,
+								&resources.task_defaults, next_attempt,
 								retry_retain_all);
 				struct physical_attempt *retry_mapping = retry
 						? calloc(1, sizeof(*retry_mapping)) : 0;
@@ -3110,7 +3156,6 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 					retry_mapping->recovery = recovery_attempt;
 					retry_mapping->parametric_view = retry_view;
 				}
-				manager_lane_lock(runtime);
 				int retry_physical_id = retry_mapping
 						? runtime_submit_locked(runtime, retry, mailbox) : -1;
 				task_valid = retry_physical_id > 0 &&
@@ -3130,11 +3175,29 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 							 .task_id = completed_logical_id,
 							 .attempt = next_attempt},
 					};
-					struct vine_datavine_workflow_error retry_error;
+					struct vine_datavine_workflow_error retry_error = {0};
 					task_valid = vine_datavine_workflow_store_record_task_events(
 							runtime->store, workflow_id, retry_events,
 							2, &retry_error);
+					if (!task_valid && report_metrics) {
+						fprintf(stderr,
+								"datavine workflow %s retry_event_failed "
+								"logical_id=%lld attempt=%u code=%d path=%s detail=%s\n",
+								workflow_id, (long long)completed_logical_id,
+								next_attempt, retry_error.code, retry_error.path,
+								retry_error.message);
+						failure_stage = "retry_event";
+					}
 				} else {
+					if (report_metrics)
+						fprintf(stderr,
+								"datavine workflow %s retry_submit_failed "
+								"logical_id=%lld attempt=%u materialized=%d "
+								"mapping=%d physical=%d\n",
+								workflow_id, (long long)completed_logical_id,
+								next_attempt, retry != 0, retry_mapping != 0,
+								retry_physical_id);
+					failure_stage = retry ? "retry_submit" : "retry_materialize";
 					physical_attempt_delete(retry_mapping);
 					if (!retry_mapping)
 						parametric_task_view_delete(retry_view);
@@ -3203,6 +3266,11 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 	}
 	if (running)
 		cancel_running_tasks(runtime, mailbox, physical_to_logical, running);
+	if (report_metrics && !valid)
+		fprintf(stderr,
+				"datavine workflow %s runtime_invalid stage=%s running=%llu\n",
+				workflow_id, failure_stage ? failure_stage : "unspecified",
+				(unsigned long long)running);
 	pending_publications_delete(pending_publications);
 	if (uncheckpointed_completions) {
 		struct timespec checkpoint_started;
