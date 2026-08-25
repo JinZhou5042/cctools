@@ -947,3 +947,19 @@ recorded but excluded. The full-scale profile still requires every gate, so the
 the configured DataVine Python, validates the Go prerequisite up front, and
 builds/removes its test-only parametric evaluator automatically; commit
 `d19287bf9` passes 17/17 from a clean test-tool state.
+
+## Current checkpoint — 200x16 dummy throughput admission (2026-08-25)
+
+The native dummy runner now supports exact Condor resources and sealed
+registration. A local sealed `/bin/true` smoke completed 100/100 physical tasks
+with a zero-byte requested result. Commit `8b5cfd959` then requested 200 Condor
+Workers with 16 cores, 10,240 MiB memory, and 20,480 MiB disk each before a
+one-million-task sealed run.
+
+The exact admission gate did not open. Across 1,448 seconds, the pool peaked at
+44 connected Workers (704 cores) and fell back under Condor churn; 36 remained
+connected before cleanup. No job was held, the workflow was never submitted,
+and the service log remained empty. Therefore no throughput number is claimed.
+All 200 Condor jobs and local processes were removed. The diagnostic is
+`acceptance/dummy-throughput-w200x16-admission-20260825.json`; a dedicated or
+otherwise confirmed 3,200-core allocation is required to execute this gate.
