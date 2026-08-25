@@ -13,6 +13,7 @@ See the file COPYING for details.
 #include "domain_name.h"
 #include "hash_table.h"
 #include "link.h"
+#include "list.h"
 #include "itable.h"
 
 typedef enum {
@@ -65,6 +66,10 @@ struct vine_worker_info {
 	struct hash_table *current_files;
 	struct itable *current_tasks;
 	struct itable *current_libraries;
+	/* Dense iteration companion for the usually tiny library set. Global task
+	 * IDs grow without bound, so walking the sparse lookup table would make
+	 * each scheduling decision O(max_task_id). */
+	struct list *current_libraries_list;
 
 	/* Dynamic information summed by count_worker_resources. */
 	int tasks_committed;	     /* # tasks at worker in any state. */

@@ -1153,6 +1153,8 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w)
 
 	itable_clear(w->current_tasks, 0);
 	itable_clear(w->current_libraries, 0);
+	while (list_pop_head(w->current_libraries_list))
+		;
 
 	w->finished_tasks = 0;
 	cleanup_worker_files(q, w);
@@ -3134,15 +3136,13 @@ static void find_max_worker(struct vine_manager *q)
  * are not counted towards the resources in use and will be killed if needed. */
 static void kill_empty_libraries_on_worker(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
 {
-	int iteration;
-	uint64_t libtask_id;
 	struct vine_task *libtask;
-	ITABLE_ITERATE(w->current_libraries, iteration, libtask_id, libtask)
+	LIST_ITERATE(w->current_libraries_list, libtask)
 	{
 		int needed_by_function = t->needs_library && !strcmp(t->needs_library, libtask->provides_library);
 		int sibling_of_replacement = t->provides_library && !strcmp(t->provides_library, libtask->provides_library);
 		if (libtask->function_slots_inuse == 0 && !needed_by_function && !sibling_of_replacement) {
-			vine_cancel_by_task_id(q, libtask_id);
+			vine_cancel_by_task_id(q, libtask->task_id);
 		}
 	}
 }
@@ -3211,6 +3211,7 @@ static vine_result_code_t commit_task_to_worker(struct vine_manager *q, struct v
 	/* If this is a library task, bookkeep it on the worker's side */
 	if (t->provides_library) {
 		itable_insert(w->current_libraries, t->task_id, t);
+		list_push_tail(w->current_libraries_list, t);
 	}
 
 	t->hostname = xxstrdup(w->hostname);
@@ -3402,6 +3403,7 @@ static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_inf
 
 	if (t->provides_library) {
 		itable_remove(w->current_libraries, t->task_id);
+		list_remove(w->current_libraries_list, t);
 	}
 
 	/* if t is a function task, t->library_task should not be invalidated, and we decrement the reference count of the library task.
@@ -5150,6 +5152,7 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 		while (library) {
 			vine_cancel_by_task_id(q, library->task_id);
 			itable_remove(w->current_libraries, library->task_id);
+			list_remove(w->current_libraries_list, library);
 			library = vine_schedule_find_library(q, w, name);
 		}
 		hash_table_remove(q->library_templates, name);

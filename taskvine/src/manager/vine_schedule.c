@@ -164,10 +164,8 @@ static int check_worker_have_committable_resources(struct vine_manager *q, struc
 {
 	/* Check if there are free slots on any of the running libraries */
 	if (w->current_libraries && itable_size(w->current_libraries) > 0) {
-		uint64_t task_id;
 		struct vine_task *t;
-		int iteration;
-		ITABLE_ITERATE(w->current_libraries, iteration, task_id, t)
+		LIST_ITERATE(w->current_libraries_list, t)
 		{
 			if (t->function_slots_inuse < t->function_slots_total && t->function_slots_reported_free > 0) {
 				return 1;
@@ -323,12 +321,10 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 
 struct vine_task *vine_schedule_find_library(struct vine_manager *q, struct vine_worker_info *w, const char *library_name)
 {
-	uint64_t task_id;
 	struct vine_task *library_task;
 	struct vine_task *available = 0;
 	int matching_instances = 0;
-	int iteration;
-	ITABLE_ITERATE(w->current_libraries, iteration, task_id, library_task)
+	LIST_ITERATE(w->current_libraries_list, library_task)
 	{
 		if (!strcmp(library_task->provides_library, library_name)) {
 			matching_instances++;
@@ -351,10 +347,8 @@ int vine_schedule_library_needs_instance(struct vine_manager *q,
 {
 	int matching_instances = 0;
 	(void)q;
-	uint64_t task_id;
 	struct vine_task *library_task;
-	int iterator;
-	ITABLE_ITERATE(w->current_libraries, iterator, task_id, library_task)
+	LIST_ITERATE(w->current_libraries_list, library_task)
 	{
 		if (!strcmp(library_task->provides_library, library_name))
 			matching_instances++;
@@ -369,10 +363,8 @@ static int count_worker_free_cores(struct vine_manager *q, struct vine_worker_in
 	int free_cores = 0;
 
 	/* library tasks may themselves consume many cores but can have free slots */
-	uint64_t task_id;
 	struct vine_task *t;
-	int iteration;
-	ITABLE_ITERATE(w->current_libraries, iteration, task_id, t)
+	LIST_ITERATE(w->current_libraries_list, t)
 	{
 		free_cores += MIN(
 				t->function_slots_total - t->function_slots_inuse,
