@@ -5,10 +5,57 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TEST_DIR="$ROOT/taskvine/test"
 TIMEOUT_SECONDS=${DATAVINE_TEST_TIMEOUT:-180}
 REPORT=${DATAVINE_REGRESSION_REPORT:-"${TMPDIR:-/tmp}/datavine-regression-latest.json"}
+CONFIGURED_PYTHON=$(sed -n 's/^CCTOOLS_PYTHON_TEST_EXEC=//p' "$ROOT/config.mk")
+REGRESSION_PYTHON=${DATAVINE_TEST_PYTHON:-$CONFIGURED_PYTHON}
+PARAMETRIC_TEST="$ROOT/taskvine/src/tools/datavine_parametric_test"
+BUILT_PARAMETRIC_TEST=0
+
+cleanup_generated_test_tool()
+{
+    if [ "$BUILT_PARAMETRIC_TEST" -eq 1 ] && [ -e "$PARAMETRIC_TEST" ]; then
+        unlink "$PARAMETRIC_TEST"
+    fi
+}
+trap cleanup_generated_test_tool EXIT INT TERM
+
+if [ -z "$REGRESSION_PYTHON" ] || [ ! -x "$REGRESSION_PYTHON" ]; then
+    echo "DataVine regression Python is not executable: $REGRESSION_PYTHON" >&2
+    echo "set DATAVINE_TEST_PYTHON or reconfigure config.mk" >&2
+    exit 2
+fi
+if ! PYTHONNOUSERSITE=1 "$REGRESSION_PYTHON" -c \
+        'import ndcctools.taskvine.datavine' >/dev/null 2>&1; then
+    echo "DataVine Python bindings are unavailable in $REGRESSION_PYTHON" >&2
+    echo "install the current tree or set DATAVINE_TEST_PYTHON" >&2
+    exit 2
+fi
+
+# TR scripts consistently invoke `python`; put the configured DataVine Python
+# first so the suite cannot silently inherit an unrelated active environment.
+PATH=$(dirname "$REGRESSION_PYTHON"):$PATH
+export PATH
+
+if [ -n "${DATAVINE_GO_BINARY:-}" ]; then
+    if [ ! -x "$DATAVINE_GO_BINARY" ]; then
+        echo "DATAVINE_GO_BINARY is not executable: $DATAVINE_GO_BINARY" >&2
+        exit 2
+    fi
+elif ! command -v "${DATAVINE_GO_COMPILER:-go}" >/dev/null 2>&1; then
+    echo "set DATAVINE_GO_BINARY or DATAVINE_GO_COMPILER before regression" >&2
+    exit 2
+fi
+
+# The regression runner invokes each TR script's run phase directly.  Build the
+# one test-only executable that is not part of the normal TaskVine install so a
+# clean checkout has the same behavior as an already-used developer tree.
+if [ ! -x "$PARAMETRIC_TEST" ]; then
+    make -C "$ROOT/taskvine/src/tools" datavine_parametric_test -j8
+    BUILT_PARAMETRIC_TEST=1
+fi
 
 mkdir -p "$(dirname "$REPORT")"
 export ROOT TEST_DIR TIMEOUT_SECONDS REPORT
-python - <<'PY'
+"$REGRESSION_PYTHON" - <<'PY'
 import json
 import os
 import pathlib

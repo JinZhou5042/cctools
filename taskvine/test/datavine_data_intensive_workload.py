@@ -143,6 +143,11 @@ def main():
     assert '"execution_semantics": "admit-before-seal"' in datavine_runner
     assert 'args.workers, args.cores, factory, timeout=args.timeout' in datavine_runner
     assert 'timeout=3600' not in datavine_runner
+    assert 'choices=("full-scale", "ordinary")' in datavine_runner
+    assert '"gate_evaluation"' in datavine_runner
+    assert 'if args.gate_profile == "ordinary" else []' in datavine_runner
+    assert 'stages.get("controller_active_results") == workload.c_tasks' in datavine_runner
+    assert 'stages.get("publication_remote_outputs") == workload.tasks' not in datavine_runner
 
     workflow_store_header = (
         repository / "taskvine/src/datavine/vine_datavine_workflow_store.h"

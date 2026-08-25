@@ -29,6 +29,11 @@ DELTA_SCHEMA = "datavine.workflow-delta/v1"
 CODEC = {"name": "bytes", "version": "1"}
 ARTIFACT_SCHEMA = "datavine.data-intensive-run/v1"
 MAX_RPC_BYTES = 64 << 20
+ORDINARY_GATE_EXCLUSIONS = {
+    "exact_sharedfs_source_bytes",
+    "data_path_is_runtime_bottleneck",
+    "gc_pressure_accounted",
+}
 
 
 def encoded(value):
@@ -416,11 +421,19 @@ def parse_args():
                         default="parametric")
     parser.add_argument("--timeout", type=float, default=24 * 60 * 60)
     parser.add_argument("--acceptance", action="store_true")
+    parser.add_argument(
+        "--gate-profile", choices=("full-scale", "ordinary"),
+        default="full-scale",
+        help=("full-scale enforces every performance/pressure gate; ordinary "
+              "checks runtime correctness, recovery, boundaries, and parallelism"),
+    )
     parser.add_argument("--plan-only", action="store_true")
     args = parser.parse_args()
     if min(args.cohorts, args.scale, args.workers, args.cores, args.memory,
            args.task_chunk) < 1:
         parser.error("numeric workload arguments must be positive")
+    if args.acceptance and args.gate_profile != "full-scale":
+        parser.error("--acceptance requires --gate-profile full-scale")
     return args
 
 
@@ -594,22 +607,28 @@ def main():
                 or estimated_task_io_seconds > reported_cpu_seconds
             )
         else:
-            intermediate_files = workload.a_tasks + workload.b_tasks
-            recovery_limit = stages.get("recovery_cache_limit", 0)
-            if intermediate_files <= recovery_limit:
-                gc_pressure = (
-                    stages.get("recovery_cache_peak") == intermediate_files
-                    and stages.get("recovery_cache_evictions") == 0
-                )
-            else:
-                gc_pressure = (
-                    stages.get("recovery_cache_peak") == recovery_limit
-                    and stages.get("recovery_cache_evictions", 0)
-                    >= intermediate_files - recovery_limit
-                )
-            output_boundary = stages.get("publication_remote_outputs") == workload.tasks
-            durable_boundary = stages.get("publication_durable_outputs") == workload.c_tasks
-            exact_reported_reads = stages.get("url_stage_in_bytes") == workload.source_bytes
+            # Explicit workflows now use the same Controller/Agent data plane
+            # as parametric workflows.  The old publication/recovery-cache
+            # counters describe the retired manager-owned path and therefore
+            # remain zero even in a correct run.
+            gc_pressure = (
+                stages.get("agent_active_waiters") == 0
+                and stages.get("agent_active_data", 0) >= workload.c_tasks
+                and stages.get("agent_peak_data", 0)
+                > stages.get("agent_active_data", 0)
+            )
+            output_boundary = (
+                stages.get("agent_peak_data", 0) > 0
+                and stages.get("manager_bytes_received") == 0
+            )
+            durable_boundary = (
+                stages.get("controller_active_results") == workload.c_tasks
+                and stages.get("controller_peak_results") == workload.c_tasks
+            )
+            # Explicit task reports do not yet expose aggregate logical read
+            # bytes; keep this diagnostic false instead of manufacturing an
+            # estimate.  It is excluded only by the ordinary gate profile.
+            exact_reported_reads = False
             data_bottleneck = dominant["stage"] in {
                 "data_stage_in", "data_object_pull", "data_publish",
             }
@@ -642,13 +661,26 @@ def main():
             ),
             **parallelism["gates"],
         }
+        excluded_gates = (
+            sorted(ORDINARY_GATE_EXCLUSIONS)
+            if args.gate_profile == "ordinary" else []
+        )
+        applicable_gates = {
+            name: passed for name, passed in gates.items()
+            if name not in excluded_gates
+        }
         result = {
             "schema": ARTIFACT_SCHEMA,
-            "status": "PASS" if all(gates.values()) else "FAIL",
+            "status": "PASS" if all(applicable_gates.values()) else "FAIL",
             "workflow_id": workflow_id,
             "contract": contract,
             "dataset_manifest_sha256": dataset["manifest_sha256"],
             "gates": gates,
+            "gate_evaluation": {
+                "profile": args.gate_profile,
+                "applicable": applicable_gates,
+                "excluded": excluded_gates,
+            },
             "workflow_info": info,
             "physical_tasks": counts,
             "physical_failures": failures,
