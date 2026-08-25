@@ -890,3 +890,26 @@ data, GC, count, output, ready-frontier, and final-pool gate passed. Post-fix
 regression is 17/17 PASS and ordinary `TR_vine_single` remains PASS. The r26
 exact 128x16 terminal measurement is running; it remains OPEN until its signed
 summary exists.
+
+## Current checkpoint — r26 exhausted-origin poison diagnosis (2026-08-25)
+
+r26 admitted exactly 128x16 and sustained 2,048 active cores, but failed closed
+after 595,393 physical completions. It produced 491,427 normal task reports and
+85,682 successful recovery reports while recovering 236,416 lost DataIDs
+across 4,424 coalesced epochs. Twenty-six site Worker removals occurred before
+terminal state. The PASS-only supervisor correctly did not start TaskVine.
+
+The terminal failure was narrower than general recovery: 676 B producers
+generated 18,102 recovery `FORSAKEN` results, and logical TaskID 310766 reached
+63 such failures before the 64-attempt infrastructure bound failed closed.
+After eight origin retries, Worker Agent failed the current placement but left
+`fetch_failures` at its terminal value. Manager intentionally has no DataID
+placement state, so later B tasks could repeatedly land on the same permanently
+poisoned replacement Worker and fail immediately.
+
+Commit `a018c2973` preserves bounded placement failure but resets the local
+retry cycle and applies a 1.6-second cooldown. It changes no Controller replica
+truth, Scheduler state, or Manager boundary. Post-fix regression is 17/17 PASS
+and ordinary TaskVine smoke is PASS. The compact diagnosis is
+`acceptance/data-intensive-parametric-origin-poison-diagnostic-20260825.json`.
+r26 remains excluded from performance claims; r27 is required.

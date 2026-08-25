@@ -325,6 +325,17 @@ invalid active-core performance gate failed. Its summary SHA-256 is
 `5ac151db62c71c327398ed06dff7a8cccf1b211b07cd172ef2106f1c914202e5`.
 The exact r26 128x16 run remains OPEN until terminal.
 
+r26 subsequently admitted the exact pool and sustained all 2,048 cores, but it
+failed closed after 595,393 physical completions. The Runtime recorded 85,682
+successful recovery task reports, yet 676 B producers accumulated 18,102
+recovery `FORSAKEN` results; one reached 63 failures. The cause was a
+replacement Worker retaining the terminal origin retry count after failing one
+placement. Since Manager correctly has no DataID-aware placement policy, later
+tasks could repeatedly return to that permanently poisoned Worker. The fix
+resets the Worker-local retry cycle behind a 1.6-second cooldown while leaving
+Controller and Scheduler state untouched. r26 is diagnostic only, its paired
+baseline was not started, and a terminal r27 remains required.
+
 The 1 x 1 tiny-profile mechanism pilot is PASS for both backends with 256/256
 logical/physical tasks and matching sampled output hashes. Its single paired
 execution measured 27.01 s for TaskVine and 26.21 s for DataVine (1.03x) with
