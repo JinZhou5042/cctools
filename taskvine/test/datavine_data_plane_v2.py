@@ -129,6 +129,8 @@ def main():
                 capabilities = client.workflow_capabilities()
                 assert capabilities["object_store"] == "sharedfs-single-file-sha256-v1"
                 assert capabilities["object_max_bytes"] == 64 * 1024 * 1024 - 64
+                assert capabilities["physical_submission_window"] == 4096
+                assert capabilities["physical_recovery_reserve"] == 2048
                 workflow = Workflow(
                     "data-plane-v2-submit", workflow_id=workflow_id,
                     maximum_tasks=64, maximum_edges=64,

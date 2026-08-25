@@ -100,9 +100,31 @@ def main():
     assert '"worker_churn_recovered"' in datavine_runner
     assert "required_ready = min(physical_window, max(1, tasks // 10))" in datavine_runner
     assert 'capabilities.get("physical_submission_window", 0)' in datavine_runner
-    assert 'extra_attempts == failures["forsaken"]' in datavine_runner
+    assert (
+        'extra_attempts == failures["infrastructure"] + recovery_replays'
+        in datavine_runner
+    )
     assert 'failures["non_infrastructure"] == 0' in datavine_runner
+    assert 'int(match.group("result")) == 72' in datavine_runner
     assert '"no_removed_workers"' not in datavine_runner
+
+    workflow_store_header = (
+        repository / "taskvine/src/datavine/vine_datavine_workflow_store.h"
+    ).read_text()
+    assert "VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW 4096" in workflow_store_header
+    assert "VINE_DATAVINE_WORKFLOW_RECOVERY_RESERVE 2048" in workflow_store_header
+    workflow_runtime = (
+        repository / "taskvine/src/datavine/vine_datavine_workflow_runtime.c"
+    ).read_text()
+    assert "VINE_DATAVINE_WORKFLOW_RECOVERY_RESERVE" in workflow_runtime
+    assert "vine_task_set_priority(physical, 1e12)" in workflow_runtime
+    assert "VINE_RESULT_OUTPUT_TRANSFER_ERROR" in workflow_runtime
+
+    worker_runtime = (
+        repository / "taskvine/src/worker/vine_worker.c"
+    ).read_text()
+    assert "VINE_DATAVINE_AGENT_COMMIT_IO_FAILED" in worker_runtime
+    assert "VINE_RESULT_OUTPUT_TRANSFER_ERROR" in worker_runtime
 
     comparator = (scripts / "compare_data_intensive_runs.py").read_text()
     assert '"worker_churn_recovered"' in comparator

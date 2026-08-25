@@ -191,6 +191,22 @@ static int check_worker_have_committable_resources(struct vine_manager *q, struc
 	return 0;
 }
 
+int vine_schedule_have_committable_worker(struct vine_manager *q)
+{
+	if (!q)
+		return 0;
+	char *key;
+	struct vine_worker_info *w;
+	int iteration;
+	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+	{
+		if (w && w->resources && w->type == VINE_WORKER_TYPE_WORKER &&
+				!w->draining && check_worker_have_committable_resources(q, w))
+			return 1;
+	}
+	return 0;
+}
+
 /* Check if this task is compatible with this given worker by considering
  * resources availability, features, blocklist, and all other relevant factors.
  * Used by all scheduling methods for basic compatibility.

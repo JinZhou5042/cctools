@@ -17,6 +17,9 @@ struct vine_file;
 struct vine_manager;
 struct vine_task;
 
+uint64_t vine_datavine_data_controller_loss_events(
+		struct vine_datavine_data_controller *controller);
+
 enum vine_datavine_agent_resolve_status {
 	VINE_DATAVINE_AGENT_UNKNOWN = 0,
 	VINE_DATAVINE_AGENT_PENDING = 1,

@@ -714,8 +714,14 @@ static void reap_process(struct vine_process *p, struct link *manager)
 	/* Output admission is local and precedes TASK_FINISHED. Controller
 	 * publication is deliberately deferred until after Manager completion. */
 	if (p->task->auxiliary_payload_length && p->result == VINE_RESULT_SUCCESS &&
-			p->exit_code == 0 && !vine_datavine_agent_commit(p))
-		p->result |= VINE_RESULT_OUTPUT_MISSING;
+			p->exit_code == 0) {
+		enum vine_datavine_agent_commit_status commit =
+				vine_datavine_agent_commit(p);
+		if (commit == VINE_DATAVINE_AGENT_COMMIT_IO_FAILED)
+			p->result |= VINE_RESULT_OUTPUT_TRANSFER_ERROR;
+		else if (commit != VINE_DATAVINE_AGENT_COMMIT_READY)
+			p->result |= VINE_RESULT_OUTPUT_MISSING;
+	}
 
 	cores_allocated -= p->task->resources_requested->cores;
 	memory_allocated -= p->task->resources_requested->memory;

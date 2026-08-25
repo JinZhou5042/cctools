@@ -23,6 +23,7 @@
 #include <openssl/crypto.h>
 #include <openssl/sha.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -167,6 +168,7 @@ struct vine_datavine_data_controller {
 	struct publication_job *prepared_head;
 	struct publication_job *prepared_tail;
 	int commit_active;
+	atomic_uint_fast64_t loss_events;
 	int loss_recording_failed;
 	int stopping;
 	int lock_initialized;
@@ -479,7 +481,14 @@ static int workflow_loss_append(struct vine_datavine_data_controller *controller
 		losses->capacity = capacity;
 	}
 	losses->data_ids[losses->count++] = data_id;
+	atomic_fetch_add(&controller->loss_events, 1);
 	return 1;
+}
+
+uint64_t vine_datavine_data_controller_loss_events(
+		struct vine_datavine_data_controller *controller)
+{
+	return controller ? atomic_load(&controller->loss_events) : 0;
 }
 
 static struct itable *result_namespace(
@@ -560,22 +569,22 @@ int vine_datavine_data_controller_last_replica_lost(
 	struct data_result *result = hash_table_lookup(
 			controller->result_files, cached_name);
 	if (result && !result->durable && !result->lost && result->losses) {
-		struct workflow_losses *losses = result->losses;
-		if (losses->count == losses->capacity) {
-			size_t capacity = losses->capacity ? losses->capacity * 2 : 16;
-			uint64_t *data_ids = realloc(losses->data_ids,
-					capacity * sizeof(*data_ids));
-			if (!data_ids) {
-				controller->loss_recording_failed = 1;
-				pthread_mutex_unlock(&controller->lock);
-				return 1;
+		/* The result does not retain its workflow string. Find the namespace
+		 * owning this loss table; this path is cold and legacy Manager-only. */
+		char *workflow_id;
+		struct workflow_losses *losses;
+		int iterator;
+		HASH_TABLE_ITERATE(controller->workflow_losses, iterator,
+				workflow_id, losses)
+		{
+			if (losses == result->losses) {
+				matched = workflow_loss_append(controller, workflow_id,
+						result->info.data_id);
+				break;
 			}
-			losses->data_ids = data_ids;
-			losses->capacity = capacity;
 		}
-		losses->data_ids[losses->count++] = result->info.data_id;
-		result->lost = 1;
-		matched = 1;
+		if (matched)
+			result->lost = 1;
 	}
 	pthread_mutex_unlock(&controller->lock);
 	pthread_mutex_lock(&controller->queue_lock);
@@ -622,19 +631,34 @@ int vine_datavine_data_controller_take_workflow_losses(
 		losses->capacity = 0;
 	}
 	size_t next = 0;
+	struct agent_namespace *namespace = hash_table_lookup(
+			controller->agent_workflows, workflow_id);
 	for (size_t index = 0; index < lost_count; index++) {
 		struct data_result *removed = result_lookup(
 				controller, workflow_id, lost[index]);
-		if (!removed || !removed->lost)
+		if (removed) {
+			if (!removed->lost)
+				continue;
+			removed = result_remove(controller, workflow_id, lost[index]);
+			if (removed && removed->remote_file) {
+				if (itable_lookup(files, lost[index]) == removed->remote_file)
+					itable_remove(files, lost[index]);
+				vine_undeclare_file_no_loss_event(manager,
+						removed->remote_file);
+			}
+			data_result_delete(removed);
+			lost[next++] = lost[index];
 			continue;
-		removed = result_remove(controller, workflow_id, lost[index]);
-		if (removed && removed->remote_file) {
-			if (itable_lookup(files, lost[index]) == removed->remote_file)
-				itable_remove(files, lost[index]);
-			vine_undeclare_file_no_loss_event(manager, removed->remote_file);
 		}
-		data_result_delete(removed);
-		lost[next++] = lost[index];
+		/* Worker-Agent intermediates never enter Manager's file/result tables.
+		 * If another exact replica arrived before this drain, the loss has
+		 * already healed. Otherwise return the DataID for physical replay. */
+		enum vine_datavine_resolve_status status = namespace
+				? vine_datavine_replica_table_resolve(namespace->replicas,
+						lost[index], 0, 0, 0, 0, 0, 0, 0)
+				: VINE_DATAVINE_RESOLVE_UNKNOWN;
+		if (status == VINE_DATAVINE_RESOLVE_PENDING)
+			lost[next++] = lost[index];
 	}
 	pthread_mutex_unlock(&controller->lock);
 	if (!next) {
@@ -1948,6 +1972,7 @@ struct vine_datavine_data_controller *vine_datavine_data_controller_open(
 			calloc(1, sizeof(*controller));
 	if (!controller)
 		return 0;
+	atomic_init(&controller->loss_events, 0);
 	size_t root_size = strlen(workflow_journal_path) + 6;
 	controller->root = malloc(root_size);
 	if (controller->root)

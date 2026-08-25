@@ -278,7 +278,7 @@ priority and will be reconsidered in future calls.
 */
 int vine_temp_start_replication(struct vine_manager *q)
 {
-	if (!q) {
+	if (!q || !priority_queue_size(q->temp_files_to_replicate)) {
 		return 0;
 	}
 

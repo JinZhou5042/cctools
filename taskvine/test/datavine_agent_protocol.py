@@ -30,7 +30,7 @@ BATCH = struct.Struct("!QIIQQII")
 PUBLISH = struct.Struct("!QIIQQ32s")
 RESOLVE_ITEM = struct.Struct("!QII")
 RESOLVE_REPLY = struct.Struct("!IIQQ32sIIQQHH64sI")
-FAULT = struct.Struct("!QIIQ")
+FAULT = struct.Struct("!QIIQIIQ")
 
 
 def read_exact(stream, size):
@@ -138,11 +138,20 @@ def main():
                 )
                 assert request(stream, DATA_READY, 6, conflicting)[0] == 3
 
-                fault = batch_header(slot, 7, 123456, 2, 1) + FAULT.pack(
-                    output.data_id, 1, 0, 9001
+                # A consumer can invalidate the exact remote replica token
+                # after a peer transfer or digest check fails.
+                wrong_fault = batch_header(slot, 7, 123456, 2, 1) + FAULT.pack(
+                    output.data_id, 1, 1, 9001, 7, 0, 123457
                 )
-                assert request(stream, DATA_FAULT, 7, fault)[0] == 0
+                assert request(stream, DATA_FAULT, 7, wrong_fault)[0] == 0
                 status, body = request(stream, RESOLVE, 8, resolve)
+                assert status == 0
+                assert RESOLVE_REPLY.unpack(body)[0] == 2  # still AVAILABLE
+                fault = batch_header(slot, 7, 123456, 3, 1) + FAULT.pack(
+                    output.data_id, 1, 1, 9001, 7, 0, 123456
+                )
+                assert request(stream, DATA_FAULT, 9, fault)[0] == 0
+                status, body = request(stream, RESOLVE, 10, resolve)
                 assert status == 0
                 assert RESOLVE_REPLY.unpack(body)[0] == 1  # PENDING
             finally:

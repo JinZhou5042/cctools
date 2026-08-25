@@ -40,8 +40,10 @@ struct local_object {
 	uint64_t data_id;
 	uint64_t size;
 	uint64_t object_token;
+	uint64_t source_session_epoch;
 	unsigned char digest[32];
 	uint32_t generation;
+	uint32_t source_worker_slot;
 	uint32_t flags;
 };
 
@@ -676,10 +678,13 @@ static int resolve_one(struct agent_workflow *workflow, uint64_t data_id,
 	local->generation = vine_datavine_get_u32(reply + 4);
 	local->size = vine_datavine_get_u64(reply + 16);
 	memcpy(local->digest, reply + 24, 32);
+	local->source_worker_slot = vine_datavine_get_u32(reply + 56);
+	local->source_session_epoch = vine_datavine_get_u64(reply + 64);
 	local->object_token = vine_datavine_get_u64(reply + 72);
 	char name[128];
 	char source[512];
-	if (!local->generation || !local->object_token ||
+	if (!local->generation || !local->source_worker_slot ||
+			!local->source_session_epoch || !local->object_token ||
 			!cache_name(name, workflow->workflow_slot, data_id,
 					local->generation, local->object_token) ||
 			snprintf(source, sizeof(source), "worker://%s:%u/%s", host,
@@ -695,6 +700,48 @@ static int resolve_one(struct agent_workflow *workflow, uint64_t data_id,
 	return 2;
 }
 
+static void report_fault(struct agent_workflow *workflow,
+		struct local_object *local, uint32_t flags)
+{
+	if (!workflow || !local || !local->data_id || !local->generation ||
+			!local->object_token || !connection_open(workflow))
+		return;
+	unsigned char payload[VINE_DATAVINE_AGENT_BATCH_HEADER +
+			VINE_DATAVINE_AGENT_FAULT_RECORD];
+	uint64_t sequence = workflow->sequence + 1;
+	batch_header(payload, workflow, sequence, 1);
+	unsigned char *record = payload + VINE_DATAVINE_AGENT_BATCH_HEADER;
+	memset(record, 0, VINE_DATAVINE_AGENT_FAULT_RECORD);
+	vine_datavine_put_u64(record, local->data_id);
+	vine_datavine_put_u32(record + 8, local->generation);
+	vine_datavine_put_u32(record + 12, flags);
+	vine_datavine_put_u64(record + 16, local->object_token);
+	if (flags == VINE_DATAVINE_AGENT_FAULT_REMOTE) {
+		vine_datavine_put_u32(record + 24, local->source_worker_slot);
+		vine_datavine_put_u64(record + 32, local->source_session_epoch);
+	}
+	unsigned char *reply = 0;
+	uint32_t reply_size = 0;
+	if (rpc_exchange(workflow, VINE_DATAVINE_RPC_AGENT_DATA_FAULT,
+			payload, sizeof(payload), &reply, &reply_size) && !reply_size)
+		workflow->sequence = sequence;
+	free(reply);
+}
+
+static void forget_object(struct agent_workflow *workflow,
+		struct local_object *local, const char *name, uint32_t fault_flags)
+{
+	report_fault(workflow, local, fault_flags);
+	vine_cache_remove(agent_cache, name, 0);
+	local->generation = 0;
+	local->size = 0;
+	local->object_token = 0;
+	local->source_worker_slot = 0;
+	local->source_session_epoch = 0;
+	memset(local->digest, 0, sizeof(local->digest));
+	local->flags = 0;
+}
+
 static int fetching_ready(struct agent_workflow *workflow,
 		struct local_object *local)
 {
@@ -707,17 +754,29 @@ static int fetching_ready(struct agent_workflow *workflow,
 			status == VINE_CACHE_STATUS_PROCESSING ||
 			status == VINE_CACHE_STATUS_TRANSFERRED)
 		return 0;
-	if (status != VINE_CACHE_STATUS_READY)
-		return -1;
+	if (status != VINE_CACHE_STATUS_READY) {
+		/* A resolved peer may disappear or its bytes may fail validation after
+		 * dispatch. Remove that exact replica at Controller and resolve again;
+		 * the last-replica transition queues producer replay. The consumer stays
+		 * in data wait and never spends its application retry budget. */
+		forget_object(workflow, local, name,
+				VINE_DATAVINE_AGENT_FAULT_REMOTE);
+		return 0;
+	}
 	char *path = vine_cache_data_path(agent_cache, name);
 	uint64_t size = 0;
 	unsigned char digest[32];
 	int valid = path && hash_file(path, &size, digest) && size == local->size &&
 			!memcmp(digest, local->digest, 32);
 	free(path);
-	if (!valid)
-		return -1;
+	if (!valid) {
+		forget_object(workflow, local, name,
+				VINE_DATAVINE_AGENT_FAULT_REMOTE);
+		return 0;
+	}
 	local->flags = LOCAL_READY | LOCAL_DIRTY | LOCAL_GENERATED;
+	local->source_worker_slot = 0;
+	local->source_session_epoch = 0;
 	return 1;
 }
 
@@ -736,7 +795,12 @@ static int prepare_generated(struct vine_process *process,
 		char *path = vine_cache_data_path(agent_cache, name);
 		int valid = path && sandbox_link(process, data_id, path);
 		free(path);
-		return valid ? 1 : -1;
+		if (valid)
+			return 1;
+		/* Local eviction, ENOSPC fallout, or an unexpected unlink is the same
+		 * precise replica fault as a failed peer pull. */
+		forget_object(workflow, local, name, 0);
+		return 0;
 	}
 	if (local->flags & LOCAL_FETCHING) {
 		int status = fetching_ready(workflow, local);
@@ -904,7 +968,8 @@ enum vine_datavine_agent_prepare_status vine_datavine_agent_prepare(
 	return VINE_DATAVINE_AGENT_READY;
 }
 
-int vine_datavine_agent_commit(struct vine_process *process)
+enum vine_datavine_agent_commit_status vine_datavine_agent_commit(
+		struct vine_process *process)
 {
 	struct task_spec spec;
 	if (spec_parse(process, &spec) != 1)
@@ -912,7 +977,7 @@ int vine_datavine_agent_commit(struct vine_process *process)
 			!process->task->auxiliary_payload_length;
 	struct agent_workflow *workflow = workflow_get(&spec);
 	if (!workflow)
-		return 0;
+		return VINE_DATAVINE_AGENT_COMMIT_IO_FAILED;
 	for (uint32_t index = 0; index < spec.output_count; index++) {
 		const unsigned char *record = spec.outputs +
 				(size_t)index * VINE_DATAVINE_TASK_SPEC_OUTPUT;
@@ -951,11 +1016,16 @@ int vine_datavine_agent_commit(struct vine_process *process)
 			return 0;
 		uint64_t size = 0;
 		unsigned char digest[32];
-		if (!hash_file(path, &size, digest))
-			return 0;
+		errno = 0;
+		if (!hash_file(path, &size, digest)) {
+			int error = errno;
+			return error == ENOENT
+					? VINE_DATAVINE_AGENT_COMMIT_INVALID
+					: VINE_DATAVINE_AGENT_COMMIT_IO_FAILED;
+		}
 		struct local_object *local = local_get(workflow, data_id, 1);
 		if (!local)
-			return 0;
+			return VINE_DATAVINE_AGENT_COMMIT_IO_FAILED;
 		if (local->flags & LOCAL_READY) {
 			if (local->generation != generation || local->size != size ||
 					memcmp(local->digest, digest, 32))
@@ -965,7 +1035,7 @@ int vine_datavine_agent_commit(struct vine_process *process)
 			if ((flags & VINE_DATAVINE_TASK_OUTPUT_REQUESTED) &&
 					!persistence_enqueue(workflow, local, durable_path,
 						durable_length))
-				return 0;
+				return VINE_DATAVINE_AGENT_COMMIT_IO_FAILED;
 			continue;
 		}
 		local->generation = generation;
@@ -978,19 +1048,24 @@ int vine_datavine_agent_commit(struct vine_process *process)
 		char cache[128];
 		struct stat info;
 		if (!cache_name(cache, workflow->workflow_slot, data_id, generation,
-				local->object_token) || stat(path, &info) ||
-				!vine_cache_add_file(agent_cache, cache, path,
+				local->object_token))
+			return VINE_DATAVINE_AGENT_COMMIT_INVALID;
+		errno = 0;
+		if (stat(path, &info))
+			return errno == ENOENT ? VINE_DATAVINE_AGENT_COMMIT_INVALID
+					: VINE_DATAVINE_AGENT_COMMIT_IO_FAILED;
+		if (!vine_cache_add_file(agent_cache, cache, path,
 					VINE_CACHE_LEVEL_WORKFLOW, info.st_mode & 0777, size,
 					info.st_mtime, process->execution_start,
 					timestamp_get() - process->execution_start, 0))
-			return 0;
+			return VINE_DATAVINE_AGENT_COMMIT_IO_FAILED;
 		local->flags = LOCAL_READY | LOCAL_DIRTY | LOCAL_GENERATED |
 				((flags & VINE_DATAVINE_TASK_OUTPUT_REQUESTED) ?
 				 LOCAL_REQUESTED : 0);
 		if ((flags & VINE_DATAVINE_TASK_OUTPUT_REQUESTED) &&
 				!persistence_enqueue(workflow, local, durable_path,
 					durable_length))
-			return 0;
+			return VINE_DATAVINE_AGENT_COMMIT_IO_FAILED;
 	}
 	/* Unique immutable sources are task-scoped. Removing the cache base is
 	 * safe here because the sandbox hardlink remains pinned until normal task
@@ -1011,7 +1086,7 @@ int vine_datavine_agent_commit(struct vine_process *process)
 			vine_cache_remove(agent_cache, name, 0);
 		local->flags = 0;
 	}
-	return 1;
+	return VINE_DATAVINE_AGENT_COMMIT_READY;
 }
 
 static void workflow_progress(struct agent_workflow *workflow)

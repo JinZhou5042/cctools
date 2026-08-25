@@ -3775,6 +3775,12 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 
 static int send_one_task(struct vine_manager *q)
 {
+	/* A saturated FunctionCall pool is common when tasks are dispatched ahead
+	 * of their data. Avoid constructing and rejecting one worker heap per
+	 * sampled ready task until a Worker reports an execution credit again. */
+	if (!vine_schedule_have_committable_worker(q))
+		return 0;
+
 	double now_secs = ((double)timestamp_get()) / ONE_SECOND;
 	int iter_depth = MIN(skip_list_size(q->ready_tasks), q->attempt_schedule_depth);
 

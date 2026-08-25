@@ -19,6 +19,7 @@ This module is private to the manager and should not be invoked by the end user.
 #include "vine_worker_info.h"
 
 struct vine_worker_info *vine_schedule_task_to_worker( struct vine_manager *q, struct vine_task *t );
+int vine_schedule_have_committable_worker(struct vine_manager *q);
 void vine_schedule_check_for_large_tasks( struct vine_manager *q );
 int vine_schedule_check_fixed_location(struct vine_manager *q, struct vine_task *t);
 int vine_schedule_in_ramp_down(struct vine_manager *q);

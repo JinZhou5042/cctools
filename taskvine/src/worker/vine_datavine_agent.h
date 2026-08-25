@@ -14,12 +14,19 @@ enum vine_datavine_agent_prepare_status {
 	VINE_DATAVINE_AGENT_FAILED = 3,
 };
 
+enum vine_datavine_agent_commit_status {
+	VINE_DATAVINE_AGENT_COMMIT_IO_FAILED = -1,
+	VINE_DATAVINE_AGENT_COMMIT_INVALID = 0,
+	VINE_DATAVINE_AGENT_COMMIT_READY = 1,
+};
+
 int vine_datavine_agent_initialize(struct vine_cache *cache,
 		const char *transfer_host, uint16_t transfer_port);
 void vine_datavine_agent_shutdown(void);
 enum vine_datavine_agent_prepare_status vine_datavine_agent_prepare(
 		struct vine_process *process);
-int vine_datavine_agent_commit(struct vine_process *process);
+enum vine_datavine_agent_commit_status vine_datavine_agent_commit(
+		struct vine_process *process);
 void vine_datavine_agent_progress(void);
 int vine_datavine_agent_waiting(void);
 

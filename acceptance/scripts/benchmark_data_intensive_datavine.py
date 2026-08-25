@@ -134,7 +134,7 @@ class ParallelismSampler:
                 (self.vine_status, option, "localhost", str(self.port)),
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20,
             )
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, OSError):
             return ""
         return completed.stdout if completed.returncode == 0 else ""
 
@@ -192,7 +192,7 @@ def parallelism_summary(samples, tasks, workers, cores, physical_window):
 def physical_failure_counts(log_path, workflow_id):
     prefix = f"datavine workflow {workflow_id} task_failed "
     result_pattern = re.compile(r"\bresult=(?P<result>-?[0-9]+)\b")
-    total = forsaken = 0
+    total = forsaken = output_transfer = 0
     for line in log_path.read_text().splitlines():
         if not line.startswith(prefix):
             continue
@@ -200,10 +200,14 @@ def physical_failure_counts(log_path, workflow_id):
         match = result_pattern.search(line)
         if match and int(match.group("result")) == 40:
             forsaken += 1
+        if match and int(match.group("result")) == 72:
+            output_transfer += 1
     return {
         "total": total,
         "forsaken": forsaken,
-        "non_infrastructure": total - forsaken,
+        "output_transfer": output_transfer,
+        "infrastructure": forsaken + output_transfer,
+        "non_infrastructure": total - forsaken - output_transfer,
     }
 
 
@@ -501,10 +505,11 @@ def main():
         stages = runtime_stages(service_log_path, workflow_id)
         dominant = dominant_stage(service_log_path, workflow_id)
         extra_attempts = counts.get("submissions", 0) - workload.tasks
+        recovery_replays = stages.get("recovery_invalidated_tasks", 0)
         exact_physical = (
             counts.get("submissions", 0) == counts.get("completions", -1)
             and extra_attempts >= 0
-            and extra_attempts == failures["forsaken"]
+            and extra_attempts == failures["infrastructure"] + recovery_replays
             and failures["non_infrastructure"] == 0
         )
         parallelism = parallelism_summary(
@@ -597,7 +602,8 @@ def main():
             "workflow_info": info,
             "physical_tasks": counts,
             "physical_failures": failures,
-            "infrastructure_retries": extra_attempts,
+            "infrastructure_retries": failures["infrastructure"],
+            "recovery_replays": recovery_replays,
             "runtime_stages": stages,
             "dominant_stage": dominant,
             "parametric_measurements": {

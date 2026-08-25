@@ -15,6 +15,11 @@ struct vine_datavine_workflow_runtime;
 /* Maximum number of materialized physical task views retained per workflow.
  * The logical Scheduler frontier may be much larger. */
 #define VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW 4096
+/* Keep one machine-wide execution wave available for physical data recovery.
+ * Ordinary children stop at SUBMISSION_WINDOW. A last-replica replay may
+ * exceed that bound by RECOVERY_RESERVE so consumers waiting in Worker Data
+ * Agents cannot prevent their producers from entering TaskVine. */
+#define VINE_DATAVINE_WORKFLOW_RECOVERY_RESERVE 2048
 struct vine_datavine_data_controller;
 struct vine_manager;
 struct jx;

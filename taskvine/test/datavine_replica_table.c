@@ -97,7 +97,8 @@ int main(void)
 	assert(!memcmp(digest, resolved_digest, sizeof(digest)));
 
 	/* One replica fault does not request replay. Losing the last one does. */
-	assert(vine_datavine_replica_table_fault(table, 5000001, 7, 1, 101, 1001, lost_data, &observations));
+	assert(vine_datavine_replica_table_fault(table, 5000001, 7, 1, 101,
+			1001, lost_data, &observations));
 	assert(observations.lost_count == 0);
 	assert(vine_datavine_replica_table_session_lost(table, 3, 303, lost_data, cancelled_waiter, &observations));
 	assert(observations.lost_count == 1 && observations.lost[0] == 5000001);

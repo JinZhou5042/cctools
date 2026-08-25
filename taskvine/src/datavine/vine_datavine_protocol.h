@@ -57,7 +57,7 @@ static inline void vine_datavine_put_u64(unsigned char *buffer, uint64_t value)
 #define VINE_DATAVINE_AGENT_PUBLISH_RECORD 64U
 #define VINE_DATAVINE_AGENT_RESOLVE_RECORD 16U
 #define VINE_DATAVINE_AGENT_RESOLVE_REPLY 152U
-#define VINE_DATAVINE_AGENT_FAULT_RECORD 24U
+#define VINE_DATAVINE_AGENT_FAULT_RECORD 40U
 #define VINE_DATAVINE_AGENT_RELEASE_RECORD 24U
 #define VINE_DATAVINE_TASK_SPEC_HEADER 144U
 #define VINE_DATAVINE_TASK_SPEC_INPUT 24U
@@ -80,6 +80,12 @@ enum vine_datavine_agent_wire_resolve_status {
 	VINE_DATAVINE_AGENT_WIRE_PENDING = 1,
 	VINE_DATAVINE_AGENT_WIRE_AVAILABLE = 2,
 	VINE_DATAVINE_AGENT_WIRE_DEAD = 3,
+};
+
+enum vine_datavine_agent_fault_flags {
+	/* The reporting Worker failed to fetch the replica identified by the
+	 * record's worker/session/token tuple. */
+	VINE_DATAVINE_AGENT_FAULT_REMOTE = 1,
 };
 
 enum vine_datavine_rpc_opcode {

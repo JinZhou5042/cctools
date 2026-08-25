@@ -372,15 +372,28 @@ static uint32_t agent_data_fault(struct vine_datavine_rpc_server *server,
 			(size_t)index * VINE_DATAVINE_AGENT_FAULT_RECORD;
 		uint64_t data_id = vine_datavine_get_u64(record);
 		uint32_t generation = vine_datavine_get_u32(record + 8);
+		uint32_t flags = vine_datavine_get_u32(record + 12);
 		uint64_t object_token = vine_datavine_get_u64(record + 16);
-		if (!data_id || !generation || vine_datavine_get_u32(record + 12) ||
-				!object_token ||
-				!vine_datavine_data_controller_agent_fault(
+		uint32_t remote_worker_slot = vine_datavine_get_u32(record + 24);
+		uint64_t remote_session_epoch = vine_datavine_get_u64(record + 32);
+		if (!data_id || !generation || !object_token ||
+				flags > VINE_DATAVINE_AGENT_FAULT_REMOTE ||
+				(flags == VINE_DATAVINE_AGENT_FAULT_REMOTE &&
+				 (!remote_worker_slot || !remote_session_epoch)))
+			return VINE_DATAVINE_RPC_REJECTED;
+		if (flags == VINE_DATAVINE_AGENT_FAULT_REMOTE)
+			vine_datavine_data_controller_agent_fault(
+					server->data_controller,
+					connection->agent_workflow_slot, data_id, generation,
+					remote_worker_slot, remote_session_epoch, object_token);
+		else
+			vine_datavine_data_controller_agent_fault(
 					server->data_controller,
 					connection->agent_workflow_slot, data_id, generation,
 					connection->agent_worker_slot,
-					connection->agent_session_epoch, object_token))
-			return VINE_DATAVINE_RPC_REJECTED;
+					connection->agent_session_epoch, object_token);
+		/* Exact faults are idempotent. The owning session may already have been
+		 * invalidated before a failed peer transfer reports the same replica. */
 	}
 	connection->agent_sequence = sequence;
 	return VINE_DATAVINE_RPC_OK;
@@ -850,7 +863,7 @@ static uint32_t workflow_capabilities(
 	if (payload_size || !object_root)
 		return VINE_DATAVINE_RPC_INVALID;
 	struct jx *document = jx_objectv(
-			"schema_versions", jx_arrayv(jx_string(VINE_DATAVINE_WORKFLOW_SCHEMA_NAME), jx_string(VINE_DATAVINE_WORKFLOW_DELTA_SCHEMA_NAME), NULL), "executor_kinds", jx_arrayv(jx_string("command"), jx_string("python"), jx_string("taskvine"), NULL), "digest", jx_string("sha1"), "append", jx_string("delta-cas-v1"), "results", jx_string("durable-bytes"), "frontier", jx_boolean(1), "wait_terminal", jx_boolean(1), "result_identity", jx_string("sha256+attempt+producer+codec"), "selective_results", jx_boolean(1), "object_store", jx_string("sharedfs-single-file-sha256-v1"), "object_max_bytes", jx_integer(67108800), "object_root", jx_string(object_root), "physical_submission_window", jx_integer(VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW), NULL);
+			"schema_versions", jx_arrayv(jx_string(VINE_DATAVINE_WORKFLOW_SCHEMA_NAME), jx_string(VINE_DATAVINE_WORKFLOW_DELTA_SCHEMA_NAME), NULL), "executor_kinds", jx_arrayv(jx_string("command"), jx_string("python"), jx_string("taskvine"), NULL), "digest", jx_string("sha1"), "append", jx_string("delta-cas-v1"), "results", jx_string("durable-bytes"), "frontier", jx_boolean(1), "wait_terminal", jx_boolean(1), "result_identity", jx_string("sha256+attempt+producer+codec"), "selective_results", jx_boolean(1), "object_store", jx_string("sharedfs-single-file-sha256-v1"), "object_max_bytes", jx_integer(67108800), "object_root", jx_string(object_root), "physical_submission_window", jx_integer(VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW), "physical_recovery_reserve", jx_integer(VINE_DATAVINE_WORKFLOW_RECOVERY_RESERVE), NULL);
 	char *encoded = document ? jx_print_string(document) : 0;
 	jx_delete(document);
 	if (!encoded)

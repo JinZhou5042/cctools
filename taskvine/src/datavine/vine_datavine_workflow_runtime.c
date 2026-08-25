@@ -333,7 +333,6 @@ struct vine_datavine_workflow_runtime {
 	atomic_int workflows_running;
 	atomic_uint_fast64_t worker_connections;
 	atomic_uint_fast64_t worker_losses;
-	atomic_uint_fast64_t data_losses;
 	volatile sig_atomic_t *external_stopping;
 };
 
@@ -2672,6 +2671,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 	uint64_t submission_event_nanoseconds = 0;
 	uint64_t publish_nanoseconds = 0;
 	struct publication_stage_totals publication_stages = {0};
+	struct publication_stage_totals recovery_stages = {0};
 	uint64_t completion_event_nanoseconds = 0;
 	uint64_t checkpoint_nanoseconds = 0;
 	uint64_t physical_submissions = 0;
@@ -2771,7 +2771,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			if (!valid)
 				break;
 		}
-		uint64_t data_losses = atomic_load(&runtime->data_losses);
+		uint64_t data_losses = vine_datavine_data_controller_loss_events(
+				runtime->data_controller);
 		if (data_losses != observed_data_losses) {
 			observed_data_losses = data_losses;
 			manager_lane_lock(runtime);
@@ -2862,7 +2863,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				submission_events[DATAVINE_WORKFLOW_EVENT_BATCH];
 		size_t submission_event_count = 0;
 		while (valid && resources.parametric &&
-				running < VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW &&
+				running < VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW +
+					VINE_DATAVINE_WORKFLOW_RECOVERY_RESERVE &&
 				submission_event_count < DATAVINE_WORKFLOW_EVENT_BATCH &&
 				resources.recovery_head < resources.recovery_tail) {
 			uint64_t task_id = resources.recovery_queue[resources.recovery_head++];
@@ -2874,6 +2876,10 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			struct vine_task *physical = materialize_parametric(runtime,
 					workflow_id, &resources, task_id, attempt, 1,
 					&parametric_view);
+			/* Recovery producers must pass consumers already queued behind the
+			 * missing generation. */
+			if (physical)
+				vine_task_set_priority(physical, 1e12);
 			clock_gettime(CLOCK_MONOTONIC, &stage_finished);
 			materialize_nanoseconds += elapsed_nanoseconds(&stage_started,
 					&stage_finished);
@@ -3072,12 +3078,14 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				struct vine_datavine_data_publication_metrics metrics;
 				if (vine_datavine_data_controller_task_metrics(
 						runtime->data_controller, completed, &metrics)) {
-					publication_stages.function_nanoseconds +=
+					struct publication_stage_totals *stages = recovery_attempt
+							? &recovery_stages : &publication_stages;
+					stages->function_nanoseconds +=
 							metrics.function_nanoseconds;
-					publication_stages.task_reports += metrics.task_reports;
-					publication_stages.task_reported_read_bytes +=
+					stages->task_reports += metrics.task_reports;
+					stages->task_reported_read_bytes +=
 							metrics.task_reported_read_bytes;
-					publication_stages.task_reported_cpu_milliseconds +=
+					stages->task_reported_cpu_milliseconds +=
 							metrics.task_reported_cpu_milliseconds;
 				}
 			}
@@ -3122,11 +3130,12 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 							attempt_limit, 1, &completion_event_nanoseconds);
 				}
 				uncheckpointed_completions += completed_logical_id > 0;
-			} else if (task_result == -(int32_t)VINE_RESULT_FORSAKEN &&
+			} else if ((task_result == -(int32_t)VINE_RESULT_FORSAKEN ||
+					task_result == -(int32_t)VINE_RESULT_OUTPUT_TRANSFER_ERROR) &&
 					attempt < DATAVINE_WORKFLOW_INFRASTRUCTURE_ATTEMPTS) {
 				/* A freshly connected Worker can reject a FunctionCall before its
 				 * library process becomes READY, or lose it during connection churn.
-				 * FORSAKEN is infrastructure reclamation, not an application failure:
+				 * FORSAKEN and Worker-Agent output I/O failure are infrastructure,
 				 * do not consume the workflow retry budget. A recovery keeps logical
 				 * DONE immutable; an ordinary task remains RUNNING. */
 				uint32_t next_attempt = attempt + 1;
@@ -3405,6 +3414,9 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				"task_bytes_sent=%llu task_bytes_received=%llu "
 				"task_reports=%llu task_reported_read_bytes=%llu "
 				"task_reported_cpu_milliseconds=%llu "
+				"recovery_task_reports=%llu "
+				"recovery_task_reported_read_bytes=%llu "
+				"recovery_task_reported_cpu_milliseconds=%llu "
 				"dominant_stage=%s dominant_stage_seconds=%.6f "
 				"completion_event_seconds=%.6f checkpoint_seconds=%.6f\n",
 				workflow_id,
@@ -3474,6 +3486,9 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				(unsigned long long)publication_stages.task_reports,
 				(unsigned long long)publication_stages.task_reported_read_bytes,
 				(unsigned long long)publication_stages.task_reported_cpu_milliseconds,
+				(unsigned long long)recovery_stages.task_reports,
+				(unsigned long long)recovery_stages.task_reported_read_bytes,
+				(unsigned long long)recovery_stages.task_reported_cpu_milliseconds,
 				dominant_stage,
 				dominant_value,
 				completion_event_nanoseconds / 1e9,
@@ -3588,7 +3603,6 @@ struct vine_datavine_workflow_runtime *vine_datavine_workflow_runtime_start(
 	atomic_init(&runtime->workflows_running, 0);
 	atomic_init(&runtime->worker_connections, 0);
 	atomic_init(&runtime->worker_losses, 0);
-	atomic_init(&runtime->data_losses, 0);
 	runtime->store = store;
 	runtime->data_controller = data_controller;
 	runtime->manager = manager;
@@ -3663,9 +3677,8 @@ void vine_datavine_workflow_runtime_run(
 			replica_loss_count++;
 		pthread_mutex_unlock(&runtime->manager_lock);
 		for (size_t index = 0; index < replica_loss_count; index++) {
-			if (vine_datavine_data_controller_last_replica_lost(
-						runtime->data_controller, replica_losses[index]))
-				atomic_fetch_add(&runtime->data_losses, 1);
+			vine_datavine_data_controller_last_replica_lost(
+					runtime->data_controller, replica_losses[index]);
 			free(replica_losses[index]);
 		}
 		if (replica_loss_status < 0)
