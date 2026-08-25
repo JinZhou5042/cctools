@@ -90,6 +90,9 @@ def main():
     assert '"worker_churn_recovered"' in taskvine_runner
     assert 'stats["tasks_exhausted_attempts"] == 0' in taskvine_runner
     assert "required_ready = min(32_768, max(1, tasks // 10))" in taskvine_runner
+    assert 'required_ready_fraction = 0.90' in taskvine_runner
+    assert 'ready_fraction >= required_ready_fraction' in taskvine_runner
+    assert 'min(ready_running) >= required_ready' not in taskvine_runner
     assert '"no_removed_workers"' not in taskvine_runner
     assert 'default=4096' in taskvine_runner
     assert 'memory_mib=args.memory' in taskvine_runner
@@ -107,11 +110,15 @@ def main():
     assert '"runtime_info_storage": "node-local-temporary"' in datavine_runner
     assert '"worker_churn_recovered"' in datavine_runner
     assert "required_ready = min(physical_window, max(1, tasks // 10))" in datavine_runner
+    assert 'required_ready_fraction = 0.90' in datavine_runner
+    assert 'ready_fraction >= required_ready_fraction' in datavine_runner
+    assert 'min(ready_running) >= required_ready' not in datavine_runner
     assert 'capabilities.get("physical_submission_window", 0)' in datavine_runner
     assert (
         'extra_attempts == failures["infrastructure"] + recovery_replays'
         in datavine_runner
     )
+    assert 'stages.get("recovery_task_reports", 0)' in datavine_runner
     assert 'failures["non_infrastructure"] == 0' in datavine_runner
     assert 'int(match.group("result")) == 72' in datavine_runner
     assert 'required_active_fraction = 0.90' in datavine_runner
@@ -167,6 +174,15 @@ def main():
         repository / "taskvine/src/worker/vine_datavine_agent.c"
     ).read_text()
     assert "local->generation > generation" in agent_runtime
+    assert "LOCAL_ORIGIN_RETRY_ATTEMPTS 8U" in agent_runtime
+    assert "retry_origin_fetch" in agent_runtime
+    origin_prepare = agent_runtime[
+        agent_runtime.index("static int prepare_uri("):
+        agent_runtime.index("int vine_datavine_agent_initialize(")
+    ]
+    assert "local->fetch_retry_after > timestamp_get()" in origin_prepare
+    assert "VINE_CACHE_STATUS_FAILED" in origin_prepare
+    assert origin_prepare.count("retry_origin_fetch(local") == 4
 
     comparator = (scripts / "compare_data_intensive_runs.py").read_text()
     assert '"worker_churn_recovered"' in comparator

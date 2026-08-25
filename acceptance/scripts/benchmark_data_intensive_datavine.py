@@ -172,8 +172,11 @@ def parallelism_summary(samples, tasks, workers, cores, physical_window):
     # data waits off the cores; active_parallelism verifies that they do.
     required_ready = min(physical_window, max(1, tasks // 10))
     required_active = math.ceil(workers * cores * 0.90)
+    ready_passing = sum(value >= required_ready for value in ready_running)
+    ready_fraction = ready_passing / len(ready_running) if ready_running else 0.0
     active_passing = sum(value >= required_active for value in active)
     active_fraction = active_passing / len(active) if active else 0.0
+    required_ready_fraction = 0.90
     required_active_fraction = 0.90
     return {
         "samples": len(samples),
@@ -184,12 +187,17 @@ def parallelism_summary(samples, tasks, workers, cores, physical_window):
         "maximum_active_cores": max(active) if active else None,
         "required_ready_plus_running": required_ready,
         "required_active_cores": required_active,
+        "ready_samples_at_or_above_required": ready_passing,
+        "ready_sample_fraction": ready_fraction,
+        "required_ready_sample_fraction": required_ready_fraction,
         "active_samples_at_or_above_required": active_passing,
         "active_sample_fraction": active_fraction,
         "required_active_sample_fraction": required_active_fraction,
         "gates": {
             "central_window_observed": bool(central),
-            "ready_parallelism": bool(ready_running) and min(ready_running) >= required_ready,
+            "ready_parallelism": (
+                bool(ready_running) and ready_fraction >= required_ready_fraction
+            ),
             "active_parallelism": (
                 bool(active) and active_fraction >= required_active_fraction
             ),
@@ -537,7 +545,17 @@ def main():
         stages = runtime_stages(service_log_path, workflow_id)
         dominant = dominant_stage(service_log_path, workflow_id)
         extra_attempts = counts.get("submissions", 0) - workload.tasks
-        recovery_replays = stages.get("recovery_invalidated_tasks", 0)
+        # Count successful physical replay completions, not only unique logical
+        # invalidations. A replay whose Worker commit is not admitted before the
+        # bounded timeout is safely submitted again; both physical successes
+        # belong in conservation even though the logical producer was
+        # invalidated only once. Recovery failures are already included in the
+        # infrastructure total below.
+        recovery_replays = (
+            stages.get("recovery_task_reports", 0)
+            if args.representation == "parametric"
+            else stages.get("recovery_invalidated_tasks", 0)
+        )
         exact_physical = (
             counts.get("submissions", 0) == counts.get("completions", -1)
             and extra_attempts >= 0

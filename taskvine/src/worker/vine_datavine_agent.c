@@ -38,6 +38,7 @@
 #define LOCAL_PREPARE_BUDGET_US 25000U
 #define LOCAL_PEER_RETRY_MIN_US 100000U
 #define LOCAL_PEER_RETRY_MAX_US 1600000U
+#define LOCAL_ORIGIN_RETRY_ATTEMPTS 8U
 
 struct local_object {
 	uint64_t data_id;
@@ -735,6 +736,33 @@ static void clear_transfer_tuple(struct local_object *local)
 	local->flags = 0;
 }
 
+static void schedule_fetch_retry(struct local_object *local)
+{
+	if (local->fetch_failures < 31)
+		local->fetch_failures++;
+	uint64_t delay = LOCAL_PEER_RETRY_MIN_US;
+	unsigned int shifts = local->fetch_failures > 1
+			? local->fetch_failures - 1 : 0;
+	if (shifts > 4)
+		shifts = 4;
+	delay <<= shifts;
+	if (delay > LOCAL_PEER_RETRY_MAX_US)
+		delay = LOCAL_PEER_RETRY_MAX_US;
+	local->fetch_retry_after = timestamp_get() + delay;
+}
+
+static int retry_origin_fetch(struct local_object *local, const char *name)
+{
+	vine_cache_remove(agent_cache, name, 0);
+	local->flags = 0;
+	if (local->fetch_failures >= LOCAL_ORIGIN_RETRY_ATTEMPTS) {
+		local->fetch_retry_after = 0;
+		return -1;
+	}
+	schedule_fetch_retry(local);
+	return 0;
+}
+
 static void report_fault(struct agent_workflow *workflow,
 		struct local_object *local, uint32_t flags)
 {
@@ -796,19 +824,9 @@ static int fetching_ready(struct agent_workflow *workflow,
 					VINE_DATAVINE_AGENT_FAULT_REMOTE);
 			return 0;
 		}
-		if (local->fetch_failures < 31)
-			local->fetch_failures++;
-		uint64_t delay = LOCAL_PEER_RETRY_MIN_US;
-		unsigned int shifts = local->fetch_failures > 1
-				? local->fetch_failures - 1 : 0;
-		if (shifts > 4)
-			shifts = 4;
-		delay <<= shifts;
-		if (delay > LOCAL_PEER_RETRY_MAX_US)
-			delay = LOCAL_PEER_RETRY_MAX_US;
 		vine_cache_remove(agent_cache, name, 0);
 		clear_transfer_tuple(local);
-		local->fetch_retry_after = timestamp_get() + delay;
+		schedule_fetch_retry(local);
 		return 0;
 	}
 	char *path = vine_cache_data_path(agent_cache, name);
@@ -890,6 +908,8 @@ static int prepare_uri(struct vine_process *process,
 	struct local_object *local = local_get(workflow, data_id, 1);
 	if (!local)
 		return -1;
+	if (local->fetch_retry_after > timestamp_get())
+		return 0;
 	/* A requested intermediate may be represented by its durable URI after
 	 * Controller admission even though this worker already owns the identical
 	 * generated object.  Reuse the admitted local identity before assigning the
@@ -902,7 +922,12 @@ static int prepare_uri(struct vine_process *process,
 		char *ready_path = vine_cache_data_path(agent_cache, ready_name);
 		int linked = ready_path && sandbox_link(process, data_id, ready_path);
 		free(ready_path);
-		return linked ? 1 : -1;
+		if (linked) {
+			local->fetch_failures = 0;
+			local->fetch_retry_after = 0;
+			return 1;
+		}
+		return retry_origin_fetch(local, ready_name);
 	}
 	local->generation = 1;
 	local->object_token = mix64(workflow->workflow_slot ^ data_id);
@@ -923,14 +948,14 @@ static int prepare_uri(struct vine_process *process,
 				VINE_CACHE_FLAGS_ON_TASK);
 		free(source);
 		if (!added)
-			return -1;
+			return retry_origin_fetch(local, name);
 		local->flags = LOCAL_FETCHING;
 	}
 	if (local->flags & LOCAL_FETCHING) {
 		vine_cache_status_t status = vine_cache_ensure(agent_cache, name);
 		if (status == VINE_CACHE_STATUS_FAILED ||
 				status == VINE_CACHE_STATUS_UNKNOWN)
-			return -1;
+			return retry_origin_fetch(local, name);
 		if (status != VINE_CACHE_STATUS_READY)
 			return 0;
 		local->flags = LOCAL_READY;
@@ -938,7 +963,12 @@ static int prepare_uri(struct vine_process *process,
 	char *path = vine_cache_data_path(agent_cache, name);
 	int valid = path && sandbox_link(process, data_id, path);
 	free(path);
-	return valid ? 1 : -1;
+	if (valid) {
+		local->fetch_failures = 0;
+		local->fetch_retry_after = 0;
+		return 1;
+	}
+	return retry_origin_fetch(local, name);
 }
 
 int vine_datavine_agent_initialize(struct vine_cache *cache,
