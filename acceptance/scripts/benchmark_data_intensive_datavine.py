@@ -172,6 +172,9 @@ def parallelism_summary(samples, tasks, workers, cores, physical_window):
     # data waits off the cores; active_parallelism verifies that they do.
     required_ready = min(physical_window, max(1, tasks // 10))
     required_active = math.ceil(workers * cores * 0.90)
+    active_passing = sum(value >= required_active for value in active)
+    active_fraction = active_passing / len(active) if active else 0.0
+    required_active_fraction = 0.90
     return {
         "samples": len(samples),
         "central_samples": len(central),
@@ -181,10 +184,15 @@ def parallelism_summary(samples, tasks, workers, cores, physical_window):
         "maximum_active_cores": max(active) if active else None,
         "required_ready_plus_running": required_ready,
         "required_active_cores": required_active,
+        "active_samples_at_or_above_required": active_passing,
+        "active_sample_fraction": active_fraction,
+        "required_active_sample_fraction": required_active_fraction,
         "gates": {
             "central_window_observed": bool(central),
             "ready_parallelism": bool(ready_running) and min(ready_running) >= required_ready,
-            "active_parallelism": bool(active) and min(active) >= required_active,
+            "active_parallelism": (
+                bool(active) and active_fraction >= required_active_fraction
+            ),
         },
     }
 

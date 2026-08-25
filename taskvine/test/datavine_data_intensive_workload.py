@@ -106,6 +106,7 @@ def main():
     )
     assert 'failures["non_infrastructure"] == 0' in datavine_runner
     assert 'int(match.group("result")) == 72' in datavine_runner
+    assert 'required_active_fraction = 0.90' in datavine_runner
     assert '"no_removed_workers"' not in datavine_runner
 
     workflow_store_header = (
@@ -129,6 +130,7 @@ def main():
     comparator = (scripts / "compare_data_intensive_runs.py").read_text()
     assert '"worker_churn_recovered"' in comparator
     assert '"no_removed_workers"' not in comparator
+    assert 'required_active_fraction = 0.90' in taskvine_runner
 
     # One smallest cohort has exactly the same regular graph invariants.
     small = Workload(cohorts=1, scale=1, size_profile="tiny")
