@@ -50,6 +50,9 @@ Manager-lane turn so connection acceptance, heartbeats, and status traffic are
 not starved by graph materialization. `FORSAKEN` denotes infrastructure
 reclamation and is resubmitted with a separate 64-attempt safety bound; it does
 not consume `maximum_attempts`, which remains the application-failure policy.
+The underlying generic link listener uses the operating system `SOMAXCONN`
+backlog instead of five, allowing a 128-worker startup burst to queue safely
+across those bounded Manager turns.
 The Worker consumes and resets one `waiting_data` hint per event-loop turn,
 reducing the next poll timeout from 5 seconds to 1 ms without changing ordinary
 TaskVine task state. Escaped and remote URIs retain the generic

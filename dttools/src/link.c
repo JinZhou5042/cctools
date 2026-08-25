@@ -491,7 +491,10 @@ struct link *link_serve_address(const char *addr, int port)
 	if (success < 0)
 		goto failure;
 
-	success = listen(link->fd, 5);
+	/* A fixed backlog of five turns an ordinary worker-pool start into a
+	 * reconnect storm whenever the server briefly performs other work. Let the
+	 * operating system cap a backlog large enough for scale-out clients. */
+	success = listen(link->fd, SOMAXCONN);
 	if (success < 0)
 		goto failure;
 

@@ -45,6 +45,15 @@ that does not consume the workflow's application retry budget; ordinary task
 failure semantics remain unchanged. The lifecycle worker-loss test now proves
 recovery with `maximum_attempts: 1`.
 
+A final admission diagnostic showed that bounded Runtime turns alone could not
+absorb 128 simultaneous worker connects because the shared `link` listener
+still hard-coded a backlog of five. The generic listener now requests
+`SOMAXCONN` (4096 on the acceptance host), so pending worker and status
+connections remain queued while Runtime briefly owns the Manager lane. This is
+a transport-capacity correction shared by DataVine and the unchanged TaskVine
+execution semantics. Post-change DataVine regression is 17/17 and ordinary
+`TR_vine_single` passes.
+
 Runtime v2 now separates compute completion from data admission. TaskVine
 Manager owns physical dispatch/completion and transports only a generic opaque
 auxiliary frame. DataVine Scheduler marks a successful physical task DONE and

@@ -40,11 +40,18 @@
     "cause": "4096-task materialization window was also used as one manager-lock batch",
     "fix": "retain 4096 in flight but bound submit and completion batches to 128; retry FORSAKEN as infrastructure reclamation outside the application attempt budget"
   },
+  "listener_followup": {
+    "old_backlog": 5,
+    "new_backlog": 4096,
+    "source": "SOMAXCONN",
+    "verified_with_ss": true,
+    "semantics_changed": false
+  },
   "gates": {
     "sharedfs_probe_zero_failures": true,
     "datavine_regression_17_of_17": true,
     "scientific_foundation_exact_counts": true,
     "ordinary_taskvine_single_worker": true
   },
-  "regression_report": "/tmp/datavine-infra-retry-regression-20260824.json"
+  "regression_report": "/tmp/datavine-somaxconn-regression-20260824.json"
 }
