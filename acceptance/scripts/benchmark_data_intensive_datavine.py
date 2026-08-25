@@ -290,7 +290,7 @@ def load_workflow(client, workflow_id, dataset_root, workload, task_chunk):
         "policy": {"maximum_tasks": workload.tasks, "maximum_edges": workload.scheduler_edges},
         "metadata": {
             "benchmark_contract_sha256": workload.contract()["contract_sha256"],
-            "execution_semantics": "sealed-before-worker-admission",
+            "execution_semantics": "admit-before-seal",
             "semantic_task_batching": False,
         },
     }
@@ -476,11 +476,18 @@ def main():
         )
         inventory = wait_scale_workers(
             repository / "taskvine/src/tools/vine_status", contact["manager_port"],
-            args.workers, args.cores, factory, timeout=3600,
+            args.workers, args.cores, factory, timeout=args.timeout,
         )
         admitted = time.monotonic()
         peak = PeakSampler((os.getpid(), service.pid, factory.pid)).start()
-        load_started = time.monotonic()
+        # Submitting a sealed workflow makes it runnable before the RPC reply is
+        # encoded, so physical work may overlap this call. Start the measured
+        # wall interval before submission; otherwise early tasks and native
+        # graph setup silently disappear from throughput. This is conservative
+        # versus the explicit TaskVine baseline, whose graph is loaded before
+        # its scheduling gate opens.
+        execution_started = time.monotonic()
+        load_started = execution_started
         if args.representation == "parametric":
             info, payload_sizes, code_digests = load_parametric_workflow(
                 client, workflow_id, dataset_root, workload
@@ -663,11 +670,12 @@ def main():
             "timing": {
                 "graph_load_seconds": sealed - load_started,
                 "worker_admission_seconds": admitted - factory_started,
-                "execution_seconds": terminal - sealed,
+                "execution_seconds": terminal - execution_started,
+                "post_submit_seconds": terminal - sealed,
                 "result_validation_seconds": fetched - terminal,
                 "worker_pool_recovery_seconds": recovered - fetched,
                 "total_seconds": fetched - started,
-                "tasks_per_second": workload.tasks / (terminal - sealed),
+                "tasks_per_second": workload.tasks / (terminal - execution_started),
             },
             "sampled_results": {
                 "count": len(results),

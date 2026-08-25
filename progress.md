@@ -758,3 +758,61 @@ comparator implement this rule.  The raw diagnostic is retained under
 compact evidence is
 `acceptance/data-intensive-large-scale-condor-churn-diagnostic-20260824.json`.
 The replacement one-pair full-scale campaign remains OPEN.
+
+## Current checkpoint — Controller-owned recovery and strict benchmark admission (2026-08-25)
+
+Full-scale worker churn exposed four coupled recovery bugs that small clean
+runs could not exercise. A generic peer transfer refusal was being reported as
+proof that the source replica was lost; one stale generation could reject an
+otherwise valid `DATA_READY_BATCH`; successful producer replays had no
+single-instance state and could be queued again before their output metadata
+arrived; and Runtime tested the Manager's legacy durable-result table for
+availability even though Worker Agent intermediates exist only in the Data
+Controller replica table.
+
+Runtime recovery is now `NONE -> QUEUED -> RUNNING -> AWAIT_ADMISSION -> NONE`
+per logical producer. Queue compaction and the per-task state prevent duplicate
+concurrent replay. A successful recovery waits only in physical bookkeeping
+for authoritative Controller admission; the Scheduler remains `DONE` and
+children remain released. Admission timeout is bounded and measured, stale or
+already-GC'd replica records are per-record idempotent no-ops, and a generic
+peer timeout uses local 100-ms to 1.6-s backoff without revoking the source.
+Only an authenticated exact `(DataID, worker, session, token)` source error, a
+worker-session disconnect, or a local integrity/I/O failure can invalidate a
+replica.
+
+The double-disconnect gate under
+`/tmp/datavine-fault-gate-c4-s8-run-r15-controller-availability-double-loss-20260825`
+completed 8,192 logical tasks with 9,295 physical submissions and completions:
+8,192 normal tasks + 1,096 recovery replays + 7 infrastructure retries. It
+restored the 4-worker pool twice, recorded two recovery epochs, zero recovery
+admission timeouts, zero non-infrastructure failures, 8,192 normal task reports
+exactly once, and no repeated completion. The final post-change regression is
+17/17 PASS.
+
+The next full run revealed a measurement error rather than a Runtime failure.
+The old DataVine runner started the factory, submitted the million-task family,
+and only then waited for exact pool admission. Thus the r22 diagnostic began
+executing on 111-115 workers and mixed early work into admission; it was
+stopped and is not performance evidence. The corrected runner admits exactly
+128 workers before submitting or sealing any workflow. Its execution timer and
+throughput start immediately before sealed submission because Runtime can take
+the workflow before the RPC response returns. The TaskVine baseline starts its execution
+timer only after opening the same exact-pool scheduling gate. Both retain graph
+load and admission as separate measurements, and admission uses the explicit
+run timeout rather than a brittle one-hour constant. A 1x1 end-to-end gate
+completed 256/256 with every acceptance gate after the ordering correction.
+The matching 1x1 TaskVine gate also completed 256/256 with all gates true and
+recorded graph load 0.190 s, admission 0.905 s, and admission-free execution
+24.835 s as separate intervals. Ordinary `TR_vine_single` remains PASS.
+
+The r23 exact-pool run under
+`/project01/ndcms/jzhou24/datavine-benchmarks/data-intensive-large-scale/datavine-native-parametric-r23-617a61836-20260825`
+was the first run with strict ordering. It reached 116/128 real 16-core Workers
+while its journal and service log remained empty and zero tasks executed. The
+methodology audit then proved that a sealed workflow can become runnable before
+its submit RPC response returns, so the old `RPC return -> terminal` interval
+could omit native setup and early tasks. r23 was stopped before admission and
+is diagnostic only. The corrected r24 timer starts before submission, includes
+native setup, and uses the 24-hour admission timeout. r21-r23 and all earlier
+interrupted artifacts remain excluded from the performance claim.

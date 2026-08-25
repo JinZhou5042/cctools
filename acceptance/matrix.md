@@ -1,6 +1,6 @@
 # DataVine acceptance matrix
 
-Updated: 2026-08-24
+Updated: 2026-08-25
 
 Status: **FIXED 1024-CORE CAMPAIGN PASS; SCIENTIFIC FOUNDATION LOCAL PASS; REAL-APPLICATION DISTRIBUTED ATTRIBUTION OPEN**
 
@@ -13,7 +13,7 @@ Status: **FIXED 1024-CORE CAMPAIGN PASS; SCIENTIFIC FOUNDATION LOCAL PASS; REAL-
 | Native parametric execution | LOCAL PASS | exact full topology builds in about 2.59 s / 172 MiB with matching exhaustive oracle digest; bounded 4,096-task views; 256/256 local physical E2E and owner-plus-worker restart recovery pass |
 | Data-intensive exact 128x16 | OPEN | 1,048,576-task / 10,485,760-file production run has not yet produced a terminal accepted artifact |
 | Completion/data admission decoupling | LOCAL PASS | physical success marks Scheduler DONE immediately; child dispatch does not wait for DATA_READY or requested-result persistence |
-| Worker replica state machine | LOCAL PASS | chunked DataID table, indexed sessions, HMAC HELLO, digest/generation checks, reconnect advertisement, session loss, idempotent GC ACK, and independent physical replay |
+| Worker replica state machine | LOCAL PASS | chunked DataID table, indexed sessions, HMAC HELLO, digest/generation checks, reconnect advertisement, exact replica faults, idempotent GC ACK, and coalesced single-instance physical replay; an 8,192-task double-disconnect gate restored the pool twice with exact physical conservation and zero admission timeout |
 | Parametric family evaluator | PASS / RUNTIME OPEN | 1,344-byte full descriptor; exact 1,048,576 tasks and 10,485,760 files; 4,096 full samples plus exhaustive small-cohort inverse equivalence; native frontier execution not integrated |
 | Production v1 contract | PASS | Annotated tag `datavine-production-v1-20260823` freezes one fail-closed production v1; historical callable ticket and manifest parsers are removed; post-freeze regression is 13/13 |
 | Decoupled input data plane | PASS | IR/scheduler retain only DataIDs and SHA-256 identities; Data Controller resolves locations; workers pull and verify digest-scoped objects into stable cache identities |

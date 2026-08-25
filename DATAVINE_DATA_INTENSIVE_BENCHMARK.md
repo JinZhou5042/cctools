@@ -189,8 +189,9 @@ A DataVine run is invalid unless all of these hold:
   128 x 16 before acceptance after any scheduler churn;
 - worker removals and failed attempts are reported explicitly, no task exhausts
   its attempts, and all 1,048,576 logical tasks complete successfully;
-- between 5% and 90% completion, READY + RUNNING never falls below 32,768 and
-  active cores never fall below 90% of 2,048;
+- between 5% and 90% completion, DataVine's bounded Manager-visible READY +
+  RUNNING window never falls below 4,096, TaskVine's explicit queue never falls
+  below 32,768, and at least 90% of samples have at least 1,844 active cores;
 - all 1,048,576 retained outputs use the worker-local/peer path;
 - exactly 131,072 requested C outputs are durable;
 - task output payload bytes bypass the manager;
@@ -201,7 +202,7 @@ A DataVine run is invalid unless all of these hold:
 - sampled result sizes and SHA-256 values match TaskVine.
 
 The TaskVine baseline uses the same exact admission/recovery-pool, logical
-success, READY + RUNNING, and 90%-active-core gates. CRC's Condor pool is
+success, backend-appropriate queue-depth, and 90%-active-core gates. CRC's Condor pool is
 opportunistic, so a healthy worker job may be evicted and restarted on another
 host.  Such churn is not silently treated as success: removals, lost workers,
 and failed attempts remain in the artifact, retries must not be exhausted, the
@@ -223,6 +224,25 @@ driver opens scheduling and starts the execution timer.  The manager scheduling
 depth is set to at least 128 so the first lazy FunctionCall-library placement
 pass covers the complete worker pool; the default depth of 100 was observed to
 strand 28 workers and is invalid for this benchmark.
+
+DataVine uses the inverse ordering because its parametric registration is
+constant-size and does not need to keep a million explicit TaskVine objects
+alive while workers connect. It starts the factory and admits exactly 128x16
+before submitting the workflow family. Only then does it start the measured
+wall interval, load/seal the family, start the parallelism sampler, and wait for
+terminal state. Consequently no task can run on a partial pool. A sealed
+workflow becomes runnable inside the submit RPC, so DataVine execution is
+exactly `submit start -> terminal`, including native graph setup; the additional
+`post_submit_seconds` field is diagnostic only and is never used for a
+performance claim.
+The baseline timer is exactly `scheduling gate open -> terminal`; neither
+throughput includes opportunistic Condor admission. Graph load, admission,
+result validation, and final pool recovery remain separate fields; DataVine
+graph setup is also reported separately but deliberately overlaps its measured
+execution wall so no early task can escape timing.
+Admission uses the explicit run timeout (24 hours by default), because a strict
+128-worker opportunistic gate must not silently degrade or fail after an
+arbitrary one-hour wait.
 
 The comparison reports a DataVine advantage only when all five full pairs pass,
 the median TaskVine/DataVine execution-time ratio is above one, and manager

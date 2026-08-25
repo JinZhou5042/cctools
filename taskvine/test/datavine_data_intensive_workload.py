@@ -94,6 +94,11 @@ def main():
     assert 'default=4096' in taskvine_runner
     assert 'memory_mib=args.memory' in taskvine_runner
     assert '"memory_mib_per_worker": args.memory' in taskvine_runner
+    assert '"execution_seconds": terminal - admitted' in taskvine_runner
+    assert '"tasks_per_second": workload.tasks / (terminal - admitted)' in taskvine_runner
+    assert 'terminal - loaded' not in taskvine_runner
+    assert 'deadline = time.monotonic() + args.timeout' in taskvine_runner
+    assert 'min(args.timeout, 3600)' not in taskvine_runner
     datavine_runner = (
         scripts / "benchmark_data_intensive_datavine.py"
     ).read_text()
@@ -122,7 +127,15 @@ def main():
     assert datavine_runner.index("wait_scale_workers(") < datavine_runner.index(
         load_call
     )
-    assert '"execution_seconds": terminal - sealed' in datavine_runner
+    assert 'execution_started = time.monotonic()' in datavine_runner
+    assert 'load_started = execution_started' in datavine_runner
+    assert '"execution_seconds": terminal - execution_started' in datavine_runner
+    assert '"post_submit_seconds": terminal - sealed' in datavine_runner
+    assert '"tasks_per_second": workload.tasks / (terminal - execution_started)' in datavine_runner
+    assert 'terminal - sealed),' not in datavine_runner
+    assert '"execution_semantics": "admit-before-seal"' in datavine_runner
+    assert 'args.workers, args.cores, factory, timeout=args.timeout' in datavine_runner
+    assert 'timeout=3600' not in datavine_runner
 
     workflow_store_header = (
         repository / "taskvine/src/datavine/vine_datavine_workflow_store.h"

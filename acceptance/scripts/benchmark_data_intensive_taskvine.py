@@ -326,7 +326,7 @@ def main():
             args.batch_type,
             memory_mib=args.memory,
         )
-        deadline = time.monotonic() + min(args.timeout, 3600)
+        deadline = time.monotonic() + args.timeout
         while True:
             if time.monotonic() >= deadline:
                 raise TimeoutError("did not admit exact TaskVine worker pool")
@@ -456,10 +456,10 @@ def main():
             "timing": {
                 "worker_admission_seconds": admitted - loaded,
                 "graph_load_seconds": loaded - load_started,
-                "execution_seconds": terminal - loaded,
+                "execution_seconds": terminal - admitted,
                 "worker_pool_recovery_seconds": recovered - terminal,
                 "total_seconds": terminal - started,
-                "tasks_per_second": workload.tasks / (terminal - loaded),
+                "tasks_per_second": workload.tasks / (terminal - admitted),
             },
             "peak": {"load": load_peak_result, "execute": execute_peak_result},
             "factory_command": list(factory_command),

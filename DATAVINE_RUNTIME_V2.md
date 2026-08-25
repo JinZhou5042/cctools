@@ -2,7 +2,7 @@
 
 Status: **LOCAL NATIVE RUNTIME PASS; EXACT 128x16 CAMPAIGN OPEN**
 
-Updated: 2026-08-24
+Updated: 2026-08-25
 
 ## Hard boundary
 
@@ -168,6 +168,42 @@ Producer replay is a physical recovery attempt. It does not roll back logical
 second time. A regenerated output must match the retained size/SHA-256; a
 mismatch fails closed.
 
+Parametric producer recovery has one explicit single-instance state machine:
+
+```text
+NONE -> QUEUED -> RUNNING -> AWAIT_ADMISSION -> NONE
+RUNNING -> NONE (failed physical attempt)
+AWAIT_ADMISSION -> QUEUED (bounded admission timeout)
+```
+
+`QUEUED`, `RUNNING`, and `AWAIT_ADMISSION` are mutually exclusive for each
+logical TaskID. Recovery queue compaction preserves O(live queued recovery)
+work and cannot enqueue a second physical replay for the same producer. A
+successful replay enters `AWAIT_ADMISSION`; the Runtime polls the Controller's
+authoritative replica table and clears the recovery bit only after that table
+contains the regenerated DataID. This admission wait is physical recovery
+bookkeeping only. The Scheduler remains `DONE`, and ordinary children neither
+wait for it nor receive a second dependency release.
+
+The two failure classes deliberately take different paths:
+
+- Worker disconnect retires the complete session generation and invalidates
+  only replicas indexed by that `(worker_slot, session_epoch)`. The Controller
+  coalesces newly dead DataIDs into recovery epochs and schedules at most one
+  replay per producer.
+- ENOSPC, EIO, missing local content, or a transfer server's authenticated
+  source error revokes the exact `(DataID, source worker, source session,
+  replica token)` record. A generic peer refusal or timeout does not prove the
+  source copy is gone; the consumer retries resolve locally with bounded
+  100-ms to 1.6-s exponential backoff. Size or SHA-256 mismatch still fails
+  closed.
+
+Replica publication is atomic for current records, while stale generations
+and already-GC'd tombstones are idempotent per-record no-ops. One stale record
+therefore cannot reject unrelated valid replicas in the same bounded batch.
+Availability is never inferred from the Manager's legacy result table: Worker
+Agent intermediates exist only in the Controller replica table.
+
 Output creation failure before atomic local installation is a task attempt
 failure. Failure of lazy persistence while the local copy remains available
 does not fail the task. Precise transfer, hash, ENOSPC, and EIO failures fail
@@ -211,6 +247,16 @@ The complete local regression is PASS: 17/17 DataVine contracts, including
 dynamic append, Owner restart, Worker loss, direct protocol, data plane,
 scientific workflow foundation, and the new parametric evaluator. Ordinary
 TaskVine `TR_vine_single` is also PASS after the generic frame change.
+
+The 2026-08-25 double-disconnect gate killed and replaced a worker twice in one
+8,192-task run. It completed all logical tasks exactly once with 9,295 physical
+submissions/completions: 8,192 normal tasks + 1,096 recovery replays + 7
+infrastructure retries. The Controller observed two recovery epochs, zero
+recovery-admission timeouts, zero non-infrastructure failures, no repeated
+logical completion, and restored the 4-worker pool after each loss. This gate
+specifically covers recovery coalescing, stale publication, authoritative
+Controller admission, and the distinction between transport uncertainty and
+an exact source fault.
 
 The full benchmark descriptor expands to exactly 1,048,576 tasks and
 10,485,760 files but serializes to 1,344 bytes. It is wired into Store,
