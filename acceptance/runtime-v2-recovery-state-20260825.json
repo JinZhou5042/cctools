@@ -111,7 +111,8 @@
       "go_binary_sha256": "9a52d76a35474cc8e7f5da5b26633428c0f929753ef218d9e7aaa7e9d5ddffd4"
     },
     "origin_retry_regression": {
-      "path": "/tmp/datavine-origin-retry-regression-20260825.json",
+      "path": "/tmp/datavine-origin-retry-regression-r3-20260825.json",
+      "sha256": "9bfc406133766614fd9ea716b97de7f74dd342b4bd719f8282ec3e7530e953ff",
       "status": "PASS",
       "passed": 17,
       "tests": 17
