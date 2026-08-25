@@ -11,6 +11,10 @@
 struct vine_datavine_workflow_store;
 struct vine_datavine_journal;
 struct vine_datavine_workflow_runtime;
+
+/* Maximum number of materialized physical task views retained per workflow.
+ * The logical Scheduler frontier may be much larger. */
+#define VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW 4096
 struct vine_datavine_data_controller;
 struct vine_manager;
 struct jx;

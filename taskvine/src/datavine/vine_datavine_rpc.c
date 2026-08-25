@@ -850,7 +850,7 @@ static uint32_t workflow_capabilities(
 	if (payload_size || !object_root)
 		return VINE_DATAVINE_RPC_INVALID;
 	struct jx *document = jx_objectv(
-			"schema_versions", jx_arrayv(jx_string(VINE_DATAVINE_WORKFLOW_SCHEMA_NAME), jx_string(VINE_DATAVINE_WORKFLOW_DELTA_SCHEMA_NAME), NULL), "executor_kinds", jx_arrayv(jx_string("command"), jx_string("python"), jx_string("taskvine"), NULL), "digest", jx_string("sha1"), "append", jx_string("delta-cas-v1"), "results", jx_string("durable-bytes"), "frontier", jx_boolean(1), "wait_terminal", jx_boolean(1), "result_identity", jx_string("sha256+attempt+producer+codec"), "selective_results", jx_boolean(1), "object_store", jx_string("sharedfs-single-file-sha256-v1"), "object_max_bytes", jx_integer(67108800), "object_root", jx_string(object_root), NULL);
+			"schema_versions", jx_arrayv(jx_string(VINE_DATAVINE_WORKFLOW_SCHEMA_NAME), jx_string(VINE_DATAVINE_WORKFLOW_DELTA_SCHEMA_NAME), NULL), "executor_kinds", jx_arrayv(jx_string("command"), jx_string("python"), jx_string("taskvine"), NULL), "digest", jx_string("sha1"), "append", jx_string("delta-cas-v1"), "results", jx_string("durable-bytes"), "frontier", jx_boolean(1), "wait_terminal", jx_boolean(1), "result_identity", jx_string("sha256+attempt+producer+codec"), "selective_results", jx_boolean(1), "object_store", jx_string("sharedfs-single-file-sha256-v1"), "object_max_bytes", jx_integer(67108800), "object_root", jx_string(object_root), "physical_submission_window", jx_integer(VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW), NULL);
 	char *encoded = document ? jx_print_string(document) : 0;
 	jx_delete(document);
 	if (!encoded)

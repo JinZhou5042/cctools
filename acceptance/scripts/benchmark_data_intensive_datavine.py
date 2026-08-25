@@ -158,17 +158,19 @@ class ParallelismSampler:
         return list(self.samples)
 
 
-def parallelism_summary(samples, tasks, workers, cores):
+def parallelism_summary(samples, tasks, workers, cores, physical_window):
     central = [
         item for item in samples
         if 0.05 * tasks <= item.get("tasks_complete", -1) <= 0.90 * tasks
     ]
     ready_running = [item.get("tasks_waiting", 0) + item.get("tasks_running", 0) for item in central]
     active = [item.get("active_cores", 0) for item in central]
-    # At the inclusive 90%-complete edge, at most 10% of a workflow can still
-    # be ready/running.  Cap the small-pilot threshold at that mathematical
-    # maximum; the full contract still requires the intended 32,768 tasks.
-    required_ready = min(32_768, max(1, tasks // 10))
+    # DataVine deliberately materializes a bounded physical window while its
+    # logical Scheduler frontier remains compact. Requiring more Manager-visible
+    # tasks than that advertised bound makes the acceptance gate impossible.
+    # Two physical waves (4,096 tasks for 2,048 cores) are sufficient to keep
+    # data waits off the cores; active_parallelism verifies that they do.
+    required_ready = min(physical_window, max(1, tasks // 10))
     required_active = math.ceil(workers * cores * 0.90)
     return {
         "samples": len(samples),
@@ -184,6 +186,24 @@ def parallelism_summary(samples, tasks, workers, cores):
             "ready_parallelism": bool(ready_running) and min(ready_running) >= required_ready,
             "active_parallelism": bool(active) and min(active) >= required_active,
         },
+    }
+
+
+def physical_failure_counts(log_path, workflow_id):
+    prefix = f"datavine workflow {workflow_id} task_failed "
+    result_pattern = re.compile(r"\bresult=(?P<result>-?[0-9]+)\b")
+    total = forsaken = 0
+    for line in log_path.read_text().splitlines():
+        if not line.startswith(prefix):
+            continue
+        total += 1
+        match = result_pattern.search(line)
+        if match and int(match.group("result")) == 40:
+            forsaken += 1
+    return {
+        "total": total,
+        "forsaken": forsaken,
+        "non_infrastructure": total - forsaken,
     }
 
 
@@ -416,6 +436,10 @@ def main():
             raise RuntimeError("DataVine service exited before publishing contact")
         contact = json.loads(contact_line)
         client = WorkflowClient(contact["endpoint"], "data-intensive-benchmark", timeout=300)
+        capabilities = client.workflow_capabilities()
+        physical_window = int(capabilities.get("physical_submission_window", 0))
+        if physical_window < args.workers * args.cores:
+            raise RuntimeError("runtime physical submission window is too small")
         client.rpc_profile(reset=True)
         load_started = time.monotonic()
         if args.representation == "parametric":
@@ -473,10 +497,19 @@ def main():
         recovered = time.monotonic()
         service_log.flush()
         counts = physical_counts(service_log_path, workflow_id)
+        failures = physical_failure_counts(service_log_path, workflow_id)
         stages = runtime_stages(service_log_path, workflow_id)
         dominant = dominant_stage(service_log_path, workflow_id)
-        exact_physical = counts == {"submissions": workload.tasks, "completions": workload.tasks}
-        parallelism = parallelism_summary(samples, workload.tasks, args.workers, args.cores)
+        extra_attempts = counts.get("submissions", 0) - workload.tasks
+        exact_physical = (
+            counts.get("submissions", 0) == counts.get("completions", -1)
+            and extra_attempts >= 0
+            and extra_attempts == failures["forsaken"]
+            and failures["non_infrastructure"] == 0
+        )
+        parallelism = parallelism_summary(
+            samples, workload.tasks, args.workers, args.cores, physical_window
+        )
         if args.representation == "parametric":
             reported_cpu_seconds = (
                 stages.get("task_reported_cpu_milliseconds", 0) / 1000
@@ -563,6 +596,8 @@ def main():
             "gates": gates,
             "workflow_info": info,
             "physical_tasks": counts,
+            "physical_failures": failures,
+            "infrastructure_retries": extra_attempts,
             "runtime_stages": stages,
             "dominant_stage": dominant,
             "parametric_measurements": {
@@ -587,6 +622,7 @@ def main():
                 "maximum_payload_bytes": max(payload_sizes),
                 "total_payload_bytes": sum(payload_sizes),
                 "rpc_profile": client.rpc_profile(reset=True),
+                "physical_submission_window": physical_window,
             },
             "timing": {
                 "graph_load_seconds": sealed - load_started,

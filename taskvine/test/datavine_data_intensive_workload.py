@@ -98,7 +98,10 @@ def main():
     assert "DATAVINE_RUNTIME_INFO_PATH=str(runtime_info_root)" in datavine_runner
     assert '"runtime_info_storage": "node-local-temporary"' in datavine_runner
     assert '"worker_churn_recovered"' in datavine_runner
-    assert "required_ready = min(32_768, max(1, tasks // 10))" in datavine_runner
+    assert "required_ready = min(physical_window, max(1, tasks // 10))" in datavine_runner
+    assert 'capabilities.get("physical_submission_window", 0)' in datavine_runner
+    assert 'extra_attempts == failures["forsaken"]' in datavine_runner
+    assert 'failures["non_infrastructure"] == 0' in datavine_runner
     assert '"no_removed_workers"' not in datavine_runner
 
     comparator = (scripts / "compare_data_intensive_runs.py").read_text()

@@ -26,7 +26,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#define DATAVINE_WORKFLOW_SUBMISSION_WINDOW 4096
 #define DATAVINE_WORKFLOW_EVENT_BATCH 128
 #define DATAVINE_WORKFLOW_CHECKPOINT_COMPLETIONS 4096
 #define DATAVINE_WORKFLOW_INFRASTRUCTURE_ATTEMPTS 64
@@ -2863,7 +2862,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				submission_events[DATAVINE_WORKFLOW_EVENT_BATCH];
 		size_t submission_event_count = 0;
 		while (valid && resources.parametric &&
-				running < DATAVINE_WORKFLOW_SUBMISSION_WINDOW &&
+				running < VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW &&
 				submission_event_count < DATAVINE_WORKFLOW_EVENT_BATCH &&
 				resources.recovery_head < resources.recovery_tail) {
 			uint64_t task_id = resources.recovery_queue[resources.recovery_head++];
@@ -2916,7 +2915,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 		if (resources.parametric &&
 				resources.recovery_head == resources.recovery_tail)
 			resources.recovery_head = resources.recovery_tail = 0;
-		while (running < DATAVINE_WORKFLOW_SUBMISSION_WINDOW &&
+		while (running < VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW &&
 				submission_event_count < DATAVINE_WORKFLOW_EVENT_BATCH &&
 				(logical_id = vine_datavine_scheduler_take(scheduler)) > 0) {
 			struct jx *task = resources.parametric ? 0
