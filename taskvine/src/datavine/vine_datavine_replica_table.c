@@ -751,6 +751,11 @@ int vine_datavine_replica_table_mark_dead(
 		return 0;
 	if (!(data->flags & DATA_LIVE))
 		return 1;
+	/* Logical GC is concurrent with physical producer replay. Keep the data
+	 * live until Runtime clears DATA_RECOVERY and evaluates current consumers;
+	 * otherwise a later replay of the same producer cannot register output. */
+	if (data->flags & DATA_RECOVERY)
+		return 1;
 	data->flags &= ~(DATA_LIVE | DATA_RECOVERY);
 	while (data->replica_head) {
 		uint32_t index = data->replica_head;

@@ -1230,8 +1230,6 @@ static int parametric_recovery_begin(
 	if (!runtime || !workflow_id || !resources || !task_id ||
 			task_id > resources->maximum_task_id)
 		return 0;
-	if (resources->recovery_active[task_id])
-		return 1;
 	uint64_t inputs[VINE_DATAVINE_PARAMETRIC_SOURCE_INPUTS];
 	size_t input_count = 0;
 	uint64_t output = 0;
@@ -1240,9 +1238,11 @@ static int parametric_recovery_begin(
 			!vine_datavine_data_controller_agent_set_recovery(
 				runtime->data_controller, workflow_id, output, 1))
 		return 0;
-	resources->recovery_active[task_id] = 1;
-	resources->recovery_active_tasks[resources->recovery_active_count++] =
-			task_id;
+	if (!resources->recovery_active[task_id]) {
+		resources->recovery_active[task_id] = 1;
+		resources->recovery_active_tasks[resources->recovery_active_count++] =
+				task_id;
+	}
 	return 1;
 }
 
@@ -1272,9 +1272,12 @@ static int parametric_recovery_finish(
 		if (valid && parametric_output_needed(resources, task_id, output))
 			valid = vine_datavine_data_controller_agent_set_recovery(
 					runtime->data_controller, workflow_id, output, 0);
-		else if (valid)
-			valid = vine_datavine_data_controller_agent_mark_dead(
+		else if (valid) {
+			valid = vine_datavine_data_controller_agent_set_recovery(
+					runtime->data_controller, workflow_id, output, 0) &&
+				vine_datavine_data_controller_agent_mark_dead(
 					runtime->data_controller, workflow_slot, output, 0);
+		}
 		if (valid)
 			resources->recovery_active[task_id] = 0;
 	}

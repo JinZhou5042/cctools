@@ -151,8 +151,12 @@ int main(void)
 			table, 8000001, 7, 0, 0, 0));
 	assert(vine_datavine_replica_table_set_recovery(table, 8000001, 0, 1));
 	assert(vine_datavine_replica_table_set_recovery(table, 8000001, 0, 1));
+	assert(vine_datavine_replica_table_mark_dead(
+			table, 8000001, 7, 0, 0, 0));
 	assert(vine_datavine_replica_table_stats(table, &stats));
 	assert(stats.active_data == active_before_recovery + 1);
+	assert(vine_datavine_replica_table_resolve(table, 8000001, 0, views, 4,
+			&count, 0, 0, 0) == VINE_DATAVINE_RESOLVE_PENDING);
 	assert(vine_datavine_replica_table_resolve(table, 8000001, 0, views, 4,
 			&count, 0, 0, 0) == VINE_DATAVINE_RESOLVE_PENDING);
 	generation = 8;
