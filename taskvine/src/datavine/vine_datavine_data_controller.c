@@ -1065,6 +1065,23 @@ int vine_datavine_data_controller_agent_mark_dead(
 	return valid;
 }
 
+int vine_datavine_data_controller_agent_output_available(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, uint64_t data_id)
+{
+	if (!controller || !workflow_id || !workflow_id[0] || !data_id)
+		return 0;
+	pthread_mutex_lock(&controller->lock);
+	struct agent_namespace *namespace = hash_table_lookup(
+			controller->agent_workflows, workflow_id);
+	enum vine_datavine_resolve_status status = namespace
+			? vine_datavine_replica_table_resolve(namespace->replicas, data_id,
+					0, 0, 0, 0, 0, 0, 0)
+			: VINE_DATAVINE_RESOLVE_UNKNOWN;
+	pthread_mutex_unlock(&controller->lock);
+	return status == VINE_DATAVINE_RESOLVE_AVAILABLE;
+}
+
 int vine_datavine_data_controller_agent_set_recovery(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id, uint64_t data_id, int active)

@@ -31,6 +31,15 @@
 #define DATAVINE_WORKFLOW_INFRASTRUCTURE_ATTEMPTS 64
 #define DATAVINE_WORKFLOW_RUNTIME_LANES 2
 #define DATAVINE_WORKFLOW_RECOVERY_CACHE_RESULTS 16384
+#define DATAVINE_WORKFLOW_RECOVERY_ADMISSION_TIMEOUT_US UINT64_C(30000000)
+#define DATAVINE_WORKFLOW_RECOVERY_QUIESCENCE_US UINT64_C(5000000)
+
+enum parametric_recovery_state {
+	PARAMETRIC_RECOVERY_NONE = 0,
+	PARAMETRIC_RECOVERY_QUEUED = 1,
+	PARAMETRIC_RECOVERY_RUNNING = 2,
+	PARAMETRIC_RECOVERY_AWAIT_ADMISSION = 3,
+};
 
 static uint64_t elapsed_nanoseconds(
 		const struct timespec *started, const struct timespec *finished)
@@ -149,10 +158,13 @@ struct execution_resources {
 	uint32_t *attempts;
 	uint32_t *recovery_marks;
 	uint64_t *recovery_queue;
-	uint8_t *recovery_pending;
+	uint8_t *recovery_state;
+	uint64_t *recovery_admission_started;
 	uint8_t *recovery_active;
 	uint64_t *recovery_active_tasks;
 	size_t recovery_active_count;
+	size_t recovery_admission_cursor;
+	size_t recovery_awaiting_admission;
 	size_t recovery_head;
 	size_t recovery_tail;
 	uint32_t recovery_epoch;
@@ -853,7 +865,9 @@ static int output_available(struct vine_datavine_workflow_runtime *runtime,
 		const char *workflow_id, uint64_t data_id)
 {
 	struct vine_datavine_workflow_result_info info;
-	return vine_datavine_data_controller_result_active(
+	return vine_datavine_data_controller_agent_output_available(
+				   runtime->data_controller, workflow_id, data_id) ||
+		   vine_datavine_data_controller_result_active(
 				   runtime->data_controller, workflow_id, data_id) ||
 		   vine_datavine_workflow_store_legacy_result_info(
 				   runtime->store, workflow_id, data_id, &info);
@@ -1146,12 +1160,46 @@ static int prepare_recovered_parametric(
 	return valid;
 }
 
+static int parametric_recovery_queue_compact(
+		struct execution_resources *resources)
+{
+	if (!resources || resources->recovery_head > resources->recovery_tail)
+		return 0;
+	if (!resources->recovery_head)
+		return 1;
+	size_t count = resources->recovery_tail - resources->recovery_head;
+	if (count)
+		memmove(resources->recovery_queue,
+				resources->recovery_queue + resources->recovery_head,
+				count * sizeof(*resources->recovery_queue));
+	resources->recovery_head = 0;
+	resources->recovery_tail = count;
+	return 1;
+}
+
+static int parametric_recovery_queue_append(
+		struct execution_resources *resources, uint64_t task_id)
+{
+	if (!resources || !task_id || task_id > resources->maximum_task_id)
+		return 0;
+	size_t capacity = (size_t)resources->maximum_task_id + 1;
+	if (resources->recovery_tail >= capacity &&
+			!parametric_recovery_queue_compact(resources))
+		return 0;
+	if (resources->recovery_tail >= capacity)
+		return 0;
+	resources->recovery_queue[resources->recovery_tail++] = task_id;
+	return 1;
+}
+
 static int apply_parametric_losses(
 		struct vine_datavine_workflow_runtime *runtime, const char *workflow_id,
 		const uint64_t *lost_data_ids, size_t lost_count,
 		struct execution_resources *resources, size_t *invalidated_first,
 		size_t *invalidated_count)
 {
+	if (!parametric_recovery_queue_compact(resources))
+		return 0;
 	*invalidated_first = resources->recovery_tail;
 	*invalidated_count = 0;
 	uint32_t mark = ++resources->recovery_epoch;
@@ -1163,24 +1211,30 @@ static int apply_parametric_losses(
 	}
 	size_t head = resources->recovery_tail;
 	size_t tail = resources->recovery_tail;
-	for (size_t index = 0; index < lost_count; index++) {
+	int valid = 1;
+	for (size_t index = 0; valid && index < lost_count; index++) {
 		uint64_t producer = 0;
 		uint64_t data_id = lost_data_ids[index];
 		itable_remove(resources->recovery_cache.members, data_id);
 		if (vine_datavine_parametric_output_producer(resources->parametric,
 				data_id, &producer) &&
 				parametric_output_needed(resources, producer, data_id) &&
+				!output_available(runtime, workflow_id, data_id) &&
 				resources->recovery_marks[producer] != mark &&
-				!resources->recovery_pending[producer] &&
+				resources->recovery_state[producer] ==
+						PARAMETRIC_RECOVERY_NONE &&
 				vine_datavine_scheduler_task_state(resources->scheduler,
 						(int64_t)producer) == VINE_DATAVINE_TASK_DONE) {
-			resources->recovery_queue[tail++] = producer;
-			resources->recovery_marks[producer] = mark;
-			resources->recovery_pending[producer] = 1;
+			valid = parametric_recovery_queue_append(resources, producer);
+			if (valid) {
+				tail = resources->recovery_tail;
+				resources->recovery_marks[producer] = mark;
+				resources->recovery_state[producer] =
+						PARAMETRIC_RECOVERY_QUEUED;
+			}
 		}
 	}
 	uint64_t inputs[VINE_DATAVINE_PARAMETRIC_SOURCE_INPUTS];
-	int valid = 1;
 	while (valid && head < tail) {
 		uint64_t task_id = resources->recovery_queue[head++];
 		size_t input_count = 0;
@@ -1192,13 +1246,18 @@ static int apply_parametric_losses(
 			if (vine_datavine_parametric_output_producer(resources->parametric,
 					inputs[index], &producer) &&
 					resources->recovery_marks[producer] != mark &&
-					!resources->recovery_pending[producer] &&
+					resources->recovery_state[producer] ==
+							PARAMETRIC_RECOVERY_NONE &&
 					!output_available(runtime, workflow_id, inputs[index]) &&
 					vine_datavine_scheduler_task_state(resources->scheduler,
 							(int64_t)producer) == VINE_DATAVINE_TASK_DONE) {
-				resources->recovery_queue[tail++] = producer;
-				resources->recovery_marks[producer] = mark;
-				resources->recovery_pending[producer] = 1;
+				valid = parametric_recovery_queue_append(resources, producer);
+				if (valid) {
+					tail = resources->recovery_tail;
+					resources->recovery_marks[producer] = mark;
+					resources->recovery_state[producer] =
+							PARAMETRIC_RECOVERY_QUEUED;
+				}
 			}
 		}
 	}
@@ -1266,7 +1325,8 @@ static int parametric_recovery_finish(
 		uint64_t output = 0;
 		valid = task_id && task_id <= resources->maximum_task_id &&
 				resources->recovery_active[task_id] &&
-				!resources->recovery_pending[task_id] &&
+				resources->recovery_state[task_id] ==
+						PARAMETRIC_RECOVERY_NONE &&
 				parametric_task_inputs(resources->parametric, task_id, inputs,
 					&input_count, &output);
 		if (valid && parametric_output_needed(resources, task_id, output))
@@ -1281,8 +1341,10 @@ static int parametric_recovery_finish(
 		if (valid)
 			resources->recovery_active[task_id] = 0;
 	}
-	if (valid)
+	if (valid) {
 		resources->recovery_active_count = 0;
+		resources->recovery_admission_cursor = 0;
+	}
 	return valid;
 }
 
@@ -1339,6 +1401,73 @@ static int record_recovery_invalidations(
 	}
 	free(records);
 	return valid;
+}
+
+static int parametric_recovery_poll_admissions(
+		struct vine_datavine_workflow_runtime *runtime,
+		const char *workflow_id, struct execution_resources *resources,
+		const uint32_t *attempts, uint64_t *event_nanoseconds,
+		uint64_t *admission_timeouts)
+{
+	if (!resources->recovery_active_count ||
+			!resources->recovery_awaiting_admission)
+		return 1;
+	uint64_t timed_out[DATAVINE_WORKFLOW_EVENT_BATCH];
+	size_t timed_out_count = 0;
+	size_t inspected = 0;
+	uint64_t now = timestamp_get();
+	while (inspected < DATAVINE_WORKFLOW_EVENT_BATCH &&
+			inspected < resources->recovery_active_count) {
+		if (resources->recovery_admission_cursor >=
+				resources->recovery_active_count)
+			resources->recovery_admission_cursor = 0;
+		uint64_t task_id = resources->recovery_active_tasks[
+				resources->recovery_admission_cursor++];
+		inspected++;
+		if (resources->recovery_state[task_id] !=
+				PARAMETRIC_RECOVERY_AWAIT_ADMISSION)
+			continue;
+		uint64_t inputs[VINE_DATAVINE_PARAMETRIC_SOURCE_INPUTS];
+		size_t input_count = 0;
+		uint64_t output = 0;
+		if (!parametric_task_inputs(resources->parametric, task_id, inputs,
+				&input_count, &output))
+			return 0;
+		if (output_available(runtime, workflow_id, output)) {
+			resources->recovery_state[task_id] = PARAMETRIC_RECOVERY_NONE;
+			resources->recovery_admission_started[task_id] = 0;
+			resources->recovery_awaiting_admission--;
+			continue;
+		}
+		uint64_t started = resources->recovery_admission_started[task_id];
+		if (!started || now - started <
+				DATAVINE_WORKFLOW_RECOVERY_ADMISSION_TIMEOUT_US)
+			continue;
+		if (attempts[task_id] >= DATAVINE_WORKFLOW_INFRASTRUCTURE_ATTEMPTS ||
+				!parametric_recovery_queue_append(resources, task_id))
+			return 0;
+		resources->recovery_state[task_id] = PARAMETRIC_RECOVERY_QUEUED;
+		resources->recovery_admission_started[task_id] = 0;
+		resources->recovery_awaiting_admission--;
+		timed_out[timed_out_count++] = task_id;
+	}
+	if (timed_out_count && !record_recovery_invalidations(runtime, workflow_id,
+				timed_out, timed_out_count, attempts, event_nanoseconds))
+		return 0;
+	if (timed_out_count && getenv("DATAVINE_WORKFLOW_METRICS")) {
+		size_t diagnostic_count = *admission_timeouts < 32
+				? 32 - *admission_timeouts : 0;
+		if (diagnostic_count > timed_out_count)
+			diagnostic_count = timed_out_count;
+		for (size_t index = 0; index < diagnostic_count; index++)
+			fprintf(stderr,
+					"datavine workflow %s recovery_admission_timeout "
+					"logical_id=%llu attempt=%u\n",
+					workflow_id, (unsigned long long)timed_out[index],
+					attempts[timed_out[index]]);
+	}
+	*admission_timeouts += timed_out_count;
+	return 1;
 }
 
 static int apply_workflow_losses(
@@ -2526,7 +2655,8 @@ static void execution_resources_delete(struct execution_resources *resources)
 	free(resources->attempts);
 	free(resources->recovery_marks);
 	free(resources->recovery_queue);
-	free(resources->recovery_pending);
+	free(resources->recovery_state);
+	free(resources->recovery_admission_started);
 	free(resources->recovery_active);
 	free(resources->recovery_active_tasks);
 	free(resources->recovery_cache.entries);
@@ -2677,9 +2807,13 @@ static int execution_resources_create(struct execution_resources *resources,
 							? malloc(((size_t)resources->maximum_task_id + 1) *
 									  sizeof(*resources->recovery_queue))
 							: 0;
-	resources->recovery_pending = valid && resources->parametric
+	resources->recovery_state = valid && resources->parametric
 			? calloc((size_t)resources->maximum_task_id + 1,
-					sizeof(*resources->recovery_pending))
+					sizeof(*resources->recovery_state))
+			: 0;
+	resources->recovery_admission_started = valid && resources->parametric
+			? calloc((size_t)resources->maximum_task_id + 1,
+					sizeof(*resources->recovery_admission_started))
 			: 0;
 	resources->recovery_active = valid && resources->parametric
 			? calloc((size_t)resources->maximum_task_id + 1,
@@ -2692,7 +2826,8 @@ static int execution_resources_create(struct execution_resources *resources,
 	valid = valid && resources->attempts && resources->recovery_marks &&
 		resources->recovery_queue;
 	if (resources->parametric)
-		valid = valid && resources->recovery_pending &&
+		valid = valid && resources->recovery_state &&
+			resources->recovery_admission_started &&
 			resources->recovery_active && resources->recovery_active_tasks;
 	resources->parametric_remaining = valid && resources->parametric
 			? calloc((size_t)resources->maximum_task_id + 1,
@@ -2776,7 +2911,9 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 	uint64_t recovery_epochs = 0;
 	uint64_t recovery_lost_data = 0;
 	uint64_t recovery_invalidated_tasks = 0;
+	uint64_t recovery_admission_timeouts = 0;
 	uint64_t recovery_inflight = 0;
+	uint64_t recovery_quiescent_started = 0;
 	uint64_t observed_data_losses = UINT64_MAX;
 	int quiescent = 0;
 	int recovered_applied = 0;
@@ -2851,10 +2988,14 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				for (size_t index = invalidated_count; valid && index > 0; index--) {
 					uint64_t task_id = invalidated[index - 1];
 					valid = task_id > 0 && task_id <= maximum_task_id &&
-							!resources.recovery_pending[task_id];
+							resources.recovery_state[task_id] ==
+									PARAMETRIC_RECOVERY_NONE;
 					if (valid) {
-						resources.recovery_queue[resources.recovery_tail++] = task_id;
-						resources.recovery_pending[task_id] = 1;
+						valid = parametric_recovery_queue_append(
+								&resources, task_id);
+						if (valid)
+							resources.recovery_state[task_id] =
+									PARAMETRIC_RECOVERY_QUEUED;
 					}
 				}
 			}
@@ -2943,13 +3084,34 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 		}
 		if (!valid)
 			break;
-		if (resources.parametric && !recovery_inflight &&
-				resources.recovery_head == resources.recovery_tail &&
-				resources.recovery_active_count) {
-			valid = parametric_recovery_finish(runtime, workflow_id, &resources);
+		if (resources.parametric) {
+			valid = parametric_recovery_poll_admissions(runtime, workflow_id,
+					&resources, attempts, &completion_event_nanoseconds,
+					&recovery_admission_timeouts);
 			if (!valid) {
-				failure_stage = "recovery_finish";
+				failure_stage = "recovery_admission";
 				break;
+			}
+		}
+		if (resources.parametric && resources.recovery_active_count) {
+			if (recovery_inflight ||
+					resources.recovery_head != resources.recovery_tail ||
+					resources.recovery_awaiting_admission) {
+				recovery_quiescent_started = 0;
+			} else {
+				uint64_t now = timestamp_get();
+				if (!recovery_quiescent_started)
+					recovery_quiescent_started = now;
+				else if (now - recovery_quiescent_started >=
+						DATAVINE_WORKFLOW_RECOVERY_QUIESCENCE_US) {
+					valid = parametric_recovery_finish(runtime, workflow_id,
+							&resources);
+					recovery_quiescent_started = 0;
+					if (!valid) {
+						failure_stage = "recovery_finish";
+						break;
+					}
+				}
 			}
 		}
 		int64_t logical_id;
@@ -2969,13 +3131,19 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				submission_event_count < DATAVINE_WORKFLOW_EVENT_BATCH &&
 				resources.recovery_head < resources.recovery_tail) {
 			uint64_t task_id = resources.recovery_queue[resources.recovery_head++];
+			valid = task_id > 0 && task_id <= maximum_task_id &&
+					resources.recovery_state[task_id] ==
+							PARAMETRIC_RECOVERY_QUEUED;
+			if (!valid)
+				break;
 			uint32_t attempt = attempts[task_id] + 1;
 			struct parametric_task_view *parametric_view = 0;
 			struct timespec stage_started;
 			struct timespec stage_finished;
 			clock_gettime(CLOCK_MONOTONIC, &stage_started);
-			valid = parametric_recovery_begin(runtime, workflow_id, &resources,
-					task_id);
+			if (valid)
+				valid = parametric_recovery_begin(runtime, workflow_id, &resources,
+						task_id);
 			struct vine_task *physical = valid
 					? materialize_parametric(runtime, workflow_id, &resources,
 						task_id, attempt, 1, &parametric_view)
@@ -3005,6 +3173,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				itable_insert(physical_to_logical, (uint64_t)physical_id, mapping);
 			if (valid) {
 				attempts[task_id] = attempt;
+				resources.recovery_state[task_id] =
+						PARAMETRIC_RECOVERY_RUNNING;
 				running++;
 				recovery_inflight++;
 				physical_submissions++;
@@ -3017,7 +3187,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			} else {
 				failure_stage = physical ? "recovery_submit"
 						: "recovery_materialize";
-				resources.recovery_pending[task_id] = 0;
+				resources.recovery_state[task_id] = PARAMETRIC_RECOVERY_NONE;
 				physical_attempt_delete(mapping);
 				if (!mapping)
 					parametric_task_view_delete(parametric_view);
@@ -3135,6 +3305,13 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			break;
 		}
 		if (!running) {
+			if (resources.parametric && resources.recovery_active_count) {
+				/* Worker publication is intentionally ordered after Manager task
+				 * completion. Poll admission and the short recovery-quiescence grace
+				 * without occupying Manager lanes or rolling logical DONE backward. */
+				usleep(1000);
+				continue;
+			}
 			if (publishing) {
 				valid = drain_publications(runtime, workflow_id, scheduler, &resources.recovery_cache, data, files, pending_consumers, requested, &pending_publications, &publishing, 1, &uncheckpointed_completions, &publish_nanoseconds, &publication_stages, &completion_event_nanoseconds);
 				continue;
@@ -3217,10 +3394,29 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			uint32_t attempt = mapping ? mapping->attempt : 0;
 			if (physical_success && recovery_attempt) {
 				/* Worker commit already installed and asynchronously advertised
-				 * the replacement generation. Logical state stays DONE. */
-				task_valid = 1;
-				if (resources.parametric)
-					resources.recovery_pending[completed_logical_id] = 0;
+				 * the replacement generation. Logical state stays DONE, while the
+				 * recovery state remains deduplicated until Controller admission. */
+				task_valid = !resources.parametric ||
+					(resources.recovery_state[completed_logical_id] ==
+							PARAMETRIC_RECOVERY_RUNNING);
+				if (task_valid && resources.parametric) {
+					uint64_t inputs[VINE_DATAVINE_PARAMETRIC_SOURCE_INPUTS];
+					size_t input_count = 0;
+					uint64_t output = 0;
+					task_valid = parametric_task_inputs(resources.parametric,
+							(uint64_t)completed_logical_id, inputs,
+							&input_count, &output);
+					if (task_valid && output_available(runtime, workflow_id, output)) {
+						resources.recovery_state[completed_logical_id] =
+								PARAMETRIC_RECOVERY_NONE;
+					} else if (task_valid) {
+						resources.recovery_state[completed_logical_id] =
+								PARAMETRIC_RECOVERY_AWAIT_ADMISSION;
+						resources.recovery_admission_started[completed_logical_id] =
+								timestamp_get();
+						resources.recovery_awaiting_admission++;
+					}
+				}
 			} else if (physical_success) {
 				uint32_t attempt_limit = task_valid
 									 ? (uint32_t)maximum_attempts(
@@ -3332,7 +3528,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			} else if (recovery_attempt) {
 				/* Non-transient replay failures are explicit and fail closed. */
 				if (resources.parametric)
-					resources.recovery_pending[completed_logical_id] = 0;
+					resources.recovery_state[completed_logical_id] =
+							PARAMETRIC_RECOVERY_NONE;
 				failure_stage = "recovery_task";
 				task_valid = 0;
 			} else {
@@ -3525,6 +3722,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				"recovery_cache_limit=%llu recovery_cache_evictions=%llu "
 				"recovery_epochs=%llu recovery_lost_data=%llu "
 				"recovery_invalidated_tasks=%llu "
+				"recovery_admission_timeouts=%llu "
 				"scheduler_wait_seconds=%.6f stage_in_seconds=%.6f "
 				"worker_execute_seconds=%.6f stage_out_seconds=%.6f "
 				"scheduler_delay_seconds=%.6f url_stage_in_seconds=%.6f "
@@ -3590,6 +3788,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				(unsigned long long)recovery_epochs,
 				(unsigned long long)recovery_lost_data,
 				(unsigned long long)recovery_invalidated_tasks,
+				(unsigned long long)recovery_admission_timeouts,
 				scheduler_wait_microseconds / 1e6,
 				stage_in_microseconds / 1e6,
 				worker_execute_microseconds / 1e6,

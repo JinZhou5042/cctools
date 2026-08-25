@@ -550,14 +550,24 @@ int vine_datavine_replica_table_publish_batch(
 		const struct vine_datavine_publish_record *record = &records[index];
 		struct data_record *data = data_lookup(table, record->data_id);
 		if (!record->data_id || !record->generation ||
-				!record->object_token || !data ||
-				data->generation != record->generation ||
-				((data->flags & DATA_IDENTITY) &&
-				 (data->size != record->size ||
-				  memcmp(data->digest, record->digest, 32))))
+				!record->object_token)
+			return 0;
+		/* Agent publication is intentionally asynchronous with logical GC and
+		 * recovery generation replacement. A stale tuple is an idempotent no-op,
+		 * not a reason to reject the other valid records in this batch. */
+		if (!data || !(data->flags & DATA_LIVE) ||
+				data->generation != record->generation)
+			continue;
+		if ((data->flags & DATA_IDENTITY) &&
+				(data->size != record->size ||
+				 memcmp(data->digest, record->digest, 32)))
 			return 0;
 		for (size_t previous = 0; previous < index; previous++) {
-			if (records[previous].data_id == record->data_id &&
+			struct data_record *previous_data =
+					data_lookup(table, records[previous].data_id);
+			if (previous_data && (previous_data->flags & DATA_LIVE) &&
+					records[previous].generation == previous_data->generation &&
+					records[previous].data_id == record->data_id &&
 					(records[previous].generation != record->generation ||
 					 records[previous].size != record->size ||
 					 memcmp(records[previous].digest, record->digest, 32)))
@@ -567,7 +577,8 @@ int vine_datavine_replica_table_publish_batch(
 	size_t live_count = 0;
 	for (size_t index = 0; index < count; index++) {
 		struct data_record *data = data_lookup(table, records[index].data_id);
-		if (data && (data->flags & DATA_LIVE))
+		if (data && (data->flags & DATA_LIVE) &&
+				data->generation == records[index].generation)
 			live_count++;
 	}
 	if (!reserve_replica_count(table, live_count))
@@ -575,7 +586,8 @@ int vine_datavine_replica_table_publish_batch(
 	for (size_t index = 0; index < count; index++) {
 		const struct vine_datavine_publish_record *record = &records[index];
 		struct data_record *data = data_lookup(table, record->data_id);
-		if (!data || !(data->flags & DATA_LIVE))
+		if (!data || !(data->flags & DATA_LIVE) ||
+				data->generation != record->generation)
 			continue;
 		if (!vine_datavine_replica_table_publish(table, record->data_id,
 				record->generation, record->size, record->digest, worker_slot,

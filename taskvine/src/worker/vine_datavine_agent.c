@@ -7,6 +7,7 @@
 #include "vine_process.h"
 
 #include "create_dir.h"
+#include "copy_stream.h"
 #include "debug.h"
 #include "domain_name_cache.h"
 #include "full_io.h"
@@ -35,6 +36,8 @@
 #define LOCAL_GENERATED 16U
 #define LOCAL_MIN_CAPACITY 1024U
 #define LOCAL_PREPARE_BUDGET_US 25000U
+#define LOCAL_PEER_RETRY_MIN_US 100000U
+#define LOCAL_PEER_RETRY_MAX_US 1600000U
 
 struct local_object {
 	uint64_t data_id;
@@ -45,6 +48,8 @@ struct local_object {
 	uint32_t generation;
 	uint32_t source_worker_slot;
 	uint32_t flags;
+	uint8_t fetch_failures;
+	timestamp_t fetch_retry_after;
 };
 
 struct agent_workflow {
@@ -644,6 +649,8 @@ static int safe_output_name(const char *name, size_t length)
 static int resolve_one(struct agent_workflow *workflow, uint64_t data_id,
 		uint32_t generation, struct local_object *local)
 {
+	if (local->fetch_retry_after > timestamp_get())
+		return 2;
 	if (!connection_open(workflow))
 		return 2;
 	unsigned char request[VINE_DATAVINE_AGENT_BATCH_HEADER +
@@ -700,6 +707,34 @@ static int resolve_one(struct agent_workflow *workflow, uint64_t data_id,
 	return 2;
 }
 
+static int transfer_source_reported_fault(const char *name)
+{
+	char *path = vine_cache_error_path(agent_cache, name);
+	char *message = 0;
+	size_t size = 0;
+	int exact = path && copy_file_to_buffer(path, &message, &size) > 0 &&
+			message && strstr(message, "Remote worker reported error for '");
+	if (exact && agent_diagnostic_failures++ < 32)
+		debug(D_NOTICE, "DataVine Worker Agent exact source fault %s: %s",
+				name, message);
+	if (path)
+		unlink(path);
+	free(message);
+	free(path);
+	return exact;
+}
+
+static void clear_transfer_tuple(struct local_object *local)
+{
+	local->generation = 0;
+	local->size = 0;
+	local->object_token = 0;
+	local->source_worker_slot = 0;
+	local->source_session_epoch = 0;
+	memset(local->digest, 0, sizeof(local->digest));
+	local->flags = 0;
+}
+
 static void report_fault(struct agent_workflow *workflow,
 		struct local_object *local, uint32_t flags)
 {
@@ -733,13 +768,9 @@ static void forget_object(struct agent_workflow *workflow,
 {
 	report_fault(workflow, local, fault_flags);
 	vine_cache_remove(agent_cache, name, 0);
-	local->generation = 0;
-	local->size = 0;
-	local->object_token = 0;
-	local->source_worker_slot = 0;
-	local->source_session_epoch = 0;
-	memset(local->digest, 0, sizeof(local->digest));
-	local->flags = 0;
+	clear_transfer_tuple(local);
+	local->fetch_failures = 0;
+	local->fetch_retry_after = 0;
 }
 
 static int fetching_ready(struct agent_workflow *workflow,
@@ -755,12 +786,29 @@ static int fetching_ready(struct agent_workflow *workflow,
 			status == VINE_CACHE_STATUS_TRANSFERRED)
 		return 0;
 	if (status != VINE_CACHE_STATUS_READY) {
-		/* A resolved peer may disappear or its bytes may fail validation after
-		 * dispatch. Remove that exact replica at Controller and resolve again;
-		 * the last-replica transition queues producer replay. The consumer stays
-		 * in data wait and never spends its application retry budget. */
-		forget_object(workflow, local, name,
-				VINE_DATAVINE_AGENT_FAULT_REMOTE);
+		/* A remote transfer-protocol error proves that the named source tuple
+		 * could not serve its object. A refusal, timeout, or truncated connection
+		 * proves only transport pressure: keep Controller truth unchanged and
+		 * retry locally with bounded exponential backoff. Worker disconnects are
+		 * removed independently by Controller session liveness. */
+		if (transfer_source_reported_fault(name)) {
+			forget_object(workflow, local, name,
+					VINE_DATAVINE_AGENT_FAULT_REMOTE);
+			return 0;
+		}
+		if (local->fetch_failures < 31)
+			local->fetch_failures++;
+		uint64_t delay = LOCAL_PEER_RETRY_MIN_US;
+		unsigned int shifts = local->fetch_failures > 1
+				? local->fetch_failures - 1 : 0;
+		if (shifts > 4)
+			shifts = 4;
+		delay <<= shifts;
+		if (delay > LOCAL_PEER_RETRY_MAX_US)
+			delay = LOCAL_PEER_RETRY_MAX_US;
+		vine_cache_remove(agent_cache, name, 0);
+		clear_transfer_tuple(local);
+		local->fetch_retry_after = timestamp_get() + delay;
 		return 0;
 	}
 	char *path = vine_cache_data_path(agent_cache, name);
@@ -777,6 +825,8 @@ static int fetching_ready(struct agent_workflow *workflow,
 	local->flags = LOCAL_READY | LOCAL_DIRTY | LOCAL_GENERATED;
 	local->source_worker_slot = 0;
 	local->source_session_epoch = 0;
+	local->fetch_failures = 0;
+	local->fetch_retry_after = 0;
 	return 1;
 }
 

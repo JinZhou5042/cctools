@@ -182,6 +182,9 @@ int vine_datavine_data_controller_agent_fault(
 int vine_datavine_data_controller_agent_mark_dead(
 		struct vine_datavine_data_controller *controller,
 		uint64_t workflow_slot, uint64_t data_id, uint32_t generation);
+int vine_datavine_data_controller_agent_output_available(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, uint64_t data_id);
 int vine_datavine_data_controller_agent_set_recovery(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id, uint64_t data_id, int active);

@@ -138,6 +138,47 @@ int main(void)
 	assert(vine_datavine_replica_table_resolve(table, 42, 7, views, 4,
 			&count, 0, 0, 0) == VINE_DATAVINE_RESOLVE_DEAD);
 
+	/* One delayed old generation must not poison a valid publication sharing
+	 * the same Agent metadata batch. */
+	generation = 7;
+	assert(vine_datavine_replica_table_expect(table, 9000001, &generation, 0));
+	assert(vine_datavine_replica_table_publish(table, 9000001, 7, 64, digest,
+			2, 202, 9001, 0, 0, 0));
+	assert(vine_datavine_replica_table_mark_dead(
+			table, 9000001, 7, 0, 0, 0));
+	assert(vine_datavine_replica_table_set_recovery(table, 9000001, 0, 1));
+	generation = 8;
+	assert(vine_datavine_replica_table_expect(table, 9000001, &generation, 0));
+	generation = 1;
+	assert(vine_datavine_replica_table_expect(table, 9000002, &generation, 0));
+	struct vine_datavine_publish_record mixed[2] = {
+		{
+			.data_id = 9000001,
+			.size = 64,
+			.object_token = 9001,
+			.generation = 7,
+		},
+		{
+			.data_id = 9000002,
+			.size = 64,
+			.object_token = 9002,
+			.generation = 1,
+		},
+	};
+	memcpy(mixed[0].digest, digest, sizeof(digest));
+	memcpy(mixed[1].digest, digest, sizeof(digest));
+	assert(vine_datavine_replica_table_publish_batch(
+			table, mixed, 2, 2, 202, 0, 0));
+	assert(vine_datavine_replica_table_resolve(table, 9000001, 8, views, 4,
+			&count, 0, 0, 0) == VINE_DATAVINE_RESOLVE_PENDING);
+	assert(vine_datavine_replica_table_resolve(table, 9000002, 1, views, 4,
+			&count, 0, 0, 0) == VINE_DATAVINE_RESOLVE_AVAILABLE);
+	assert(vine_datavine_replica_table_set_recovery(table, 9000001, 0, 0));
+	assert(vine_datavine_replica_table_mark_dead(
+			table, 9000001, 8, 0, 0, 0));
+	assert(vine_datavine_replica_table_mark_dead(
+			table, 9000002, 1, 0, 0, 0));
+
 	/* Recovery may temporarily resurrect an intermediate that logical GC
 	 * retired, replace its empty generation, and retire it again. */
 	struct vine_datavine_replica_stats stats;
