@@ -1,0 +1,51 @@
+{
+  "artifact_type": "datavine-single-workflow-reactor",
+  "status": "PASS",
+  "date": "2026-08-26",
+  "architecture": {
+    "active_workflows_per_process": 1,
+    "scheduler_manager_reactor_threads": 1,
+    "workflow_lane_threads": 0,
+    "completion_mailboxes": 0,
+    "completion_routing_tables": 0,
+    "manager_request_queues": 0,
+    "manager_mutexes": 0,
+    "data_owner": "Data Controller",
+    "rpc": "independent epoll service"
+  },
+  "local_exact_gate": {
+    "tasks": 10000,
+    "executor": "builtin",
+    "requested_output": false,
+    "registration": "sealed",
+    "workers": 4,
+    "cores_per_worker": 4,
+    "physical_submissions": 10000,
+    "physical_completions": 10000,
+    "service_execution_seconds": 2.199306,
+    "service_tasks_per_second": 4546.888882220119,
+    "client_execution_seconds": 2.8418466050061397,
+    "client_tasks_per_second": 3518.8387657462586,
+    "manager_lock_seconds": 0.0,
+    "manager_queue_seconds": 0.0,
+    "reactor_submit_seconds": 0.262484,
+    "manager_submission_frontier": 4096,
+    "peak_rss_bytes": 89276416,
+    "peak_fds": 104
+  },
+  "validation": {
+    "build": "PASS",
+    "module_boundaries": "PASS",
+    "workflow_service": "PASS",
+    "workflow_execution": "PASS",
+    "lifecycle_worker_loss_restart": "PASS",
+    "notebook_single_workflow_parallelism": "PASS",
+    "data_plane_v2": "PASS",
+    "exact_physical_task_identity": true,
+    "cleanup": "all local managers, factories, and workers removed"
+  },
+  "limitations": [
+    "The throughput gate is local and must not replace distributed scale evidence.",
+    "The RPC compatibility surface may execute later submissions sequentially; no concurrent workflow scheduler is created."
+  ]
+}

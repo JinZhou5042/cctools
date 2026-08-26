@@ -311,22 +311,20 @@ def main():
             assert wait_terminal(replacement, "fork-wall-time")["state"] == "failed"
             assert len(python_descendants(worker.pid)) == 2
 
-            slow_session = WorkflowSession.create(
-                replacement, "lane-slow", maximum_tasks=2, maximum_edges=1,
-                idempotency_key="lane-slow-v1",
-            )
-            fast_session = WorkflowSession.create(
-                replacement, "lane-fast", maximum_tasks=2, maximum_edges=1,
-                idempotency_key="lane-fast-v1",
+            parallel_session = WorkflowSession.create(
+                replacement, "single-reactor-parallel", maximum_tasks=2,
+                maximum_edges=0, idempotency_key="single-reactor-parallel-v1",
             )
             # A task that specifies memory but omits cores must still default
             # to one core; otherwise TaskVine may reserve the whole worker and
-            # serialize this independent workflow behind the slow task.
-            slow = slow_session.submit(
+            # serialize the independent ready task behind the slow task.
+            slow = parallel_session.submit(
                 sleep_return, 10.0, "slow", resources={"memory_mb": 1}
             )
             fast_started = time.monotonic()
-            fast = fast_session.submit(lambda: "fast", resources={"memory_mb": 1})
+            fast = parallel_session.submit(
+                lambda: "fast", resources={"memory_mb": 1}
+            )
             assert fast.result(timeout=30) == "fast"
             fast_seconds = time.monotonic() - fast_started
             assert fast_seconds < 5.0, fast_seconds
@@ -334,14 +332,16 @@ def main():
                 slow_value = slow.result(timeout=30)
             except TimeoutError as error:
                 raise AssertionError({
-                    "workflow": replacement.describe_workflow("lane-slow"),
+                    "workflow": replacement.describe_workflow(
+                        "single-reactor-parallel"
+                    ),
                     "python_processes": python_descendants(worker.pid),
                 }) from error
             assert slow_value == "slow"
-            fast_session.seal()
-            slow_session.seal()
-            assert wait_terminal(replacement, "lane-fast")["state"] == "completed"
-            assert wait_terminal(replacement, "lane-slow")["state"] == "completed"
+            parallel_session.seal()
+            assert wait_terminal(replacement, "single-reactor-parallel")[
+                "state"
+            ] == "completed"
 
         finally:
             if worker is not None and worker.poll() is None:
@@ -440,7 +440,7 @@ def main():
         "python-executor-crash-retry=1 python-preloader=1 fork-children=0 "
         "callable-register-once=1 "
         "fork-cancel=1 wall-time-kill=1 "
-        "runtime-lanes=parallel "
+        "single-workflow-task-parallelism=1 "
         "default-profile=1 "
         "sparse-frontier-attach=1 terminal-attach=reject resource-default-core=1"
     )

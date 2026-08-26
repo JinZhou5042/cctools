@@ -1,6 +1,6 @@
 # DataVine acceptance matrix
 
-Updated: 2026-08-25
+Updated: 2026-08-26
 
 Status: **FIXED 1024-CORE CAMPAIGN PASS; SCIENTIFIC FOUNDATION LOCAL PASS; REAL-APPLICATION DISTRIBUTED ATTRIBUTION OPEN**
 
@@ -9,6 +9,7 @@ Status: **FIXED 1024-CORE CAMPAIGN PASS; SCIENTIFIC FOUNDATION LOCAL PASS; REAL-
 | Gate | State | Current evidence |
 |---|---|---|
 | One native authority | PASS | C Runtime owns control; C Data Controller exclusively owns result files, metadata, hashes, fetch, retention, and GC |
+| Single-workflow reactor | PASS | one active workflow and one C Scheduler/Manager reactor per frontend process; no workflow pthreads, completion mailboxes, cross-workflow routing table, Manager request queue, or Manager mutex; local 10k exact gate reached 4,546.9 service tasks/s |
 | Runtime v2 Manager boundary | LOCAL PASS | Manager transports only a generic opaque auxiliary payload; DataVine inputs/outputs create no Manager vine_file/cache-update/unlink state; manifest and task-data telemetry are parsed only by Controller; direct Worker Agent protocol and module scan pass |
 | Native parametric execution | DISTRIBUTED RECOVERY PASS / FULL PERF OPEN | exact full topology builds in about 2.59 s / 172 MiB with matching exhaustive oracle digest; bounded 4,096-task views; replacement-churn gate removed half of 8 Workers and completed exact 8,192 logical + 943 replay + 32 disconnect tasks with zero recovery timeout |
 | Data-intensive exact 128x16 | OPEN | r26 sustained 2,048 cores but failed after 595,393 physical completions when replacement Workers retained an exhausted origin retry state; bounded cooldown/reset is regression-clean and r27 is required |
@@ -51,7 +52,7 @@ Status: **FIXED 1024-CORE CAMPAIGN PASS; SCIENTIFIC FOUNDATION LOCAL PASS; REAL-
 | 1024-core requested-output path | PASS / ADVANTAGE | 128 x 32 MiB: TV 13.008 s, DV 11.224 s, rate 1.159, paired CI [1.055, 1.274]; worker-local-first publication removed the old durable Controller hop bottleneck |
 | 1024-core high-degree path | PASS / ADVANTAGE | degree 64: TV 25.230 s, DV 15.487 s, rate 1.548, paired CI [1.491, 1.583]; fan-in 16 reaches 232.8 versus 119.4 tasks/s |
 | 1024-core large broadcast path | CONFIRMED LIMITATION | 32 MiB broadcast: TV 1.262 s, DV 1.371 s; separated result-fetch excess is 0.121335 s and covers the 0.109198 s wall gap; add parallel/streaming multi-DataID reads |
-| 1024-core dynamic tiny path | CONFIRMED LIMITATION | TV 0.186 s, DV 1.007 s, paired CI [0.149, 0.202]; 8 dependent steps plus seal cause 9 Runtime invocations; keep a resident session lane |
+| 1024-core dynamic tiny path | CONFIRMED LIMITATION | TV 0.186 s, DV 1.007 s, paired CI [0.149, 0.202]; 8 dependent steps plus seal cause 9 Runtime invocations; keep one resident workflow reactor |
 | SharedFS eData object ingest | PASS / PROFILED LIMITATION | 4096 distinct 256-byte objects: 83.4 cold objects/s at 1 writer and 752.9 at 16; warm deduplicated 3162.2/s; cold SharedFS metadata/durability is the bottleneck |
 | Scientific foundation | LOCAL PASS | versioned artifact schema, deterministic non-sparse generator, calibrated resource sampler and HEP-S TV-native/DV-native/TV-durable-sink driver pass 6/6 local runs with 19/19 exact physical counts and one result digest |
 | Scientific distributed attribution | OPEN | producer/consumer worker identity, per-worker byte deltas, CAL-small cold/warm/peer gates, 10x16 pilots and reserved-node repetitions have not run |

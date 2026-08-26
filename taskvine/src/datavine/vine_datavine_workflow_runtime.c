@@ -15,7 +15,6 @@
 #include "vine_datavine_protocol.h"
 
 #include <limits.h>
-#include <pthread.h>
 #include <openssl/sha.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -31,7 +30,6 @@
 #define DATAVINE_REACTOR_SUBMISSION_WINDOW_MAX 32768
 #define DATAVINE_WORKFLOW_CHECKPOINT_COMPLETIONS 4096
 #define DATAVINE_WORKFLOW_INFRASTRUCTURE_ATTEMPTS 64
-#define DATAVINE_WORKFLOW_RUNTIME_LANES 2
 #define DATAVINE_WORKFLOW_RECOVERY_CACHE_RESULTS 16384
 #define DATAVINE_WORKFLOW_RECOVERY_ADMISSION_TIMEOUT_US UINT64_C(30000000)
 #define DATAVINE_WORKFLOW_RECOVERY_QUIESCENCE_US UINT64_C(5000000)
@@ -84,11 +82,6 @@ struct task_defaults_index {
 	size_t capacity;
 };
 
-struct completion_node {
-	struct vine_task *task;
-	struct completion_node *next;
-};
-
 struct pending_publication {
 	struct vine_datavine_data_publication *publication;
 	struct jx *task;
@@ -135,15 +128,7 @@ struct recovery_result_cache {
 	uintptr_t next_token;
 };
 
-struct execution_mailbox {
-	pthread_mutex_t lock;
-	struct completion_node *head;
-	struct completion_node *tail;
-};
-
 struct execution_resources {
-	struct execution_mailbox mailbox;
-	int mailbox_initialized;
 	struct retained_root *roots;
 	struct task_defaults_index task_defaults;
 	struct itable *data;
@@ -175,17 +160,6 @@ struct execution_resources {
 	struct vine_datavine_parametric *parametric;
 	struct jx *initial_root;
 	uint8_t *parametric_remaining;
-};
-
-struct manager_owner_request {
-	void (*action)(struct vine_datavine_workflow_runtime *, void *);
-	void *argument;
-	int complete;
-	struct timespec submitted;
-	uint64_t queue_nanoseconds;
-	uint64_t execute_nanoseconds;
-	pthread_cond_t completed;
-	struct manager_owner_request *next;
 };
 
 static int retained_root_add(struct retained_root **roots, struct jx *root)
@@ -351,20 +325,9 @@ struct vine_datavine_workflow_runtime {
 	struct vine_datavine_workflow_store *store;
 	struct vine_datavine_data_controller *data_controller;
 	struct vine_manager *manager;
-	pthread_t lanes[DATAVINE_WORKFLOW_RUNTIME_LANES];
-	size_t lane_count;
-	pthread_mutex_t manager_lock;
-	pthread_mutex_t manager_request_lock;
-	struct manager_owner_request *manager_request_head;
-	struct manager_owner_request *manager_request_tail;
-	pthread_mutex_t routing_lock;
-	struct itable *completion_owners;
 	atomic_int stopping;
-	atomic_int lanes_running;
-	atomic_int workflows_running;
 	atomic_uint_fast64_t worker_connections;
 	atomic_uint_fast64_t worker_losses;
-	int single_owner_reactor;
 	volatile sig_atomic_t *external_stopping;
 };
 
@@ -374,181 +337,34 @@ static int runtime_stopping(struct vine_datavine_workflow_runtime *runtime)
 		   (runtime->external_stopping && *runtime->external_stopping);
 }
 
-static void manager_lane_lock(struct vine_datavine_workflow_runtime *runtime)
+static struct vine_task *runtime_wait(
+		struct vine_datavine_workflow_runtime *runtime,
+		int timeout_milliseconds)
 {
-	pthread_mutex_lock(&runtime->manager_lock);
-}
-
-static void manager_lane_unlock(struct vine_datavine_workflow_runtime *runtime)
-{
-	pthread_mutex_unlock(&runtime->manager_lock);
-}
-
-static void manager_owner_call(struct vine_datavine_workflow_runtime *runtime,
-		void (*action)(struct vine_datavine_workflow_runtime *, void *),
-		void *argument, uint64_t *queue_nanoseconds,
-		uint64_t *execute_nanoseconds)
-{
-	if (!runtime->single_owner_reactor) {
-		struct timespec started;
-		struct timespec finished;
-		clock_gettime(CLOCK_MONOTONIC, &started);
-		manager_lane_lock(runtime);
-		action(runtime, argument);
-		manager_lane_unlock(runtime);
-		clock_gettime(CLOCK_MONOTONIC, &finished);
-		if (execute_nanoseconds)
-			*execute_nanoseconds += elapsed_nanoseconds(&started, &finished);
-		return;
+	struct vine_task *task = vine_wait_for_milliseconds(runtime->manager,
+			timeout_milliseconds);
+	struct vine_worker_event worker_event;
+	while (vine_manager_poll_worker_event(runtime->manager, &worker_event) > 0) {
+		if (worker_event.type == VINE_WORKER_EVENT_CONNECTED)
+			atomic_fetch_add(&runtime->worker_connections, 1);
+		else if (worker_event.type == VINE_WORKER_EVENT_LOST)
+			atomic_fetch_add(&runtime->worker_losses, 1);
 	}
-	struct manager_owner_request request = {
-			.action = action,
-			.argument = argument,
-	};
-	clock_gettime(CLOCK_MONOTONIC, &request.submitted);
-	if (pthread_cond_init(&request.completed, 0))
-		abort();
-	pthread_mutex_lock(&runtime->manager_request_lock);
-	if (runtime->manager_request_tail)
-		runtime->manager_request_tail->next = &request;
-	else
-		runtime->manager_request_head = &request;
-	runtime->manager_request_tail = &request;
-	while (!request.complete)
-		pthread_cond_wait(&request.completed, &runtime->manager_request_lock);
-	pthread_mutex_unlock(&runtime->manager_request_lock);
-	if (queue_nanoseconds)
-		*queue_nanoseconds += request.queue_nanoseconds;
-	if (execute_nanoseconds)
-		*execute_nanoseconds += request.execute_nanoseconds;
-	pthread_cond_destroy(&request.completed);
-}
-
-static int manager_owner_drain(struct vine_datavine_workflow_runtime *runtime)
-{
-	int drained = 0;
-	for (;;) {
-		pthread_mutex_lock(&runtime->manager_request_lock);
-		struct manager_owner_request *request = runtime->manager_request_head;
-		if (request) {
-			runtime->manager_request_head = request->next;
-			if (!runtime->manager_request_head)
-				runtime->manager_request_tail = 0;
-		}
-		pthread_mutex_unlock(&runtime->manager_request_lock);
-		if (!request)
-			break;
-		struct timespec execution_started;
-		struct timespec execution_finished;
-		clock_gettime(CLOCK_MONOTONIC, &execution_started);
-		request->queue_nanoseconds = elapsed_nanoseconds(
-				&request->submitted, &execution_started);
-		if (!runtime->single_owner_reactor)
-			manager_lane_lock(runtime);
-		request->action(runtime, request->argument);
-		if (!runtime->single_owner_reactor)
-			manager_lane_unlock(runtime);
-		clock_gettime(CLOCK_MONOTONIC, &execution_finished);
-		request->execute_nanoseconds = elapsed_nanoseconds(
-				&execution_started, &execution_finished);
-		pthread_mutex_lock(&runtime->manager_request_lock);
-		request->complete = 1;
-		pthread_cond_signal(&request->completed);
-		pthread_mutex_unlock(&runtime->manager_request_lock);
-		drained++;
+	char *replica_path = 0;
+	int loss_status;
+	while ((loss_status = vine_manager_poll_last_replica_loss(
+				runtime->manager, &replica_path)) > 0) {
+		vine_datavine_data_controller_last_replica_lost(
+				runtime->data_controller, replica_path);
+		free(replica_path);
+		replica_path = 0;
 	}
-	return drained;
-}
-
-struct cancel_task_context {
-	int task_id;
-};
-
-static void cancel_task_on_manager(
-		struct vine_datavine_workflow_runtime *runtime, void *argument)
-{
-	struct cancel_task_context *context = argument;
-	vine_cancel_by_task_id(runtime->manager, context->task_id);
-}
-
-struct manager_stats_context {
-	struct vine_stats *stats;
-};
-
-static void get_stats_on_manager(
-		struct vine_datavine_workflow_runtime *runtime, void *argument)
-{
-	struct manager_stats_context *context = argument;
-	vine_get_stats(runtime->manager, context->stats);
-}
-
-static struct vine_task *mailbox_take(struct execution_mailbox *mailbox)
-{
-	if (!mailbox)
-		return 0;
-	pthread_mutex_lock(&mailbox->lock);
-	struct completion_node *node = mailbox->head;
-	if (node) {
-		mailbox->head = node->next;
-		if (!mailbox->head)
-			mailbox->tail = 0;
-	}
-	pthread_mutex_unlock(&mailbox->lock);
-	struct vine_task *task = node ? node->task : 0;
-	free(node);
+	if (loss_status < 0)
+		atomic_store(&runtime->stopping, 1);
 	return task;
 }
 
-static void mailbox_delete(struct execution_mailbox *mailbox)
-{
-	struct vine_task *task;
-	while ((task = mailbox_take(mailbox)))
-		vine_task_delete(task);
-	pthread_mutex_destroy(&mailbox->lock);
-}
-
-static int mailbox_put(struct execution_mailbox *mailbox,
-		struct vine_task *task)
-{
-	struct completion_node *node = malloc(sizeof(*node));
-	if (!node)
-		return 0;
-	node->task = task;
-	node->next = 0;
-	pthread_mutex_lock(&mailbox->lock);
-	if (mailbox->tail)
-		mailbox->tail->next = node;
-	else
-		mailbox->head = node;
-	mailbox->tail = node;
-	pthread_mutex_unlock(&mailbox->lock);
-	return 1;
-}
-
-static struct vine_task *runtime_wait(
-		struct vine_datavine_workflow_runtime *runtime,
-		struct execution_mailbox *mailbox, int timeout_seconds)
-{
-	struct timespec started;
-	clock_gettime(CLOCK_MONOTONIC, &started);
-	for (;;) {
-		struct vine_task *task = mailbox_take(mailbox);
-		if (task)
-			return task;
-		if (!timeout_seconds)
-			return 0;
-		struct timespec now;
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		if (now.tv_sec - started.tv_sec >= timeout_seconds)
-			return 0;
-		if (runtime_stopping(runtime))
-			return 0;
-		usleep(1000);
-	}
-}
-
 static void cancel_running_tasks(struct vine_datavine_workflow_runtime *runtime,
-		struct execution_mailbox *mailbox,
 		struct itable *physical_to_logical, uint64_t running)
 {
 	uint64_t physical_id;
@@ -556,27 +372,19 @@ static void cancel_running_tasks(struct vine_datavine_workflow_runtime *runtime,
 	int iterator;
 	ITABLE_ITERATE(physical_to_logical, iterator, physical_id, logical_value)
 	{
-		struct cancel_task_context context = {.task_id = (int)physical_id};
-		manager_owner_call(runtime, cancel_task_on_manager, &context, 0, 0);
+		vine_cancel_by_task_id(runtime->manager, (int)physical_id);
 	}
 	while (running) {
-		struct vine_task *cancelled = runtime_wait(runtime, mailbox, 1);
+		struct vine_task *cancelled = runtime_wait(runtime, 1000);
 		if (!cancelled && runtime_stopping(runtime)) {
 			ITABLE_ITERATE(physical_to_logical, iterator, physical_id, logical_value)
 			{
-				pthread_mutex_lock(&runtime->routing_lock);
-				itable_remove(runtime->completion_owners, physical_id);
-				pthread_mutex_unlock(&runtime->routing_lock);
 				physical_attempt_delete(logical_value);
 			}
 			return;
 		}
 		if (!cancelled)
 			continue;
-		pthread_mutex_lock(&runtime->routing_lock);
-		itable_remove(runtime->completion_owners,
-				(uint64_t)vine_task_get_id(cancelled));
-		pthread_mutex_unlock(&runtime->routing_lock);
 		physical_attempt_delete(itable_remove(physical_to_logical,
 				(uint64_t)vine_task_get_id(cancelled)));
 		vine_task_delete(cancelled);
@@ -584,22 +392,12 @@ static void cancel_running_tasks(struct vine_datavine_workflow_runtime *runtime,
 	}
 }
 
-/* Submit exactly one logical task as exactly one TaskVine task.  The caller
- * owns manager_lock so no other workflow lane can interleave Manager calls. */
+/* Submit exactly one logical task as exactly one TaskVine task. The workflow
+ * reactor is the sole Manager owner. */
 static int runtime_submit_locked(struct vine_datavine_workflow_runtime *runtime,
-		struct vine_task *task, struct execution_mailbox *mailbox)
+		struct vine_task *task)
 {
-	int task_id = vine_submit(runtime->manager, task);
-	if (task_id > 0) {
-		pthread_mutex_lock(&runtime->routing_lock);
-		if (!itable_insert(runtime->completion_owners, (uint64_t)task_id, mailbox)) {
-			/* The Manager already accepted the task. Returning a rejection would
-			 * orphan its completion, so fail-stop and let journal recovery retry. */
-			abort();
-		}
-		pthread_mutex_unlock(&runtime->routing_lock);
-	}
-	return task_id;
+	return vine_submit(runtime->manager, task);
 }
 
 static void put_little_u64(unsigned char *buffer, uint64_t value)
@@ -879,14 +677,12 @@ static int __attribute__((unused)) prepare_delta_inputs(struct vine_datavine_wor
 		const char *kind = jx_lookup_string(origin, "kind");
 		if (!strcmp(kind, "inline") || !strcmp(kind, "uri") ||
 				!strcmp(kind, "object")) {
-			manager_lane_lock(runtime);
 			int prepared = prepare_origin(runtime->data_controller,
 					runtime->manager,
 					data_id,
 					record,
 					default_codec,
 					files);
-			manager_lane_unlock(runtime);
 			if (!prepared)
 				return 0;
 		}
@@ -903,7 +699,6 @@ static int __attribute__((unused)) prepare_delta_inputs(struct vine_datavine_wor
 			struct jx *data_item = data_record(data, data_id);
 			if (!data_item || !vine_datavine_ir_data_is_output(data_item))
 				continue;
-			manager_lane_lock(runtime);
 			struct vine_file *file =
 					vine_datavine_data_controller_restore_file(
 							runtime->data_controller, runtime->manager, workflow_id, data_id);
@@ -920,7 +715,6 @@ static int __attribute__((unused)) prepare_delta_inputs(struct vine_datavine_wor
 				}
 			}
 			int inserted = file && itable_insert(files, data_id, file);
-			manager_lane_unlock(runtime);
 			if (!inserted)
 				continue;
 		}
@@ -2616,7 +2410,6 @@ static int __attribute__((unused)) restore_published_outputs(
 	struct jx *outputs = vine_datavine_ir_task_outputs(task);
 	int count = jx_array_length(outputs);
 	int valid = count > 0;
-	manager_lane_lock(runtime);
 	for (int index = 0; valid && index < count; index++) {
 		uint64_t data_id = (uint64_t)jx_array_index(
 				outputs, index)
@@ -2633,33 +2426,24 @@ static int __attribute__((unused)) restore_published_outputs(
 			valid = 0;
 		}
 	}
-	manager_lane_unlock(runtime);
 	return valid;
 }
 
-struct release_results_context {
-	const char *workflow_id;
-	struct itable *files;
-	uint64_t *data_ids;
-	size_t count;
-	int valid;
-};
-
-static void release_results_on_manager(
-		struct vine_datavine_workflow_runtime *runtime, void *argument)
+static int release_results(struct vine_datavine_workflow_runtime *runtime,
+		const char *workflow_id, struct itable *files,
+		uint64_t *data_ids, size_t count)
 {
-	struct release_results_context *context = argument;
-	context->valid = 1;
-	for (size_t offset = 0; context->valid && offset < context->count;) {
-		size_t batch = context->count - offset;
+	int valid = 1;
+	for (size_t offset = 0; valid && offset < count;) {
+		size_t batch = count - offset;
 		if (batch > UINT16_MAX)
 			batch = UINT16_MAX;
-		context->valid = vine_datavine_data_controller_release_results(
+		valid = vine_datavine_data_controller_release_results(
 				runtime->data_controller, runtime->manager,
-				context->workflow_id, context->files,
-				context->data_ids + offset, batch);
+				workflow_id, files, data_ids + offset, batch);
 		offset += batch;
 	}
+	return valid;
 }
 
 static int recovery_cache_retain(
@@ -2711,14 +2495,8 @@ static int recovery_cache_retain(
 		}
 	}
 	if (valid && release_count) {
-		struct release_results_context context = {
-				.workflow_id = workflow_id,
-				.files = files,
-				.data_ids = release,
-				.count = release_count,
-		};
-		manager_owner_call(runtime, release_results_on_manager, &context, 0, 0);
-		valid = context.valid;
+		valid = release_results(runtime, workflow_id, files, release,
+				release_count);
 		if (valid)
 			cache->evictions += release_count;
 	}
@@ -3037,8 +2815,6 @@ static void execution_resources_delete(struct execution_resources *resources)
 	if (resources->data)
 		itable_delete(resources->data);
 	retained_roots_delete(resources->roots);
-	if (resources->mailbox_initialized)
-		mailbox_delete(&resources->mailbox);
 }
 
 static int execution_resources_create(struct execution_resources *resources,
@@ -3047,9 +2823,6 @@ static int execution_resources_create(struct execution_resources *resources,
 {
 	memset(resources, 0, sizeof(*resources));
 	buffer_init(&resources->recovered_tasks);
-	if (pthread_mutex_init(&resources->mailbox.lock, 0))
-		return 0;
-	resources->mailbox_initialized = 1;
 	struct jx *root = jx_parse_string_and_length(document, (int)document_size);
 	resources->initial_root = root;
 	int valid = retained_root_add(&resources->roots, root) &&
@@ -3197,7 +2970,6 @@ struct submit_batch_context {
 	const char *workflow_id;
 	struct execution_resources *resources;
 	struct vine_datavine_workflow_info *workflow_info;
-	struct execution_mailbox *mailbox;
 	uint64_t *running;
 	uint64_t *recovery_inflight;
 	uint64_t *physical_submissions;
@@ -3212,30 +2984,11 @@ struct submit_batch_context {
 	size_t event_count;
 };
 
-struct take_losses_context {
-	const char *workflow_id;
-	struct itable *files;
-	uint64_t **lost_data_ids;
-	size_t *lost_count;
-	int valid;
-};
-
-static void take_losses_on_manager(
-		struct vine_datavine_workflow_runtime *runtime, void *argument)
+/* The workflow reactor is the sole Manager owner and submits one bounded batch
+ * before returning to Manager progress. */
+static void submit_batch(struct vine_datavine_workflow_runtime *runtime,
+		struct submit_batch_context *context)
 {
-	struct take_losses_context *context = argument;
-	context->valid = vine_datavine_data_controller_take_workflow_losses(
-			runtime->data_controller, runtime->manager, context->workflow_id,
-			context->files, context->lost_data_ids, context->lost_count);
-}
-
-/* The Manager reactor is the sole executor of this callback. Workflow lanes
- * prepare logical state and wait for this bounded physical submission batch;
- * they never compete with vine_wait for Manager ownership in reactor mode. */
-static void submit_batch_on_manager(
-		struct vine_datavine_workflow_runtime *runtime, void *argument)
-{
-	struct submit_batch_context *context = argument;
 	struct execution_resources *resources = context->resources;
 	struct itable *tasks = resources->tasks;
 	struct itable *data = resources->data;
@@ -3302,7 +3055,7 @@ static void submit_batch_on_manager(
 		}
 		clock_gettime(CLOCK_MONOTONIC, &stage_started);
 		int physical_id = mapping
-				? runtime_submit_locked(runtime, physical, context->mailbox) : -1;
+				? runtime_submit_locked(runtime, physical) : -1;
 		clock_gettime(CLOCK_MONOTONIC, &stage_finished);
 		*context->submit_nanoseconds += elapsed_nanoseconds(
 				&stage_started, &stage_finished);
@@ -3377,7 +3130,7 @@ static void submit_batch_on_manager(
 			break;
 		}
 		clock_gettime(CLOCK_MONOTONIC, &stage_started);
-		int physical_id = runtime_submit_locked(runtime, physical, context->mailbox);
+		int physical_id = runtime_submit_locked(runtime, physical);
 		clock_gettime(CLOCK_MONOTONIC, &stage_finished);
 		*context->submit_nanoseconds += elapsed_nanoseconds(
 				&stage_started, &stage_finished);
@@ -3417,7 +3170,6 @@ static void submit_batch_on_manager(
 struct retry_submit_context {
 	const char *workflow_id;
 	struct execution_resources *resources;
-	struct execution_mailbox *mailbox;
 	struct jx *task;
 	int64_t logical_id;
 	uint32_t next_attempt;
@@ -3430,10 +3182,9 @@ struct retry_submit_context {
 	int physical_id;
 };
 
-static void retry_submit_on_manager(
-		struct vine_datavine_workflow_runtime *runtime, void *argument)
+static void retry_submit(struct vine_datavine_workflow_runtime *runtime,
+		struct retry_submit_context *context)
 {
-	struct retry_submit_context *context = argument;
 	struct execution_resources *resources = context->resources;
 	uint64_t retry_logical_id = (uint64_t)context->logical_id;
 	if (context->recovery_attempt && !resources->parametric)
@@ -3458,7 +3209,7 @@ static void retry_submit_on_manager(
 		context->mapping->parametric_view = context->retry_view;
 	}
 	context->physical_id = context->mapping
-			? runtime_submit_locked(runtime, context->retry, context->mailbox) : -1;
+			? runtime_submit_locked(runtime, context->retry) : -1;
 	context->valid = context->physical_id > 0 && context->mapping &&
 			itable_insert(resources->physical_to_logical,
 					(uint64_t)context->physical_id, context->mapping);
@@ -3471,7 +3222,6 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 	clock_gettime(CLOCK_MONOTONIC, &execution_started);
 	struct execution_resources resources;
 	int valid = execution_resources_create(&resources, runtime, workflow_id, document, document_size);
-	struct execution_mailbox *mailbox = &resources.mailbox;
 	struct itable *data = resources.data;
 	struct itable *tasks = resources.tasks;
 	struct itable *files = resources.files;
@@ -3491,10 +3241,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 	int report_metrics = stderr_metrics || (profile_path && profile_path[0]);
 	struct vine_stats manager_stats_before = {0};
 	struct vine_stats manager_stats_after = {0};
-	if (report_metrics) {
-		struct manager_stats_context context = {.stats = &manager_stats_before};
-		manager_owner_call(runtime, get_stats_on_manager, &context, 0, 0);
-	}
+	if (report_metrics)
+		vine_get_stats(runtime->manager, &manager_stats_before);
 	if (report_metrics && !valid)
 		fprintf(stderr, "datavine workflow %s setup_failed=1\n", workflow_id);
 	struct timespec setup_finished;
@@ -3506,9 +3254,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 	uint32_t uncheckpointed_completions = 0;
 	uint64_t materialize_nanoseconds = 0;
 	uint64_t submit_nanoseconds = 0;
-	uint64_t manager_lock_nanoseconds = 0;
-	uint64_t manager_owner_queue_nanoseconds = 0;
-	uint64_t manager_owner_execute_nanoseconds = 0;
+	uint64_t reactor_submit_nanoseconds = 0;
 	uint64_t manager_submission_frontier = 0;
 	uint64_t submission_event_nanoseconds = 0;
 	uint64_t publish_nanoseconds = 0;
@@ -3635,14 +3381,9 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			observed_data_losses = data_losses;
 			uint64_t *lost_data_ids = 0;
 			size_t lost_count = 0;
-			struct take_losses_context context = {
-					.workflow_id = workflow_id,
-					.files = files,
-					.lost_data_ids = &lost_data_ids,
-					.lost_count = &lost_count,
-			};
-			manager_owner_call(runtime, take_losses_on_manager, &context, 0, 0);
-			valid = context.valid;
+			valid = vine_datavine_data_controller_take_workflow_losses(
+					runtime->data_controller, runtime->manager, workflow_id,
+					files, &lost_data_ids, &lost_count);
 			if (!valid)
 				failure_stage = "recovery_take_losses";
 			if (valid && lost_count) {
@@ -3716,12 +3457,11 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			resources.recovery_active_count = 0;
 			resources.recovery_admission_cursor = 0;
 		}
-		if (runtime->single_owner_reactor) {
+		{
 			struct submit_batch_context context = {
 					.workflow_id = workflow_id,
 					.resources = &resources,
 					.workflow_info = &workflow_info,
-					.mailbox = mailbox,
 					.running = &running,
 					.recovery_inflight = &recovery_inflight,
 					.physical_submissions = &physical_submissions,
@@ -3732,9 +3472,13 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 					.valid = valid,
 					.failure_stage = failure_stage,
 			};
-			manager_owner_call(runtime, submit_batch_on_manager, &context,
-					&manager_owner_queue_nanoseconds,
-					&manager_owner_execute_nanoseconds);
+			struct timespec submit_batch_started;
+			struct timespec submit_batch_finished;
+			clock_gettime(CLOCK_MONOTONIC, &submit_batch_started);
+			submit_batch(runtime, &context);
+			clock_gettime(CLOCK_MONOTONIC, &submit_batch_finished);
+			reactor_submit_nanoseconds += elapsed_nanoseconds(
+					&submit_batch_started, &submit_batch_finished);
 			valid = context.valid;
 			failure_stage = context.failure_stage;
 			if (context.event_count) {
@@ -3753,183 +3497,6 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 							"datavine workflow %s event_failed code=%d path=%s detail=%s\n",
 							workflow_id, event_error.code, event_error.path,
 							event_error.message);
-				valid = valid && recorded;
-			}
-		} else {
-		int64_t logical_id;
-		struct timespec manager_lock_started;
-		struct timespec manager_lock_finished;
-		clock_gettime(CLOCK_MONOTONIC, &manager_lock_started);
-		manager_lane_lock(runtime);
-		clock_gettime(CLOCK_MONOTONIC, &manager_lock_finished);
-		manager_lock_nanoseconds += elapsed_nanoseconds(
-				&manager_lock_started, &manager_lock_finished);
-		struct vine_datavine_workflow_task_event_record
-				submission_events[DATAVINE_WORKFLOW_EVENT_BATCH];
-		size_t submission_event_count = 0;
-		while (valid && resources.recovery_head < resources.recovery_tail &&
-				running < VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW +
-					VINE_DATAVINE_WORKFLOW_RECOVERY_RESERVE &&
-				submission_event_count < DATAVINE_WORKFLOW_EVENT_BATCH &&
-				resources.recovery_head < resources.recovery_tail) {
-			uint64_t task_id = resources.recovery_queue[resources.recovery_head++];
-			valid = task_id > 0 && task_id <= maximum_task_id &&
-					resources.recovery_state[task_id] ==
-							PARAMETRIC_RECOVERY_QUEUED;
-			if (!valid)
-				break;
-			uint32_t attempt = attempts[task_id] + 1;
-			struct parametric_task_view *parametric_view = 0;
-			struct timespec stage_started;
-			struct timespec stage_finished;
-			clock_gettime(CLOCK_MONOTONIC, &stage_started);
-			if (valid && resources.parametric)
-				valid = parametric_recovery_begin(runtime, workflow_id, &resources,
-						task_id);
-			struct vine_task *physical = !valid ? 0
-					: resources.parametric
-						? materialize_parametric(runtime, workflow_id, &resources,
-								task_id, attempt, 1, &parametric_view)
-						: materialize(runtime->manager,
-								runtime->data_controller, workflow_id,
-								itable_lookup(tasks, task_id), data, files,
-								pending_consumers, resources.origin_tickets,
-								requested, &resources.task_defaults, attempt, 1);
-			/* Recovery producers must pass consumers already queued behind the
-			 * missing generation. */
-			if (physical)
-				vine_task_set_priority(physical, 1e12);
-			clock_gettime(CLOCK_MONOTONIC, &stage_finished);
-			materialize_nanoseconds += elapsed_nanoseconds(&stage_started,
-					&stage_finished);
-			struct physical_attempt *mapping = physical
-					? calloc(1, sizeof(*mapping)) : 0;
-			if (mapping) {
-				mapping->logical_id = (int64_t)task_id;
-				mapping->attempt = attempt;
-				mapping->recovery = 1;
-				mapping->parametric_view = parametric_view;
-			}
-			clock_gettime(CLOCK_MONOTONIC, &stage_started);
-			int physical_id = mapping
-					? runtime_submit_locked(runtime, physical, mailbox) : -1;
-			clock_gettime(CLOCK_MONOTONIC, &stage_finished);
-			submit_nanoseconds += elapsed_nanoseconds(&stage_started,
-					&stage_finished);
-			valid = physical_id > 0 && mapping &&
-				itable_insert(physical_to_logical, (uint64_t)physical_id, mapping);
-			if (valid) {
-				attempts[task_id] = attempt;
-				resources.recovery_state[task_id] =
-						PARAMETRIC_RECOVERY_RUNNING;
-				if (!resources.parametric && !resources.recovery_active[task_id]) {
-					valid = resources.recovery_active_count <= maximum_task_id;
-					if (valid) {
-						resources.recovery_active[task_id] = 1;
-						resources.recovery_active_tasks[
-								resources.recovery_active_count++] = task_id;
-					}
-				}
-				running++;
-				recovery_inflight++;
-				physical_submissions++;
-				submission_events[submission_event_count++] =
-						(struct vine_datavine_workflow_task_event_record){
-								.type = VINE_DATAVINE_WORKFLOW_TASK_SUBMITTED,
-								.task_id = (int64_t)task_id,
-								.attempt = attempt,
-						};
-			} else {
-				failure_stage = physical ? "recovery_submit"
-						: "recovery_materialize";
-				resources.recovery_state[task_id] = PARAMETRIC_RECOVERY_NONE;
-				physical_attempt_delete(mapping);
-				if (!mapping)
-					parametric_task_view_delete(parametric_view);
-				if (physical_id < 1 && physical)
-					vine_task_delete(physical);
-			}
-		}
-		if (resources.recovery_head == resources.recovery_tail)
-			resources.recovery_head = resources.recovery_tail = 0;
-		while ((resources.parametric ||
-				(!recovery_inflight && !resources.recovery_awaiting_admission &&
-				 resources.recovery_head == resources.recovery_tail)) &&
-				running < VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW &&
-				submission_event_count < DATAVINE_WORKFLOW_EVENT_BATCH &&
-				(logical_id = vine_datavine_scheduler_take(scheduler)) > 0) {
-			struct jx *task = resources.parametric ? 0
-					: itable_lookup(tasks, (uint64_t)logical_id);
-			struct parametric_task_view *parametric_view = 0;
-			struct timespec stage_started;
-			struct timespec stage_finished;
-			clock_gettime(CLOCK_MONOTONIC, &stage_started);
-			struct vine_task *physical = resources.parametric
-					? materialize_parametric(runtime, workflow_id, &resources,
-							(uint64_t)logical_id, attempts[logical_id] + 1,
-							workflow_info.state != VINE_DATAVINE_WORKFLOW_RUNNING,
-							&parametric_view)
-					: materialize(runtime->manager, runtime->data_controller,
-							workflow_id, task, data, files, pending_consumers,
-							resources.origin_tickets, requested,
-							&resources.task_defaults,
-							attempts[logical_id] + 1,
-							workflow_info.state != VINE_DATAVINE_WORKFLOW_RUNNING);
-			clock_gettime(CLOCK_MONOTONIC, &stage_finished);
-			materialize_nanoseconds += elapsed_nanoseconds(
-					&stage_started, &stage_finished);
-			if (!physical) {
-				if (report_metrics)
-					fprintf(stderr, "datavine workflow %s materialize_failed task=%lld\n", workflow_id, (long long)logical_id);
-				valid = 0;
-				break;
-			}
-			clock_gettime(CLOCK_MONOTONIC, &stage_started);
-			int physical_id = runtime_submit_locked(runtime, physical, mailbox);
-			clock_gettime(CLOCK_MONOTONIC, &stage_finished);
-			submit_nanoseconds += elapsed_nanoseconds(&stage_started, &stage_finished);
-			struct physical_attempt *mapping = physical_id > 0
-					? calloc(1, sizeof(*mapping)) : 0;
-			if (mapping) {
-				mapping->logical_id = logical_id;
-				mapping->attempt = attempts[logical_id] + 1;
-				mapping->parametric_view = parametric_view;
-			}
-			if (physical_id < 1 || !mapping || !itable_insert(physical_to_logical,
-								   (uint64_t)physical_id, mapping)) {
-				if (report_metrics)
-					fprintf(stderr, "datavine workflow %s submit_failed task=%lld physical=%d\n", workflow_id, (long long)logical_id, physical_id);
-				physical_attempt_delete(mapping);
-				if (!mapping)
-					parametric_task_view_delete(parametric_view);
-				if (physical_id < 1)
-					vine_task_delete(physical);
-				valid = 0;
-				break;
-			}
-			running++;
-			physical_submissions++;
-			attempts[logical_id]++;
-			submission_events[submission_event_count++] =
-					(struct vine_datavine_workflow_task_event_record){
-							.type = VINE_DATAVINE_WORKFLOW_TASK_SUBMITTED,
-							.task_id = logical_id,
-							.attempt = attempts[logical_id],
-					};
-		}
-		manager_lane_unlock(runtime);
-		if (submission_event_count) {
-			struct vine_datavine_workflow_error event_error;
-			struct timespec event_started;
-			struct timespec event_finished;
-			clock_gettime(CLOCK_MONOTONIC, &event_started);
-			int recorded = vine_datavine_workflow_store_record_task_events(
-					runtime->store, workflow_id, submission_events, submission_event_count, &event_error);
-			clock_gettime(CLOCK_MONOTONIC, &event_finished);
-			submission_event_nanoseconds += elapsed_nanoseconds(
-					&event_started, &event_finished);
-				if (!recorded && report_metrics)
-					fprintf(stderr, "datavine workflow %s event_failed code=%d path=%s detail=%s\n", workflow_id, event_error.code, event_error.path, event_error.message);
 				valid = valid && recorded;
 			}
 		}
@@ -3977,7 +3544,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			valid = 0;
 			break;
 		}
-		struct vine_task *completed = runtime_wait(runtime, mailbox, 1);
+		struct vine_task *completed = runtime_wait(runtime, 1000);
 		if (!completed)
 			continue;
 		int drained_completions = 0;
@@ -4001,9 +3568,6 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				stage_out_microseconds += (uint64_t)(done_at - retrieval_started);
 			task_bytes_sent += (uint64_t)vine_task_get_metric(completed, "bytes_sent");
 			task_bytes_received += (uint64_t)vine_task_get_metric(completed, "bytes_received");
-			pthread_mutex_lock(&runtime->routing_lock);
-			itable_remove(runtime->completion_owners, (uint64_t)physical_id);
-			pthread_mutex_unlock(&runtime->routing_lock);
 			struct physical_attempt *mapping = itable_remove(
 					physical_to_logical, (uint64_t)physical_id);
 			int64_t completed_logical_id = mapping ? mapping->logical_id : 0;
@@ -4150,7 +3714,6 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				struct retry_submit_context retry_context = {
 						.workflow_id = workflow_id,
 						.resources = &resources,
-						.mailbox = mailbox,
 						.task = task,
 						.logical_id = completed_logical_id,
 						.next_attempt = next_attempt,
@@ -4158,8 +3721,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 						.retain_all = retry_retain_all,
 						.valid = task_valid,
 				};
-				manager_owner_call(runtime, retry_submit_on_manager,
-						&retry_context, 0, 0);
+				retry_submit(runtime, &retry_context);
 				task_valid = retry_context.valid;
 				struct vine_task *retry = retry_context.retry;
 				struct parametric_task_view *retry_view = retry_context.retry_view;
@@ -4253,7 +3815,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 			drained_completions++;
 			completed = valid &&
 					drained_completions < DATAVINE_WORKFLOW_EVENT_BATCH
-							? runtime_wait(runtime, mailbox, 0)
+							? runtime_wait(runtime, 0)
 							: 0;
 		} while (completed);
 		if (parametric_completion_event_count) {
@@ -4271,7 +3833,7 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 		}
 	}
 	if (running)
-		cancel_running_tasks(runtime, mailbox, physical_to_logical, running);
+		cancel_running_tasks(runtime, physical_to_logical, running);
 	if (report_metrics && !valid)
 		fprintf(stderr,
 				"datavine workflow %s runtime_invalid stage=%s running=%llu\n",
@@ -4296,10 +3858,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 	size_t recovery_cache_limit = resources.recovery_cache.limit;
 	uint64_t recovery_cache_evictions = resources.recovery_cache.evictions;
 	execution_resources_delete(&resources);
-	if (report_metrics) {
-		struct manager_stats_context context = {.stats = &manager_stats_after};
-		manager_owner_call(runtime, get_stats_on_manager, &context, 0, 0);
-	}
+	if (report_metrics)
+		vine_get_stats(runtime->manager, &manager_stats_after);
 	size_t controller_active_results = 0;
 	size_t controller_peak_results = 0;
 	if (report_metrics)
@@ -4426,9 +3986,9 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 				(unsigned long long)physical_completions,
 				materialize_nanoseconds / 1e9,
 					submit_nanoseconds / 1e9,
-					manager_lock_nanoseconds / 1e9,
-					manager_owner_queue_nanoseconds / 1e9,
-					manager_owner_execute_nanoseconds / 1e9,
+					0.0,
+					0.0,
+					reactor_submit_nanoseconds / 1e9,
 					(unsigned long long)manager_submission_frontier,
 				submission_event_nanoseconds / 1e9,
 				publish_nanoseconds / 1e9,
@@ -4505,22 +4065,8 @@ static int execute_document(struct vine_datavine_workflow_runtime *runtime,
 	return valid && !runtime_stopping(runtime);
 }
 
-struct finish_workflow_context {
-	const char *workflow_id;
-};
-
-static void finish_workflow_on_manager(
-		struct vine_datavine_workflow_runtime *runtime, void *argument)
+static void runtime_main(struct vine_datavine_workflow_runtime *runtime)
 {
-	struct finish_workflow_context *context = argument;
-	vine_datavine_data_controller_finish_workflow(runtime->data_controller,
-			runtime->manager, context->workflow_id);
-}
-
-static void *runtime_main(void *argument)
-{
-	struct vine_datavine_workflow_runtime *runtime = argument;
-	atomic_fetch_add(&runtime->lanes_running, 1);
 	while (!runtime_stopping(runtime)) {
 		struct vine_datavine_workflow_info info;
 		char *document = 0;
@@ -4529,12 +4075,13 @@ static void *runtime_main(void *argument)
 					&info,
 					&document,
 					&document_size)) {
+			struct vine_task *unexpected = runtime_wait(runtime, 10);
+			if (unexpected)
+				vine_task_delete(unexpected);
 			usleep(1000);
 			continue;
 		}
-		atomic_fetch_add(&runtime->workflows_running, 1);
 		int outcome = execute_document(runtime, info.workflow_id, document, document_size);
-		atomic_fetch_sub(&runtime->workflows_running, 1);
 		free(document);
 		if (!runtime_stopping(runtime) && outcome == 3) {
 			struct vine_datavine_workflow_error error;
@@ -4548,16 +4095,12 @@ static void *runtime_main(void *argument)
 						outcome == 1,
 						&info,
 						&error)) {
-				struct finish_workflow_context context = {
-						.workflow_id = info.workflow_id,
-				};
-				manager_owner_call(runtime, finish_workflow_on_manager,
-						&context, 0, 0);
+				vine_datavine_data_controller_finish_workflow(
+						runtime->data_controller, runtime->manager,
+						info.workflow_id);
 			}
 		}
 	}
-	atomic_fetch_sub(&runtime->lanes_running, 1);
-	return 0;
 }
 
 struct vine_datavine_workflow_runtime *vine_datavine_workflow_runtime_start(
@@ -4609,7 +4152,7 @@ struct vine_datavine_workflow_runtime *vine_datavine_workflow_runtime_start(
 	 * its native FunctionCall resource model and prevents fork overcommit. */
 	vine_task_set_function_exec_mode_from_string(python_library, "fork");
 	vine_manager_install_library(manager, python_library, "datavine-python-v1");
-	/* Workflow lanes briefly acquire the Manager lock between progress cycles. */
+	/* The workflow reactor is the sole Manager owner. */
 	vine_tune(manager, "idle-poll-milliseconds", 10);
 	vine_tune(manager, "max-retrievals", 256);
 	const char *worker_first = getenv("DATAVINE_WORKER_FIRST_SCHEDULING");
@@ -4619,13 +4162,8 @@ struct vine_datavine_workflow_runtime *vine_datavine_workflow_runtime_start(
 	if (!runtime)
 		return 0;
 	atomic_init(&runtime->stopping, 0);
-	atomic_init(&runtime->lanes_running, 0);
-	atomic_init(&runtime->workflows_running, 0);
 	atomic_init(&runtime->worker_connections, 0);
 	atomic_init(&runtime->worker_losses, 0);
-	const char *single_owner = getenv("DATAVINE_SINGLE_OWNER_REACTOR");
-	runtime->single_owner_reactor = single_owner && single_owner[0] &&
-			strcmp(single_owner, "0");
 	runtime->store = store;
 	runtime->data_controller = data_controller;
 	runtime->manager = manager;
@@ -4634,29 +4172,6 @@ struct vine_datavine_workflow_runtime *vine_datavine_workflow_runtime_start(
 		return 0;
 	}
 	if (!vine_manager_enable_last_replica_loss_events(manager)) {
-		free(runtime);
-		return 0;
-	}
-	runtime->completion_owners = itable_create(0);
-	if (!runtime->completion_owners) {
-		free(runtime);
-		return 0;
-	}
-	if (pthread_mutex_init(&runtime->manager_lock, 0)) {
-		itable_delete(runtime->completion_owners);
-		free(runtime);
-		return 0;
-	}
-	if (pthread_mutex_init(&runtime->manager_request_lock, 0)) {
-		pthread_mutex_destroy(&runtime->manager_lock);
-		itable_delete(runtime->completion_owners);
-		free(runtime);
-		return 0;
-	}
-	if (pthread_mutex_init(&runtime->routing_lock, 0)) {
-		pthread_mutex_destroy(&runtime->manager_request_lock);
-		pthread_mutex_destroy(&runtime->manager_lock);
-		itable_delete(runtime->completion_owners);
 		free(runtime);
 		return 0;
 	}
@@ -4670,71 +4185,7 @@ void vine_datavine_workflow_runtime_run(
 	if (!runtime)
 		return;
 	runtime->external_stopping = external_stopping;
-	for (size_t index = 0; index < DATAVINE_WORKFLOW_RUNTIME_LANES; index++) {
-		if (pthread_create(&runtime->lanes[index], 0, runtime_main, runtime))
-			break;
-		runtime->lane_count++;
-	}
-	if (!runtime->lane_count) {
-		atomic_store(&runtime->stopping, 1);
-		return;
-	}
-	int poll_milliseconds = 10;
-	while (!runtime_stopping(runtime) || atomic_load(&runtime->lanes_running)) {
-		if (runtime->single_owner_reactor)
-			manager_owner_drain(runtime);
-		int desired = atomic_load(&runtime->workflows_running) ? 1 : 10;
-		if (!runtime->single_owner_reactor)
-			manager_lane_lock(runtime);
-		if (desired != poll_milliseconds) {
-			vine_tune(runtime->manager, "idle-poll-milliseconds", desired);
-			poll_milliseconds = desired;
-		}
-		struct vine_task *task = vine_wait_for_milliseconds(runtime->manager,
-				poll_milliseconds);
-		struct vine_worker_event worker_event;
-		while (vine_manager_poll_worker_event(runtime->manager, &worker_event) > 0) {
-			if (worker_event.type == VINE_WORKER_EVENT_CONNECTED)
-				atomic_fetch_add(&runtime->worker_connections, 1);
-			else if (worker_event.type == VINE_WORKER_EVENT_LOST) {
-				atomic_fetch_add(&runtime->worker_losses, 1);
-			}
-		}
-		char *replica_losses[4096];
-		size_t replica_loss_count = 0;
-		int replica_loss_status = 0;
-		while (replica_loss_count < sizeof(replica_losses) / sizeof(replica_losses[0]) &&
-				(replica_loss_status = vine_manager_poll_last_replica_loss(
-						 runtime->manager,
-						 &replica_losses[replica_loss_count])) > 0)
-			replica_loss_count++;
-		if (!runtime->single_owner_reactor)
-			manager_lane_unlock(runtime);
-		for (size_t index = 0; index < replica_loss_count; index++) {
-			vine_datavine_data_controller_last_replica_lost(
-					runtime->data_controller, replica_losses[index]);
-			free(replica_losses[index]);
-		}
-		if (replica_loss_status < 0)
-			atomic_store(&runtime->stopping, 1);
-		if (task) {
-			pthread_mutex_lock(&runtime->routing_lock);
-			struct execution_mailbox *owner = itable_lookup(
-					runtime->completion_owners,
-					(uint64_t)vine_task_get_id(task));
-			pthread_mutex_unlock(&runtime->routing_lock);
-			if (!owner)
-				vine_task_delete(task);
-			else if (!mailbox_put(owner, task))
-				abort();
-		} else {
-			usleep(1000);
-		}
-	}
-	atomic_store(&runtime->stopping, 1);
-	for (size_t index = 0; index < runtime->lane_count; index++)
-		pthread_join(runtime->lanes[index], 0);
-	runtime->lane_count = 0;
+	runtime_main(runtime);
 }
 
 void vine_datavine_workflow_runtime_stop(
@@ -4743,9 +4194,5 @@ void vine_datavine_workflow_runtime_stop(
 	if (!runtime)
 		return;
 	atomic_store(&runtime->stopping, 1);
-	pthread_mutex_destroy(&runtime->routing_lock);
-	pthread_mutex_destroy(&runtime->manager_request_lock);
-	pthread_mutex_destroy(&runtime->manager_lock);
-	itable_delete(runtime->completion_owners);
 	free(runtime);
 }

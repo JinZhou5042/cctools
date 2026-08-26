@@ -1,6 +1,6 @@
 # DataVine Runtime v2: decoupled task and data planes
 
-Status: **NATIVE RUNTIME PASS; SINGLE-OWNER REACTOR OPT-IN**
+Status: **NATIVE SINGLE-WORKFLOW REACTOR PASS**
 
 Updated: 2026-08-26
 
@@ -44,25 +44,26 @@ is normal worker activity and must never be interpreted as permanent data
 loss. Non-retryable copy failures retain an operation-specific errno, with
 diagnostics bounded per worker so one bad origin cannot create a log storm.
 
-The in-flight window and event-loop batch are deliberately distinct. Runtime
-may retain 4,096 physical tasks, but creates/submits and drains at most 128 per
-Manager-lane turn so connection acceptance, heartbeats, and status traffic are
-not starved by graph materialization. `FORSAKEN` denotes infrastructure
+The in-flight window and event-loop batches are deliberately distinct. Runtime
+submits at most 4,096 tasks and drains at most 128 completions per reactor turn,
+so connection acceptance, heartbeats, and Controller events remain bounded.
+`FORSAKEN` denotes infrastructure
 reclamation and is resubmitted with a separate 64-attempt safety bound; it does
 not consume `maximum_attempts`, which remains the application-failure policy.
 The underlying generic link listener uses the operating system `SOMAXCONN`
 backlog instead of five, allowing a 128-worker startup burst to queue safely
 across those bounded Manager turns.
 
-The opt-in `DATAVINE_SINGLE_OWNER_REACTOR=1` path makes the runtime progress
-thread the sole caller of active TaskVine Manager operations. Workflow lanes
-retain parallel logical state progress, but submit bounded Manager commands to
-the owner instead of competing with `vine_wait` for a shared Manager mutex.
+Each frontend process has exactly one active workflow. One C reactor advances its DAG,
+submits physical tasks, calls `vine_wait`, consumes completions, and handles
+Worker-loss notifications. There are no workflow lanes, completion mailboxes,
+cross-workflow routing tables, Manager request queues, or Manager mutexes.
 Submission uses a 4,096-task quantum and an adaptive physical frontier of twice
-the observed worker slots, bounded to `[4096,32768]`. Completion processing
-retains its independent 128-task quantum so a large ready workflow cannot starve
-another workflow's results, cancellation, recovery, or Controller events. The
-established lane-owned Manager path remains the default for direct comparison.
+the observed worker slots, bounded to `[4096,32768]`; completion processing uses
+an independent 128-task quantum. Deployments run multiple workflows in multiple
+frontend processes. The RPC compatibility surface may retain completed metadata
+and execute another submitted workflow sequentially, but there is never a second
+active scheduler lane or concurrent workflow state in one process.
 
 The Worker consumes and resets one `waiting_data` hint per event-loop turn,
 reducing the next poll timeout from 5 seconds to 1 ms without changing ordinary

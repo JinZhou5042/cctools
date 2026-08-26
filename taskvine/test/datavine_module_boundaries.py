@@ -168,27 +168,41 @@ assert loss_path.index("parametric_recovery_order(") < loss_path.index(
 )
 restart_begin = runtime_source.index("if (!recovered_applied) {")
 first_replay_submit = runtime_source.index(
-    "while (valid && resources.recovery_head < resources.recovery_tail &&\n"
-    "\t\t\t\trunning < VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW"
+    "submit_batch(runtime, &context);", restart_begin
 )
 restart_path = runtime_source[restart_begin:first_replay_submit]
 assert restart_path.index("parametric_recovery_order(") < restart_path.index(
     "parametric_recovery_arm("
 )
-bounded_replay = runtime_source[first_replay_submit : runtime_source.index(
-    "while ((resources.parametric ||", first_replay_submit
+bounded_replay_begin = runtime_source.index(
+    "while (context->valid && resources->recovery_head < resources->recovery_tail &&\n"
+    "\t\t\t*context->running < submission_window"
+)
+bounded_replay = runtime_source[bounded_replay_begin : runtime_source.index(
+    "while ((resources->parametric ||", bounded_replay_begin
 )]
-assert "resources.parametric\n\t\t\t\t\t\t? materialize_parametric(" in bounded_replay
+assert "resources->parametric\n\t\t\t\t\t? materialize_parametric(" in bounded_replay
 assert ": materialize(runtime->manager," in bounded_replay
 assert "vine_task_set_priority(physical, 1e12)" in bounded_replay
+for removed in (
+    "pthread_create",
+    "execution_mailbox",
+    "completion_owners",
+    "manager_request_head",
+    "manager_owner_call",
+    "DATAVINE_WORKFLOW_RUNTIME_LANES",
+):
+    assert removed not in runtime_source, removed
+assert "runtime_main(runtime);" in runtime_source
 assert "resources->recovery_state = valid\n" in runtime_source
 assert "if (data_losses != observed_data_losses &&" not in runtime_source
 assert "recovery_queue_compact(resources)" in explicit_loss_path
 assert explicit_loss_path.count("recovery_queue_reverse(") == 4
 assert "failure_stage = \"recovery_requeue\"" in runtime_source
 assert (
-    "(!recovery_inflight && !resources.recovery_awaiting_admission &&\n"
-    "\t\t\t\t resources.recovery_head == resources.recovery_tail)"
+    "(!*context->recovery_inflight &&\n"
+    "\t\t\t !resources->recovery_awaiting_admission &&\n"
+    "\t\t\t resources->recovery_head == resources->recovery_tail)"
 ) in runtime_source
 assert "static int recovery_poll_admissions(" in runtime_source
 assert "The COMPLETED recovery event is recorded by admission polling." in runtime_source

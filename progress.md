@@ -982,3 +982,29 @@ about 107 raw-fit Workers, so the observed ceiling is consistent with current
 resource fragmentation plus negotiation. No workflow was submitted and no
 throughput is claimed. The diagnostic is
 `acceptance/dummy-throughput-w400x8-m3g-admission-20260825.json`.
+
+## Current checkpoint — single-workflow C reactor (2026-08-26)
+
+The frontend hot path now assumes one active workflow per process. Scheduler
+and TaskVine Manager progress execute in one C reactor thread. The former two
+workflow pthreads, completion mailboxes, physical-completion routing table,
+Manager request queue, three Manager/routing mutexes, and opt-in ownership mode
+are removed. RPC remains an independent nonblocking service surface and the
+Data Controller remains the sole data-state owner. For compatibility, a
+process can retain completed metadata and execute a later workflow
+sequentially; it never runs two workflow schedulers concurrently.
+
+The merge initially used a zero-timeout Manager poll while waiting for the
+first submission. That did not accept Worker or status connections. The fixed
+reactor uses a 10 ms idle progress poll, a 1 s blocking completion wait, and a
+zero-timeout bounded completion drain. Build, module-boundary, workflow
+execution, lifecycle/restart/Worker-loss, notebook/fork, and 64-task 4 MiB
+data-plane gates pass. The notebook concurrency gate now tests independent
+tasks inside one workflow instead of multiple workflows in one process.
+
+A final local sealed 10,000-task builtin run on four 4-core Workers completed
+exactly 10,000 submissions and completions. It measured 2.199306 s inside the
+C service (4,546.9 tasks/s), 2.841847 s client-observed execution including
+registration polling (3,518.8 tasks/s), zero Manager lock/queue time, and a
+4,096-task submission frontier. This is a local structural/performance gate,
+not a substitute for the existing distributed 400/512-Worker evidence.
