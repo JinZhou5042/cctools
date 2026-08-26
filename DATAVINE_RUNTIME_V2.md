@@ -1,8 +1,8 @@
 # DataVine Runtime v2: decoupled task and data planes
 
-Status: **LOCAL NATIVE RUNTIME PASS; EXACT 128x16 CAMPAIGN OPEN**
+Status: **NATIVE RUNTIME PASS; SINGLE-OWNER REACTOR OPT-IN**
 
-Updated: 2026-08-25
+Updated: 2026-08-26
 
 ## Hard boundary
 
@@ -53,6 +53,17 @@ not consume `maximum_attempts`, which remains the application-failure policy.
 The underlying generic link listener uses the operating system `SOMAXCONN`
 backlog instead of five, allowing a 128-worker startup burst to queue safely
 across those bounded Manager turns.
+
+The opt-in `DATAVINE_SINGLE_OWNER_REACTOR=1` path makes the runtime progress
+thread the sole caller of active TaskVine Manager operations. Workflow lanes
+retain parallel logical state progress, but submit bounded Manager commands to
+the owner instead of competing with `vine_wait` for a shared Manager mutex.
+Submission uses a 4,096-task quantum and an adaptive physical frontier of twice
+the observed worker slots, bounded to `[4096,32768]`. Completion processing
+retains its independent 128-task quantum so a large ready workflow cannot starve
+another workflow's results, cancellation, recovery, or Controller events. The
+established lane-owned Manager path remains the default for direct comparison.
+
 The Worker consumes and resets one `waiting_data` hint per event-loop turn,
 reducing the next poll timeout from 5 seconds to 1 ms without changing ordinary
 TaskVine task state. Escaped and remote URIs retain the generic

@@ -254,6 +254,12 @@ def main():
         default="baseline",
         help="physical TaskVine scheduling path used by the native runtime",
     )
+    parser.add_argument(
+        "--runtime-mode",
+        choices=("lanes", "reactor"),
+        default="lanes",
+        help="DataVine Manager ownership model used by the native runtime",
+    )
     parser.add_argument("--minimum-runtime-tasks-per-second", type=float, default=0)
     parser.add_argument("--worker-timeout", type=float, default=300)
     parser.add_argument("--workflow-timeout", type=float, default=1800)
@@ -303,6 +309,10 @@ def main():
             service_environment["DATAVINE_WORKER_FIRST_SCHEDULING"] = "1"
         else:
             service_environment.pop("DATAVINE_WORKER_FIRST_SCHEDULING", None)
+        if args.runtime_mode == "reactor":
+            service_environment["DATAVINE_SINGLE_OWNER_REACTOR"] = "1"
+        else:
+            service_environment.pop("DATAVINE_SINGLE_OWNER_REACTOR", None)
         service = subprocess.Popen(
             (str(service_binary), "serve", str(journal), token),
             stdout=subprocess.PIPE,
@@ -467,7 +477,11 @@ def main():
                 )
             evidence = {
                 "status": "PASS",
-                "architecture": "native-c-workflow-owner",
+                "architecture": (
+                    "native-c-single-manager-owner"
+                    if args.runtime_mode == "reactor"
+                    else "native-c-workflow-owner"
+                ),
                 "executor": args.executor,
                 "command_argv": command_argv if args.executor == "command" else None,
                 "tasks": args.tasks,
@@ -480,6 +494,7 @@ def main():
                 "batch_type": args.batch_type,
                 "registration": args.registration,
                 "scheduling_mode": args.scheduling_mode,
+                "runtime_mode": args.runtime_mode,
                 "requested_output": not args.no_requested_output,
                 "worker_inventory": len(inventory),
                 "worker_wait_seconds": worker_wait,
