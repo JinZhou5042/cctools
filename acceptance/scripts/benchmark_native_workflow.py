@@ -36,6 +36,28 @@ def physical_task_counts(service_log_path, workflow_id):
     raise RuntimeError("native runtime did not report physical task counts")
 
 
+def native_runtime_metrics(service_log_path, workflow_id):
+    for line in reversed(service_log_path.read_text().splitlines()):
+        if f"datavine workflow {workflow_id} " not in line:
+            continue
+        fields = dict(re.findall(r"([a-z_]+)=([^ ]+)", line))
+        required = (
+            "run_seconds",
+            "manager_lock_seconds",
+            "manager_owner_queue_seconds",
+            "manager_owner_execute_seconds",
+            "manager_submission_frontier",
+            "scheduler_delay_seconds",
+        )
+        if all(key in fields for key in required):
+            return {
+                key: int(fields[key]) if key == "manager_submission_frontier"
+                else float(fields[key])
+                for key in required
+            }
+    raise RuntimeError("native runtime did not report service metrics")
+
+
 def process_tree(root_pids):
     pids = {int(pid) for pid in root_pids if pid}
     changed = True
@@ -460,6 +482,9 @@ def main():
             physical_tasks = physical_task_counts(
                 service_log_path, document["workflow_id"]
             )
+            service_metrics = native_runtime_metrics(
+                service_log_path, document["workflow_id"]
+            )
             expected_physical_tasks = {
                 "submissions": args.tasks,
                 "completions": args.tasks,
@@ -516,6 +541,11 @@ def main():
                 ),
                 "run_seconds": run_seconds,
                 "runtime_tasks_per_second": runtime_rate,
+                "service_execution_seconds": service_metrics["run_seconds"],
+                "service_runtime_tasks_per_second": (
+                    args.tasks / service_metrics["run_seconds"]
+                ),
+                "service_metrics": service_metrics,
                 "tasks_per_second": args.tasks / elapsed,
                 "post_registration_tasks_per_second": (
                     args.tasks / run_seconds if run_seconds > 0 else None
