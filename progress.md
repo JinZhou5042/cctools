@@ -963,3 +963,13 @@ and the service log remained empty. Therefore no throughput number is claimed.
 All 200 Condor jobs and local processes were removed. The diagnostic is
 `acceptance/dummy-throughput-w200x16-admission-20260825.json`; a dedicated or
 otherwise confirmed 3,200-core allocation is required to execute this gate.
+
+A second shape held total requested cores constant while reducing slot
+fragmentation: 400 Workers at 8 cores, 6,144 MiB memory, 10,240 MiB disk, and
+zero GPUs. The runner now passes `--gpus 0` explicitly and records the resource
+in its artifact. This request remained fixed at 39 connected Workers (312
+cores) for a complete negotiation interval of 606 seconds with zero held jobs.
+Again, the workflow was never submitted and no throughput is claimed. The
+diagnostic is `acceptance/dummy-throughput-w400x8-admission-20260825.json`.
+Together the 200x16 and 400x8 attempts show that current Condor allocation,
+not per-job fragmentation alone, blocks the requested 3,200-core measurement.
