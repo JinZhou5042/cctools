@@ -973,3 +973,12 @@ Again, the workflow was never submitted and no throughput is claimed. The
 diagnostic is `acceptance/dummy-throughput-w400x8-admission-20260825.json`.
 Together the 200x16 and 400x8 attempts show that current Condor allocation,
 not per-job fragmentation alone, blocks the requested 3,200-core measurement.
+
+Reducing the 400x8 Worker memory request again, from 6,144 MiB to 3,072
+MiB, improved packing substantially but did not open the exact gate. The pool
+grew from 19 to 95 connected Workers and then remained at 95 (760 cores) after
+1,086 seconds, with zero held jobs. The pre-submit resource snapshot predicted
+about 107 raw-fit Workers, so the observed ceiling is consistent with current
+resource fragmentation plus negotiation. No workflow was submitted and no
+throughput is claimed. The diagnostic is
+`acceptance/dummy-throughput-w400x8-m3g-admission-20260825.json`.

@@ -1,0 +1,37 @@
+{
+  "artifact_type": "datavine-dummy-throughput-admission-diagnostic",
+  "attempt": {
+    "batch_type": "condor",
+    "commit": "ec5184608f01b5a07611b42138f18baaa89e2234",
+    "executor": [
+      "/bin/true"
+    ],
+    "logical_tasks": 1000000,
+    "registration": "sealed",
+    "requested_output_bytes": 0
+  },
+  "factory": {
+    "cores_per_worker": 8,
+    "disk_mib_per_worker": 10240,
+    "gpus_per_worker": 0,
+    "memory_mib_per_worker": 3072,
+    "requested_workers": 400,
+    "total_requested_cores": 3200
+  },
+  "admission": {
+    "elapsed_seconds": 1086,
+    "held_jobs": 0,
+    "peak_connected_cores": 760,
+    "peak_connected_workers": 95,
+    "workers_connected_before_cleanup": 95
+  },
+  "evidence": {
+    "factory_log": "/project01/ndcms/jzhou24/datavine-benchmarks/dummy-throughput-1m-w400x8-m3g-d10g-g0-ec5184608-20260825.json.factory.log",
+    "factory_log_sha256": "4138f8d07fcaf754ae12fa7a0b20433ee25522d0f0e47f01a0ed438c4c090d89",
+    "service_log_bytes": 0
+  },
+  "reason": "3 GiB workers improved packing but exact 400-worker admission remained unavailable",
+  "status": "BLOCKED_ADMISSION",
+  "throughput_tasks_per_second": null,
+  "workflow_submitted": false
+}
