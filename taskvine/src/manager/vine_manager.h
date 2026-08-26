@@ -263,6 +263,10 @@ struct vine_manager {
 	int last_replica_loss_events_enabled;
 	int last_replica_loss_events_suppressed;
 	int last_replica_loss_events_failed;
+	/* Optional worker-first scheduler. The default task-first priority-queue
+	 * path remains unchanged for direct baseline comparisons. */
+	int worker_first_scheduling;
+	int worker_first_dispatch_limit;
 };
 
 /*

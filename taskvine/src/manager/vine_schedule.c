@@ -207,6 +207,13 @@ int vine_schedule_have_committable_worker(struct vine_manager *q)
 	return 0;
 }
 
+int vine_schedule_worker_has_free_slots(struct vine_manager *q,
+		struct vine_worker_info *w)
+{
+	return q && w && w->resources && w->type == VINE_WORKER_TYPE_WORKER &&
+		!w->draining && check_worker_have_committable_resources(q, w);
+}
+
 /* Check if this task is compatible with this given worker by considering
  * resources availability, features, blocklist, and all other relevant factors.
  * Used by all scheduling methods for basic compatibility.

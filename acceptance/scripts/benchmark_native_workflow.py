@@ -248,6 +248,12 @@ def main():
             "result; physical task identity and terminal state are still checked"
         ),
     )
+    parser.add_argument(
+        "--scheduling-mode",
+        choices=("baseline", "worker-first"),
+        default="baseline",
+        help="physical TaskVine scheduling path used by the native runtime",
+    )
     parser.add_argument("--minimum-runtime-tasks-per-second", type=float, default=0)
     parser.add_argument("--worker-timeout", type=float, default=300)
     parser.add_argument("--workflow-timeout", type=float, default=1800)
@@ -293,6 +299,10 @@ def main():
             DATAVINE_WORKFLOW_METRICS="1",
             DATAVINE_RUNTIME_INFO_PATH=str(root / "run-info"),
         )
+        if args.scheduling_mode == "worker-first":
+            service_environment["DATAVINE_WORKER_FIRST_SCHEDULING"] = "1"
+        else:
+            service_environment.pop("DATAVINE_WORKER_FIRST_SCHEDULING", None)
         service = subprocess.Popen(
             (str(service_binary), "serve", str(journal), token),
             stdout=subprocess.PIPE,
@@ -469,6 +479,7 @@ def main():
                 "gpus_per_worker": args.gpus,
                 "batch_type": args.batch_type,
                 "registration": args.registration,
+                "scheduling_mode": args.scheduling_mode,
                 "requested_output": not args.no_requested_output,
                 "worker_inventory": len(inventory),
                 "worker_wait_seconds": worker_wait,

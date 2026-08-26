@@ -3798,6 +3798,85 @@ static int send_one_task(struct vine_manager *q)
 }
 
 /*
+Fill Workers directly from the READY queue without rebuilding a Worker heap
+for every Task.  This is an opt-in path for large pools of short, homogeneous
+Tasks.  The established task-first scheduler above remains the default.
+
+Compatibility and resource checks are unchanged.  Dispatch is bounded so the
+Manager returns to completion, connection, and recovery progress promptly.
+*/
+static int send_tasks_worker_first(struct vine_manager *q)
+{
+	int changed = 0;
+	int remaining = q->worker_first_dispatch_limit;
+	double now_secs = ((double)timestamp_get()) / ONE_SECOND;
+	char *key;
+	struct vine_worker_info *w;
+	int worker_iteration;
+
+	HASH_TABLE_ITERATE(q->worker_table, worker_iteration, key, w)
+	{
+		if (remaining < 1 || !skip_list_size(q->ready_tasks))
+			break;
+
+		timestamp_t schedule_started = timestamp_get();
+		int has_slots = vine_schedule_worker_has_free_slots(q, w);
+		q->stats->time_scheduling += timestamp_get() - schedule_started;
+		if (!has_slots)
+			continue;
+
+		skip_list_seek(q->ready_tasks_cr, 0);
+		struct vine_task *t;
+		int inspected = 0;
+		int worker_valid = 1;
+		SKIP_LIST_ITERATE(q->ready_tasks_cr, t)
+		{
+			if (remaining < 1 ||
+					inspected >= q->attempt_schedule_depth)
+				break;
+			inspected++;
+
+			if (retrieve_ready_task(q, t, now_secs)) {
+				skip_list_remove_here(q->ready_tasks_cr);
+				changed = 1;
+				continue;
+			}
+			if (!consider_task(q, t))
+				continue;
+
+			schedule_started = timestamp_get();
+			int compatible = check_worker_against_task(q, w, t);
+			q->stats->time_scheduling += timestamp_get() - schedule_started;
+			if (!compatible)
+				continue;
+
+			skip_list_remove_here(q->ready_tasks_cr);
+			vine_result_code_t result = q->task_groups_enabled
+					? commit_task_group_to_worker(q, w, t)
+					: commit_task_to_worker(q, w, t);
+			changed = 1;
+			if (result != VINE_SUCCESS) {
+				/* A chained commit failure may remove the Worker. Stop this
+				 * pass before the hash-table iterator or w can be reused. */
+				worker_valid = 0;
+				break;
+			}
+			remaining--;
+
+			schedule_started = timestamp_get();
+			has_slots = vine_schedule_worker_has_free_slots(q, w);
+			q->stats->time_scheduling += timestamp_get() - schedule_started;
+			if (!has_slots)
+				break;
+		}
+		if (!worker_valid)
+			break;
+	}
+
+	return changed;
+}
+
+/*
 Finding a worker that has tasks waiting to be retrieved, then fetch the outputs
 of those tasks. Returns the number of tasks received.
 */
@@ -4297,6 +4376,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->wait_for_workers = 0;
 	q->max_workers = -1;
 	q->attempt_schedule_depth = 100;
+	q->worker_first_scheduling = 0;
+	q->worker_first_dispatch_limit = 4096;
 
 	q->max_retrievals = 1;
 	q->worker_retrievals = 1;
@@ -5668,7 +5749,9 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			}
 			// tasks waiting to be dispatched?
 			BEGIN_ACCUM_TIME(q, time_send);
-			result = send_one_task(q);
+			result = q->worker_first_scheduling
+					? send_tasks_worker_first(q)
+					: send_one_task(q);
 			END_ACCUM_TIME(q, time_send);
 			if (result) {
 				// sent at least one task
@@ -6209,6 +6292,12 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "worker-retrievals")) {
 		q->worker_retrievals = MAX(0, (int)value);
+
+	} else if (!strcmp(name, "worker-first-scheduling")) {
+		q->worker_first_scheduling = !!((int)value);
+
+	} else if (!strcmp(name, "worker-first-dispatch-limit")) {
+		q->worker_first_dispatch_limit = MAX(1, (int)value);
 
 	} else if (!strcmp(name, "file-source-max-transfers")) {
 		q->file_source_max_transfers = MAX(1, (int)value);

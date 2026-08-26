@@ -4149,6 +4149,9 @@ struct vine_datavine_workflow_runtime *vine_datavine_workflow_runtime_start(
 	/* Workflow lanes briefly acquire the Manager lock between progress cycles. */
 	vine_tune(manager, "idle-poll-milliseconds", 10);
 	vine_tune(manager, "max-retrievals", 256);
+	const char *worker_first = getenv("DATAVINE_WORKER_FIRST_SCHEDULING");
+	if (worker_first && worker_first[0] && strcmp(worker_first, "0"))
+		vine_tune(manager, "worker-first-scheduling", 1);
 	struct vine_datavine_workflow_runtime *runtime = calloc(1, sizeof(*runtime));
 	if (!runtime)
 		return 0;
