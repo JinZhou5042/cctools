@@ -107,7 +107,7 @@ def wait_workers(vine_status, port, workers, cores, factory, timeout):
     raise TimeoutError(f"did not observe exactly {workers} x {cores} Workers")
 
 
-def workflow_document(tasks, executor, command_argv):
+def workflow_document(tasks, executor, command_argv, request_result):
     records = []
     data = []
     if executor == "builtin":
@@ -141,7 +141,7 @@ def workflow_document(tasks, executor, command_argv):
         "data_defaults": {"codec": {"name": "bytes", "version": "1"}},
         "tasks": records,
         "data": data,
-        "requested_outputs": [tasks],
+        "requested_outputs": [tasks] if request_result else [],
         "policy": {"maximum_tasks": tasks, "maximum_edges": 0},
     }
 
@@ -172,7 +172,9 @@ def streaming_initial(tasks, executor, command_argv):
     }
 
 
-def workflow_delta(initial, start, stop, tasks, executor, command_argv):
+def workflow_delta(
+    initial, start, stop, tasks, executor, command_argv, request_result
+):
     records = []
     data = []
     for ordinal in range(start, stop):
@@ -193,7 +195,9 @@ def workflow_delta(initial, start, stop, tasks, executor, command_argv):
         "data_defaults": {"codec": {"name": "bytes", "version": "1"}},
         "tasks": records,
         "data": data,
-        "requested_outputs": [final_output] if stop > tasks else [],
+        "requested_outputs": (
+            [final_output] if request_result and stop > tasks else []
+        ),
     }
 
 
@@ -235,6 +239,14 @@ def main():
         "--expected-result-base64",
         default="",
         help="exact requested output expected from the command",
+    )
+    parser.add_argument(
+        "--no-requested-output",
+        action="store_true",
+        help=(
+            "run a pure task-throughput gate without fetching a workflow "
+            "result; physical task identity and terminal state are still checked"
+        ),
     )
     parser.add_argument("--minimum-runtime-tasks-per-second", type=float, default=0)
     parser.add_argument("--worker-timeout", type=float, default=300)
@@ -329,7 +341,12 @@ def main():
             worker_wait = time.monotonic() - gate_started
             build_started = time.monotonic()
             document = (
-                workflow_document(args.tasks, args.executor, command_argv)
+                workflow_document(
+                    args.tasks,
+                    args.executor,
+                    command_argv,
+                    not args.no_requested_output,
+                )
                 if args.registration == "sealed"
                 else streaming_initial(args.tasks, args.executor, command_argv)
             )
@@ -357,7 +374,13 @@ def main():
                     stop = min(args.tasks + 1, start + args.chunk_tasks)
                     delta_started = time.monotonic()
                     delta = workflow_delta(
-                        document, start, stop, args.tasks, args.executor, command_argv
+                        document,
+                        start,
+                        stop,
+                        args.tasks,
+                        args.executor,
+                        command_argv,
+                        not args.no_requested_output,
                     )
                     delta_build_seconds += time.monotonic() - delta_started
                     encode_started = time.monotonic()
@@ -399,15 +422,19 @@ def main():
                 time.sleep(0.25)
             elapsed = time.monotonic() - started
             run_seconds = time.monotonic() - submitted_at
-            result_data_id = (
-                args.tasks + 1
-                if args.executor == "builtin" and args.registration == "streaming"
-                else args.tasks
-            )
-            result = client.fetch_workflow_result(
-                document["workflow_id"], result_data_id
-            )
-            if state["state"] != "completed" or result != expected_result:
+            result = b""
+            if not args.no_requested_output:
+                result_data_id = (
+                    args.tasks + 1
+                    if args.executor == "builtin" and args.registration == "streaming"
+                    else args.tasks
+                )
+                result = client.fetch_workflow_result(
+                    document["workflow_id"], result_data_id
+                )
+            if state["state"] != "completed" or (
+                not args.no_requested_output and result != expected_result
+            ):
                 raise RuntimeError({"state": state, "result": base64.b64encode(result).decode()})
             service_log.flush()
             physical_tasks = physical_task_counts(
@@ -442,6 +469,7 @@ def main():
                 "gpus_per_worker": args.gpus,
                 "batch_type": args.batch_type,
                 "registration": args.registration,
+                "requested_output": not args.no_requested_output,
                 "worker_inventory": len(inventory),
                 "worker_wait_seconds": worker_wait,
                 "workflow_build_seconds": build_seconds,
