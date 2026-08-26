@@ -219,6 +219,8 @@ def main():
                         help="memory in MiB requested per worker")
     parser.add_argument("--disk", type=int, default=4096,
                         help="disk in MiB requested per worker")
+    parser.add_argument("--gpus", type=int, default=0,
+                        help="GPUs requested per worker")
     parser.add_argument("--batch-type", choices=("local", "condor"),
                         default="local")
     parser.add_argument("--registration", choices=("streaming", "sealed"),
@@ -252,6 +254,8 @@ def main():
     if min(args.tasks, args.workers, args.cores, args.memory, args.disk,
            args.chunk_tasks) < 1:
         parser.error("task and worker resource arguments must be positive")
+    if args.gpus < 0:
+        parser.error("GPUs per worker cannot be negative")
     try:
         command_argv = json.loads(args.command_argv_json)
     except json.JSONDecodeError as error:
@@ -298,6 +302,7 @@ def main():
                 "--factory-period", "1", "--factory-timeout", str(round(args.workflow_timeout + 120)),
                 "--cores", str(args.cores), "--timeout", str(round(args.workflow_timeout + 60)),
                 "--memory", str(args.memory), "--disk", str(args.disk),
+                "--gpus", str(args.gpus),
                 "--worker-binary", str(repository / "taskvine/src/worker/vine_worker"),
                 "--scratch-dir", str(root / "factory"), "--parent-death",
                 manager_host, str(contact["manager_port"]),
@@ -434,6 +439,7 @@ def main():
                 "cores_per_worker": args.cores,
                 "memory_mib_per_worker": args.memory,
                 "disk_mib_per_worker": args.disk,
+                "gpus_per_worker": args.gpus,
                 "batch_type": args.batch_type,
                 "registration": args.registration,
                 "worker_inventory": len(inventory),
