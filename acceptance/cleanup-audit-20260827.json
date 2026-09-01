@@ -1,0 +1,79 @@
+{
+  "artifact_type": "datavine-maintenance-cleanup-audit",
+  "date": "2026-08-27",
+  "status": "PASS",
+  "source": {
+    "branch": "benchmark/data-intensive-million-file",
+    "base_head": "9818f7f42cd0ac83d4e830697a520e6c13b4bba7",
+    "dirty_worktree": true,
+    "tracked_diff_sha256": "1a6e145d5cb46300c3a545533368a03a61327961ac52fda6de73665b3afbad9e",
+    "datavine_workflow_sha256": "5e9f8cab95464af0997f3bd7bef40739ca369856cd169ed926911caad0a8c32f",
+    "vine_worker_sha256": "c3076b5fdfbfc6c482e11f88c4733967659e9b6788aa089f5037572361b4e0f2",
+    "vine_factory_sha256": "59877762b484204eada014c516e74f092109c04a9738882577f550c3052595d0"
+  },
+  "cleanup": {
+    "tracked_files_changed": 118,
+    "lines_added": 1879,
+    "lines_deleted": 1103484,
+    "net_lines": -1101605,
+    "acceptance_size_before": "645 MiB",
+    "acceptance_size_after": "2.8 MiB",
+    "taskvine_test_size_before": "161 MiB",
+    "taskvine_test_size_after": "496 KiB",
+    "production_documents": 5
+  },
+  "validation": {
+    "warning_clean_native_build": true,
+    "warning_clean_worker_build": true,
+    "warning_clean_tool_builds": 5,
+    "python_compile": true,
+    "git_diff_check": true,
+    "regression": {
+      "status": "PASS",
+      "tests": 18,
+      "passed": 18,
+      "environment": "/groups/dthain/users/jzhou24/miniconda/envs/datavine"
+    },
+    "retired_result_journal_record": "rejected",
+    "active_datavine_processes": 0,
+    "active_condor_jobs": 0
+  },
+  "throughput_smoke": {
+    "tasks": 10000,
+    "workers": 1,
+    "cores_per_worker": 16,
+    "requested_outputs": 0,
+    "runtime_tasks_per_second": 3527.480864058486,
+    "service_tasks_per_second": 4559.963520291837,
+    "physical_submissions": 10000,
+    "physical_completions": 10000,
+    "status": "PASS"
+  },
+  "rigorous_validation": {
+    "artifact": "acceptance/rigorous-validation-20260827/summary.json",
+    "controller_data_ids": 1000000,
+    "local_50k_mean_runtime_tasks_per_second": 4067.697,
+    "condor_16x4_service_tasks_per_second": 19277.696,
+    "small_stream_speedup": 42.588,
+    "large_stream_service_mib_per_second": 150.178,
+    "rpc_64_connection_publish_records_per_second": 101067.915,
+    "rpc_64_connection_resolve_records_per_second": 83954.168,
+    "fixed_core_empty_plateau_files_per_second": 3657.739,
+    "fixed_core_4k_files_per_second": 3391.440,
+    "fixed_core_bulk_mib_per_second": 656.000,
+    "worker_connection_lock_change_percent_1x16": 3.948,
+    "prefer_dispatch_change_percent_4x4": 9.999,
+    "prefer_dispatch_change_percent_16x1": 14.551,
+    "final_4k_files_per_second_4x4": 3250.394,
+    "final_4k_files_per_second_16x1": 3462.804,
+    "final_bulk_mib_per_second": 663.255,
+    "layered_function_tasks": 20000,
+    "layered_function_edges": 39488,
+    "status": "PASS"
+  },
+  "open": [
+    "Git commit and provenance closure",
+    "Production package rebuild only when explicitly requested",
+    "Cross-host result durability remains out of scope"
+  ]
+}

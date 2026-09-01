@@ -1,0 +1,51 @@
+{
+  "artifact_type": "datavine-controller-remote-network-ceiling",
+  "date": "2026-08-28",
+  "status": "PASS",
+  "host": "daccssfe.crc.nd.edu",
+  "scope": "remote Worker to Controller inbound TCP only; no DataVine, filesystem or fsync",
+  "interface": {
+    "name": "enp11s0f0",
+    "adapter": "Intel X520",
+    "negotiated_gbit_per_second": 10,
+    "duplex": "full",
+    "mtu": 1500,
+    "second_10g_port": "enp11s0f1 down with no carrier"
+  },
+  "method": {
+    "receiver": "temporary warning-clean C pthread TCP receiver; payload discarded from memory",
+    "sender": "temporary warning-clean C pthread TCP sender in CRC Condor jobs; zero buffers generated in memory",
+    "synchronization": "receiver starts timing only after every TCP stream connects, then releases all streams together",
+    "validation": "exact byte count and zero sender/receiver exit status",
+    "local_receiver_guard_gbit_per_second": 69.483066
+  },
+  "runs": [
+    {"streams": 1, "bytes_per_stream": 1073741824, "total_bytes": 1073741824, "seconds": 0.913743, "gbit_per_second": 9.400824, "mib_per_second": 1120.666, "condor_cluster": 31274, "remote_host": "d12chas327.crc.nd.edu"},
+    {"streams": 4, "bytes_per_stream": 536870912, "total_bytes": 2147483648, "seconds": 1.825145, "gbit_per_second": 9.412879, "mib_per_second": 1122.103, "condor_cluster": 31275, "remote_host": "d12chas326.crc.nd.edu"},
+    {"streams": 16, "repetition": 1, "bytes_per_stream": 268435456, "total_bytes": 4294967296, "seconds": 3.650642, "gbit_per_second": 9.411973, "mib_per_second": 1121.995, "condor_cluster": 31276, "remote_host": "d12chas327.crc.nd.edu"},
+    {"streams": 16, "repetition": 2, "bytes_per_stream": 268435456, "total_bytes": 4294967296, "seconds": 3.650627, "gbit_per_second": 9.412011, "mib_per_second": 1121.999, "condor_cluster": 31277, "remote_host": "d12chas327.crc.nd.edu"},
+    {"streams": 16, "repetition": 3, "bytes_per_stream": 268435456, "total_bytes": 4294967296, "seconds": 3.650611, "gbit_per_second": 9.412051, "mib_per_second": 1122.004, "condor_cluster": 31278, "remote_host": "d12chas327.crc.nd.edu"}
+  ],
+  "findings": {
+    "empirical_ceiling_gbit_per_second": 9.412,
+    "empirical_ceiling_mib_per_second": 1122.0,
+    "wire_efficiency_percent": 94.12,
+    "single_stream_saturates_link": true,
+    "sixteen_stream_mean_gbit_per_second": 9.412012,
+    "datavine_best_nic_receive_gbit_per_second": 4.810373,
+    "datavine_fraction_of_empirical_ceiling_percent": 51.11,
+    "datavine_best_payload_mib_per_second": 546.401,
+    "network_only_payload_headroom_ratio": 2.053,
+    "conclusion": "the current remote DataVine path is storage-persistence limited, not network limited; a faster local device can improve throughput by about 2x before this NIC becomes the next ceiling"
+  },
+  "limitations": [
+    "Only the Worker-to-Controller direction relevant to requested-output fan-in was measured.",
+    "This isolates TCP capacity and does not include DataVine framing, hashing, copying or persistence.",
+    "The inactive second Intel X520 port was not cabled or tested."
+  ],
+  "cleanup": {
+    "condor_jobs_remaining": 0,
+    "listening_servers_remaining": 0,
+    "temporary_sources_binaries_and_logs_removed": true
+  }
+}

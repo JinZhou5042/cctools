@@ -1,0 +1,4 @@
+{"phase":0,"mode":"controller_stream_tmp","workers":96,"files":19200,"bytes":2084044800,"seconds":16.914118656,"files_per_second":1135.146,"mib_per_second":117.505}
+{"phase":1,"mode":"worker_direct_sharedfs","workers":96,"files":19200,"bytes":2084044800,"seconds":39.478036736,"files_per_second":486.346,"mib_per_second":50.344}
+{"phase":2,"mode":"worker_direct_sharedfs","workers":96,"files":19200,"bytes":2084044800,"seconds":39.264977920,"files_per_second":488.985,"mib_per_second":50.618}
+{"phase":3,"mode":"controller_stream_tmp","workers":96,"files":19200,"bytes":2084044800,"seconds":30.105119488,"files_per_second":637.765,"mib_per_second":66.019}

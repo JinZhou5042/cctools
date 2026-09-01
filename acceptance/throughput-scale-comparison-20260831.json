@@ -1,0 +1,77 @@
+{
+  "status": "PASS",
+  "date": "2026-08-31",
+  "question": "Why did the iData backup benchmark report about 1.1k task/s when the established dummy ceiling was about 12k task/s?",
+  "method": "Current binaries, one local host, independent tasks, one variable changed at a time. Logical throughput includes frontend append time; service throughput is also recorded where available.",
+  "established_dummy_reference": {
+    "artifact": "acceptance/dummy-throughput-controller-slimming-20260827.json",
+    "executor": "taskvine-builtin-v1-empty",
+    "tasks": 50000,
+    "dependencies": 0,
+    "requested_outputs": 0,
+    "durable_files": 0,
+    "median_e2e_tasks_per_second_16_workers_x_1_core": 12086.8
+  },
+  "current_control": {
+    "builtin_no_output_16_workers_x_1_core": {
+      "tasks": 50000,
+      "logical_tasks_per_second": 12420.12451518098,
+      "service_tasks_per_second": 18377.265411450433
+    },
+    "builtin_one_empty_live_idata_16_workers_x_1_core": {
+      "tasks": 10000,
+      "logical_tasks_per_second": 12166.218844191939,
+      "service_tasks_per_second": 14849.794330348526
+    },
+    "builtin_one_empty_live_idata_background_backup_16_workers_x_1_core": {
+      "tasks": 10000,
+      "logical_tasks_per_second": 12217.816157171628,
+      "service_tasks_per_second": 15124.474424513748,
+      "backup_files_per_second_including_drain": 6636.578662208433,
+      "peak_backup_backlog": 7040
+    },
+    "builtin_one_empty_live_idata_1_worker_x_16_cores": {
+      "tasks": 10000,
+      "logical_tasks_per_second_runs": [2202.5615770550003, 2230.018233624358]
+    },
+    "command_no_output_1_worker_x_16_cores": {
+      "tasks": 10000,
+      "logical_tasks_per_second": 1651.9207479308898
+    },
+    "command_one_empty_live_idata_1_worker_x_16_cores": {
+      "tasks": 10000,
+      "logical_tasks_per_second_runs": [1153.9299833127316, 1201.03010281775]
+    },
+    "command_one_empty_live_idata_background_backup_1_worker_x_16_cores": {
+      "tasks": 10000,
+      "logical_tasks_per_second_runs": [1172.6714728740235, 1139.4883331092174],
+      "backup_files_per_second_runs": [1167.8027346947438, 1134.8889407824192]
+    },
+    "command_one_empty_live_idata_4_workers_x_4_cores": {
+      "tasks": 10000,
+      "logical_tasks_per_second_runs": [3175.8860289229287, 3196.097984677521]
+    },
+    "command_one_empty_live_idata_background_backup_4_workers_x_4_cores": {
+      "tasks": 10000,
+      "logical_tasks_per_second_runs": [3355.118736689602, 3281.8018278371255],
+      "backup_files_per_second_runs": [3314.577766316905, 3242.8979706559135]
+    },
+    "command_one_empty_live_idata_16_workers_x_1_core": {
+      "tasks": 10000,
+      "logical_tasks_per_second": 3523.6261653700026
+    },
+    "command_one_empty_live_idata_background_backup_16_workers_x_1_core": {
+      "tasks": 10000,
+      "logical_tasks_per_second": 3639.325870359639,
+      "backup_files_per_second_including_drain": 3615.3852190811663
+    }
+  },
+  "diagnosis": [
+    "There is no order-of-magnitude scheduler or Controller regression: the current binary reproduces the about-12k dummy result at the matching 16-worker topology, even with one live empty iData per builtin task.",
+    "The about-1.1k result measures a different workload: one 16-slot Worker repeatedly fork/execs /bin/true and publishes one output per task.",
+    "Worker count is a performance dimension even at fixed total cores because each Worker has one control/execution event loop. Sixteen 1-core Workers sustain 12.17k builtin live-iData tasks/s; one 16-core Worker sustains only about 2.22k.",
+    "For command tasks, host process creation and Worker execution dominate: changing from one 16-core Worker to sixteen 1-core Workers raises live-iData throughput only from about 1.18k to 3.52k, far below builtin throughput.",
+    "Background backup is not the cause of the 12k-to-1.1k gap. In the paired 1x16 command runs its median logical cost is about 1.8 percent, within run noise; at 16x1 it runs asynchronously and drains after logical completion."
+  ],
+  "scope_limit": "Single-host local diagnosis. These results compare software paths and Worker topology; they are not a multi-node network or storage-capacity claim."
+}

@@ -1,0 +1,115 @@
+{
+  "artifact_type": "datavine-dynamic-data-management-acceptance",
+  "date": "2026-08-31",
+  "status": "PASS",
+  "architecture": {
+    "controller_backup_role": "asynchronous safety replica and fallback",
+    "dynamic_specific_data_plane": false,
+    "manager_owns_dataids": false,
+    "normal_source_order": [
+      "worker-local",
+      "worker-peer",
+      "controller-local-tmp"
+    ],
+    "scheduler_waits_for_persistence": false,
+    "static_dynamic_shared_resolver": true
+  },
+  "root_cause": {
+    "before_fix": "Controller journal replay restored the durable result catalog but the new dense replica table had no immutable identity, so a Worker resolve for a post-restart dynamic consumer remained pending",
+    "fix": "lazily restore DataID generation, size, SHA-256 and persisted state from the catalog at first Worker resolve",
+    "restart_catalog_scan": false,
+    "restore_complexity": "O(1) per DataID first used after replay",
+    "stale_generation_rejected": true
+  },
+  "focused_tests": [
+    {
+      "elapsed_seconds": 0.83,
+      "gate": "dense replica table including persisted restore identity",
+      "status": "PASS"
+    },
+    {
+      "elapsed_seconds": 5.62,
+      "gate": "dynamic 7 -> Controller restart -> append 49 -> append 50",
+      "producer_replays": 0,
+      "status": "PASS"
+    },
+    {
+      "elapsed_seconds": 0.84,
+      "gate": "default background backup, Worker loss, Controller fallback",
+      "producer_replays": 0,
+      "status": "PASS"
+    },
+    {
+      "elapsed_seconds": 4.15,
+      "gate": "Controller-admitted result stream restart and resume",
+      "status": "PASS"
+    },
+    {
+      "elapsed_seconds": 18.16,
+      "gate": "retry, Worker loss, owner restart and checkpoint lifecycle",
+      "status": "PASS"
+    },
+    {
+      "elapsed_seconds": 3.09,
+      "gate": "volatile late consumer replay and late requested-output promotion",
+      "status": "PASS"
+    },
+    {
+      "elapsed_seconds": 1.36,
+      "gate": "ENOSPC and EIO persistence fail-closed",
+      "status": "PASS"
+    },
+    {
+      "gate": "production data plane, scheduler, module boundary and IR",
+      "status": "PASS"
+    }
+  ],
+  "fresh_dynamic_peer_validation": {
+    "background_backups_before_append": 1000,
+    "bytes_per_file": 65536,
+    "consumer_files_per_second": 301.78502616375124,
+    "consumer_mib_per_second": 18.861564135234453,
+    "consumer_seconds": 3.3136170230573043,
+    "consumer_workers": 4,
+    "consumers_completed": 1000,
+    "consumers_submitted": 1000,
+    "files": 1000,
+    "frontend_receive_bytes": 317586,
+    "frontend_transmit_bytes": 62226,
+    "mode": "local",
+    "post_seal_controller_files": 0,
+    "producer_workers": 2,
+    "route_isolation": "producer Workers remained connected but were resource-ineligible for consumers, forcing Worker-to-Worker reads",
+    "status": "PASS"
+  },
+  "fresh_adaptive_validation": {
+    "backend": "datavine",
+    "batch_type": "local",
+    "cores": 4,
+    "discovered_edges": 445,
+    "discovered_tasks": 477,
+    "physical_completions": 477,
+    "physical_submissions": 477,
+    "recovery_epochs": 0,
+    "result_payload_sha256": "b89c71e8f58eaa6739796591ea35b6669aa2653e4ced5379f44c653e12561e7f",
+    "rpc_requests": 483,
+    "seconds": 1.5644667269662023,
+    "status": "PASS",
+    "tasks_per_second": 304.8962255176839,
+    "trace_sha256": "e1d1352b01ec8989df2a2b761dfc56a3829eca1eb86ade033623b1dd244c2038",
+    "workers": 1
+  },
+  "prior_remote_route_evidence": {
+    "controller_median_mib_per_second": 832,
+    "evidence": "acceptance/peer-vs-controller-20260831.json",
+    "files_per_run": 10000,
+    "peer_median_mib_per_second": 1779,
+    "peer_speedup": 2.139,
+    "size_per_file_bytes": 1048576
+  },
+  "scope": {
+    "git_provenance": "OPEN: dirty uncommitted checkout",
+    "new_remote_campaign": false,
+    "production_package": "OPEN: not rebuilt or promoted"
+  }
+}

@@ -1,0 +1,106 @@
+{
+  "status": "PASS",
+  "date": "2026-08-31",
+  "scope": "single-host Controller-local /tmp; real Worker-to-Controller TCP backup path",
+  "configuration": {
+    "runs": 5,
+    "tasks_per_run": 50000,
+    "workers": 16,
+    "cores_per_worker": 1,
+    "background_copy_limit": 4,
+    "executor": "taskvine builtin-v1",
+    "output_files_per_task": 1,
+    "output_payload_bytes": 0,
+    "idata_backup": "controller-background",
+    "durability": "SHA-256 plus file fsync plus atomic rename"
+  },
+  "runs": [
+    {
+      "run": 1,
+      "logical_seconds": 3.538538547931239,
+      "logical_tasks_per_second": 14130.127260937104,
+      "backups_at_logical_completion": 16209,
+      "remaining_backups": 33791,
+      "pure_drain_seconds": 4.339812573045492,
+      "pure_drain_files_per_second": 7786.280958278099,
+      "all_backups_seconds_from_start": 7.878351120976731,
+      "all_backups_files_per_second_from_start": 6346.505662443891,
+      "peak_backlog": 35029
+    },
+    {
+      "run": 2,
+      "logical_seconds": 3.435704231960699,
+      "logical_tasks_per_second": 14553.057138875378,
+      "backups_at_logical_completion": 14337,
+      "remaining_backups": 35663,
+      "pure_drain_seconds": 4.582741428981535,
+      "pure_drain_files_per_second": 7782.023173828884,
+      "all_backups_seconds_from_start": 8.018445660942234,
+      "all_backups_files_per_second_from_start": 6235.622477751453,
+      "peak_backlog": 36462
+    },
+    {
+      "run": 3,
+      "logical_seconds": 3.471203148015775,
+      "logical_tasks_per_second": 14404.227545305503,
+      "backups_at_logical_completion": 14716,
+      "remaining_backups": 35284,
+      "pure_drain_seconds": 4.578446774045005,
+      "pure_drain_files_per_second": 7706.543668919185,
+      "all_backups_seconds_from_start": 8.04964992206078,
+      "all_backups_files_per_second_from_start": 6211.45024741642,
+      "peak_backlog": 36551
+    },
+    {
+      "run": 4,
+      "logical_seconds": 3.531884966068901,
+      "logical_tasks_per_second": 14156.746462683232,
+      "backups_at_logical_completion": 16360,
+      "remaining_backups": 33640,
+      "pure_drain_seconds": 4.237937608035281,
+      "pure_drain_files_per_second": 7937.823326189927,
+      "all_backups_seconds_from_start": 7.769822574104182,
+      "all_backups_files_per_second_from_start": 6435.153380032584,
+      "peak_backlog": 34724
+    },
+    {
+      "run": 5,
+      "logical_seconds": 3.3991368679562584,
+      "logical_tasks_per_second": 14709.616571003997,
+      "backups_at_logical_completion": 13556,
+      "remaining_backups": 36444,
+      "pure_drain_seconds": 4.651523275999352,
+      "pure_drain_files_per_second": 7834.85276490855,
+      "all_backups_seconds_from_start": 8.05066014395561,
+      "all_backups_files_per_second_from_start": 6210.670815304471,
+      "peak_backlog": 37207
+    }
+  ],
+  "summary": {
+    "median_logical_tasks_per_second": 14404.227545305503,
+    "median_backups_at_logical_completion": 14716,
+    "median_remaining_backups": 35284,
+    "median_pure_drain_seconds": 4.578446774045005,
+    "median_pure_drain_files_per_second": 7786.280958278099,
+    "minimum_pure_drain_files_per_second": 7706.543668919185,
+    "maximum_pure_drain_files_per_second": 7937.823326189927,
+    "median_all_backups_files_per_second_from_start": 6235.622477751453,
+    "background_bytes_each_run": 0,
+    "failures_each_run": 0,
+    "post_gc_files_each_run": 0
+  },
+  "median_fixed_cost_thread_seconds": {
+    "worker_request": 9.284816,
+    "stream": 0.007831,
+    "fsync": 12.912416,
+    "rename": 3.977294,
+    "sha256_verify": 1.301333
+  },
+  "interpretation": [
+    "The standalone empty-file backup ceiling is approximately 7.8k files/s once a backlog exists and all four background copy slots stay busy.",
+    "The approximately 6.2k files/s start-to-finish number includes initial task production and backup ramp-up, so it is not the standalone drain ceiling.",
+    "With zero payload bytes, network bandwidth and hashing are not limiting. Per-file request, fsync, inode creation and rename dominate.",
+    "Logical task execution remains faster than backup, so high-rate empty-output workflows accumulate a backlog by design without blocking scheduling."
+  ],
+  "benchmark": "acceptance/scripts/benchmark_idata_background_backup.py"
+}

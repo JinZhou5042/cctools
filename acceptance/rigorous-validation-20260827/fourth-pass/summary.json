@@ -1,0 +1,56 @@
+{
+  "artifact_type": "datavine-fourth-pass-fixed-core-data-path",
+  "base_commit": "9818f7f42cd0ac83d4e830697a520e6c13b4bba7",
+  "date": "2026-08-27",
+  "host": "daccssfe.crc.nd.edu",
+  "status": "PASS",
+  "invariants": {
+    "logical_tasks_per_run": 8000,
+    "physical_submissions_per_run": 8000,
+    "physical_completions_per_run": 8000,
+    "fixed_total_worker_cores": 16,
+    "controller_data_threads": 16,
+    "requested_outputs_per_run": 8000,
+    "repetitions": 3
+  },
+  "four_kib_before_service_files_per_second": {
+    "1_worker_x_16_cores": 1124.916755,
+    "4_workers_x_4_cores": 3202.128836,
+    "16_workers_x_1_core": 3386.866034
+  },
+  "four_kib_after_service_files_per_second": {
+    "1_worker_x_16_cores": 1169.329011,
+    "4_workers_x_4_cores": 3208.640774,
+    "16_workers_x_1_core": 3391.439656
+  },
+  "connection_lock_change_percent": {
+    "1_worker_x_16_cores": 3.948103,
+    "4_workers_x_4_cores": 0.203362,
+    "16_workers_x_1_core": 0.135039
+  },
+  "empty_service_files_per_second": {
+    "1_worker_x_16_cores": 1176.516867,
+    "4_workers_x_4_cores": 3441.803898,
+    "16_workers_x_1_core": 3657.738511
+  },
+  "four_kib_cost_at_multi_worker_percent": {
+    "4_workers_x_4_cores": 6.773078,
+    "16_workers_x_1_core": 7.281742
+  },
+  "bulk_guard": {
+    "workers": 16,
+    "cores_per_worker": 1,
+    "files": 4096,
+    "bytes_per_file": 262144,
+    "total_bytes": 1073741824,
+    "service_seconds": 1.561539,
+    "service_files_per_second": 2623.053283,
+    "service_mib_per_second": 655.999884,
+    "exact_validation": true
+  },
+  "regression": {
+    "passed": 18,
+    "total": 18
+  },
+  "conclusion": "Releasing a Worker connection after the complete framed body, before local fsync and rename, is safe and modestly improves the serialized one-Worker case. Empty and 4 KiB topology scaling show that the approximately 3.6k per-second local ceiling is dominated by per-task completion and scheduling work, not Controller metadata, byte bandwidth, or local persistence."
+}

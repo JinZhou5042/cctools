@@ -1,0 +1,46 @@
+{
+  "artifact_type": "datavine-volatile-worker-local-acceptance",
+  "created_at": "2026-08-26",
+  "status": "PASS",
+  "semantics": {
+    "open_output_default": "worker-local-volatile",
+    "controller_hot_path": "fixed-width-replica-metadata-only",
+    "late_consumer": "pin-and-resolve-existing-replica",
+    "late_consumer_after_last_replica_loss": "lazy-producer-replay",
+    "requested_output": "asynchronous-controller-local-persistence",
+    "sealed_zero-consumer_output": "generation-checked-release"
+  },
+  "integration_gates": {
+    "late_consumer_after_quiescence": "PASS",
+    "volatile_last_replica_loss_then_late_consumer": "PASS",
+    "completed_output_late_requested_promotion": "PASS",
+    "inflight_output_late_requested_promotion": "PASS",
+    "sealed_gc_exact_agent_active_data": 1,
+    "sealed_gc_exact_agent_active_replicas": 1,
+    "sealed_gc_note": "one requested result remains; the non-requested sink is released",
+    "replica_table": "PASS",
+    "dynamic_workflow": "PASS",
+    "workflow_lifecycle": "PASS",
+    "direct_agent_protocol": "PASS",
+    "data_plane_v2": "PASS",
+    "workflow_execution": "PASS",
+    "python_output_policy": "PASS",
+    "full_build": "PASS"
+  },
+  "small_scale_gate": {
+    "artifact": "/tmp/datavine-volatile-10k.json",
+    "tasks": 10000,
+    "dependency_edges": 17952,
+    "workers": 4,
+    "cores_per_worker": 4,
+    "requested_outputs": 0,
+    "controller_durable_files": 0,
+    "agent_active_data_after_seal": 0,
+    "agent_active_replicas_after_seal": 0,
+    "agent_peak_data": 2050,
+    "agent_peak_replicas": 1076,
+    "service_tasks_per_second": 1660.5351406597806,
+    "execution_seconds": 6.28229853900848,
+    "status": "PASS"
+  }
+}

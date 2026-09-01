@@ -1,0 +1,104 @@
+2026/08/27 19:07:49: |submitted: 0 |needed: 4 |waiting connection: 0 |requested: 4 
+PROJECT            HOST                   PORT WAITING RUNNING COMPLETE WORKERS 
+localhost          localhost              1024       0       0        0       0 
+
+vine_worker: creating workspace /tmp/worker-241627-973425
+vine_worker: using 4.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:43188
+vine_worker: creating workspace /tmp/worker-241627-973424
+vine_worker: using 4.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:43172
+vine_worker: creating workspace /tmp/worker-241627-973423
+vine_worker: using 4.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:43164
+vine_worker: creating workspace /tmp/worker-241627-973426
+vine_worker: using 4.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:43158
+2026/08/27 19:07:51.25 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 23 path /tmp/worker-241627-973423/func.23/.taskvine.stdout: No such file or directory
+2026/08/27 19:07:51.25 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 1 path /tmp/worker-241627-973425/func.1/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 27 path /tmp/worker-241627-973423/func.27/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 5 path /tmp/worker-241627-973425/func.5/.taskvine.stdout: No such file or directory
+2026/08/27 19:07:51.25 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 50 path /tmp/worker-241627-973424/func.50/.taskvine.stdout: No such file or directory
+2026/08/27 19:07:51.25 vine_worker[973426]notice: DataVine Worker Agent commit-output failed for data 60 path /tmp/worker-241627-973426/func.60/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 31 path /tmp/worker-241627-973423/func.31/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 9 path /tmp/worker-241627-973425/func.9/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 54 path /tmp/worker-241627-973424/func.54/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973426]notice: DataVine Worker Agent commit-output failed for data 64 path /tmp/worker-241627-973426/func.64/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 13 path /tmp/worker-241627-973425/func.13/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 58 path /tmp/worker-241627-973424/func.58/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 35 path /tmp/worker-241627-973423/func.35/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973426]notice: DataVine Worker Agent commit-output failed for data 68 path /tmp/worker-241627-973426/func.68/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 17 path /tmp/worker-241627-973425/func.17/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 39 path /tmp/worker-241627-973423/func.39/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 62 path /tmp/worker-241627-973424/func.62/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973426]notice: DataVine Worker Agent commit-output failed for data 72 path /tmp/worker-241627-973426/func.72/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 21 path /tmp/worker-241627-973425/func.21/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 43 path /tmp/worker-241627-973423/func.43/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 66 path /tmp/worker-241627-973424/func.66/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973426]notice: DataVine Worker Agent commit-output failed for data 76 path /tmp/worker-241627-973426/func.76/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 25 path /tmp/worker-241627-973425/func.25/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 47 path /tmp/worker-241627-973423/func.47/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 70 path /tmp/worker-241627-973424/func.70/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973426]notice: DataVine Worker Agent commit-output failed for data 80 path /tmp/worker-241627-973426/func.80/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 29 path /tmp/worker-241627-973425/func.29/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 51 path /tmp/worker-241627-973423/func.51/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 74 path /tmp/worker-241627-973424/func.74/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973426]notice: DataVine Worker Agent commit-output failed for data 84 path /tmp/worker-241627-973426/func.84/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 33 path /tmp/worker-241627-973425/func.33/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 55 path /tmp/worker-241627-973423/func.55/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 78 path /tmp/worker-241627-973424/func.78/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973426]notice: DataVine Worker Agent commit-output failed for data 88 path /tmp/worker-241627-973426/func.88/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 37 path /tmp/worker-241627-973425/func.37/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 59 path /tmp/worker-241627-973423/func.59/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 82 path /tmp/worker-241627-973424/func.82/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973426]notice: DataVine Worker Agent commit-output failed for data 92 path /tmp/worker-241627-973426/func.92/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 41 path /tmp/worker-241627-973425/func.41/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 63 path /tmp/worker-241627-973423/func.63/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 86 path /tmp/worker-241627-973424/func.86/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.25 vine_worker[973426]notice: DataVine Worker Agent commit-output failed for data 96 path /tmp/worker-241627-973426/func.96/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 67 path /tmp/worker-241627-973423/func.67/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 90 path /tmp/worker-241627-973424/func.90/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 45 path /tmp/worker-241627-973425/func.45/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973426]notice: DataVine Worker Agent commit-output failed for data 100 path /tmp/worker-241627-973426/func.100/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 71 path /tmp/worker-241627-973423/func.71/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 94 path /tmp/worker-241627-973424/func.94/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 49 path /tmp/worker-241627-973425/func.49/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 75 path /tmp/worker-241627-973423/func.75/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 98 path /tmp/worker-241627-973424/func.98/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973426]notice: DataVine Worker Agent commit-output failed for data 104 path /tmp/worker-241627-973426/func.104/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 53 path /tmp/worker-241627-973425/func.53/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 79 path /tmp/worker-241627-973423/func.79/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 57 path /tmp/worker-241627-973425/func.57/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973424]notice: DataVine Worker Agent commit-output failed for data 102 path /tmp/worker-241627-973424/func.102/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 83 path /tmp/worker-241627-973423/func.83/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 61 path /tmp/worker-241627-973425/func.61/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 87 path /tmp/worker-241627-973423/func.87/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 65 path /tmp/worker-241627-973425/func.65/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 91 path /tmp/worker-241627-973423/func.91/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 69 path /tmp/worker-241627-973425/func.69/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 95 path /tmp/worker-241627-973423/func.95/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 73 path /tmp/worker-241627-973425/func.73/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 99 path /tmp/worker-241627-973423/func.99/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 77 path /tmp/worker-241627-973425/func.77/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973423]notice: DataVine Worker Agent commit-output failed for data 103 path /tmp/worker-241627-973423/func.103/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 81 path /tmp/worker-241627-973425/func.81/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 85 path /tmp/worker-241627-973425/func.85/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 89 path /tmp/worker-241627-973425/func.89/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 93 path /tmp/worker-241627-973425/func.93/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 97 path /tmp/worker-241627-973425/func.97/.taskvine.stdout: No such file or directory
+2026/08/27 23:07:51.26 vine_worker[973425]notice: DataVine Worker Agent commit-output failed for data 101 path /tmp/worker-241627-973425/func.101/.taskvine.stdout: No such file or directory
+received signal(15), shutting down workers...
+2026/08/27 23:07:54.61 vine_worker[973426]notice: stopping: abort signal received
+2026/08/27 23:07:54.61 vine_worker[973423]notice: stopping: abort signal received
+2026/08/27 23:07:54.61 vine_worker[973425]notice: stopping: abort signal received
+2026/08/27 23:07:54.62 vine_worker[973424]notice: stopping: abort signal received
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-973426
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-973423
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-973424
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-973425
+removing 4 workers...
+all workers removed.

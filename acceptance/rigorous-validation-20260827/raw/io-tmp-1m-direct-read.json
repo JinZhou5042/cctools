@@ -1,0 +1,1 @@
+{"mode":"read","dir":"/tmp/datavine-io-validation-direct","files":1024,"file_bytes":1048576,"threads":16,"direct":1,"elapsed_seconds":0.286928089,"files_per_second":3568.838,"mib_per_second":3568.838,"bytes":1073741824,"checksum":1073750528,"status":"PASS"}

@@ -1,0 +1,110 @@
+{
+  "artifact_type": "datavine-dynamic-control-root-fix",
+  "date": "2026-08-31",
+  "status": "PASS",
+  "base_commit": "9818f7f42cd0ac83d4e830697a520e6c13b4bba7",
+  "code_diff_sha256": "dee5384f7c73df966ac524066cee4e237aaf2c26d001e24e3dc096a55ed81742",
+  "workload": {
+    "tasks": 477,
+    "edges": 445,
+    "roots": 32,
+    "maximum_depth": 3,
+    "task_cpu_milliseconds": 5,
+    "output_bytes": 256,
+    "workers": 2,
+    "cores_per_worker": 4,
+    "batch_type": "condor",
+    "trace_sha256": "e1d1352b01ec8989df2a2b761dfc56a3829eca1eb86ade033623b1dd244c2038"
+  },
+  "root_cause": {
+    "legacy_object_put_requests": 478,
+    "legacy_object_put_bytes": [123068, 123069, 123067],
+    "legacy_object_put_wall_seconds": [4.113503613, 3.998980286, 3.407861015],
+    "legacy_sharedfs_seconds": [3.188581784, 3.185303877, 2.672976992],
+    "finding": "unique Python invocation control records used a durable SharedFS object transaction per task"
+  },
+  "implementation": {
+    "inline_ticket": "DVP2",
+    "inline_invocation_max_bytes": 65536,
+    "legacy_fallback": "DVP1",
+    "result_stream": "controller-admitted-sequence-v1",
+    "result_stream_inline_max_bytes": 65536,
+    "sequence_storage": "append-only requested-result array rebuilt from DATA_READY_BATCH journal order",
+    "scheduler_waits_for_controller": false,
+    "generic_taskvine_path_changed": false
+  },
+  "remote_runs": [
+    {
+      "completion_mode": "stream",
+      "datavine_seconds": 1.223562240949832,
+      "datavine_tasks_per_second": 389.8453090786068,
+      "taskvine_seconds": 2.36413264402654,
+      "taskvine_tasks_per_second": 201.7653286947486,
+      "datavine_rpc_requests": 483,
+      "datavine_object_put_requests": 1,
+      "datavine_object_put_wall_seconds": 0.009531970,
+      "summary_sha256": "68c8af286f08ba8c91528dd6e10ee8df345e2457a9428ecea8f5c15f78626ccb"
+    },
+    {
+      "completion_mode": "poll",
+      "datavine_seconds": 1.2245785429840907,
+      "datavine_tasks_per_second": 389.52176872022574,
+      "taskvine_seconds": 4.339176806039177,
+      "taskvine_tasks_per_second": 109.92868493768708,
+      "datavine_rpc_requests": 1539,
+      "datavine_object_put_requests": 1,
+      "datavine_object_put_wall_seconds": 0.009471021,
+      "summary_sha256": "06743ed252c3fffb88d21c7d51df9bef4a80b9ebf5f458904e21c8fe48fe3cd2"
+    }
+  ],
+  "local_ab": {
+    "workers": 1,
+    "cores": 4,
+    "stream_seconds": 1.5509829689981416,
+    "stream_rpc_requests": 483,
+    "poll_seconds": 1.5629067800473422,
+    "poll_rpc_requests": 1654,
+    "stream_summary_sha256": "802eabe87621880ac01ca5c056c9d2a10b2ac43baa65e1b43f4b7aff32bf77f7",
+    "poll_summary_sha256": "7ca98be85f9e0281cf69a72eaf08c97895c9bf2b01b4cc6b6613d2dd7643b745"
+  },
+  "wider_local": {
+    "tasks": 948,
+    "edges": 884,
+    "workers": 1,
+    "cores": 16,
+    "datavine_seconds": 1.651972969993949,
+    "datavine_tasks_per_second": 573.8592684137395,
+    "taskvine_seconds": 3.440764454891905,
+    "taskvine_tasks_per_second": 275.5201678081106,
+    "summary_sha256": "081aa0c42b0c0995090640197c3e8b81a9420f0bd7a315e71a56e54e331588cb"
+  },
+  "result_stream_scale": {
+    "tasks": 10000,
+    "requested_empty_results": 10000,
+    "workers": 1,
+    "cores": 16,
+    "submit_seconds": 0.8618149179965258,
+    "execution_and_stream_seconds": 8.506139493081719,
+    "results_per_second": 1175.6214447380366,
+    "final_sequence": 10000,
+    "terminal": "completed",
+    "rpc_connections": 2,
+    "rpc_requests": 5,
+    "stream_requests": 1,
+    "missing_or_duplicate_results": 0
+  },
+  "acceptance": {
+    "inline_small_result": "PASS",
+    "legacy_large_invocation_fallback": "PASS",
+    "empty_result": "PASS",
+    "large_result_descriptor": "PASS",
+    "disconnect_resume": "PASS",
+    "restart_replay_resume": "PASS",
+    "terminal_frame": "PASS",
+    "workflow_lifecycle": "PASS",
+    "production_data_plane": "PASS",
+    "module_boundaries": "PASS",
+    "warning_clean_build": "PASS"
+  },
+  "raw_evidence": "/groups/dthain/users/jzhou24/datavine-benchmarks/root-fix-20260831"
+}

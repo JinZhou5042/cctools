@@ -1,0 +1,27 @@
+{
+  "batching": false,
+  "client_mode": "threads",
+  "connections": 64,
+  "iterations": 25,
+  "phases": {
+    "publish": {
+      "records": 102400,
+      "records_per_second": 19723.315604212512,
+      "seconds": 5.191824846027885,
+      "service_cpu_nanoseconds_per_record": 17773.437499999996,
+      "service_cpu_seconds": 1.8199999999999998
+    },
+    "resolve": {
+      "records": 102400,
+      "records_per_second": 15271.405156573373,
+      "seconds": 6.705342367000412,
+      "service_cpu_nanoseconds_per_record": 19531.25,
+      "service_cpu_seconds": 2.0
+    }
+  },
+  "records": 4096,
+  "records_per_request": 1,
+  "status": "PASS",
+  "workflow_build_seconds": 0.04931318695889786,
+  "workflow_submit_seconds": 0.3591539000044577
+}

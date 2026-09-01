@@ -1,0 +1,159 @@
+{
+  "status": "PASS_WITH_LIMITATION",
+  "date": "2026-08-28",
+  "scope": "diagnosis only; no persistence, scheduling, queue, retry, thread-count, or durability policy change",
+  "diagnostics": {
+    "activation": "DATAVINE_PERSISTENCE_DIAGNOSTICS=1",
+    "default": "disabled",
+    "data_threads": 16,
+    "counter_layout": "one cache-line-aligned counter block per data thread",
+    "stages": [
+      "enqueue block",
+      "queue wait",
+      "Worker connection wait",
+      "connect/request/header/open",
+      "combined socket-read and file-write stream",
+      "fsync",
+      "close",
+      "rename",
+      "durable-file SHA-256 verification reread",
+      "prepared-to-commit wait",
+      "journal/install commit"
+    ]
+  },
+  "worker_shape": {
+    "workers": 16,
+    "cores_per_worker": 4,
+    "memory_mib_per_worker": 3072,
+    "disk_mib_per_worker": 10240,
+    "gpus_per_worker": 0,
+    "batch_type": "condor"
+  },
+  "one_mib_probe_off": {
+    "tasks": 4096,
+    "total_mib": 4096,
+    "service_seconds": 7.488155,
+    "mib_per_second": 546.997,
+    "controller_cpu_seconds": 35.44
+  },
+  "one_mib_probe_on": {
+    "tasks": 4096,
+    "total_mib": 4096,
+    "service_seconds": 7.474973,
+    "mib_per_second": 547.962,
+    "controller_cpu_seconds": 35.66,
+    "jobs": 4096,
+    "bytes": 4294967296,
+    "failures": 0,
+    "retries": 0,
+    "peak_queue_depth": 3501,
+    "enqueue_block_seconds": 0.000478,
+    "queue_wait_seconds": 11436.864320,
+    "connection_wait_seconds": 13.983663,
+    "request_seconds": 1.799698,
+    "stream_seconds": 12.980566,
+    "fsync_seconds": 60.339559,
+    "close_seconds": 0.438225,
+    "rename_seconds": 0.381174,
+    "verify_seconds": 26.071315,
+    "commit_wait_seconds": 3.269404,
+    "commit_seconds": 0.089475,
+    "commit_groups": 1664,
+    "accounted_active_seconds": 119.353079,
+    "accounted_parallel_seconds": 7.459567,
+    "service_window_coverage_percent": 99.794,
+    "active_stage_percent": {
+      "fsync": 50.56,
+      "verify": 21.84,
+      "connection_wait": 11.72,
+      "stream": 10.88,
+      "commit_wait": 2.74,
+      "request": 1.51,
+      "close": 0.37,
+      "rename": 0.32,
+      "commit": 0.07
+    }
+  },
+  "sixteen_mib_probe_runs": [
+    {
+      "service_seconds": 10.214624,
+      "mib_per_second": 400.994,
+      "fsync_seconds": 117.272945,
+      "verify_seconds": 20.951958,
+      "stream_seconds": 10.996343,
+      "connection_wait_seconds": 10.402360,
+      "fsync_active_stage_percent": 73.27,
+      "service_window_coverage_percent": 97.939,
+      "peak_queue_depth": 225,
+      "failures": 0,
+      "retries": 2
+    },
+    {
+      "service_seconds": 9.919889,
+      "mib_per_second": 412.908,
+      "fsync_seconds": 113.903756,
+      "verify_seconds": 21.012091,
+      "stream_seconds": 10.543893,
+      "connection_wait_seconds": 9.387322,
+      "fsync_active_stage_percent": 73.35,
+      "service_window_coverage_percent": 97.839,
+      "peak_queue_depth": 230,
+      "failures": 0,
+      "retries": 0
+    }
+  ],
+  "sixteen_mib_probe_off": {
+    "service_seconds": 7.048261,
+    "mib_per_second": 581.136,
+    "controller_cpu_seconds": 27.91
+  },
+  "findings": {
+    "primary": "per-file fsync and its storage-level variability",
+    "secondary": "full durable-file SHA-256 reread after streaming",
+    "tertiary": "one persistent pull connection per Worker serializes concurrent outputs from the same Worker",
+    "not_material": ["enqueue blocking", "rename", "close", "journal/install commit", "Scheduler", "metadata RPC"],
+    "queue_interpretation": "a large ready backlog forms, but the queue is not the service work; 16 data threads remain continuously occupied",
+    "next_optimization_candidate": "none of streaming SHA-256, fdatasync, preallocation or sync_file_range showed a stable matched-load improvement; retain the current path unless a remote production A/B proves otherwise"
+  },
+  "fsync_contract": {
+    "required": true,
+    "reason": "requested-output metadata must not commit before delayed local ENOSPC or EIO can be observed",
+    "boundary": "local runtime durability only; the containing directory is not fsynced and Controller-host loss, reboot and cross-host durability remain out of scope",
+    "removal_requires_policy_change": true
+  },
+  "followup_optimization_screen": {
+    "scope": "temporary Controller-local /tmp microbenchmarks; 16 threads and 4 GiB per point; no production code change",
+    "posix_fallocate_active_time_change_percent": {
+      "1_mib": 2.1,
+      "16_mib": 3.5
+    },
+    "streaming_sha_active_time_change_percent": {
+      "1_mib": -0.7,
+      "16_mib_repetitions": [5.6, 2.5, -1.5],
+      "16_mib_median": 2.5
+    },
+    "fdatasync": "indistinguishable from fsync within run variability",
+    "sync_file_range_active_time_change_percent": [14.8, 2.1],
+    "decision": "NO_PROMOTION"
+  },
+  "measurement_limitations": [
+    "link_stream_to_fd combines socket read and local write, so stream_seconds cannot split those two operations without changing the transfer implementation",
+    "the 1-MiB probe-on/off pair differs by only 0.18 percent, but the 16-MiB probe runs are slower than their adjacent probe-off run; use their repeatable stage proportions for diagnosis and the probe-off run for production throughput",
+    "the 64-MiB diagnostic was excluded because Condor could not admit the exact 16-Worker inventory"
+  ],
+  "validation": {
+    "forced_warning_clean_build": "PASS",
+    "local_100_output_metrics_smoke": "PASS",
+    "production_data_plane": "PASS with one Python/cloudpickle environment mismatch diagnosed and corrected",
+    "persistence_fault_gate": "PASS: deterministic ENOSPC and EIO fail closed, clean temporary files, recover once and replay",
+    "scheduler_smoke": "PASS",
+    "final_process_cleanup": "PASS"
+  },
+  "raw_evidence_sha256": {
+    "requested-explicit-1m-w16-off.json": "a0d949d0158565dabb4be32fc550e9dd12bd2ee4b3d4ce56d7eceb0d00ad333a",
+    "requested-explicit-1m-w16-aligned.json": "942b04b8a617cc0372c722d31307a6c11a38141fba42d1009450cfab20ff6d7b",
+    "requested-explicit-16m-w16.json": "c3c0f000ba9efce87e6fcc2a6f21771323375e521b8650eadb41f7a072cbea6b",
+    "requested-explicit-16m-w16-off.json": "c34ff39bb0c7f5742e6770d6333e3fa3d68f57d046697b773d057069e6aa463f",
+    "requested-explicit-16m-w16-repeat2.json": "7f3afecd8792fe4f2b151221ab54b3d15061f0af65357086cecdfa40ee903be9"
+  }
+}

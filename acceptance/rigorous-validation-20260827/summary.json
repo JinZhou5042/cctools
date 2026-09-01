@@ -1,0 +1,73 @@
+{
+  "artifact_type": "datavine-rigorous-validation",
+  "base_commit": "9818f7f42cd0ac83d4e830697a520e6c13b4bba7",
+  "branch": "benchmark/data-intensive-million-file",
+  "date": "2026-08-27",
+  "host": "daccssfe.crc.nd.edu",
+  "status": "PASS",
+  "controller_state_machine": {
+    "disconnect_replicas": 2000000,
+    "disconnect_replicas_per_second": 3960724.239,
+    "lifecycle_data_ids": 1000000,
+    "lifecycle_seconds": 0.958261422,
+    "maximum_rss_kib": 302492,
+    "publish_records_per_second": 8558483.790,
+    "workers": 128
+  },
+  "controller_single_record_rpc": {
+    "connections_tested": [1, 16, 64, 128],
+    "maximum_publish_records_per_second": 109741.482,
+    "maximum_resolve_records_per_second": 90131.668,
+    "process_driver_64_connection_mean_publish_records_per_second": 101067.915,
+    "process_driver_64_connection_mean_resolve_records_per_second": 83954.168,
+    "records_per_phase": 102400,
+    "records_per_request": 1,
+    "thread_driver_note": "The earlier approximately 20k/s result was limited by the Python GIL, not the Controller."
+  },
+  "filesystem": {
+    "files_4k": 5000,
+    "sharedfs_4k_write_files_per_second": 815.290,
+    "tmp_4k_write_files_per_second": 15037.414,
+    "tmp_over_sharedfs_4k_write": 18.444,
+    "files_1m": 1024,
+    "sharedfs_1m_direct_read_mib_per_second": 992.793,
+    "sharedfs_1m_direct_write_mib_per_second": 350.818,
+    "tmp_1m_direct_read_mib_per_second": 3568.838,
+    "tmp_1m_direct_write_mib_per_second": 2807.401,
+    "tmp_over_sharedfs_1m_direct_read": 3.595,
+    "tmp_over_sharedfs_1m_direct_write": 8.002,
+    "threads": 16
+  },
+  "task_throughput": {
+    "condor_16x4_runtime_tasks_per_second": 13686.385,
+    "condor_16x4_service_tasks_per_second": 19277.696,
+    "condor_tasks": 50000,
+    "local_1x16_cv": 0.01276,
+    "local_1x16_mean_runtime_tasks_per_second": 4067.697,
+    "local_1x16_repetitions": 3,
+    "local_tasks_per_repetition": 50000
+  },
+  "requested_output": {
+    "empty_1x16_cv": 0.006579,
+    "empty_1x16_mean_files_per_second": 978.824,
+    "empty_files_per_repetition": 20000,
+    "empty_repetitions": 3,
+    "large_bytes_per_repetition": 1073741824,
+    "large_post_fix_mean_service_mib_per_second": 150.178,
+    "large_post_fix_repetitions": 2,
+    "small_files": 2000,
+    "small_post_fix_cv": 0.005088,
+    "small_post_fix_mean_files_per_second": 1034.163,
+    "small_post_fix_repetitions": 3,
+    "small_pre_fix_files_per_second": 24.242,
+    "small_tcp_nodelay_speedup": 42.588
+  },
+  "regression": {
+    "passed": 18,
+    "tests": 18
+  },
+  "fifth_pass": "fifth-pass/summary.json",
+  "fourth_pass": "fourth-pass/summary.json",
+  "third_pass": "third-pass/summary.json",
+  "remote_repeat_note": "A second Condor repetition observed 16 idle jobs for 300 seconds, failed the exact-inventory admission gate, and cleaned all jobs. It is excluded from throughput statistics."
+}

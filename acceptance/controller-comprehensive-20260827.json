@@ -1,0 +1,164 @@
+{
+  "artifact_type": "datavine-controller-comprehensive-evaluation",
+  "date": "2026-08-27",
+  "source_state": "intentionally-dirty-uncommitted-worktree",
+  "status": "PASS_WITH_OBSERVABILITY_AND_FAULT_INJECTION_OPEN",
+  "constraints": {
+    "workflow_processes": 1,
+    "workflows_per_process": 1,
+    "controller_data_threads": 16,
+    "rpc_batching": false,
+    "records_per_rpc": 1,
+    "persistence_root": "/tmp",
+    "maximum_metadata_records": 10000000,
+    "maximum_replicas": 10000000
+  },
+  "metadata": {
+    "controller_1m_r1_lifecycle": {
+      "total_seconds": 0.771102473,
+      "max_rss_kib": 189716,
+      "expect_per_second": 11115876.859,
+      "publish_per_second": 11134040.551,
+      "resolve_random_per_second": 2821077.955,
+      "mark_dead_per_second": 7267644.202,
+      "take_releases_per_second": 36798266.697
+    },
+    "controller_10m_r1_lifecycle": {
+      "total_seconds": 13.479657781,
+      "max_rss_kib": 2386060,
+      "expect_per_second": 8441527.697,
+      "publish_per_second": 8625485.738,
+      "resolve_random_per_second": 1970042.167,
+      "mark_dead_per_second": 6666727.485,
+      "take_releases_per_second": 3375398.602
+    },
+    "controller_10m_r1_disconnect": {
+      "total_seconds": 11.579259407,
+      "max_rss_kib": 2151844,
+      "session_lost_replicas_per_second": 4243391.612,
+      "mark_dead_per_second": 23336571.572
+    },
+    "controller_1m_r4_lifecycle": {
+      "total_seconds": 2.888623742,
+      "max_rss_kib": 407040,
+      "publish_replicas_per_second": 9132104.929,
+      "resolve_random_per_second": 852033.574,
+      "mark_dead_data_per_second": 1694398.687,
+      "take_releases_per_second": 8309483.799
+    },
+    "conclusions": [
+      "Expect and publish remain above 8.4 million operations per second at 10 million records.",
+      "Random resolve is the first metadata operation to degrade with working-set size.",
+      "Four replicas per data reduce random resolve from 2.82 million to 0.85 million operations per second at one million data IDs.",
+      "Ten million data IDs with one replica and one waiter peak at approximately 2.28 GiB RSS."
+    ]
+  },
+  "single_record_rpc": {
+    "records_per_phase": 131072,
+    "latency_sample_stride": 16,
+    "latency_samples_per_phase": 8192,
+    "connections": {
+      "1": {
+        "publish_per_second": 20795.282,
+        "publish_p50_us": 41.968,
+        "publish_p99_us": 50.903,
+        "resolve_per_second": 17942.315,
+        "resolve_p50_us": 53.267,
+        "resolve_p99_us": 63.077
+      },
+      "16": {
+        "publish_per_second": 87132.434,
+        "publish_p50_us": 134.123,
+        "publish_p99_us": 294.312,
+        "resolve_per_second": 81930.571,
+        "resolve_p50_us": 148.036,
+        "resolve_p99_us": 313.475
+      },
+      "64": {
+        "publish_per_second": 105321.131,
+        "publish_p50_us": 478.357,
+        "publish_p99_us": 1310.082,
+        "resolve_per_second": 83752.357,
+        "resolve_p50_us": 726.388,
+        "resolve_p99_us": 1464.257
+      },
+      "128": {
+        "publish_per_second": 111541.798,
+        "publish_p50_us": 1047.682,
+        "publish_p99_us": 2181.412,
+        "resolve_per_second": 85444.914,
+        "resolve_p50_us": 1514.921,
+        "resolve_p99_us": 1649.715
+      }
+    },
+    "conclusion": "Throughput saturates around 64 to 128 connections while queueing increases tail latency. Sixteen connections are the best latency-throughput balance."
+  },
+  "persistence": {
+    "empty_files_per_second": {
+      "w1": 2034.832,
+      "w4": 7593.308,
+      "w16": 9666.515,
+      "w64": 9017.620
+    },
+    "four_kib_files_per_second": {
+      "w1": 755.884,
+      "w4": 3137.972,
+      "w16": 4848.443,
+      "w64": 3714.964
+    },
+    "one_mib_mib_per_second_single_sweep": {
+      "w1": 182.246,
+      "w4": 711.173,
+      "w16": 471.752,
+      "w64": 459.161
+    },
+    "one_mib_repeated": {
+      "w4_mean_mib_per_second": 586.4,
+      "w4_cv": 0.308,
+      "w16_mean_mib_per_second": 415.7,
+      "w16_cv": 0.117
+    },
+    "sixty_four_mib_mib_per_second": {
+      "w1": 242.240,
+      "w4": 339.432,
+      "w16": 411.149
+    },
+    "raw_tmp_direct_fsync_sixty_four_mib_mib_per_second": {
+      "threads_1": 705.8,
+      "threads_4": 702.5,
+      "threads_16": 770.0
+    },
+    "conclusions": [
+      "Small-file throughput peaks near 16 Workers and declines at 64 Workers.",
+      "Large output persistence is limited primarily by local durable-write bandwidth and double writes on this same-host test topology.",
+      "More than 16 concurrent producers adds memory and file descriptors without improving throughput.",
+      "Sixteen Controller data threads remain a sound production default."
+    ]
+  },
+  "worker_local_boundary": {
+    "one_mib_unrequested_generated_mib_per_second": 764.9,
+    "one_mib_unrequested_durable_files": 0,
+    "one_mib_requested_mib_per_second": 471.8,
+    "sixty_four_mib_unrequested_generated_mib_per_second": 1213.5,
+    "sixty_four_mib_unrequested_durable_files": 0,
+    "sixty_four_mib_requested_mib_per_second": 411.1,
+    "conclusion": "Unrequested outputs remain Worker-local and avoid the Controller persistence write."
+  },
+  "correctness_gates": {
+    "replica_table_invariants": "PASS",
+    "late_dynamic_consumer": "PASS",
+    "volatile_loss_replay": "PASS",
+    "late_request_promotion": "PASS",
+    "inflight_request_promotion": "PASS",
+    "retry": "PASS",
+    "worker_loss_scheduler_retry": "PASS",
+    "owner_restart": "PASS",
+    "checkpoint_resume": "PASS",
+    "production_data_plane_dedup": "PASS"
+  },
+  "open_findings": [
+    "Agent persistence is not included in the current publication timing counters; the profile reports zero despite verified durable files.",
+    "The repository has no deterministic ENOSPC or EIO injection gate for Controller persistence.",
+    "High replica fan-out makes resolve and mark-dead costs proportional to replicas per data ID."
+  ]
+}

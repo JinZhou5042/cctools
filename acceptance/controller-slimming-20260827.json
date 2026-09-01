@@ -1,0 +1,54 @@
+{
+  "artifact_type": "datavine-controller-slimming",
+  "created_at": "2026-08-27",
+  "status": "PASS_WITH_RETIRED_MULTI_WORKFLOW_TESTS",
+  "scope": "single-workflow-controller-metadata",
+  "production_boundary": {
+    "workflow_processes": 1,
+    "workflows_per_process": 1,
+    "generic_hash_tables_in_controller": 0,
+    "generic_itables_in_controller": 0,
+    "logical_task_batching": false
+  },
+  "structure_bytes": {
+    "catalog_slot_before": 0,
+    "catalog_slot_after": 8,
+    "data_record_before": 64,
+    "data_record_after": 56,
+    "replica_record_before": 56,
+    "replica_record_after": 40,
+    "waiter_record_before": 56,
+    "waiter_record_after": 48,
+    "worker_session_before": 24,
+    "worker_session_after": 16,
+    "publication_job_live_allocation_before": 960,
+    "publication_job_after": 336,
+    "durable_result_before": 336,
+    "durable_result_after": 312
+  },
+  "lifecycle_1m_w128_r1": {
+    "baseline_source": "acceptance/rigorous-validation-20260827/raw/controller-lifecycle-1m-w128-r1.json",
+    "baseline_total_seconds": 0.958261422,
+    "current_total_seconds": 0.852070266,
+    "speedup": 1.1246,
+    "baseline_max_rss_kib": 214816,
+    "current_max_rss_kib": 189592,
+    "rss_reduction_fraction": 0.1174,
+    "baseline_expect_per_second": 7487802.723,
+    "current_expect_per_second": 9744118.760,
+    "baseline_publish_per_second": 8558483.790,
+    "current_publish_per_second": 10688972.357,
+    "baseline_resolve_per_second": 2329570.563,
+    "current_resolve_per_second": 2516244.991
+  },
+  "gates": {
+    "warning_clean_datavine_build": "PASS",
+    "warning_clean_manager_library": "PASS",
+    "warning_clean_worker": "PASS",
+    "replica_failure_regression": "PASS",
+    "production_data_plane": "PASS",
+    "single_workflow_second_id_rejected": "PASS",
+    "git_diff_check": "PASS",
+    "legacy_full_regression": "12/18 after rebuilding the strict singleton binary; six tests reuse one service for multiple workflow IDs and are outside the production contract"
+  }
+}

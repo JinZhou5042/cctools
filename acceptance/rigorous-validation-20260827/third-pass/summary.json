@@ -1,0 +1,62 @@
+{
+  "artifact_type": "datavine-third-pass-rpc-validation",
+  "base_commit": "9818f7f42cd0ac83d4e830697a520e6c13b4bba7",
+  "date": "2026-08-27",
+  "status": "PASS",
+  "single_connection_before": {
+    "publish_cpu_nanoseconds_per_record": 22460.938,
+    "publish_records_per_second": 19153.614,
+    "resolve_cpu_nanoseconds_per_record": 23632.813,
+    "resolve_records_per_second": 17033.867,
+    "repetitions": 1
+  },
+  "single_connection_after": {
+    "publish_cpu_nanoseconds_per_record": 17480.469,
+    "publish_records_per_second": 21327.565,
+    "resolve_cpu_nanoseconds_per_record": 19335.937,
+    "resolve_records_per_second": 19432.171,
+    "repetitions": 3
+  },
+  "single_connection_change": {
+    "publish_cpu_percent": -22.174,
+    "publish_rate_percent": 11.350,
+    "resolve_cpu_percent": -18.182,
+    "resolve_rate_percent": 14.080
+  },
+  "connections_64_cpu_change": {
+    "publish_percent": -27.623,
+    "resolve_percent": -22.265
+  },
+  "process_driver": {
+    "connections_16": {
+      "publish_mean_records_per_second": 94169.258,
+      "resolve_mean_records_per_second": 81388.884
+    },
+    "connections_64": {
+      "publish_cv": 0.041079,
+      "publish_mean_cpu_nanoseconds_per_record": 6868.490,
+      "publish_mean_records_per_second": 101067.915,
+      "resolve_mean_cpu_nanoseconds_per_record": 7942.708,
+      "resolve_mean_records_per_second": 83954.168
+    },
+    "connections_128": {
+      "publish_cv": 0.103516,
+      "publish_mean_records_per_second": 98694.595,
+      "resolve_mean_records_per_second": 87329.975
+    },
+    "records_per_phase": 102400,
+    "records_per_request": 1,
+    "repetitions": 3
+  },
+  "small_file_regression": {
+    "durable_bytes_per_repetition": 8192000,
+    "durable_files_per_repetition": 2000,
+    "mean_service_files_per_second": 1198.972,
+    "previous_mean_service_files_per_second": 1203.843,
+    "repetitions": 3
+  },
+  "regression": {
+    "passed": 18,
+    "tests": 18
+  }
+}

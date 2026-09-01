@@ -1,0 +1,128 @@
+{
+  "artifact_type": "datavine-controller-local-tmp-handoff",
+  "created_at": "2026-08-27T13:18:03-04:00",
+  "status": "PASS_WITH_UNCOMMITTED_WORKTREE",
+  "source": {
+    "branch": "benchmark/data-intensive-million-file",
+    "git_revision": "9818f7f42cd0ac83d4e830697a520e6c13b4bba7",
+    "dirty_worktree": true,
+    "tracked_diff_sha256_before_handoff": "b2356ad4578b6cfd3a894971e4e9d83e809ac270a72d5674bd56ce765b3bece9",
+    "modified_tracked_files_before_handoff": 16,
+    "untracked_entries_before_handoff": 10,
+    "datavine_workflow_sha256": "8959844209906fdc2ca1043d4214a21ab56b2a1c1d80d5657aecd8fbc30a0edc",
+    "vine_worker_sha256": "b0f58948aa3fa3faaf280f787a1c68621aaa7d2399219eca0e94e5d40f01a844",
+    "vine_factory_sha256": "59877762b484204eada014c516e74f092109c04a9738882577f550c3052595d0"
+  },
+  "production_decision": {
+    "scope": "one workflow per process",
+    "default_output": "worker-local volatile replica",
+    "consumer_path": "same-worker or peer-first replica transfer",
+    "requested_output_path": "worker stream to Controller, Controller fsync plus atomic rename under local /tmp",
+    "scheduler_waits_for_persistence": false,
+    "controller_data_threads": 16,
+    "worker_direct_sharedfs": false,
+    "file_size_routing": false,
+    "sharedfs_in_critical_path": false,
+    "durability_boundary": "workflow and Controller-host lifetime; /tmp does not survive Controller-host loss"
+  },
+  "experiments": {
+    "controller_local_200k": {
+      "status": "PASS",
+      "workers": 128,
+      "cores_per_worker": 4,
+      "available_worker_cores": 512,
+      "tasks": 200000,
+      "requested_empty_outputs": 200000,
+      "physical_submissions": 200000,
+      "physical_completions": 200000,
+      "controller_seconds": 20.632866,
+      "controller_files_per_second": 9693.27285894262,
+      "end_to_end_tasks_per_second": 9465.977532087198,
+      "worker_inventory": 128,
+      "submission_frontier": 4096,
+      "peak_rss_bytes": 616599552,
+      "peak_fds": 409
+    },
+    "matched_datavine_tmp_vs_sharedfs": {
+      "status": "PASS",
+      "workers": 24,
+      "cores_per_worker": 1,
+      "tasks_and_requested_empty_outputs": 20000,
+      "tmp_controller_files_per_second": 5004.570423939663,
+      "sharedfs_controller_files_per_second": 195.88200205313723,
+      "tmp_speedup": 25.548903786382912
+    },
+    "filesystem_16_thread_medians": {
+      "status": "PASS",
+      "small_file_bytes": 4096,
+      "small_write_tmp_files_per_second": 15337.729,
+      "small_write_sharedfs_files_per_second": 156.962,
+      "small_write_tmp_speedup": 97.716,
+      "small_read_tmp_files_per_second": 79733.839,
+      "small_read_sharedfs_files_per_second": 1922.821,
+      "small_read_tmp_speedup": 41.467,
+      "large_file_bytes": 268435456,
+      "large_write_tmp_mib_per_second": 686.545,
+      "large_write_sharedfs_mib_per_second": 1111.363,
+      "large_read_tmp_mib_per_second": 439.826,
+      "large_read_sharedfs_mib_per_second": 1117.688,
+      "note": "Size crossover was explored and retained in raw evidence, but production deliberately has no size-based routing."
+    },
+    "remote_worker_direct_vs_controller_stream": {
+      "status": "PASS",
+      "workers": 96,
+      "controller_stream_concurrency": 16,
+      "files_per_round": 19200,
+      "bytes_per_round": 2084044800,
+      "distribution": "90 percent 4 KiB and 10 percent 1 MiB; identical policy for every file",
+      "controller_tmp_round_seconds": [16.914118656, 30.105119488],
+      "controller_tmp_round_files_per_second": [1135.146, 637.765],
+      "worker_direct_sharedfs_round_seconds": [39.478036736, 39.26497792],
+      "worker_direct_sharedfs_round_files_per_second": [486.346, 488.985],
+      "controller_aggregate_files_per_second": 816.687,
+      "worker_direct_aggregate_files_per_second": 487.662,
+      "controller_aggregate_speedup": 1.675,
+      "controller_worst_round_speedup_over_best_direct": 1.304,
+      "condor_exit_zero_jobs": 96,
+      "controller_failures": 0
+    },
+    "thread_selection": {
+      "selected_controller_data_threads": 16,
+      "four_thread_96_worker_files_per_second": 6218.13516634009,
+      "sixteen_thread_96_worker_files_per_second": 9649.248839750197,
+      "sixteen_thread_speedup": 1.5517914264687194,
+      "filesystem_write_16_threads_files_per_second": 15337.729,
+      "filesystem_write_64_threads_files_per_second": 12858.078,
+      "decision": "fixed 16-thread pool; idle threads block on the condition variable; do not create threads per Worker"
+    }
+  },
+  "correctness": {
+    "full_build": "PASS before the storage A/B campaign",
+    "replica_table": "PASS",
+    "dynamic_workflow": "PASS",
+    "workflow_lifecycle": "PASS",
+    "late_consumer_existing_replica": "PASS",
+    "late_consumer_after_last_replica_loss": "PASS via lazy producer replay",
+    "completed_output_late_requested_promotion": "PASS",
+    "inflight_output_late_requested_promotion": "PASS",
+    "sealed_zero_consumer_release": "PASS",
+    "agent_protocol": "PASS",
+    "data_plane_v2": "PASS",
+    "workflow_execution": "PASS",
+    "python_output_policy": "PASS"
+  },
+  "claim_boundaries": [
+    "The worktree is dirty and the implementation plus evidence are not committed.",
+    "The 200k command-output gate stresses Controller file creation and durability; the separate remote topology benchmark supplies the Worker-to-Controller streaming evidence.",
+    "The topology C harness is acceptance-only and is not linked into DataVine.",
+    "Controller-local /tmp persistence does not survive Controller-host failure, reboot, or external /tmp cleanup.",
+    "No production package was rebuilt or promoted after these uncommitted changes.",
+    "The final post-handoff full regression was not rerun; rely only on the explicitly listed targeted PASS gates."
+  ],
+  "cleanup": {
+    "condor_jobs_remaining": 0,
+    "benchmark_processes_remaining": 0,
+    "sharedfs_test_trees_remaining": 0,
+    "tmp_payload_test_trees_remaining": 0
+  }
+}

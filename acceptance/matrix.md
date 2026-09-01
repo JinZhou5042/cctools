@@ -1,93 +1,59 @@
 # DataVine acceptance matrix
 
-Updated: 2026-08-26
+Updated: 2026-08-31
 
-Status: **FIXED 1024-CORE CAMPAIGN PASS; SCIENTIFIC FOUNDATION LOCAL PASS; REAL-APPLICATION DISTRIBUTED ATTRIBUTION OPEN**
-
-## Architecture and correctness
-
-| Gate | State | Current evidence |
+| Gate | State | Evidence |
 |---|---|---|
-| One native authority | PASS | C Runtime owns control; C Data Controller exclusively owns result files, metadata, hashes, fetch, retention, and GC |
-| Single-workflow reactor | PASS | one active workflow and one C Scheduler/Manager reactor per frontend process; no workflow pthreads, completion mailboxes, cross-workflow routing table, Manager request queue, or Manager mutex; local 10k exact gate reached 4,546.9 service tasks/s |
-| Runtime v2 Manager boundary | LOCAL PASS | Manager transports only a generic opaque auxiliary payload; DataVine inputs/outputs create no Manager vine_file/cache-update/unlink state; manifest and task-data telemetry are parsed only by Controller; direct Worker Agent protocol and module scan pass |
-| Native parametric execution | DISTRIBUTED RECOVERY PASS / FULL PERF OPEN | exact full topology builds in about 2.59 s / 172 MiB with matching exhaustive oracle digest; bounded 4,096-task views; replacement-churn gate removed half of 8 Workers and completed exact 8,192 logical + 943 replay + 32 disconnect tasks with zero recovery timeout |
-| Data-intensive exact 128x16 | OPEN | r26 sustained 2,048 cores but failed after 595,393 physical completions when replacement Workers retained an exhausted origin retry state; bounded cooldown/reset is regression-clean and r27 is required |
-| Data-intensive ordinary explicit recovery | PASS | ordinary-profile artifact from clean commit `d19287bf9`: 8,192 logical tasks on 8x8 completed 10,128/10,128 physical attempts after one Worker loss; 487 lost DataIDs caused 1,928 producer-first replays with zero admission timeout and exact pool restoration |
-| Dummy throughput at 3,200 cores | BLOCKED ADMISSION | 200x16 peaked at 44 Workers; 400x8 peaked at 39 with 6 GiB and 95 with 3 GiB; all used 10-20 GiB disk and 0 GPU, but no exact gate opened or workflow was submitted |
-| Completion/data admission decoupling | LOCAL PASS | physical success marks Scheduler DONE immediately; child dispatch does not wait for DATA_READY or requested-result persistence |
-| Worker replica state machine | DISTRIBUTED PASS | chunked DataID table, indexed sessions, HMAC HELLO, digest/generation checks, reconnect advertisement, exact replica faults, idempotent GC ACK, coalesced replay, whole-closure Controller arming, O(n) A/B/C replay ordering, and bounded local origin retry; three 8,192-task disconnect gates have exact physical conservation and zero admission timeout |
-| Parametric family evaluator | PASS | 1,344-byte full descriptor; exact 1,048,576 tasks and 10,485,760 files; 4,096 full samples plus exhaustive small-cohort inverse equivalence; native bounded-frontier execution and distributed replay are integrated |
-| Production v1 contract | PASS | Annotated tag `datavine-production-v1-20260823` freezes one fail-closed production v1; historical callable ticket and manifest parsers are removed; post-freeze regression is 13/13 |
-| Decoupled input data plane | PASS | IR/scheduler retain only DataIDs and SHA-256 identities; Data Controller resolves locations; workers pull and verify digest-scoped objects into stable cache identities |
-| Serialization deduplication | PASS | callable and repeated invocation bytes serialize once; 1,000,000 repeated calls build at 44,945 tasks/s with 1,000,002 Data records |
-| Stage attribution | PASS | final orthogonal runs identify `scheduler_delay` for 256 immediate tasks, `data_stage_in` for 16 unique 4 MiB inputs, and `python_function` for 64 x 50 ms CPU tasks |
-| Core isolation | PASS | DataVine policy is in `libdatavine.a`; core additions are generic helpers |
-| Thin language adaptors | PASS | Python, Shell, and Go share Workflow IR/RPC and contain no scheduler policy |
-| Dynamic workflow | PASS | result-driven append, quiescent/resume, generation CAS, detach/attach, and restart |
-| Python lifecycle | PASS | preloaded single-threaded parent, independent fork children, process-group cancel/wall-time cleanup |
-| Logical/physical identity | PASS | one logical task creates one physical TaskVine task; no noop grouping path remains |
-| Static compact IR | PASS | task/data defaults plus compact records; full records remain compatible; shared native accessors preserve one C graph owner |
-| Producer completion readiness | PASS | Scheduler uses physical producer completion only; DATA_READY and persistence are independent Worker-to-Controller progress |
-| Multi-output callable | PASS | direct cloudpickle output files are atomically published as one metadata batch |
-| Live result | PASS | a requested DataID is fetchable immediately after its task commit while downstream work is still running |
-| Payload isolation | PASS | 2 MiB result stays in immutable Data Controller storage; workflow journal remains under 1 MiB |
-| Corruption | PASS | modified result file makes service restart fail closed |
-| Regression | PASS | 17/17 contracts pass from clean test-tool state; runner selects configured DataVine Python, fails fast on Go prerequisites, and builds/removes the test-only parametric evaluator automatically |
+| Ownership boundary | PASS | Manager carries opaque task frames; Controller owns DataID/replica/result lifecycle |
+| Task/data decoupling | PASS | physical completion releases children without persistence admission |
+| Worker-local/peer-first data | PASS | `volatile-worker-local-20260826.json` and full regression |
+| Default background iData backup | PASS | Controller-background by default with explicit Worker-local opt-out; compact low-priority ring, 4/16-thread cap, at most one background pull per Worker, fsync+rename+digest admission |
+| Peer-first input delivery | PASS | 10k x 1 MiB, 32 producer + 64 consumer Workers: peer median 1,779 MiB/s vs Controller 832 MiB/s; Worker local replicas remain after backup |
+| Background backup recovery | PASS | only Worker killed; fresh Worker fetched a 1-MiB+17-byte output in bounded signed chunks; producer replay count 0 |
+| Background backup overhead | PASS / local | alternating 3x 10k empty-output runs: median logical throughput 1,163.3 -> 1,133.8 tasks/s (-2.54%); 4x4 validation backed up 10k at 3,318.5 files/s |
+| Late consumer and lazy replay | PASS | Shell workflow focused cases |
+| Requested result persistence | PASS | Worker stream -> Controller `/tmp`, fsync and atomic rename |
+| Scheduler throughput | PASS | 3x local 50k mean 4,067.7 tasks/s; Condor 16x4 19,277.7 service tasks/s |
+| Controller indexed metadata | PASS | zero generic hash/itable objects; 8-byte DataID slots; strict single workflow |
+| Controller throughput | PASS | fresh 10M lifecycle 13.48 s, 2.28 GiB RSS, 8.63M publish/s; unbatched RPC 111.5k publish/s |
+| Controller RPC latency | PASS | 16 connections: 87.1k publish/s and 81.9k resolve/s, p99 below 314 us |
+| Controller concurrency knee | PASS | small-file persistence peaks near 16 Workers; 64 Workers regress and inflate RSS/FDs |
+| Remote large-output fan-in | PASS | 4-GiB sweeps peak at 542.8-546.4 MiB/s with 16 Workers; 32/64 Workers regress |
+| Controller inbound network ceiling | PASS | memory-only remote TCP: 9.4008 Gbit/s single stream; three 16-stream runs mean 9.4120 Gbit/s (1,122 MiB/s) |
+| Exact 10k x 1-MiB persistence | PASS | two remote 16-Worker runs: 23.03-33.22 s service, 28.13 s mean, exact 10,000 files and 10,000 MiB per run |
+| Fixed-topology data-intensive A/B | PASS / pilot | three 2x4 pairs, exact 1,024 tasks and 10,240 workflow files: median paired DataVine speedup 16.09x; Manager bytes -99.938%; identical sampled hashes |
+| Result-driven dynamic correctness | PASS / pilot | three 2x4 pairs discover the same 477-task/445-edge graph; exact physical identity, hashes, CPU work, zero failure/recovery |
+| Result-driven dynamic performance | PASS / pilot | root cause was 478 tiny SharedFS object puts; DVP2 reduced them to one. Two new 2x4 Condor runs took 1.2236/1.2246 s; stream RPCs 483 vs matched poll 1,539 |
+| Unified dynamic data lifecycle | PASS | one static/dynamic resolver; restart hydration is lazy O(1); 7->restart->49->50 has zero producer replay; 1k forced-peer late consumers complete and post-seal files=0 |
+| Durable result stream | PASS | Controller-admitted sequence, empty/inline/descriptor records, disconnect resume, restart replay and terminal frame |
+| Worker-local byte avoidance | PASS | explicit 4-GiB control: 1.44 MiB Controller RX, 0 durable files |
+| Dead command stdout suppression | OPEN | generic TaskVine retrieves unrequested/no-consumer stdout after DataVine declines retention |
+| Controller agent persistence metrics | PASS | opt-in per-thread counters explain 99.8% of 1-MiB service time; `fsync` 50.6%, verify reread 21.8% |
+| Requested-output `fsync` contract | PASS | required before metadata commit to surface delayed local ENOSPC/EIO; not a Controller-host crash guarantee |
+| Persistence optimization screening | PASS / no promotion | streaming SHA, `fdatasync`, preallocation and `sync_file_range` showed no stable matched-load improvement |
+| Controller persistence fault injection | PASS | test-only LD_PRELOAD gate: ENOSPC/EIO leave no descriptor/final/temp file; restart recovery commits once and replays without a Worker |
+| `/tmp` storage decision | PASS | `controller-local-tmp-20260827/summary.json` plus checksummed raw evidence |
+| End-to-end data movement | PASS | exact 1 GiB Worker stream at mean 150.2 MiB/s service rate |
+| Small-file transfer latency | PASS | TCP delayed-ACK fix: 24.24 -> mean 1,034.2 files/s, 42.6x |
+| Fixed-core data-path scaling | PASS | 1/4/16 Worker matrix; empty plateau 3,657.7 files/s; exact 1 GiB guard 656.0 MiB/s |
+| Completion-to-dispatch latency | PASS | interleaved 50k A/B: `prefer-dispatch` +10.00% at 4x4 and +14.55% at 16x1 |
+| Dense Worker availability | PASS | 64x2 paired 50k A/B: +4.25% service and +2.98% E2E; neutral at 8 Workers |
+| Native line parsing | PASS | 8x16 four-run mean +3.97% service; Worker `vfscanf` 4.23% -> 1.77% |
+| Physical attempt lookup | PASS | DataVine Runtime direct array; completion-processing time -3.56% |
+| Worker child lifetime | PASS | transfer server exits when an abruptly killed Worker loses its parent |
+| Native FunctionCall output | PASS | exact-byte regression and 20k-task/39,488-edge layered DAG |
+| Warning-clean build | PASS | native library, Worker and five tools rebuilt on 2026-08-27 |
+| Pre-singleton full regression | PASS | final 18/18; `rigorous-validation-20260827/fifth-pass/regression.json` |
+| Strict-singleton production regression | PASS | replica table, production data plane, scheduler, build and second-ID rejection |
+| Strict-singleton full regression | PASS | 21/21 on 2026-09-01; all formerly multi-workflow notebook, execution, service and scientific scenarios now use one owner per workflow with no skipped tests |
+| Retired journal fail-closed | PASS | valid opcode-107 record rejected by workflow service test |
+| Rigorous post-cleanup suite | PASS | `rigorous-validation-20260827/summary.json`, raw evidence and 18/18 regression |
+| Git provenance | OPEN | worktree remains uncommitted |
+| Production package | OPEN / not requested | rebuild and promotion require explicit authorization |
+| Cross-host result durability | OUT OF SCOPE | local `/tmp` does not survive Controller-host loss |
 
-## Scale and CPU
-
-| Gate | State | Current evidence |
-|---|---|---|
-| Exact 100k | PASS | worker-local 100,000/100,000; 28.63 s E2E; 4,303 Runtime tasks/s; 447 MB peak RSS |
-| Exact 1M | PASS | worker-local 1,000,000/1,000,000; 295.64 s E2E; 4,122 Runtime tasks/s; 4.04 GB peak RSS; 44 FDs; five processes |
-| Production static IR exact 1M, 4x16 | PASS | fresh local pool; 1,000,000 submissions/completions; 38.59 MB payload; 10.69 s registration; 4,271 Runtime tasks/s; 1.606 GB process-tree RSS |
-| Production static IR 100k / 1M-I/O, 4x16 | PASS | real Python FunctionCall tasks; 26 RPC requests; 26.98 MB payload; 6.81 s graph load; 1.188 GB load RSS; exact 100,000 physical tasks |
-| CPU fork 1 core | PASS | DataVine/FunctionCall rate 1.003; 97.56% useful CPU |
-| CPU fork 4 cores | PASS | rate 1.003; 97.07% useful CPU |
-| CPU fork 16 cores | PASS | rate 0.966; 92.01% useful CPU |
-| Multi-worker workflow characterization | PILOT PASS | worker-local persistent 10x16 Condor pools reached the exact all-connected gate with zero physical-task or result mismatch; homogeneous reserved-node publication run remains OPEN |
-| Data-aware advantage | MIXED / LIMITATION | bottleneck-optimized exact 10x16 n=5: 32 MiB reuse is 0.814x and wide multi-output 0.599x versus TaskVine; wide wall falls 28.8%, but parity remains OPEN |
-| Fixed 1024-core synthetic campaign | PASS | exact 64x16 pools per backend; 49 cases, 98 accepted warmups, 980 accepted runs, 10 paired repetitions; paired CI gives 46 DV-faster, 2 DV-slower, 1 inconclusive; every regression attributed |
-| 1024-core requested-output path | PASS / ADVANTAGE | 128 x 32 MiB: TV 13.008 s, DV 11.224 s, rate 1.159, paired CI [1.055, 1.274]; worker-local-first publication removed the old durable Controller hop bottleneck |
-| 1024-core high-degree path | PASS / ADVANTAGE | degree 64: TV 25.230 s, DV 15.487 s, rate 1.548, paired CI [1.491, 1.583]; fan-in 16 reaches 232.8 versus 119.4 tasks/s |
-| 1024-core large broadcast path | CONFIRMED LIMITATION | 32 MiB broadcast: TV 1.262 s, DV 1.371 s; separated result-fetch excess is 0.121335 s and covers the 0.109198 s wall gap; add parallel/streaming multi-DataID reads |
-| 1024-core dynamic tiny path | CONFIRMED LIMITATION | TV 0.186 s, DV 1.007 s, paired CI [0.149, 0.202]; 8 dependent steps plus seal cause 9 Runtime invocations; keep one resident workflow reactor |
-| SharedFS eData object ingest | PASS / PROFILED LIMITATION | 4096 distinct 256-byte objects: 83.4 cold objects/s at 1 writer and 752.9 at 16; warm deduplicated 3162.2/s; cold SharedFS metadata/durability is the bottleneck |
-| Scientific foundation | LOCAL PASS | versioned artifact schema, deterministic non-sparse generator, calibrated resource sampler and HEP-S TV-native/DV-native/TV-durable-sink driver pass 6/6 local runs with 19/19 exact physical counts and one result digest |
-| Scientific distributed attribution | OPEN | producer/consumer worker identity, per-worker byte deltas, CAL-small cold/warm/peer gates, 10x16 pilots and reserved-node repetitions have not run |
-
-The 100k/1M rows are worker-local scale runs, and the historical 10x16
-data-heavy row predates the fixed-core result. The fixed 1024-core rows are the
-current synthetic publication campaign. Real scientific-application
-performance remains OPEN. Historical CPU and workflow-shape rows remain
-pre-worker-local baselines unless explicitly labeled 1024-core above.
-
-The removed grouped-noop implementation previously reported roughly 16k to
-17k tasks/s at 1M scale. That number is historical and invalid for independent
-TaskVine task throughput because up to 256 logical noops shared one physical
-execution.
-
-## Durability and operations
-
-| Gate | State | Current evidence |
-|---|---|---|
-| Journal integrity | PASS | bounded records, replay, truncated-tail recovery, checksum corruption rejection |
-| Result identity | PASS | DataID, producer/output, attempt, codec, size, and SHA-256 survive restart |
-| RPC bounds | PASS | capabilities preflight and bounded frames, clients, queues, identifiers, tasks, and results |
-| Worker/restart recovery | PASS | lifecycle suite covers retry, worker loss, restart, checkpoint resume, and cancellation |
-| Production static IR live-loss recovery | PASS | four worker removals; exact sinks; 5,232 lost DataIDs caused 1,779 completed-task invalidations and 1,844 extra attempts; maximum attempt 3 |
-| Generated residue | PASS | runtime info is temporary; old run directories, snapshots, logs, and retired test binaries removed |
-| Production package | PASS, promoted | active `datavine.tar.gz` SHA-256 is `6019adc524f86bf4d14b984e8a6f07928cf08964ec2a6a19031e36829f50adcd`; package contract/hashes pass; active-path smoke passed 10,000/10,000 at 3,820.6 Runtime tasks/s; prior `32e136...abba6d` package remains as rollback |
-| Multi-manager/Foreman | OPEN | no current sharded metadata or partition acceptance |
-| Historical protocol migration | OUT OF SCOPE | production accepts v1 only and fails closed on removed executor/ticket/manifest generations |
-| Multi-tenant security | OPEN | workflow-token authentication and one-object GET HMAC tickets exist; TLS, rotation, and tenant authorization domains do not |
-
-No OPEN row may be promoted from historical output. Artifact hashes
-and reproduction commands are in `progress.md` and `current-handoff.sha256`.
-Workflow-shape methodology, raw artifacts, limitations, and publication gates
-are in `SC_WORKFLOW_COMPARISON_REPORT.md`.
-The production data-plane contract, final regression, stage experiments, and checksums
-are in `DATAVINE_DATA_PLANE_V2.md` and `acceptance/data-plane-v2/`.
-The current static-IR contract and 2026-08-23 acceptance artifacts are indexed
-in `STATIC_IR_V2.md`.
+Run `sha256sum -c SHA256SUMS` inside
+`acceptance/rigorous-validation-20260827/` to verify the new evidence. Only the
+latest accepted evidence is listed here. Old campaign diagnostics,
+admission failures and superseded architecture comparisons are not current
+product gates.

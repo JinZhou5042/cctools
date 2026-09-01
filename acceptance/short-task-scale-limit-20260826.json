@@ -1,0 +1,85 @@
+{
+  "artifact_type": "datavine-short-task-scale-limit",
+  "status": "PASS_WITH_ADMISSION_LIMIT",
+  "date": "2026-08-26",
+  "source": {
+    "git_revision": "9818f7f42cd0ac83d4e830697a520e6c13b4bba7",
+    "dirty_worktree": true,
+    "service_sha256": "42908876d5da5fe35ff35bd13133e818087230f283a0c104e99b34255eda07b7",
+    "factory_sha256": "15988fbaa14f2f396cc4adca5cc17c85ce0537efe24d096242138976234a7070",
+    "worker_sha256": "5ab8a91522d80d7952b597b3eddad695b3c9ca8bcf1d03fc242a1fb081f7c7fa"
+  },
+  "workload": {
+    "logical_tasks": 100000,
+    "physical_task_per_logical_task": 1,
+    "executor": "builtin-v1",
+    "requested_outputs": 0,
+    "registration": "sealed",
+    "task_batching": false,
+    "scheduling_mode": "baseline"
+  },
+  "worker_shape": {
+    "cores": 1,
+    "memory_mib": 1024,
+    "disk_mib": 2048,
+    "gpus": 0
+  },
+  "completed_runs": [
+    {
+      "workers": 32,
+      "worker_wait_seconds": 9.083909711975139,
+      "service_execution_seconds": 5.470237,
+      "service_tasks_per_second": 18280.74359483876,
+      "end_to_end_runtime_tasks_per_second": 12116.921804085468,
+      "physical_submissions": 100000,
+      "physical_completions": 100000,
+      "artifact": "/project01/ndcms/jzhou24/datavine-benchmarks/short-task-scale-20260826-current/baseline-100k-w32x1-m1g-d2g.json",
+      "sha256": "c2a5a0faabe452d3b2b6521b3ee76c3243d3ad389ebaa9c02f1885f79a28a231"
+    },
+    {
+      "workers": 64,
+      "worker_wait_seconds": 26.30378215998644,
+      "service_execution_seconds": 7.261016,
+      "service_tasks_per_second": 13772.177337166038,
+      "end_to_end_runtime_tasks_per_second": 10099.675428887647,
+      "physical_submissions": 100000,
+      "physical_completions": 100000,
+      "artifact": "/project01/ndcms/jzhou24/datavine-benchmarks/short-task-scale-20260826-current/baseline-100k-w64x1-m1g-d2g.json",
+      "sha256": "732675e21864b57722cf40e65662e728355f7f8437870d49b59c15a5178e87c8"
+    }
+  ],
+  "admission_limits": [
+    {
+      "requested_workers": 128,
+      "worker_shape": "1 core, 1024 MiB memory, 2048 MiB disk",
+      "timeout_seconds": 240,
+      "peak_connected_workers": 67,
+      "workflow_submitted": false,
+      "factory_log": "/project01/ndcms/jzhou24/datavine-benchmarks/short-task-scale-20260826-current/baseline-100k-w128x1-m1g-d2g.json.factory.log",
+      "factory_log_sha256": "35273e63b9a52c38fa1854c16b3ca3d48de26096c2449fc534cd45a1d2db2bf5"
+    },
+    {
+      "requested_workers": 32,
+      "worker_shape": "8 cores, 3072 MiB memory, 10240 MiB disk",
+      "timeout_seconds": 180,
+      "peak_connected_workers": 5,
+      "workflow_submitted": false,
+      "factory_log": "/project01/ndcms/jzhou24/datavine-benchmarks/short-task-scale-20260826-current/baseline-100k-w32x8-m3g-d10g.json.factory.log",
+      "factory_log_sha256": "060c7dbe5dafed56d0d618dce117fde5dbad2160a48c0ce9dc49f8ee772b3c15"
+    }
+  ],
+  "conclusion": {
+    "highest_observed_service_tasks_per_second": 18280.74359483876,
+    "throughput_peak_workers": 32,
+    "64_worker_change_percent": -24.662925959672865,
+    "largest_exactly_admitted_and_executed_worker_count": 64,
+    "largest_observed_connected_worker_count": 67,
+    "primary_runtime_limit": "single-manager worker-message and scheduling fan-in",
+    "primary_larger-scale_limit": "current Condor admission and fair-share availability",
+    "claim_boundary": "One run per completed scale under time-varying shared-cluster availability; this identifies the current observed limit, not a hardware-independent maximum."
+  },
+  "cleanup": {
+    "condor_jobs_remaining": 0,
+    "local_benchmark_processes_remaining": 0
+  }
+}

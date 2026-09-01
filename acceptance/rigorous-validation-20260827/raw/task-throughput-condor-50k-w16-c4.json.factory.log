@@ -1,0 +1,7 @@
+2026/08/27 15:11:20: |submitted: 0 |needed: 16 |waiting connection: 0 |requested: 16 
+PROJECT            HOST                   PORT WAITING RUNNING COMPLETE WORKERS 
+daccssfe.crc.nd.ed daccssfe.crc.nd.edu    1024       0       0        0       0 
+
+received signal(15), shutting down workers...
+removing 16 workers...
+all workers removed.

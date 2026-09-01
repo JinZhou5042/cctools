@@ -1,0 +1,54 @@
+{
+  "artifact_type": "datavine-dummy-end-to-end-throughput",
+  "created_at": "2026-08-27",
+  "status": "PASS",
+  "source_state": "intentionally-dirty-controller-slimming-worktree",
+  "workload": {
+    "logical_tasks": 50000,
+    "physical_submissions": 50000,
+    "physical_completions": 50000,
+    "executor": "taskvine-builtin-v1-empty",
+    "dependencies": 0,
+    "requested_outputs": 0,
+    "durable_files": 0,
+    "registration": "sealed",
+    "logical_task_batching": false,
+    "batch_type": "local",
+    "memory_mib_per_worker": 2048,
+    "disk_mib_per_worker": 4096
+  },
+  "runs": {
+    "4_workers_x_4_cores": [
+      {"runtime_tasks_per_second": 9727.040011355584, "service_tasks_per_second": 13448.669119703914, "execution_seconds": 5.140309893002268, "service_seconds": 3.71784},
+      {"runtime_tasks_per_second": 9666.386360326069, "service_tasks_per_second": 13382.69585307727, "execution_seconds": 5.172563783009537, "service_seconds": 3.736168},
+      {"runtime_tasks_per_second": 9899.725282680947, "service_tasks_per_second": 13436.977217605128, "execution_seconds": 5.0506452019908465, "service_seconds": 3.721075}
+    ],
+    "16_workers_x_1_core": [
+      {"runtime_tasks_per_second": 12024.038320741225, "service_tasks_per_second": 17685.567586457666, "execution_seconds": 4.158336714026518, "service_seconds": 2.827164},
+      {"runtime_tasks_per_second": 12165.105600617671, "service_tasks_per_second": 17778.827123663123, "execution_seconds": 4.110116396972444, "service_seconds": 2.812334},
+      {"runtime_tasks_per_second": 12071.271652033487, "service_tasks_per_second": 17396.12685673211, "execution_seconds": 4.1420656780246645, "service_seconds": 2.874203}
+    ],
+    "8_workers_x_16_cores": [
+      {"runtime_tasks_per_second": 12340.375134310836, "service_tasks_per_second": 18199.263002645443, "execution_seconds": 4.0517406850121915, "service_seconds": 2.747364},
+      {"runtime_tasks_per_second": 13130.965504169186, "service_tasks_per_second": 18295.54327883945, "execution_seconds": 3.8077931119478308, "service_seconds": 2.732906},
+      {"runtime_tasks_per_second": 12359.440972163246, "service_tasks_per_second": 18306.94448309244, "execution_seconds": 4.045490415999666, "service_seconds": 2.731204}
+    ]
+  },
+  "summary": {
+    "4_workers_x_4_cores_runtime_mean": 9764.383884787534,
+    "4_workers_x_4_cores_runtime_cv": 0.012399034660082445,
+    "4_workers_x_4_cores_service_mean": 13422.78073012877,
+    "4_workers_x_4_cores_service_cv": 0.0026226541745460767,
+    "16_workers_x_1_core_runtime_mean": 12086.805191130794,
+    "16_workers_x_1_core_runtime_cv": 0.005940778390969268,
+    "16_workers_x_1_core_service_mean": 17620.17385561763,
+    "16_workers_x_1_core_service_cv": 0.01132536078763802,
+    "8_workers_x_16_cores_runtime_mean": 12610.26053688109,
+    "8_workers_x_16_cores_runtime_cv": 0.0357680540853133,
+    "8_workers_x_16_cores_service_mean": 18267.25025485911,
+    "8_workers_x_16_cores_service_cv": 0.0032382546686423475,
+    "8x16_service_gain_over_16x1": 0.0367236103652393,
+    "best_observed_runtime_tasks_per_second": 13130.965504169186,
+    "best_observed_service_tasks_per_second": 18306.94448309244
+  }
+}

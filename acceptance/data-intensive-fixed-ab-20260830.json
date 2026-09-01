@@ -1,0 +1,130 @@
+{
+  "status": "PASS",
+  "date": "2026-08-30",
+  "scope": "fixed-topology paired pilot; not a full-scale production claim",
+  "host": "daccssfe.crc.nd.edu",
+  "contract": {
+    "sha256": "468fa0fdfbdf72f405fa0664ff14fbf24dad2f2d40a47016fc667a8366865f41",
+    "tasks": 1024,
+    "physical_tasks_per_backend_per_run": 1024,
+    "source_files": 9216,
+    "output_files": 1024,
+    "workflow_files": 10240,
+    "scheduler_edges": 5760,
+    "stored_artifact_bytes": 1116553216,
+    "logical_data_path_bytes": 3968679936,
+    "logical_read_bytes": 3599581184,
+    "requested_outputs": 128,
+    "size_profile": "full"
+  },
+  "resources": {
+    "workers": 2,
+    "cores_per_worker": 4,
+    "memory_mib_per_worker": 3072,
+    "batch_type": "condor",
+    "dataset_filesystem": "/groups NFS"
+  },
+  "method": {
+    "repetitions": 3,
+    "order": [
+      ["taskvine", "datavine"],
+      ["datavine", "taskvine"],
+      ["taskvine", "datavine"]
+    ],
+    "timing_boundary": "exact worker pool admitted before execution; Condor admission excluded",
+    "task_identity": "one logical task equals one successful physical user task; no recovery submissions",
+    "data_correctness": "same deterministic kernel and identical 16 sampled output SHA-256 values in every pair"
+  },
+  "runs": [
+    {
+      "repetition": 1,
+      "taskvine_seconds": 112.031466,
+      "datavine_seconds": 10.026669,
+      "speedup_taskvine_over_datavine": 11.173348,
+      "taskvine_manager_bytes": 67213321,
+      "datavine_manager_bytes": 41410
+    },
+    {
+      "repetition": 2,
+      "taskvine_seconds": 229.262336,
+      "datavine_seconds": 11.953955,
+      "speedup_taskvine_over_datavine": 19.178785,
+      "taskvine_manager_bytes": 67215055,
+      "datavine_manager_bytes": 41410
+    },
+    {
+      "repetition": 3,
+      "taskvine_seconds": 160.409456,
+      "datavine_seconds": 9.966807,
+      "speedup_taskvine_over_datavine": 16.094368,
+      "taskvine_manager_bytes": 67213780,
+      "datavine_manager_bytes": 41410
+    }
+  ],
+  "summary": {
+    "taskvine_median_seconds": 160.409456,
+    "datavine_median_seconds": 10.026669,
+    "ratio_of_median_execution_seconds": 15.998279,
+    "median_paired_speedup_taskvine_over_datavine": 16.094368,
+    "median_manager_data_plane_byte_reduction_fraction": 0.9993839061,
+    "taskvine_median_worker_execute_good_seconds": 45.037056,
+    "datavine_median_worker_execute_seconds": 48.790529,
+    "datavine_reported_cpu_seconds_per_run": 38.997,
+    "datavine_reported_read_gib_per_run": 3.352371,
+    "interpretation": "useful Worker work is comparable; TaskVine wall time is dominated by data and sandbox movement while DataVine keeps intermediates Worker-local or peer-first and bypasses the generic Manager payload path"
+  },
+  "gates": {
+    "all_three_pairs_pass": true,
+    "same_contract": true,
+    "same_worker_resources": true,
+    "sampled_hashes_equal": true,
+    "exact_task_counts": true,
+    "zero_user_task_failures": true,
+    "zero_recovery_submissions": true,
+    "ready_parallelism": true,
+    "active_parallelism": true,
+    "manager_byte_reduction_positive": true,
+    "median_speedup_above_one": true
+  },
+  "regression": {
+    "focused_gates": "PASS",
+    "aggregate_passed": 15,
+    "aggregate_total": 19,
+    "expected_retired_failures": [
+      "TR_datavine_notebook_workflow.sh",
+      "TR_datavine_scientific_workflow_foundation.sh",
+      "TR_datavine_workflow_execution.sh",
+      "TR_datavine_workflow_service.sh"
+    ],
+    "unexpected_failures": 0
+  },
+  "provenance": {
+    "branch": "benchmark/data-intensive-million-file",
+    "base_commit": "9818f7f42cd0ac83d4e830697a520e6c13b4bba7",
+    "worktree_clean": false,
+    "archive_root": "/groups/dthain/users/jzhou24/datavine-benchmarks/fixed-ab-current-20260830/provenance",
+    "tracked_worktree_patch_sha256": "5652833a91e17641f887323d8a374818647126df92c038e7bdabdfc26a92cc3a",
+    "untracked_worktree_archive_sha256": "6a3a7ffd3a304aafdf0012f41f38c4767fb4328d0ea06f133a579f01115e6e3b",
+    "comparison_sha256": "9c2e53a57c8499e7e16e1deb8ac9365ea68aaefbbaf9ae8ab9f84b60af4753fc",
+    "dataset_manifest_sha256": "84ab9e5bb0123692cdabc3327f272ac37af8b4a3536dca4fa3aa24de967fedee",
+    "regression_sha256": "337bde7b5f57cef9233e47c4491de4b4361a78e04d7bc8562d1044eb609444f2",
+    "runtime_sha256": {
+      "datavine_workflow": "2d527577d32dff169021e800e734b3121b8cc825b3b81aca7714f7e302385233",
+      "vine_worker": "797f1c3a0fc68b40b0c8190e07a16e3d375d38baab4896aa9337084f25944c58",
+      "python_cvine": "4b607924698c0c09bdb0aaa4ecee6c3bbc6daefd4474c62c6736d99a8a368d78",
+      "python_manager": "a62df978342562b0598c7dfab08db7350a3eeb2d57a318f0c449afc30fae5ff4",
+      "workload_contract": "94ccfa628a95a0b96ac8d0d9c8ff9cfd04bb1280ab466fc6a47743313161e2e9",
+      "datavine_runner": "45d8c80a5f682706a933bfd5628422917779791645639b95094931fc8631f4a6",
+      "taskvine_runner": "2162754b1a872fe16da561e8e71247586105d4f06b27c34290116f86b9572770",
+      "comparison_runner": "dbf33d358509a8f2e37bab80ec09116134a03153186b62fa34895add2ef4532b",
+      "dataset_generator": "f5fea38cb495a751868abbaf5aa3603e1f206ac64305f5bcc2a197ae7fe48b45",
+      "shared_harness": "2824cab9b3f1f0ac7e6ca6c6adcb2c1176cd5bf98660392aa6365e9b4629c102",
+      "workload_regression": "ea2c84213cbfa476c907558d9739d6ef2bc444fbccdac33264f8fc490b527f68"
+    }
+  },
+  "limitations": [
+    "This is a three-pair 2-worker by 4-core pilot, not the frozen 128-worker by 16-core million-task acceptance contract.",
+    "The intentionally dirty source state is checksummed and archived but not committed.",
+    "Manager-byte reduction is not total network-byte reduction; requested DataVine results travel through the Controller rather than the generic Manager."
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "status": "PASS",
+  "date": "2026-08-28",
+  "host": "daccssfe.crc.nd.edu",
+  "scope": "10000 independent remote command tasks, each durably persisting one 1-MiB requested output to Controller-local /tmp",
+  "configuration": {
+    "tasks": 10000,
+    "payload_bytes_per_task": 1048576,
+    "total_payload_bytes": 10485760000,
+    "workers": 16,
+    "cores_per_worker": 4,
+    "memory_mib_per_worker": 3072,
+    "disk_mib_per_worker": 10240,
+    "batch_type": "condor",
+    "controller_data_threads": 16,
+    "network_interface": "enp11s0f0",
+    "command": ["/usr/bin/head", "-c", "1048576", "/dev/zero"],
+    "retention": "all outputs requested; Controller stream, fsync, atomic rename"
+  },
+  "validation": {
+    "physical_submissions_per_run": 10000,
+    "physical_completions_per_run": 10000,
+    "durable_files_per_run": 10000,
+    "durable_bytes_per_run": 10485760000,
+    "terminal_state": "completed"
+  },
+  "runs": [
+    {
+      "service_seconds": 33.222451,
+      "client_execution_seconds": 33.740789,
+      "payload_mib_per_second": 301.001,
+      "wire_receive_mib_per_second": 315.039,
+      "controller_cpu_seconds": 95.52,
+      "worker_admission_seconds_excluded_from_execution": 5.036024,
+      "raw_json_sha256": "39b44770ae8b7487e8d66cdb1d9359e36ae992e38a8e52a15effcfbb971609a1"
+    },
+    {
+      "service_seconds": 23.032106,
+      "client_execution_seconds": 23.394584,
+      "payload_mib_per_second": 434.177,
+      "wire_receive_mib_per_second": 454.381,
+      "controller_cpu_seconds": 93.87,
+      "worker_admission_seconds_excluded_from_execution": 18.107714,
+      "raw_json_sha256": "26ea583fdd609d1cc7f0930ccf296978947c509a0627a3e9e181e40b244baf42"
+    }
+  ],
+  "summary": {
+    "completed_runs": 2,
+    "mean_service_seconds": 28.127279,
+    "aggregate_payload_mib_per_second": 355.527,
+    "observed_service_seconds_range": [23.032106, 33.222451],
+    "observed_client_execution_seconds_range": [23.394584, 33.740789]
+  },
+  "excluded_attempts": [
+    {
+      "reason": "cancelled before execution after all 16 Condor jobs remained idle during the short admission window; no Worker connected and no workflow was submitted"
+    }
+  ]
+}

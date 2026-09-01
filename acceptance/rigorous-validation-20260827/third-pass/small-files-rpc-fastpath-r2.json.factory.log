@@ -1,0 +1,13 @@
+2026/08/27 16:07:21: |submitted: 0 |needed: 1 |waiting connection: 0 |requested: 1 
+PROJECT            HOST                   PORT WAITING RUNNING COMPLETE WORKERS 
+localhost          localhost              1024       0       0        0       0 
+
+vine_worker: creating workspace /tmp/worker-241627-638479
+vine_worker: using 16.000000 cores, 10240.000000 MB memory, 20480.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:45458
+received signal(15), shutting down workers...
+2026/08/27 16:07:24.96 vine_worker[638479]notice: stopping: abort signal received
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-638479
+removing 0 workers...
+all workers removed.

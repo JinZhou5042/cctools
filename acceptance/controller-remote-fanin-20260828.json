@@ -1,0 +1,106 @@
+{
+  "status": "PASS",
+  "date": "2026-08-28",
+  "host": "daccssfe.crc.nd.edu",
+  "scope": "single-workflow remote Worker fan-in to Controller-local /tmp",
+  "controller": {
+    "data_threads": 16,
+    "network_interface": "enp11s0f0",
+    "network_link_gbit_per_second": 10,
+    "persistence": "stream, fsync, atomic rename"
+  },
+  "worker_shape": {
+    "cores": 4,
+    "memory_mib": 3072,
+    "disk_mib": 10240,
+    "gpus": 0,
+    "batch_type": "condor"
+  },
+  "method": {
+    "payload": "zeros generated independently by each command task",
+    "requested_sweep_total_mib_per_run": 4096,
+    "physical_identity": "one logical task equals one physical TaskVine task",
+    "validation": [
+      "all tasks completed",
+      "exact durable file count and byte count",
+      "Controller process CPU and I/O counters",
+      "Controller-host interface byte counters",
+      "final process and Condor cleanup"
+    ]
+  },
+  "requested_output_runs": [
+    {"payload_mib": 1, "tasks": 4096, "workers": 4, "service_seconds": 11.536923, "mib_per_second": 355.034, "controller_cpu_seconds": 36.60, "controller_write_mib": 4097.1, "network_receive_mib": 4286.9, "peak_rss_mib": 50.4, "peak_fds": 43},
+    {"payload_mib": 1, "tasks": 4096, "workers": 16, "service_seconds": 7.546092, "mib_per_second": 542.798, "controller_cpu_seconds": 35.68, "controller_write_mib": 4097.1, "network_receive_mib": 4286.7, "peak_rss_mib": 51.4, "peak_fds": 79},
+    {"payload_mib": 1, "tasks": 4096, "workers": 32, "service_seconds": 8.264713, "mib_per_second": 495.601, "controller_cpu_seconds": 35.92, "controller_write_mib": 4097.1, "network_receive_mib": 4288.4, "peak_rss_mib": 52.5, "peak_fds": 128},
+    {"payload_mib": 1, "tasks": 4096, "workers": 64, "service_seconds": 9.247809, "mib_per_second": 442.916, "controller_cpu_seconds": 37.31, "controller_write_mib": 4097.1, "network_receive_mib": 4287.4, "peak_rss_mib": 54.7, "peak_fds": 220},
+    {"payload_mib": 16, "tasks": 256, "workers": 16, "service_seconds": 7.496323, "mib_per_second": 546.401, "controller_cpu_seconds": 28.19, "controller_write_mib": 4096.1, "network_receive_mib": 4298.7, "peak_rss_mib": 30.3, "peak_fds": 80},
+    {"payload_mib": 16, "tasks": 256, "workers": 32, "service_seconds": 8.392071, "mib_per_second": 488.080, "controller_cpu_seconds": 28.69, "controller_write_mib": 4096.1, "network_receive_mib": 4296.8, "peak_rss_mib": 31.1, "peak_fds": 128},
+    {"payload_mib": 16, "tasks": 256, "workers": 64, "service_seconds": 10.223456, "mib_per_second": 400.647, "controller_cpu_seconds": 28.68, "controller_write_mib": 4096.1, "network_receive_mib": 4301.1, "peak_rss_mib": 32.0, "peak_fds": 224},
+    {"payload_mib": 64, "tasks": 64, "workers": 16, "service_seconds": 8.009542, "mib_per_second": 511.390, "controller_cpu_seconds": 24.28, "controller_write_mib": 4096.0, "network_receive_mib": 4295.2, "peak_rss_mib": 28.8, "peak_fds": 80}
+  ],
+  "explicit_file_ab": {
+    "payload_mib": 1,
+    "tasks": 4096,
+    "workers": 16,
+    "worker_local": {
+      "service_seconds": 5.571273,
+      "tasks_per_second": 735.200,
+      "durable_files": 0,
+      "controller_cpu_seconds": 0.59,
+      "controller_write_mib": 0.566,
+      "network_receive_mib": 1.442,
+      "peak_rss_mib": 30.5
+    },
+    "requested": {
+      "service_seconds": 8.214225,
+      "mib_per_second": 498.647,
+      "durable_files": 4096,
+      "controller_cpu_seconds": 36.08,
+      "controller_write_mib": 4097.137,
+      "network_receive_mib": 4287.039,
+      "peak_rss_mib": 51.4
+    }
+  },
+  "stdout_policy_diagnostic": {
+    "status": "ISSUE",
+    "description": "An unrequested, consumer-free command stdout was still retrieved by generic TaskVine after the DataVine Agent correctly declined retention.",
+    "tasks": 4096,
+    "payload_mib_per_task": 1,
+    "workers": 16,
+    "network_receive_mib": 4286.7,
+    "manager_receive_good_seconds": 5.958031,
+    "controller_durable_files": 0,
+    "fair_control_network_receive_mib": 1.442,
+    "scope": "DataVine command stdout with no consumer and no requested output; declared consumer data remains retained"
+  },
+  "excluded_attempts": [
+    {"payload_mib": 16, "workers": 4, "reason": "exact Condor inventory did not arrive before the 300-second admission timeout"},
+    {"payload_mib": 64, "workers": 4, "reason": "exact Condor inventory did not arrive before the 300-second admission timeout"},
+    {"payload_mib": 64, "workers": 32, "reason": "aborted during partial Condor admission after the 16-MiB sweep had already established the regression"}
+  ],
+  "findings": {
+    "best_observed_remote_requested_mib_per_second": 546.401,
+    "recommended_data_threads": 16,
+    "recommended_remote_fanin_workers": 16,
+    "worker_32_regression_percent_at_1_mib": 8.70,
+    "worker_64_regression_percent_at_1_mib": 18.40,
+    "worker_32_regression_percent_at_16_mib": 10.67,
+    "worker_64_regression_percent_at_16_mib": 26.68,
+    "bottleneck_classification": "Controller requested-output pull plus durable local write path",
+    "not_primary_limits": ["10-Gbit network link", "Controller CPU", "scheduler", "metadata RPC"],
+    "sustained_capacity_model_gib_per_second": 0.48
+  },
+  "raw_evidence_sha256": {
+    "requested-1m-w4.json": "bce1346b5a61faa2c2c604adaa0013e54fcdee955a4e6482089f2ce6f42005a3",
+    "requested-1m-w16.json": "7f49714af08c56ae7ad2c7b5783c7d5bd3e9d89467f5329d6954a1224f9cd5d5",
+    "requested-1m-w32.json": "c84ca651b190f63884bd64bcc7c731e4a0e247921da01df00188dc483f2a9919",
+    "requested-1m-w64.json": "4b7d980e9cd9dfb809a5f0e190cb2c00e6a65f8cbcceabcc847b0cc0413cac83",
+    "requested-16m-w16.json": "887fd963adf02da7d95f994a8a86944ec0f0f8698ac6d7a25439cb6c439b9b16",
+    "requested-16m-w32.json": "39684a4b828555f88084c72a38d2fe9ec30cb37f2b3a9f82c33959f8cb25eaea",
+    "requested-16m-w64.json": "2711bafe8b0b2369401386a6881321fc9c82c1fd55eb221f95a84e3fe05a6300",
+    "requested-64m-w16.json": "710030403994bceee5cca48b1d8dd2ca31be50f733d99389c6287a52950a981b",
+    "volatile-explicit-1m-w16.json": "6b5201d391c7c3c672523d32f70ca5b61cc1540b904a79287234614a0ffaaacb",
+    "requested-explicit-1m-w16.json": "ee2eb224fe1eb0b3c6d49b6831aa58ec90ca10f59d000fc13a3f567f2d92ccf2",
+    "volatile-1m-w16.json": "10d3287af4a367227cc62394b5ce34d36321727341c531144607976d1a0c2aac"
+  }
+}

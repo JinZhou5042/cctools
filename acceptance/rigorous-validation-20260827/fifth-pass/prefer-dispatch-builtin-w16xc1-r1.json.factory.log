@@ -1,0 +1,103 @@
+2026/08/27 19:04:54: |submitted: 0 |needed: 16 |waiting connection: 0 |requested: 16 
+PROJECT            HOST                   PORT WAITING RUNNING COMPLETE WORKERS 
+localhost          localhost              1024       0       0        0       0 
+
+vine_worker: creating workspace /tmp/worker-241627-970316
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47408
+vine_worker: creating workspace /tmp/worker-241627-970319
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47378
+vine_worker: creating workspace /tmp/worker-241627-970315
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47402
+vine_worker: creating workspace /tmp/worker-241627-970311
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47330
+vine_worker: creating workspace /tmp/worker-241627-970308
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47358
+vine_worker: creating workspace /tmp/worker-241627-970321
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47464
+vine_worker: creating workspace /tmp/worker-241627-970322
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47448
+vine_worker: creating workspace /tmp/worker-241627-970307
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47388
+vine_worker: creating workspace /tmp/worker-241627-970317
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47442
+vine_worker: creating workspace /tmp/worker-241627-970314
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47404
+vine_worker: creating workspace /tmp/worker-241627-970318
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47456
+vine_worker: creating workspace /tmp/worker-241627-970309
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47372
+vine_worker: creating workspace /tmp/worker-241627-970313
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47410
+vine_worker: creating workspace /tmp/worker-241627-970320
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47426
+vine_worker: creating workspace /tmp/worker-241627-970310
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47338
+vine_worker: creating workspace /tmp/worker-241627-970312
+vine_worker: using 1.000000 cores, 2048.000000 MB memory, 4096.000000 MB disk, 0.000000 gpus
+connected to manager localhost:1024 via local address 127.0.0.1:47340
+received signal(15), shutting down workers...
+2026/08/27 19:04:59.95 vine_worker[970318]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970320]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970319]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970317]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970315]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970307]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970310]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970312]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970311]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970308]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970316]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970314]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970309]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970322]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970321]notice: stopping: abort signal received
+2026/08/27 19:04:59.95 vine_worker[970313]notice: stopping: abort signal received
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970318
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970320
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970312
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970319
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970308
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970310
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970307
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970315
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970317
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970313
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970322
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970309
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970316
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970314
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970311
+disconnected from manager localhost:1024
+vine_worker: deleting workspace /tmp/worker-241627-970321
+removing 16 workers...
+all workers removed.

@@ -1,0 +1,111 @@
+{
+  "artifact_type": "datavine-controller-performance",
+  "created_at": "2026-08-26",
+  "status": "PASS_WITH_OPEN_REGRESSION",
+  "scope": "single-workflow-controller-scale",
+  "constraints": {
+    "rpc_batching": false,
+    "one_physical_task_per_logical_task": true,
+    "requested_outputs_are_individual_files": true,
+    "controller_data_threads": 16,
+    "maximum_workers_tested": 192,
+    "maximum_metadata_records_tested": 10000000,
+    "maximum_replicas_tested": 10000000
+  },
+  "limits": {
+    "replica_table_publish_records_per_second_10m_r1": 6863010.460,
+    "replica_table_resolve_records_per_second_10m_r1": 3905023.751,
+    "controller_rpc_publish_records_per_second_8_connections": 77627.49200854106,
+    "controller_rpc_resolve_records_per_second_8_connections": 71580.35443558704,
+    "durable_files_per_second_96_workers": 9649.248839750197,
+    "durable_files_per_second_192_workers_4_thread_baseline": 6009.283140595591,
+    "observed_durable_worker_knee_4_thread_baseline": 96,
+    "durable_files_per_second_96_workers_4_thread_baseline": 6218.13516634009,
+    "durable_files_per_second_24_workers_16_threads": 7552.8929090420215,
+    "durable_files_per_second_96_workers_16_threads": 9649.248839750197,
+    "durable_96_worker_16_thread_speedup": 1.5517914264687194
+  },
+  "fixes": {
+    "disconnect_200k_old_seconds": 9.563353176,
+    "disconnect_200k_new_seconds": 0.052425425,
+    "disconnect_200k_speedup": 182.418,
+    "rpc_publish_2_connections_old_records_per_second": 23509.717804539796,
+    "rpc_publish_2_connections_new_records_per_second": 44349.93157385153,
+    "rpc_publish_speedup": 1.886,
+    "rpc_resolve_2_connections_old_records_per_second": 27706.91108241831,
+    "rpc_resolve_2_connections_new_records_per_second": 40536.343068875925,
+    "rpc_resolve_speedup": 1.463,
+    "requested_result_terminal_check": "O(1)",
+    "worker_transfer_connections": "persistent-per-endpoint"
+  },
+  "scale_runs": [
+    {
+      "workers": 96,
+      "data_threads": 4,
+      "tasks": 100000,
+      "requested_files": 100000,
+      "execution_seconds": 19.135527601989452,
+      "service_execution_seconds": 16.081992,
+      "service_files_per_second": 6218.13516634009,
+      "peak_rss_bytes": 497778688,
+      "peak_fds": 593,
+      "physical_submissions": 100000,
+      "physical_completions": 100000,
+      "status": "PASS"
+    },
+    {
+      "workers": 192,
+      "data_threads": 4,
+      "tasks": 200000,
+      "requested_files": 200000,
+      "execution_seconds": 39.024392982013524,
+      "service_execution_seconds": 33.28184,
+      "service_files_per_second": 6009.283140595591,
+      "peak_rss_bytes": 994254848,
+      "peak_fds": 1170,
+      "physical_submissions": 200000,
+      "physical_completions": 200000,
+      "status": "PASS"
+    },
+    {
+      "workers": 24,
+      "data_threads": 16,
+      "tasks": 20000,
+      "requested_files": 20000,
+      "execution_seconds": 3.5125214449944906,
+      "service_execution_seconds": 2.647992,
+      "service_files_per_second": 7552.8929090420215,
+      "peak_rss_bytes": 120467456,
+      "peak_fds": 448,
+      "physical_submissions": 20000,
+      "physical_completions": 20000,
+      "status": "PASS"
+    },
+    {
+      "workers": 96,
+      "data_threads": 16,
+      "tasks": 100000,
+      "requested_files": 100000,
+      "execution_seconds": 13.367407284036744,
+      "service_execution_seconds": 10.363501,
+      "service_files_per_second": 9649.248839750197,
+      "peak_rss_bytes": 519118848,
+      "peak_fds": 1695,
+      "physical_submissions": 100000,
+      "physical_completions": 100000,
+      "status": "PASS"
+    }
+  ],
+  "gates": {
+    "full_build": "PASS",
+    "metadata_10m": "PASS",
+    "replicas_10m": "PASS",
+    "disconnect_10m": "PASS",
+    "rpc_no_batching": "PASS",
+    "remote_controller_pull": "PASS",
+    "remote_100k_files": "PASS",
+    "remote_200k_files": "PASS",
+    "existing_regression_suite": "16/18 PASS; scientific warmup OPEN; Go gate unavailable because the retained binary is stale and no Go compiler is installed"
+  },
+  "evidence_root": "/project01/ndcms/jzhou24/datavine-benchmarks/controller-scale-20260826"
+}

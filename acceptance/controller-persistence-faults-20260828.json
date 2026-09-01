@@ -1,0 +1,75 @@
+{
+  "artifact_type": "datavine-controller-persistence-fault-gate",
+  "date": "2026-08-28",
+  "status": "PASS",
+  "source_commit": "9818f7f42cd0ac83d4e830697a520e6c13b4bba7",
+  "scope": "requested-output fsync failure state machine; no production runtime code change",
+  "injection": {
+    "mechanism": "Linux test-only LD_PRELOAD fsync shim",
+    "target": "Controller private requested-output .part files only",
+    "gate": "test-owned marker file",
+    "production_fault_branch": false
+  },
+  "cases": {
+    "ENOSPC": {
+      "injected_fsync_failures_per_run": 8,
+      "result_descriptor_before_recovery": false,
+      "terminal_before_recovery": false,
+      "temporary_files_after_shutdown": 0,
+      "durable_files_before_recovery": 0,
+      "recovery_completed": true,
+      "commit_groups_after_recovery": 1,
+      "durable_files_after_recovery": 1,
+      "second_replay_without_worker": "PASS"
+    },
+    "EIO": {
+      "injected_fsync_failures_per_run": 8,
+      "result_descriptor_before_recovery": false,
+      "terminal_before_recovery": false,
+      "temporary_files_after_shutdown": 0,
+      "durable_files_before_recovery": 0,
+      "recovery_completed": true,
+      "commit_groups_after_recovery": 1,
+      "durable_files_after_recovery": 1,
+      "second_replay_without_worker": "PASS"
+    }
+  },
+  "invariants": {
+    "metadata_before_fsync_success": false,
+    "phantom_result_after_restart": false,
+    "part_file_leak": false,
+    "source_replica_reused_across_internal_retries": true,
+    "producer_recomputed_after_worker_and_controller_restart": true,
+    "single_result_commit": true,
+    "journal_replay_fetch_without_worker": true
+  },
+  "validation": {
+    "focused_repetitions": 5,
+    "focused_repetitions_passed": 5,
+    "production_data_plane": "PASS",
+    "module_boundaries": "PASS",
+    "aggregate_regression": {
+      "status": "EXPECTED_15_OF_19",
+      "new_gate": "PASS",
+      "passed": 15,
+      "total": 19,
+      "known_retired_multi_workflow_failures": [
+        "TR_datavine_notebook_workflow.sh",
+        "TR_datavine_scientific_workflow_foundation.sh",
+        "TR_datavine_workflow_execution.sh",
+        "TR_datavine_workflow_service.sh"
+      ]
+    },
+    "process_cleanup": "PASS",
+    "condor_cleanup": "PASS"
+  },
+  "limitations": [
+    "The shim deterministically returns the same errno at the fsync API boundary; it does not emulate a physical device failure.",
+    "The gate validates Controller state, cleanup, retry, restart and journal invariants rather than filesystem hardware behavior."
+  ],
+  "source_sha256": {
+    "taskvine/test/datavine_fsync_fault_preload.c": "e3f2eff92a9efc9b9a3bb9467bee3b1a2dc60fc5d0bcdcf90986b04e40bd902e",
+    "taskvine/test/datavine_persistence_faults.py": "32ca3353c31d29fb151efda1523b42827f8844bd570de02589658fe9a6fe6d19",
+    "taskvine/test/TR_datavine_persistence_faults.sh": "7a973c162178f459116d5494d126bcf29ec637c366a04f89ae16a13e6ee227a1"
+  }
+}

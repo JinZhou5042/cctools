@@ -1,0 +1,110 @@
+{
+  "artifact_type": "datavine.dynamic-adaptive-fixed-ab/v1",
+  "date": "2026-08-30",
+  "status": "PASS",
+  "scope": "fixed-topology-condor-pilot",
+  "source": {
+    "branch": "benchmark/data-intensive-million-file",
+    "head": "9818f7f42cd0ac83d4e830697a520e6c13b4bba7",
+    "dirty_worktree": true,
+    "benchmark_sha256": "9651a1974ca10ce43353676c59f1add4da04db3334fa9bcd08baa67e7d5fba4a",
+    "datavine_workflow_sha256": "2d527577d32dff169021e800e734b3121b8cc825b3b81aca7714f7e302385233",
+    "vine_worker_sha256": "797f1c3a0fc68b40b0c8190e07a16e3d375d38baab4896aa9337084f25944c58"
+  },
+  "workload": {
+    "control": "each completed result deterministically chooses one to three children",
+    "pre_materialized_graph": false,
+    "semantic_batching": false,
+    "roots": 32,
+    "maximum_depth": 3,
+    "discovered_tasks": 477,
+    "discovered_edges": 445,
+    "task_target_cpu_ms": 5.0,
+    "task_output_bytes": 256,
+    "trace_sha256": "e1d1352b01ec8989df2a2b761dfc56a3829eca1eb86ade033623b1dd244c2038",
+    "payload_sha256": "b89c71e8f58eaa6739796591ea35b6669aa2653e4ced5379f44c653e12561e7f"
+  },
+  "topology": {
+    "batch_type": "condor",
+    "workers": 2,
+    "cores_per_worker": 4,
+    "memory_mib_per_worker": 2048,
+    "disk_mib_per_worker": 4096,
+    "cold_runtime_start_included": true,
+    "one_process_one_workflow": true
+  },
+  "pairs": [
+    {
+      "pair": 1,
+      "order": "taskvine-first",
+      "taskvine_seconds": 3.225582,
+      "datavine_seconds": 5.636619,
+      "datavine_over_taskvine_time": 1.747474
+    },
+    {
+      "pair": 2,
+      "order": "datavine-first",
+      "taskvine_seconds": 2.807807,
+      "datavine_seconds": 5.230189,
+      "datavine_over_taskvine_time": 1.862731
+    },
+    {
+      "pair": 3,
+      "order": "taskvine-first",
+      "taskvine_seconds": 2.098848,
+      "datavine_seconds": 4.656383,
+      "datavine_over_taskvine_time": 2.218541
+    }
+  ],
+  "summary": {
+    "taskvine_median_seconds": 2.807807,
+    "taskvine_range_seconds": [2.098848, 3.225582],
+    "datavine_median_seconds": 5.230189,
+    "datavine_range_seconds": [4.656383, 5.636619],
+    "median_paired_datavine_over_taskvine_time": 1.862731,
+    "taskvine_median_tasks_per_second": 169.883469,
+    "datavine_median_tasks_per_second": 91.201288,
+    "useful_cpu_seconds": 2.38517,
+    "useful_cpu_relative_spread": 0.00000497,
+    "datavine_rpc_requests_per_run": 1441,
+    "datavine_rpc_breakdown": {
+      "workflow_append": 477,
+      "workflow_result_descriptors": 477,
+      "workflow_watch": 483,
+      "other": 4
+    }
+  },
+  "local_gate": {
+    "workers": 1,
+    "cores_per_worker": 4,
+    "taskvine_seconds": 2.855806,
+    "datavine_seconds": 1.581918,
+    "taskvine_over_datavine_time": 1.805281,
+    "summary_sha256": "481abf27a7d88df91d93db12804b2621bc916ad9aa07ea22aa397c01165ae612"
+  },
+  "raw_summary_sha256": {
+    "pair1": "f037662a717e9ba2cb766d33fc35cae17664442fbd88c6cfa21892a04d27751c",
+    "pair2": "864a4257877fa5d433cf86d9b3038939f4668921fae126e86764ff91d08cb9c0",
+    "pair3": "6b45d3982fd02f5c2cac27904f40fa5596d7155173c54276577a2adbb731a2b0"
+  },
+  "gates": {
+    "result_driven_graph_discovery": true,
+    "identical_discovered_graph": true,
+    "identical_result_content": true,
+    "exact_logical_task_count": true,
+    "one_logical_task_per_physical_task": true,
+    "zero_task_failures": true,
+    "zero_recovery_submissions": true,
+    "equal_useful_cpu": true,
+    "fixed_worker_topology": true,
+    "alternating_backend_order": true,
+    "strict_single_workflow_process": true,
+    "bounded_event_cursor_consumed": true
+  },
+  "conclusion": {
+    "static_data_intensive_result_generalizes": false,
+    "current_dynamic_bottleneck": "per-completion frontend control loop",
+    "interpretation": "DataVine wins locally but loses on remote Workers because every discovered task requires an append, requested-result lookup, and event-stream interaction on the critical path.",
+    "next_design_gate": "one blocking completion stream carrying task identity and compact control result, followed by one append transaction per completed parent"
+  }
+}

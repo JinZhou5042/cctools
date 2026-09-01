@@ -1,0 +1,93 @@
+{
+  "artifact_type": "datavine-native-fastpath-evaluation",
+  "base_commit": "9818f7f42cd0ac83d4e830697a520e6c13b4bba7",
+  "date": "2026-08-27",
+  "source_state": "intentionally-dirty-uncommitted-worktree",
+  "status": "PASS_WITH_RETIRED_HARNESS_CASES",
+  "workload": {
+    "executor": "builtin-v1",
+    "dependency_mode": "independent",
+    "requested_outputs": 0,
+    "tasks_per_run": 50000
+  },
+  "dense_worker_pool_ab": {
+    "topology": "64-workers-x-2-cores",
+    "repetitions_per_variant": 2,
+    "fallback": {
+      "e2e_tasks_per_second_mean": 10078.16,
+      "service_tasks_per_second_mean": 13902.91,
+      "manager_scheduling_microseconds_mean": 43542.5
+    },
+    "dense": {
+      "e2e_tasks_per_second_mean": 10378.41,
+      "service_tasks_per_second_mean": 14493.71,
+      "manager_scheduling_microseconds_mean": 42669.5
+    },
+    "e2e_improvement_percent": 2.979,
+    "service_improvement_percent": 4.249,
+    "scheduling_time_reduction_percent": 2.005
+  },
+  "physical_attempt_array": {
+    "repetitions_per_variant": 4,
+    "completion_processing_seconds_before_mean": 0.257938,
+    "completion_processing_seconds_after_mean": 0.248750,
+    "completion_processing_reduction_percent": 3.562,
+    "overall_throughput_conclusion": "inconclusive-under-run-noise"
+  },
+  "line_protocol_parser": {
+    "topology": "8-workers-x-16-cores",
+    "repetitions_per_variant": 4,
+    "before": {
+      "e2e_tasks_per_second_mean": 12493.49,
+      "service_tasks_per_second_mean": 18436.71,
+      "service_run_seconds_mean": 2.712946
+    },
+    "after_worker_and_manager": {
+      "e2e_tasks_per_second_mean": 12953.38,
+      "service_tasks_per_second_mean": 19169.40,
+      "service_run_seconds_mean": 2.608386
+    },
+    "e2e_improvement_percent": 3.681,
+    "service_improvement_percent": 3.974,
+    "service_time_reduction_percent": 3.854,
+    "worker_perf_profile": {
+      "tasks": 100000,
+      "vfscanf_share_before_percent": 4.23,
+      "vfscanf_share_after_percent": 1.77,
+      "service_throughput_improvement_percent": 5.287
+    },
+    "manager_status_processing_reduction_percent": 4.901
+  },
+  "final_confirmation": {
+    "topology": "8-workers-x-16-cores",
+    "tasks": 50000,
+    "physical_submissions": 50000,
+    "physical_completions": 50000,
+    "e2e_tasks_per_second": 13419.584,
+    "service_tasks_per_second": 19666.913,
+    "manager_scheduling_microseconds": 43158,
+    "manager_status_microseconds": 396180,
+    "peak_rss_bytes": 204099584,
+    "status": "PASS"
+  },
+  "negative_results": [
+    "At 8 Workers the dense availability ring was throughput-neutral; its benefit appears at higher Worker cardinality.",
+    "A 1024-record physical-attempt slab passed correctness gates but reduced mean service throughput by 1.6 percent and was reverted."
+  ],
+  "validation": {
+    "clean_native_build": "PASS",
+    "module_boundaries": "PASS",
+    "scheduler": "PASS",
+    "worker_loss_and_restart_lifecycle": "PASS",
+    "shell_dynamic_and_recovery": "PASS",
+    "production_data_plane": "PASS",
+    "generic_taskvine_single": "PASS",
+    "generic_taskvine_multicore": "PASS",
+    "worker_transfer_parent_death": "PASS",
+    "legacy_aggregate_regression": {
+      "passed": 14,
+      "total": 18,
+      "classification": "four tests submit multiple workflow IDs to one strict-singleton service and are retired until process-isolated"
+    }
+  }
+}

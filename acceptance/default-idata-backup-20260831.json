@@ -1,0 +1,29 @@
+{
+  "status": "PASS",
+  "date": "2026-08-31",
+  "contract": {
+    "default": "controller-background",
+    "primary_replica": "Worker local disk",
+    "backup_replica": "Controller-local /tmp",
+    "worker_replica_removed_after_backup": false,
+    "explicit_opt_out": "worker-local",
+    "logical_completion_waits_for_backup": false,
+    "resolution_order": ["Worker local", "Worker peer", "Controller fallback"]
+  },
+  "validation": {
+    "python_builder_default": "PASS",
+    "raw_ir_omitted_policy_default": "PASS",
+    "controller_backup_admitted": "PASS",
+    "worker_loss_controller_fetch": "PASS",
+    "producer_replays_after_worker_loss": 0,
+    "explicit_worker_local_tasks": 2000,
+    "explicit_worker_local_background_jobs": 0,
+    "explicit_worker_local_backup_files": 0,
+    "capability_default": "controller-background",
+    "schema_default": "controller-background"
+  },
+  "tests": [
+    "taskvine/test/datavine_background_backup.py",
+    "acceptance/scripts/benchmark_idata_background_backup.py --mode worker-local"
+  ]
+}

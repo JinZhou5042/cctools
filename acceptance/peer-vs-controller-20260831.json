@@ -1,0 +1,70 @@
+{
+  "status": "PASS",
+  "date": "2026-08-31",
+  "question": "When many consumers request files distributed across many Workers, should the normal source be a Worker peer or the Controller backup?",
+  "route_isolation": {
+    "common": "Every producer output had already been admitted to Controller /tmp before consumers were submitted.",
+    "peer": "Producer Workers remained connected and retained their local replicas. Consumer tasks required more memory than producer Workers provided, so fresh consumer Workers could not execute locally. The resolver therefore selected live Worker replicas.",
+    "controller": "All producer Workers were disconnected after backup admission and before fresh consumer Workers joined. With no live Worker replica, the resolver necessarily selected Controller /tmp.",
+    "consumer_output_policy": "The workflow was sealed immediately after consumer append so unused consumer outputs were dead and did not become a second backup workload."
+  },
+  "distributed_pilot": {
+    "files": 1000,
+    "bytes_per_file": 1048576,
+    "producer_workers": 16,
+    "consumer_workers": 16,
+    "peer": {
+      "seconds": 0.8083145590499043,
+      "files_per_second": 1237.1421358232164,
+      "mib_per_second": 1237.1421358232164,
+      "frontend_transmit_bytes": 1024595
+    },
+    "controller": {
+      "seconds": 1.3197211869992316,
+      "files_per_second": 757.7358080260799,
+      "mib_per_second": 757.7358080260799,
+      "frontend_transmit_bytes": 1100350753
+    },
+    "peer_speedup": 1.6326826879753797
+  },
+  "distributed_large": {
+    "files_per_run": 10000,
+    "bytes_per_file": 1048576,
+    "input_mib_per_run": 10000,
+    "producer_workers": 32,
+    "consumer_workers": 64,
+    "total_connected_workers_in_peer_mode": 96,
+    "orders": ["controller-peer", "peer-controller"],
+    "peer": {
+      "seconds": [4.086637240019627, 8.999977650004439],
+      "mib_per_second": [2446.9996754475746, 1111.1138703766744],
+      "median_mib_per_second": 1779.0567729121244,
+      "frontend_transmit_bytes": [10463440, 10952697],
+      "controller_cpu_seconds": [4.549999999999997, 4.540000000000006]
+    },
+    "controller": {
+      "seconds": [12.13600535702426, 11.914463765919209],
+      "mib_per_second": [823.9943627094767, 839.3159941116741],
+      "median_mib_per_second": 831.6551784105754,
+      "frontend_transmit_bytes": [10983103689, 10983653693],
+      "controller_cpu_seconds": [21.42, 20.989999999999995]
+    },
+    "median_peer_speedup": 2.139175969916021,
+    "slowest_peer_over_fastest_controller": 1.3238325948413139,
+    "backup_ready_wait_seconds": [
+      33.385278878966346,
+      33.401027421001345,
+      33.37674596894067,
+      33.45587357797194
+    ],
+    "physical_failures": 0,
+    "post_gc_files": 0
+  },
+  "decision": {
+    "production_order": ["Worker local", "Worker peer", "Controller fallback"],
+    "controller_role": "Asynchronous resilience replica and fallback source, not the normal distribution hub.",
+    "reason": "Peer delivery aggregates Worker NICs and disks and removes payload traffic from the Frontend. Controller delivery is bounded by one Frontend network and service endpoint.",
+    "variance": "Peer throughput varied with Worker placement and source distribution, but the slowest large peer run still exceeded the fastest Controller run by 32 percent."
+  },
+  "benchmark": "acceptance/scripts/benchmark_peer_vs_controller.py"
+}

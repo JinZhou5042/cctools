@@ -1,0 +1,95 @@
+{
+  "status": "PASS",
+  "date": "2026-08-31",
+  "scope": "single-host local acceptance; paired 1x16 plus final 4x4 validation",
+  "workload": {
+    "tasks": 10000,
+    "runs_per_mode": 3,
+    "task": "/bin/true",
+    "output": "one empty iData per task",
+    "workflow": "streaming and held open until logical quiescence and backup drain",
+    "ordering": [
+      "worker-local-r1",
+      "controller-background-r1",
+      "controller-background-r2",
+      "worker-local-r2",
+      "worker-local-r3",
+      "controller-background-r3"
+    ]
+  },
+  "worker-local": {
+    "logical_seconds": [
+      8.596435177954845,
+      8.668661670992151,
+      8.375047411071137
+    ],
+    "logical_tasks_per_second": [
+      1163.2728907960047,
+      1153.5806078881694,
+      1194.0230913535854
+    ],
+    "median_logical_tasks_per_second": 1163.2728907960047
+  },
+  "controller-background": {
+    "logical_seconds": [
+      8.820067591033876,
+      8.823634451953694,
+      8.764143864973448
+    ],
+    "logical_tasks_per_second": [
+      1133.778159496827,
+      1133.3198416652267,
+      1141.0127622351959
+    ],
+    "backup_drain_seconds": [
+      8.862462630029768,
+      8.865530855953693,
+      8.806753888027743
+    ],
+    "backup_files_per_second": [
+      1128.3545462991037,
+      1127.9640398842498,
+      1135.492160578531
+    ],
+    "peak_backlog": [18, 19, 20],
+    "completed_background_jobs": [10000, 10000, 10000],
+    "median_logical_tasks_per_second": 1133.778159496827,
+    "median_backup_files_per_second": 1128.3545462991037
+  },
+  "comparison": {
+    "median_logical_throughput_change_percent": -2.5354954570457777,
+    "median_backup_drain_after_logical_completion_seconds": 0.04239503899589181
+  },
+  "post_queue_and_priority_validation": {
+    "tasks": 10000,
+    "logical_tasks_per_second": 1183.9567903381298,
+    "backup_files_per_second": 1178.2076670657027,
+    "backup_files": 10000,
+    "post_gc_files": 0,
+    "peak_backlog": 25,
+    "per_worker_background_pull_limit": 1,
+    "status": "PASS"
+  },
+  "multi_worker_validation": {
+    "workers": 4,
+    "cores_per_worker": 4,
+    "tasks": 10000,
+    "logical_tasks_per_second": 3351.081168591516,
+    "backup_files_per_second": 3318.480388121889,
+    "backup_files": 10000,
+    "post_gc_files": 0,
+    "peak_backlog": 68,
+    "status": "PASS"
+  },
+  "correctness": {
+    "all_background_files_admitted_before_seal": true,
+    "worker_loss_controller_fetch": true,
+    "worker_loss_payload_bytes": 1048593,
+    "controller_fetch_chunk_bytes": 1048576,
+    "producer_replays": 0,
+    "sha256_verified": true,
+    "default_remains_worker-local": true,
+    "unrequested_backups_after_logical_gc": 0
+  },
+  "benchmark": "acceptance/scripts/benchmark_idata_background_backup.py"
+}

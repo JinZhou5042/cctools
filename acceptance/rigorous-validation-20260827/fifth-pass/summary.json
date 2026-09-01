@@ -1,0 +1,90 @@
+{
+  "artifact_type": "datavine-fifth-pass-completion-dispatch",
+  "base_commit": "9818f7f42cd0ac83d4e830697a520e6c13b4bba7",
+  "date": "2026-08-27",
+  "host": "daccssfe.crc.nd.edu",
+  "status": "PASS",
+  "invariants": {
+    "one_physical_task_per_logical_task": true,
+    "batching": false,
+    "new_threads_or_owners": false,
+    "fixed_total_worker_cores": 16,
+    "controller_data_threads": 16
+  },
+  "accepted_change": {
+    "name": "prefer-dispatch",
+    "description": "When READY work and retrieved completions coexist, refill free Worker slots before returning the completion to the workflow reactor.",
+    "scope": "DataVine runtime tuning only; generic TaskVine keeps its default policy.",
+    "builtin_50000_service_tasks_per_second": {
+      "4_workers_x_4_cores_before": 15035.423,
+      "4_workers_x_4_cores_after": 16538.762,
+      "4_workers_x_4_cores_change_percent": 9.999,
+      "16_workers_x_1_core_before": 13862.156,
+      "16_workers_x_1_core_after": 15879.206,
+      "16_workers_x_1_core_change_percent": 14.551
+    },
+    "scheduler_delay_seconds": {
+      "4_workers_x_4_cores_before": 0.255203,
+      "4_workers_x_4_cores_after": 0.014663,
+      "16_workers_x_1_core_before": 0.277963,
+      "16_workers_x_1_core_after": 0.015696
+    }
+  },
+  "rejected_change": {
+    "name": "direct-poll-worker-pointer",
+    "status": "REVERTED",
+    "builtin_50000_16_workers_x_1_core_before": 14341.4,
+    "builtin_50000_16_workers_x_1_core_candidate": 14204.0,
+    "change_percent": -0.958,
+    "note": "Status CPU fell, but end-to-end throughput did not; source was restored."
+  },
+  "workload_guards": {
+    "command_no_output": {
+      "tasks_per_run": 8000,
+      "4_workers_x_4_cores_change_percent": -3.21,
+      "16_workers_x_1_core_change_percent": 0.75,
+      "interpretation": "Two-run process-creation-dominated guard; no claimed speedup."
+    },
+    "empty_requested_output": {
+      "tasks_and_files_per_run": 8000,
+      "4_workers_x_4_cores_change_percent": 1.33,
+      "16_workers_x_1_core_change_percent": 2.07
+    },
+    "four_kib_requested_output": {
+      "tasks_and_files_per_run": 8000,
+      "4_workers_x_4_cores_mean_files_per_second": 3250.394,
+      "4_workers_x_4_cores_change_from_fourth_pass_percent": 1.301,
+      "16_workers_x_1_core_mean_files_per_second": 3462.804,
+      "16_workers_x_1_core_change_from_fourth_pass_percent": 2.104,
+      "exact_bytes_per_run": 32768000
+    },
+    "bulk_requested_output": {
+      "workers": 16,
+      "cores_per_worker": 1,
+      "files": 4096,
+      "bytes_per_file": 262144,
+      "total_bytes": 1073741824,
+      "service_files_per_second": 2653.020,
+      "service_mib_per_second": 663.255,
+      "exact_validation": true
+    },
+    "layered_function_workflow": {
+      "tasks": 20000,
+      "edges": 39488,
+      "width": 256,
+      "service_tasks_per_second": 1249.49,
+      "exact_validation": true
+    }
+  },
+  "correctness_fix": {
+    "name": "function-call-output-materialization",
+    "description": "Materialize DataVine FunctionCall output from Worker memory into its declared sandbox output before Agent commit.",
+    "failure_before": "OUTPUT_MISSING for the first dependent task output",
+    "coverage": "native-function-output regression plus the exact 20000-task layered DAG"
+  },
+  "regression": {
+    "passed": 18,
+    "total": 18
+  },
+  "conclusion": "The local independent-task ceiling was primarily completion-to-refill latency, not DataVine completion bookkeeping. Prefer-dispatch removes most scheduler delay without batching or changing ownership; data-heavy and bulk guards remain stable."
+}
