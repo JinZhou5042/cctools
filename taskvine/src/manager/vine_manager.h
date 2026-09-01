@@ -74,6 +74,7 @@ typedef enum {
 struct vine_worker_info;
 struct vine_task;
 struct vine_file;
+struct vine_worker_pool;
 
 struct vine_manager {
 
@@ -267,6 +268,7 @@ struct vine_manager {
 	 * path remains unchanged for direct baseline comparisons. */
 	int worker_first_scheduling;
 	int worker_first_dispatch_limit;
+	struct vine_worker_pool *worker_pool;
 };
 
 /*

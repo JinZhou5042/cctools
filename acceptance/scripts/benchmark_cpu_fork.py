@@ -12,7 +12,7 @@ import time
 
 import cloudpickle
 import ndcctools.taskvine as vine
-from ndcctools.taskvine.datavine.workflow import Workflow
+from ndcctools.taskvine.datavine.workflow import WorkflowSession
 from ndcctools.taskvine.datavine.workflow_client import WorkflowClient
 
 
@@ -207,45 +207,35 @@ def run_datavine(repository, root, workload, workers, cores):
         )
         wait_workers(vine_status, contact["manager_port"], workers, cores, factory)
         client = WorkflowClient(contact["endpoint"], token)
-        warmup_builder = Workflow(
-            "cpu-fork-datavine-warmup-v1",
-            workflow_id="cpu-fork-datavine-warmup",
-            maximum_tasks=1,
+        session = WorkflowSession.create(
+            client,
+            "cpu-fork-datavine",
+            maximum_tasks=len(workload) + 1,
             maximum_edges=0,
+            idempotency_key="cpu-fork-datavine-v1",
         )
-        warmup_result = warmup_builder.python_callable(cpu_kernel, 1000, 0)
-        warmup_builder.request(warmup_result)
-        client.submit_workflow(warmup_builder.document())
-        warmup_deadline = time.monotonic() + 180
-        while True:
-            warmup_state = client.describe_workflow(warmup_builder.workflow_id)
-            if warmup_state["state"] in {"completed", "failed", "cancelled"}:
-                break
-            if time.monotonic() >= warmup_deadline:
-                raise TimeoutError(warmup_state)
-            time.sleep(0.05)
-        if warmup_state["state"] != "completed":
-            raise RuntimeError(warmup_state)
-        cloudpickle.loads(client.fetch_workflow_result(
-            warmup_builder.workflow_id, warmup_result.data_id
-        ))
-        builder = Workflow(
-            "cpu-fork-datavine-v1",
-            workflow_id="cpu-fork-datavine",
-            maximum_tasks=len(workload),
-            maximum_edges=0,
+        # Prime the fork library inside the one production workflow, then add
+        # the measured tasks as one delta.  This keeps warmup outside the
+        # measurement without violating the single-service/single-workflow
+        # contract or turning task submission into one RPC per task.
+        warmup = session.submit(
+            cpu_kernel, 1000, 0, idempotency_key="cpu-fork-warmup-v1"
         )
+        warmup.result(timeout=180)
         references = []
         for task_key, (iterations, seed) in workload.items():
-            reference = builder.python_callable(cpu_kernel, iterations, seed)
+            reference = session.builder.python_callable(
+                cpu_kernel, iterations, seed
+            )
             references.append((task_key, reference))
-            builder.request(reference)
+            session.builder.request(reference)
         started = time.monotonic()
-        client.submit_workflow(builder.document())
+        session._commit("cpu-fork-measured-v1")
+        session.seal()
         submitted = time.monotonic()
         deadline = started + 900
         while True:
-            state = client.describe_workflow(builder.workflow_id)
+            state = client.describe_workflow(session.workflow_id)
             if state["state"] in {"completed", "failed", "cancelled"}:
                 break
             if time.monotonic() >= deadline:
@@ -260,7 +250,9 @@ def run_datavine(repository, root, workload, workers, cores):
             })
         values = []
         for task_key, reference in references:
-            payload = client.fetch_workflow_result(builder.workflow_id, reference.data_id)
+            payload = client.fetch_workflow_result(
+                session.workflow_id, reference.data_id
+            )
             values.append({"task_key": task_key, "result": cloudpickle.loads(payload)})
         fetched = time.monotonic()
         useful_cpu_ns = verify(values, workload)
@@ -274,6 +266,7 @@ def run_datavine(repository, root, workload, workers, cores):
             "status": "PASS",
             "architecture": "datavine-c-runtime-preloaded-python-fork",
             "task_count": len(workload),
+            "workflow_warmup_tasks": 1,
             "submission_seconds": submitted - started,
             "execution_seconds": completed - submitted,
             "fetch_seconds": fetched - completed,

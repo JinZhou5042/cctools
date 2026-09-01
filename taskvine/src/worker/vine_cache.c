@@ -47,7 +47,7 @@ struct vine_cache {
 
 static int cache_name_is_datavine(const char *cachename)
 {
-	return cachename && !strncmp(cachename, "datavine-v2-", 12);
+	return cachename && !strncmp(cachename, "datavine-", 9);
 }
 
 static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager);
@@ -629,7 +629,8 @@ static int do_transfer(struct vine_cache *c, struct vine_cache_file *f, const ch
 			result = do_worker_transfer(c, f, cachename, error_message);
 		}
 	} else if (strncmp(f->source, "datavine://", 11) == 0 ||
-			strncmp(f->source, "datavine-file://", 16) == 0) {
+			strncmp(f->source, "datavine-file://", 16) == 0 ||
+			strncmp(f->source, "datavine-backup://", 18) == 0) {
 		result = vine_datavine_transfer_get(f->source, transfer_path, error_message);
 	} else {
 		result = do_curl_transfer(c, f, transfer_path, cache_path, error_message);

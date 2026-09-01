@@ -989,6 +989,7 @@ class Manager(object):
     # - "wait-retrieve-many" If set to 0, cvine.vine_wait breaks out of the while loop whenever a task changes to "task_done" (wait_retrieve_one mode). If set to 1, vine_wait does not break, but continues recieving and dispatching tasks. This occurs until no task is sent or recieved, at which case it breaks out of the while loop (wait_retrieve_many mode). (default=0)
     # - "worker-retrievals" If 1, retrieve all completed tasks from a worker when retrieving results, even if going above the parameter max-retrievals . Otherwise, if 0, retrieve just one task before deciding to dispatch new tasks or connect new workers. (default=1)
     # - "worker-first-scheduling" If 1, traverse workers with free resources and fill them directly from compatible ready tasks without building a worker priority queue for every task. The established task-first scheduler remains the default. (default=0)
+    # - "dense-worker-pool" If 1, use a dense generation-safe free-worker ring with worker-first scheduling. It is not allocated by default. (default=0)
     # - "worker-first-dispatch-limit" Maximum tasks dispatched by one worker-first scheduling pass before returning to manager progress. (default=4096)
     # - "watch-library-logfiles" If 1, watch the output files produced by each of the library processes running on the remote workers, take them back the current logging directory. (default=0)
     # @param value The value to set the parameter to.

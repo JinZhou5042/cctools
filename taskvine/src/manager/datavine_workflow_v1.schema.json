@@ -248,7 +248,11 @@
       "additionalProperties": false,
       "properties": {
         "maximum_tasks": {"type": "integer", "minimum": 1},
-        "maximum_edges": {"type": "integer", "minimum": 0}
+        "maximum_edges": {"type": "integer", "minimum": 0},
+        "idata_backup": {
+          "enum": ["worker-local", "controller-background"],
+          "default": "controller-background"
+        }
       }
     }
   }

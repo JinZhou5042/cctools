@@ -25,14 +25,32 @@ REQUIRED_GATES = {
         "central_window_observed", "ready_parallelism", "active_parallelism",
     },
 }
+PILOT_DATAVINE_EXCLUSIONS = {
+    "exact_sharedfs_source_bytes",
+    "data_path_is_runtime_bottleneck",
+    "gc_pressure_accounted",
+}
 
 
-def gates_pass(value, backend):
+def gates_pass(value, backend, allow_pilot=False):
     gates = value.get("gates")
+    required = REQUIRED_GATES[backend]
+    if allow_pilot and backend == "datavine":
+        evaluation = value.get("gate_evaluation", {})
+        excluded = set(evaluation.get("excluded", []))
+        applicable = evaluation.get("applicable")
+        if (
+            evaluation.get("profile") != "ordinary"
+            or not isinstance(applicable, dict)
+            or not excluded.issubset(PILOT_DATAVINE_EXCLUSIONS)
+            or required - excluded - set(applicable)
+        ):
+            return False
+        return all(applicable.values())
     return (
         isinstance(gates, dict)
-        and REQUIRED_GATES[backend].issubset(gates)
-        and all(gates[name] is True for name in REQUIRED_GATES[backend])
+        and required.issubset(gates)
+        and all(gates[name] is True for name in required)
     )
 
 
@@ -58,9 +76,11 @@ def main():
         tv_path, tv = load(tv_arg)
         contract = dv.get("contract", {})
         pair_errors = []
-        if dv.get("status") != "PASS" or not gates_pass(dv, "datavine"):
+        if dv.get("status") != "PASS" or not gates_pass(
+                dv, "datavine", args.allow_pilot):
             pair_errors.append("DataVine run is not fully PASS")
-        if tv.get("status") != "PASS" or not gates_pass(tv, "taskvine"):
+        if tv.get("status") != "PASS" or not gates_pass(
+                tv, "taskvine", args.allow_pilot):
             pair_errors.append("TaskVine run is not fully PASS")
         if contract.get("contract_sha256") != tv.get("contract", {}).get("contract_sha256"):
             pair_errors.append("contract digest mismatch")

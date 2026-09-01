@@ -7,13 +7,6 @@
 
 struct vine_datavine_replica_table;
 
-enum vine_datavine_session_state {
-	VINE_DATAVINE_SESSION_UNUSED = 0,
-	VINE_DATAVINE_SESSION_ACTIVE = 1,
-	VINE_DATAVINE_SESSION_SUSPECT = 2,
-	VINE_DATAVINE_SESSION_DRAINING = 3,
-};
-
 enum vine_datavine_resolve_status {
 	VINE_DATAVINE_RESOLVE_UNKNOWN = 0,
 	VINE_DATAVINE_RESOLVE_PENDING = 1,
@@ -70,9 +63,6 @@ void vine_datavine_replica_table_delete(
 int vine_datavine_replica_table_session_open(
 		struct vine_datavine_replica_table *table, uint32_t worker_slot,
 		uint64_t session_epoch);
-int vine_datavine_replica_table_session_state(
-		struct vine_datavine_replica_table *table, uint32_t worker_slot,
-		uint64_t session_epoch, enum vine_datavine_session_state state);
 int vine_datavine_replica_table_session_active(
 		struct vine_datavine_replica_table *table, uint32_t worker_slot,
 		uint64_t session_epoch);
@@ -85,7 +75,7 @@ int vine_datavine_replica_table_session_lost(
  * A retry may replace it only before content identity is established. */
 int vine_datavine_replica_table_expect(
 		struct vine_datavine_replica_table *table, uint64_t data_id,
-		uint32_t *generation, int requested);
+		uint32_t *generation);
 
 /* First valid publication fixes size and digest for a generation. Repeated
  * publication is idempotent. A different digest for the same generation is
@@ -94,7 +84,7 @@ int vine_datavine_replica_table_publish(
 		struct vine_datavine_replica_table *table, uint64_t data_id,
 		uint32_t generation, uint64_t size, const unsigned char digest[32],
 		uint32_t worker_slot, uint64_t session_epoch, uint64_t object_token,
-		int requested, vine_datavine_waiter_callback_t wake_waiter,
+		vine_datavine_waiter_callback_t wake_waiter,
 		void *argument);
 /* Validate and reserve the complete bounded batch before making the first
  * record visible. Invalid/conflicting input therefore has no partial effect.
@@ -124,6 +114,22 @@ int vine_datavine_replica_table_fault(
 		uint64_t object_token, vine_datavine_data_callback_t last_replica,
 		void *argument);
 int vine_datavine_replica_table_set_persisted(
+		struct vine_datavine_replica_table *table, uint64_t data_id,
+		uint32_t generation);
+/* Rebuild the durable half of one DataID after Controller journal replay.
+ * This is intentionally lazy: the catalog is authoritative for persisted
+ * payloads, while the dense replica table is hydrated only when a Worker
+ * resolves the DataID. */
+int vine_datavine_replica_table_restore_persisted(
+		struct vine_datavine_replica_table *table, uint64_t data_id,
+		uint32_t generation, uint64_t size, const unsigned char digest[32]);
+/* Background Controller backup admission is represented by one bit in the
+ * dense DataID record.  Return 1 when the caller must enqueue the DataID, 2
+ * when it is already queued or persisted, and 0 for an invalid generation. */
+int vine_datavine_replica_table_queue_backup(
+		struct vine_datavine_replica_table *table, uint64_t data_id,
+		uint32_t generation);
+int vine_datavine_replica_table_clear_backup(
 		struct vine_datavine_replica_table *table, uint64_t data_id,
 		uint32_t generation);
 int vine_datavine_replica_table_set_recovery(

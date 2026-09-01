@@ -124,6 +124,27 @@ def timed_work_unit(task_key, target_cpu_ms, seed, output_bytes, *parents):
     }
 
 
+def adaptive_work_unit(
+    task_key, depth, maximum_depth, target_cpu_ms, seed, output_bytes, *parents
+):
+    """Return useful data plus a result-driven, deterministic fan-out.
+
+    The submit process cannot derive ``fanout`` before receiving this result.
+    Child keys make the discovered graph independent of completion order, so
+    both backends must still produce exactly the same dynamic DAG.
+    """
+
+    value = timed_work_unit(
+        task_key, target_cpu_ms, seed, output_bytes, *parents
+    )
+    value["depth"] = int(depth)
+    value["fanout"] = (
+        0 if int(depth) >= int(maximum_depth)
+        else 1 + int(value["digest"][:8], 16) % 3
+    )
+    return value
+
+
 def split_unit(task_key, iterations, seed, output_bytes, *parents):
     return tuple(
         work_unit(
@@ -150,6 +171,61 @@ def canonical(values):
             "payload_sha256": hashlib.sha256(value["payload"]).hexdigest(),
         })
     return result, cpu_by_task
+
+
+def adaptive_outcome(completed):
+    """Compact, order-independent proof of one discovered adaptive DAG."""
+
+    trace = []
+    useful_cpu_ns = 0
+    payload_bytes = 0
+    payload_digests = []
+    for key, value in sorted(completed.items()):
+        trace.append({
+            "key": key,
+            "depth": int(value["depth"]),
+            "fanout": int(value["fanout"]),
+            "digest": value["digest"],
+        })
+        useful_cpu_ns += int(value["cpu_by_task"][key])
+        payload_bytes += len(value["payload"])
+        payload_digests.append(hashlib.sha256(value["payload"]).hexdigest())
+    encoded_trace = json.dumps(
+        trace, sort_keys=True, separators=(",", ":")
+    ).encode()
+    encoded_payloads = "".join(payload_digests).encode()
+    return ({
+        "digest": hashlib.sha256(encoded_trace).hexdigest(),
+        "payload_bytes": payload_bytes,
+        "payload_sha256": hashlib.sha256(encoded_payloads).hexdigest(),
+    }, useful_cpu_ns, trace)
+
+
+def adaptive_seed(key):
+    return int.from_bytes(hashlib.sha256(str(key).encode()).digest()[:8], "big")
+
+
+def taskvine_ready_futures(pending, timeout=900):
+    """Consume any Manager completion without Future-list head blocking."""
+
+    deadline = time.monotonic() + float(timeout)
+    by_task_id = {
+        int(future._task.id): future for future in pending
+    }
+    manager = next(iter(pending))._task.manager
+    while time.monotonic() < deadline:
+        task = manager.wait(1)
+        if task is None:
+            continue
+        future = by_task_id.get(int(task.id))
+        if future is None:
+            continue
+        # Manager.wait already retrieved this exact task.  Mark that single
+        # Future accordingly, then let its normal output path fetch/decode the
+        # result file.  No private scheduler or data state is modified.
+        future._task._has_retrieved = True
+        return {future: future.result(timeout=0)}
+    raise TimeoutError(f"{len(pending)} adaptive TaskVine tasks remain")
 
 
 def release_process_heap():
@@ -320,6 +396,16 @@ def workflow_specs(parallelism=1):
         "duration_ms": 20,
         "output_bytes": 64,
     }
+    adaptive_roots = max(32, 4 * parallelism)
+    specs["adaptive"] = {
+        "mode": "adaptive",
+        "roots": adaptive_roots,
+        "maximum_depth": 3,
+        "maximum_tasks": adaptive_roots * 40,
+        "duration_ms": 5,
+        "output_bytes": 256,
+        "kind": "timed",
+    }
     return specs
 
 
@@ -327,7 +413,11 @@ def materialize_iterations(spec, calibrated):
     result = json.loads(json.dumps(spec))
     for item in result.get("nodes", ()):
         item["iterations"] = calibrated[str(float(item.pop("duration_ms")))]
-    if result.get("mode") == "dynamic":
+    if result.get("mode") == "adaptive":
+        # adaptive_work_unit uses process CPU milliseconds directly so Worker
+        # speed cannot distort the controlled cost.
+        result["iterations"] = float(result.pop("duration_ms"))
+    elif result.get("mode") == "dynamic":
         result["iterations"] = calibrated[
             str(float(result.pop("duration_ms")))
         ]
@@ -473,7 +563,7 @@ def taskvine_stats(manager):
     stats = manager.stats
     names = (
         "tasks_submitted", "tasks_done", "tasks_successful", "tasks_failed",
-        "tasks_exhausted_attempts",
+        "tasks_exhausted_attempts", "tasks_recovery",
         "bytes_sent", "bytes_received", "time_workers_execute_good",
         "time_send_good", "time_receive_good", "time_scheduling",
         "workers_joined", "workers_removed", "workers_lost",
@@ -531,6 +621,10 @@ def start_resident_factory(root, manager_port, workers, cores, worker_binary,
     process = subprocess.Popen(
         command, stdout=log, stderr=subprocess.STDOUT, text=True,
         start_new_session=True,
+        env=dict(
+            os.environ,
+            PATH=f"{worker_binary.parent}{os.pathsep}{os.environ.get('PATH', '')}",
+        ),
     )
     return process, log, command
 
@@ -578,7 +672,7 @@ def wait_datavine(client, workflow_id, roots, timeout=900):
     return client.wait_workflow(workflow_id, timeout=timeout), None
 
 
-def start_datavine(repository, root, workers, cores, batch_type):
+def start_datavine(repository, root, workers, cores, batch_type, warmup=True):
     service_log_path = root / "service.log"
     service_log = service_log_path.open("w")
     service = subprocess.Popen(
@@ -602,23 +696,30 @@ def start_datavine(repository, root, workers, cores, batch_type):
                              contact["manager_port"], workers, cores, factory,
                              timeout=3600)
     client = WorkflowClient(contact["endpoint"], "sc-workflow-comparison")
-    warmup = Workflow("sc-datavine-warmup-v1", workflow_id="sc-datavine-warmup",
-                      maximum_tasks=1, maximum_edges=0)
-    output = warmup.python_callable(work_unit, "warmup", 1000, 1, 0)
-    warmup.request(output).submit(client)
-    state, _ = wait_datavine(client, warmup.workflow_id, (service.pid, factory.pid))
-    if state["state"] != "completed":
-        raise RuntimeError(state)
-    cloudpickle.loads(client.fetch_workflow_result(warmup.workflow_id, output.data_id))
+    if warmup:
+        warmup_workflow = Workflow(
+            "sc-datavine-warmup-v1", workflow_id="sc-datavine-warmup",
+            maximum_tasks=1, maximum_edges=0,
+        )
+        output = warmup_workflow.python_callable(work_unit, "warmup", 1000, 1, 0)
+        warmup_workflow.request(output).submit(client)
+        state, _ = wait_datavine(
+            client, warmup_workflow.workflow_id, (service.pid, factory.pid)
+        )
+        if state["state"] != "completed":
+            raise RuntimeError(state)
+        cloudpickle.loads(
+            client.fetch_workflow_result(warmup_workflow.workflow_id, output.data_id)
+        )
     return (service, service_log, service_log_path, factory, factory_log,
             command, client, inventory, int(contact["manager_port"]))
 
 
 class DataVinePool:
-    def __init__(self, repository, root, workers, cores, batch_type):
+    def __init__(self, repository, root, workers, cores, batch_type, warmup=True):
         root.mkdir(parents=True)
         values = start_datavine(
-            repository, root, workers, cores, batch_type
+            repository, root, workers, cores, batch_type, warmup=warmup
         )
         (self.service, self.service_log, self.service_log_path, self.factory,
          self.factory_log, self.factory_command, self.client,
@@ -635,7 +736,8 @@ class DataVinePool:
         self.service_log.close()
 
 
-def run_datavine(pool, root, name, spec, repetition):
+def run_datavine(pool, root, name, spec, repetition,
+                 completion_mode="stream"):
     root.mkdir(parents=True)
     service = pool.service
     factory = pool.factory
@@ -650,7 +752,136 @@ def run_datavine(pool, root, name, spec, repetition):
         started = time.monotonic()
         built = started
         ingest_profile = None
-        if spec.get("mode") == "dynamic":
+        if spec.get("mode") == "adaptive":
+            session = WorkflowSession.create(
+                client, workflow_id,
+                maximum_tasks=spec["maximum_tasks"],
+                maximum_edges=spec["maximum_tasks"] - spec["roots"],
+                idempotency_key=f"{workflow_id}-open",
+            )
+            pending = {}
+            completed_values = {}
+            cursor = 0
+            completion_queue = []
+            result_stream = (
+                client.workflow_result_stream(workflow_id, timeout=900)
+                if completion_mode == "stream" else None
+            )
+
+            def collect_events():
+                nonlocal cursor
+                while True:
+                    events = client.watch_workflow(
+                        workflow_id, after_event_id=cursor, limit=64
+                    )
+                    if not events:
+                        return
+                    for event in events:
+                        cursor = max(cursor, int(event["event_id"]))
+                        if event["type"] == "task_failed":
+                            raise RuntimeError({"adaptive_task_failed": event})
+                        if event["type"] == "task_completed":
+                            completion_queue.append(int(event["task_id"]))
+                    if len(events) < 64:
+                        return
+
+            if result_stream is None:
+                collect_events()
+
+            def submit_adaptive(key, depth, parent=None):
+                parents = () if parent is None else (parent,)
+                future = session.submit(
+                    adaptive_work_unit,
+                    key,
+                    depth,
+                    spec["maximum_depth"],
+                    spec["iterations"],
+                    adaptive_seed(key),
+                    spec["output_bytes"],
+                    *parents,
+                    idempotency_key=f"{workflow_id}-{key}",
+                )
+                task_id = session.builder._next_task_id - 1
+                pending[
+                    future.data_id if result_stream is not None else task_id
+                ] = (future, key, depth)
+                # One append generates several durable lifecycle events.  Drain
+                # continuously so a wide initial frontier cannot overrun the
+                # deliberately bounded event retention window.
+                if result_stream is None:
+                    collect_events()
+
+            for root_index in range(spec["roots"]):
+                submit_adaptive(f"root-{root_index:05d}", 0)
+            submitted = time.monotonic()
+            while pending:
+                if result_stream is not None:
+                    try:
+                        record = next(result_stream)
+                    except StopIteration:
+                        raise RuntimeError({
+                            "adaptive_stream_terminal":
+                                result_stream.terminal_state,
+                            "pending": len(pending),
+                        })
+                    completion_ids = (int(record["data_id"]),)
+                    payloads = {int(record["data_id"]): record["payload"]}
+                else:
+                    collect_events()
+                    if not completion_queue:
+                        time.sleep(0.001)
+                        continue
+                    completion_ids = completion_queue[:]
+                    completion_queue.clear()
+                    payloads = {}
+                for completion_id in completion_ids:
+                    item = pending.pop(completion_id, None)
+                    if item is None:
+                        continue
+                    future, key, depth = item
+                    payload = payloads.get(completion_id)
+                    value = (
+                        cloudpickle.loads(payload)
+                        if payload is not None else future.result()
+                    )
+                    completed_values[key] = value
+                    for child_index in range(int(value["fanout"])):
+                        child_key = f"{key}.{child_index}"
+                        submit_adaptive(child_key, depth + 1, future)
+                    if len(pending) + len(completed_values) > spec["maximum_tasks"]:
+                        raise RuntimeError("adaptive workflow exceeded maximum_tasks")
+            session.seal()
+            if result_stream is not None:
+                for unexpected in result_stream:
+                    raise RuntimeError({"unexpected_result": unexpected})
+                if result_stream.terminal_state != "completed":
+                    raise RuntimeError({
+                        "adaptive_stream_terminal":
+                            result_stream.terminal_state,
+                    })
+            completed = time.monotonic()
+            terminal = completed
+            outcome, useful_cpu_ns, adaptive_trace = adaptive_outcome(
+                completed_values
+            )
+            canonical_values = [outcome]
+            cpu_by_task = {"adaptive": useful_cpu_ns}
+            logical_tasks = len(completed_values)
+            ingest_profile = session.profile()
+            adaptive_profile = {
+                "roots": spec["roots"],
+                "maximum_depth": spec["maximum_depth"],
+                "discovered_tasks": logical_tasks,
+                "discovered_edges": logical_tasks - spec["roots"],
+                "generations": session.generation,
+                "completion_events_consumed_through": cursor,
+                "completion_mode": completion_mode,
+                "completion_sequence": (
+                    result_stream.sequence if result_stream is not None else 0
+                ),
+                "trace_sha256": outcome["digest"],
+            }
+        elif spec.get("mode") == "dynamic":
             session = WorkflowSession.create(
                 client, workflow_id, maximum_tasks=spec["steps"], maximum_edges=0,
                 idempotency_key=f"{workflow_id}-open",
@@ -766,6 +997,8 @@ def run_datavine(pool, root, name, spec, repetition):
             },
             "rpc_profile": client.rpc_profile(reset=True),
         }
+        if "adaptive_profile" in locals():
+            result["adaptive_profile"] = adaptive_profile
         if "values" in locals():
             values.clear()
         cleanup_started = time.monotonic()
@@ -798,11 +1031,12 @@ def taskvine_directory(root):
         os.chdir(previous)
 
 
-def start_taskvine(repository, root, workers, cores, batch_type):
+def start_taskvine(repository, root, workers, cores, batch_type, warmup=True):
     executor = vine.FuturesExecutor(port=0, factory=False)
     library_name = "sc-workflow-functions"
     library = executor.manager.create_library_from_functions(
-        library_name, work_unit, timed_work_unit, split_unit, select_unit,
+        library_name, work_unit, timed_work_unit, adaptive_work_unit,
+        split_unit, select_unit,
         add_env=False, exec_mode="fork",
     )
     library.set_cores(cores)
@@ -827,20 +1061,23 @@ def start_taskvine(repository, root, workers, cores, batch_type):
     factory.factory_timeout = POOL_LIFETIME_SECONDS
     factory.start()
     inventory = wait_taskvine_pool(executor.manager, factory, workers, cores)
-    warmup = executor.future_funcall(library_name, "work_unit", "warmup", 1000, 1, 0)
-    warmup.set_cores(1)
-    if executor.submit(warmup).result()["digest"] == "":
-        raise RuntimeError("unreachable warmup result")
+    if warmup:
+        warmup_task = executor.future_funcall(
+            library_name, "work_unit", "warmup", 1000, 1, 0
+        )
+        warmup_task.set_cores(1)
+        if executor.submit(warmup_task).result()["digest"] == "":
+            raise RuntimeError("unreachable warmup result")
     return executor, factory, library_name, inventory
 
 
 class TaskVinePool:
-    def __init__(self, repository, root, workers, cores, batch_type):
+    def __init__(self, repository, root, workers, cores, batch_type, warmup=True):
         root.mkdir(parents=True)
         with taskvine_directory(root):
             (self.executor, self.factory, self.library,
              self.inventory) = start_taskvine(
-                repository, root, workers, cores, batch_type
+                repository, root, workers, cores, batch_type, warmup=warmup
             )
         self.workers = workers
         self.cores = cores
@@ -959,7 +1196,57 @@ def run_taskvine(pool, root, name, spec, repetition):
         baseline = taskvine_stats(executor.manager)
         sampler = PeakSampler((os.getpid(), factory._factory_proc.pid)).start()
         started = time.monotonic()
-        if spec.get("mode") == "dynamic":
+        if spec.get("mode") == "adaptive":
+            pending = {}
+            completed_values = {}
+
+            def submit_adaptive(key, depth, parent=None):
+                parents = () if parent is None else (parent,)
+                task = executor.future_funcall(
+                    library,
+                    "adaptive_work_unit",
+                    key,
+                    depth,
+                    spec["maximum_depth"],
+                    spec["iterations"],
+                    adaptive_seed(key),
+                    spec["output_bytes"],
+                    *parents,
+                )
+                task.set_cores(1)
+                future = executor.submit(task)
+                run_futures.append(future)
+                pending[future] = (key, depth)
+
+            for root_index in range(spec["roots"]):
+                submit_adaptive(f"root-{root_index:05d}", 0)
+            submitted = time.monotonic()
+            while pending:
+                ready = taskvine_ready_futures(pending)
+                for future, value in ready.items():
+                    key, depth = pending.pop(future)
+                    completed_values[key] = value
+                    for child_index in range(int(value["fanout"])):
+                        child_key = f"{key}.{child_index}"
+                        submit_adaptive(child_key, depth + 1, future)
+                    if len(pending) + len(completed_values) > spec["maximum_tasks"]:
+                        raise RuntimeError("adaptive workflow exceeded maximum_tasks")
+            completed = time.monotonic()
+            terminal = completed
+            outcome, useful_cpu_ns, adaptive_trace = adaptive_outcome(
+                completed_values
+            )
+            canonical_values = [outcome]
+            cpu_by_task = {"adaptive": useful_cpu_ns}
+            logical_tasks = len(completed_values)
+            adaptive_profile = {
+                "roots": spec["roots"],
+                "maximum_depth": spec["maximum_depth"],
+                "discovered_tasks": logical_tasks,
+                "discovered_edges": logical_tasks - spec["roots"],
+                "trace_sha256": outcome["digest"],
+            }
+        elif spec.get("mode") == "dynamic":
             values = []
             seed = 1
             submitted = started
@@ -1076,6 +1363,8 @@ def run_taskvine(pool, root, name, spec, repetition):
                 "cores_per_worker": pool.cores,
             },
         }
+        if "adaptive_profile" in locals():
+            result["adaptive_profile"] = adaptive_profile
         if "values" in locals():
             values.clear()
         result["client_cleanup"] = cleanup_taskvine_futures(
@@ -1137,6 +1426,10 @@ def main():
         default="taskvine-first",
     )
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--datavine-completion-mode", choices=("stream", "poll"),
+        default="stream",
+    )
     args = parser.parse_args()
     if min(args.repetitions, args.workers, args.cores) < 1:
         parser.error("repetitions, workers, and cores must be positive")
@@ -1160,7 +1453,10 @@ def main():
     durations = sorted({
         item["duration_ms"]
         for spec in available.values() for item in spec.get("nodes", ())
-    } | {available["dynamic"]["duration_ms"]})
+    } | {
+        spec["duration_ms"] for spec in available.values()
+        if spec.get("mode") in {"dynamic", "adaptive"}
+    })
     base_duration = 20.0
     base_iterations = calibrate(base_duration)
     calibrated = {
@@ -1171,7 +1467,7 @@ def main():
              for name in names}
     expected = {
         name: (
-            None if spec.get("mode") == "dynamic" or
+            None if spec.get("mode") in {"dynamic", "adaptive"} or
             spec.get("cross_backend_only") else execute_locally(spec)
         )
         for name, spec in specs.items()
@@ -1186,12 +1482,36 @@ def main():
     if args.backend_order == "datavine-first":
         backends.reverse()
     for backend, pool_type, runner in backends:
-        pool = pool_type(repository, output / "pools" / backend,
-                         args.workers, args.cores, args.batch_type)
+        pool = None
         try:
+            if backend == "taskvine":
+                pool = pool_type(
+                    repository, output / "pools" / backend,
+                    args.workers, args.cores, args.batch_type, warmup=True,
+                )
             for repetition, name in jobs:
                 run_root = output / "runs" / f"r{repetition}-{name}-{backend}"
-                result = runner(pool, run_root, name, specs[name], repetition)
+                if backend == "datavine":
+                    # A DataVine service owns exactly one workflow.  Every
+                    # measured run therefore gets a fresh owner; TaskVine
+                    # retains its resident comparison pool.
+                    pool = pool_type(
+                        repository,
+                        output / "pools" / f"datavine-r{repetition}-{name}",
+                        args.workers, args.cores, args.batch_type, warmup=False,
+                    )
+                    try:
+                        result = runner(
+                            pool, run_root, name, specs[name], repetition,
+                            completion_mode=args.datavine_completion_mode,
+                        )
+                    finally:
+                        pool.close()
+                        pool = None
+                else:
+                    result = runner(
+                        pool, run_root, name, specs[name], repetition
+                    )
                 if expected[name] is not None and result["results"] != expected[name]:
                     raise RuntimeError(f"{name}/{backend}: result mismatch")
                 repetition_peer = next((item for item in runs
@@ -1217,7 +1537,8 @@ def main():
                     "tasks_per_second": result["tasks_per_second"],
                 }, sort_keys=True), flush=True)
         finally:
-            pool.close()
+            if pool is not None:
+                pool.close()
     commit = subprocess.run(
         ("git", "rev-parse", "HEAD"), cwd=repository,
         text=True, stdout=subprocess.PIPE, check=True,
@@ -1235,7 +1556,9 @@ def main():
             "semantic_batching": False,
             "taskvine_executor": "FunctionCall-fork",
             "datavine_executor": "preloaded-python-fork",
-            "warmup_excluded": True,
+            "taskvine_warmup_excluded": True,
+            "datavine_cold_runtime_start_included": True,
+            "datavine_one_service_per_workflow": True,
             "result_content_validated": True,
         },
         "environment": {
@@ -1250,6 +1573,8 @@ def main():
             "cores_per_worker": args.cores,
             "batch_type": args.batch_type,
             "backend_order": args.backend_order,
+            "taskvine_runtime_warmup": True,
+            "datavine_runtime_warmup": False,
             "clock_ticks_per_second": os.sysconf("SC_CLK_TCK"),
         },
         "calibration": calibrated,

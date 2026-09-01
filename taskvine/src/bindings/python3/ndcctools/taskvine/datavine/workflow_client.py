@@ -35,6 +35,7 @@ _OBJECT_PATH = 32
 _RESULT_PATH = 34
 _RESULT_DESCRIPTORS = 36
 _WAIT_TERMINAL = 37
+_RESULT_STREAM = 38
 _OBJECT_PUT_WORKERS = 16
 
 _OPCODE_NAMES = {
@@ -55,6 +56,13 @@ _OPCODE_NAMES = {
     _RESULT_PATH: "workflow_result_path",
     _RESULT_DESCRIPTORS: "workflow_result_descriptors",
     _WAIT_TERMINAL: "workflow_wait_terminal",
+    _RESULT_STREAM: "workflow_result_stream",
+}
+
+_WORKFLOW_STATES = {
+    1: "open", 2: "sealed", 3: "cancelled", 4: "running",
+    5: "completed", 6: "failed", 7: "running_open",
+    8: "open_quiescent", 9: "staged",
 }
 
 
@@ -83,6 +91,145 @@ class WorkflowEventCursorExpired(RuntimeError):
             f"workflow event cursor {requested} expired; oldest retained event is {oldest}; "
             "reconstruct from describe/result state"
         )
+
+
+class WorkflowResultStream:
+    """One-request stream of Controller-admitted requested results."""
+
+    def __init__(
+        self, client, workflow_id, after_sequence=0,
+        max_inline_bytes=64 * 1024, timeout=None,
+    ):
+        self.client = client
+        self.workflow_id = str(workflow_id)
+        self.sequence = int(after_sequence)
+        self.max_inline_bytes = int(max_inline_bytes)
+        self.timeout = timeout
+        self.terminal_state = None
+        self._stream = None
+        self._request_id = None
+
+    def _open(self):
+        if not 0 <= self.max_inline_bytes <= 64 * 1024:
+            raise ValueError("max_inline_bytes must be between 0 and 65536")
+        if not 0 <= self.sequence <= (1 << 64) - 1:
+            raise ValueError("after_sequence must be an unsigned 64-bit value")
+        stream = socket.create_connection(
+            (self.client.host, self.client.port), self.client.timeout
+        )
+        stream.settimeout(
+            self.client.timeout if self.timeout is None else self.timeout
+        )
+        stream.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        with self.client._rpc_profile_lock:
+            self.client._rpc_connections += 1
+        self.client._exchange(stream, _AUTH, self.client.token)
+        encoded = self.client._identifier(self.workflow_id)
+        payload = struct.pack(
+            "!HIQ", len(encoded), self.max_inline_bytes, self.sequence
+        ) + encoded
+        with self.client._id_lock:
+            self._request_id = next(self.client._ids)
+        with self.client._rpc_profile_lock:
+            self.client._rpc_requests += 1
+            self.client._rpc_by_opcode[_RESULT_STREAM] = (
+                self.client._rpc_by_opcode.get(_RESULT_STREAM, 0) + 1
+            )
+        stream.sendall(
+            struct.pack(
+                "!IHHIQ", _MAGIC, _VERSION, _RESULT_STREAM,
+                len(payload), self._request_id,
+            ) + payload
+        )
+        self._stream = stream
+
+    def close(self):
+        if self._stream is not None:
+            self._stream.close()
+            self._stream = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.terminal_state is not None:
+            raise StopIteration
+        if self._stream is None:
+            self._open()
+        header = self.client._read(self._stream, 24)
+        magic, version, opcode, status, size, request_id = struct.unpack(
+            "!IHHIIQ", header
+        )
+        if (
+            magic != _MAGIC or version != _VERSION
+            or opcode != _RESULT_STREAM or request_id != self._request_id
+            or size > _MAX_BODY
+        ):
+            self.close()
+            raise RuntimeError("invalid workflow result stream header")
+        body = self.client._read(self._stream, size) if size else b""
+        if status:
+            self.close()
+            raise WorkflowClientError(status, opcode, body)
+        if len(body) < 128 or body[:4] != b"DVS1":
+            self.close()
+            raise RuntimeError("invalid workflow result stream frame")
+        (
+            flags, sequence, data_id, result_size, producer_task_id,
+            attempt, output_index, name_size, version_size, payload_size,
+            workflow_state, reserved,
+        ) = struct.unpack_from("!IQQQQIIHHIII", body, 4)
+        expected = 128 + name_size + version_size + payload_size
+        if reserved or len(body) != expected or sequence < self.sequence:
+            self.close()
+            raise RuntimeError("inconsistent workflow result stream frame")
+        if flags & 4:
+            if flags != 4 or payload_size:
+                self.close()
+                raise RuntimeError("invalid workflow terminal stream frame")
+            self.sequence = sequence
+            self.terminal_state = _WORKFLOW_STATES.get(
+                workflow_state, f"unknown:{workflow_state}"
+            )
+            self.close()
+            raise StopIteration
+        if not flags & 1 or flags & ~3 or not sequence or sequence <= self.sequence:
+            self.close()
+            raise RuntimeError("invalid workflow result stream record")
+        digest = body[64:128].decode("ascii")
+        codec_name = body[128:128 + name_size].decode("utf-8")
+        codec_version = body[
+            128 + name_size:128 + name_size + version_size
+        ].decode("utf-8")
+        payload = (
+            body[len(body) - payload_size:] if payload_size else b""
+        ) if flags & 2 else None
+        if bool(flags & 2) != (payload is not None) or (
+            payload is not None and (
+                len(payload) != result_size
+                or hashlib.sha256(payload).hexdigest() != digest
+            )
+        ):
+            self.close()
+            raise RuntimeError("workflow result stream digest mismatch")
+        self.sequence = sequence
+        return {
+            "sequence": sequence,
+            "data_id": data_id,
+            "size": result_size,
+            "producer_task_id": producer_task_id,
+            "attempt": attempt,
+            "producer_output_index": output_index,
+            "codec": (codec_name, codec_version),
+            "sha256": digest,
+            "payload": payload,
+        }
 
 
 class WorkflowClient:
@@ -204,23 +351,12 @@ class WorkflowClient:
         state, generation, event_id, tasks, data, edges, requested, streaming, id_size = values
         if len(body) != 104 + id_size:
             raise RuntimeError("truncated workflow info")
-        states = {
-            1: "open",
-            2: "sealed",
-            3: "cancelled",
-            4: "running",
-            5: "completed",
-            6: "failed",
-            7: "running_open",
-            8: "open_quiescent",
-            9: "staged",
-        }
         return {
             "workflow_id": body[104:].decode("utf-8"),
             "digest": body[64:104].decode("ascii"),
             "generation": generation,
             "event_id": event_id,
-            "state": states.get(state, f"unknown:{state}"),
+            "state": _WORKFLOW_STATES.get(state, f"unknown:{state}"),
             "tasks": tasks,
             "data": data,
             "edges": edges,
@@ -447,6 +583,17 @@ class WorkflowClient:
             if getattr(self._local, "stream", None) is stream:
                 stream.settimeout(previous_timeout)
         return self._info(body)
+
+    def workflow_result_stream(
+        self, workflow_id, after_sequence=0, *,
+        max_inline_bytes=64 * 1024, timeout=None,
+    ):
+        """Subscribe once; yield each durable requested result in admission order."""
+
+        return WorkflowResultStream(
+            self, workflow_id, after_sequence,
+            max_inline_bytes=max_inline_bytes, timeout=timeout,
+        )
 
     def workflow_frontier(self, workflow_id):
         body = self.request(_FRONTIER, self._payload(workflow_id, "!H"))

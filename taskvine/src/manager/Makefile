@@ -3,6 +3,7 @@ include ../../../rules.mk
 
 SOURCES = \
 	vine_manager.c \
+	vine_worker_pool.c \
 	vine_manager_get.c \
 	vine_manager_put.c \
 	vine_manager_factory.c \
@@ -40,6 +41,12 @@ LIBRARIES = libtaskvine.a
 TARGETS = $(LIBRARIES)
 
 all: $(TARGETS)
+
+# This tree does not generate compiler dependency files. Keep the allocator
+# and the optional dense index synchronized when Worker layout changes so an
+# incremental build cannot produce a mixed-ABI manager.
+vine_worker_info.o vine_manager.o vine_worker_pool.o: vine_worker_info.h
+vine_manager.o vine_worker_pool.o: vine_worker_pool.h
 
 libtaskvine.a: $(OBJECTS)
 

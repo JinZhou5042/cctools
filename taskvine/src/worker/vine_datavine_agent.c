@@ -18,13 +18,16 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -86,19 +89,10 @@ struct task_spec {
 	size_t strings_size;
 };
 
-struct persistence_job {
-	struct agent_workflow *workflow;
-	struct local_object *object;
-	char *path;
-	struct persistence_job *next;
-};
-
 static struct vine_cache *agent_cache;
 static char agent_transfer_host[VINE_DATAVINE_AGENT_HOST_MAX];
 static uint16_t agent_transfer_port;
 static struct agent_workflow *agent_workflows;
-static struct persistence_job *persistence_head;
-static struct persistence_job *persistence_tail;
 static int agent_waiting_data;
 static unsigned int agent_diagnostic_failures;
 
@@ -138,8 +132,10 @@ static int spec_parse(const struct vine_process *process, struct task_spec *spec
 			vine_datavine_get_u16(bytes + 6) ||
 			vine_datavine_get_u32(bytes + 128) ||
 			vine_datavine_get_u32(bytes + 132) ||
-			vine_datavine_get_u64(bytes + 136))
+			vine_datavine_get_u64(bytes + 136)) {
+		agent_diagnostic_failure("parse-task-spec-header", size, 0, 0);
 		return -1;
+	}
 	uint16_t host_size = vine_datavine_get_u16(bytes + 50);
 	uint32_t inputs = vine_datavine_get_u32(bytes + 116);
 	uint32_t outputs = vine_datavine_get_u32(bytes + 120);
@@ -150,8 +146,10 @@ static int spec_parse(const struct vine_process *process, struct task_spec *spec
 			!vine_datavine_get_u16(bytes + 48) ||
 			records > SIZE_MAX - VINE_DATAVINE_TASK_SPEC_HEADER ||
 			strings_size > SIZE_MAX - VINE_DATAVINE_TASK_SPEC_HEADER - records ||
-			size != VINE_DATAVINE_TASK_SPEC_HEADER + records + strings_size)
+			size != VINE_DATAVINE_TASK_SPEC_HEADER + records + strings_size) {
+		agent_diagnostic_failure("parse-task-spec-layout", size, 0, 0);
 		return -1;
+	}
 	spec->bytes = bytes;
 	spec->size = size;
 	spec->workflow_slot = vine_datavine_get_u64(bytes + 40);
@@ -167,7 +165,11 @@ static int spec_parse(const struct vine_process *process, struct task_spec *spec
 	spec->strings = spec->outputs +
 			(size_t)outputs * VINE_DATAVINE_TASK_SPEC_OUTPUT;
 	spec->strings_size = strings_size;
-	return spec->workflow_slot ? 1 : -1;
+	if (!spec->workflow_slot) {
+		agent_diagnostic_failure("parse-task-spec-workflow-slot", 0, 0, 0);
+		return -1;
+	}
+	return 1;
 }
 
 static int string_field(const struct task_spec *spec, uint32_t offset,
@@ -301,6 +303,8 @@ static int socket_connect(const char *host, uint16_t port)
 	}
 	freeaddrinfo(addresses);
 	if (fd >= 0) {
+		int enabled = 1;
+		setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
 		struct timeval timeout = {.tv_sec = 2};
 		setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 		setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
@@ -320,9 +324,35 @@ static int rpc_exchange(struct agent_workflow *workflow, uint16_t opcode,
 	vine_datavine_put_u16(header + 6, opcode);
 	vine_datavine_put_u32(header + 8, payload_size);
 	vine_datavine_put_u64(header + 12, request);
-	if (full_write(workflow->fd, header, sizeof(header)) != sizeof(header) ||
-			(payload_size && full_write(workflow->fd, payload, payload_size) !=
-					(ssize_t)payload_size) ||
+	struct iovec vectors[2] = {
+		{.iov_base = header, .iov_len = sizeof(header)},
+		{.iov_base = (void *)payload, .iov_len = payload_size},
+	};
+	struct msghdr message = {
+		.msg_iov = vectors,
+		.msg_iovlen = payload_size ? 2 : 1,
+	};
+	size_t remaining = sizeof(header) + payload_size;
+	while (remaining) {
+		ssize_t written = sendmsg(workflow->fd, &message, MSG_NOSIGNAL);
+		if (written < 0 && errno == EINTR)
+			continue;
+		if (written <= 0)
+			break;
+		remaining -= (size_t)written;
+		while (message.msg_iovlen &&
+				(size_t)written >= message.msg_iov[0].iov_len) {
+			written -= (ssize_t)message.msg_iov[0].iov_len;
+			message.msg_iov++;
+			message.msg_iovlen--;
+		}
+		if (message.msg_iovlen && written) {
+			message.msg_iov[0].iov_base =
+					(unsigned char *)message.msg_iov[0].iov_base + written;
+			message.msg_iov[0].iov_len -= (size_t)written;
+		}
+	}
+	if (remaining ||
 			full_read(workflow->fd, response, sizeof(response)) != sizeof(response) ||
 			vine_datavine_get_u32(response) != VINE_DATAVINE_RPC_MAGIC ||
 			vine_datavine_get_u16(response + 4) != VINE_DATAVINE_RPC_VERSION ||
@@ -394,10 +424,45 @@ static void batch_header(unsigned char *header,
 static int cache_name(char name[128], uint64_t workflow_slot,
 		uint64_t data_id, uint32_t generation, uint64_t object_token)
 {
-	return snprintf(name, 128, "datavine-v2-%016llx-%016llx-%08x-%016llx",
+	return snprintf(name, 128, "datavine-%016llx-%016llx-%08x-%016llx",
 			(unsigned long long)workflow_slot,
 			(unsigned long long)data_id, generation,
 			(unsigned long long)object_token) < 128;
+}
+
+static int backup_source(char source[768], const struct agent_workflow *workflow,
+		uint64_t data_id, uint32_t generation, uint64_t size,
+		const unsigned char digest[32])
+{
+	unsigned char message[64] = "DVB1";
+	vine_datavine_put_u64(message + 4, workflow->workflow_slot);
+	vine_datavine_put_u64(message + 12, data_id);
+	vine_datavine_put_u32(message + 20, generation);
+	vine_datavine_put_u64(message + 24, size);
+	memcpy(message + 32, digest, 32);
+	unsigned char signature[EVP_MAX_MD_SIZE];
+	unsigned int signature_size = 0;
+	if (!HMAC(EVP_sha256(), workflow->workflow_key,
+			(int)sizeof(workflow->workflow_key), message, sizeof(message),
+			signature, &signature_size) || signature_size != 32)
+		return 0;
+	char digest_hex[65];
+	char signature_hex[65];
+	static const char hexadecimal[] = "0123456789abcdef";
+	for (size_t index = 0; index < 32; index++) {
+		digest_hex[index * 2] = hexadecimal[digest[index] >> 4];
+		digest_hex[index * 2 + 1] = hexadecimal[digest[index] & 15];
+		signature_hex[index * 2] = hexadecimal[signature[index] >> 4];
+		signature_hex[index * 2 + 1] = hexadecimal[signature[index] & 15];
+	}
+	digest_hex[64] = 0;
+	signature_hex[64] = 0;
+	return snprintf(source, 768,
+			"datavine-backup://%s:%u/%016llx/%016llx/%08x/%016llx/%s/%s",
+			workflow->controller_host, workflow->controller_port,
+			(unsigned long long)workflow->workflow_slot,
+			(unsigned long long)data_id, generation,
+			(unsigned long long)size, digest_hex, signature_hex) < 768;
 }
 
 static int hash_file(const char *path, uint64_t *size,
@@ -427,114 +492,6 @@ static int hash_file(const char *path, uint64_t *size,
 	if (fd >= 0)
 		close(fd);
 	return valid;
-}
-
-static int persistence_enqueue(struct agent_workflow *workflow,
-		struct local_object *object, const char *path, size_t path_size)
-{
-	for (struct persistence_job *job = persistence_head; job; job = job->next)
-		if (job->workflow == workflow && job->object == object)
-			return 1;
-	struct persistence_job *job = calloc(1, sizeof(*job));
-	if (!job)
-		return 0;
-	job->path = malloc(path_size + 1);
-	if (!job->path) {
-		free(job);
-		return 0;
-	}
-	memcpy(job->path, path, path_size);
-	job->path[path_size] = 0;
-	job->workflow = workflow;
-	job->object = object;
-	if (persistence_tail)
-		persistence_tail->next = job;
-	else
-		persistence_head = job;
-	persistence_tail = job;
-	return 1;
-}
-
-static int persistence_copy(struct persistence_job *job)
-{
-	char cache[128];
-	if (!cache_name(cache, job->workflow->workflow_slot,
-			job->object->data_id, job->object->generation,
-			job->object->object_token))
-		return 0;
-	char *source_path = vine_cache_data_path(agent_cache, cache);
-	char temporary[4096];
-	if (!source_path || snprintf(temporary, sizeof(temporary),
-			"%s.part.%ld.%llu", job->path, (long)getpid(),
-			(unsigned long long)job->object->object_token) >=
-				(int)sizeof(temporary)) {
-		free(source_path);
-		return 0;
-	}
-	int input = open(source_path, O_RDONLY | O_CLOEXEC);
-	int output = input >= 0 ? open(temporary,
-			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
-	int valid = output >= 0;
-	unsigned char buffer[1 << 16];
-	while (valid) {
-		ssize_t count = read(input, buffer, sizeof(buffer));
-		if (count > 0)
-			valid = full_write(output, buffer, (size_t)count) == count;
-		else if (!count)
-			break;
-		else if (errno != EINTR)
-			valid = 0;
-	}
-	valid = valid && fsync(output) == 0;
-	if (input >= 0)
-		close(input);
-	if (output >= 0 && close(output))
-		valid = 0;
-	if (valid && rename(temporary, job->path))
-		valid = 0;
-	if (!valid)
-		unlink(temporary);
-	free(source_path);
-	return valid;
-}
-
-static int persistence_notify(struct persistence_job *job)
-{
-	if (!connection_open(job->workflow))
-		return 0;
-	unsigned char payload[56] = {0};
-	vine_datavine_put_u64(payload, job->object->data_id);
-	vine_datavine_put_u32(payload + 8, job->object->generation);
-	vine_datavine_put_u64(payload + 16, job->object->size);
-	memcpy(payload + 24, job->object->digest, 32);
-	unsigned char *reply = 0;
-	uint32_t reply_size = 0;
-	int valid = rpc_exchange(job->workflow,
-			VINE_DATAVINE_RPC_AGENT_PERSISTED, payload, sizeof(payload),
-			&reply, &reply_size) && !reply_size;
-	free(reply);
-	return valid;
-}
-
-static void persistence_progress(void)
-{
-	struct persistence_job *job = persistence_head;
-	if (!job || (job->object->flags & LOCAL_DIRTY))
-		return;
-	uint64_t size = 0;
-	unsigned char digest[32];
-	int copied = hash_file(job->path, &size, digest) &&
-			size == job->object->size &&
-			!memcmp(digest, job->object->digest, 32);
-	if (!copied)
-		copied = persistence_copy(job);
-	if (!copied || !persistence_notify(job))
-		return;
-	persistence_head = job->next;
-	if (!persistence_head)
-		persistence_tail = 0;
-	free(job->path);
-	free(job);
 }
 
 static int sandbox_link(struct vine_process *process, uint64_t data_id,
@@ -687,17 +644,34 @@ static int resolve_one(struct agent_workflow *workflow, uint64_t data_id,
 	local->size = vine_datavine_get_u64(reply + 16);
 	memcpy(local->digest, reply + 24, 32);
 	local->source_worker_slot = vine_datavine_get_u32(reply + 56);
+	uint32_t persisted = vine_datavine_get_u32(reply + 60);
 	local->source_session_epoch = vine_datavine_get_u64(reply + 64);
 	local->object_token = vine_datavine_get_u64(reply + 72);
 	char name[128];
-	char source[512];
-	if (!local->generation || !local->source_worker_slot ||
-			!local->source_session_epoch || !local->object_token ||
+	char source[768];
+	int controller_backup = persisted && !local->source_worker_slot;
+	if (controller_backup) {
+		local->source_session_epoch = 0;
+		local->object_token = mix64(workflow->workflow_slot ^ data_id ^
+				((uint64_t)local->generation << 32));
+		if (!local->object_token)
+			local->object_token = 1;
+	}
+	if (!local->generation || !local->object_token ||
 			!cache_name(name, workflow->workflow_slot, data_id,
-					local->generation, local->object_token) ||
-			snprintf(source, sizeof(source), "worker://%s:%u/%s", host,
-					port, name) >= (int)sizeof(source) ||
-			!vine_cache_add_transfer(agent_cache, name, source,
+					local->generation, local->object_token)) {
+		free(reply);
+		return 0;
+	}
+	int source_valid = controller_backup
+			? backup_source(source, workflow, data_id, local->generation,
+					local->size, local->digest)
+			: local->source_worker_slot && local->source_session_epoch &&
+					local->object_token &&
+					snprintf(source, sizeof(source), "worker://%s:%u/%s", host,
+						port, name) < (int)sizeof(source);
+	if (!source_valid ||
+				!vine_cache_add_transfer(agent_cache, name, source,
 					VINE_CACHE_LEVEL_WORKFLOW, 0600, local->size,
 					VINE_CACHE_FLAGS_ON_TASK)) {
 		free(reply);
@@ -1075,8 +1049,6 @@ enum vine_datavine_agent_commit_status vine_datavine_agent_commit(
 		uint32_t flags = vine_datavine_get_u32(record + 12);
 		uint32_t offset = vine_datavine_get_u32(record + 16);
 		uint32_t length = vine_datavine_get_u32(record + 20);
-		uint32_t durable_offset = vine_datavine_get_u32(record + 24);
-		uint32_t durable_length = vine_datavine_get_u32(record + 28);
 		const char *name = 0;
 		if (!data_id || !generation ||
 				flags & ~(VINE_DATAVINE_TASK_OUTPUT_RETAIN |
@@ -1086,14 +1058,6 @@ enum vine_datavine_agent_commit_status vine_datavine_agent_commit(
 			return 0;
 		if (!(flags & VINE_DATAVINE_TASK_OUTPUT_RETAIN))
 			continue;
-		const char *durable_path = 0;
-		if ((flags & VINE_DATAVINE_TASK_OUTPUT_REQUESTED) &&
-				!string_field(&spec, durable_offset, durable_length,
-						&durable_path))
-			return 0;
-		if (!(flags & VINE_DATAVINE_TASK_OUTPUT_REQUESTED) &&
-				(durable_offset || durable_length))
-			return 0;
 		char relative[4096];
 		char path[4096];
 		if (length >= sizeof(relative))
@@ -1108,6 +1072,8 @@ enum vine_datavine_agent_commit_status vine_datavine_agent_commit(
 		errno = 0;
 		if (!hash_file(path, &size, digest)) {
 			int error = errno;
+			agent_diagnostic_failure("commit-output", data_id, path,
+					error ? error : EINVAL);
 			return error == ENOENT
 					? VINE_DATAVINE_AGENT_COMMIT_INVALID
 					: VINE_DATAVINE_AGENT_COMMIT_IO_FAILED;
@@ -1135,10 +1101,6 @@ enum vine_datavine_agent_commit_status vine_datavine_agent_commit(
 				return 0;
 			unlink(path);
 			local->flags |= LOCAL_DIRTY;
-			if ((flags & VINE_DATAVINE_TASK_OUTPUT_REQUESTED) &&
-					!persistence_enqueue(workflow, local, durable_path,
-						durable_length))
-				return VINE_DATAVINE_AGENT_COMMIT_IO_FAILED;
 			continue;
 		}
 		local->generation = generation;
@@ -1165,10 +1127,6 @@ enum vine_datavine_agent_commit_status vine_datavine_agent_commit(
 		local->flags = LOCAL_READY | LOCAL_DIRTY | LOCAL_GENERATED |
 				((flags & VINE_DATAVINE_TASK_OUTPUT_REQUESTED) ?
 				 LOCAL_REQUESTED : 0);
-		if ((flags & VINE_DATAVINE_TASK_OUTPUT_REQUESTED) &&
-				!persistence_enqueue(workflow, local, durable_path,
-					durable_length))
-			return VINE_DATAVINE_AGENT_COMMIT_IO_FAILED;
 	}
 	/* Unique immutable sources are task-scoped. Removing the cache base is
 	 * safe here because the sandbox hardlink remains pinned until normal task
@@ -1287,7 +1245,6 @@ void vine_datavine_agent_progress(void)
 	for (struct agent_workflow *workflow = agent_workflows; workflow;
 			workflow = workflow->next)
 		workflow_progress(workflow);
-	persistence_progress();
 }
 
 int vine_datavine_agent_waiting(void)
@@ -1299,13 +1256,6 @@ int vine_datavine_agent_waiting(void)
 
 void vine_datavine_agent_shutdown(void)
 {
-	while (persistence_head) {
-		struct persistence_job *next = persistence_head->next;
-		free(persistence_head->path);
-		free(persistence_head);
-		persistence_head = next;
-	}
-	persistence_tail = 0;
 	while (agent_workflows) {
 		struct agent_workflow *next = agent_workflows->next;
 		connection_close(agent_workflows);

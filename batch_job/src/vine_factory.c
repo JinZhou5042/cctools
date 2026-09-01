@@ -1834,12 +1834,14 @@ int main(int argc, char *argv[])
 			exit(EXIT_FAILURE);
 		}
 		free(cmd);
-		char *tmp = xxstrdup(path_basename(worker_command));
+		/* Execute the exact binary copied into the factory scratch directory.
+		 * A bare basename is resolved through PATH by the local batch backend and
+		 * can silently launch a different installed vine_worker. */
+		char *tmp = string_format("./%s", path_basename(worker_command));
 		free(worker_command);
 		worker_command = tmp;
 	}else{
-		worker_command = xxstrdup("vine_worker");
-		char *tmp = path_which(worker_command);
+		char *tmp = path_which("vine_worker");
 		if(!tmp) {
 			fprintf(stderr, "vine_factory: please add vine_worker to your PATH, or use --worker-binary\n");
 			exit(EXIT_FAILURE);
@@ -1851,6 +1853,7 @@ int main(int argc, char *argv[])
 			exit(EXIT_FAILURE);
 		}
 		free(cmd);
+		worker_command = xxstrdup("./vine_worker");
 	}
 
 	if(password_file) {

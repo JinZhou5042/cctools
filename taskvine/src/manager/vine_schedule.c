@@ -322,6 +322,12 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 		if (library) {
 			/* The worker already has the library with a free slot. */
 		} else {
+			/* A matching instance that is starting or out of credits is not
+			 * compatible now. commit_task_to_worker enforces the same
+			 * single-instance boundary, so reject before removing the Task from
+			 * READY or constructing another library allocation. */
+			if (!vine_schedule_library_needs_instance(q, w, t->needs_library))
+				return 0;
 			library = vine_manager_find_library_template(q, t->needs_library);
 			if (library) {
 				if (check_worker_against_task(q, w, library)) {

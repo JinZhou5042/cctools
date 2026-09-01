@@ -474,22 +474,8 @@ static int serve(int argc, char **argv)
 		return 1;
 	}
 	advertised_host[sizeof(advertised_host) - 1] = 0;
-	/* Metadata RPC and publication are non-blocking control-plane work.  One
-	 * event-loop thread is the default; deployments may opt into more while
-	 * the compatibility path is being retired. */
-	int service_threads = 1;
-	const char *configured_threads = getenv("DATAVINE_SERVICE_THREADS");
-	if (configured_threads && configured_threads[0]) {
-		char *end = 0;
-		long value = strtol(configured_threads, &end, 10);
-		if (!end || *end || value < 1 || value > 256) {
-			fprintf(stderr, "datavine_workflow: invalid DATAVINE_SERVICE_THREADS\n");
-			return 2;
-		}
-		service_threads = (int)value;
-	}
 	struct vine_datavine_rpc_server *server = vine_datavine_rpc_server_create(
-			"0.0.0.0", port, argv[3], service_threads, argv[2]);
+			"0.0.0.0", port, argv[3], 1, argv[2]);
 	if (!server) {
 		fprintf(stderr, "datavine_workflow: could not start native service\n");
 		return 1;

@@ -8,6 +8,8 @@ go_compiler=${DATAVINE_GO_COMPILER:-go}
 root=$(mktemp -d "${TMPDIR:-/tmp}/datavine-go-workflow.XXXXXX")
 service_pid=
 worker_pid=
+endpoint=
+manager_port=
 
 cleanup()
 {
@@ -18,6 +20,38 @@ cleanup()
 	rm -rf "$root"
 }
 trap cleanup EXIT HUP INT TERM
+
+stop_runtime()
+{
+	[ -z "$worker_pid" ] || kill "$worker_pid" 2>/dev/null || true
+	[ -z "$worker_pid" ] || wait "$worker_pid" 2>/dev/null || true
+	worker_pid=
+	[ -z "$service_pid" ] || kill "$service_pid" 2>/dev/null || true
+	[ -z "$service_pid" ] || wait "$service_pid" 2>/dev/null || true
+	service_pid=
+}
+
+start_runtime()
+{
+	case_name=$1
+	stop_runtime
+	contact="$root/contact-$case_name.json"
+	service_error="$root/service-$case_name.err"
+	"$repository/taskvine/src/tools/datavine_workflow" serve \
+		"$root/$case_name.journal" "$token" >"$contact" 2>"$service_error" &
+	service_pid=$!
+	for unused in $(seq 1 100); do
+		[ -s "$contact" ] && break
+		sleep 0.1
+	done
+	endpoint=$(sed -n 's/.*"endpoint":"\([^"]*\)".*/\1/p' "$contact")
+	manager_port=$(sed -n 's/.*"manager_port":\([0-9]*\).*/\1/p' "$contact")
+	[ -n "$endpoint" ] && [ -n "$manager_port" ]
+	"$repository/taskvine/src/worker/vine_worker" --cores=1 --memory=256 \
+		--disk=256 --idle-timeout=15 localhost "$manager_port" \
+		>"$root/worker-$case_name.out" 2>"$root/worker-$case_name.err" &
+	worker_pid=$!
+}
 
 if [ -z "$go_client" ]; then
     command -v "$go_compiler" >/dev/null 2>&1 || {
@@ -40,22 +74,7 @@ cat >"$root/dynamic-delta.json" <<'EOF'
 EOF
 
 token=go-workflow-token
-"$repository/taskvine/src/tools/datavine_workflow" serve \
-	"$root/journal" "$token" >"$root/contact.json" 2>"$root/service.err" &
-service_pid=$!
-for unused in $(seq 1 100); do
-	[ -s "$root/contact.json" ] && break
-	sleep 0.1
-done
-endpoint=$(sed -n 's/.*"endpoint":"\([^"]*\)".*/\1/p' "$root/contact.json")
-manager_port=$(sed -n 's/.*"manager_port":\([0-9]*\).*/\1/p' "$root/contact.json")
-[ -n "$endpoint" ] && [ -n "$manager_port" ]
-
-"$repository/taskvine/src/worker/vine_worker" --cores=1 --memory=256 \
-	--disk=256 --idle-timeout=15 localhost "$manager_port" \
-	>"$root/worker.out" 2>"$root/worker.err" &
-worker_pid=$!
-
+start_runtime shared-fixture
 jq '.valid[] | select(.name == "sealed-command-chain") | .document' \
 	"$repository/taskvine/test/datavine_workflow_ir_fixtures.json" \
 	>"$root/shared-fixture.json"
@@ -75,6 +94,7 @@ grep -q '"state":"completed"' "$root/shared-fixture-status.json"
 	>"$root/shared-fixture-output.json"
 grep -q '"base64":"SEVMTE8="' "$root/shared-fixture-output.json"
 
+start_runtime direct
 "$go_client" submit "$endpoint" "$token" "$root/workflow.json" \
 	>"$root/submitted.json"
 grep -q '"workflow_id":"go-direct-workflow"' "$root/submitted.json"
@@ -89,6 +109,7 @@ grep -q '"state":"completed"' "$root/status.json"
 	>"$root/result.json"
 grep -q '"base64":"Z28tYWRhcHRvcg=="' "$root/result.json"
 
+start_runtime dynamic
 "$go_client" submit "$endpoint" "$token" "$root/dynamic-open.json" \
 	>"$root/dynamic-submit.json"
 "$go_client" append "$endpoint" "$token" go-dynamic-workflow 1 \

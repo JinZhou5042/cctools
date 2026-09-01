@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <openssl/evp.h>
+#include <openssl/crypto.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,17 @@ struct object_source {
 	int port;
 	char digest[65];
 	char signature[65];
+};
+
+struct backup_source {
+	char host[256];
+	int port;
+	uint64_t workflow_slot;
+	uint64_t data_id;
+	uint64_t size;
+	uint32_t generation;
+	unsigned char digest[32];
+	unsigned char signature[32];
 };
 
 static pthread_mutex_t connection_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -38,6 +50,67 @@ static int lowercase_hex(const char *value, size_t size)
 			return 0;
 	}
 	return 1;
+}
+
+static int decode_hex(const char *encoded, unsigned char *decoded, size_t size)
+{
+	if (!lowercase_hex(encoded, size * 2))
+		return 0;
+	for (size_t index = 0; index < size; index++) {
+		unsigned int value = 0;
+		if (sscanf(encoded + index * 2, "%2x", &value) != 1)
+			return 0;
+		decoded[index] = (unsigned char)value;
+	}
+	return 1;
+}
+
+static int parse_backup_source(const char *source, struct backup_source *parsed)
+{
+	static const char prefix[] = "datavine-backup://";
+	if (!source || strncmp(source, prefix, sizeof(prefix) - 1))
+		return 0;
+	const char *authority = source + sizeof(prefix) - 1;
+	const char *path = strchr(authority, '/');
+	if (!path)
+		return 0;
+	const char *colon = 0;
+	for (const char *cursor = authority; cursor < path; cursor++)
+		if (*cursor == ':')
+			colon = cursor;
+	if (!colon || colon == authority || (size_t)(colon - authority) >=
+			sizeof(parsed->host))
+		return 0;
+	memcpy(parsed->host, authority, (size_t)(colon - authority));
+	parsed->host[colon - authority] = 0;
+	char port_text[8];
+	size_t port_size = (size_t)(path - colon - 1);
+	if (!port_size || port_size >= sizeof(port_text))
+		return 0;
+	memcpy(port_text, colon + 1, port_size);
+	port_text[port_size] = 0;
+	char trailing = 0;
+	if (sscanf(port_text, "%d%c", &parsed->port, &trailing) != 1 ||
+			parsed->port < 1 || parsed->port > 65535)
+		return 0;
+	unsigned long long workflow_slot = 0;
+	unsigned long long data_id = 0;
+	unsigned long long size = 0;
+	unsigned int generation = 0;
+	char digest[65] = {0};
+	char signature[65] = {0};
+	int used = 0;
+	if (sscanf(path + 1, "%16llx/%16llx/%8x/%16llx/%64[0-9a-f]/%64[0-9a-f]%n",
+			&workflow_slot, &data_id, &generation, &size,
+			digest, signature, &used) != 6 || path[1 + used])
+		return 0;
+	parsed->workflow_slot = (uint64_t)workflow_slot;
+	parsed->data_id = (uint64_t)data_id;
+	parsed->generation = generation;
+	parsed->size = (uint64_t)size;
+	return parsed->workflow_slot && parsed->data_id && parsed->generation &&
+			decode_hex(digest, parsed->digest, 32) &&
+			decode_hex(signature, parsed->signature, 32);
 }
 
 static int parse_source(const char *source, struct object_source *parsed)
@@ -207,6 +280,64 @@ static int transfer_once(const struct object_source *parsed,
 	return valid;
 }
 
+static int transfer_backup_once(const struct backup_source *parsed,
+		const char *destination, time_t deadline)
+{
+	struct object_source endpoint = {0};
+	snprintf(endpoint.host, sizeof(endpoint.host), "%s", parsed->host);
+	endpoint.port = parsed->port;
+	struct link *connection = connection_get(&endpoint, deadline);
+	int fd = connection ? open(destination,
+			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
+	EVP_MD_CTX *digest = fd >= 0 ? EVP_MD_CTX_new() : 0;
+	int valid = digest && EVP_DigestInit_ex(digest, EVP_sha256(), 0) == 1;
+	uint64_t offset = 0;
+	while (valid && offset < parsed->size) {
+		uint32_t count = parsed->size - offset < VINE_DATAVINE_BACKUP_GET_CHUNK
+				? (uint32_t)(parsed->size - offset)
+				: VINE_DATAVINE_BACKUP_GET_CHUNK;
+		unsigned char payload[VINE_DATAVINE_BACKUP_GET_REQUEST] = {0};
+		vine_datavine_put_u64(payload, parsed->workflow_slot);
+		vine_datavine_put_u64(payload + 8, parsed->data_id);
+		vine_datavine_put_u32(payload + 16, parsed->generation);
+		vine_datavine_put_u64(payload + 24, parsed->size);
+		vine_datavine_put_u64(payload + 32, offset);
+		vine_datavine_put_u32(payload + 40, count);
+		memcpy(payload + 48, parsed->digest, 32);
+		memcpy(payload + 80, parsed->signature, 32);
+		unsigned char response[VINE_DATAVINE_RPC_RESPONSE_HEADER];
+		uint64_t request_id = next_request_id++;
+		valid = request(connection, VINE_DATAVINE_RPC_BACKUP_GET,
+				payload, sizeof(payload), request_id, response, deadline) &&
+				vine_datavine_get_u32(response + 8) == VINE_DATAVINE_RPC_OK &&
+				vine_datavine_get_u32(response + 12) == count;
+		unsigned char buffer[1 << 16];
+		uint32_t remaining = count;
+		while (valid && remaining) {
+			size_t chunk = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+			ssize_t got = link_read(connection, (char *)buffer, chunk, deadline);
+			valid = got == (ssize_t)chunk &&
+					full_write(fd, buffer, chunk) == (ssize_t)chunk &&
+					EVP_DigestUpdate(digest, buffer, chunk) == 1;
+			remaining -= valid ? (uint32_t)chunk : 0;
+		}
+		offset += valid ? count : 0;
+	}
+	unsigned char actual[EVP_MAX_MD_SIZE];
+	unsigned int actual_size = 0;
+	if (valid && (EVP_DigestFinal_ex(digest, actual, &actual_size) != 1 ||
+			actual_size != 32 || CRYPTO_memcmp(actual, parsed->digest, 32)))
+		valid = 0;
+	EVP_MD_CTX_free(digest);
+	if (fd >= 0 && close(fd))
+		valid = 0;
+	if (!valid) {
+		unlink(destination);
+		connection_reset();
+	}
+	return valid;
+}
+
 static int transfer_sharedfs(const char *source, const char *destination)
 {
 	static const char prefix[] = "datavine-file://";
@@ -267,6 +398,23 @@ int vine_datavine_transfer_get(const char *source, const char *destination,
 		int valid = transfer_sharedfs(source, destination);
 		if (!valid)
 			*error_message = string_format("DataVine SharedFS object transfer failed");
+		return valid;
+	}
+	if (!strncmp(source, "datavine-backup://", 18)) {
+		struct backup_source backup;
+		if (!parse_backup_source(source, &backup)) {
+			*error_message = string_format("invalid DataVine backup URI");
+			return 0;
+		}
+		pthread_mutex_lock(&connection_lock);
+		time_t deadline = time(0) + 300;
+		int valid = transfer_backup_once(&backup, destination, deadline);
+		if (!valid)
+			valid = transfer_backup_once(&backup, destination, deadline);
+		pthread_mutex_unlock(&connection_lock);
+		if (!valid)
+			*error_message = string_format(
+					"DataVine Controller backup transfer failed");
 		return valid;
 	}
 	struct object_source parsed;

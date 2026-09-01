@@ -174,7 +174,7 @@ def main():
     worker_binary = repository / "taskvine/src/worker/vine_worker"
     token = "workflow-lifecycle-token"
     with tempfile.TemporaryDirectory(prefix="datavine-workflow-lifecycle-") as root:
-        journal = Path(root) / "native.journal"
+        journal = Path(root) / "retry.journal"
         service, contact = start_service(service_binary, journal, token)
         worker = start_worker(worker_binary, contact["manager_port"])
         client = WorkflowClient(contact["endpoint"], token)
@@ -193,6 +193,13 @@ def main():
                 "task_failed",
                 "failed",
             ]
+
+            stop(worker)
+            stop(service)
+            journal = Path(root) / "worker-loss.journal"
+            service, contact = start_service(service_binary, journal, token)
+            worker = start_worker(worker_binary, contact["manager_port"])
+            client = WorkflowClient(contact["endpoint"], token)
 
             worker_loss_id = "native-worker-loss"
             loss_marker = Path(root) / "worker-loss-first-attempt"
@@ -243,6 +250,13 @@ def main():
                 b"recovered-after-worker-loss"
             )
 
+            stop(worker)
+            stop(service)
+            journal = Path(root) / "cancel.journal"
+            service, contact = start_service(service_binary, journal, token)
+            worker = start_worker(worker_binary, contact["manager_port"])
+            client = WorkflowClient(contact["endpoint"], token)
+
             cancel_id = "native-running-cancel"
             client.submit_workflow(
                 command_workflow(cancel_id, ["/bin/sleep", "30"])
@@ -255,6 +269,13 @@ def main():
             assert wait_state(client, cancel_id, {"cancelled"})["state"] == (
                 "cancelled"
             )
+
+            stop(worker)
+            stop(service)
+            journal = Path(root) / "restart.journal"
+            service, contact = start_service(service_binary, journal, token)
+            worker = start_worker(worker_binary, contact["manager_port"])
+            client = WorkflowClient(contact["endpoint"], token)
 
             restart_id = "native-owner-restart"
             client.submit_workflow(restart_chain(restart_id))

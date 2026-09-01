@@ -708,6 +708,24 @@ account for the resources as necessary.
 Should maintain parallel structure to start_process() above.
 */
 
+static int materialize_datavine_function_output(struct vine_process *p)
+{
+	if (!p || p->type != VINE_PROCESS_TYPE_FUNCTION ||
+			!p->task->auxiliary_payload_length)
+		return 1;
+	if (p->output_length < 0 || (uint64_t)p->output_length > SIZE_MAX ||
+			(p->output_length && !p->function_output))
+		return 0;
+	int fd = open(p->output_file_name,
+			O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+	int valid = fd >= 0 && (!p->output_length ||
+			full_write(fd, p->function_output, (size_t)p->output_length) ==
+					p->output_length);
+	if (fd >= 0 && close(fd))
+		valid = 0;
+	return valid;
+}
+
 static void reap_process(struct vine_process *p, struct link *manager)
 {
 	p->execution_end = timestamp_get();
@@ -716,7 +734,9 @@ static void reap_process(struct vine_process *p, struct link *manager)
 	if (p->task->auxiliary_payload_length && p->result == VINE_RESULT_SUCCESS &&
 			p->exit_code == 0) {
 		enum vine_datavine_agent_commit_status commit =
-				vine_datavine_agent_commit(p);
+				materialize_datavine_function_output(p)
+					? vine_datavine_agent_commit(p)
+					: VINE_DATAVINE_AGENT_COMMIT_IO_FAILED;
 		if (commit == VINE_DATAVINE_AGENT_COMMIT_IO_FAILED)
 			p->result |= VINE_RESULT_OUTPUT_TRANSFER_ERROR;
 		else if (commit != VINE_DATAVINE_AGENT_COMMIT_READY)
@@ -922,6 +942,38 @@ static void normalize_resources(struct vine_process *p)
 	}
 }
 
+/* Task descriptions are line-oriented and overwhelmingly numeric. libc
+ * scanf builds a format parser for every field of every short task; direct
+ * prefix parsing keeps the protocol unchanged while removing that overhead. */
+static int parse_i64_field(const char *line, const char *prefix, int64_t *value)
+{
+	size_t length = strlen(prefix);
+	if (strncmp(line, prefix, length))
+		return 0;
+	char *end = 0;
+	errno = 0;
+	long long parsed = strtoll(line + length, &end, 10);
+	if (errno || end == line + length)
+		return 0;
+	*value = (int64_t)parsed;
+	return 1;
+}
+
+static int parse_u64_field(const char *line, const char *prefix,
+		timestamp_t *value)
+{
+	size_t length = strlen(prefix);
+	if (strncmp(line, prefix, length))
+		return 0;
+	char *end = 0;
+	errno = 0;
+	unsigned long long parsed = strtoull(line + length, &end, 10);
+	if (errno || end == line + length)
+		return 0;
+	*value = (timestamp_t)parsed;
+	return 1;
+}
+
 /*
 Handle an incoming task message from the manager.
 Generate a vine_process wrapped around a vine_task,
@@ -934,8 +986,6 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 	char localname[VINE_LINE_MAX];
 	char taskname[VINE_LINE_MAX];
 	char taskname_encoded[VINE_LINE_MAX];
-	char library_name[VINE_LINE_MAX];
-	char category[VINE_LINE_MAX];
 	int flags, length, groupid;
 	int64_t n;
 
@@ -947,30 +997,35 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 	while (recv_message(manager, line, sizeof(line), stoptime)) {
 		if (!strcmp(line, "end")) {
 			break;
-		} else if (sscanf(line, "category %s", category)) {
-			vine_task_set_category(task, category);
-		} else if (sscanf(line, "cmd %d", &length) == 1) {
+		} else if (!strncmp(line, "category ", 9)) {
+			vine_task_set_category(task, line + 9);
+		} else if (parse_i64_field(line, "cmd ", &n) && n >= 0 && n <= INT_MAX) {
+			length = (int)n;
 			char *cmd = malloc(length + 1);
+			if (!cmd) {
+				vine_task_delete(task);
+				return 0;
+			}
 			link_read(manager, cmd, length, stoptime);
 			cmd[length] = 0;
 			vine_task_set_command(task, cmd);
 			debug(D_VINE, "rx: %s", cmd);
 			free(cmd);
-		} else if (sscanf(line, "needs_library %s", library_name) == 1) {
-			vine_task_set_library_required(task, library_name);
-		} else if (sscanf(line, "library_task_id %" PRId64, &n) == 1) {
+		} else if (!strncmp(line, "needs_library ", 14)) {
+			vine_task_set_library_required(task, line + 14);
+		} else if (parse_i64_field(line, "library_task_id ", &n)) {
 			if (n <= 0 || n > INT_MAX) {
 				vine_task_delete(task);
 				return 0;
 			}
 			task->library_task_id = (int)n;
-		} else if (sscanf(line, "function_credit_generation %" PRId64, &n) == 1) {
+		} else if (parse_i64_field(line, "function_credit_generation ", &n)) {
 			if (n <= 0) {
 				vine_task_delete(task);
 				return 0;
 			}
 			task->function_credit_generation = n;
-		} else if (sscanf(line, "function_input %" PRId64, &n) == 1) {
+		} else if (parse_i64_field(line, "function_input ", &n)) {
 			if (n <= 0 || n > 1024LL * 1024 * 1024) {
 				vine_task_delete(task);
 				return 0;
@@ -983,7 +1038,7 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			}
 			vine_task_set_function_input(task, input, n);
 			free(input);
-		} else if (sscanf(line, "auxiliary_payload %" PRId64, &n) == 1) {
+		} else if (parse_i64_field(line, "auxiliary_payload ", &n)) {
 			if (n <= 0 || n > VINE_DATAVINE_RPC_MAX_PAYLOAD) {
 				vine_task_delete(task);
 				return 0;
@@ -996,14 +1051,14 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			}
 			vine_task_set_auxiliary_payload(task, spec, (size_t)n);
 			free(spec);
-		} else if (sscanf(line, "provides_library %s", library_name) == 1) {
-			vine_task_set_library_provided(task, library_name);
-		} else if (sscanf(line, "function_slots %" PRId64, &n) == 1) {
+		} else if (!strncmp(line, "provides_library ", 17)) {
+			vine_task_set_library_provided(task, line + 17);
+		} else if (parse_i64_field(line, "function_slots ", &n)) {
 			/* Set the number of slots requested by the user. */
 			task->function_slots_requested = n;
 			/* Also set the total number determined by the manager. */
 			task->function_slots_total = n;
-		} else if (sscanf(line, "func_exec_mode %" PRId64, &n) == 1) {
+		} else if (parse_i64_field(line, "func_exec_mode ", &n)) {
 			vine_task_func_exec_mode_t func_exec_mode = n;
 			if (func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_INVALID) {
 				debug(D_VINE | D_NOTICE, "invalid func_exec_mode from manager: %s", line);
@@ -1019,21 +1074,24 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			url_decode(taskname_encoded, taskname, VINE_LINE_MAX);
 			vine_hack_do_not_compute_cached_name = 1;
 			vine_task_add_output_file(task, localname, taskname, flags);
-		} else if (sscanf(line, "cores %" PRId64, &n)) {
+		} else if (parse_i64_field(line, "cores ", &n)) {
 			vine_task_set_cores(task, n);
-		} else if (sscanf(line, "memory %" PRId64, &n)) {
+		} else if (parse_i64_field(line, "memory ", &n)) {
 			vine_task_set_memory(task, n);
-		} else if (sscanf(line, "disk %" PRId64, &n)) {
+		} else if (parse_i64_field(line, "disk ", &n)) {
 			vine_task_set_disk(task, n);
-		} else if (sscanf(line, "gpus %" PRId64, &n)) {
+		} else if (parse_i64_field(line, "gpus ", &n)) {
 			vine_task_set_gpus(task, n);
-		} else if (sscanf(line, "groupid %d", &groupid)) {
+		} else if (parse_i64_field(line, "groupid ", &n) &&
+				n >= INT_MIN && n <= INT_MAX) {
+			groupid = (int)n;
 			task->group_id = groupid;
-		} else if (sscanf(line, "wall_time %" PRIu64, &nt)) {
+		} else if (parse_u64_field(line, "wall_time ", &nt)) {
 			vine_task_set_time_max(task, nt);
-		} else if (sscanf(line, "end_time %" PRIu64, &nt)) {
+		} else if (parse_u64_field(line, "end_time ", &nt)) {
 			vine_task_set_time_end(task, nt * USECOND); // end_time needs it usecs
-		} else if (sscanf(line, "env %d", &length) == 1) {
+		} else if (parse_i64_field(line, "env ", &n) && n >= 0 && n <= INT_MAX) {
+			length = (int)n;
 			char *env = malloc(length + 2); /* +2 for \n and \0 */
 			link_read(manager, env, length + 1, stoptime);
 			env[length] = 0; /* replace \n with \0 */
@@ -1422,7 +1480,7 @@ static int handle_manager(struct link *manager)
 	int cache_level;
 
 	if (recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
-		if (sscanf(line, "task %" SCNd64, &task_id) == 1) {
+		if (parse_i64_field(line, "task ", &task_id)) {
 			r = do_task(manager, task_id, time(0) + options->active_timeout);
 		} else if (sscanf(line, "put %s %d %" SCNd64, filename_encoded, &cache_level, &length) == 3) {
 			url_decode(filename_encoded, filename, sizeof(filename));
@@ -2103,7 +2161,8 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	vine_cache_load(cache_manager);
 
 	/* Start the transfer server, which serves up the cache directory. */
-	if (!vine_transfer_server_start(cache_manager, options->transfer_port_min, options->transfer_port_max)) {
+	if (!vine_transfer_server_start(cache_manager, manager,
+			options->transfer_port_min, options->transfer_port_max)) {
 		fprintf(stderr, "vine_worker: unable to bind transfer port (check --transfer-port or cluster permissions)\n");
 	}
 	if (vine_transfer_server_running()) {

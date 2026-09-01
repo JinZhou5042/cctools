@@ -331,7 +331,7 @@ class ScientificTaskVinePool:
 
 
 class ScientificDataVinePool:
-    """Resident DataVine pool with a by-value HEP kernel warmup."""
+    """Resident DataVine pool dedicated to one scientific workflow."""
 
     def __init__(self, repository, root, workers, cores, batch_type):
         root.mkdir(parents=True)
@@ -373,26 +373,6 @@ class ScientificDataVinePool:
             self.client = WorkflowClient(
                 contact["endpoint"], "scientific-workflow"
             )
-            warmup = Workflow(
-                "scientific-datavine-warmup-v1",
-                workflow_id="scientific-datavine-warmup",
-                maximum_tasks=1,
-                maximum_edges=0,
-            )
-            output = warmup.python_callable(reduce_histograms, "warmup", {
-                "histogram": [1], "records": 1, "input_bytes": 1,
-                "shard_digests": ["0" * 64], "cpu_by_task": {},
-            })
-            warmup.request(output).submit(self.client)
-            state, _ = wait_datavine(
-                self.client, warmup.workflow_id,
-                (self.service.pid, self.factory.pid),
-            )
-            if state["state"] != "completed":
-                raise RuntimeError(state)
-            cloudpickle.loads(self.client.fetch_workflow_result(
-                warmup.workflow_id, output.data_id
-            ))
         except BaseException:
             self.close()
             raise
@@ -684,19 +664,26 @@ def main():
                 repository, output / "pools/taskvine",
                 args.workers, args.cores, args.batch_type,
             )
-        if "DV-native" in contracts:
-            pools["datavine"] = ScientificDataVinePool(
-                repository, output / "pools/datavine",
-                args.workers, args.cores, args.batch_type,
-            )
         for repetition in range(1, args.repetitions + 1):
             for contract in contracts:
                 root = output / "runs" / f"r{repetition}-{contract.lower()}"
                 if contract == "DV-native":
-                    run = run_datavine(
-                        pools["datavine"], root, manifest, args.fan_in,
-                        args.histogram_bins, repetition,
+                    # A DataVine service owns exactly one workflow.  Create a
+                    # fresh service/factory pair for each measured run so
+                    # repetitions exercise the production singleton boundary.
+                    datavine = ScientificDataVinePool(
+                        repository,
+                        output / "pools" / f"datavine-r{repetition}",
+                        args.workers, args.cores, args.batch_type,
                     )
+                    pools["datavine"] = datavine
+                    try:
+                        run = run_datavine(
+                            datavine, root, manifest, args.fan_in,
+                            args.histogram_bins, repetition,
+                        )
+                    finally:
+                        datavine.close()
                 else:
                     run = run_taskvine(
                         pools["taskvine"], root, output / "durable-sinks",

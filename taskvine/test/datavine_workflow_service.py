@@ -60,6 +60,35 @@ def assert_corrupt_journal_rejected(executable, source, token, root):
     assert not process.stdout
 
 
+def assert_retired_result_record_rejected(executable, source, token, root):
+    retired = root / "retired-result.journal"
+    shutil.copyfile(source, retired)
+    sequence = 0
+    with retired.open("rb") as stream:
+        while header := stream.read(24):
+            assert len(header) == 24
+            payload_size = struct.unpack_from("!I", header, 8)[0]
+            sequence = struct.unpack_from("!Q", header, 16)[0]
+            assert len(stream.read(payload_size)) == payload_size
+    opcode = 107
+    checksum = 2166136261
+    for byte in (opcode >> 8, opcode & 0xFF):
+        checksum = ((checksum ^ byte) * 16777619) & 0xFFFFFFFF
+    with retired.open("ab") as stream:
+        stream.write(struct.pack(
+            "!IHHIIQ", 0x44564A31, 1, opcode, 0, checksum, sequence + 1
+        ))
+    process = subprocess.run(
+        (str(executable), "serve", str(retired), token),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=20,
+    )
+    assert process.returncode != 0
+    assert not process.stdout
+
+
 def assert_resource_bounds(process, endpoint):
     parsed = urllib.parse.urlsplit(endpoint)
     address = (parsed.hostname, parsed.port)
@@ -204,6 +233,15 @@ def main():
             assert_resource_bounds(service, endpoint)
             assert client.describe_workflow("detached-workflow")["generation"] == 2
 
+            # The service is a single-workflow owner.  Keep the CAS race as a
+            # separate scenario instead of submitting a second workflow to
+            # the detached-workflow service.
+            client.close()
+            stop_service(service)
+            service, endpoint = start_service(
+                executable, root / "append-race.journal", token
+            )
+            client = WorkflowClient(endpoint, token)
             race_initial = {
                 **initial,
                 "workflow_id": "append-cas-race",
@@ -262,6 +300,7 @@ def main():
             stop_service(service)
 
         assert_corrupt_journal_rejected(executable, journal, token, root)
+        assert_retired_result_record_rejected(executable, journal, token, root)
 
         with journal.open("ab") as stream:
             stream.write(b"truncated-tail")

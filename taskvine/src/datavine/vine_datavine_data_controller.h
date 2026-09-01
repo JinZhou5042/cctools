@@ -5,16 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-struct itable;
-struct jx;
 struct vine_datavine_data_controller;
 struct vine_datavine_journal;
-struct vine_datavine_data_publication;
 struct vine_datavine_publish_record;
 struct vine_datavine_workflow_result_info;
-struct vine_datavine_object_store_metrics;
-struct vine_file;
-struct vine_manager;
 struct vine_task;
 
 uint64_t vine_datavine_data_controller_loss_events(
@@ -44,6 +38,31 @@ struct vine_datavine_agent_stats {
 	uint64_t peak_data;
 	uint64_t peak_replicas;
 	uint64_t peak_waiters;
+};
+
+/* Cumulative diagnostics for requested-output persistence.  These counters
+ * observe the existing path only; they do not alter queueing or durability. */
+struct vine_datavine_agent_persistence_metrics {
+	uint64_t jobs;
+	uint64_t bytes;
+	uint64_t failures;
+	uint64_t retries;
+	uint64_t peak_queue_depth;
+	uint64_t enqueue_block_nanoseconds;
+	uint64_t queue_wait_nanoseconds;
+	uint64_t connection_wait_nanoseconds;
+	uint64_t request_nanoseconds;
+	uint64_t stream_nanoseconds;
+	uint64_t fsync_nanoseconds;
+	uint64_t close_nanoseconds;
+	uint64_t rename_nanoseconds;
+	uint64_t verify_nanoseconds;
+	uint64_t commit_wait_nanoseconds;
+	uint64_t commit_nanoseconds;
+	uint64_t commit_groups;
+	uint64_t background_jobs;
+	uint64_t background_bytes;
+	uint64_t background_peak_backlog;
 };
 
 struct vine_datavine_agent_release {
@@ -92,8 +111,6 @@ int vine_datavine_data_controller_configure_object_service(
 		const char *host, int port, const char *token);
 const char *vine_datavine_data_controller_object_root(
 		struct vine_datavine_data_controller *controller);
-char *vine_datavine_data_controller_persistence_context(
-		struct vine_datavine_data_controller *controller);
 int vine_datavine_data_controller_workflow_key(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id, unsigned char key[32]);
@@ -103,9 +120,6 @@ int vine_datavine_data_controller_agent_endpoint(
 char *vine_datavine_data_controller_object_ticket(
 		struct vine_datavine_data_controller *controller,
 		const char *sha256);
-struct vine_file *vine_datavine_data_controller_resolve_object(
-		struct vine_datavine_data_controller *controller,
-		struct vine_manager *manager, const char *sha256);
 int vine_datavine_data_controller_put_object(
 		struct vine_datavine_data_controller *controller, const char sha256[65],
 		const void *data, size_t size, int *deduplicated);
@@ -120,18 +134,24 @@ int vine_datavine_data_controller_object_path(
 int vine_datavine_data_controller_prepare_workflow(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id);
-int vine_datavine_data_controller_output_path(
-		struct vine_datavine_data_controller *controller,
-		const char *workflow_id, uint64_t data_id, uint32_t attempt,
-		char *path, size_t path_size);
-int vine_datavine_data_controller_result_persisted(
-		struct vine_datavine_data_controller *controller,
-		const char *path, uint64_t size, const char sha256[65]);
-int vine_datavine_data_controller_object_metrics(
-		struct vine_datavine_data_controller *controller,
-		struct vine_datavine_object_store_metrics *metrics);
+/* Enable the optional low-priority Controller replica for every live retained
+ * Worker output.  The setting is fixed before either persistence queue starts. */
+int vine_datavine_data_controller_set_idata_backup(
+		struct vine_datavine_data_controller *controller, int background);
 
-/* Runtime-v2 Worker Data Agent metadata path. The workflow key authenticates
+/* Authenticate and serve bounded ranges from Controller-backed iData.  This
+ * is a recovery source for Workers, not a scheduler-visible file mount. */
+int vine_datavine_data_controller_validate_backup_ticket(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot, uint64_t data_id, uint32_t generation,
+		uint64_t size, const unsigned char digest[32],
+		const unsigned char signature[32]);
+int vine_datavine_data_controller_read_backup(
+		struct vine_datavine_data_controller *controller,
+		uint64_t workflow_slot, uint64_t data_id, uint32_t generation,
+		uint64_t offset, size_t requested, unsigned char **data, size_t *size);
+
+/* Worker Data Agent metadata path. The workflow key authenticates
  * one HELLO and returns a compact workflow slot; all later records are fixed
  * width and carry the slot rather than a workflow string. Payload bytes never
  * enter these calls. */
@@ -142,8 +162,7 @@ int vine_datavine_data_controller_agent_hello(
 		uint64_t *workflow_slot);
 int vine_datavine_data_controller_agent_expect(
 		struct vine_datavine_data_controller *controller,
-		const char *workflow_id, uint64_t data_id, uint32_t *generation,
-		int requested);
+		const char *workflow_id, uint64_t data_id, uint32_t *generation);
 int vine_datavine_data_controller_agent_expect_result(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id, uint64_t data_id, uint32_t generation,
@@ -157,7 +176,7 @@ int vine_datavine_data_controller_agent_publish(
 		struct vine_datavine_data_controller *controller,
 		uint64_t workflow_slot, uint64_t data_id, uint32_t generation,
 		uint64_t size, const unsigned char digest[32], uint32_t worker_slot,
-		uint64_t session_epoch, uint64_t object_token, int requested);
+		uint64_t session_epoch, uint64_t object_token);
 int vine_datavine_data_controller_agent_publish_batch(
 		struct vine_datavine_data_controller *controller,
 		uint64_t workflow_slot,
@@ -194,44 +213,15 @@ int vine_datavine_data_controller_agent_take_releases(
 		uint64_t session_epoch, uint64_t acknowledged_sequence,
 		struct vine_datavine_agent_release *releases, size_t capacity,
 		size_t *count);
-int vine_datavine_data_controller_agent_persisted(
-		struct vine_datavine_data_controller *controller,
-		uint64_t workflow_slot, uint64_t data_id, uint32_t generation,
-		uint64_t size, const unsigned char digest[32]);
 int vine_datavine_data_controller_agent_stats(
 		struct vine_datavine_data_controller *controller,
 		uint64_t workflow_slot, struct vine_datavine_agent_stats *stats);
+int vine_datavine_data_controller_agent_persistence_metrics(
+		struct vine_datavine_data_controller *controller,
+		struct vine_datavine_agent_persistence_metrics *metrics);
 int vine_datavine_data_controller_agent_check(
 		struct vine_datavine_data_controller *controller,
 		uint64_t workflow_slot);
-
-/* Bind retained outputs directly to controller-owned immutable files. */
-int vine_datavine_data_controller_bind_outputs(
-		struct vine_datavine_data_controller *controller,
-		struct vine_manager *manager, const char *workflow_id,
-		struct vine_task *physical, struct jx *task, struct jx *executor,
-		struct itable *files,
-		struct itable *consumers,
-		struct itable *requested, uint32_t attempt, int retain_all);
-
-/* Queue validation and durable metadata publication. Payload bytes never
- * enter the workflow runtime or workflow journal. */
-struct vine_datavine_data_publication *
-vine_datavine_data_controller_publish_async(
-		struct vine_datavine_data_controller *controller,
-		const char *workflow_id, struct jx *task, struct jx *executor,
-		struct jx *default_codec, struct itable *data,
-		struct itable *files, struct itable *consumers, struct itable *requested,
-		uint32_t attempt, int retain_all, struct vine_task *completed);
-int vine_datavine_data_publication_ready(
-		struct vine_datavine_data_publication *publication);
-int vine_datavine_data_publication_wait(
-		struct vine_datavine_data_publication *publication);
-int vine_datavine_data_publication_get_metrics(
-		struct vine_datavine_data_publication *publication,
-		struct vine_datavine_data_publication_metrics *metrics);
-void vine_datavine_data_publication_delete(
-		struct vine_datavine_data_publication *publication);
 
 int vine_datavine_data_controller_fetch_result(
 		struct vine_datavine_data_controller *controller,
@@ -249,31 +239,32 @@ int vine_datavine_data_controller_result_descriptors(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id, const uint64_t *data_ids, size_t count,
 		struct vine_datavine_workflow_result_info *results, char **paths);
+/* Return the next durably admitted requested result after sequence. Sequence
+ * starts at one and follows DATA_READY_BATCH journal order, so reconnecting
+ * clients can resume without consulting the bounded workflow event log. */
+int vine_datavine_data_controller_next_requested_result(
+		struct vine_datavine_data_controller *controller,
+		const char *workflow_id, uint64_t after_sequence,
+		uint64_t *sequence,
+		struct vine_datavine_workflow_result_info *result, char **path);
+void vine_datavine_data_controller_set_result_notifier(
+		struct vine_datavine_data_controller *controller,
+		void (*notify)(void *), void *context);
 int vine_datavine_data_controller_result_active(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id, uint64_t data_id);
 int vine_datavine_data_controller_result_counts(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id, size_t *active, size_t *peak);
-struct vine_file *vine_datavine_data_controller_restore_file(
+int vine_datavine_data_controller_requested_results_ready(
 		struct vine_datavine_data_controller *controller,
-		struct vine_manager *manager, const char *workflow_id,
-		uint64_t data_id);
-int vine_datavine_data_controller_release_results(
-		struct vine_datavine_data_controller *controller,
-		struct vine_manager *manager, const char *workflow_id,
-		struct itable *files,
-		const uint64_t *data_ids, size_t count);
+		const char *workflow_id, size_t expected);
 int vine_datavine_data_controller_finish_workflow(
 		struct vine_datavine_data_controller *controller,
-		struct vine_manager *manager, const char *workflow_id);
-int vine_datavine_data_controller_last_replica_lost(
-		struct vine_datavine_data_controller *controller,
-		const char *cached_name);
+		const char *workflow_id);
 int vine_datavine_data_controller_take_workflow_losses(
 		struct vine_datavine_data_controller *controller,
-		struct vine_manager *manager, const char *workflow_id,
-		struct itable *files,
+		const char *workflow_id,
 		uint64_t **data_ids, size_t *count);
 
 #endif

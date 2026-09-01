@@ -251,6 +251,9 @@ def main():
             library_name, taskvine_file_kernel, add_env=False, exec_mode="fork"
         )
         library.set_cores(args.cores)
+        if os.environ.get("DATAVINE_BENCHMARK_WATCH_LIBRARY_LOGFILES") == "1":
+            if manager.tune("watch-library-logfiles", 1) != 0:
+                raise RuntimeError("TaskVine library logfile tune is unavailable")
         manager.install_library(library)
         # The manager dispatches at most attempt-schedule-depth ready tasks in
         # one scheduling pass.  Function libraries are installed lazily on the
@@ -356,6 +359,7 @@ def main():
         samples = []
         next_sample = time.monotonic()
         execution_deadline = time.monotonic() + args.timeout
+        completed_task_ids = set()
         while completed < workload.tasks:
             if time.monotonic() >= execution_deadline:
                 raise TimeoutError(f"{workload.tasks - completed} tasks remain")
@@ -375,6 +379,9 @@ def main():
                 next_sample = now + 1.0
             if task is None:
                 continue
+            if task.id in completed_task_ids:
+                raise RuntimeError(f"duplicate completed TaskVine task ID {task.id}")
+            completed_task_ids.add(task.id)
             if not task.successful():
                 failed += 1
             protocol_output = task._output_file
@@ -420,7 +427,17 @@ def main():
             "dataset_manifest": dataset["status"] == "PASS",
             "exact_logical_tasks": completed == workload.tasks,
             "exact_physical_submissions": stats["tasks_submitted"] == workload.tasks,
-            "exact_physical_completions": stats["tasks_done"] == workload.tasks,
+            # TaskVine's aggregate tasks_done/tasks_failed counters include
+            # internal FunctionCall library pilots, while tasks_submitted,
+            # tasks_successful and tasks_recovery describe user task attempts.
+            # Require one unique successful result per logical task and no
+            # recovery submission; do not mistake a retired pilot for a user
+            # task completion.
+            "exact_physical_completions": (
+                len(completed_task_ids) == workload.tasks
+                and stats["tasks_successful"] == workload.tasks
+                and stats["tasks_recovery"] == 0
+            ),
             "all_tasks_successful": (
                 failed == 0
                 and stats["tasks_successful"] == workload.tasks

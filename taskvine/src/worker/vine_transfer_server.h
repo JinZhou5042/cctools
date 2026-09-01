@@ -17,7 +17,8 @@ See the file COPYING for details.
 #define VINE_TRANSFER_PROC_MAX_CHILD 128
 
 /* Returns 1 on success, 0 on failure (e.g. cannot bind port). */
-int vine_transfer_server_start( struct vine_cache *cache, int port_min, int port_max );
+int vine_transfer_server_start(struct vine_cache *cache, struct link *manager,
+		int port_min, int port_max);
 void vine_transfer_server_stop();
 int vine_transfer_server_running();
 void vine_transfer_server_address( char *addr, int *port );

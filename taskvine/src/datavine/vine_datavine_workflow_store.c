@@ -14,8 +14,6 @@ See the file COPYING for details.
 #include "vine_datavine_parametric.h"
 #include "vine_datavine_protocol.h"
 
-#include <openssl/sha.h>
-
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,16 +27,15 @@ enum store_record_opcode {
 	STORE_START = 104,
 	STORE_COMPLETE = 105,
 	STORE_FAIL = 106,
-	/* Replay-only compatibility records; current writers use batch records. */
-	STORE_RESULT = 107,
+	/* 107 was used by a retired payload-in-journal format. */
 	STORE_RECOVER = 108,
 	STORE_TASK_EVENT = 109,
-	STORE_RESULT_V2 = 110,
+	/* 110 was used by a retired payload-in-journal format. */
 	STORE_CHECKPOINT = 111,
 	STORE_TASK_EVENT_BATCH = 112,
 	STORE_APPEND_DELTA = 113,
 	STORE_QUIESCENT = 114,
-	STORE_RESULT_BATCH = 115,
+	/* 115 was used by a retired payload-in-journal format. */
 };
 #define STORE_MAX_EVENTS 64
 
@@ -58,10 +55,8 @@ struct stored_workflow {
 	struct vine_datavine_workflow_event events[STORE_MAX_EVENTS];
 	size_t event_start;
 	size_t event_count;
-	struct itable *results;
 	struct itable *attempts;
 	struct itable *completed_tasks;
-	struct itable *output_metadata;
 	struct itable *data_producers;
 	struct vine_datavine_parametric *parametric;
 	uint64_t maximum_tasks;
@@ -73,19 +68,6 @@ struct stored_workflow {
 	int runtime_claimed;
 };
 
-struct stored_output_metadata {
-	int64_t producer_task_id;
-	int32_t producer_output_index;
-	int requested;
-	char codec_name[129];
-	char codec_version[65];
-};
-
-struct stored_result {
-	char *data;
-	struct vine_datavine_workflow_result_info info;
-};
-
 struct idempotency_record {
 	struct stored_workflow *workflow;
 	char digest[VINE_DATAVINE_WORKFLOW_DIGEST_LENGTH + 1];
@@ -93,15 +75,18 @@ struct idempotency_record {
 
 struct vine_datavine_workflow_store {
 	pthread_mutex_t lock;
-	struct hash_table *workflows;
+	struct stored_workflow *workflow;
 	struct hash_table *idempotency;
 	struct vine_datavine_journal *journal;
 };
 
-static void result_delete(void *value);
-static int update_output_metadata(struct stored_workflow *workflow,
-		struct jx *root);
-static void invalidate_result_metadata_index(struct stored_workflow *workflow);
+static struct stored_workflow *workflow_lookup(
+		struct vine_datavine_workflow_store *store, const char *workflow_id)
+{
+	return store && store->workflow && workflow_id &&
+			!strcmp(store->workflow->workflow_id, workflow_id)
+			? store->workflow : 0;
+}
 
 static void transaction_delete(struct stored_transaction *transaction)
 {
@@ -160,10 +145,6 @@ static void workflow_delete(void *value)
 	free(workflow->workflow_id);
 	free(workflow->document);
 	transaction_list_delete(workflow->delta_head);
-	if (workflow->results) {
-		itable_clear(workflow->results, result_delete);
-		itable_delete(workflow->results);
-	}
 	if (workflow->attempts)
 		itable_delete(workflow->attempts);
 	if (workflow->completed_tasks)
@@ -171,48 +152,7 @@ static void workflow_delete(void *value)
 	if (workflow->data_producers)
 		itable_delete(workflow->data_producers);
 	vine_datavine_parametric_delete(workflow->parametric);
-	invalidate_result_metadata_index(workflow);
 	free(workflow);
-}
-
-static void result_delete(void *value)
-{
-	struct stored_result *result = value;
-	if (result) {
-		free(result->data);
-		free(result);
-	}
-}
-
-static int ensure_result_metadata_index(struct stored_workflow *workflow)
-{
-	if (workflow->output_metadata)
-		return 1;
-	struct jx *root = jx_parse_string_and_length(workflow->document,
-			(int)workflow->document_size);
-	workflow->output_metadata = itable_create(0);
-	int valid = root && workflow->output_metadata &&
-			update_output_metadata(workflow, root);
-	if (root)
-		jx_delete(root);
-	if (!valid)
-		invalidate_result_metadata_index(workflow);
-	return valid;
-}
-
-static void invalidate_result_metadata_index(struct stored_workflow *workflow)
-{
-	if (workflow->output_metadata) {
-		uint64_t data_id;
-		void *metadata;
-		int iterator;
-		ITABLE_ITERATE(workflow->output_metadata, iterator, data_id, metadata)
-		{
-			free(metadata);
-		}
-		itable_delete(workflow->output_metadata);
-	}
-	workflow->output_metadata = 0;
 }
 
 static int update_graph_indices(struct stored_workflow *workflow,
@@ -266,52 +206,6 @@ static int update_graph_indices(struct stored_workflow *workflow,
 	return 1;
 }
 
-static int update_output_metadata(struct stored_workflow *workflow,
-		struct jx *root)
-{
-	if (!workflow->output_metadata) {
-		workflow->output_metadata = itable_create(0);
-		if (!workflow->output_metadata)
-			return 0;
-	}
-	struct jx *item;
-	struct jx *data_defaults = jx_lookup(root, "data_defaults");
-	struct jx *default_codec = data_defaults
-						   ? jx_lookup(data_defaults, "codec")
-						   : 0;
-	void *iterator = 0;
-	while ((item = jx_iterate_array(jx_lookup(root, "data"), &iterator))) {
-		if (!vine_datavine_ir_data_is_output(item))
-			continue;
-		struct stored_output_metadata *metadata = calloc(1, sizeof(*metadata));
-		struct jx *codec = vine_datavine_ir_data_codec(item, default_codec);
-		if (metadata) {
-			metadata->producer_task_id = vine_datavine_ir_data_producer(item);
-			metadata->producer_output_index = vine_datavine_ir_data_output_index(item);
-			snprintf(metadata->codec_name, sizeof(metadata->codec_name), "%s", jx_lookup_string(codec, "name"));
-			snprintf(metadata->codec_version,
-					sizeof(metadata->codec_version),
-					"%s",
-					jx_lookup_string(codec, "version"));
-		}
-		if (!metadata || !itable_insert(workflow->output_metadata,
-						 vine_datavine_ir_data_id(item),
-						 metadata)) {
-			free(metadata);
-			return 0;
-		}
-	}
-	iterator = 0;
-	while ((item = jx_iterate_array(jx_lookup(root, "requested_outputs"),
-				&iterator))) {
-		struct stored_output_metadata *metadata = itable_lookup(
-				workflow->output_metadata, (uint64_t)item->u.integer_value);
-		if (metadata)
-			metadata->requested = 1;
-	}
-	return 1;
-}
-
 static int lookup_accepted_data(void *context, uint64_t data_id,
 		int64_t *producer_task_id)
 {
@@ -322,33 +216,6 @@ static int lookup_accepted_data(void *context, uint64_t data_id,
 	if (producer_task_id)
 		*producer_task_id = (int64_t)(uintptr_t)encoded - 1;
 	return 1;
-}
-
-/*
-Only requested outputs are part of the durable public result set after a
-workflow becomes terminal.  Intermediate outputs remain journaled while the
-workflow can still need them for restart recovery, then this deterministic
-projection drops them from memory.  Replaying the terminal transition applies
-the same projection, so no separate pruning journal or Python mirror exists.
-*/
-static void prune_unrequested_results(struct stored_workflow *workflow)
-{
-	int count = itable_size(workflow->results);
-	uint64_t *drop = count ? malloc((size_t)count * sizeof(*drop)) : 0;
-	if (count && !drop)
-		return;
-	size_t drops = 0;
-	uint64_t data_id;
-	struct stored_result *result;
-	int iterator;
-	ITABLE_ITERATE(workflow->results, iterator, data_id, result)
-	{
-		if (result && !result->info.requested)
-			drop[drops++] = data_id;
-	}
-	for (size_t i = 0; i < drops; i++)
-		result_delete(itable_remove(workflow->results, drop[i]));
-	free(drop);
 }
 
 static void release_terminal_graph(struct stored_workflow *workflow)
@@ -371,68 +238,6 @@ static void release_terminal_graph(struct stored_workflow *workflow)
 		itable_delete(workflow->completed_tasks);
 		workflow->completed_tasks = 0;
 	}
-	invalidate_result_metadata_index(workflow);
-}
-
-static int result_metadata(struct stored_workflow *workflow, uint64_t data_id,
-		uint32_t attempt, size_t size, const char *data,
-		struct vine_datavine_workflow_result_info *info)
-{
-	if (!ensure_result_metadata_index(workflow))
-		return 0;
-	struct stored_output_metadata *metadata = itable_lookup(
-			workflow->output_metadata, data_id);
-	if (!metadata)
-		return 0;
-	memset(info, 0, sizeof(*info));
-	info->data_id = data_id;
-	info->size = size;
-	info->attempt = attempt;
-	info->producer_task_id = metadata->producer_task_id;
-	info->producer_output_index = metadata->producer_output_index;
-	snprintf(info->codec_name, sizeof(info->codec_name), "%s", metadata->codec_name);
-	snprintf(info->codec_version, sizeof(info->codec_version), "%s", metadata->codec_version);
-	info->requested = metadata->requested;
-	unsigned char digest[SHA256_DIGEST_LENGTH];
-	SHA256((const unsigned char *)data, size, digest);
-	static const char hexadecimal[] = "0123456789abcdef";
-	for (size_t i = 0; i < sizeof(digest); i++) {
-		info->sha256[i * 2] = hexadecimal[digest[i] >> 4];
-		info->sha256[i * 2 + 1] = hexadecimal[digest[i] & 15];
-	}
-	info->sha256[sizeof(digest) * 2] = 0;
-	return 1;
-}
-
-static int apply_result(struct vine_datavine_workflow_store *store,
-		const char *workflow_id, uint64_t data_id,
-		uint32_t attempt, const char *data, size_t size,
-		struct vine_datavine_workflow_error *error)
-{
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows, workflow_id);
-	if (!workflow)
-		return store_fail(error, VINE_DATAVINE_WORKFLOW_REFERENCE, "$.workflow_id", "unknown workflow_id");
-	struct stored_result *known = itable_lookup(workflow->results, data_id);
-	if (known)
-		return attempt >= known->info.attempt && known->info.size == size &&
-			   !memcmp(known->data, data, size);
-	struct stored_result *result = calloc(1, sizeof(*result));
-	if (result)
-		result->data = size ? malloc(size) : malloc(1);
-	if (!result || !result->data) {
-		result_delete(result);
-		return store_fail(error, VINE_DATAVINE_WORKFLOW_LIMIT, "$.result", "could not allocate workflow result");
-	}
-	memcpy(result->data, data, size);
-	if (!result_metadata(workflow, data_id, attempt, size, data, &result->info)) {
-		result_delete(result);
-		return store_fail(error, VINE_DATAVINE_WORKFLOW_REFERENCE, "$.result", "result DataID is not a workflow output");
-	}
-	if (!itable_insert(workflow->results, data_id, result)) {
-		result_delete(result);
-		return store_fail(error, VINE_DATAVINE_WORKFLOW_LIMIT, "$.result", "workflow result index insertion failed");
-	}
-	return 1;
 }
 
 static void idempotency_delete(void *value)
@@ -496,7 +301,7 @@ static int apply_task_event(struct vine_datavine_workflow_store *store,
 		int64_t task_id, uint32_t attempt, int32_t result,
 		struct vine_datavine_workflow_error *error, int commit)
 {
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows, workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	if (!workflow)
 		return store_fail(error, VINE_DATAVINE_WORKFLOW_REFERENCE, "$.workflow_id", "unknown workflow_id");
 	if ((workflow->info.state != VINE_DATAVINE_WORKFLOW_RUNNING &&
@@ -584,7 +389,7 @@ static int apply_submit(struct vine_datavine_workflow_store *store,
 		free(key);
 		return same ? 1 : store_fail(error, VINE_DATAVINE_WORKFLOW_DUPLICATE, "$.idempotency_key", "idempotency key already names different content");
 	}
-	if (hash_table_lookup(store->workflows, workflow_id)) {
+	if (store->workflow) {
 		free(workflow_id);
 		free(key);
 		return store_fail(error, VINE_DATAVINE_WORKFLOW_DUPLICATE, "$.workflow_id", "workflow_id already exists");
@@ -603,19 +408,17 @@ static int apply_submit(struct vine_datavine_workflow_store *store,
 	workflow->workflow_id = workflow_id;
 	workflow->document = document;
 	workflow->document_size = size;
-	workflow->results = itable_create(0);
 	workflow->attempts = itable_create(0);
 	workflow->completed_tasks = itable_create(0);
 	workflow->data_producers = itable_create(0);
-	if (!workflow->results || !workflow->attempts ||
-			!workflow->completed_tasks || !workflow->data_producers) {
+	if (!workflow->attempts || !workflow->completed_tasks ||
+			!workflow->data_producers) {
 		workflow_delete(workflow);
 		free(key);
-		return store_fail(error, VINE_DATAVINE_WORKFLOW_LIMIT, "$", "could not allocate workflow results");
+		return store_fail(error, VINE_DATAVINE_WORKFLOW_LIMIT, "$", "could not allocate workflow indices");
 	}
 	struct jx *accepted_root = jx_parse_string_and_length(json, (int)size);
-	if (!accepted_root || !update_graph_indices(workflow, accepted_root, 1) ||
-			!ensure_result_metadata_index(workflow)) {
+	if (!accepted_root || !update_graph_indices(workflow, accepted_root, 1)) {
 		if (accepted_root)
 			jx_delete(accepted_root);
 		workflow_delete(workflow);
@@ -635,9 +438,9 @@ static int apply_submit(struct vine_datavine_workflow_store *store,
 		free(key);
 		return store_fail(error, VINE_DATAVINE_WORKFLOW_LIMIT, "$", "workflow journal commit failed");
 	}
-	if (!hash_table_insert(store->workflows, workflow_id, workflow) ||
-			!remember_idempotency(store, key, workflow, digest)) {
-		hash_table_remove(store->workflows, workflow_id);
+	store->workflow = workflow;
+	if (!remember_idempotency(store, key, workflow, digest)) {
+		store->workflow = 0;
 		workflow_delete(workflow);
 		free(key);
 		return store_fail(error, VINE_DATAVINE_WORKFLOW_LIMIT, "$", "workflow index insertion failed");
@@ -654,8 +457,7 @@ static int apply_append_delta(struct vine_datavine_workflow_store *store,
 		struct vine_datavine_workflow_info *result,
 		struct vine_datavine_workflow_error *error, int commit)
 {
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows,
-			workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	if (!workflow)
 		return store_fail(error, VINE_DATAVINE_WORKFLOW_REFERENCE, "$.workflow_id", "unknown workflow_id");
 	char digest[VINE_DATAVINE_WORKFLOW_DIGEST_LENGTH + 1];
@@ -720,8 +522,7 @@ static int apply_append_delta(struct vine_datavine_workflow_store *store,
 			return store_fail(error, VINE_DATAVINE_WORKFLOW_LIMIT, "$", "delta journal commit failed");
 		}
 	}
-	if (!update_graph_indices(workflow, transaction->root, 0) ||
-			!update_output_metadata(workflow, transaction->root)) {
+	if (!update_graph_indices(workflow, transaction->root, 0)) {
 		transaction_delete(transaction);
 		free(record);
 		free(key);
@@ -768,7 +569,7 @@ static int apply_transition(struct vine_datavine_workflow_store *store,
 		struct vine_datavine_workflow_info *result,
 		struct vine_datavine_workflow_error *error, int commit)
 {
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows, workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	if (!workflow)
 		return store_fail(error, VINE_DATAVINE_WORKFLOW_REFERENCE, "$.workflow_id", "unknown workflow_id");
 	if (workflow->info.state == state) {
@@ -819,7 +620,6 @@ static int apply_transition(struct vine_datavine_workflow_store *store,
 	if (state == VINE_DATAVINE_WORKFLOW_COMPLETED ||
 			state == VINE_DATAVINE_WORKFLOW_FAILED) {
 		workflow->runtime_claimed = 0;
-		prune_unrequested_results(workflow);
 		release_terminal_graph(workflow);
 	}
 	if (result)
@@ -831,7 +631,7 @@ static int apply_recover(struct vine_datavine_workflow_store *store,
 		const char *workflow_id, struct vine_datavine_workflow_error *error,
 		int commit)
 {
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows, workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	if (!workflow || (workflow->info.state != VINE_DATAVINE_WORKFLOW_RUNNING &&
 					 workflow->info.state != VINE_DATAVINE_WORKFLOW_RUNNING_OPEN &&
 					 workflow->info.state != VINE_DATAVINE_WORKFLOW_OPEN_QUIESCENT))
@@ -894,60 +694,6 @@ static int replay_append_delta(struct vine_datavine_workflow_store *store,
 						   0);
 	free(workflow_id);
 	return valid;
-}
-
-static int replay_result_batch(struct vine_datavine_workflow_store *store,
-		const unsigned char *payload, size_t payload_size,
-		struct vine_datavine_workflow_error *error)
-{
-	if (payload_size < 8)
-		return 0;
-	uint32_t id_size = vine_datavine_get_u32(payload);
-	uint32_t count = vine_datavine_get_u32(payload + 4);
-	char workflow_id[VINE_DATAVINE_WORKFLOW_IDENTIFIER_MAX + 1];
-	if (!count || !replay_workflow_id(payload, payload_size, 8, id_size, workflow_id))
-		return 0;
-	size_t offset = 8 + id_size;
-	for (uint32_t index = 0; index < count; index++) {
-		if (offset > payload_size || payload_size - offset < 16)
-			return 0;
-		uint64_t data_id = vine_datavine_get_u64(payload + offset);
-		uint32_t attempt = vine_datavine_get_u32(payload + offset + 8);
-		uint32_t result_size = vine_datavine_get_u32(payload + offset + 12);
-		offset += 16;
-		if (result_size > payload_size - offset ||
-				!apply_result(store, workflow_id, data_id, attempt, (const char *)payload + offset, result_size, error))
-			return 0;
-		offset += result_size;
-	}
-	return offset == payload_size;
-}
-
-static int replay_legacy_result(struct vine_datavine_workflow_store *store,
-		uint16_t opcode, const unsigned char *payload, size_t payload_size,
-		struct vine_datavine_workflow_error *error)
-{
-	size_t header_size = opcode == STORE_RESULT_V2 ? 24 : 20;
-	if (payload_size < header_size)
-		return 0;
-	uint32_t id_size = vine_datavine_get_u32(payload);
-	uint64_t result_size = vine_datavine_get_u64(payload + 12);
-	char workflow_id[VINE_DATAVINE_WORKFLOW_IDENTIFIER_MAX + 1];
-	if (result_size > SIZE_MAX ||
-			payload_size != header_size + (size_t)id_size +
-							(size_t)result_size ||
-			!replay_workflow_id(payload, payload_size, header_size, id_size, workflow_id))
-		return 0;
-	uint32_t attempt = opcode == STORE_RESULT_V2
-					   ? vine_datavine_get_u32(payload + 20)
-					   : 1;
-	return apply_result(store,
-			workflow_id,
-			vine_datavine_get_u64(payload + 4),
-			attempt,
-			(const char *)payload + header_size + id_size,
-			(size_t)result_size,
-			error);
 }
 
 static int replay_task_event(struct vine_datavine_workflow_store *store,
@@ -1038,8 +784,7 @@ static int replay_transition(struct vine_datavine_workflow_store *store,
 	if (!transition)
 		return 0;
 	enum vine_datavine_workflow_state state = transition->state;
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows,
-			workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	if (opcode == STORE_SEAL && workflow &&
 			(workflow->info.state == VINE_DATAVINE_WORKFLOW_RUNNING_OPEN ||
 					workflow->info.state ==
@@ -1070,8 +815,7 @@ static int replay_identifier_record(struct vine_datavine_workflow_store *store,
 		return 1;
 	if (opcode == STORE_RECOVER)
 		return apply_recover(store, workflow_id, error, 0);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows,
-			workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	if (opcode != STORE_QUIESCENT || !workflow ||
 			workflow->info.state != VINE_DATAVINE_WORKFLOW_RUNNING_OPEN)
 		return 0;
@@ -1090,11 +834,6 @@ static int replay_record(void *context, uint16_t opcode,
 		return apply_submit(store, (const char *)payload, payload_size, 0, &error, 0);
 	case STORE_APPEND_DELTA:
 		return replay_append_delta(store, payload, payload_size, &error);
-	case STORE_RESULT_BATCH:
-		return replay_result_batch(store, payload, payload_size, &error);
-	case STORE_RESULT:
-	case STORE_RESULT_V2:
-		return replay_legacy_result(store, opcode, payload, payload_size, &error);
 	case STORE_TASK_EVENT:
 		return replay_task_event(store, payload, payload_size, &error);
 	case STORE_TASK_EVENT_BATCH:
@@ -1124,9 +863,8 @@ struct vine_datavine_workflow_store *vine_datavine_workflow_store_open(
 		free(store);
 		return 0;
 	}
-	store->workflows = hash_table_create(0, 0);
 	store->idempotency = hash_table_create(0, 0);
-	if (!store->workflows || !store->idempotency) {
+	if (!store->idempotency) {
 		vine_datavine_workflow_store_close(store);
 		return 0;
 	}
@@ -1135,15 +873,11 @@ struct vine_datavine_workflow_store *vine_datavine_workflow_store_open(
 		vine_datavine_workflow_store_close(store);
 		return 0;
 	}
-	char *key;
-	void *value;
-	int iterator;
-	HASH_TABLE_ITERATE(store->workflows, iterator, key, value)
 	{
-		struct stored_workflow *workflow = value;
-		if (workflow->info.state == VINE_DATAVINE_WORKFLOW_RUNNING ||
+		struct stored_workflow *workflow = store->workflow;
+		if (workflow && (workflow->info.state == VINE_DATAVINE_WORKFLOW_RUNNING ||
 				workflow->info.state == VINE_DATAVINE_WORKFLOW_RUNNING_OPEN ||
-				workflow->info.state == VINE_DATAVINE_WORKFLOW_OPEN_QUIESCENT) {
+				workflow->info.state == VINE_DATAVINE_WORKFLOW_OPEN_QUIESCENT)) {
 			struct vine_datavine_workflow_error error;
 			if (!apply_recover(store, workflow->workflow_id, &error, 1)) {
 				vine_datavine_workflow_store_close(store);
@@ -1170,10 +904,7 @@ void vine_datavine_workflow_store_close(struct vine_datavine_workflow_store *sto
 		hash_table_clear(store->idempotency, idempotency_delete);
 		hash_table_delete(store->idempotency);
 	}
-	if (store->workflows) {
-		hash_table_clear(store->workflows, workflow_delete);
-		hash_table_delete(store->workflows);
-	}
+	workflow_delete(store->workflow);
 	pthread_mutex_destroy(&store->lock);
 	free(store);
 }
@@ -1213,8 +944,7 @@ int vine_datavine_workflow_store_seal(struct vine_datavine_workflow_store *store
 	if (!store || !workflow_id)
 		return 0;
 	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows,
-			workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	enum vine_datavine_workflow_state state = workflow &&
 										  workflow->info.state == VINE_DATAVINE_WORKFLOW_RUNNING_OPEN
 								  ? VINE_DATAVINE_WORKFLOW_RUNNING
@@ -1231,7 +961,7 @@ int vine_datavine_workflow_store_cancel(struct vine_datavine_workflow_store *sto
 	if (!store || !workflow_id)
 		return 0;
 	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows, workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	uint64_t generation = workflow ? workflow->info.generation : 0;
 	int valid = apply_transition(store, workflow_id, generation, VINE_DATAVINE_WORKFLOW_CANCELLED, VINE_DATAVINE_WORKFLOW_CANCELLED_EVENT, STORE_CANCEL, result, error, 1);
 	pthread_mutex_unlock(&store->lock);
@@ -1244,7 +974,7 @@ int vine_datavine_workflow_store_describe(struct vine_datavine_workflow_store *s
 	if (!store || !workflow_id || !result)
 		return 0;
 	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows, workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	if (workflow)
 		*result = workflow->info;
 	pthread_mutex_unlock(&store->lock);
@@ -1261,8 +991,7 @@ int vine_datavine_workflow_store_frontier(
 			!maximum_tasks || !maximum_edges)
 		return 0;
 	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows,
-			workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	if (workflow) {
 		*maximum_task_id = workflow->maximum_task_id;
 		*maximum_data_id = workflow->maximum_data_id;
@@ -1280,7 +1009,7 @@ size_t vine_datavine_workflow_store_watch(struct vine_datavine_workflow_store *s
 	if (!store || !workflow_id || (!events && capacity))
 		return 0;
 	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows, workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	size_t count = 0;
 	if (workflow) {
 		for (size_t i = 0; i < workflow->event_count && count < capacity; i++) {
@@ -1305,21 +1034,14 @@ int vine_datavine_workflow_store_take_runnable(
 	*document = 0;
 	*document_size = 0;
 	pthread_mutex_lock(&store->lock);
-	char *key;
-	void *value;
-	int iterator;
 	struct stored_workflow *workflow = 0;
-	HASH_TABLE_ITERATE(store->workflows, iterator, key, value)
-	{
-		struct stored_workflow *candidate = value;
-		if (!candidate->runtime_claimed &&
-				(candidate->info.state == VINE_DATAVINE_WORKFLOW_SEALED ||
-						candidate->info.state == VINE_DATAVINE_WORKFLOW_OPEN ||
-						candidate->info.state == VINE_DATAVINE_WORKFLOW_RUNNING_OPEN)) {
-			workflow = candidate;
-			break;
-		}
-	}
+	struct stored_workflow *candidate = store->workflow;
+	if (candidate && !candidate->runtime_claimed &&
+			(candidate->info.state == VINE_DATAVINE_WORKFLOW_SEALED ||
+					candidate->info.state == VINE_DATAVINE_WORKFLOW_OPEN ||
+					candidate->info.state == VINE_DATAVINE_WORKFLOW_RUNNING_OPEN ||
+					candidate->info.state == VINE_DATAVINE_WORKFLOW_RUNNING))
+		workflow = candidate;
 	int valid = 0;
 	if (workflow) {
 		char *copy = malloc(workflow->document_size + 1);
@@ -1331,8 +1053,10 @@ int vine_datavine_workflow_store_take_runnable(
 												  VINE_DATAVINE_WORKFLOW_OPEN
 										  ? VINE_DATAVINE_WORKFLOW_RUNNING_OPEN
 										  : VINE_DATAVINE_WORKFLOW_RUNNING;
-			/* A resumed open workflow already has its durable START event. */
-			if (workflow->info.state == VINE_DATAVINE_WORKFLOW_RUNNING_OPEN) {
+			/* A resumed workflow already has its durable START event. This also
+			 * covers append immediately followed by seal before reactor claim. */
+			if (workflow->info.state == VINE_DATAVINE_WORKFLOW_RUNNING_OPEN ||
+					workflow->info.state == VINE_DATAVINE_WORKFLOW_RUNNING) {
 				valid = 1;
 				*result = workflow->info;
 				/* START is the only transition from OPEN into RUNNING_OPEN. */
@@ -1378,8 +1102,7 @@ struct jx *vine_datavine_workflow_store_take_delta_root(
 	if (!store || !workflow_id || !generation)
 		return 0;
 	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows,
-			workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	struct stored_transaction *transaction = workflow
 								 ? workflow->delta_head
 								 : 0;
@@ -1409,8 +1132,7 @@ int vine_datavine_workflow_store_mark_quiescent(
 	if (!store || !workflow_id)
 		return 0;
 	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows,
-			workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	if (workflow && workflow->info.state == VINE_DATAVINE_WORKFLOW_RUNNING_OPEN &&
 			workflow->info.generation != expected_generation) {
 		if (result)
@@ -1451,56 +1173,11 @@ int vine_datavine_workflow_store_finish(
 	if (!store || !workflow_id)
 		return 0;
 	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows, workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	uint64_t generation = workflow ? workflow->info.generation : 0;
 	int valid = apply_transition(store, workflow_id, generation, successful ? VINE_DATAVINE_WORKFLOW_COMPLETED : VINE_DATAVINE_WORKFLOW_FAILED, successful ? VINE_DATAVINE_WORKFLOW_COMPLETED_EVENT : VINE_DATAVINE_WORKFLOW_FAILED_EVENT, successful ? STORE_COMPLETE : STORE_FAIL, result, error, 1);
 	pthread_mutex_unlock(&store->lock);
 	return valid;
-}
-
-int vine_datavine_workflow_store_legacy_fetch_result(
-		struct vine_datavine_workflow_store *store,
-		const char *workflow_id, uint64_t data_id,
-		char **data, size_t *size)
-{
-	if (!store || !workflow_id || !data || !size || !data_id)
-		return 0;
-	*data = 0;
-	*size = 0;
-	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows, workflow_id);
-	struct stored_result *result = workflow
-							   ? itable_lookup(workflow->results, data_id)
-							   : 0;
-	if (result) {
-		char *copy = result->info.size ? malloc(result->info.size) : malloc(1);
-		if (copy) {
-			memcpy(copy, result->data, result->info.size);
-			*data = copy;
-			*size = result->info.size;
-		}
-	}
-	pthread_mutex_unlock(&store->lock);
-	return *data != 0;
-}
-
-int vine_datavine_workflow_store_legacy_result_info(
-		struct vine_datavine_workflow_store *store,
-		const char *workflow_id, uint64_t data_id,
-		struct vine_datavine_workflow_result_info *result)
-{
-	if (!store || !workflow_id || !data_id || !result)
-		return 0;
-	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows,
-			workflow_id);
-	struct stored_result *stored = workflow
-							   ? itable_lookup(workflow->results, data_id)
-							   : 0;
-	if (stored)
-		*result = stored->info;
-	pthread_mutex_unlock(&store->lock);
-	return stored != 0;
 }
 
 int vine_datavine_workflow_store_record_task_events(
@@ -1517,8 +1194,7 @@ int vine_datavine_workflow_store_record_task_events(
 			count > (SIZE_MAX - 8 - id_size) / 20)
 		return 0;
 	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows,
-			workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	int valid = workflow &&
 			(workflow->info.state == VINE_DATAVINE_WORKFLOW_RUNNING ||
 					workflow->info.state == VINE_DATAVINE_WORKFLOW_RUNNING_OPEN ||
@@ -1564,8 +1240,7 @@ uint32_t vine_datavine_workflow_store_task_attempts(
 	if (!store || !workflow_id || task_id < 1)
 		return 0;
 	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows,
-			workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	uint32_t attempts = workflow
 						? (uint32_t)(uintptr_t)itable_lookup(workflow->attempts,
 								  (uint64_t)task_id)
@@ -1581,8 +1256,7 @@ int vine_datavine_workflow_store_task_attempts_snapshot(
 	if (!store || !workflow_id || !attempts || count < 2)
 		return 0;
 	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows,
-			workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	int valid = workflow != 0;
 	if (workflow) {
 		uint64_t task_id;
@@ -1610,8 +1284,7 @@ int vine_datavine_workflow_store_completed_task_ids(
 	*task_ids = 0;
 	*count = 0;
 	pthread_mutex_lock(&store->lock);
-	struct stored_workflow *workflow = hash_table_lookup(store->workflows,
-			workflow_id);
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
 	size_t size = workflow ? (size_t)itable_size(workflow->completed_tasks) : 0;
 	int64_t *copy = size ? malloc(size * sizeof(*copy)) : malloc(1);
 	if (workflow && copy) {
@@ -1638,7 +1311,7 @@ int vine_datavine_workflow_store_checkpoint(
 			strlen(workflow_id) > VINE_DATAVINE_WORKFLOW_IDENTIFIER_MAX)
 		return 0;
 	pthread_mutex_lock(&store->lock);
-	int valid = hash_table_lookup(store->workflows, workflow_id) &&
+	int valid = workflow_lookup(store, workflow_id) &&
 			vine_datavine_journal_commit(store->journal, STORE_CHECKPOINT, (const unsigned char *)workflow_id, strlen(workflow_id));
 	pthread_mutex_unlock(&store->lock);
 	return valid;

@@ -59,6 +59,42 @@ def assert_result_info(
     return info
 
 
+def start_execution_owner(service_binary, worker_binary, journal, token):
+    service = subprocess.Popen(
+        (str(service_binary), "serve", str(journal), token),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    line = service.stdout.readline()
+    if not line:
+        raise AssertionError(service.stderr.read())
+    contact = json.loads(line)
+    worker = subprocess.Popen(
+        (
+            str(worker_binary), "--cores=1", "--memory=512", "--disk=512",
+            "--idle-timeout=120", "localhost", str(contact["manager_port"]),
+        ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return service, worker, contact, WorkflowClient(contact["endpoint"], token)
+
+
+def stop_execution_owner(service, worker, client=None):
+    if client is not None:
+        client.close()
+    if worker is not None and worker.poll() is None:
+        worker.send_signal(signal.SIGTERM)
+        worker.communicate(timeout=20)
+    if service.poll() is None:
+        service.send_signal(signal.SIGTERM)
+    stdout, stderr = service.communicate(timeout=20)
+    if service.returncode != 0:
+        raise AssertionError((service.returncode, stdout, stderr))
+
+
 def main():
     repository = Path(__file__).resolve().parents[2]
     service_binary = repository / "taskvine/src/tools/datavine_workflow"
@@ -127,6 +163,38 @@ def main():
         ],
         "requested_outputs": [3],
         "policy": {"maximum_tasks": 2, "maximum_edges": 1},
+    }
+    function_result = b"native function output\n"
+    function_workflow = {
+        "schema": "datavine.workflow/v1",
+        "workflow_id": "native-function-output",
+        "idempotency_key": "native-function-output-v1",
+        "mode": "sealed",
+        "task_defaults": {
+            "executor": {
+                "kind": "taskvine",
+                "version": "builtin-v1",
+                "payload_ref": 1,
+            },
+            "resources": {"cores": 1},
+        },
+        "data_defaults": {"codec": {"name": "bytes", "version": "1"}},
+        "data": [
+            {
+                "data_id": 1,
+                "codec": {"name": "datavine/builtin", "version": "1"},
+                "origin": {
+                    "kind": "inline",
+                    "base64": base64.b64encode(
+                        b"DVB1\x02" + function_result
+                    ).decode(),
+                },
+            },
+            [2, 1, 0],
+        ],
+        "tasks": [[1, [], [2]]],
+        "requested_outputs": [2],
+        "policy": {"maximum_tasks": 1, "maximum_edges": 0},
     }
 
     class UnsupportedRuntime:
@@ -216,6 +284,29 @@ def main():
                 assert error.status == 5, error
             else:
                 raise AssertionError("non-requested intermediate was not pruned")
+
+            stop_execution_owner(service, worker, client)
+            service, worker, contact, client = start_execution_owner(
+                service_binary, worker_binary, root / "function.journal", token
+            )
+            submitted = client.submit_workflow(function_workflow)
+            assert submitted["state"] in {"sealed", "running"}, submitted
+            terminal = wait_for(
+                client, function_workflow["workflow_id"], {"completed", "failed"}
+            )
+            assert terminal["state"] == "completed", terminal
+            assert client.fetch_workflow_result(
+                function_workflow["workflow_id"], 2
+            ) == function_result
+            assert_result_info(
+                client,
+                function_workflow["workflow_id"],
+                2,
+                function_result,
+                task_id=1,
+                output_index=0,
+                codec="bytes",
+            )
         finally:
             if worker is not None and worker.poll() is None:
                 worker.send_signal(signal.SIGTERM)
@@ -272,6 +363,10 @@ def main():
                     "pruned intermediate reappeared after journal replay"
                 )
 
+            stop_execution_owner(restarted, restarted_worker, client)
+            restarted, restarted_worker, contact, client = start_execution_owner(
+                service_binary, worker_binary, root / "multi.journal", token
+            )
             multi = {
                 "schema": "datavine.workflow/v1",
                 "workflow_id": "native-multi-output",
@@ -380,6 +475,10 @@ def main():
                 codec="bytes",
             )
 
+            stop_execution_owner(restarted, restarted_worker, client)
+            restarted, restarted_worker, contact, client = start_execution_owner(
+                service_binary, worker_binary, root / "adaptor.journal", token
+            )
             adaptor = Workflow(
                 "python-thin-adaptor-v1",
                 workflow_id="python-thin-adaptor",
@@ -423,6 +522,10 @@ def main():
                 b"python-adaptor"
             )
 
+            stop_execution_owner(restarted, restarted_worker, client)
+            restarted, restarted_worker, contact, client = start_execution_owner(
+                service_binary, worker_binary, root / "callable.journal", token
+            )
             callable_code = "\n".join(
                 (
                     "import json,sys",
@@ -457,6 +560,10 @@ def main():
                 )
             ) == 42
 
+            stop_execution_owner(restarted, restarted_worker, client)
+            restarted, restarted_worker, contact, client = start_execution_owner(
+                service_binary, worker_binary, root / "python-executor.journal", token
+            )
             python_executor = Workflow(
                 "native-python-executor-v1",
                 workflow_id="native-python-executor",
@@ -487,6 +594,10 @@ def main():
                 codec="bytes",
             )
 
+            stop_execution_owner(restarted, restarted_worker, client)
+            restarted, restarted_worker, contact, client = start_execution_owner(
+                service_binary, worker_binary, root / "live.journal", token
+            )
             live = {
 				"schema": "datavine.workflow/v1",
 				"workflow_id": "live-result-before-workflow-end",
@@ -527,6 +638,10 @@ def main():
             assert client.describe_workflow(live["workflow_id"])["state"] == "running"
             assert wait_for(client, live["workflow_id"], {"completed", "failed"})["state"] == "completed"
 
+            stop_execution_owner(restarted, restarted_worker, client)
+            restarted, restarted_worker, contact, client = start_execution_owner(
+                service_binary, worker_binary, root / "large.journal", token
+            )
             large = {
 				"schema": "datavine.workflow/v1",
 				"workflow_id": "large-result-outside-workflow-journal",
@@ -553,15 +668,15 @@ def main():
             stdout, stderr = restarted.communicate(timeout=20)
             assert restarted.returncode == 0, (restarted.returncode, stdout, stderr)
 
-        assert (root / "native.journal").stat().st_size < 1024 * 1024
-        assert not (root / "native.journal.data/catalog").exists()
-        result_files = list((root / "native.journal.data").rglob("*.data"))
+        assert (root / "large.journal").stat().st_size < 1024 * 1024
+        assert not (root / "large.journal.data/catalog").exists()
+        result_files = list((root / "large.journal.data").rglob("*.data"))
         largest = max(result_files, key=lambda path: path.stat().st_size)
         assert largest.stat().st_size >= 2 * 1024 * 1024
         with largest.open("r+b") as stream:
             stream.write(b"X")
         corrupt = subprocess.run(
-            (str(service_binary), "serve", str(root / "native.journal"), token),
+            (str(service_binary), "serve", str(root / "large.journal"), token),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -573,7 +688,7 @@ def main():
         "DataVine native command workflow PASS "
         "c-owner=1 worker=1 dag=2 multi-output=1 python-executor=1 "
         "python-adaptor-exit=1 callable-adaptor-exit=1 capability-preflight=1 "
-        "durable-result=1 selective-pruning=1 "
+        "durable-result=1 function-output=1 selective-pruning=1 "
         "live-result=1 payload-free-workflow-journal=1 corrupt-result-rejected=1 "
         "result-identity=sha256+attempt+producer+codec"
     )

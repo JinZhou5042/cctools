@@ -67,6 +67,10 @@ for removed in (
     "REGISTER_TASKS",
     "RPC_PING",
     "working_directory",
+    "AGENT_PERSISTED",
+    "RESULT_PERSISTED",
+    "Runtime-v2",
+    "datavine-v2-",
 ):
     assert removed not in protocol, removed
 assert "workflow_result_descriptors" in adaptor_source
@@ -100,6 +104,8 @@ for forbidden in (
     "vine_manager_cache_invalid",
     "vine_task_add_input",
     "vine_task_add_output",
+    "persistence_enqueue",
+    "durable_offset",
 ):
     assert forbidden not in worker_agent_source, forbidden
 
@@ -132,7 +138,6 @@ runtime_source = (native / "vine_datavine_workflow_runtime.c").read_text()
 store_source = (native / "vine_datavine_workflow_store.c").read_text()
 controller_source = (native / "vine_datavine_data_controller.c").read_text()
 for forbidden in (
-    "DVP2",
     "stdout-base64-v1",
     "workflow_store_publish_results",
     "vine_task_get_stdout",
@@ -143,7 +148,7 @@ assert "vine_datavine_workflow_store_publish_results" not in store_source
 assert "vine_task_get_stdout" in controller_source
 assert "pthread_create" in controller_source
 assert "vine_datavine_journal" in controller_source
-assert "vine_declare_temp" in controller_source
+assert "vine_declare_temp" not in controller_source
 assert "vine_fetch_file" not in controller_source
 assert "vine_fetch_file" not in runtime_source
 
@@ -215,10 +220,27 @@ python_executor = (source / "tools/datavine_python_executor").read_text()
 assert "HashingWriter" in python_executor
 assert "DVM1" in python_executor
 assert "DVP1" in python_executor
-for removed in ("DVM2", "DVP2", "DVP3", "DVP4", "DVP5", "DVP6", "DVP7", "DVP8", "DVP9", "urllib.parse"):
+assert "DVP2" in python_executor
+for removed in ("DVM2", "DVP3", "DVP4", "DVP5", "DVP6", "DVP7", "DVP8", "DVP9", "urllib.parse"):
     assert removed not in python_executor, removed
 assert "class ObjectPuller" in python_executor
 assert "base64" not in python_executor
+for removed in (
+    "DurabilityNotifier",
+    "persistence_agent",
+    "DATAVINE_PERSIST_CONTEXT_V1",
+    "RESULT_PERSISTED",
+):
+    assert removed not in python_executor, removed
+
+for removed in (
+    "workflow_store_legacy",
+    "DATAVINE_SERVICE_THREADS",
+    "DATAVINE_WORKER_FIRST",
+    "DATAVINE_RECOVERY_CACHE",
+    "__attribute__((unused))",
+):
+    assert removed not in runtime_source + store_source, removed
 
 swig = (source / "bindings/python3/taskvine.i").read_text().lower()
 assert "vine_datavine" not in swig

@@ -80,7 +80,7 @@ def python_descendants(parent_pid):
             try:
                 fields = stat.read_text().split(") ", 1)[1].split()
                 pid, parent = int(stat.parent.name), int(fields[1])
-            except (FileNotFoundError, IndexError, ValueError):
+            except (OSError, IndexError, ValueError):
                 continue
             if parent in parents and pid not in parents:
                 parents.add(pid)
@@ -89,9 +89,42 @@ def python_descendants(parent_pid):
     for pid in parents - {int(parent_pid)}:
         try:
             commands.append(Path(f"/proc/{pid}/cmdline").read_bytes())
-        except FileNotFoundError:
+        except OSError:
             pass
     return [command for command in commands if b"python" in command.lower()]
+
+
+def start_notebook_owner(service_binary, worker_binary, journal, token):
+    service = subprocess.Popen(
+        (str(service_binary), "serve", str(journal), token),
+        stdout=subprocess.PIPE,
+        stderr=None,
+        text=True,
+    )
+    contact = json.loads(service.stdout.readline())
+    worker = subprocess.Popen(
+        (
+            str(worker_binary), "--cores=3", "--memory=1024", "--disk=1024",
+            "--idle-timeout=30", "localhost", str(contact["manager_port"]),
+        ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return service, worker, contact, WorkflowClient(contact["endpoint"], token)
+
+
+def stop_notebook_owner(service, worker, client=None):
+    if client is not None:
+        client.close()
+    if worker is not None and worker.poll() is None:
+        worker.send_signal(signal.SIGTERM)
+        worker.communicate(timeout=20)
+    if service.poll() is None:
+        service.send_signal(signal.SIGTERM)
+    stdout, stderr = service.communicate(timeout=20)
+    if service.returncode != 0:
+        raise AssertionError((service.returncode, stdout, stderr))
 
 
 def main():
@@ -120,30 +153,12 @@ def main():
         if data["codec"]["name"] == "python/callable"
     ]) == 1
     with tempfile.TemporaryDirectory(prefix="datavine-notebook-") as root:
-        service = subprocess.Popen(
-            (str(service_binary), "serve", str(Path(root) / "journal"), token),
-            stdout=subprocess.PIPE,
-            stderr=None,
-            text=True,
+        root = Path(root)
+        service, worker, contact, client = start_notebook_owner(
+            service_binary, worker_binary, root / "journal", token
         )
-        worker = None
+        replacement = client
         try:
-            contact = json.loads(service.stdout.readline())
-            worker = subprocess.Popen(
-                (
-                    str(worker_binary),
-                    "--cores=3",
-                    "--memory=1024",
-                    "--disk=1024",
-                    "--idle-timeout=30",
-                    "localhost",
-                    str(contact["manager_port"]),
-                ),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            client = WorkflowClient(contact["endpoint"], token)
             session = WorkflowSession.create(
                 client,
                 workflow_id,
@@ -199,9 +214,9 @@ def main():
             assert replaced.result(timeout=30) == 77
             time.sleep(0.2)
             python_processes = python_descendants(worker.pid)
-            # One fork preloader plus one persistent Worker Data Agent.  The
-            # agent replaces one persistence process per requested output.
-            assert len(python_processes) == 2, python_processes
+            # One fork preloader serves every callable. Data persistence is
+            # owned by the Controller and needs no Python helper process.
+            assert len(python_processes) == 1, python_processes
             assert all(
                 b"datavine_python_executor" in process
                 for process in python_processes
@@ -215,6 +230,10 @@ def main():
             else:
                 raise AssertionError("terminal workflow accepted a dynamic attach")
 
+            stop_notebook_owner(service, worker, replacement)
+            service, worker, contact, replacement = start_notebook_owner(
+                service_binary, worker_binary, root / "sparse.journal", token
+            )
             sparse_id = "sparse-attach"
             replacement.submit_workflow({
                 "schema": "datavine.workflow/v1",
@@ -251,6 +270,10 @@ def main():
             sparse_session.seal()
             assert wait_terminal(replacement, sparse_id)["state"] == "completed"
 
+            stop_notebook_owner(service, worker, replacement)
+            service, worker, contact, replacement = start_notebook_owner(
+                service_binary, worker_binary, root / "generator.journal", token
+            )
             crash_marker = Path(root) / "generator-crashed-once"
 
             def generator_factory():
@@ -276,24 +299,32 @@ def main():
                 replacement, "managed-generator-restart"
             )["state"] == "completed"
 
+            stop_notebook_owner(service, worker, replacement)
+            service, worker, contact, replacement = start_notebook_owner(
+                service_binary, worker_binary, root / "cancel.journal", token
+            )
             cancel_session = WorkflowSession.create(
                 replacement, "fork-cancel", maximum_tasks=1, maximum_edges=0,
                 idempotency_key="fork-cancel-v1",
             )
             cancel_session.submit(sleep_return, 30.0, "never")
             child_deadline = time.monotonic() + 20
-            while len(python_descendants(worker.pid)) < 3:
+            while len(python_descendants(worker.pid)) < 2:
                 if time.monotonic() >= child_deadline:
                     raise AssertionError("fork child did not start before cancellation")
                 time.sleep(0.05)
             cancel_session.cancel()
             assert wait_terminal(replacement, "fork-cancel")["state"] == "cancelled"
             cleanup_deadline = time.monotonic() + 3
-            while len(python_descendants(worker.pid)) != 2:
+            while len(python_descendants(worker.pid)) != 1:
                 if time.monotonic() >= cleanup_deadline:
                     raise AssertionError(python_descendants(worker.pid))
                 time.sleep(0.05)
 
+            stop_notebook_owner(service, worker, replacement)
+            service, worker, contact, replacement = start_notebook_owner(
+                service_binary, worker_binary, root / "wall-time.journal", token
+            )
             timeout_session = WorkflowSession.create(
                 replacement, "fork-wall-time", maximum_tasks=1, maximum_edges=0,
                 idempotency_key="fork-wall-time-v1",
@@ -309,8 +340,12 @@ def main():
             else:
                 raise AssertionError("wall-time task unexpectedly succeeded")
             assert wait_terminal(replacement, "fork-wall-time")["state"] == "failed"
-            assert len(python_descendants(worker.pid)) == 2
+            assert len(python_descendants(worker.pid)) == 1
 
+            stop_notebook_owner(service, worker, replacement)
+            service, worker, contact, replacement = start_notebook_owner(
+                service_binary, worker_binary, root / "parallel.journal", token
+            )
             parallel_session = WorkflowSession.create(
                 replacement, "single-reactor-parallel", maximum_tasks=2,
                 maximum_edges=0, idempotency_key="single-reactor-parallel-v1",
@@ -344,14 +379,7 @@ def main():
             ] == "completed"
 
         finally:
-            if worker is not None and worker.poll() is None:
-                worker.send_signal(signal.SIGTERM)
-                worker.communicate(timeout=20)
-            if service.poll() is None:
-                service.send_signal(signal.SIGTERM)
-            stdout, stderr = service.communicate(timeout=20)
-            if service.returncode != 0:
-                raise AssertionError((service.returncode, stdout, stderr))
+            stop_notebook_owner(service, worker, replacement)
         profile_path = Path(root) / "journal.profile"
         assert profile_path.is_file()
         assert "dominant_stage=" in profile_path.read_text()

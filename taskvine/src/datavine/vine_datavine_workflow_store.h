@@ -180,17 +180,6 @@ int vine_datavine_workflow_store_finish(
 		struct vine_datavine_workflow_info *result,
 		struct vine_datavine_workflow_error *error);
 
-/* Result reads exist only to migrate journals written by the retired
- * payload-in-workflow-store implementation. New results belong exclusively
- * to vine_datavine_data_controller. */
-int vine_datavine_workflow_store_legacy_fetch_result(
-		struct vine_datavine_workflow_store *store,
-		const char *workflow_id, uint64_t data_id,
-		char **data, size_t *size);
-int vine_datavine_workflow_store_legacy_result_info(
-		struct vine_datavine_workflow_store *store,
-		const char *workflow_id, uint64_t data_id,
-		struct vine_datavine_workflow_result_info *result);
 int vine_datavine_workflow_store_record_task_events(
 		struct vine_datavine_workflow_store *store,
 		const char *workflow_id,

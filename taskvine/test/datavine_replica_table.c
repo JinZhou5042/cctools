@@ -18,7 +18,7 @@ struct observations {
 static void lost_data(uint64_t data_id, uint32_t generation, void *argument)
 {
 	struct observations *observations = argument;
-	assert(generation == 7 || generation == 9);
+	assert(generation == 3 || generation == 7 || generation == 9);
 	observations->lost[observations->lost_count++] = data_id;
 }
 
@@ -75,16 +75,16 @@ int main(void)
 	struct observations observations = {0};
 
 	uint32_t generation = 7;
-	assert(vine_datavine_replica_table_expect(table, 5000001, &generation, 0));
+	assert(vine_datavine_replica_table_expect(table, 5000001, &generation));
 	assert(generation == 7);
 	assert(vine_datavine_replica_table_wait(
 			table, 5000001, 0, 2, 202, 55, 3));
-	assert(vine_datavine_replica_table_publish(table, 5000001, 7, 4096, digest, 1, 101, 1001, 0, waiter_event, &observations));
+	assert(vine_datavine_replica_table_publish(table, 5000001, 7, 4096, digest, 1, 101, 1001, waiter_event, &observations));
 	assert(observations.woken_count == 1 && observations.woken[0] == 5000001);
 	/* Exact retransmission is idempotent; conflicting content is rejected. */
-	assert(vine_datavine_replica_table_publish(table, 5000001, 7, 4096, digest, 1, 101, 1001, 0, waiter_event, &observations));
-	assert(!vine_datavine_replica_table_publish(table, 5000001, 7, 4096, other, 1, 101, 1002, 0, waiter_event, &observations));
-	assert(vine_datavine_replica_table_publish(table, 5000001, 7, 4096, digest, 3, 303, 3001, 0, waiter_event, &observations));
+	assert(vine_datavine_replica_table_publish(table, 5000001, 7, 4096, digest, 1, 101, 1001, waiter_event, &observations));
+	assert(!vine_datavine_replica_table_publish(table, 5000001, 7, 4096, other, 1, 101, 1002, waiter_event, &observations));
+	assert(vine_datavine_replica_table_publish(table, 5000001, 7, 4096, digest, 3, 303, 3001, waiter_event, &observations));
 
 	struct vine_datavine_replica_view views[4];
 	size_t count = 0;
@@ -105,24 +105,67 @@ int main(void)
 	assert(vine_datavine_replica_table_resolve(table, 5000001, 7, views, 4, &count, &size, resolved_digest, &persisted) ==
 			VINE_DATAVINE_RESOLVE_PENDING);
 
+	/* A compact queued bit suppresses duplicate background admission.  Once
+	 * persisted, loss of the only Worker replica still resolves AVAILABLE with
+	 * zero Worker sources so the Controller fallback can be selected. */
+	generation = 3;
+	assert(vine_datavine_replica_table_expect(table, 6000001, &generation));
+	assert(vine_datavine_replica_table_publish(table, 6000001, 3, 8, digest,
+			2, 202, 6001, 0, 0));
+	assert(vine_datavine_replica_table_queue_backup(table, 6000001, 3) == 1);
+	assert(vine_datavine_replica_table_queue_backup(table, 6000001, 3) == 2);
+	assert(vine_datavine_replica_table_clear_backup(table, 6000001, 3));
+	assert(vine_datavine_replica_table_queue_backup(table, 6000001, 3) == 1);
+	assert(vine_datavine_replica_table_set_persisted(table, 6000001, 3));
+	assert(vine_datavine_replica_table_fault(table, 6000001, 3, 2, 202,
+			6001, lost_data, &observations));
+	count = 4;
+	persisted = 0;
+	assert(vine_datavine_replica_table_resolve(table, 6000001, 3, views, 4,
+			&count, &size, resolved_digest, &persisted) ==
+			VINE_DATAVINE_RESOLVE_AVAILABLE);
+	assert(count == 0 && persisted == 1 && size == 8);
+	assert(observations.lost_count == 1);
+	assert(vine_datavine_replica_table_mark_dead(
+			table, 6000001, 3, 0, 0, 0));
+
 	/* A stale session cannot publish after reconnect under a new epoch. */
 	assert(vine_datavine_replica_table_session_open(table, 1, 111));
-	assert(!vine_datavine_replica_table_publish(table, 7000001, 9, 1, digest, 1, 101, 7001, 0, 0, 0));
+	assert(!vine_datavine_replica_table_publish(table, 7000001, 9, 1, digest, 1, 101, 7001, 0, 0));
 	generation = 9;
-	assert(vine_datavine_replica_table_expect(table, 7000001, &generation, 0));
-	assert(vine_datavine_replica_table_publish(table, 7000001, 9, 1, digest, 1, 111, 7001, 0, 0, 0));
+	assert(vine_datavine_replica_table_expect(table, 7000001, &generation));
+	assert(vine_datavine_replica_table_publish(table, 7000001, 9, 1, digest, 1, 111, 7001, 0, 0));
 
 	generation = 7;
-	assert(vine_datavine_replica_table_expect(table, 42, &generation, 1));
-	assert(vine_datavine_replica_table_publish(table, 42, 7, 16, digest, 2, 202, 4200, 1, 0, 0));
+	assert(vine_datavine_replica_table_expect(table, 42, &generation));
+	assert(vine_datavine_replica_table_publish(table, 42, 7, 16, digest, 2, 202, 4200, 0, 0));
 	assert(vine_datavine_replica_table_set_persisted(table, 42, 7));
+
+	/* Controller restart keeps the durable catalog but deliberately rebuilds
+	 * the dense runtime directory lazily on the first resolve. */
+	unsigned char restored_digest[32];
+	memset(restored_digest, 0x5a, sizeof(restored_digest));
+	assert(vine_datavine_replica_table_restore_persisted(
+			table, 77, 9, 1234, restored_digest));
+	count = 0;
+	size = 0;
+	persisted = 0;
+	assert(vine_datavine_replica_table_resolve(table, 77, 9, views, 4,
+			&count, &size, digest, &persisted) ==
+			VINE_DATAVINE_RESOLVE_AVAILABLE);
+	assert(count == 0 && size == 1234 && persisted == 1);
+	assert(!memcmp(digest, restored_digest, sizeof(digest)));
+	assert(vine_datavine_replica_table_restore_persisted(
+			table, 77, 9, 1234, restored_digest));
+	assert(!vine_datavine_replica_table_restore_persisted(
+			table, 77, 10, 1234, restored_digest));
 	assert(vine_datavine_replica_table_wait(table, 42, 7, 2, 202, 55, 3));
 	assert(vine_datavine_replica_table_mark_dead(table, 42, 7, released_replica, cancelled_waiter, &observations));
 	assert(vine_datavine_replica_table_mark_dead(table, 42, 7, released_replica, cancelled_waiter, &observations));
 	assert(observations.released_count == 1 && observations.released[0] == 42);
 	assert(observations.cancelled == 1);
 	assert(vine_datavine_replica_table_resolve(table, 42, 7, views, 4, &count, 0, 0, 0) == VINE_DATAVINE_RESOLVE_DEAD);
-	assert(!vine_datavine_replica_table_publish(table, 42, 7, 16, digest, 2, 202, 4200, 1, 0, 0));
+	assert(!vine_datavine_replica_table_publish(table, 42, 7, 16, digest, 2, 202, 4200, 0, 0));
 	/* Batched publication is asynchronous with respect to task completion.
 	 * An exact generation retired in the meantime is a harmless tombstone. */
 	struct vine_datavine_publish_record late = {
@@ -141,16 +184,16 @@ int main(void)
 	/* One delayed old generation must not poison a valid publication sharing
 	 * the same Agent metadata batch. */
 	generation = 7;
-	assert(vine_datavine_replica_table_expect(table, 9000001, &generation, 0));
+	assert(vine_datavine_replica_table_expect(table, 9000001, &generation));
 	assert(vine_datavine_replica_table_publish(table, 9000001, 7, 64, digest,
-			2, 202, 9001, 0, 0, 0));
+			2, 202, 9001, 0, 0));
 	assert(vine_datavine_replica_table_mark_dead(
 			table, 9000001, 7, 0, 0, 0));
 	assert(vine_datavine_replica_table_set_recovery(table, 9000001, 0, 1));
 	generation = 8;
-	assert(vine_datavine_replica_table_expect(table, 9000001, &generation, 0));
+	assert(vine_datavine_replica_table_expect(table, 9000001, &generation));
 	generation = 1;
-	assert(vine_datavine_replica_table_expect(table, 9000002, &generation, 0));
+	assert(vine_datavine_replica_table_expect(table, 9000002, &generation));
 	struct vine_datavine_publish_record mixed[2] = {
 		{
 			.data_id = 9000001,
@@ -185,9 +228,9 @@ int main(void)
 	assert(vine_datavine_replica_table_stats(table, &stats));
 	uint64_t active_before_recovery = stats.active_data;
 	generation = 7;
-	assert(vine_datavine_replica_table_expect(table, 8000001, &generation, 0));
+	assert(vine_datavine_replica_table_expect(table, 8000001, &generation));
 	assert(vine_datavine_replica_table_publish(table, 8000001, 7, 32, digest,
-			2, 202, 8001, 0, 0, 0));
+			2, 202, 8001, 0, 0));
 	assert(vine_datavine_replica_table_mark_dead(
 			table, 8000001, 7, 0, 0, 0));
 	assert(vine_datavine_replica_table_set_recovery(table, 8000001, 0, 1));
@@ -201,10 +244,10 @@ int main(void)
 	assert(vine_datavine_replica_table_resolve(table, 8000001, 0, views, 4,
 			&count, 0, 0, 0) == VINE_DATAVINE_RESOLVE_PENDING);
 	generation = 8;
-	assert(vine_datavine_replica_table_expect(table, 8000001, &generation, 0));
+	assert(vine_datavine_replica_table_expect(table, 8000001, &generation));
 	assert(generation == 8);
 	assert(vine_datavine_replica_table_publish(table, 8000001, 8, 32, digest,
-			2, 202, 8002, 0, 0, 0));
+			2, 202, 8002, 0, 0));
 	assert(vine_datavine_replica_table_set_recovery(table, 8000001, 0, 0));
 	assert(vine_datavine_replica_table_mark_dead(
 			table, 8000001, 8, 0, 0, 0));

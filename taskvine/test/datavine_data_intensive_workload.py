@@ -21,8 +21,13 @@ def main():
         stage_source,
     )
     from generate_data_intensive_dataset import (  # pylint: disable=import-outside-toplevel
+        allocated_bytes,
+        allocation_reports_sparse,
         content,
         write_source,
+    )
+    from compare_data_intensive_runs import (  # pylint: disable=import-outside-toplevel
+        gates_pass,
     )
 
     full = Workload()
@@ -49,6 +54,21 @@ def main():
     assert sizes["c_outputs"] == 68_719_476_736, sizes
     assert sizes["stored_artifacts"] == 1_143_350_493_184, sizes
     assert sizes["stored_artifacts"] < sizes["limit"]
+
+    class AllocationStat:
+        def __init__(self, size, blocks):
+            self.st_size = size
+            self.st_blocks = blocks
+
+    nfs_small = AllocationStat(64, 0)
+    assert allocated_bytes(nfs_small) == 64
+    assert not allocation_reports_sparse(nfs_small)
+    local_materialized = AllocationStat(4096, 8)
+    assert allocated_bytes(local_materialized) == 4096
+    assert not allocation_reports_sparse(local_materialized)
+    local_sparse = AllocationStat(1 << 20, 8)
+    assert allocated_bytes(local_sparse) == 4096
+    assert allocation_reports_sparse(local_sparse)
 
     campaign = subprocess.run(
         (
@@ -199,6 +219,32 @@ def main():
     assert '"no_removed_workers"' not in comparator
     assert '"worker resource contract mismatch"' in comparator
     assert 'required_active_fraction = 0.90' in taskvine_runner
+    ordinary = {
+        "gates": {"dataset_manifest": True},
+        "gate_evaluation": {
+            "profile": "ordinary",
+            "applicable": {
+                name: True for name in (
+                    "dataset_manifest", "exact_logical_counts",
+                    "exact_physical_counts", "worker_churn_recovered",
+                    "exact_worker_pool", "sampled_outputs",
+                    "all_outputs_worker_local",
+                    "durable_outputs_only_requested",
+                    "manager_output_payload_bypass", "central_window_observed",
+                    "ready_parallelism", "active_parallelism",
+                )
+            },
+            "excluded": [
+                "exact_sharedfs_source_bytes",
+                "data_path_is_runtime_bottleneck",
+                "gc_pressure_accounted",
+            ],
+        },
+    }
+    assert gates_pass(ordinary, "datavine", allow_pilot=True)
+    assert not gates_pass(ordinary, "datavine", allow_pilot=False)
+    ordinary["gate_evaluation"]["excluded"].append("exact_worker_pool")
+    assert not gates_pass(ordinary, "datavine", allow_pilot=True)
 
     # One smallest cohort has exactly the same regular graph invariants.
     small = Workload(cohorts=1, scale=1, size_profile="tiny")

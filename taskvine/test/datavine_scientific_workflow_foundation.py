@@ -12,12 +12,18 @@ import tempfile
 def run(command, *, environment=None):
     completed = subprocess.run(
         tuple(str(item) for item in command),
-        check=True,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=environment,
     )
+    if completed.returncode:
+        raise RuntimeError({
+            "command": tuple(str(item) for item in command),
+            "returncode": completed.returncode,
+            "stdout": completed.stdout[-8000:],
+            "stderr": completed.stderr[-8000:],
+        })
     return completed.stdout
 
 

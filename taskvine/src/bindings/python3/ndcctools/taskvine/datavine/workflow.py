@@ -41,6 +41,7 @@ class Workflow:
         streaming=False,
         maximum_tasks=100_000,
         maximum_edges=1_000_000,
+        idata_backup="controller-background",
         metadata=None,
     ):
         if not str(idempotency_key):
@@ -50,6 +51,11 @@ class Workflow:
         self.streaming = bool(streaming)
         self.maximum_tasks = int(maximum_tasks)
         self.maximum_edges = int(maximum_edges)
+        if idata_backup not in ("worker-local", "controller-background"):
+            raise ValueError(
+                "idata_backup must be 'worker-local' or 'controller-background'"
+            )
+        self.idata_backup = idata_backup
         self.metadata = dict(metadata or {})
         self._tasks = []
         self._data = []
@@ -78,6 +84,8 @@ class Workflow:
             "object_put_bytes": 0,
             "object_put_wall_nanoseconds": 0,
             "object_put_parallelism": 0,
+            "inline_invocation_records": 0,
+            "inline_invocation_bytes": 0,
         }
 
     def _data_ref(self, codec, origin, content_sha256=None):
@@ -432,6 +440,7 @@ class Workflow:
             "policy": {
                 "maximum_tasks": self.maximum_tasks,
                 "maximum_edges": self.maximum_edges,
+                "idata_backup": self.idata_backup,
             },
         }
         if self.workflow_id is not None:
@@ -505,6 +514,14 @@ class Workflow:
                 "runtime does not support executor kinds "
                 f"{sorted(missing)}; no workflow mutation was attempted"
             )
+        if (
+            self.idata_backup != "worker-local"
+            and self.idata_backup not in capabilities.get("idata_backup_modes", ())
+        ):
+            raise RuntimeError(
+                f"runtime does not support idata_backup={self.idata_backup!r}; "
+                "no workflow mutation was attempted"
+            )
         return capabilities
 
     def _externalize(self, client, data_start, capabilities):
@@ -520,12 +537,24 @@ class Workflow:
             for task in self._tasks
             if task["executor"]["kind"] == "taskvine"
         }
+        inline_invocation_max = int(
+            capabilities.get("inline_invocation_max_bytes", 0)
+        )
         pending = {}
         for record in self._data[data_start:]:
             origin = record["origin"]
             if origin["kind"] != "inline" or record["data_id"] in builtin_payloads:
                 continue
             payload = base64.b64decode(origin["base64"], validate=True)
+            codec = record.get("codec", {})
+            if (
+                codec.get("name") == "python/invocation"
+                and codec.get("version") == "1"
+                and 0 < len(payload) <= inline_invocation_max
+            ):
+                self._profile["inline_invocation_records"] += 1
+                self._profile["inline_invocation_bytes"] += len(payload)
+                continue
             hash_started = time.perf_counter_ns()
             digest = hashlib.sha256(payload).hexdigest()
             self._profile["object_hash_nanoseconds"] += (

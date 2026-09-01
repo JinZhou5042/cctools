@@ -21,6 +21,14 @@ See the file COPYING for details.
 #include <sys/wait.h>
 #include <unistd.h>
 
+#if defined(CCTOOLS_OPSYS_DARWIN)
+/* no parent-death syscall */
+#elif defined(CCTOOLS_OPSYS_FREEBSD)
+#include <sys/procctl.h>
+#else
+#include <sys/prctl.h>
+#endif
+
 /* The initial timeout to wait for a command is short, to avoid unnecessary hangs */
 static int command_timeout = 5;
 
@@ -45,6 +53,7 @@ static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
 	char filename[VINE_LINE_MAX];
 
 	change_process_title("vine_worker [transfer]");
+	link_tune(lnk, LINK_TUNE_INTERACTIVE);
 
 	if (options->password) {
 		if (!link_auth_password(lnk, options->password, time(0) + command_timeout)) {
@@ -53,17 +62,20 @@ static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
 		}
 	}
 
-	if (link_readline(lnk, line, sizeof(line), time(0) + command_timeout)) {
+	while (link_readline(lnk, line, sizeof(line), time(0) + command_timeout)) {
 		if (sscanf(line, "get %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			vine_transfer_put_any(lnk, cache, filename, VINE_TRANSFER_MODE_ANY, time(0) + transfer_timeout);
+			if (!vine_transfer_put_any(lnk, cache, filename,
+					VINE_TRANSFER_MODE_ANY, time(0) + transfer_timeout))
+				return;
 		} else {
 			debug(D_VINE, "invalid peer transfer message: %s\n", line);
+			return;
 		}
 	}
 }
 
-static void vine_transfer_process(struct vine_cache *cache)
+static void vine_transfer_process(struct vine_cache *cache, pid_t worker_pid)
 {
 	static int child_count = 0;
 
@@ -75,6 +87,8 @@ static void vine_transfer_process(struct vine_cache *cache)
 	5. lnk should be closed in the parent process to prevent file descriptor exhaustion.
 	*/
 	while (1) {
+		if (getppid() != worker_pid)
+			return;
 		/* Do a non-blocking wait for any exited children. */
 		while (waitpid(-1, NULL, WNOHANG) > 0) {
 			child_count--;
@@ -114,7 +128,8 @@ static void vine_transfer_process(struct vine_cache *cache)
 	}
 }
 
-int vine_transfer_server_start(struct vine_cache *cache, int port_min, int port_max)
+int vine_transfer_server_start(struct vine_cache *cache, struct link *manager,
+		int port_min, int port_max)
 {
 	transfer_link = link_serve_range(port_min, port_max);
 
@@ -124,9 +139,28 @@ int vine_transfer_server_start(struct vine_cache *cache, int port_min, int port_
 
 	transfer_server_pid = fork();
 	if (transfer_server_pid == 0) {
-		// consider closing additional resources here?
+		pid_t worker_pid = getppid();
+		/* Do not survive an abruptly killed Worker. Normal shutdown already
+		 * stops this process, while the parent-death signal closes the crash
+		 * and test-timeout path that otherwise leaves an orphan listener. */
+#if defined(CCTOOLS_OPSYS_DARWIN)
+		/* The accept loop also checks parent identity at bounded intervals. */
+#elif defined(CCTOOLS_OPSYS_FREEBSD)
+		const int signal = SIGKILL;
+		procctl(P_PID, 0, PROC_PDEATHSIG_CTL, (void *)&signal);
+#else
+		/* The fork inherited the Worker's graceful signal handler, but this
+		 * child never polls the Worker abort flag. SIGKILL is intentional. */
+		prctl(PR_SET_PDEATHSIG, SIGKILL);
+#endif
+		if (getppid() != worker_pid)
+			_exit(0);
+		/* The server is a separate lifetime domain. It must not keep the
+		 * Worker's Manager connection alive after the Worker dies. */
+		if (manager)
+			link_close(manager);
 		change_process_title("vine_worker [transfer server]");
-		vine_transfer_process(cache);
+		vine_transfer_process(cache, worker_pid);
 		_exit(0);
 	} else if (transfer_server_pid > 0) {
 		char addr[LINK_ADDRESS_MAX];

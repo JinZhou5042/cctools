@@ -8,7 +8,7 @@ case "${1:-run}" in
 		make -C "$(dirname "$0")/../src" install
 		;;
 	run)
-		python "$(dirname "$0")/datavine_data_plane_v2.py"
+		python "$(dirname "$0")/datavine_background_backup.py"
 		;;
 	clean)
 		;;

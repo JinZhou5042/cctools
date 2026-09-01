@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproducible local stage-profile experiment for DataVine data-plane v2."""
+"""Reproducible local stage-profile experiment for the production data plane."""
 
 import argparse
 import json
@@ -96,7 +96,11 @@ def main():
                 info = wait_terminal(client, workflow_id)
                 wall_seconds = time.monotonic() - started
                 if info["state"] != "completed":
-                    raise RuntimeError(info)
+                    raise RuntimeError({
+                        "workflow": info,
+                        "service_log_tail": service_log_path.read_text().splitlines()[-40:],
+                        "worker_log_tail": worker_log_path.read_text().splitlines()[-40:],
+                    })
                 client.close()
                 client_profile = workflow.profile()
             finally:

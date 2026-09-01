@@ -106,6 +106,11 @@ struct vine_worker_info {
 
 	int incoming_xfer_counter;
 	int outgoing_xfer_counter;
+
+	/* Optional dense availability-index identity. */
+	uint32_t worker_pool_slot;
+	uint32_t worker_pool_generation;
+	int worker_pool_slot_valid;
 };
 
 struct vine_worker_info *vine_worker_create(struct link *lnk);

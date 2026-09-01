@@ -173,12 +173,19 @@ def main():
             client.seal_workflow(workflow_id, 3)
             wait_state(client, workflow_id, {"completed"}, 3)
             assert client.fetch_workflow_result(workflow_id, 3) == b"50"
-            event_types = [
-                event["type"] for event in client.watch_workflow(workflow_id)
-            ]
+            events = client.watch_workflow(workflow_id)
+            event_types = [event["type"] for event in events]
             assert event_types.count("quiescent") >= 3, event_types
             assert event_types.count("resumed") == 2, event_types
             assert "recovered" in event_types, event_types
+            submitted = [
+                event.get("task_id")
+                for event in events
+                if event["type"] == "task_submitted"
+            ]
+            assert submitted.count(1) == 1, submitted
+            assert submitted.count(2) == 1, submitted
+            assert submitted.count(3) == 1, submitted
         finally:
             if worker is not None and worker.poll() is None:
                 worker.send_signal(signal.SIGTERM)
@@ -194,7 +201,7 @@ def main():
     print(
         "DataVine dynamic workflow PASS result-driven=7->49->50 "
         "runtime-delta=2 quiescent=3 resumed=2 runtime-crash-recovery=1 "
-        "seal=completed"
+        "durable-rehydrate=1 producer-replay=0 seal=completed"
     )
 
 

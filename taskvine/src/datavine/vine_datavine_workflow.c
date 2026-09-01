@@ -692,15 +692,21 @@ static int validate_document(struct validation *v, struct jx *root,
 	v->maximum_edges = WORKFLOW_MAX_EDGES;
 	struct jx *policy = jx_lookup(root, "policy");
 	if (policy) {
-		static const char *const policy_keys[] = {"maximum_tasks", "maximum_edges", 0};
+		static const char *const policy_keys[] = {"maximum_tasks", "maximum_edges", "idata_backup", 0};
 		if (!allowed_keys(v, policy, "$.policy", policy_keys))
 			return 0;
 		struct jx *maximum_tasks = jx_lookup(policy, "maximum_tasks");
 		struct jx *maximum_edges = jx_lookup(policy, "maximum_edges");
+		struct jx *idata_backup = jx_lookup(policy, "idata_backup");
 		if (maximum_tasks && (!jx_istype(maximum_tasks, JX_INTEGER) || maximum_tasks->u.integer_value < 1))
 			return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, "$.policy.maximum_tasks", "invalid maximum_tasks");
 		if (maximum_edges && (!jx_istype(maximum_edges, JX_INTEGER) || maximum_edges->u.integer_value < 0))
 			return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, "$.policy.maximum_edges", "invalid maximum_edges");
+		if (idata_backup && (!jx_istype(idata_backup, JX_STRING) ||
+				(strcmp(idata_backup->u.string_value, "worker-local") &&
+				 strcmp(idata_backup->u.string_value, "controller-background"))))
+			return fail(v, VINE_DATAVINE_WORKFLOW_VALUE,
+					"$.policy.idata_backup", "invalid idata_backup");
 		if (maximum_tasks)
 			v->maximum_tasks = (uint64_t)maximum_tasks->u.integer_value;
 		if (maximum_edges)

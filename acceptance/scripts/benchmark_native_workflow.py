@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -13,8 +14,25 @@ import tempfile
 import time
 import hashlib
 import re
+import shutil
 
-from ndcctools.taskvine.datavine.workflow_client import WorkflowClient
+
+def load_workflow_client():
+    """Load the client that belongs to this checkout, without an install step."""
+    repository = Path(__file__).resolve().parents[2]
+    source = (
+        repository / "taskvine/src/bindings/python3/ndcctools/taskvine/datavine"
+        / "workflow_client.py"
+    )
+    spec = importlib.util.spec_from_file_location("datavine_workflow_client", source)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load DataVine workflow client from {source}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.WorkflowClient
+
+
+WorkflowClient = load_workflow_client()
 
 
 PHYSICAL_COUNTS = re.compile(
@@ -37,7 +55,13 @@ def physical_task_counts(service_log_path, workflow_id):
 
 
 def native_runtime_metrics(service_log_path, workflow_id):
-    for line in reversed(service_log_path.read_text().splitlines()):
+    lines = service_log_path.read_text().splitlines()
+    persistence_fields = {}
+    for line in reversed(lines):
+        if f"datavine controller_persistence {workflow_id} " in line:
+            persistence_fields = dict(re.findall(r"([a-z_]+)=([^ ]+)", line))
+            break
+    for line in reversed(lines):
         if f"datavine workflow {workflow_id} " not in line:
             continue
         fields = dict(re.findall(r"([a-z_]+)=([^ ]+)", line))
@@ -47,14 +71,64 @@ def native_runtime_metrics(service_log_path, workflow_id):
             "manager_owner_queue_seconds",
             "manager_owner_execute_seconds",
             "manager_submission_frontier",
+            "manager_time_send_us",
+            "manager_time_receive_us",
+            "manager_time_send_good_us",
+            "manager_time_receive_good_us",
+            "manager_time_internal_us",
+            "manager_time_polling_us",
+            "manager_time_status_us",
+            "manager_time_application_us",
+            "manager_time_scheduling_us",
+            "completion_processing_seconds",
+            "logical_transition_seconds",
+            "completion_event_seconds",
+            "checkpoint_seconds",
             "scheduler_delay_seconds",
         )
         if all(key in fields for key in required):
-            return {
+            metrics = {
                 key: int(fields[key]) if key == "manager_submission_frontier"
                 else float(fields[key])
                 for key in required
             }
+            persistence_required = (
+                "agent_persistence_jobs",
+                "agent_persistence_bytes",
+                "agent_persistence_failures",
+                "agent_persistence_retries",
+                "agent_persistence_peak_queue_depth",
+                "agent_persistence_enqueue_block_seconds",
+                "agent_persistence_queue_wait_seconds",
+                "agent_persistence_connection_wait_seconds",
+                "agent_persistence_request_seconds",
+                "agent_persistence_stream_seconds",
+                "agent_persistence_fsync_seconds",
+                "agent_persistence_close_seconds",
+                "agent_persistence_rename_seconds",
+                "agent_persistence_verify_seconds",
+                "agent_persistence_commit_wait_seconds",
+                "agent_persistence_commit_seconds",
+                "agent_persistence_commit_groups",
+            )
+            if not all(key in persistence_fields for key in persistence_required):
+                raise RuntimeError(
+                    "native runtime did not report Controller persistence metrics"
+                )
+            integer_metrics = {
+                "agent_persistence_jobs",
+                "agent_persistence_bytes",
+                "agent_persistence_failures",
+                "agent_persistence_retries",
+                "agent_persistence_peak_queue_depth",
+                "agent_persistence_commit_groups",
+            }
+            metrics.update({
+                key: int(persistence_fields[key]) if key in integer_metrics
+                else float(persistence_fields[key])
+                for key in persistence_required
+            })
+            return metrics
     raise RuntimeError("native runtime did not report service metrics")
 
 
@@ -67,7 +141,7 @@ def process_tree(root_pids):
             try:
                 fields = stat.read_text().split(") ", 1)[1].split()
                 pid, parent = int(stat.parent.name), int(fields[1])
-            except (FileNotFoundError, IndexError, ValueError):
+            except (OSError, IndexError, ValueError):
                 continue
             if parent in pids and pid not in pids:
                 pids.add(pid)
@@ -83,9 +157,48 @@ def sample(root_pids):
             status = Path(f"/proc/{pid}/status").read_text().splitlines()
             rss += int(next(line for line in status if line.startswith("VmRSS:" )).split()[1]) * 1024
             fds += len(list(Path(f"/proc/{pid}/fd").iterdir()))
-        except (FileNotFoundError, StopIteration):
+        except (OSError, StopIteration):
             continue
     return {"processes": len(pids), "rss_bytes": rss, "fds": fds}
+
+
+def process_counters(pid):
+    result = {"cpu_seconds": 0.0, "read_bytes": 0, "write_bytes": 0}
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()
+        ticks = os.sysconf("SC_CLK_TCK")
+        result["cpu_seconds"] = (int(fields[11]) + int(fields[12])) / ticks
+    except (OSError, IndexError, ValueError):
+        pass
+    try:
+        values = dict(
+            line.split(":", 1) for line in
+            Path(f"/proc/{pid}/io").read_text().splitlines()
+        )
+        result["read_bytes"] = int(values.get("read_bytes", 0))
+        result["write_bytes"] = int(values.get("write_bytes", 0))
+    except (OSError, ValueError):
+        pass
+    return result
+
+
+def interface_counters(interface):
+    if not interface:
+        return {"receive_bytes": 0, "transmit_bytes": 0}
+    fields = Path("/proc/net/dev").read_text().splitlines()
+    for line in fields:
+        name, separator, counters = line.partition(":")
+        if separator and name.strip() == interface:
+            values = counters.split()
+            return {
+                "receive_bytes": int(values[0]),
+                "transmit_bytes": int(values[8]),
+            }
+    raise RuntimeError(f"network interface not found: {interface}")
+
+
+def counter_delta(before, after):
+    return {key: after[key] - before[key] for key in before}
 
 
 def worker_inventory(vine_status, port):
@@ -129,7 +242,42 @@ def wait_workers(vine_status, port, workers, cores, factory, timeout):
     raise TimeoutError(f"did not observe exactly {workers} x {cores} Workers")
 
 
-def workflow_document(tasks, executor, command_argv, request_result):
+def layered_inputs(task_id, tasks, width):
+    """Two deterministic parents in the previous wide layer."""
+    layer, offset = divmod(task_id - 1, width)
+    if layer == 0:
+        return []
+    previous_first = (layer - 1) * width + 1
+    previous_count = min(width, tasks - previous_first + 1)
+    first = previous_first + offset % previous_count
+    second_offset = (offset * 8191 + layer * 131) % previous_count
+    second = previous_first + second_offset
+    if previous_count > 1 and second == first:
+        second = previous_first + (second_offset + 1) % previous_count
+    return [first] if second == first else [first, second]
+
+
+def dependency_inputs(task_id, tasks, mode, width):
+    return [] if mode == "independent" else layered_inputs(task_id, tasks, width)
+
+
+def dependency_edges(tasks, mode, width):
+    if mode == "independent" or tasks <= width:
+        return 0
+    return 2 * (tasks - width)
+
+
+def command_executor(command_argv, output_name):
+    record = {"kind": "command", "version": "1", "argv": command_argv}
+    if output_name:
+        record["output_files"] = [output_name]
+    return record
+
+
+def workflow_document(tasks, executor, command_argv, command_output_name,
+                      request_result,
+                      request_all_outputs=False, dependency_mode="independent",
+                      dag_width=16384):
     records = []
     data = []
     if executor == "builtin":
@@ -138,9 +286,10 @@ def workflow_document(tasks, executor, command_argv, request_result):
         executor_record = (
             {"kind": "taskvine", "version": "builtin-v1", "payload_ref": payload_id}
             if executor == "builtin"
-            else {"kind": "command", "version": "1", "argv": command_argv}
+            else command_executor(command_argv, command_output_name)
         )
-        records.append([ordinal, [], [ordinal]])
+        records.append([ordinal, dependency_inputs(
+            ordinal, tasks, dependency_mode, dag_width), [ordinal]])
         data.append([ordinal, ordinal, 0])
     if executor == "builtin":
         data.append({
@@ -153,7 +302,7 @@ def workflow_document(tasks, executor, command_argv, request_result):
         })
     return {
         "schema": "datavine.workflow/v1",
-        "workflow_id": f"native-scale-{executor}-{tasks}",
+        "workflow_id": f"native-scale-{executor}-{dependency_mode}-{tasks}",
         "idempotency_key": (
             f"native-scale-{executor}-{tasks}-"
             f"{hashlib.sha256(json.dumps(command_argv).encode()).hexdigest()[:12]}"
@@ -163,12 +312,17 @@ def workflow_document(tasks, executor, command_argv, request_result):
         "data_defaults": {"codec": {"name": "bytes", "version": "1"}},
         "tasks": records,
         "data": data,
-        "requested_outputs": [tasks] if request_result else [],
-        "policy": {"maximum_tasks": tasks, "maximum_edges": 0},
+        "requested_outputs": (
+            list(range(1, tasks + 1)) if request_all_outputs
+            else [tasks] if request_result else []
+        ),
+        "policy": {"maximum_tasks": tasks, "maximum_edges": dependency_edges(
+            tasks, dependency_mode, dag_width)},
     }
 
 
-def streaming_initial(tasks, executor, command_argv):
+def streaming_initial(tasks, executor, command_argv, command_output_name,
+                      dependency_mode="independent", dag_width=16384):
     data = []
     if executor == "builtin":
         data.append({
@@ -181,7 +335,7 @@ def streaming_initial(tasks, executor, command_argv):
         })
     return {
         "schema": "datavine.workflow/v1",
-        "workflow_id": f"native-scale-{executor}-{tasks}",
+        "workflow_id": f"native-scale-{executor}-{dependency_mode}-{tasks}",
         "idempotency_key": (
             f"native-scale-{executor}-{tasks}-streaming-"
             f"{hashlib.sha256(json.dumps(command_argv).encode()).hexdigest()[:12]}"
@@ -190,24 +344,30 @@ def streaming_initial(tasks, executor, command_argv):
         "tasks": [],
         "data": data,
         "requested_outputs": [],
-        "policy": {"maximum_tasks": tasks, "maximum_edges": 0},
+        "policy": {"maximum_tasks": tasks, "maximum_edges": dependency_edges(
+            tasks, dependency_mode, dag_width)},
     }
 
 
 def workflow_delta(
-    initial, start, stop, tasks, executor, command_argv, request_result
+    initial, start, stop, tasks, executor, command_argv, command_output_name,
+    request_result,
+    request_all_outputs=False, dependency_mode="independent", dag_width=16384,
 ):
     records = []
     data = []
+    requested_ids = []
     for ordinal in range(start, stop):
         output_id = ordinal + 1 if executor == "builtin" else ordinal
         executor_record = (
             {"kind": "taskvine", "version": "builtin-v1", "payload_ref": 1}
             if executor == "builtin"
-            else {"kind": "command", "version": "1", "argv": command_argv}
+            else command_executor(command_argv, command_output_name)
         )
-        records.append([ordinal, [], [output_id]])
+        records.append([ordinal, dependency_inputs(
+            ordinal, tasks, dependency_mode, dag_width), [output_id]])
         data.append([output_id, ordinal, 0])
+        requested_ids.append(output_id)
     final_output = tasks + 1 if executor == "builtin" else tasks
     return {
         "schema": "datavine.workflow-delta/v1",
@@ -218,7 +378,8 @@ def workflow_delta(
         "tasks": records,
         "data": data,
         "requested_outputs": (
-            [final_output] if request_result and stop > tasks else []
+            requested_ids if request_all_outputs
+            else [final_output] if request_result and stop > tasks else []
         ),
     }
 
@@ -258,9 +419,18 @@ def main():
         help="JSON argv used by every command task",
     )
     parser.add_argument(
+        "--command-output-name",
+        help="declare the single sandbox file produced by every command task",
+    )
+    parser.add_argument(
         "--expected-result-base64",
         default="",
         help="exact requested output expected from the command",
+    )
+    parser.add_argument(
+        "--expected-result-file",
+        type=Path,
+        help="file containing the exact expected command output",
     )
     parser.add_argument(
         "--no-requested-output",
@@ -271,10 +441,21 @@ def main():
         ),
     )
     parser.add_argument(
-        "--scheduling-mode",
-        choices=("baseline", "worker-first"),
-        default="baseline",
-        help="physical TaskVine scheduling path used by the native runtime",
+        "--request-all-outputs",
+        action="store_true",
+        help="retain every task output as a durable Controller result",
+    )
+    parser.add_argument(
+        "--dependency-mode", choices=("independent", "layered"),
+        default="independent",
+    )
+    parser.add_argument(
+        "--dag-width", type=int, default=16384,
+        help="ready-task width for the deterministic layered DAG",
+    )
+    parser.add_argument(
+        "--journal-parent", type=Path,
+        help="create the temporary Controller journal/data tree under this filesystem",
     )
     parser.add_argument("--minimum-runtime-tasks-per-second", type=float, default=0)
     parser.add_argument("--worker-timeout", type=float, default=300)
@@ -289,20 +470,40 @@ def main():
         "--poncho-env",
         help="run factory workers inside this packed environment",
     )
+    parser.add_argument(
+        "--metrics-interface",
+        help="record host network-byte deltas for this interface",
+    )
+    parser.add_argument(
+        "--persistence-diagnostics",
+        action="store_true",
+        help="enable detailed requested-output timing counters",
+    )
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     if min(args.tasks, args.workers, args.cores, args.memory, args.disk,
-           args.chunk_tasks) < 1:
+           args.chunk_tasks, args.dag_width) < 1:
         parser.error("task and worker resource arguments must be positive")
     if args.gpus < 0:
         parser.error("GPUs per worker cannot be negative")
+    if args.no_requested_output and args.request_all_outputs:
+        parser.error("requested-output options are mutually exclusive")
     try:
         command_argv = json.loads(args.command_argv_json)
     except json.JSONDecodeError as error:
         parser.error(f"invalid --command-argv-json: {error}")
     if not isinstance(command_argv, list) or not command_argv:
         parser.error("--command-argv-json must be a non-empty JSON array")
-    expected_result = base64.b64decode(args.expected_result_base64, validate=True)
+    if args.expected_result_file and args.expected_result_base64:
+        parser.error("expected-result options are mutually exclusive")
+    try:
+        expected_result = (
+            args.expected_result_file.read_bytes()
+            if args.expected_result_file
+            else base64.b64decode(args.expected_result_base64, validate=True)
+        )
+    except OSError as error:
+        parser.error(f"cannot read expected result: {error}")
 
     repository = Path(__file__).resolve().parents[2]
     service_binary = repository / "taskvine/src/tools/datavine_workflow"
@@ -312,7 +513,14 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="datavine-native-scale-") as root_name:
         root = Path(root_name)
-        journal = root / "journal"
+        journal_state = None
+        if args.journal_parent:
+            args.journal_parent.resolve().mkdir(parents=True, exist_ok=True)
+            journal_state = Path(tempfile.mkdtemp(
+                prefix="datavine-shared-state-",
+                dir=args.journal_parent.resolve(),
+            ))
+        journal = (journal_state or root) / "journal"
         service_log_path = Path(f"{output}.service.log")
         service_log = service_log_path.open("w")
         factory_log = (Path(f"{output}.factory.log")).open("w")
@@ -321,10 +529,8 @@ def main():
             DATAVINE_WORKFLOW_METRICS="1",
             DATAVINE_RUNTIME_INFO_PATH=str(root / "run-info"),
         )
-        if args.scheduling_mode == "worker-first":
-            service_environment["DATAVINE_WORKER_FIRST_SCHEDULING"] = "1"
-        else:
-            service_environment.pop("DATAVINE_WORKER_FIRST_SCHEDULING", None)
+        if args.persistence_diagnostics:
+            service_environment["DATAVINE_PERSISTENCE_DIAGNOSTICS"] = "1"
         service = subprocess.Popen(
             (str(service_binary), "serve", str(journal), token),
             stdout=subprocess.PIPE,
@@ -340,7 +546,8 @@ def main():
                 "localhost" if args.batch_type == "local" else socket.getfqdn()
             )
             factory_command = (
-                "vine_factory", "--batch-type", args.batch_type,
+                str(repository / "batch_job/src/vine_factory"),
+                "--batch-type", args.batch_type,
                 "--min-workers", str(args.workers),
                 "--max-workers", str(args.workers), "--workers-per-cycle", str(args.workers),
                 "--factory-period", "1", "--factory-timeout", str(round(args.workflow_timeout + 120)),
@@ -377,10 +584,18 @@ def main():
                     args.tasks,
                     args.executor,
                     command_argv,
+                    args.command_output_name,
                     not args.no_requested_output,
+                    args.request_all_outputs,
+                    args.dependency_mode,
+                    args.dag_width,
                 )
                 if args.registration == "sealed"
-                else streaming_initial(args.tasks, args.executor, command_argv)
+                else streaming_initial(
+                    args.tasks, args.executor, command_argv,
+                    args.command_output_name,
+                    args.dependency_mode, args.dag_width,
+                )
             )
             build_seconds = time.monotonic() - build_started
             initial_payload_bytes = len(json.dumps(
@@ -391,6 +606,8 @@ def main():
             ).encode())
             client = WorkflowClient(contact["endpoint"], token)
             started = time.monotonic()
+            process_before = process_counters(service.pid)
+            network_before = interface_counters(args.metrics_interface)
             initial_submit_started = time.monotonic()
             submitted = client.submit_workflow(document)
             initial_submit_seconds = time.monotonic() - initial_submit_started
@@ -412,7 +629,11 @@ def main():
                         args.tasks,
                         args.executor,
                         command_argv,
+                        args.command_output_name,
                         not args.no_requested_output,
+                        args.request_all_outputs,
+                        args.dependency_mode,
+                        args.dag_width,
                     )
                     delta_build_seconds += time.monotonic() - delta_started
                     encode_started = time.monotonic()
@@ -454,6 +675,8 @@ def main():
                 time.sleep(0.25)
             elapsed = time.monotonic() - started
             run_seconds = time.monotonic() - submitted_at
+            process_after = process_counters(service.pid)
+            network_after = interface_counters(args.metrics_interface)
             result = b""
             if not args.no_requested_output:
                 result_data_id = (
@@ -484,6 +707,26 @@ def main():
                     "task identity violation: expected one physical TaskVine "
                     f"execution per logical task, got {physical_tasks}"
                 )
+            durable_root = Path(f"{journal}.data")
+            durable_file_count = 0
+            durable_file_bytes = 0
+            if durable_root.exists():
+                for directory, _, names in os.walk(durable_root):
+                    for name in names:
+                        path = Path(directory) / name
+                        durable_file_count += 1
+                        durable_file_bytes += path.stat().st_size
+            expected_durable_files = (
+                args.tasks if args.request_all_outputs
+                else 0 if args.no_requested_output else 1
+            )
+            if (durable_file_count != expected_durable_files or
+                    durable_file_bytes != len(expected_result) * expected_durable_files):
+                raise RuntimeError({
+                    "durable_file_count": durable_file_count,
+                    "expected_durable_files": expected_durable_files,
+                    "durable_file_bytes": durable_file_bytes,
+                })
             runtime_rate = args.tasks / elapsed
             if runtime_rate < args.minimum_runtime_tasks_per_second:
                 raise RuntimeError(
@@ -495,6 +738,9 @@ def main():
                 "architecture": "native-c-single-workflow-reactor",
                 "executor": args.executor,
                 "command_argv": command_argv if args.executor == "command" else None,
+                "command_output_name": (
+                    args.command_output_name if args.executor == "command" else None
+                ),
                 "tasks": args.tasks,
                 "physical_tasks": physical_tasks,
                 "workers": args.workers,
@@ -504,8 +750,16 @@ def main():
                 "gpus_per_worker": args.gpus,
                 "batch_type": args.batch_type,
                 "registration": args.registration,
-                "scheduling_mode": args.scheduling_mode,
+                "scheduling_mode": "worker-first",
+                "dependency_mode": args.dependency_mode,
+                "dag_width": args.dag_width,
+                "dependency_edges": dependency_edges(
+                    args.tasks, args.dependency_mode, args.dag_width),
                 "requested_output": not args.no_requested_output,
+                "requested_outputs": (
+                    args.tasks if args.request_all_outputs
+                    else 0 if args.no_requested_output else 1
+                ),
                 "worker_inventory": len(inventory),
                 "worker_wait_seconds": worker_wait,
                 "workflow_build_seconds": build_seconds,
@@ -538,10 +792,17 @@ def main():
                 "workflow": state,
                 "submitted": submitted,
                 "exact_result_bytes": len(result),
+                "journal_filesystem_root": str(journal_state or root),
+                "durable_file_count": durable_file_count,
+                "durable_file_bytes": durable_file_bytes,
                 "peak": peak,
-                "journal_bytes": sum(
-                    path.stat().st_size for path in root.glob("journal*")
-                ),
+                "system_metrics": {
+                    "service": counter_delta(process_before, process_after),
+                    "network_interface": args.metrics_interface,
+                    "network": counter_delta(network_before, network_after),
+                },
+                "persistence_diagnostics": args.persistence_diagnostics,
+                "journal_bytes": journal.stat().st_size,
                 "factory_command": list(factory_command),
             }
             output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
@@ -552,6 +813,8 @@ def main():
             terminate_group(service)
             factory_log.close()
             service_log.close()
+            if journal_state:
+                shutil.rmtree(journal_state)
 
 
 if __name__ == "__main__":

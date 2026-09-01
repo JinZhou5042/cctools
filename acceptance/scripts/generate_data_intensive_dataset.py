@@ -20,6 +20,23 @@ GENERATOR = "shake256-files/v1"
 DEFAULT_PARTS = 128
 
 
+def allocated_bytes(stat):
+    """Return stable allocation accounting when NFS omits st_blocks.
+
+    Linux NFS may report zero blocks for a fully materialized non-empty file.
+    In that case the logical size is the only portable lower bound.  Content
+    hashing remains the authoritative non-sparse acceptance check: a hole
+    reads as zeros and cannot match the deterministic generated payload.
+    """
+    blocks = stat.st_blocks * 512
+    return stat.st_size if stat.st_size and blocks == 0 else blocks
+
+
+def allocation_reports_sparse(stat):
+    blocks = stat.st_blocks * 512
+    return blocks > 0 and blocks < stat.st_size
+
+
 def digest_without(value, key):
     copy = dict(value)
     copy.pop(key, None)
@@ -35,7 +52,7 @@ def verify_prefix(path, source_index, size, chunk_bytes, complete):
     stat = path.stat()
     if stat.st_size > size or (complete and stat.st_size != size):
         raise RuntimeError(f"unexpected resumed source size: {path}")
-    if stat.st_blocks * 512 < stat.st_size:
+    if allocation_reports_sparse(stat):
         raise RuntimeError(f"resumed source is sparse: {path}")
     digest = hashlib.sha256()
     offset = 0
@@ -59,7 +76,7 @@ def write_source(path, source_index, size, chunk_bytes, resume):
         digest, written = verify_prefix(
             path, source_index, size, chunk_bytes, complete=True
         )
-        return digest.digest(), path.stat().st_blocks * 512
+        return digest.digest(), allocated_bytes(path.stat())
     path.parent.mkdir(parents=True, exist_ok=True)
     if temporary.exists():
         if not resume:
@@ -88,9 +105,9 @@ def write_source(path, source_index, size, chunk_bytes, resume):
             pass
         raise
     stat = path.stat()
-    if stat.st_size != size or stat.st_blocks * 512 < size:
+    if stat.st_size != size or allocation_reports_sparse(stat):
         raise RuntimeError(f"source file is short or sparse: {path}")
-    return digest.digest(), stat.st_blocks * 512
+    return digest.digest(), allocated_bytes(stat)
 
 
 def workload_from_args(args):
@@ -193,10 +210,10 @@ def verify_part(root, workload, part, parts, full_hash):
             continue
         if stat.st_size != size:
             errors.append(f"size mismatch source index {source_index}")
-        if stat.st_blocks * 512 < stat.st_size:
+        if allocation_reports_sparse(stat):
             errors.append(f"sparse source index {source_index}")
         observed_bytes += stat.st_size
-        observed_allocated += stat.st_blocks * 512
+        observed_allocated += allocated_bytes(stat)
         if full_hash:
             digest = hashlib.sha256()
             with source.open("rb") as stream:

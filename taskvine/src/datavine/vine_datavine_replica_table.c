@@ -12,13 +12,10 @@
 
 #define DATA_PRESENT 0x01U
 #define DATA_LIVE 0x02U
-#define DATA_REQUESTED 0x04U
 #define DATA_PERSISTED 0x08U
 #define DATA_RECOVERY 0x10U
 #define DATA_IDENTITY 0x20U
-
-#define REPLICA_ACTIVE 0x01U
-#define WAITER_ACTIVE 0x01U
+#define DATA_BACKUP_QUEUED 0x40U
 
 struct data_record {
 	uint64_t size;
@@ -26,9 +23,7 @@ struct data_record {
 	uint32_t generation;
 	uint32_t flags;
 	uint32_t replica_head;
-	uint32_t replica_count;
 	uint32_t waiter_head;
-	uint32_t waiter_count;
 };
 
 struct data_chunk {
@@ -37,20 +32,16 @@ struct data_chunk {
 
 struct replica_record {
 	uint64_t object_token;
-	uint64_t session_epoch;
 	uint64_t data_id;
-	uint32_t generation;
 	uint32_t worker_slot;
 	uint32_t data_next;
 	uint32_t data_previous;
 	uint32_t worker_next;
 	uint32_t worker_previous;
-	uint32_t flags;
 };
 
 struct waiter_record {
 	uint64_t data_id;
-	uint64_t session_epoch;
 	uint64_t request_id;
 	uint32_t generation;
 	uint32_t worker_slot;
@@ -59,14 +50,12 @@ struct waiter_record {
 	uint32_t data_previous;
 	uint32_t worker_next;
 	uint32_t worker_previous;
-	uint32_t flags;
 };
 
 struct worker_session {
 	uint64_t epoch;
 	uint32_t replica_head;
 	uint32_t waiter_head;
-	unsigned char state;
 };
 
 struct vine_datavine_replica_table {
@@ -265,15 +254,14 @@ static int session_matches(struct vine_datavine_replica_table *table,
 		uint32_t worker_slot, uint64_t session_epoch)
 {
 	return table && worker_slot < table->worker_capacity && session_epoch &&
-			table->workers[worker_slot].epoch == session_epoch &&
-			table->workers[worker_slot].state != VINE_DATAVINE_SESSION_UNUSED;
+			table->workers[worker_slot].epoch == session_epoch;
 }
 
 static void replica_remove(struct vine_datavine_replica_table *table,
 		uint32_t index)
 {
 	struct replica_record *replica = &table->replicas[index];
-	if (!(replica->flags & REPLICA_ACTIVE))
+	if (!replica->object_token)
 		return;
 	struct data_record *data = data_lookup(table, replica->data_id);
 	struct worker_session *worker = replica->worker_slot < table->worker_capacity
@@ -287,8 +275,6 @@ static void replica_remove(struct vine_datavine_replica_table *table,
 		if (replica->data_next)
 			table->replicas[replica->data_next].data_previous =
 					replica->data_previous;
-		if (data->replica_count)
-			data->replica_count--;
 	}
 	if (worker) {
 		if (replica->worker_previous)
@@ -300,7 +286,7 @@ static void replica_remove(struct vine_datavine_replica_table *table,
 			table->replicas[replica->worker_next].worker_previous =
 					replica->worker_previous;
 	}
-	replica->flags = 0;
+	replica->object_token = 0;
 	replica->data_next = table->replica_free;
 	table->replica_free = index;
 	if (table->stats.active_replicas)
@@ -311,7 +297,7 @@ static void waiter_remove(struct vine_datavine_replica_table *table,
 		uint32_t index)
 {
 	struct waiter_record *waiter = &table->waiters[index];
-	if (!(waiter->flags & WAITER_ACTIVE))
+	if (!waiter->request_id)
 		return;
 	struct data_record *data = data_lookup(table, waiter->data_id);
 	struct worker_session *worker = waiter->worker_slot < table->worker_capacity
@@ -324,8 +310,6 @@ static void waiter_remove(struct vine_datavine_replica_table *table,
 			data->waiter_head = waiter->data_next;
 		if (waiter->data_next)
 			table->waiters[waiter->data_next].data_previous = waiter->data_previous;
-		if (data->waiter_count)
-			data->waiter_count--;
 	}
 	if (worker) {
 		if (waiter->worker_previous)
@@ -336,7 +320,7 @@ static void waiter_remove(struct vine_datavine_replica_table *table,
 			table->waiters[waiter->worker_next].worker_previous =
 					waiter->worker_previous;
 	}
-	waiter->flags = 0;
+	waiter->request_id = 0;
 	waiter->data_next = table->waiter_free;
 	table->waiter_free = index;
 	if (table->stats.active_waiters)
@@ -354,7 +338,9 @@ static void wake_waiters(struct vine_datavine_replica_table *table,
 		if (!copy.generation || copy.generation == data->generation) {
 			waiter_remove(table, index);
 			if (callback)
-				callback(data_id, data->generation, copy.worker_slot, copy.session_epoch, copy.request_id, copy.item_index, argument);
+				callback(data_id, data->generation, copy.worker_slot,
+						table->workers[copy.worker_slot].epoch, copy.request_id,
+						copy.item_index, argument);
 		}
 		index = next;
 	}
@@ -386,26 +372,14 @@ int vine_datavine_replica_table_session_open(
 	if (!table || !session_epoch || !reserve_workers(table, worker_slot))
 		return 0;
 	struct worker_session *worker = &table->workers[worker_slot];
-	if (worker->state != VINE_DATAVINE_SESSION_UNUSED) {
+	if (worker->epoch) {
 		if (worker->epoch == session_epoch)
-			return worker->state == VINE_DATAVINE_SESSION_ACTIVE;
+			return 1;
 		vine_datavine_replica_table_session_lost(
 				table, worker_slot, worker->epoch, 0, 0, 0);
 	}
 	worker->epoch = session_epoch;
-	worker->state = VINE_DATAVINE_SESSION_ACTIVE;
 	table->stats.active_sessions++;
-	return 1;
-}
-
-int vine_datavine_replica_table_session_state(
-		struct vine_datavine_replica_table *table, uint32_t worker_slot,
-		uint64_t session_epoch, enum vine_datavine_session_state state)
-{
-	if (!session_matches(table, worker_slot, session_epoch) ||
-			state == VINE_DATAVINE_SESSION_UNUSED)
-		return 0;
-	table->workers[worker_slot].state = (unsigned char)state;
 	return 1;
 }
 
@@ -414,7 +388,7 @@ int vine_datavine_replica_table_session_active(
 		uint64_t session_epoch)
 {
 	return session_matches(table, worker_slot, session_epoch) &&
-			table->workers[worker_slot].state == VINE_DATAVINE_SESSION_ACTIVE;
+			table->workers[worker_slot].epoch != 0;
 }
 
 int vine_datavine_replica_table_session_lost(
@@ -430,7 +404,7 @@ int vine_datavine_replica_table_session_lost(
 		struct replica_record copy = table->replicas[index];
 		struct data_record *data = data_lookup(table, copy.data_id);
 		replica_remove(table, index);
-		if (data && !data->replica_count && (data->flags & DATA_LIVE) &&
+		if (data && !data->replica_head && (data->flags & DATA_LIVE) &&
 				!(data->flags & DATA_PERSISTED) && last_replica)
 			last_replica(copy.data_id, data->generation, argument);
 	}
@@ -439,7 +413,8 @@ int vine_datavine_replica_table_session_lost(
 		struct waiter_record copy = table->waiters[index];
 		waiter_remove(table, index);
 		if (cancelled_waiter)
-			cancelled_waiter(copy.data_id, copy.generation, copy.worker_slot, copy.session_epoch, copy.request_id, copy.item_index, argument);
+			cancelled_waiter(copy.data_id, copy.generation, copy.worker_slot,
+					session_epoch, copy.request_id, copy.item_index, argument);
 	}
 	memset(worker, 0, sizeof(*worker));
 	if (table->stats.active_sessions)
@@ -449,7 +424,7 @@ int vine_datavine_replica_table_session_lost(
 
 int vine_datavine_replica_table_expect(
 		struct vine_datavine_replica_table *table, uint64_t data_id,
-		uint32_t *generation, int requested)
+		uint32_t *generation)
 {
 	if (!table || !data_id || !generation || !*generation)
 		return 0;
@@ -457,7 +432,7 @@ int vine_datavine_replica_table_expect(
 	if (!data || !(data->flags & DATA_LIVE))
 		return 0;
 	if (data->flags & DATA_IDENTITY) {
-		if (*generation > data->generation && !data->replica_count &&
+		if (*generation > data->generation && !data->replica_head &&
 				!(data->flags & DATA_PERSISTED)) {
 			data->flags &= ~DATA_IDENTITY;
 			data->generation = *generation;
@@ -469,8 +444,6 @@ int vine_datavine_replica_table_expect(
 	} else {
 		data->generation = *generation;
 	}
-	if (requested)
-		data->flags |= DATA_REQUESTED;
 	return 1;
 }
 
@@ -478,12 +451,11 @@ int vine_datavine_replica_table_publish(
 		struct vine_datavine_replica_table *table, uint64_t data_id,
 		uint32_t generation, uint64_t size, const unsigned char digest[32],
 		uint32_t worker_slot, uint64_t session_epoch, uint64_t object_token,
-		int requested, vine_datavine_waiter_callback_t wake_waiter,
+		vine_datavine_waiter_callback_t wake_waiter,
 		void *argument)
 {
 	if (!table || !data_id || !generation || !digest || !object_token ||
-			!session_matches(table, worker_slot, session_epoch) ||
-			table->workers[worker_slot].state != VINE_DATAVINE_SESSION_ACTIVE)
+			!session_matches(table, worker_slot, session_epoch))
 		return 0;
 	struct data_record *data = data_lookup(table, data_id);
 	if (!data || !(data->flags & DATA_LIVE) ||
@@ -499,13 +471,10 @@ int vine_datavine_replica_table_publish(
 		memcpy(data->digest, digest, sizeof(data->digest));
 		data->flags |= DATA_IDENTITY;
 	}
-	if (requested)
-		data->flags |= DATA_REQUESTED;
 	for (uint32_t index = data->replica_head; index;
 			index = table->replicas[index].data_next) {
 		struct replica_record *known = &table->replicas[index];
 		if (known->worker_slot == worker_slot &&
-				known->session_epoch == session_epoch &&
 				known->object_token == object_token)
 			return 1;
 	}
@@ -514,16 +483,12 @@ int vine_datavine_replica_table_publish(
 		return 0;
 	struct replica_record *replica = &table->replicas[index];
 	replica->object_token = object_token;
-	replica->session_epoch = session_epoch;
 	replica->data_id = data_id;
-	replica->generation = generation;
 	replica->worker_slot = worker_slot;
-	replica->flags = REPLICA_ACTIVE;
 	replica->data_next = data->replica_head;
 	if (data->replica_head)
 		table->replicas[data->replica_head].data_previous = index;
 	data->replica_head = index;
-	data->replica_count++;
 	struct worker_session *worker = &table->workers[worker_slot];
 	replica->worker_next = worker->replica_head;
 	if (worker->replica_head)
@@ -543,8 +508,7 @@ int vine_datavine_replica_table_publish_batch(
 		vine_datavine_waiter_callback_t wake_waiter, void *argument)
 {
 	if (!table || !records || !count ||
-			!session_matches(table, worker_slot, session_epoch) ||
-			table->workers[worker_slot].state != VINE_DATAVINE_SESSION_ACTIVE)
+			!session_matches(table, worker_slot, session_epoch))
 		return 0;
 	for (size_t index = 0; index < count; index++) {
 		const struct vine_datavine_publish_record *record = &records[index];
@@ -591,7 +555,7 @@ int vine_datavine_replica_table_publish_batch(
 			continue;
 		if (!vine_datavine_replica_table_publish(table, record->data_id,
 				record->generation, record->size, record->digest, worker_slot,
-				session_epoch, record->object_token, record->requested,
+				session_epoch, record->object_token,
 				wake_waiter, argument))
 			abort();
 	}
@@ -613,7 +577,7 @@ enum vine_datavine_resolve_status vine_datavine_replica_table_resolve(
 		return VINE_DATAVINE_RESOLVE_DEAD;
 	if (!(data->flags & DATA_IDENTITY) ||
 			(generation && generation != data->generation) ||
-			!data->replica_count)
+			(!data->replica_head && !(data->flags & DATA_PERSISTED)))
 		return VINE_DATAVINE_RESOLVE_PENDING;
 	if (size)
 		*size = data->size;
@@ -625,24 +589,24 @@ enum vine_datavine_resolve_status vine_datavine_replica_table_resolve(
 	for (uint32_t index = data->replica_head; index;
 			index = table->replicas[index].data_next) {
 		struct replica_record *replica = &table->replicas[index];
-		if (!(replica->flags & REPLICA_ACTIVE) ||
-				!session_matches(table, replica->worker_slot, replica->session_epoch) ||
-				table->workers[replica->worker_slot].state !=
-						VINE_DATAVINE_SESSION_ACTIVE)
+		if (!replica->object_token ||
+				replica->worker_slot >= table->worker_capacity ||
+				!table->workers[replica->worker_slot].epoch)
 			continue;
 		if (replicas && found < capacity) {
 			replicas[found] = (struct vine_datavine_replica_view){
 					.worker_slot = replica->worker_slot,
-					.session_epoch = replica->session_epoch,
+					.session_epoch = table->workers[replica->worker_slot].epoch,
 					.object_token = replica->object_token,
-					.generation = replica->generation,
+					.generation = data->generation,
 			};
 		}
 		found++;
 	}
 	if (count)
 		*count = found < capacity ? found : capacity;
-	return found ? VINE_DATAVINE_RESOLVE_AVAILABLE
+	return (found || (data->flags & DATA_PERSISTED))
+			? VINE_DATAVINE_RESOLVE_AVAILABLE
 			 : VINE_DATAVINE_RESOLVE_PENDING;
 }
 
@@ -661,7 +625,6 @@ int vine_datavine_replica_table_wait(
 			index = table->waiters[index].data_next) {
 		struct waiter_record *known = &table->waiters[index];
 		if (known->worker_slot == worker_slot &&
-				known->session_epoch == session_epoch &&
 				known->request_id == request_id &&
 				known->item_index == item_index)
 			return known->generation == generation;
@@ -673,15 +636,12 @@ int vine_datavine_replica_table_wait(
 	waiter->data_id = data_id;
 	waiter->generation = generation;
 	waiter->worker_slot = worker_slot;
-	waiter->session_epoch = session_epoch;
 	waiter->request_id = request_id;
 	waiter->item_index = item_index;
-	waiter->flags = WAITER_ACTIVE;
 	waiter->data_next = data->waiter_head;
 	if (data->waiter_head)
 		table->waiters[data->waiter_head].data_previous = index;
 	data->waiter_head = index;
-	data->waiter_count++;
 	struct worker_session *worker = &table->workers[worker_slot];
 	waiter->worker_next = worker->waiter_head;
 	if (worker->waiter_head)
@@ -700,16 +660,16 @@ int vine_datavine_replica_table_fault(
 		void *argument)
 {
 	struct data_record *data = data_lookup(table, data_id);
-	if (!data || data->generation != generation)
+	if (!data || data->generation != generation ||
+			!session_matches(table, worker_slot, session_epoch))
 		return 0;
 	for (uint32_t index = data->replica_head; index;
 			index = table->replicas[index].data_next) {
 		struct replica_record *replica = &table->replicas[index];
 		if (replica->worker_slot == worker_slot &&
-				replica->session_epoch == session_epoch &&
 				replica->object_token == object_token) {
 			replica_remove(table, index);
-			if (!data->replica_count && (data->flags & DATA_LIVE) &&
+			if (!data->replica_head && (data->flags & DATA_LIVE) &&
 					!(data->flags & DATA_PERSISTED) && last_replica)
 				last_replica(data_id, generation, argument);
 			return 1;
@@ -723,10 +683,59 @@ int vine_datavine_replica_table_set_persisted(
 		uint32_t generation)
 {
 	struct data_record *data = data_lookup(table, data_id);
-	if (!data || !(data->flags & DATA_IDENTITY) ||
+	if (!data || !(data->flags & DATA_LIVE) ||
+			!(data->flags & DATA_IDENTITY) ||
 			data->generation != generation)
 		return 0;
-	data->flags |= DATA_PERSISTED;
+	data->flags = (data->flags | DATA_PERSISTED) & ~DATA_BACKUP_QUEUED;
+	return 1;
+}
+
+int vine_datavine_replica_table_restore_persisted(
+		struct vine_datavine_replica_table *table, uint64_t data_id,
+		uint32_t generation, uint64_t size, const unsigned char digest[32])
+{
+	if (!table || !data_id || !generation || !digest)
+		return 0;
+	struct data_record *data = data_get(table, data_id);
+	if (!data || !(data->flags & DATA_LIVE))
+		return 0;
+	if (data->generation && data->generation != generation)
+		return 0;
+	if ((data->flags & DATA_IDENTITY) &&
+			(data->size != size ||
+			 memcmp(data->digest, digest, sizeof(data->digest))))
+		return 0;
+	data->generation = generation;
+	data->size = size;
+	memcpy(data->digest, digest, sizeof(data->digest));
+	data->flags = (data->flags | DATA_IDENTITY | DATA_PERSISTED) &
+			~DATA_BACKUP_QUEUED;
+	return 1;
+}
+
+int vine_datavine_replica_table_queue_backup(
+		struct vine_datavine_replica_table *table, uint64_t data_id,
+		uint32_t generation)
+{
+	struct data_record *data = data_lookup(table, data_id);
+	if (!data || !(data->flags & DATA_LIVE) ||
+			data->generation != generation || !(data->flags & DATA_IDENTITY))
+		return 0;
+	if (data->flags & (DATA_PERSISTED | DATA_BACKUP_QUEUED))
+		return 2;
+	data->flags |= DATA_BACKUP_QUEUED;
+	return 1;
+}
+
+int vine_datavine_replica_table_clear_backup(
+		struct vine_datavine_replica_table *table, uint64_t data_id,
+		uint32_t generation)
+{
+	struct data_record *data = data_lookup(table, data_id);
+	if (!data || (generation && data->generation != generation))
+		return 0;
+	data->flags &= ~DATA_BACKUP_QUEUED;
 	return 1;
 }
 
@@ -768,26 +777,28 @@ int vine_datavine_replica_table_mark_dead(
 	 * otherwise a later replay of the same producer cannot register output. */
 	if (data->flags & DATA_RECOVERY)
 		return 1;
-	data->flags &= ~(DATA_LIVE | DATA_RECOVERY);
+	data->flags &= ~(DATA_LIVE | DATA_RECOVERY | DATA_BACKUP_QUEUED);
 	while (data->replica_head) {
 		uint32_t index = data->replica_head;
 		struct replica_record copy = table->replicas[index];
 		struct vine_datavine_replica_view view = {
 				.worker_slot = copy.worker_slot,
-				.session_epoch = copy.session_epoch,
+				.session_epoch = table->workers[copy.worker_slot].epoch,
 				.object_token = copy.object_token,
-				.generation = copy.generation,
+				.generation = data->generation,
 		};
 		replica_remove(table, index);
 		if (release_replica)
-			release_replica(data_id, copy.generation, &view, argument);
+			release_replica(data_id, data->generation, &view, argument);
 	}
 	while (data->waiter_head) {
 		uint32_t index = data->waiter_head;
 		struct waiter_record copy = table->waiters[index];
 		waiter_remove(table, index);
 		if (cancel_waiter)
-			cancel_waiter(data_id, copy.generation, copy.worker_slot, copy.session_epoch, copy.request_id, copy.item_index, argument);
+			cancel_waiter(data_id, copy.generation, copy.worker_slot,
+					table->workers[copy.worker_slot].epoch, copy.request_id,
+					copy.item_index, argument);
 	}
 	if (table->stats.active_data)
 		table->stats.active_data--;
@@ -815,14 +826,14 @@ int vine_datavine_replica_table_check(
 	for (uint32_t worker_slot = 0; worker_slot < table->worker_capacity;
 			worker_slot++) {
 		struct worker_session *worker = &table->workers[worker_slot];
-		if (worker->state == VINE_DATAVINE_SESSION_UNUSED)
+		if (!worker->epoch)
 			continue;
 		sessions++;
 		uint32_t previous = 0;
 		for (uint32_t index = worker->replica_head; index;
 				index = table->replicas[index].worker_next) {
 			if (index > table->replica_highwater ||
-					!(table->replicas[index].flags & REPLICA_ACTIVE) ||
+					!table->replicas[index].object_token ||
 					table->replicas[index].worker_slot != worker_slot ||
 					table->replicas[index].worker_previous != previous)
 				return 0;
@@ -833,7 +844,7 @@ int vine_datavine_replica_table_check(
 		for (uint32_t index = worker->waiter_head; index;
 				index = table->waiters[index].worker_next) {
 			if (index > table->waiter_highwater ||
-					!(table->waiters[index].flags & WAITER_ACTIVE) ||
+					!table->waiters[index].request_id ||
 					table->waiters[index].worker_slot != worker_slot ||
 					table->waiters[index].worker_previous != previous)
 				return 0;
