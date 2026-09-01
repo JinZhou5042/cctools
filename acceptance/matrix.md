@@ -48,8 +48,8 @@ Updated: 2026-08-31
 | Strict-singleton full regression | PASS | 21/21 on 2026-09-01; all formerly multi-workflow notebook, execution, service and scientific scenarios now use one owner per workflow with no skipped tests |
 | Retired journal fail-closed | PASS | valid opcode-107 record rejected by workflow service test |
 | Rigorous post-cleanup suite | PASS | `rigorous-validation-20260827/summary.json`, raw evidence and 18/18 regression |
-| Git provenance | OPEN | worktree remains uncommitted |
-| Production package | OPEN / not requested | rebuild and promotion require explicit authorization |
+| Git provenance | PASS | runtime `b481c3768`, production branch and clean worktree; evidence in `production-baseline-20260901.json` |
+| Production package | PASS / candidate | 791,236,983-byte package; clean-build binary hashes match, import and 100-task packaged-Worker smoke pass; canonical `datavine.tar.gz` intentionally not overwritten |
 | Cross-host result durability | OUT OF SCOPE | local `/tmp` does not survive Controller-host loss |
 
 Run `sha256sum -c SHA256SUMS` inside

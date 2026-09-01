@@ -1,0 +1,129 @@
+{
+  "artifact_type": "datavine-production-baseline",
+  "schema_version": 1,
+  "status": "PASS",
+  "scope": "local-release-candidate",
+  "date": "2026-09-01",
+  "runtime_commit": "b481c3768cfaa624f41a662117b4a9c3f497e7e4",
+  "runtime_tree": "e3bea071fa81f56245e3616bf84e0365b835be7b",
+  "branch": "production-baseline",
+  "environment": {
+    "host": "daccssfe.crc.nd.edu",
+    "kernel": "Linux 5.14.0-687.41.1.el9_8.x86_64",
+    "python": "3.10.20",
+    "effective_cpu_capacity": 32
+  },
+  "gates": {
+    "clean_native_rebuild": true,
+    "current_bindings_installed": true,
+    "strict_singleton_regression": true,
+    "controller_lifecycle": true,
+    "replica_lifecycle": true,
+    "dummy_end_to_end": true,
+    "requested_output_persistence": true,
+    "single_workflow_cpu_warmup": true,
+    "candidate_binary_identity": true,
+    "candidate_import": true,
+    "candidate_worker_smoke": true,
+    "existing_production_package_untouched": true
+  },
+  "regression": {
+    "status": "PASS",
+    "passed": 21,
+    "total": 21,
+    "report_sha256": "28ce309a1abdb9d21bee29ed00661bb446382fc3e582555b9c520803002b1d79",
+    "tests": [
+      "1024-benchmark-contract",
+      "agent-protocol",
+      "background-backup",
+      "data-intensive-workload",
+      "dynamic-workflow",
+      "go-workflow",
+      "module-boundaries",
+      "notebook-workflow",
+      "parametric-ir",
+      "persistence-faults",
+      "production-data-plane",
+      "python-output-policy",
+      "replica-table",
+      "result-stream",
+      "scheduler",
+      "scientific-workflow-foundation",
+      "shell-workflow",
+      "workflow-execution",
+      "workflow-ir",
+      "workflow-lifecycle",
+      "workflow-service"
+    ]
+  },
+  "controller_lifecycle": {
+    "data_ids": 1000000,
+    "workers": 128,
+    "replicas_per_data": 1,
+    "total_seconds": 1.067767928,
+    "max_rss_kib": 189856,
+    "expect_per_second": 8758300.982,
+    "publish_per_second": 8729532.093,
+    "resolve_random_per_second": 1938836.656
+  },
+  "replica_lifecycle": {
+    "data_ids": 1000000,
+    "workers": 128,
+    "replicas_per_data": 1,
+    "total_seconds": 0.472085913,
+    "max_rss_kib": 402660,
+    "publish_per_second": 11183930.806,
+    "resolve_random_per_second": 5155636.869
+  },
+  "dummy_end_to_end": {
+    "workers": 8,
+    "cores_per_worker": 4,
+    "tasks": 10000,
+    "physical_submissions": 10000,
+    "physical_completions": 10000,
+    "end_to_end_tasks_per_second": 9146.494666471017,
+    "service_tasks_per_second": 17277.90121878315,
+    "durable_files": 0,
+    "artifact_sha256": "90cb7ea689b580ff2d667308ca8afeaced25d10ebad5a6a3be5ced3b5abba383"
+  },
+  "requested_output_persistence": {
+    "workers": 4,
+    "cores_per_worker": 4,
+    "tasks": 2000,
+    "bytes_per_output": 4096,
+    "durable_files": 2000,
+    "durable_bytes": 8192000,
+    "end_to_end_tasks_per_second": 1550.2880106118705,
+    "service_tasks_per_second": 2106.704587349239,
+    "persistence_failures": 0,
+    "artifact_sha256": "55f44af5ac34a75499418f5f4cefef2d694ee6774c4a55ccc9671c07c20d69fa"
+  },
+  "cpu_fork_singleton_smoke": {
+    "status": "PASS",
+    "workflow_warmup_tasks": 1,
+    "measured_tasks": 4,
+    "note": "warmup and measured delta use one streaming workflow owner",
+    "artifact_sha256": "843c1bac7f223b41648d8351f85ea3da5a8aca36d4ece9d8338edbdb88fc82cb"
+  },
+  "candidate_package": {
+    "path": "/users/jzhou24/graph_optimization/factories/datavine.production-baseline-b481c3768.tar.gz",
+    "bytes": 791236983,
+    "sha256": "c112b9732ca5cc42946ec5617f1f3adaa9c312d97003df13f8363677ba48783c",
+    "datavine_workflow_sha256": "bfc7d3dea15847e8d36f89f34cc4e0b6bc5e6cb3014d57cebf73956c702af294",
+    "vine_worker_sha256": "0420fb42db67e14cd348d731c756bbca08a138d8c41a1fae291e0310ada7b5ff",
+    "binary_hashes_match_clean_build": true,
+    "python_import": "PASS",
+    "worker_smoke": {
+      "status": "PASS",
+      "tasks": 100,
+      "physical_submissions": 100,
+      "physical_completions": 100,
+      "artifact_sha256": "5dd544cbe0f788b2886290ac0685a70c1b289203418dcd50128dd51ee854bb65"
+    },
+    "promoted_to_datavine_tar_gz": false
+  },
+  "open": [
+    "remote multi-worker churn plus peer-first plus background-backup integrated stress",
+    "explicit promotion of the candidate over datavine.tar.gz"
+  ]
+}

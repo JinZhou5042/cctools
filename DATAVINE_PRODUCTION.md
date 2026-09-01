@@ -2,8 +2,9 @@
 
 Updated: 2026-09-01
 
-Status: production implementation with strict-singleton regression 21/21 PASS;
-Git provenance and candidate-package verification remain release gates.
+Status: production candidate with strict-singleton regression 21/21 PASS,
+committed provenance and independently verified candidate package. Promotion
+over the existing canonical package remains an explicit operator action.
 
 ## Scope
 

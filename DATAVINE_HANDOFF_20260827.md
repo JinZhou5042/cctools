@@ -1,6 +1,16 @@
 # DataVine handoff: production cleanup
 
-Updated: 2026-08-31
+Updated: 2026-09-01
+
+## Production-baseline closure
+
+The source/test boundary is commit `58bc4288b`; the consolidated production
+baseline is `b481c3768` on branch `production-baseline`. A clean rebuild and
+the strict-singleton suite pass 21/21. Current performance and package checks
+are recorded in `acceptance/production-baseline-20260901.json`. The verified
+candidate package is
+`/users/jzhou24/graph_optimization/factories/datavine.production-baseline-b481c3768.tar.gz`;
+the canonical `datavine.tar.gz` was not overwritten.
 
 This is the continuation point for the uncommitted DataVine implementation.
 Read `DATAVINE_PRODUCTION.md` and

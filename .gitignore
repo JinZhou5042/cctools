@@ -34,6 +34,7 @@
 !/acceptance/default-idata-backup-20260831.json
 !/acceptance/peer-vs-controller-20260831.json
 !/acceptance/dynamic-data-management-20260831.json
+!/acceptance/production-baseline-20260901.json
 !/DATAVINE_HANDOFF_20260827.md
 !/CONTROLLER_PERFORMANCE_20260827.md
 !/CONTROLLER_REMOTE_FANIN_20260828.md
