@@ -19,6 +19,9 @@ struct vine_cache_file {
 	/* Static properties of cache file object. */
 	vine_cache_type_t cache_type;
 	char *source;
+	char *expected_sha256;
+	int inject_corruption;
+	uint64_t pause_after_progress_usec;
 	struct vine_task *mini_task;
 
 	/* Dynamic state tracking process to materialize the file. */
@@ -27,6 +30,8 @@ struct vine_cache_file {
 	timestamp_t stop_time;
 	pid_t pid;
 	vine_cache_status_t status;
+	uint64_t transfer_bytes_observed;
+	int transfer_progress_reported;
 
 	/* Metadata info stored in disk in .meta file. */
 	vine_file_type_t original_type; // original type of the object: file, url, temp, etc..

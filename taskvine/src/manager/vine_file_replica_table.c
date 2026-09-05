@@ -32,6 +32,14 @@ int vine_file_replica_table_insert(struct vine_manager *m, struct vine_worker_in
 
 	hash_table_insert(w->current_files, cachename, replica);
 	w->inuse_cache += replica->size;
+	int64_t cache_items = hash_table_size(w->current_files) + w->cache_prune_pending_items;
+	if (cache_items > w->cache_items_high_water) {
+		w->cache_items_high_water = cache_items;
+	}
+	int64_t cache_bytes = w->inuse_cache + w->cache_prune_pending_bytes;
+	if (cache_bytes > w->cache_bytes_high_water) {
+		w->cache_bytes_high_water = cache_bytes;
+	}
 
 	if (prev_available >= m->current_max_worker->disk) {
 		/* the current worker may have been the one with the maximum available space, so we update it. */
@@ -146,6 +154,39 @@ struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager
 	}
 
 	return peer_selected;
+}
+
+struct vine_worker_info *vine_file_replica_table_find_worker_except(
+		struct vine_manager *q,
+		const char *cachename,
+		const char *excluded_workerid)
+{
+	struct set *workers = hash_table_lookup(
+			q->file_worker_table, cachename);
+	if (!workers || !excluded_workerid) {
+		return 0;
+	}
+	struct vine_worker_info *peer;
+	int iteration;
+	SET_ITERATE(workers, iteration, peer)
+	{
+		if (!peer->workerid
+				|| !strcmp(peer->workerid, excluded_workerid)
+				|| !peer->transfer_port_active
+				|| peer->outgoing_xfer_counter
+						>= q->worker_source_max_transfers) {
+			continue;
+		}
+		struct vine_file_replica *replica =
+				hash_table_lookup(
+						peer->current_files, cachename);
+		if (replica
+				&& replica->state
+						== VINE_FILE_REPLICA_STATE_READY) {
+			return peer;
+		}
+	}
+	return 0;
 }
 
 /*

@@ -282,6 +282,12 @@ This may be called on tasks after they are returned from @ref vine_wait.
 */
 void vine_task_delete(struct vine_task *t);
 
+/** Add a reference to an existing task object, return the same object.
+@param t A task object.
+@return The same task object, or null.
+*/
+struct vine_task *vine_task_addref(struct vine_task *t);
+
 /** Indicate the command to be executed.
 @param t A task object.
 @param cmd The command to be executed.  This string will be duplicated by this call, so the argument may be freed or
@@ -717,6 +723,13 @@ has previously been called on this object.
 */
 const char *vine_file_contents(struct vine_file *f);
 
+/** Attach a Controller-qualified DataVine identity to a declared file. */
+int vine_file_set_datavine_data_id(struct vine_file *f, const char *data_id);
+
+/** Attach the expected SHA-256 of DataVine serialized bytes. */
+int vine_file_set_datavine_content_hash(
+		struct vine_file *f, const char *content_hash);
+
 /** Get the length of a vine file.
 @param f A file object.
 @return The length of the file, or zero if unknown.
@@ -770,6 +783,11 @@ be delete at the manager's site after it is not needed by the workflow (@ref vin
 */
 struct vine_file *vine_declare_url(
 		struct vine_manager *m, const char *url, vine_cache_level_t cache, vine_file_flags_t flags);
+
+/** Declare an immutable URL using a caller-provided cache identity. */
+struct vine_file *vine_declare_url_cached(
+		struct vine_manager *m, const char *url, const char *cached_name,
+		vine_cache_level_t cache, vine_file_flags_t flags);
 
 /** Create a file object of a remote file accessible from an xrootd server.
 @param m A manager object
@@ -938,6 +956,24 @@ but is still available on the manager's site, and can be recovered by submitting
 */
 int vine_prune_file(struct vine_manager *m, struct vine_file *f);
 
+/** Prune one replica from the worker with the given stable WorkerID. */
+int vine_prune_file_on_worker(struct vine_manager *m, struct vine_file *f, const char *worker_id);
+
+/** Return cumulative remote prune requests for a declared file. */
+int64_t vine_prune_file_requested(struct vine_manager *m, struct vine_file *f);
+
+/** Return cumulative worker-confirmed remote prune operations. */
+int64_t vine_prune_file_confirmed(struct vine_manager *m, struct vine_file *f);
+
+/** Return cumulative worker-reported remote prune failures. */
+int64_t vine_prune_file_failed(struct vine_manager *m, struct vine_file *f);
+
+/** Forget completed remote prune acknowledgement state.
+This succeeds only after every requested operation has been acknowledged.
+@return 1 if completed state was removed, otherwise 0.
+*/
+int vine_prune_file_forget(struct vine_manager *m, struct vine_file *f);
+
 //@}
 
 /** @name Functions - Managers */
@@ -1024,6 +1060,14 @@ This is a testing support hook, not a normal manager control operation.
 @return Non-zero if a worker was released.
 */
 int vine_manager_release_random_worker(struct vine_manager *m);
+
+/** Shut down one named worker for deterministic failure-injection tests.
+This is a testing support hook, not a normal manager control operation.
+@param m A manager object.
+@param worker_id The exact TaskVine WorkerID to terminate.
+@return Non-zero if the named worker was found and shut down.
+*/
+int vine_manager_shut_down_worker_by_id(struct vine_manager *m, const char *worker_id);
 
 /** Wait for a task to complete.
 This call will block until either a task has completed, the timeout has expired, or the manager is empty.
@@ -1129,6 +1173,9 @@ int vine_enable_peer_transfers(struct vine_manager *m);
 
 /** Disable taskvine peer transfers to be scheduled by the manager **/
 int vine_disable_peer_transfers(struct vine_manager *m);
+
+/** Configure Controller authority for observed TaskVine peer transfers. */
+int vine_set_datavine_controller(struct vine_manager *m, const char *endpoint, const char *token);
 
 /** When enabled, resources to tasks in are assigned in proportion to the size
 of the worker. If a resource is specified (e.g. with @ref vine_task_set_cores),
@@ -1460,6 +1507,35 @@ loop (wait_retrieve_many mode). (default=0)
 a times series, if this feature is enabled. See @ref vine_enable_monitoring.
  - "update_interval"  Seconds between updates to the catalog. (default=60)
  - "temp-replica-count" Degree of replication across workers for remote temp files (default=0)
+ - "datavine-cache-capacity-items" Strict projected worker-cache item limit,
+including assigned-task outputs and pending acknowledged unlinks. A negative
+value disables this DataVine admission gate. (default=-1)
+ - "datavine-cache-capacity-bytes" Worker-cache serialized-byte limit. Inputs
+are reserved before dispatch and workers fail closed when actual publication
+would exceed the limit. A negative value disables the gate. (default=-1)
+ - "datavine-fault-peer-source-loss" Test-only count of leased peer transfers
+whose real source worker is abruptly lost after the destination starts its
+transfer child. Disabled by default. (default=0)
+ - "datavine-fault-peer-source-loss-after-bytes" Test-only positive-byte
+threshold. When nonzero, one leased peer source is abruptly lost only after
+the destination reports a partial transfer at or above the threshold.
+Disabled by default. (default=0)
+ - "datavine-fault-peer-corruption" Test-only count of leased peer transfers
+whose received bytes are corrupted before worker-side SHA-256 validation.
+Disabled by default. (default=0)
+ - "datavine-fault-peer-source-loss-after-bytes-deferred" Test-only mode that
+retains a byte-threshold source-loss fault until an explicit trigger, allowing
+deterministic inspection of the positive-partial-write window. (default=0)
+ - "datavine-trigger-deferred-peer-source-loss" Test-only trigger for the
+currently retained byte-threshold source-loss fault. Fails if none is pending.
+ - "datavine-fault-idata-release-failure" Test-only count of successful
+IData peer transfers whose first Controller lease release is retained for
+bounded retry. Disabled by default. (default=0)
+ - "datavine-transfer-release-retry-seconds" Delay before retrying a failed
+Controller transfer-lease release. (default=0.1)
+ - "datavine-transfer-release-capacity" Maximum completed transfer leases
+retained for retry. Missing IData preparation backpressures at the limit;
+stable EData may use its stable origin. (default=1024)
  - "transient-error-interval" Time to wait in seconds after a resource failure before attempting to use it again
 (default=15)
  - "resource_management_interval" Seconds between measurement of manager local resources. (default=30)
@@ -1474,6 +1550,64 @@ a times series, if this feature is enabled. See @ref vine_enable_monitoring.
 @return 0 on succes, -1 on failure.
 */
 int vine_tune(struct vine_manager *m, const char *name, double value);
+
+/** Return the number of leased DataVine peer transfers whose destination
+transfer process was observed starting. */
+uint64_t vine_manager_datavine_peer_transfer_starts(
+		struct vine_manager *m);
+
+/** Return validated partial peer-transfer progress event count. */
+uint64_t vine_manager_datavine_peer_transfer_progress_events(
+		struct vine_manager *m);
+
+/** Return the largest validated partial peer-transfer byte observation. */
+uint64_t vine_manager_datavine_peer_transfer_progress_max_bytes(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_deferred_peer_source_loss_pending(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_deferred_peer_source_loss_pauses(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_deferred_peer_source_loss_triggers(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_deferred_peer_source_loss_expirations(
+		struct vine_manager *m);
+
+/** Return reports issued after failed partial-transfer cleanup. */
+uint64_t vine_manager_datavine_peer_transfer_cleanup_reports(
+		struct vine_manager *m);
+
+/** Return cleanup reports whose exact transfer path was absent. */
+uint64_t vine_manager_datavine_peer_transfer_cleanup_absent(
+		struct vine_manager *m);
+
+/** Return byte-fault cleanup observations that have not yet arrived. */
+uint64_t vine_manager_datavine_peer_transfer_cleanup_pending(
+		struct vine_manager *m);
+
+/** Return the number of deterministic abrupt peer-source losses injected. */
+uint64_t vine_manager_datavine_peer_source_losses_injected(
+		struct vine_manager *m);
+
+uint64_t vine_manager_datavine_peer_corruptions_injected(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_corruptions_rejected(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_alternate_source_fallbacks(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_corrupt_fallback_pending(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_release_failures_injected(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_release_retries_succeeded(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_release_pending(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_release_pending_capacity(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_release_pending_high_water(
+		struct vine_manager *m);
+uint64_t vine_manager_datavine_peer_release_capacity_backpressure(
+		struct vine_manager *m);
 
 /** Sets the maximum resources a task without an explicit category ("default" category).
 rm specifies the maximum resources a task in the default category may use.

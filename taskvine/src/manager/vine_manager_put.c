@@ -241,9 +241,34 @@ vine_result_code_t vine_manager_put_url_now(struct vine_manager *q, struct vine_
 	url_encode(source_url, source_encoded, sizeof(source_encoded));
 	url_encode(f->cached_name, cached_name_encoded, sizeof(cached_name_encoded));
 
-	char *transfer_id = vine_current_transfers_add(q, dest_worker, source_worker, source_url);
+	char *transfer_id = vine_current_transfers_add(q, dest_worker, source_worker, source_url, f);
+	if (!transfer_id) {
+		return VINE_MGR_FAILURE;
+	}
 
-	vine_manager_send(q, dest_worker, "puturl_now %s %s %d %lld 0%o %s\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id);
+	const char *expected_hash = f->datavine_content_hash
+			? f->datavine_content_hash
+			: "-";
+	int inject_corruption = 0;
+	if (source_worker && f->datavine_content_hash
+			&& vine_file_replica_table_count_replicas(
+					   q,
+					   f->cached_name,
+					   VINE_FILE_REPLICA_STATE_READY)
+					>= 2
+			&& q->datavine_fault_peer_corruption_remaining > 0) {
+		q->datavine_fault_peer_corruption_remaining--;
+		q->datavine_peer_corruptions_injected++;
+		inject_corruption = 1;
+	}
+	uint64_t pause_after_progress_usec =
+			source_worker
+					&& q->datavine_fault_peer_source_loss_after_bytes_deferred
+					&& q->datavine_fault_peer_source_loss_after_bytes_remaining
+							> 0
+			? 5000000
+			: 0;
+	vine_manager_send(q, dest_worker, "puturl_now %s %s %d %lld 0%o %s %s %d %" PRIu64 "\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id, expected_hash, inject_corruption, pause_after_progress_usec);
 
 	vine_file_replica_table_get_or_create(q, dest_worker, f->cached_name, f->type, f->cache_level, f->size, f->mtime);
 
@@ -279,9 +304,34 @@ vine_result_code_t vine_manager_put_url(struct vine_manager *q, struct vine_work
 	url_encode(f->source, source_encoded, sizeof(source_encoded));
 	url_encode(f->cached_name, cached_name_encoded, sizeof(cached_name_encoded));
 
-	char *transfer_id = vine_current_transfers_add(q, dest_worker, source_worker, f->source);
+	char *transfer_id = vine_current_transfers_add(q, dest_worker, source_worker, f->source, f);
+	if (!transfer_id) {
+		return VINE_MGR_FAILURE;
+	}
 
-	vine_manager_send(q, dest_worker, "puturl %s %s %d %lld 0%o %s\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id);
+	const char *expected_hash = f->datavine_content_hash
+			? f->datavine_content_hash
+			: "-";
+	int inject_corruption = 0;
+	if (source_worker && f->datavine_content_hash
+			&& vine_file_replica_table_count_replicas(
+					   q,
+					   f->cached_name,
+					   VINE_FILE_REPLICA_STATE_READY)
+					>= 2
+			&& q->datavine_fault_peer_corruption_remaining > 0) {
+		q->datavine_fault_peer_corruption_remaining--;
+		q->datavine_peer_corruptions_injected++;
+		inject_corruption = 1;
+	}
+	uint64_t pause_after_progress_usec =
+			source_worker
+					&& q->datavine_fault_peer_source_loss_after_bytes_deferred
+					&& q->datavine_fault_peer_source_loss_after_bytes_remaining
+							> 0
+			? 5000000
+			: 0;
+	vine_manager_send(q, dest_worker, "puturl %s %s %d %lld 0%o %s %s %d %" PRIu64 "\n", source_encoded, cached_name_encoded, f->cache_level, (long long)f->size, mode, transfer_id, expected_hash, inject_corruption, pause_after_progress_usec);
 
 	vine_file_replica_table_get_or_create(q, dest_worker, f->cached_name, f->type, f->cache_level, f->size, f->mtime);
 
@@ -440,6 +490,17 @@ static vine_result_code_t vine_manager_put_input_file_if_needed(struct vine_mana
 
 	/* Now send the actual file. */
 	vine_result_code_t result = vine_manager_put_input_file(q, w, t, m, file_to_send);
+	if (result == VINE_MGR_FAILURE && m->substitute) {
+		/*
+		A DataVine-bound peer is only a usable source after the Controller
+		authorizes its transfer lease.  A cache observation made by TaskVine
+		alone is soft state, so discard the substitute and retry the stable
+		origin without rolling back computation.
+		*/
+		vine_file_delete(m->substitute);
+		m->substitute = 0;
+		result = vine_manager_put_input_file(q, w, t, m, m->file);
+	}
 
 	/* If the send succeeded, then note that we have a PENDING replica */
 	/* If will be marked as READY when a cache-update message comes back. */

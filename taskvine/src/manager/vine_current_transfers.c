@@ -6,10 +6,13 @@ See the file COPYING for details.
 
 #include "vine_current_transfers.h"
 #include "macros.h"
+#include "vine_file.h"
 #include "vine_file_replica.h"
 #include "vine_file_replica_table.h"
 #include "vine_blocklist.h"
 #include "vine_manager.h"
+#include "vine_datavine.h"
+#include "timestamp.h"
 #include "xxmalloc.h"
 
 #include "debug.h"
@@ -18,14 +21,32 @@ struct vine_transfer_pair {
 	struct vine_worker_info *dest_worker;
 	struct vine_worker_info *source_worker;
 	char *source_url;
+	char *cachename;
+	char *datavine_data_id;
+	int datavine_lease;
+	int success;
+	int completed;
+	int release_attempts;
+	timestamp_t release_retry_after;
+	uint64_t expected_size;
 };
 
-static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url)
+static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename, const char *datavine_data_id, uint64_t expected_size)
 {
 	struct vine_transfer_pair *t = malloc(sizeof(struct vine_transfer_pair));
 	t->dest_worker = dest_worker;
 	t->source_worker = source_worker;
 	t->source_url = source_url ? xxstrdup(source_url) : 0;
+	t->cachename = cachename ? xxstrdup(cachename) : 0;
+	t->datavine_data_id = datavine_data_id
+			? xxstrdup(datavine_data_id)
+			: 0;
+	t->datavine_lease = 0;
+	t->success = 0;
+	t->completed = 0;
+	t->release_attempts = 0;
+	t->release_retry_after = 0;
+	t->expected_size = expected_size;
 
 	if (t->dest_worker) {
 		t->dest_worker->incoming_xfer_counter++;
@@ -47,18 +68,81 @@ static void vine_transfer_pair_delete(struct vine_transfer_pair *p)
 			p->source_worker->outgoing_xfer_counter--;
 		}
 		free(p->source_url);
+		free(p->cachename);
+		free(p->datavine_data_id);
 		free(p);
 	}
 }
 
-// add a current transaction to the transfer table
-char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url)
+static void vine_transfer_pair_complete(struct vine_transfer_pair *p)
 {
-	cctools_uuid_t uuid;
-	cctools_uuid_create(&uuid);
+	if (!p || p->completed) {
+		return;
+	}
+	p->completed = 1;
+	if (p->dest_worker) {
+		p->dest_worker->incoming_xfer_counter--;
+		p->dest_worker = 0;
+	}
+	if (p->source_worker) {
+		p->source_worker->outgoing_xfer_counter--;
+		p->source_worker = 0;
+	}
+}
 
-	char *transfer_id = strdup(uuid.str);
-	struct vine_transfer_pair *t = vine_transfer_pair_create(dest_worker, source_worker, source_url);
+// add a current transaction to the transfer table
+char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, struct vine_file *f)
+{
+	char *transfer_id = NULL;
+	int lease_reserved = f && f->datavine_lease_id;
+	if (lease_reserved) {
+		transfer_id = xxstrdup(f->datavine_lease_id);
+		free(f->datavine_lease_id);
+		f->datavine_lease_id = NULL;
+	} else {
+		cctools_uuid_t uuid;
+		cctools_uuid_create(&uuid);
+		transfer_id = xxstrdup(uuid.str);
+	}
+	struct vine_transfer_pair *t = vine_transfer_pair_create(
+			dest_worker,
+			source_worker,
+			source_url,
+			f ? f->cached_name : 0,
+			f ? f->datavine_data_id : 0,
+			f ? f->size : 0);
+	if (f && f->datavine_data_id && source_worker) {
+		if (vine_current_transfers_pending_releases(q)
+				>= q->datavine_transfer_release_capacity) {
+			debug(D_VINE,
+					"DataVine peer release queue is full; using stable origin for %s",
+					f->datavine_data_id);
+			vine_transfer_pair_delete(t);
+			if (lease_reserved) {
+				vine_datavine_release_transfer(q, transfer_id, 0);
+			}
+			free(transfer_id);
+			return 0;
+		}
+		if (!source_worker->workerid || !dest_worker || !dest_worker->workerid) {
+			debug(D_VINE, "DataVine rejected peer transfer lease for %s; using stable origin", f->datavine_data_id);
+			vine_transfer_pair_delete(t);
+			if (lease_reserved) {
+				vine_datavine_release_transfer(q, transfer_id, 0);
+			}
+			free(transfer_id);
+			return 0;
+		}
+		if (!lease_reserved) {
+			debug(D_VINE,
+					"DataVine rejected peer transfer without a Controller lease for %s",
+					f->datavine_data_id);
+			vine_transfer_pair_delete(t);
+			free(transfer_id);
+			return 0;
+		}
+		t->datavine_lease = 1;
+	}
 
 	hash_table_insert(q->current_transfer_table, transfer_id, t);
 	return transfer_id;
@@ -68,8 +152,61 @@ char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info
 int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 {
 	struct vine_transfer_pair *p;
-	p = hash_table_remove(q->current_transfer_table, id);
+	p = hash_table_lookup(q->current_transfer_table, id);
 	if (p) {
+		if (q->datavine_deferred_peer_source_loss_transfer_id
+				&& !strcmp(
+						q->datavine_deferred_peer_source_loss_transfer_id,
+						id)) {
+			free(q->datavine_deferred_peer_source_loss_transfer_id);
+			q->datavine_deferred_peer_source_loss_transfer_id = 0;
+			free(
+					q->datavine_deferred_peer_source_loss_destination_workerid);
+			q->datavine_deferred_peer_source_loss_destination_workerid =
+					0;
+			if (!q->datavine_deferred_peer_source_loss_triggering) {
+				q->datavine_deferred_peer_source_loss_expirations++;
+			}
+		}
+		if (p->datavine_lease) {
+			int injected_failure =
+					p->datavine_data_id
+					&& !strncmp(
+							p->datavine_data_id,
+							"i:",
+							2)
+					&& q->datavine_fault_idata_release_failures_remaining
+							> 0;
+			if (injected_failure) {
+				q->datavine_fault_idata_release_failures_remaining--;
+				q->datavine_peer_release_failures_injected++;
+			}
+			if (injected_failure
+					|| !vine_datavine_release_transfer(
+							q, id, p->success)) {
+				if (p->release_attempts == 0) {
+					q->datavine_peer_release_pending++;
+				}
+				p->release_attempts++;
+				p->release_retry_after = timestamp_get()
+						+ q->datavine_transfer_release_retry_delay;
+				q->datavine_peer_release_pending_high_water =
+						MAX(
+								q->datavine_peer_release_pending_high_water,
+								q->datavine_peer_release_pending);
+				debug(D_ERROR,
+						"DataVine transfer lease release failed for %s; retaining transfer record for bounded retry",
+						id);
+				return 0;
+			}
+			if (p->release_attempts > 0) {
+				if (q->datavine_peer_release_pending > 0) {
+					q->datavine_peer_release_pending--;
+				}
+				q->datavine_peer_release_retries_succeeded++;
+			}
+		}
+		hash_table_remove(q->current_transfer_table, id);
 		vine_transfer_pair_delete(p);
 		return 1;
 	} else {
@@ -132,16 +269,24 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 
 	struct vine_worker_info *source_worker = p->source_worker;
 	struct vine_worker_info *dest_worker = p->dest_worker;
+	p->success = 0;
 
-	/* If p is valid, the elements of p should always be valid, because a failed worker causes the transfer record to be removed,
-	 * not nulled out. This shouldn't happen, but we check and emit an error just in case. */
+	/* Stable URL transfers intentionally have no source worker.  A URL
+	 * failure is not evidence that the destination worker is unhealthy. */
+	if (!source_worker && p->source_url && dest_worker) {
+		vine_transfer_pair_complete(p);
+		return 0;
+	}
+
+	/* Peer transfers require both worker endpoints. */
 	if (!source_worker || !dest_worker) {
 		if (!source_worker) {
-			debug(D_ERROR, "%s: transfer record for file %s with id %s is found, but source worker is null", __func__, cachename, id);
+			debug(D_ERROR, "%s: peer transfer record for file %s with id %s is found, but source worker is null", __func__, cachename, id);
 		}
 		if (!dest_worker) {
 			debug(D_ERROR, "%s: transfer record for file %s with id %s is found, but destination worker is null", __func__, cachename, id);
 		}
+		vine_transfer_pair_complete(p);
 		return 0;
 	}
 
@@ -151,6 +296,9 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 	struct vine_file_replica *source_replica = vine_file_replica_table_lookup(source_worker, cachename);
 	if (source_replica && source_replica->state == VINE_FILE_REPLICA_STATE_READY) {
 		debug(D_VINE, "Unable to transfer a READY replica from %s (%s) to %s (%s) for file %s \n", source_worker->hostname, source_worker->addrport, dest_worker->hostname, dest_worker->addrport, cachename);
+
+		/* Detach the transfer before throttling may remove either worker. */
+		vine_transfer_pair_complete(p);
 
 		source_worker->xfer_streak_bad_source_counter++;
 		source_worker->xfer_total_bad_source_counter++;
@@ -162,6 +310,7 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 		return 1;
 	}
 
+	vine_transfer_pair_complete(p);
 	return 0;
 }
 
@@ -172,6 +321,7 @@ void vine_current_transfers_set_success(struct vine_manager *q, char *id)
 	if (!p) {
 		return;
 	}
+	p->success = 1;
 
 	struct vine_worker_info *source = p->source_worker;
 	if (source) {
@@ -188,6 +338,7 @@ void vine_current_transfers_set_success(struct vine_manager *q, char *id)
 		dest_worker->xfer_streak_bad_destination_counter = 0;
 		dest_worker->xfer_total_good_destination_counter++;
 	}
+	vine_transfer_pair_complete(p);
 }
 
 // count the number transfers coming from a specific remote url (not a worker)
@@ -234,6 +385,11 @@ int vine_current_transfers_wipe_worker(struct vine_manager *q, struct vine_worke
 	list_first_item(ids_to_remove);
 	char *transfer_id;
 	while ((transfer_id = list_pop_head(ids_to_remove))) {
+		struct vine_transfer_pair *t = hash_table_lookup(q->current_transfer_table, transfer_id);
+		if (t) {
+			t->success = 0;
+			vine_transfer_pair_complete(t);
+		}
 		vine_current_transfers_remove(q, transfer_id);
 		free(transfer_id);
 		removed++;
@@ -266,10 +422,171 @@ void vine_current_transfers_print_table(struct vine_manager *q)
 
 void vine_current_transfers_clear(struct vine_manager *q)
 {
-	hash_table_clear(q->current_transfer_table, (void *)vine_transfer_pair_delete);
+	struct list *ids = list_create();
+	char *id;
+	struct vine_transfer_pair *t;
+	int iteration;
+	HASH_TABLE_ITERATE(q->current_transfer_table, iteration, id, t)
+	{
+		t->success = 0;
+		vine_transfer_pair_complete(t);
+		list_push_tail(ids, xxstrdup(id));
+	}
+	while ((id = list_pop_head(ids))) {
+		if (!vine_current_transfers_remove(q, id)) {
+			struct vine_transfer_pair *pending = hash_table_remove(q->current_transfer_table, id);
+			if (pending && pending->release_attempts > 0
+					&& q->datavine_peer_release_pending > 0) {
+				q->datavine_peer_release_pending--;
+			}
+			vine_transfer_pair_delete(pending);
+		}
+		free(id);
+	}
+	list_delete(ids);
 }
 
 int vine_current_transfers_get_table_size(struct vine_manager *q)
 {
 	return hash_table_size(q->current_transfer_table);
+}
+
+int vine_current_transfers_is_datavine_peer(struct vine_manager *q, const char *id)
+{
+	struct vine_transfer_pair *p;
+	if (!q || !id) {
+		return 0;
+	}
+	p = hash_table_lookup(q->current_transfer_table, id);
+	return p && p->datavine_lease && p->source_worker && p->dest_worker && !p->completed;
+}
+
+int vine_current_transfers_is_datavine_peer_destination(
+		struct vine_manager *q,
+		const char *id,
+		struct vine_worker_info *destination)
+{
+	struct vine_transfer_pair *p;
+	if (!q || !id || !destination) {
+		return 0;
+	}
+	p = hash_table_lookup(q->current_transfer_table, id);
+	return p && p->datavine_lease && p->source_worker &&
+			p->dest_worker == destination && !p->completed;
+}
+
+int vine_current_transfers_is_partial_datavine_peer_progress(
+		struct vine_manager *q,
+		const char *id,
+		struct vine_worker_info *destination,
+		uint64_t bytes)
+{
+	struct vine_transfer_pair *p;
+	if (!q || !id || !destination || bytes == 0) {
+		return 0;
+	}
+	p = hash_table_lookup(q->current_transfer_table, id);
+	return p && p->datavine_lease && p->source_worker &&
+			p->dest_worker == destination && !p->completed &&
+			p->expected_size > 0 && bytes < p->expected_size;
+}
+
+const char *vine_current_transfers_peer_source_workerid(
+		struct vine_manager *q, const char *id)
+{
+	struct vine_transfer_pair *p =
+			q && id
+			? hash_table_lookup(q->current_transfer_table, id)
+			: 0;
+	return p && p->datavine_lease && !p->completed
+					&& p->source_worker
+			? p->source_worker->workerid
+			: 0;
+}
+
+const char *vine_current_transfers_cachename(
+		struct vine_manager *q, const char *id)
+{
+	struct vine_transfer_pair *p =
+			q && id
+			? hash_table_lookup(q->current_transfer_table, id)
+			: 0;
+	return p && p->datavine_lease && !p->completed
+			? p->cachename
+			: 0;
+}
+
+int vine_current_transfers_uses_alternate_peer(
+		struct vine_manager *q,
+		const char *id,
+		const char *excluded_source_workerid)
+{
+	const char *source_workerid =
+			vine_current_transfers_peer_source_workerid(q, id);
+	return source_workerid && excluded_source_workerid
+			&& strcmp(source_workerid, excluded_source_workerid);
+}
+
+int vine_current_transfers_abort_source(struct vine_manager *q, const char *id)
+{
+	struct vine_transfer_pair *p;
+	struct vine_worker_info *source;
+	if (!q || !id) {
+		return 0;
+	}
+	p = hash_table_lookup(q->current_transfer_table, id);
+	if (!p || !p->datavine_lease || p->completed || !p->source_worker) {
+		return 0;
+	}
+	source = p->source_worker;
+	vine_manager_send(q, source, "abort-worker\n");
+	vine_manager_remove_worker(
+			q, source, VINE_WORKER_DISCONNECT_FAILURE);
+	return 1;
+}
+
+int vine_current_transfers_retry_releases(struct vine_manager *q, int limit)
+{
+	if (!q || limit < 1) {
+		return 0;
+	}
+	struct list *ids = list_create();
+	char *id;
+	struct vine_transfer_pair *t;
+	int iteration;
+	HASH_TABLE_ITERATE(q->current_transfer_table, iteration, id, t)
+	{
+		if (t->datavine_lease && t->completed
+				&& timestamp_get() >= t->release_retry_after) {
+			list_push_tail(ids, xxstrdup(id));
+			if (list_size(ids) >= limit) {
+				break;
+			}
+		}
+	}
+	int released = 0;
+	while ((id = list_pop_head(ids))) {
+		released += vine_current_transfers_remove(q, id);
+		free(id);
+	}
+	list_delete(ids);
+	return released;
+}
+
+uint64_t vine_current_transfers_pending_releases(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_release_pending : 0;
+}
+
+uint64_t vine_current_transfers_pending_release_capacity(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_transfer_release_capacity : 0;
+}
+
+uint64_t vine_current_transfers_pending_release_high_water(
+		struct vine_manager *q)
+{
+	return q ? q->datavine_peer_release_pending_high_water : 0;
 }

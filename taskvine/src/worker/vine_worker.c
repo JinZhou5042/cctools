@@ -55,6 +55,7 @@ See the file COPYING for details.
 #include "trash.h"
 #include "unlink_recursive.h"
 #include "url_encode.h"
+#include "uuid.h"
 #include "xpu_tracker.h"
 #include "xxmalloc.h"
 
@@ -104,9 +105,12 @@ static struct itable *procs_complete = NULL;
 
 /* Table of current transfers and their id. */
 static struct hash_table *current_transfers = NULL;
+static struct link *active_manager_link = NULL;
 
 /* The cache manager object keeping track of files stored by the worker. */
 struct vine_cache *cache_manager = 0;
+static int64_t datavine_cache_capacity_items = -1;
+static int64_t datavine_cache_capacity_bytes = -1;
 
 /* The watcher object is responsible for periodically checking whether */
 /* files marked with VINE_WATCH have been modified and should be streamed back. */
@@ -510,6 +514,40 @@ Send an asynchronmous message to the manager indicating that an item was success
 its size in bytes and transfer time in usec.
 */
 
+static void vine_worker_send_cache_capacity_status(
+		struct link *manager,
+		int64_t capacity_items,
+		int64_t capacity_bytes,
+		int accepted)
+{
+	if (!manager || !cache_manager) {
+		return;
+	}
+	int64_t items;
+	int64_t bytes;
+	int64_t items_high_water;
+	int64_t bytes_high_water;
+	int64_t admission_rejections;
+	vine_cache_get_usage(
+			cache_manager,
+			&items,
+			&bytes,
+			&items_high_water,
+			&bytes_high_water,
+			&admission_rejections);
+	send_async_message(
+			manager,
+			"info cache-capacity-status %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %d\n",
+			capacity_items,
+			capacity_bytes,
+			items,
+			bytes,
+			items_high_water,
+			bytes_high_water,
+			admission_rejections,
+			accepted);
+}
+
 void vine_worker_send_cache_update(struct link *manager, const char *cachename, struct vine_cache_file *f)
 {
 	if (!manager) {
@@ -520,9 +558,23 @@ void vine_worker_send_cache_update(struct link *manager, const char *cachename, 
 	if (!transfer_id) {
 		transfer_id = xxstrdup("X");
 	}
+	int64_t items;
+	int64_t bytes;
+	int64_t items_high_water;
+	int64_t bytes_high_water;
+	int64_t admission_rejections;
+	vine_cache_get_usage(
+			cache_manager,
+			&items,
+			&bytes,
+			&items_high_water,
+			&bytes_high_water,
+			&admission_rejections);
 
 	send_async_message(manager,
-			"cache-update %s %d %d %lld %lld %lld %lld %s\n",
+			"cache-update %s %d %d %lld %lld %lld %lld %s"
+			" %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64
+			" %" PRId64 "\n",
 			cachename,
 			f->original_type,
 			f->cache_level,
@@ -530,7 +582,12 @@ void vine_worker_send_cache_update(struct link *manager, const char *cachename, 
 			(long long)f->mtime,
 			(long long)f->transfer_time,
 			(long long)f->start_time,
-			transfer_id);
+			transfer_id,
+			items,
+			bytes,
+			items_high_water,
+			bytes_high_water,
+			admission_rejections);
 
 	free(transfer_id);
 }
@@ -556,6 +613,80 @@ void vine_worker_send_cache_invalid(struct link *manager, const char *cachename,
 		send_async_message(manager, "cache-invalid %s %d\n", cachename, length);
 	}
 	link_write(manager, message, length, time(0) + options->active_timeout);
+}
+
+void vine_worker_send_cache_transfer_start(const char *cachename)
+{
+	if (!active_manager_link || !cachename) {
+		return;
+	}
+	const char *transfer_id = hash_table_lookup(
+			current_transfers, cachename);
+	if (transfer_id) {
+		send_async_message(
+				active_manager_link,
+				"cache-transfer-start %s\n",
+				transfer_id);
+	}
+}
+
+void vine_worker_send_cache_transfer_progress(
+		const char *cachename, uint64_t bytes)
+{
+	if (!active_manager_link || !cachename || bytes == 0) {
+		return;
+	}
+	const char *transfer_id = hash_table_lookup(
+			current_transfers, cachename);
+	if (transfer_id) {
+		send_async_message(
+				active_manager_link,
+				"cache-transfer-progress %s %" PRIu64 "\n",
+				transfer_id,
+				bytes);
+	}
+}
+
+void vine_worker_send_cache_transfer_cleanup(
+		const char *cachename, uint64_t bytes, int path_absent)
+{
+	if (!active_manager_link || !cachename || bytes == 0) {
+		return;
+	}
+	const char *transfer_id = hash_table_lookup(
+			current_transfers, cachename);
+	if (transfer_id) {
+		send_async_message(
+				active_manager_link,
+				"cache-transfer-cleanup %s %" PRIu64 " %d\n",
+				transfer_id,
+				bytes,
+				!!path_absent);
+	}
+}
+
+void vine_worker_send_cache_transfer_corrupt(const char *cachename)
+{
+	if (!active_manager_link || !cachename) {
+		return;
+	}
+	const char *transfer_id = hash_table_lookup(
+			current_transfers, cachename);
+	if (transfer_id) {
+		send_async_message(
+				active_manager_link,
+				"cache-transfer-corrupt %s\n",
+				transfer_id);
+	}
+}
+
+void vine_worker_send_cache_capacity_update(struct link *manager)
+{
+	vine_worker_send_cache_capacity_status(
+			manager,
+			datavine_cache_capacity_items,
+			datavine_cache_capacity_bytes,
+			1);
 }
 
 /*
@@ -700,7 +831,9 @@ static void reap_process(struct vine_process *p, struct link *manager)
 	xpu_tracker_free(core_tracker, p->task->task_id);
 
 	if (manager) {
-		vine_sandbox_stageout(p, cache_manager, manager);
+		if (!vine_sandbox_stageout(p, cache_manager, manager)) {
+			p->result |= VINE_RESULT_OUTPUT_MISSING;
+		}
 	}
 
 	if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
@@ -882,7 +1015,19 @@ Generate a vine_process wrapped around a vine_task,
 and deposit it into the waiting list.
 */
 
-static struct vine_task *do_task_body(struct link *manager, int task_id, time_t stoptime)
+static void release_task_output_reservations(struct vine_task *task)
+{
+	struct vine_mount *output;
+	LIST_ITERATE(task->output_mounts, output)
+	{
+		if (output->file && output->file->cached_name) {
+			vine_cache_release_output(
+					cache_manager, output->file->cached_name);
+		}
+	}
+}
+
+static struct vine_task *do_task_body(struct link *manager, int task_id, time_t stoptime, int reserve_outputs)
 {
 	char line[VINE_LINE_MAX];
 	char localname[VINE_LINE_MAX];
@@ -923,6 +1068,7 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			vine_task_func_exec_mode_t func_exec_mode = n;
 			if (func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_INVALID) {
 				debug(D_VINE | D_NOTICE, "invalid func_exec_mode from manager: %s", line);
+				release_task_output_reservations(task);
 				vine_task_delete(task);
 				return 0;
 			}
@@ -935,6 +1081,16 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			url_decode(taskname_encoded, taskname, VINE_LINE_MAX);
 			vine_hack_do_not_compute_cached_name = 1;
 			vine_task_add_output_file(task, localname, taskname, flags);
+			if (reserve_outputs && !vine_cache_reserve_output(
+						cache_manager, localname, manager)) {
+				debug(
+						D_VINE,
+						"worker cache rejected output reservation %s",
+						localname);
+				release_task_output_reservations(task);
+				vine_task_delete(task);
+				return 0;
+			}
 		} else if (sscanf(line, "cores %" PRId64, &n)) {
 			vine_task_set_cores(task, n);
 		} else if (sscanf(line, "memory %" PRId64, &n)) {
@@ -962,6 +1118,7 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			free(env);
 		} else {
 			debug(D_VINE | D_NOTICE, "invalid command from manager: %s", line);
+			release_task_output_reservations(task);
 			vine_task_delete(task);
 			return 0;
 		}
@@ -974,7 +1131,7 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 
 static int do_task(struct link *manager, int task_id, time_t stoptime)
 {
-	struct vine_task *task = do_task_body(manager, task_id, stoptime);
+	struct vine_task *task = do_task_body(manager, task_id, stoptime, 1);
 	if (!task)
 		return 0;
 
@@ -1042,18 +1199,20 @@ static int do_put(struct link *manager, const char *cachename, vine_cache_level_
 Accept a url specification and queue it for later transfer.
 */
 
-static int do_put_url(const char *cache_name, vine_cache_level_t cache_level, int64_t size, int mode, const char *source)
+static int do_put_url(struct link *manager, const char *cache_name, vine_cache_level_t cache_level, int64_t size, int mode, const char *source, const char *expected_sha256, int inject_corruption, uint64_t pause_after_progress_usec)
 {
-	return vine_cache_add_transfer(cache_manager, cache_name, source, cache_level, mode, size, VINE_CACHE_FLAGS_ON_TASK);
+	vine_cache_add_transfer(cache_manager, cache_name, source, cache_level, mode, size, expected_sha256, inject_corruption, pause_after_progress_usec, VINE_CACHE_FLAGS_ON_TASK, manager);
+	return 1;
 }
 
 /*
 Accept a url specification and transfer immediately.
 */
 
-static int do_put_url_now(const char *cache_name, vine_cache_level_t cache_level, int64_t size, int mode, const char *source)
+static int do_put_url_now(struct link *manager, const char *cache_name, vine_cache_level_t cache_level, int64_t size, int mode, const char *source, const char *expected_sha256, int inject_corruption, uint64_t pause_after_progress_usec)
 {
-	return vine_cache_add_transfer(cache_manager, cache_name, source, cache_level, mode, size, VINE_CACHE_FLAGS_NOW);
+	vine_cache_add_transfer(cache_manager, cache_name, source, cache_level, mode, size, expected_sha256, inject_corruption, pause_after_progress_usec, VINE_CACHE_FLAGS_NOW, manager);
+	return 1;
 }
 
 /*
@@ -1065,11 +1224,14 @@ static int do_put_mini_task(struct link *manager, time_t stoptime, const char *c
 {
 	mini_task_id++;
 
-	struct vine_task *mini_task = do_task_body(manager, mini_task_id, stoptime);
+	struct vine_task *mini_task = do_task_body(manager, mini_task_id, stoptime, 0);
 	if (!mini_task)
 		return 0;
 
-	return vine_cache_add_mini_task(cache_manager, cache_name, source, mini_task, cache_level, mode, size);
+	if (!vine_cache_add_mini_task(cache_manager, cache_name, source, mini_task, cache_level, mode, size, manager)) {
+		vine_task_delete(mini_task);
+	}
+	return 1;
 }
 
 /*
@@ -1078,7 +1240,7 @@ directory.  If the request is valid, then move the file to the
 trash and deal with it there.
 */
 
-static int do_unlink(struct link *manager, const char *path)
+static int do_unlink(struct link *manager, const char *path, const char *operation_id)
 {
 	char *cached_path = vine_cache_data_path(cache_manager, path);
 
@@ -1093,6 +1255,35 @@ static int do_unlink(struct link *manager, const char *path)
 	}
 
 	free(cached_path);
+	if (operation_id) {
+		char path_encoded[VINE_LINE_MAX];
+		int64_t items;
+		int64_t bytes;
+		int64_t items_high_water;
+		int64_t bytes_high_water;
+		int64_t admission_rejections;
+		vine_cache_get_usage(
+				cache_manager,
+				&items,
+				&bytes,
+				&items_high_water,
+				&bytes_high_water,
+				&admission_rejections);
+		url_encode(path, path_encoded, sizeof(path_encoded));
+		send_async_message(
+				manager,
+				"cache-unlinked %s %s %d"
+				" %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64
+				" %" PRId64 "\n",
+				path_encoded,
+				operation_id,
+				result,
+				items,
+				bytes,
+				items_high_water,
+				bytes_high_water,
+				admission_rejections);
+	}
 	return result;
 }
 
@@ -1122,6 +1313,8 @@ static int do_kill(int task_id)
 
 	itable_remove(procs_complete, p->task->task_id);
 	list_remove(procs_waiting, p);
+
+	release_task_output_reservations(p->task);
 
 	vine_watcher_remove_process(watcher, p);
 
@@ -1311,7 +1504,13 @@ static int handle_manager(struct link *manager)
 	char source_encoded[VINE_LINE_MAX];
 	char source[VINE_LINE_MAX];
 	char transfer_id[VINE_LINE_MAX];
+	char expected_sha256[65];
+	int inject_corruption;
+	uint64_t pause_after_progress_usec;
+	char operation_id[UUID_LEN + 1];
 	int64_t length;
+	int64_t cache_capacity_items;
+	int64_t cache_capacity_bytes;
 	int64_t task_id = 0;
 	int mode, n;
 	int r = 0;
@@ -1324,26 +1523,65 @@ static int handle_manager(struct link *manager)
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = do_put(manager, filename, cache_level, length);
 			reset_idle_timer();
+		} else if (sscanf(line, "puturl %s %s %d %" SCNd64 " %o %s %64s %d %" SCNu64, source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id, expected_sha256, &inject_corruption, &pause_after_progress_usec) == 9) {
+			url_decode(filename_encoded, filename, sizeof(filename));
+			url_decode(source_encoded, source, sizeof(source));
+			hash_table_insert(current_transfers, filename, strdup(transfer_id));
+			r = do_put_url(manager, filename, cache_level, length, mode, source, expected_sha256, inject_corruption, pause_after_progress_usec);
+			reset_idle_timer();
+		} else if (sscanf(line, "puturl %s %s %d %" SCNd64 " %o %s %64s %d", source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id, expected_sha256, &inject_corruption) == 8) {
+			url_decode(filename_encoded, filename, sizeof(filename));
+			url_decode(source_encoded, source, sizeof(source));
+			hash_table_insert(current_transfers, filename, strdup(transfer_id));
+			r = do_put_url(manager, filename, cache_level, length, mode, source, expected_sha256, inject_corruption, 0);
+			reset_idle_timer();
 		} else if (sscanf(line, "puturl %s %s %d %" SCNd64 " %o %s", source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id) == 6) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			url_decode(source_encoded, source, sizeof(source));
-			r = do_put_url(filename, cache_level, length, mode, source);
-			reset_idle_timer();
 			hash_table_insert(current_transfers, filename, strdup(transfer_id));
+			r = do_put_url(manager, filename, cache_level, length, mode, source, NULL, 0, 0);
+			reset_idle_timer();
+		} else if (sscanf(line, "puturl_now %s %s %d %" SCNd64 " %o %s %64s %d %" SCNu64, source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id, expected_sha256, &inject_corruption, &pause_after_progress_usec) == 9) {
+			url_decode(filename_encoded, filename, sizeof(filename));
+			url_decode(source_encoded, source, sizeof(source));
+			hash_table_insert(current_transfers, filename, strdup(transfer_id));
+			r = do_put_url_now(manager, filename, cache_level, length, mode, source, expected_sha256, inject_corruption, pause_after_progress_usec);
+			reset_idle_timer();
+		} else if (sscanf(line, "puturl_now %s %s %d %" SCNd64 " %o %s %64s %d", source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id, expected_sha256, &inject_corruption) == 8) {
+			url_decode(filename_encoded, filename, sizeof(filename));
+			url_decode(source_encoded, source, sizeof(source));
+			hash_table_insert(current_transfers, filename, strdup(transfer_id));
+			r = do_put_url_now(manager, filename, cache_level, length, mode, source, expected_sha256, inject_corruption, 0);
+			reset_idle_timer();
 		} else if (sscanf(line, "puturl_now %s %s %d %" SCNd64 " %o %s", source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id) == 6) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			url_decode(source_encoded, source, sizeof(source));
-			r = do_put_url_now(filename, cache_level, length, mode, source);
-			reset_idle_timer();
 			hash_table_insert(current_transfers, filename, strdup(transfer_id));
+			r = do_put_url_now(manager, filename, cache_level, length, mode, source, NULL, 0, 0);
+			reset_idle_timer();
 		} else if (sscanf(line, "mini_task %s %s %d %" SCNd64 " %o", source_encoded, filename_encoded, &cache_level, &length, &mode) == 5) {
 			url_decode(source_encoded, source, sizeof(source));
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = do_put_mini_task(manager, time(0) + options->active_timeout, filename, cache_level, length, mode, source);
 			reset_idle_timer();
+		} else if (sscanf(line, "cache-capacity %" SCNd64 " %" SCNd64, &cache_capacity_items, &cache_capacity_bytes) == 2) {
+			int accepted = vine_cache_set_capacity(cache_manager, cache_capacity_items, cache_capacity_bytes);
+			if (accepted) {
+				datavine_cache_capacity_items = cache_capacity_items;
+				datavine_cache_capacity_bytes = cache_capacity_bytes;
+			}
+			vine_worker_send_cache_capacity_status(
+					manager,
+					cache_capacity_items,
+					cache_capacity_bytes,
+					accepted);
+			r = 1;
+		} else if (sscanf(line, "unlink %s %36s", filename_encoded, operation_id) == 2) {
+			url_decode(filename_encoded, filename, sizeof(filename));
+			r = do_unlink(manager, filename, operation_id);
 		} else if (sscanf(line, "unlink %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = do_unlink(manager, filename);
+			r = do_unlink(manager, filename, NULL);
 		} else if (sscanf(line, "getfile %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = vine_transfer_put_any(manager, cache_manager, filename, VINE_TRANSFER_MODE_FILE_ONLY, time(0) + options->active_timeout);
@@ -1362,6 +1600,14 @@ static int handle_manager(struct link *manager)
 		} else if (!strncmp(line, "exit", 5)) {
 			abort_flag = 1;
 			r = 1;
+		} else if (!strncmp(line, "abort-worker", 13)) {
+			/*
+			 * Deterministic abrupt-loss hook.  SIGKILL intentionally
+			 * bypasses worker cleanup so manager and Controller recovery
+			 * see the same boundary as an external process loss.
+			 */
+			kill(-getpgrp(), SIGKILL);
+			r = 0;
 		} else if (!strncmp(line, "check", 6)) {
 			r = send_keepalive(manager, 0);
 		} else if (!strncmp(line, "auth", 4)) {
@@ -1701,6 +1947,7 @@ static void vine_worker_serve_manager(struct link *manager)
 	sigset_t mask;
 
 	debug(D_VINE, "working for manager at %s:%d.\n", current_manager_address->addr, current_manager_address->port);
+	active_manager_link = manager;
 
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGCHLD);
@@ -1743,7 +1990,9 @@ static void vine_worker_serve_manager(struct link *manager)
 		hence a maximum wait time of five seconds is enforced.
 		*/
 
-		int wait_msec = 5000;
+		int wait_msec = vine_cache_transfer_count(cache_manager) > 0
+				? 1
+				: 5000;
 
 		if (sigchld_received_flag) {
 			wait_msec = 0;
@@ -1838,6 +2087,7 @@ static void vine_worker_serve_manager(struct link *manager)
 			reset_idle_timer();
 		}
 	}
+	active_manager_link = NULL;
 }
 
 /* Attempt to connect, authenticate, and work with the manager at this specific host and port. */
@@ -2259,6 +2509,12 @@ void vine_worker_create_structures()
 	total_resources = vine_resources_create();
 
 	worker_id = make_worker_id();
+	/*
+	Expose the unique worker incarnation to DataVine task processes.  This is
+	soft-state identity, not an authentication credential; Controller requests
+	remain token-authenticated.
+	*/
+	setenv("VINE_WORKER_ID", worker_id, 1);
 }
 
 /* Final cleanup of all worker structures before exiting */
