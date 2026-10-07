@@ -1,10 +1,12 @@
 # DataVine production contract
 
-Updated: 2026-09-01
+Updated: 2026-10-06
 
-Status: production candidate with strict-singleton regression 21/21 PASS,
-committed provenance and independently verified candidate package. Promotion
-over the existing canonical package remains an explicit operator action.
+Project navigation, source ownership and evidence entry points are indexed in
+`DATAVINE_MAP.md`.
+
+Delivery state and outstanding work are recorded in
+[the handoff](DATAVINE_HANDOFF_20260827.md).
 
 ## Scope
 
@@ -17,29 +19,42 @@ Every logical task is one physical TaskVine task per attempt. Workflow-delta
 framing, compact IR and native parametric descriptions reduce registration
 cost; they never batch task execution or completion.
 
+Workflow metadata recovery defaults to `policy.recovery: journal`. A workflow
+may explicitly select `recovery: none` when Controller process loss already
+means workflow loss. That process-lifetime mode keeps live status/events and
+all data-plane semantics but writes no workflow submit, delta, task-event or
+checkpoint records. It does not weaken requested-output persistence or change
+`idata_backup`; those are independent Controller policies.
+
 ## Ownership
 
 - Scheduler: dependency counters, ready state, dispatch, completion and retry.
-- TaskVine Manager: Worker connections and physical task transport. It carries
+- TaskVine Manager: Worker selection, connections and physical task transport. It carries
   one opaque DataVine task frame but owns no DataID, replica or GC policy.
 - Data Controller: DataID metadata, Worker sessions, replica state, requested
   result persistence, loss transitions and GC decisions.
 - Worker Data Agent: local replicas, input resolution, peer transfer,
   publication metadata and release acknowledgement.
+- Python frontend: IR construction, serialization, RPC and result consumption.
+  Submission and Session append share one builder path. The native validator
+  owns IR acceptance; the frontend does not negotiate execution variants.
 
 Task completion and data progress are independent. Physical success marks the
 logical task done and releases children immediately. A child may wait on its
 Worker for data, but Scheduler dispatch never waits for Controller persistence.
 
-Dynamic Python invocation records are control metadata. Up to 64 KiB travels
-inside a DVP2 `function_input` task frame and never enters the SharedFS object
-store. Larger invocations retain the DVP1 object path. The reusable callable
-object is still content-addressed and Worker-cached.
+Dynamic Python invocation records are control metadata. Source calls use DVP1;
+callable invocations up to 64 KiB use DVP3 inline task frames. Larger DVP4
+invocations are uploaded by Controller RPC and referenced by a signed
+content-addressed capability. Reusable callables are staged once in the Worker
+library cache; per-call payloads stay in the task sandbox. No frontend or
+Worker receives a Controller-local filesystem path.
 
 ## Data path
 
-Ordinary outputs stay Worker-local and volatile. Consumers resolve locally or
-peer-first. Open workflows retain an otherwise unused output because a later
+Outputs are initially published on Worker-local storage. Retained outputs
+receive an asynchronous Controller backup under the default policy; they remain
+volatile until a backup is admitted. Consumers resolve locally or peer-first. Open workflows retain an otherwise unused output because a later
 delta may add a consumer; sealing releases outputs with no consumer and no
 result request.
 
@@ -53,14 +68,10 @@ data threads copy background data.
 Backup is additive: admitting the Controller copy never removes the Worker
 local replica. Input resolution remains local-first, then peer-first while any
 live Worker replica exists, with the Controller copy used only as fallback.
-This boundary is performance-critical. In two 10,000-file, 10,000-MiB Condor
-runs with 32 producer and 64 consumer Workers, peer delivery sustained a
-median 1,779 MiB/s versus 832 MiB/s through the Controller, a 2.14x speedup.
-The slowest peer run still exceeded the fastest Controller run by 32 percent.
-Controller routing sent about 10.98 GB per run through the Frontend; peer
-routing left only about 10--11 MB of Frontend control traffic. Evidence and
-the exact route-isolation method are in
-`acceptance/peer-vs-controller-20260831.json`.
+The route-isolated comparison, storage matrix and dense crossover are indexed
+in [acceptance/README.md](acceptance/README.md). They support peer-first bulk
+delivery and do not establish a fixed file-size routing threshold.
+
 Foreground requested-result persistence always uses the high-priority queue;
 Worker input resolution also pauses new background admission briefly. A
 million-entry backlog therefore uses about 8 MiB rather than one heap object
@@ -101,7 +112,7 @@ request to dead: Worker replicas are released and unrequested Controller
 backups are removed. External source data and generated data share one DataID
 namespace and Worker Agent lifecycle; immutable origins use the source-fetch
 branch while generated data uses the replica resolver. Small Python invocations
-remain bounded DVP2 control frames and do not become files.
+remain bounded DVP3 control frames and do not become files.
 
 Requested outputs use one path for every file size:
 
@@ -143,9 +154,14 @@ is not fsynced after rename, consistent with that host-crash boundary.
 - Restart: current v1 workflow and Controller journals replay. Retired
   payload-in-workflow-journal result records are rejected rather than copied
   into a compatibility data plane. Durable result identities enter the live
-  replica table lazily, so restart cost is independent of files no later task
-  reads.
+  replica table lazily. This avoids eagerly hydrating every persisted DataID;
+  journal replay still depends on retained journal contents. Recovery requires
+  the journal and Controller files to remain available. `recovery:none` does
+  not reconstruct the workflow after service loss.
 - Corrupt or stale generation reports cannot replace a newer replica/result.
+
+The retry contract contains only `maximum_attempts`. Failed logical attempts
+may be retried within that budget; result-name filters are unsupported.
 
 The `ENOSPC`/`EIO` contract is enforced without a production fault hook by
 `TR_datavine_persistence_faults.sh`. It injects errors at the private result
@@ -167,6 +183,16 @@ a Worker.
 - immediate nonblocking small-response writes; `EPOLLOUT` only on backpressure;
 - connection maintenance bounded to 10 ms resolution under sustained traffic;
 - worker-first physical dispatch, depth 1, bounded at 4,096 sends per turn;
+- least-loaded selection over the dense Worker ring, plus generation-bound
+  recall of queued (never started) fork calls when a late Worker becomes idle;
+- fork executors use an 8x dispatch queue and a Worker-owned elastic execution
+  window. With C denoting Worker cores, it starts at 2C and samples every
+  250 ms while active. Headroom permits growth within granted capacity. At
+  CPU utilization of at least 95%, more than 3C observed runnable processes
+  for two pressure epochs trigger a reduction by C, down to a 2C floor.
+  The 3C value is a feedback threshold, not a hard execution-window cap.
+  Memory pressure at 80% uses a separate halving/drain path, with predictive
+  declared-memory checks before admission;
 - a generic, opt-in dense Worker availability ring with generation-checked
   slots; ordinary TaskVine does not allocate it and retains task-first by
   default;
@@ -192,9 +218,8 @@ Generic TaskVine retains its normal scheduler and file machinery as the
 baseline. DataVine does not carry a second runtime strategy merely to perform
 the comparison.
 
-A second workflow ID is rejected fail-closed. Historical tests that submit
-several workflows to one `serve` process are not production acceptance; each
-workflow must start its own process and journal.
+A second workflow ID is rejected fail-closed; each workflow requires its own
+process and journal.
 
 ## External contract
 
@@ -203,52 +228,61 @@ workflow must start its own process and journal.
 - native RPC: version 1
 - Python source/callable: `source-v1` and `callable-v1`
 - TaskVine executor: `builtin-v1`
-- Python ticket/output manifest: `DVP1` object fallback, `DVP2` inline
-  invocation and `DVM1` output manifest
+- Python execution frames: `DVP1` source, `DVP3` inline callable invocation,
+  `DVP4` Controller-RPC callable reference, and `DVM1` output manifest
 
 Compact records and defaults are accepted through `vine_datavine_ir.c`; full
 v1 records remain valid inputs, not a separate runtime. The Controller address
 and physical file paths never enter durable Workflow IR.
 
-## Maintainer map
+## Verification
 
-- `taskvine/src/datavine/vine_datavine_workflow_runtime.c`: workflow reactor
-  and Scheduler integration.
-- `taskvine/src/datavine/vine_datavine_data_controller.c`: data authority and
-  requested-result persistence.
-- `taskvine/src/worker/vine_datavine_agent.c`: Worker-local data plane.
-- `taskvine/src/datavine/vine_datavine_workflow_store.c`: workflow state and
-  task-event journal, never result payload storage.
-- `taskvine/src/datavine/vine_datavine_rpc.c`: bounded metadata/client RPC.
-- `taskvine/src/manager/vine_manager.c` and `vine_worker_pool.c`: generic
-  worker-first dispatch and optional dense availability index used by
-  DataVine.
+Source ownership is indexed in [DATAVINE_MAP.md](DATAVINE_MAP.md). Build and
+runtime commands are in [acceptance/README.md](acceptance/README.md); recorded
+PASS results and their limits are in [acceptance/matrix.md](acceptance/matrix.md).
+Performance comparisons must state executor, Worker topology, output lifecycle,
+recovery policy and whether asynchronous backup drain is included.
 
-## Acceptance
+## Preparation and diagnostics
 
-The current commands and state are in `acceptance/README.md`,
-`acceptance/matrix.md` and `progress.md`. Current storage evidence is under
-`acceptance/controller-local-tmp-20260827/` and must be verified from that
-directory with `sha256sum -c SHA256SUMS`. Deterministic persistence-failure
-evidence is `acceptance/controller-persistence-faults-20260828.json`.
+Worker preparation requires a real library execution opportunity and input
+readiness. The Worker has one elastic execution policy, with the constants
+specified above. Alternative admission and eager-preparation controls have
+been removed from production and fresh campaign entry points.
+`DATAVINE_TRACE_ATTEMPTS=1` records worker-local receipt, preparation, execution,
+and completion timestamps for auxiliary-payload attempts. It is disabled by
+default. These timestamps are not synchronized across hosts.
 
-The apparent drop from roughly 12k dummy tasks/s to roughly 1.1k tasks/s in
-the first background-iData benchmark was a comparison-boundary error, not a
-tenfold Controller regression. The 12k result uses persistent builtin tasks
-distributed over many Worker processes; the 1.1k result uses one 16-slot
-Worker that forks `/bin/true` and publishes one output per task. With current
-binaries, 16 one-core Workers sustain 12,166 builtin tasks/s while publishing
-one empty live iData each, and 12,218 logical tasks/s with background backup
-enabled. The backup then drains independently at 6,637 files/s. The complete
-controlled comparison is
-`acceptance/throughput-scale-comparison-20260831.json`; throughput claims must
-always state executor, Worker count, cores per Worker, output lifecycle and
-whether backup-drain time is included.
+Dense least-loaded dispatch visits each offered Worker at most once in a
+bounded scheduling pass. Reoffering an incompatible low-load Worker must not
+starve a recalled task's reserved destination. Worker-removal tests
+explicitly enable `DATAVINE_TASKVINE_TRANSACTION_LOG=1`, because fault selection
+must correlate connected Workers with jobs owned by the test factory.
 
-A five-run, 50,000-file follow-up isolates the zero-byte backup ceiling. Once
-a backlog exists, four background copy slots drain a median 7,786 files/s
-(range 7,707--7,938). Measured from task submission through the final durable
-copy, including backup ramp-up, the median is 6,236 files/s. Payload bytes are
-zero, so this case measures fixed per-file TCP request, file creation, `fsync`,
-digest and rename cost rather than network bandwidth. Evidence is
-`acceptance/empty-idata-backup-throughput-20260831.json`.
+Paper evidence and reproduction instructions live in
+[paper](paper/README.md).
+
+## Unified execution environment
+
+Workers run inside the same installed Poncho environment. DataVine ships one
+`datavine_executor` script and installs one `datavine-executor-v1` library.
+Built-in noop/echo requests finish inline; Python source and callables run in
+forked children of that same process. Python execution uses the interpreter
+and dependencies supplied by Poncho. Task executors cannot specify an
+`environment` override, including through `task_defaults`. Executor-path
+overrides are removed; the service always stages its installed sibling executor.
+
+Each Worker Agent holds one workflow for its current Manager connection and
+releases that state on disconnect. Builtin noop and echo share the same inline
+invocation format; there is no separate noop ticket decoder. The executor
+terminates and reaps active Python children when its input pipe closes.
+
+This replaces the separate C builtin and Python libraries. Native-only work
+now requires the Poncho Python environment as well, and shares the execution
+library's slot budget. Historical throughput measurements used the earlier
+layout and do not establish this layout's performance.
+
+DataVine always enables the dense Worker pool and least-loaded Worker selection.
+Requested results use the existing result descriptor and fetch/stream interfaces;
+the unused single-result path RPC has been removed. Scheduler recovery uses
+its existing rebuild path rather than a separate DONE rollback operation.

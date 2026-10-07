@@ -119,6 +119,8 @@ void vine_worker_account_task_started(struct vine_worker_info *worker,
 		struct vine_task *task);
 void vine_worker_account_task_completed(struct vine_worker_info *worker,
 		struct vine_task *task);
+void vine_worker_account_task_retrieved(struct vine_worker_info *worker,
+		struct vine_task *task);
 
 struct jx *vine_worker_to_jx(struct vine_worker_info *w);
 #endif

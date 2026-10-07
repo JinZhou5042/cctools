@@ -1,0 +1,17 @@
+{
+  "compute_attempt_1": "373584.0",
+  "compute_attempt_1_status": "removed after diagnosed library startup restriction",
+  "compute_attempt_2": "see compute-campaign-v2.condor.log",
+  "factory_jobs": "owned and cleaned by each run_trial factory; never remove jobs by username",
+  "compute_v4": "373774.0 completed",
+  "preloaded_science_v1": "373980.0 completed",
+  "preloaded_data_v1": "374003.0 completed",
+  "data_pipeline_v1": "373853.0 completed",
+  "pressure_v2": "373845.0 completed",
+  "process_waits": "373919.0 completed",
+  "diagnostic_quadrature": "373883.0 completed",
+  "unrelated_preserved": [
+    "251996.0",
+    "252002.0"
+  ]
+}

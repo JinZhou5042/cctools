@@ -4,7 +4,10 @@ The executable workload contract is
 `acceptance/scripts/data_intensive_workload.py`. One logical task is one
 physical TaskVine task; sleeps and task grouping are forbidden.
 
-## Full workload
+## Planned full workload
+
+This table is a target workload contract, not a completed-run claim. The
+[fixed-topology pilot](DATAVINE_FIXED_AB_20260830.md) is the retained bounded comparison.
 
 | Item | Value |
 |---|---:|
@@ -53,6 +56,5 @@ comparison. Dataset generation and verification are handled by
 4. Use the million-task dataset only for a scale-specific question.
 
 The current production decision does not depend on completing another 1M-task
-campaign. Current scheduler and Controller results are summarized in
-`progress.md`; raw Controller-local `/tmp` evidence is under
-`acceptance/controller-local-tmp-20260827/`.
+campaign. Use [the result index](acceptance/README.md) for accepted measurements and
+[the matrix](acceptance/matrix.md) for their scope limits.

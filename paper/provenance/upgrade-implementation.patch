@@ -1,0 +1,496 @@
+--- a/taskvine/src/manager/vine_manager.c
++++ b/taskvine/src/manager/vine_manager.c
+@@ -3334,30 +3334,42 @@
+ 
+ static vine_result_code_t commit_task_group_to_worker(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
+ {
+-	vine_result_code_t result = VINE_SUCCESS;
+-
+-	struct list *l = NULL;
+-	if (t->group_id) {
+-		l = itable_lookup(q->task_group_table, t->group_id);
+-		list_remove(l, t);
+-		// decrement refcount
+-		vine_task_delete(t);
+-	}
+-
++	struct list *l = t->group_id ? itable_lookup(q->task_group_table, t->group_id) : NULL;
++	vine_result_code_t first_result = VINE_SUCCESS;
+ 	int counter = 0;
+-	do {
+-
+-		if (counter && (result == VINE_SUCCESS)) {
+-			skip_list_remove(q->ready_tasks, t);
+-			// decrement refcount
++	while (t) {
++		/* The caller removed the first task from READY. Subsequent group
++		 * members stay in both READY and the group until actually attempted.
++		 * A library startup or exhausted credit is a deferral, not a commit. */
++		int group_reference = l && list_remove(l, t);
++		vine_result_code_t result = commit_task_to_worker(q, w, t);
++		if (!counter)
++			first_result = result;
++		if (result == VINE_MGR_FAILURE) {
++			if (group_reference)
++				list_push_head(l, t);
++			if (counter)
++				push_task_to_ready_tasks(q, t);
++			break;
++		}
++		if (group_reference)
+ 			vine_task_delete(t);
+-		}
+-		result = commit_task_to_worker(q, w, t);
++		if (result != VINE_SUCCESS) {
++			/* Propagate a later failure too: the worker-first caller must
++			 * not inspect w after failure handling has removed it. */
++			first_result = result;
++			break;
++		}
+ 		counter++;
+-	} while ((l && (t = list_pop_head(l))));
+-
+-	debug(D_VINE, "Sent batch of %d tasks to worker %s", counter, w->hostname);
+-	return result;
++		t = l ? list_peek_head(l) : NULL;
++		if (!t)
++			break;
++		skip_list_remove(q->ready_tasks, t);
++	}
++	debug(D_VINE, "Sent batch of %d tasks from task group", counter);
++	/* A later deferral must not cause the caller to requeue the first,
++	 * already committed task. Each member retains its own state. */
++	return first_result;
+ }
+ 
+ /* Returns true if task should be resubmitted due to resource exhaustion. */
+@@ -6204,11 +6216,10 @@
+ 
+ 	if (task->group_id) {
+ 		struct list *l = itable_lookup(q->task_group_table, task->group_id);
+-		if (l) {
+-			list_remove(l, task);
+-		}
++		int group_reference = l && list_remove(l, task);
+ 		task->group_id = 0;
+-		vine_task_delete(task);
++		if (group_reference)
++			vine_task_delete(task);
+ 	}
+ 
+ 	// set result before next call so that task appears with
+--- a/taskvine/src/manager/vine_task_groups.c
++++ b/taskvine/src/manager/vine_task_groups.c
+@@ -49,6 +49,7 @@
+ {
+ 	struct vine_mount *input_mount;
+ 	struct vine_mount *output_mount;
++	struct vine_mount *single_input = NULL;
+ 
+ 	int inputs_present = 0;
+ 	int outputs_present = 0;
+@@ -57,7 +58,7 @@
+ 	{
+ 		if (input_mount->file->type == VINE_TEMP) {
+ 			inputs_present++;
+-			break;
++			single_input = input_mount;
+ 		}
+ 	}
+ 
+@@ -69,9 +70,11 @@
+ 		}
+ 	}
+ 
+-	// could also be inputs_present && outputs_present
+-	if (inputs_present) {
+-		vine_task_groups_add_to_group(q, t, input_mount);
++	/* A join is a group boundary: sending it with only its first producer
++	 * can consume all function slots while other producers are still READY.
++	 * Its normal scheduler admission must observe every external dependency. */
++	if (inputs_present == 1 && single_input->file->recovery_task->group_id) {
++		vine_task_groups_add_to_group(q, t, single_input);
+ 		debug(D_VINE, "Assigned task to group %d", t->group_id);
+ 	} else if (outputs_present) {
+ 		vine_task_groups_create_group(q, t, output_mount);
+@@ -84,6 +87,9 @@
+ static void vine_task_group_delete(struct list *l)
+ {
+ 	if (l) {
++		struct vine_task *task;
++		while ((task = list_pop_head(l)))
++			vine_task_delete(task);
+ 		list_delete(l);
+ 	}
+ }
+--- a/taskvine/src/manager/vine_function_call.c
++++ b/taskvine/src/manager/vine_function_call.c
+@@ -387,7 +387,12 @@
+ 	int iteration;
+ 	ITABLE_ITERATE(manager->function_start_grants, iteration, task_id, task)
+ 	{
+-		if ((!task->library_task || !task->library_task->function_adaptive) &&
++		/* Native groups intentionally dispatch successors before their
++		 * temporary inputs exist. Their dispatch time is not the start of
++		 * a ready-to-execute grant deadline. Worker loss, explicit task
++		 * limits and cancellation still apply to these grouped calls. */
++		if (!task->group_id &&
++				(!task->library_task || !task->library_task->function_adaptive) &&
+ 				!task->function_start_acknowledged &&
+ 				!task->function_start_revoke_pending && task->worker &&
+ 				now - task->time_when_commit_end >= manager->function_start_timeout) {
+--- a/taskvine/src/tools/datavine_workflow.c
++++ b/taskvine/src/tools/datavine_workflow.c
+@@ -46,15 +46,17 @@
+ static int native_executor_path(char result[PATH_MAX])
+ {
+ 	const char *override = getenv("DATAVINE_EXECUTOR_PATH");
+-	return (override && realpath(override, result) && access(result, X_OK) == 0) ||
+-	       sibling_executable("datavine_executor", result);
++	if (override && override[0])
++		return realpath(override, result) && access(result, X_OK) == 0;
++	return sibling_executable("datavine_executor", result);
+ }
+ 
+ static int python_executor_path(char result[PATH_MAX])
+ {
+ 	const char *override = getenv("DATAVINE_PYTHON_EXECUTOR_PATH");
+-	return (override && realpath(override, result) && access(result, X_OK) == 0) ||
+-	       sibling_executable("datavine_python_executor", result);
++	if (override && override[0])
++		return realpath(override, result) && access(result, X_OK) == 0;
++	return sibling_executable("datavine_python_executor", result);
+ }
+ 
+ struct rpc_client {
+@@ -493,7 +495,7 @@
+ 	char python_executor[PATH_MAX];
+ 	if (!native_executor_path(native_executor) ||
+ 			!python_executor_path(python_executor)) {
+-		fprintf(stderr, "datavine_workflow: could not locate datavine_executor\n");
++		fprintf(stderr, "datavine_workflow: could not locate configured executors; check DATAVINE_EXECUTOR_PATH and DATAVINE_PYTHON_EXECUTOR_PATH\n");
+ 		vine_delete(manager);
+ 		vine_datavine_rpc_server_delete(server);
+ 		return 1;
+--- a/acceptance/scripts/run_regression.sh
++++ b/acceptance/scripts/run_regression.sh
+@@ -9,6 +9,16 @@
+ REGRESSION_PYTHON=${DATAVINE_TEST_PYTHON:-$CONFIGURED_PYTHON}
+ PARAMETRIC_TEST="$ROOT/taskvine/src/tools/datavine_parametric_test"
+ BUILT_PARAMETRIC_TEST=0
++REGRESSION_BINDINGS=${DATAVINE_TEST_BINDINGS:-"$ROOT/test_support/python_modules/python3"}
++
++# The C tools below come from this checkout. Test the matching Python extension
++# as well, rather than silently importing an older installed environment.
++if [ ! -f "$REGRESSION_BINDINGS/ndcctools/taskvine/_cvine.so" ]; then
++    echo "build the TaskVine Python bindings or set DATAVINE_TEST_BINDINGS" >&2
++    exit 2
++fi
++export PYTHONPATH="$REGRESSION_BINDINGS${PYTHONPATH:+:$PYTHONPATH}"
++export PYTHONNOUSERSITE=1 REGRESSION_BINDINGS
+ 
+ cleanup_generated_test_tool()
+ {
+@@ -57,12 +67,19 @@
+ export ROOT TEST_DIR TIMEOUT_SECONDS REPORT
+ "$REGRESSION_PYTHON" - <<'PY'
+ import json
++import hashlib
+ import os
+ import pathlib
+ import signal
+ import subprocess
+ import tempfile
+ import time
++from ndcctools.taskvine import _cvine
++
++binding = pathlib.Path(_cvine.__file__).resolve()
++expected = (pathlib.Path(os.environ['REGRESSION_BINDINGS']) / 'ndcctools/taskvine/_cvine.so').resolve()
++if binding != expected:
++    raise RuntimeError('regression imported an unexpected Python extension: ' + str(binding))
+ 
+ test_dir = pathlib.Path(os.environ["TEST_DIR"])
+ timeout = int(os.environ["TIMEOUT_SECONDS"])
+@@ -116,6 +133,19 @@
+     "test_count": len(results),
+     "passed_count": sum(item["passed"] for item in results),
+     "results": results,
++    "python_extension": str(binding),
++    "fingerprints": {
++        str(path): hashlib.sha256(path.read_bytes()).hexdigest()
++        for path in [binding,
++            test_dir.parent / 'src/tools/datavine_workflow',
++            test_dir.parent / 'src/worker/vine_worker',
++            test_dir.parent / 'src/manager/vine_manager.c',
++            test_dir.parent / 'src/manager/vine_function_call.c',
++            test_dir.parent / 'src/manager/vine_task_groups.c',
++            test_dir.parent.parent / 'acceptance/scripts/run_regression.sh',
++            *sorted(test_dir.glob('TR_datavine_*.sh')),
++            *sorted(test_dir.glob('datavine_*.py'))]
++    },
+ }
+ path = pathlib.Path(os.environ["REPORT"])
+ path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+--- /dev/null
++++ b/taskvine/test/datavine_task_groups.py
+@@ -0,0 +1,80 @@
++#!/usr/bin/env python3
++"""Native grouping must retain calls deferred by library startup or credits."""
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++
++import ndcctools.taskvine as vine
++
++
++def add(*values):
++    return sum(values)+1
++
++
++def slow_add(*values):
++    import time
++    time.sleep(.05)
++    return sum(values)+1
++
++
++def run(cores, start_timeout=None):
++    root=Path(__file__).resolve().parents[2]
++    with tempfile.TemporaryDirectory(prefix='vine-group-credit-') as directory:
++        executor=vine.FuturesExecutor(port=0,factory=False)
++        manager=executor.manager
++        assert manager.tune('task-groups',1)==0
++        function = add if start_timeout is None else slow_add
++        if start_timeout is not None:
++            assert manager.tune('function-start-timeout', start_timeout)==0
++        library=manager.create_library_from_functions('group-add',function,add_env=False,exec_mode='fork')
++        library.set_cores(cores)
++        library.set_function_slots(cores)
++        manager.install_library(library)
++        chains=[]
++        for seed in range(8):
++            parent=seed
++            for _ in range(4):
++                task=executor.future_funcall('group-add',function.__name__,parent)
++                task.set_cores(1)
++                parent=executor.submit(task)
++            chains.append(parent)
++        # Cross-group fan-in must not be sent as part of only one input chain.
++        join=executor.submit(executor.future_funcall('group-add',function.__name__,*chains))
++        sink=executor.submit(executor.future_funcall('group-add',function.__name__,join))
++        with open(Path(directory)/'worker.log','w') as log:
++            worker=subprocess.Popen([str(root/'taskvine/src/worker/vine_worker'),
++                '--cores',str(cores),'--memory','1024','--disk','1024','--idle-timeout','60',
++                'localhost',str(manager.port)],cwd=directory,stdout=log,stderr=log)
++            try:
++                assert sink.result(timeout=45)==sum(range(8))+8*4+2
++                assert [future.result(timeout=5) for future in chains]==[i+4 for i in range(8)]
++                manager._refresh_stats()
++                assert manager.stats.tasks_done==34
++                assert manager.stats.tasks_failed==0
++            finally:
++                worker.terminate()
++                worker.wait(timeout=15)
++                manager.__del__()
++    print(f'PASS grouping: {cores} credits, cold library, 8 chains, cross-group join, start timeout {start_timeout}',flush=True)
++
++
++def cancel():
++    executor=vine.FuturesExecutor(port=0,factory=False)
++    manager=executor.manager
++    manager.tune('task-groups',1)
++    library=manager.create_library_from_functions('not-installed',add,add_env=False,exec_mode='fork')
++    library.set_cores(1)
++    library.set_function_slots(1)
++    manager.install_library(library)
++    parent=executor.submit(executor.future_funcall('not-installed','add',0))
++    child=executor.submit(executor.future_funcall('not-installed','add',parent))
++    assert manager.cancel_by_task_id(child._task.id)
++    manager.__del__()
++    print('PASS grouping: cancel and destroy uncommitted group',flush=True)
++
++
++if __name__=='__main__':
++    for capacity in [1,4]:run(capacity)
++    run(4, start_timeout=.01)
++    cancel()
+--- /dev/null
++++ b/taskvine/test/TR_datavine_task_groups.sh
+@@ -0,0 +1,7 @@
++#!/bin/sh
++set -eu
++case "${1:-run}" in
++prepare|clean) ;;
++run) python "$(dirname "$0")/datavine_task_groups.py" ;;
++*) exit 2 ;;
++esac
+--- /dev/null
++++ b/taskvine/test/datavine_group_disconnect.py
+@@ -0,0 +1,112 @@
++#!/usr/bin/env python3
++"""Disconnect while sending a later group member, then verify recovery."""
++from pathlib import Path
++import multiprocessing
++import selectors
++import socket
++import struct
++import subprocess
++import tempfile
++
++import ndcctools.taskvine as vine
++
++
++def payload_size(parent, payload):
++    return parent + len(payload) + 1
++
++
++def run():
++    root = Path(__file__).resolve().parents[2]
++    with tempfile.TemporaryDirectory(prefix='vine-group-disconnect-') as directory:
++        executor = vine.FuturesExecutor(port=0, factory=False)
++        manager = executor.manager
++        manager.tune('task-groups', 1)
++        manager.tune('worker-first-scheduling', 1)
++        manager.tune('function-start-timeout', 0)
++        manager.tune('transient-error-interval', 0)
++        debug = Path(directory) / 'manager.log'
++        vine.cvine.vine_enable_debug_log(str(debug))
++        library = manager.create_library_from_functions('group-reconnect', payload_size,
++                                                       add_env=False, exec_mode='fork')
++        library.set_cores(2)
++        library.set_function_slots(2)
++        manager.install_library(library)
++        first = executor.submit(executor.future_funcall('group-reconnect', 'payload_size', 0, b''))
++        # Larger than socket buffers: resetting in this payload makes the
++        # synchronous second commit fail after the first has succeeded.
++        payload = b'GROUP-DISCONNECT-MARKER-' * (1024 * 1024)
++        second = executor.submit(executor.future_funcall('group-reconnect', 'payload_size', first, payload))
++        listener = socket.socket()
++        listener.bind(('127.0.0.1', 0))
++        listener.listen()
++        listener.settimeout(.2)
++        context = multiprocessing.get_context('fork')
++        stopped = context.Event()
++        disconnected = context.Event()
++        errors = context.Queue()
++        manager_port = manager.port
++
++        def proxy():
++            while not stopped.is_set():
++                try:
++                    downstream, _ = listener.accept()
++                except socket.timeout:
++                    continue
++                upstream = socket.create_connection(('127.0.0.1', manager_port))
++                try:
++                    with selectors.DefaultSelector() as poll:
++                        poll.register(upstream, selectors.EVENT_READ, downstream)
++                        poll.register(downstream, selectors.EVENT_READ, upstream)
++                        active = True
++                        while active and not stopped.is_set():
++                            for key, _ in poll.select(.2):
++                                data = key.fileobj.recv(65536)
++                                if not data:
++                                    active = False
++                                    break
++                                if key.fileobj is upstream and not disconnected.is_set() and b'GROUP-DISCONNECT-MARKER-' * 8 in data:
++                                    disconnected.set()
++                                    upstream.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
++                                    active = False
++                                    break
++                                key.data.sendall(data)
++                except (ConnectionError, OSError) as error:
++                    if not disconnected.is_set():
++                        errors.put(str(error))
++                finally:
++                    upstream.close()
++                    downstream.close()
++
++        # A separate process is necessary: a blocking C manager send may hold
++        # the Python GIL while the proxy must continue draining that socket.
++        proxy_process = context.Process(target=proxy, daemon=True)
++        proxy_process.start()
++        log = open(Path(directory) / 'worker.log', 'w')
++        worker = subprocess.Popen([str(root / 'taskvine/src/worker/vine_worker'),
++                                   '--cores', '2', '--memory', '1024', '--disk', '1024',
++                                   '--idle-timeout', '60', '127.0.0.1', str(listener.getsockname()[1])],
++                                  cwd=directory, stdout=log, stderr=log)
++        try:
++            assert second.result(timeout=60) == len(payload) + 2
++            assert disconnected.is_set(), 'fault was not injected'
++            assert errors.empty(), 'proxy failed before fault injection'
++            text = debug.read_text()
++            assert 'Failed to send task' in text, 'disconnect did not fail synchronous group commit'
++            manager._refresh_stats()
++            assert manager.stats.workers_removed >= 1
++        finally:
++            worker.terminate()
++            worker.wait(timeout=15)
++            stopped.set()
++            proxy_process.join(timeout=2)
++            if proxy_process.is_alive():
++                proxy_process.terminate()
++                proxy_process.join(timeout=2)
++            listener.close()
++            log.close()
++            manager.__del__()
++        print('PASS grouping: later-member send disconnect, worker reconnect, complete result', flush=True)
++
++
++if __name__ == '__main__':
++    run()
+--- /dev/null
++++ b/taskvine/test/TR_datavine_group_disconnect.sh
+@@ -0,0 +1,7 @@
++#!/bin/sh
++set -eu
++case "${1:-run}" in
++prepare|clean) ;;
++run) python "$(dirname "$0")/datavine_group_disconnect.py" ;;
++*) exit 2 ;;
++esac
+--- /dev/null
++++ b/taskvine/test/datavine_executor_override.py
+@@ -0,0 +1,32 @@
++#!/usr/bin/env python3
++"""An explicit unusable executor must fail before publishing service contact."""
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++
++
++def main():
++    executable = Path(__file__).resolve().parents[1] / 'src/tools/datavine_workflow'
++    with tempfile.TemporaryDirectory(prefix='datavine-override-') as directory:
++        root = Path(directory)
++        denied = root / 'not-executable'
++        denied.write_text('#!/bin/sh\nexit 0\n')
++        denied.chmod(0o600)
++        for variable in ['DATAVINE_EXECUTOR_PATH', 'DATAVINE_PYTHON_EXECUTOR_PATH']:
++            for target in [root / 'missing', denied]:
++                env = dict(os.environ)
++                env.pop('DATAVINE_EXECUTOR_PATH', None)
++                env.pop('DATAVINE_PYTHON_EXECUTOR_PATH', None)
++                env[variable] = str(target)
++                env['DATAVINE_RUNTIME_INFO_PATH'] = str(root / 'runtime')
++                done = subprocess.run([str(executable), 'serve', str(root / (variable + target.name)), 'test-token'],
++                                      env=env, cwd=root, capture_output=True, text=True, timeout=3)
++                assert done.returncode != 0, variable
++                assert '"endpoint"' not in done.stdout, done.stdout
++                assert 'configured executors' in done.stderr, done.stderr
++    print('PASS explicit executor overrides: missing and non-executable paths fail before contact', flush=True)
++
++
++if __name__ == '__main__':
++    main()
+--- /dev/null
++++ b/taskvine/test/TR_datavine_executor_override.sh
+@@ -0,0 +1,7 @@
++#!/bin/sh
++set -eu
++case "${1:-run}" in
++prepare|clean) ;;
++run) python "$(dirname "$0")/datavine_executor_override.py" ;;
++*) exit 2 ;;
++esac

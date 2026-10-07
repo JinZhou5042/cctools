@@ -1,0 +1,18 @@
+universe = vanilla
+executable = /groups/dthain/users/jzhou24/miniconda/envs/datavine/bin/python
+arguments = /users/jzhou24/cctools_repo/datavine/paper/scripts/research_pool_agent.py --pool /users/jzhou24/cctools_repo/datavine/paper/results/reserved-pool-v2 --index $(Process)
+request_cpus = 24
+request_memory = 16384MB
+request_disk = 8192MB
+requirements = TARGET.Machine == "$(machine)"
+should_transfer_files = NO
+getenv = true
+output = /users/jzhou24/cctools_repo/datavine/paper/results/pool-v2-$(Process).stdout
+error = /users/jzhou24/cctools_repo/datavine/paper/results/pool-v2-$(Process).stderr
+log = /users/jzhou24/cctools_repo/datavine/paper/results/pool-v2.condor.log
+queue machine from (
+cclws22.cse.nd.edu
+cclws23.cse.nd.edu
+cclws25.cse.nd.edu
+cclws26.cse.nd.edu
+)

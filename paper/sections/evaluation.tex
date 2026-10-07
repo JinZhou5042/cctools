@@ -1,0 +1,218 @@
+\section{Evaluation}
+\subsection{Questions and methodology}
+The evaluation asks four questions. Does separating the control boundaries
+improve completion time against a modern data-aware baseline? How much of any
+improvement comes from fixed concurrency rather than the architecture? Does
+deferred preparation change where tasks wait? Do correctness and recovery
+remain intact when workers disappear?
+
+The primary artifact contains two campaigns. A colocated campaign requests an
+eight-core compute allocation and runs two four-core workers within it. A
+separate campaign obtains two or four four-core workers through the batch
+system, with the service on a submission host. Worker count is not automatically
+physical node count: placement may colocate workers, and every result records
+the actual execution hosts. Consequently, the latter is a worker-pool study
+on an opportunistic cluster, not an exclusive-node strong-scaling claim.
+The colocated cold-library allocation uses an AMD EPYC 7543 host; the
+separate preloaded allocation uses an AMD EPYC 9334 host. Python is 3.10.20
+and NumPy 1.26.4. Runtime comparisons are within their respective allocation;
+cross-campaign differences also include this hardware change.
+Each worker is explicitly pinned to exactly its declared number of logical
+CPUs; local workers use disjoint CPU sets, and the colocated campaign process
+is limited to eight CPUs overall. This is necessary because the batch system
+assigns CPU shares without a hard quota. Task records verify actual affinity.
+Affinity limits concurrency capacity but does not establish exclusive cores;
+other allocations can still contend on the same host.
+
+Every trial creates a fresh service or manager and admits the complete
+requested worker pool before starting the measured interval. Timing includes
+graph construction and submission, function execution, fetching every sink,
+and a local fsync of each fetched sink. DataVine additionally performs its
+controller's requested-output durable admission. This is a conservative extra
+cost for DataVine, but it means the two implementations do not perform identical
+numbers of persistence operations. Intermediate backup is disabled in both
+primary comparisons; default-background-backup behavior is tested separately.
+Pool admission time is reported separately and excluded from performance.
+
+Within each workload and worker count, variant order is randomized in three
+repetition blocks using a retained seed. A trial is accepted only if its
+scientific invariants, logical identities, sink checksums, and DataVine physical
+attempt counts pass. Failed and interrupted attempts remain in the artifact.
+An incomplete pool never becomes a performance sample, and changing executable
+inputs prevents resuming a campaign under its old identity. Figures use only
+validated runs and expose the number of repetitions. We show ranges with
+medians rather than claiming precise population confidence from three samples.
+
+\subsection{Workloads and controls}
+Each graph contains 32 lanes and four stages, for 128 distinct task identities.
+Every task produces 256\,KiB of output, except where a numerical representation
+requires its corresponding element count. Both runtimes invoke the same
+serialized Python function. Parent payload hashes are checked at each consumer,
+and the sink closure must contain every expected logical identity. Telemetry
+records travel with results in both implementations; this is a measurable
+instrumentation cost and grows with graph depth.
+
+\begin{table}[t]
+\centering\small
+\caption{Scientific kernels and controlled stressor. These are miniapplications,
+not full production scientific analyses.}
+\label{tab:workloads}
+\begin{tabular}{@{}p{.18\columnwidth}p{.39\columnwidth}p{.31\columnwidth}@{}}
+\toprule
+Workload & Computation and graph & Independent check \\
+\midrule
+Spectral & FFT low-pass pipelines & Analytical signal energy \\
+Histogram & Byte scans; adjacent-lane fan-in & Count conservation and hashes \\
+Quadrature & Simpson integration pipelines & Analytic Gaussian integral \\
+Phase & CPU / disk / CPU / disk, with fan-in & All identities and content hashes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Spectral filtering uses NumPy FFTs on a deterministic two-frequency signal;
+energy has an analytical expected value. Quadrature computes a smooth Gaussian
+integral with composite Simpson integration and checks against the error-function
+solution. Histogram tasks scan all parent bytes and check count conservation.
+The phase control alternates a 100\,ms process-CPU loop with actual node-local
+file writes, fsync, and reads. It does not replace I/O with sleeping, although
+its files can still benefit from kernel caching and storage-device behavior.
+Its purpose is to expose a resource-phase transition, not model an application
+filesystem quantitatively.
+
+The colocated campaign compares DataVine fixed windows of $C$, $2C$, and $4C$,
+elastic admission, and elastic admission with eager preparation. TaskVine is
+measured at $C$ and with the explicitly extended fixed $2C$/$4C$ controls.
+The worker-pool campaign uses four representative variants: DataVine $C$ and
+elastic, stock TaskVine $C$, and extended TaskVine $4C$. These comparisons
+separate application correctness from scheduling and preparation choices.
+
+\subsection{Completion time and concurrency attribution}
+\input{results/evaluation-summary.tex}
+\begin{figure*}[t]
+\centering\includegraphics[width=.96\textwidth]{completion.pdf}
+\caption{Colocated compute-allocation trials. Points show individual accepted
+runs; bars indicate medians and whiskers the observed range. TV+ denotes the
+private fixed-overcommit extension, not stock TaskVine. Lower is better.}
+\label{fig:completion}
+\end{figure*}
+
+A comparison with stock TaskVine alone cannot distinguish more available
+function slots from cheaper data coordination. The fixed-window controls
+address that ambiguity. For each workload, the most informative pair is
+DataVine elastic versus the best tested fixed setting within DataVine, followed
+by the best tested extended TaskVine setting. If elastic matches a fixed
+setting, the result supports convenience across phases only to the extent
+that one fixed setting does not already work well everywhere. A negative
+result is retained rather than explained away by choosing a different baseline.
+
+The comparison is still not a complete factorial decomposition of scheduler
+and controller implementation costs. Both runtimes differ in APIs, graph
+submission, serialization, and result admission. Attempt timelines isolate
+preparation ordering within DataVine, but an architecture-level causal claim
+needs additional matched instrumentation of both control paths. We therefore
+report end-to-end differences separately from mechanism observations.
+
+\subsection{Separating dependency deployment from runtime behavior}
+The fresh-library campaign includes importing dependencies in each forked
+function process. Process-state diagnostics found a substantial deployment
+confound: Python children blocked in NFS open and RPC waits. Four additional
+identically configured quadrature diagnostics completed in 32.453, 0.711,
+0.694, and 1.367 s. The slow run included repeated kernel wait states associated
+with NFS; these samples establish an observed source of delay, not an
+attribution of every campaign outlier to the filesystem. The function body's
+CPU timer begins after its initial standard-library imports and therefore
+cannot explain the entire task residence interval.
+
+We consequently add a separate, symmetric-preload control. Both execution
+libraries import the same explicit standard-library modules and NumPy before
+reporting readiness and before forking function calls. TaskVine uses its
+existing module-hoisting interface; DataVine uses a private executor selected
+through its existing executor-path override. All later task bodies, data
+checks, CPU limits, graph shapes, and persistence policies are unchanged.
+The timer follows full worker connection, without a separate all-libraries-ready
+barrier; residual library setup can therefore enter the measured interval.
+This measures an explicitly configured preload deployment; the original cold-library observations
+remain visible and are not replaced or pooled with these runs. The preloaded
+campaign uses a separate opportunistic allocation, so ratios between cold and
+preloaded campaigns are not paired causal estimates.
+
+\begin{figure*}[t]
+\centering\includegraphics[width=.96\textwidth]{preloaded.pdf}
+\caption{Matched explicit dependency preloading, with three randomized blocks.
+Points show all accepted runs, bars medians, and whiskers observed ranges.
+Both backends preload dependencies once per library; residual startup is
+included if it outlasts worker admission.}
+\label{fig:preloaded}
+\end{figure*}
+\input{results/preloaded-summary.tex}
+These comparisons test the runtime under a controlled library environment.
+They do not establish that feedback is responsible for all differences:
+DataVine fixed $C$ is the direct counterexample when it matches or exceeds
+elastic admission. A production deployment must also account for preparing
+and distributing these libraries, and for libraries that are unsafe to fork.
+
+\subsection{Worker-pool sensitivity}
+\begin{figure}[t]
+\centering\includegraphics[width=\columnwidth]{worker-pool.pdf}
+\caption{Completion time versus admitted worker count on the opportunistic
+cluster. Host placement is recorded per trial. This is not an exclusive-node
+scaling result. Markers are medians; whiskers are observed ranges.}
+\label{fig:pool}
+\end{figure}
+Increasing the worker count can reduce available work per worker while adding
+control and transfer endpoints. At 128 tasks, this study tests sensitivity to
+pool size rather than maximum system capacity. It is especially important not
+to infer scalability from the mere ability to connect more workers. Changes
+in physical placement, node-local I/O, and submission-host load can affect
+observations even after full admission. The artifact retains those conditions
+so follow-up reserved-allocation runs can test the same hypotheses.
+
+\subsection{Data paths, larger graphs, and resource pressure}
+\begin{figure}[t]
+\centering\includegraphics[width=\columnwidth]{data-pipeline.pdf}
+\caption{Larger hash-data pipeline in two separate CPU-limited allocations,
+with fresh libraries and with explicit dependency preloading.
+All points represent validated complete runs; TV+ is the fixed-overcommit
+extension. DV E and DV P denote elastic and eager preparation. The kernel reads,
+hashes, and generates payloads.}
+\label{fig:data-pipeline}
+\end{figure}
+\begin{figure}[t]
+\centering\includegraphics[width=\columnwidth]{memory-pressure.pdf}
+\caption{Independent memory-pressure study: completion time and peak sampled
+worker memory for a declared 128-MiB task footprint. Sampling is not a hard
+bound on every allocation between observations.}
+\label{fig:memory}
+\end{figure}
+\begin{figure}[t]
+\centering\includegraphics[width=\columnwidth]{routes.pdf}
+\caption{Source-isolated delivery of 128 files. Admission and backup preparation
+precede the measured consumer phase. Network utilization is not inferred from
+shared frontend counters.}
+\label{fig:routes}
+\end{figure}
+\input{results/supplemental-summary.tex}
+
+\subsection{Preparation timeline and exercised failures}
+\begin{figure}[t]
+\centering\includegraphics[width=\columnwidth]{preparation.pdf}
+\caption{Worker-local residence decomposition for the focused 32-task
+functional experiment, using median per-attempt intervals; component medians need not sum to the
+median total. This submission-host
+run validates and illustrates the instrumentation; it is not a distributed
+performance result.}
+\label{fig:preparation}
+\end{figure}
+The focused eager/deferred experiment verifies 32 ordered traces in each mode.
+It shows where residence can be measured without conflating pre-preparation
+queueing with post-preparation waiting. These short, single-worker runs do not
+establish a throughput advantage for either policy. In particular, delaying
+preparation may sacrifice useful prefetch when transfers are long; the main
+campaign's eager variant tests the end-to-end effect independently.
+
+\input{results/recovery-summary.tex}
+The regression suite also exercises protocol, lifecycle, and persistence
+boundaries. Passing these cases supports the stated tested semantics; it is
+not a bound on all recovery times. No experiment in this paper is interpreted
+as controller-host-loss durability, arbitrary external-side-effect exactly-once
+execution, or guaranteed memory safety under undeclared allocation.

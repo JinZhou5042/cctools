@@ -1,0 +1,24 @@
+\section{Related Work}
+\textbf{Data-aware scientific runtimes.}
+TaskVine already manages in-cluster data and peer movement~\cite{taskvine}, and
+its high-energy physics application combines data placement and function
+execution improvements~\cite{hep}. DataVine builds on this runtime but moves
+replica resolution and preparation timing across explicit owners. Task grouping
+and WOW provide relevant locality and prepared-node alternatives~\cite{grouping,wow};
+their boundaries differ from dispatching before local readiness.
+
+\textbf{Separated data and recovery services.}
+Hoplite and Pocket establish consumer-driven lookup and independent storage
+services~\cite{hoplite,pocket}; ExoFlow separates execution from recovery under
+a stronger exactly-once contract~\cite{exoflow}. DataVine does not claim those
+primitives. The contribution under study is their interaction with
+input-preparation timing, logical progress, and worker admission for
+file-producing scientific tasks.
+
+\textbf{Local queues and resource adaptation.}
+Apollo and Sparrow study local queues, scheduling correction, and late binding~
+\cite{apollo,sparrow}; adaptive allocation predicts resource needs from
+observed tasks~\cite{adaptive}. DataVine binds descriptors early but postpones
+physical preparation. Wasabi and Svalinn constrain claims about resource-aware
+queuing, overbooking, and overload admission~\cite{wasabi,svalinn}. We do not
+claim queuing, recall, overcommit, or CPU/memory feedback as individually novel.

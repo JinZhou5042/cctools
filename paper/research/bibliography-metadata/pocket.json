@@ -1,0 +1,1236 @@
+{
+  "status": "ok",
+  "message-type": "work-list",
+  "message-version": "1.0.0",
+  "message": {
+    "facets": {},
+    "total-results": 673274,
+    "items": [
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2026,
+              9,
+              5
+            ]
+          ],
+          "date-time": "2026-09-05T17:01:59Z",
+          "timestamp": 1788627719528,
+          "version": "build-2803163510"
+        },
+        "reference-count": 58,
+        "publisher": "Association for Computing Machinery (ACM)",
+        "issue": "7",
+        "content-domain": {
+          "domain": [
+            "dl.acm.org"
+          ],
+          "crossmark-restriction": true
+        },
+        "short-container-title": [
+          "Proc. VLDB Endow."
+        ],
+        "published-print": {
+          "date-parts": [
+            [
+              2023,
+              3
+            ]
+          ]
+        },
+        "abstract": "<jats:p>Cloud object storage such as AWS S3 is cost-effective and highly elastic but relatively slow, while high-performance cloud storage such as AWS ElastiCache is expensive and provides limited elasticity. We present a new cloud storage service called ServerlessMemory, which stores data using the memory of serverless functions. ServerlessMemory employs a sliding-window-based memory management strategy inspired by the garbage collection mechanisms used in the programming language to effectively segregate hot/cold data and provides fine-grained elasticity, good performance, and a pay-per-access cost model with extremely low cost.</jats:p>\n          <jats:p>We then design and implement InfiniStore, a persistent and elastic cloud storage system, which seamlessly couples the function-based ServerlessMemory layer with a persistent, inexpensive cloud object store layer. InfiniStore enables durability despite function failures using a fast parallel recovery scheme built on the auto-scaling functionality of a FaaS (Function-as-a-Service) platform. We evaluate InfiniStore extensively using both microbenchmarking and two real-world applications. Results show that InfiniStore has more performance benefits for objects larger than 10 MB compared to AWS ElastiCache and Anna, and InfiniStore achieves 26.25% and 97.24% tenant-side cost reduction compared to InfiniCache and ElastiCache, respectively.</jats:p>",
+        "DOI": "10.14778/3587136.3587139",
+        "type": "journal-article",
+        "created": {
+          "date-parts": [
+            [
+              2023,
+              5,
+              8
+            ]
+          ],
+          "date-time": "2023-05-08T23:11:35Z",
+          "timestamp": 1683587495000
+        },
+        "page": "1629-1642",
+        "update-policy": "https://doi.org/10.1145/crossmark-policy",
+        "source": "Crossref",
+        "is-referenced-by-count": 14,
+        "title": [
+          "InfiniStore: Elastic Serverless Cloud Storage"
+        ],
+        "prefix": "10.14778",
+        "volume": "16",
+        "author": [
+          {
+            "given": "Jingyuan",
+            "family": "Zhang",
+            "sequence": "first",
+            "affiliation": [
+              {
+                "name": "George Mason University"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Ao",
+            "family": "Wang",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "George Mason University and Alibaba Group"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Xiaolong",
+            "family": "Ma",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Nevada, Reno"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Benjamin",
+            "family": "Carver",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "George Mason University"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Nicholas John",
+            "family": "Newman",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "George Mason University"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Ali",
+            "family": "Anwar",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Minnesota"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Lukas",
+            "family": "Rupprecht",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "IBM Research"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Vasily",
+            "family": "Tarasov",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "IBM Research"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Dimitrios",
+            "family": "Skourtis",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Redpanda Data"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Feng",
+            "family": "Yan",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Houston"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Yue",
+            "family": "Cheng",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Virginia"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          }
+        ],
+        "member": "320",
+        "published-online": {
+          "date-parts": [
+            [
+              2023,
+              5,
+              8
+            ]
+          ]
+        },
+        "reference": [
+          {
+            "key": "e_1_2_1_1_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/1807128.1807165"
+          },
+          {
+            "key": "e_1_2_1_2_1",
+            "volume-title": "CLOC: Count Lines of Code. https://github.com/AlDanial/cloc/.",
+            "year": "2022",
+            "unstructured": "AlDanial. 2022 . CLOC: Count Lines of Code. https://github.com/AlDanial/cloc/. AlDanial. 2022. CLOC: Count Lines of Code. https://github.com/AlDanial/cloc/."
+          },
+          {
+            "key": "e_1_2_1_3_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/2907294.2907304"
+          },
+          {
+            "key": "e_1_2_1_4_1",
+            "volume-title": "Improving Docker Registry Design Based on Production Workload Analysis. In 16th USENIX Conference on File and Storage Technologies (FAST 18)",
+            "author": "Anwar Ali",
+            "unstructured": "Ali Anwar , Mohamed Mohamed , Vasily Tarasov , Michael Littley , Lukas Rupprecht , Yue Cheng , Nannan Zhao , Dimitrios Skourtis , Amit S. Warke , Heiko Ludwig , Dean Hildebrand , and Ali R. Butt . 2018 . Improving Docker Registry Design Based on Production Workload Analysis. In 16th USENIX Conference on File and Storage Technologies (FAST 18) . USENIX Association, Oakland, CA, 265--278. https://www.usenix.org/conference/fast18/presentation/anwar Ali Anwar, Mohamed Mohamed, Vasily Tarasov, Michael Littley, Lukas Rupprecht, Yue Cheng, Nannan Zhao, Dimitrios Skourtis, Amit S. Warke, Heiko Ludwig, Dean Hildebrand, and Ali R. Butt. 2018. Improving Docker Registry Design Based on Production Workload Analysis. In 16th USENIX Conference on File and Storage Technologies (FAST 18). USENIX Association, Oakland, CA, 265--278. https://www.usenix.org/conference/fast18/presentation/anwar"
+          },
+          {
+            "key": "e_1_2_1_5_1",
+            "unstructured": "AWS. 2022. Amazon DynamoDB: Fast flexible NoSQL database service for single-digit millisecond performance at any scale. https://aws.amazon.com/dynamodb/.  AWS. 2022. Amazon DynamoDB: Fast flexible NoSQL database service for single-digit millisecond performance at any scale. https://aws.amazon.com/dynamodb/."
+          },
+          {
+            "key": "e_1_2_1_6_1",
+            "unstructured": "AWS. 2022. AWS ElastiCache: Unlock microsecond latency and scale with in-memory caching. https://aws.amazon.com/elasticache/.  AWS. 2022. AWS ElastiCache: Unlock microsecond latency and scale with in-memory caching. https://aws.amazon.com/elasticache/."
+          },
+          {
+            "key": "e_1_2_1_7_1",
+            "unstructured": "AWS. 2022. AWS FSx: Launch and run feature-rich and highly-performant file systems with just a few clicks. https://aws.amazon.com/fsx/.  AWS. 2022. AWS FSx: Launch and run feature-rich and highly-performant file systems with just a few clicks. https://aws.amazon.com/fsx/."
+          },
+          {
+            "key": "e_1_2_1_8_1",
+            "unstructured": "AWS. 2022. AWS Lambda execution context. https://docs.aws.amazon.com/lambda/latest/dg/runtimes-context.html.  AWS. 2022. AWS Lambda execution context. https://docs.aws.amazon.com/lambda/latest/dg/runtimes-context.html."
+          },
+          {
+            "key": "e_1_2_1_9_1",
+            "unstructured": "AWS. 2022. AWS S3: Object storage built to retrieve any amount of data from anywhere. https://aws.amazon.com/s3/.  AWS. 2022. AWS S3: Object storage built to retrieve any amount of data from anywhere. https://aws.amazon.com/s3/."
+          },
+          {
+            "key": "e_1_2_1_10_1",
+            "unstructured": "AWS. 2023. AWS Lambda: Run code without thinking about servers or clusters. https://aws.amazon.com/lambda/.  AWS. 2023. AWS Lambda: Run code without thinking about servers or clusters. https://aws.amazon.com/lambda/."
+          },
+          {
+            "key": "e_1_2_1_11_1",
+            "volume-title": "Proceedings of the 9th USENIX Conference on Operating Systems Design and Implementation",
+            "author": "Beaver Doug",
+            "year": "2010",
+            "unstructured": "Doug Beaver , Sanjeev Kumar , Harry C. Li , Jason Sobel , and Peter Vajgel . 2010 . Finding a Needle in Haystack: Facebook's Photo Storage . In Proceedings of the 9th USENIX Conference on Operating Systems Design and Implementation ( Vancouver, BC, Canada) (OSDI'10). USENIX Association, Berkeley, CA, USA, 47--60. http://dl.acm.org/citation.cfm?id= 1924943.1924947 Doug Beaver, Sanjeev Kumar, Harry C. Li, Jason Sobel, and Peter Vajgel. 2010. Finding a Needle in Haystack: Facebook's Photo Storage. In Proceedings of the 9th USENIX Conference on Operating Systems Design and Implementation (Vancouver, BC, Canada) (OSDI'10). USENIX Association, Berkeley, CA, USA, 47--60. http://dl.acm.org/citation.cfm?id=1924943.1924947"
+          },
+          {
+            "key": "e_1_2_1_12_1",
+            "volume-title": "Proceedings of the 2014 USENIX Annual Technical Conference",
+            "author": "Bessani Alysson",
+            "year": "2014",
+            "unstructured": "Alysson Bessani , Ricardo Mendes , Tiago Oliveira , and Nuno Neves . 2014 . SCFS: A Shared Cloud-backed File System . Proceedings of the 2014 USENIX Annual Technical Conference (2014), 169--180. https://www.usenix.org/conference/atc14/technical-sessions/presentation/bessani Alysson Bessani, Ricardo Mendes, Tiago Oliveira, and Nuno Neves. 2014. SCFS: A Shared Cloud-backed File System. Proceedings of the 2014 USENIX Annual Technical Conference (2014), 169--180. https://www.usenix.org/conference/atc14/technical-sessions/presentation/bessani"
+          },
+          {
+            "key": "e_1_2_1_13_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3419111.3421286"
+          },
+          {
+            "key": "e_1_2_1_14_1",
+            "volume-title": "4th International Parallel Data Systems Workshop (PDSW",
+            "author": "Carver Benjamin",
+            "year": "2019",
+            "unstructured": "Benjamin Carver , Jingyuan Zhang , Ao Wang , and Yue Cheng . 2019 . In Search of a Fast and Efficient Serverless DAG Engine . In 4th International Parallel Data Systems Workshop (PDSW 2019). Benjamin Carver, Jingyuan Zhang, Ao Wang, and Yue Cheng. 2019. In Search of a Fast and Efficient Serverless DAG Engine. In 4th International Parallel Data Systems Workshop (PDSW 2019)."
+          },
+          {
+            "key": "e_1_2_1_15_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/2749246.2749252"
+          },
+          {
+            "key": "e_1_2_1_16_1",
+            "volume-title": "Tenant. In 7th USENIX Workshop on Hot Topics in Cloud Computing (HotCloud 15)",
+            "author": "Cheng Yue",
+            "unstructured": "Yue Cheng , M. Safdar Iqbal , Aayush Gupta , and Ali R. Butt . 2015. Pricing Games for Hybrid Object Stores in the Cloud: Provider vs . Tenant. In 7th USENIX Workshop on Hot Topics in Cloud Computing (HotCloud 15) . USENIX Association, Santa Clara, CA. https://www.usenix.org/conference/hotcloud15/workshop-program/presentation/cheng Yue Cheng, M. Safdar Iqbal, Aayush Gupta, and Ali R. Butt. 2015. Pricing Games for Hybrid Object Stores in the Cloud: Provider vs. Tenant. In 7th USENIX Workshop on Hot Topics in Cloud Computing (HotCloud 15). USENIX Association, Santa Clara, CA. https://www.usenix.org/conference/hotcloud15/workshop-program/presentation/cheng"
+          },
+          {
+            "key": "e_1_2_1_17_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/1807128.1807152"
+          },
+          {
+            "key": "e_1_2_1_18_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/2465351.2465370"
+          },
+          {
+            "key": "e_1_2_1_19_1",
+            "volume-title": "Docker Hub: Container Image Library. https://www.docker.com/products/docker-hub.",
+            "year": "2022",
+            "unstructured": "Docker. 2022 . Docker Hub: Container Image Library. https://www.docker.com/products/docker-hub. Docker. 2022. Docker Hub: Container Image Library. https://www.docker.com/products/docker-hub."
+          },
+          {
+            "key": "e_1_2_1_20_1",
+            "unstructured": "Google. 2022. Google Cloud Functions. https://cloud.google.com/functions/.  Google. 2022. Google Cloud Functions. https://cloud.google.com/functions/."
+          },
+          {
+            "key": "e_1_2_1_21_1",
+            "unstructured": "Google. 2022. Google Cloud Storage. https://cloud.google.com/storage.  Google. 2022. Google Cloud Storage. https://cloud.google.com/storage."
+          },
+          {
+            "key": "e_1_2_1_22_1",
+            "unstructured": "IETF HTTP Working Group. 2022. HTTP/2. https://http2.github.io/.  IETF HTTP Working Group. 2022. HTTP/2. https://http2.github.io/."
+          },
+          {
+            "key": "e_1_2_1_23_1",
+            "unstructured": "IBM. 2022. IBM Cloud Functions. https://console.bluemix.net/openwhisk/.  IBM. 2022. IBM Cloud Functions. https://console.bluemix.net/openwhisk/."
+          },
+          {
+            "key": "e_1_2_1_24_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3127479.3128601"
+          },
+          {
+            "key": "e_1_2_1_25_1",
+            "unstructured": "Richard Jones and Rafael. Lins. 1996. Garbage collection : algorithms for automatic dynamic memory management. (1996) 377.  Richard Jones and Rafael. Lins. 1996. Garbage collection : algorithms for automatic dynamic memory management. (1996) 377."
+          },
+          {
+            "key": "e_1_2_1_26_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/258533.258660"
+          },
+          {
+            "key": "e_1_2_1_27_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3492321.3527539"
+          },
+          {
+            "key": "e_1_2_1_28_1",
+            "volume-title": "Understanding Ephemeral Storage for Serverless Analytics. In 2018 USENIX Annual Technical Conference (USENIX ATC 18)",
+            "author": "Klimovic Ana",
+            "year": "2018",
+            "unstructured": "Ana Klimovic , Yawen Wang , Christos Kozyrakis , Patrick Stuedi , Jonas Pfefferle , and Animesh Trivedi . 2018 . Understanding Ephemeral Storage for Serverless Analytics. In 2018 USENIX Annual Technical Conference (USENIX ATC 18) . USENIX Association, Boston, MA, 789--794. https://www.usenix.org/conference/atc18/presentation/klimovic-serverless Ana Klimovic, Yawen Wang, Christos Kozyrakis, Patrick Stuedi, Jonas Pfefferle, and Animesh Trivedi. 2018. Understanding Ephemeral Storage for Serverless Analytics. In 2018 USENIX Annual Technical Conference (USENIX ATC 18). USENIX Association, Boston, MA, 789--794. https://www.usenix.org/conference/atc18/presentation/klimovic-serverless"
+          },
+          {
+            "key": "e_1_2_1_29_1",
+            "volume-title": "Pocket: Elastic Ephemeral Storage for Server-less Analytics. In 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI 18)",
+            "author": "Klimovic Ana",
+            "year": "2018",
+            "unstructured": "Ana Klimovic , Yawen Wang , Patrick Stuedi , Animesh Trivedi , Jonas Pfefferle , and Christos Kozyrakis . 2018 . Pocket: Elastic Ephemeral Storage for Server-less Analytics. In 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI 18) . USENIX Association, Carlsbad, CA, 427--444. https://www.usenix.org/conference/osdi18/presentation/klimovic Ana Klimovic, Yawen Wang, Patrick Stuedi, Animesh Trivedi, Jonas Pfefferle, and Christos Kozyrakis. 2018. Pocket: Elastic Ephemeral Storage for Server-less Analytics. In 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI 18). USENIX Association, Carlsbad, CA, 427--444. https://www.usenix.org/conference/osdi18/presentation/klimovic"
+          },
+          {
+            "key": "e_1_2_1_30_1",
+            "volume-title": "Measurement and Analysis of Large-Scale Network File System Workloads. In USENIX 2008 Annual Technical Conference",
+            "author": "Leung Andrew W.",
+            "unstructured": "Andrew W. Leung , Shankar Pasupathy , Garth Goodson , and Ethan L. Miller . 2008 . Measurement and Analysis of Large-Scale Network File System Workloads. In USENIX 2008 Annual Technical Conference ( Boston, Massachusetts) (ATC'08). USENIX Association, USA, 213--226. Andrew W. Leung, Shankar Pasupathy, Garth Goodson, and Ethan L. Miller. 2008. Measurement and Analysis of Large-Scale Network File System Workloads. In USENIX 2008 Annual Technical Conference (Boston, Massachusetts) (ATC'08). USENIX Association, USA, 213--226."
+          },
+          {
+            "key": "e_1_2_1_31_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/CLOUD.2019.00065"
+          },
+          {
+            "key": "e_1_2_1_32_1",
+            "volume-title": "SONIC: Application-aware Data Passing for Chained Serverless Applications. In 2021 USENIX Annual Technical Conference (USENIX ATC 21)",
+            "author": "Mahgoub Ashraf",
+            "year": "2021",
+            "unstructured": "Ashraf Mahgoub , Karthick Shankar , Subrata Mitra , Ana Klimovic , Somali Chaterji , and Saurabh Bagchi . 2021 . SONIC: Application-aware Data Passing for Chained Serverless Applications. In 2021 USENIX Annual Technical Conference (USENIX ATC 21) . USENIX Association, 285--301. https://www.usenix.org/conference/atc21/presentation/mahgoub Ashraf Mahgoub, Karthick Shankar, Subrata Mitra, Ana Klimovic, Somali Chaterji, and Saurabh Bagchi. 2021. SONIC: Application-aware Data Passing for Chained Serverless Applications. In 2021 USENIX Annual Technical Conference (USENIX ATC 21). USENIX Association, 285--301. https://www.usenix.org/conference/atc21/presentation/mahgoub"
+          },
+          {
+            "key": "e_1_2_1_33_1",
+            "unstructured": "Microsoft. 2022. Azure Blob Storage. https://azure.microsoft.com/en-us/services/storage/blobs/.  Microsoft. 2022. Azure Blob Storage. https://azure.microsoft.com/en-us/services/storage/blobs/."
+          },
+          {
+            "key": "e_1_2_1_34_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3447786.3456239"
+          },
+          {
+            "key": "e_1_2_1_35_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/2043556.2043560"
+          },
+          {
+            "key": "e_1_2_1_36_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/SC.2012.101"
+          },
+          {
+            "key": "e_1_2_1_37_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3318464.3380609"
+          },
+          {
+            "key": "e_1_2_1_38_1",
+            "volume-title": "Fast and Slow: Scalable Analytics on Serverless Infrastructure. In 16th USENIX Symposium on Networked Systems Design and Implementation (NSDI 19)",
+            "author": "Pu Qifan",
+            "year": "2019",
+            "unstructured": "Qifan Pu , Shivaram Venkataraman , and Ion Stoica . 2019 . Shuffling , Fast and Slow: Scalable Analytics on Serverless Infrastructure. In 16th USENIX Symposium on Networked Systems Design and Implementation (NSDI 19) . USENIX Association, Boston, MA, 193--206. https://www.usenix.org/conference/nsdi19/presentation/pu Qifan Pu, Shivaram Venkataraman, and Ion Stoica. 2019. Shuffling, Fast and Slow: Scalable Analytics on Serverless Infrastructure. In 16th USENIX Symposium on Networked Systems Design and Implementation (NSDI 19). USENIX Association, Boston, MA, 193--206. https://www.usenix.org/conference/nsdi19/presentation/pu"
+          },
+          {
+            "key": "e_1_2_1_39_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/2168836.2168845"
+          },
+          {
+            "key": "e_1_2_1_40_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3472883.3486974"
+          },
+          {
+            "key": "e_1_2_1_41_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/146941.146943"
+          },
+          {
+            "key": "e_1_2_1_42_1",
+            "volume-title": "Log-structured Memory for DRAM-based Storage. In 12th USENIX Conference on File and Storage Technologies (FAST 14)",
+            "author": "Rumble Stephen M.",
+            "year": "2014",
+            "unstructured": "Stephen M. Rumble , Ankita Kejriwal , and John Ousterhout . 2014 . Log-structured Memory for DRAM-based Storage. In 12th USENIX Conference on File and Storage Technologies (FAST 14) . USENIX Association, Santa Clara, CA, 1--16. https://www.usenix.org/conference/fast14/technical-sessions/presentation/rumble Stephen M. Rumble, Ankita Kejriwal, and John Ousterhout. 2014. Log-structured Memory for DRAM-based Storage. In 12th USENIX Conference on File and Storage Technologies (FAST 14). USENIX Association, Santa Clara, CA, 1--16. https://www.usenix.org/conference/fast14/technical-sessions/presentation/rumble"
+          },
+          {
+            "key": "e_1_2_1_43_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3135974.3135980"
+          },
+          {
+            "key": "e_1_2_1_44_1",
+            "volume-title": "Serverless: Cold Start War. https://mikhail.io/2018/08/serverless-cold-start-war/.",
+            "author": "Shilkov Mikhail",
+            "year": "2018",
+            "unstructured": "Mikhail Shilkov . 2018 . Serverless: Cold Start War. https://mikhail.io/2018/08/serverless-cold-start-war/. Mikhail Shilkov. 2018. Serverless: Cold Start War. https://mikhail.io/2018/08/serverless-cold-start-war/."
+          },
+          {
+            "key": "e_1_2_1_45_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3342195.3387535"
+          },
+          {
+            "key": "e_1_2_1_46_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.14778/3407790.3407836"
+          },
+          {
+            "key": "e_1_2_1_47_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3357223.3362710"
+          },
+          {
+            "key": "e_1_2_1_48_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3183713.3196937"
+          },
+          {
+            "key": "e_1_2_1_49_1",
+            "volume-title": "Building An Elastic Query Engine on Disaggregated Storage. In 17th USENIX Symposium on Networked Systems Design and Implementation (NSDI 20)",
+            "author": "Vuppalapati Midhul",
+            "year": "2020",
+            "unstructured": "Midhul Vuppalapati , Justin Miron , Rachit Agarwal , Dan Truong , Ashish Motivala , and Thierry Cruanes . 2020 . Building An Elastic Query Engine on Disaggregated Storage. In 17th USENIX Symposium on Networked Systems Design and Implementation (NSDI 20) . USENIX Association, Santa Clara, CA, 449--462. https://www.usenix.org/conference/nsdi20/presentation/vuppalapati Midhul Vuppalapati, Justin Miron, Rachit Agarwal, Dan Truong, Ashish Motivala, and Thierry Cruanes. 2020. Building An Elastic Query Engine on Disaggregated Storage. In 17th USENIX Symposium on Networked Systems Design and Implementation (NSDI 20). USENIX Association, Santa Clara, CA, 449--462. https://www.usenix.org/conference/nsdi20/presentation/vuppalapati"
+          },
+          {
+            "key": "e_1_2_1_50_1",
+            "volume-title": "2021 USENIX Annual Technical Conference (USENIX ATC 21)",
+            "author": "Wang Ao",
+            "year": "2021",
+            "unstructured": "Ao Wang , Shuai Chang , Huangshi Tian , Hongqi Wang , Haoran Yang , Huiba Li , Rui Du , and Yue Cheng . 2021 . FaaSNet: Scalable and Fast Provisioning of Custom Serverless Container Runtimes at Alibaba Cloud Function Compute . In 2021 USENIX Annual Technical Conference (USENIX ATC 21) . USENIX Association, 443--457. https://www.usenix.org/conference/atc21/presentation/wang-ao Ao Wang, Shuai Chang, Huangshi Tian, Hongqi Wang, Haoran Yang, Huiba Li, Rui Du, and Yue Cheng. 2021. FaaSNet: Scalable and Fast Provisioning of Custom Serverless Container Runtimes at Alibaba Cloud Function Compute. In 2021 USENIX Annual Technical Conference (USENIX ATC 21). USENIX Association, 443--457. https://www.usenix.org/conference/atc21/presentation/wang-ao"
+          },
+          {
+            "key": "e_1_2_1_51_1",
+            "volume-title": "18th USENIX Conference on File and Storage Technologies (FAST 20)",
+            "author": "Wang Ao",
+            "year": "2020",
+            "unstructured": "Ao Wang , Jingyuan Zhang , Xiaolong Ma , Ali Anwar , Lukas Rupprecht , Dimitrios Skourtis , Vasily Tarasov , Feng Yan , and Yue Cheng . 2020 . InfiniCache: Exploiting Ephemeral Serverless Functions to Build a Cost-Effective Memory Cache . In 18th USENIX Conference on File and Storage Technologies (FAST 20) . USENIX Association, Santa Clara, CA, 267--281. https://www.usenix.org/conference/fast20/presentation/wang-ao Ao Wang, Jingyuan Zhang, Xiaolong Ma, Ali Anwar, Lukas Rupprecht, Dimitrios Skourtis, Vasily Tarasov, Feng Yan, and Yue Cheng. 2020. InfiniCache: Exploiting Ephemeral Serverless Functions to Build a Cost-Effective Memory Cache. In 18th USENIX Conference on File and Storage Technologies (FAST 20). USENIX Association, Santa Clara, CA, 267--281. https://www.usenix.org/conference/fast20/presentation/wang-ao"
+          },
+          {
+            "key": "e_1_2_1_52_1",
+            "volume-title": "Peeking Behind the Curtains of Serverless Platforms. In 2018 USENIX Annual Technical Conference (USENIX ATC 18)",
+            "author": "Wang Liang",
+            "year": "2018",
+            "unstructured": "Liang Wang , Mengyuan Li , Yinqian Zhang , Thomas Ristenpart , and Michael Swift . 2018 . Peeking Behind the Curtains of Serverless Platforms. In 2018 USENIX Annual Technical Conference (USENIX ATC 18) . USENIX Association, Boston, MA, 133--146. https://www.usenix.org/conference/atc18/presentation/wang-liang Liang Wang, Mengyuan Li, Yinqian Zhang, Thomas Ristenpart, and Michael Swift. 2018. Peeking Behind the Curtains of Serverless Platforms. In 2018 USENIX Annual Technical Conference (USENIX ATC 18). USENIX Association, Boston, MA, 133--146. https://www.usenix.org/conference/atc18/presentation/wang-liang"
+          },
+          {
+            "key": "e_1_2_1_53_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/TKDE.2019.2898401"
+          },
+          {
+            "key": "e_1_2_1_54_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/2517349.2522730"
+          },
+          {
+            "key": "e_1_2_1_55_1",
+            "volume-title": "CosTLO: Cost-Effective Redundancy for Lower Latency Variance on Cloud Storage Services. In 12th USENIX Symposium on Networked Systems Design and Implementation (NSDI 15)",
+            "author": "Wu Zhe",
+            "unstructured": "Zhe Wu , Curtis Yu , and Harsha V. Madhyastha . 2015 . CosTLO: Cost-Effective Redundancy for Lower Latency Variance on Cloud Storage Services. In 12th USENIX Symposium on Networked Systems Design and Implementation (NSDI 15) . USENIX Association, Oakland, CA, 543--557. https://www.usenix.org/conference/nsdi15/technical-sessions/presentation/wu Zhe Wu, Curtis Yu, and Harsha V. Madhyastha. 2015. CosTLO: Cost-Effective Redundancy for Lower Latency Variance on Cloud Storage Services. In 12th USENIX Symposium on Networked Systems Design and Implementation (NSDI 15). USENIX Association, Oakland, CA, 543--557. https://www.usenix.org/conference/nsdi15/technical-sessions/presentation/wu"
+          },
+          {
+            "key": "e_1_2_1_56_1",
+            "unstructured": "ZeroMQ. 2022. ZeroMQ. https://zeromq.org/.  ZeroMQ. 2022. ZeroMQ. https://zeromq.org/."
+          },
+          {
+            "key": "e_1_2_1_57_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.48550/ARXIV.2209.01496"
+          },
+          {
+            "key": "e_1_2_1_58_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3357223.3362723"
+          }
+        ],
+        "container-title": [
+          "Proceedings of the VLDB Endowment"
+        ],
+        "language": "en",
+        "link": [
+          {
+            "URL": "https://dl.acm.org/doi/pdf/10.14778/3587136.3587139",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2023,
+              5,
+              8
+            ]
+          ],
+          "date-time": "2023-05-08T23:17:21Z",
+          "timestamp": 1683587841000
+        },
+        "score": 30.821283,
+        "resource": {
+          "primary": {
+            "URL": "https://dl.acm.org/doi/10.14778/3587136.3587139"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              2023,
+              3
+            ]
+          ]
+        },
+        "references-count": 58,
+        "journal-issue": {
+          "issue": "7",
+          "published-print": {
+            "date-parts": [
+              [
+                2023,
+                3
+              ]
+            ]
+          }
+        },
+        "alternative-id": [
+          "10.14778/3587136.3587139"
+        ],
+        "URL": "https://doi.org/10.14778/3587136.3587139",
+        "ISSN": [
+          "2150-8097"
+        ],
+        "issn-type": [
+          {
+            "value": "2150-8097",
+            "type": "print"
+          }
+        ],
+        "published": {
+          "date-parts": [
+            [
+              2023,
+              3
+            ]
+          ]
+        },
+        "assertion": [
+          {
+            "value": "2023-05-08",
+            "order": 2,
+            "name": "published",
+            "label": "Published",
+            "group": {
+              "name": "publication_history",
+              "label": "Publication History"
+            }
+          }
+        ]
+      },
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2026,
+              6,
+              12
+            ]
+          ],
+          "date-time": "2026-06-12T17:05:36Z",
+          "timestamp": 1781283936148,
+          "version": "3.54.1"
+        },
+        "publisher-location": "New York, NY, USA",
+        "reference-count": 51,
+        "publisher": "ACM",
+        "license": [
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2023,
+                  9,
+                  1
+                ]
+              ],
+              "date-time": "2023-09-01T00:00:00Z",
+              "timestamp": 1693526400000
+            },
+            "content-version": "vor",
+            "delay-in-days": 0,
+            "URL": "https://www.acm.org/publications/policies/copyright_policy#Background"
+          }
+        ],
+        "funder": [
+          {
+            "DOI": "10.13039/501100012166",
+            "name": "National Key Research and Development Program of China",
+            "doi-asserted-by": "publisher",
+            "award": [
+              "2022YFB4500700"
+            ],
+            "award-info": [
+              {
+                "award-number": [
+                  "2022YFB4500700"
+                ]
+              }
+            ],
+            "id": [
+              {
+                "id": "10.13039/501100012166",
+                "id-type": "DOI",
+                "asserted-by": "publisher"
+              }
+            ]
+          }
+        ],
+        "content-domain": {
+          "domain": [
+            "dl.acm.org"
+          ],
+          "crossmark-restriction": true
+        },
+        "published-print": {
+          "date-parts": [
+            [
+              2023,
+              9,
+              10
+            ]
+          ]
+        },
+        "DOI": "10.1145/3603269.3604816",
+        "type": "proceedings-article",
+        "created": {
+          "date-parts": [
+            [
+              2023,
+              9,
+              1
+            ]
+          ],
+          "date-time": "2023-09-01T16:16:29Z",
+          "timestamp": 1693584989000
+        },
+        "page": "406-419",
+        "update-policy": "https://doi.org/10.1145/crossmark-policy",
+        "source": "Crossref",
+        "is-referenced-by-count": 28,
+        "title": [
+          "Ditto: Efficient Serverless Analytics with Elastic Parallelism"
+        ],
+        "prefix": "10.1145",
+        "author": [
+          {
+            "ORCID": "https://orcid.org/0009-0006-1355-4995",
+            "authenticated-orcid": false,
+            "given": "Chao",
+            "family": "Jin",
+            "sequence": "first",
+            "affiliation": [
+              {
+                "name": "Peking University, Beijing, China"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0000-0003-4209-9451",
+            "authenticated-orcid": false,
+            "given": "Zili",
+            "family": "Zhang",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Peking University, Beijing, China"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0009-0009-6196-0332",
+            "authenticated-orcid": false,
+            "given": "Xingyu",
+            "family": "Xiang",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Peking University, Beijing, China"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0009-0005-5879-2623",
+            "authenticated-orcid": false,
+            "given": "Songyun",
+            "family": "Zou",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Peking University, Beijing, China"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0000-0002-4686-3181",
+            "authenticated-orcid": false,
+            "given": "Gang",
+            "family": "Huang",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Peking University, Beijing, China"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0000-0002-7908-8484",
+            "authenticated-orcid": false,
+            "given": "Xuanzhe",
+            "family": "Liu",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Peking University, Beijing, China"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0000-0001-8741-5847",
+            "authenticated-orcid": false,
+            "given": "Xin",
+            "family": "Jin",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Peking University, Beijing, China"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          }
+        ],
+        "member": "320",
+        "published-online": {
+          "date-parts": [
+            [
+              2023,
+              9
+            ]
+          ]
+        },
+        "reference": [
+          {
+            "key": "e_1_3_2_1_1_1",
+            "unstructured": "2023. Amazon Aurora Serverless. https://aws.amazon.com/rds/aurora/serverless."
+          },
+          {
+            "key": "e_1_3_2_1_2_1",
+            "unstructured": "2023. Amazon ElastiCache. https://aws.amazon.com/elasticache/."
+          },
+          {
+            "key": "e_1_3_2_1_3_1",
+            "unstructured": "2023. Amazon ElasticCache Pricing. https://aws.amazon.com/elasticache/pricing/."
+          },
+          {
+            "key": "e_1_3_2_1_4_1",
+            "unstructured": "2023. Amazon Glue. https://aws.amazon.com/glue/."
+          },
+          {
+            "key": "e_1_3_2_1_5_1",
+            "unstructured": "2023. Amazon Lambda. https://aws.amazon.com/lambda/."
+          },
+          {
+            "key": "e_1_3_2_1_6_1",
+            "unstructured": "2023. Amazon S3 Pricing. https://aws.amazon.com/s3/pricing/."
+          },
+          {
+            "key": "e_1_3_2_1_7_1",
+            "unstructured": "2023. Amazon simple storage service (S3). https://aws.amazon.com/s3/."
+          },
+          {
+            "key": "e_1_3_2_1_8_1",
+            "unstructured": "2023. Apache Hive. https://hive.apache.org/."
+          },
+          {
+            "key": "e_1_3_2_1_9_1",
+            "unstructured": "2023. Apache OpenWhisk. https://openwhisk.apache.org/."
+          },
+          {
+            "key": "e_1_3_2_1_10_1",
+            "unstructured": "2023. Azure Functions. https://azure.microsoft.com/products/functions/."
+          },
+          {
+            "key": "e_1_3_2_1_11_1",
+            "unstructured": "2023. Azure Synapse Analytics. https://azure.microsoft.com/products/synapse-analytics/."
+          },
+          {
+            "key": "e_1_3_2_1_12_1",
+            "unstructured": "2023. Google BigQuery. https://cloud.google.com/bigquery/."
+          },
+          {
+            "key": "e_1_3_2_1_13_1",
+            "unstructured": "2023. Google Cloud Functions. https://cloud.google.com/functions/."
+          },
+          {
+            "key": "e_1_3_2_1_14_1",
+            "unstructured": "2023. Knative. https://knative.dev/."
+          },
+          {
+            "key": "e_1_3_2_1_15_1",
+            "unstructured": "2023. Redis. https://redis.io/."
+          },
+          {
+            "key": "e_1_3_2_1_16_1",
+            "unstructured": "2023. Spark SQL. https://spark.apache.org/sql/."
+          },
+          {
+            "key": "e_1_3_2_1_17_1",
+            "unstructured": "2023. TPC-DS. https://www.tpc.org/tpcds/."
+          },
+          {
+            "key": "e_1_3_2_1_18_1",
+            "unstructured": "Sameer Agarwal Srikanth Kandula Nicolas Bruno Ming-Chuan Wu Ion Stoica and Jingren Zhou. 2012. Re-Optimizing Data-Parallel Computing. In USENIX NSDI."
+          },
+          {
+            "key": "e_1_3_2_1_19_1",
+            "volume-title": "SAND: Towards High-Performance Serverless Computing. In USENIX ATC.",
+            "author": "Akkus Istemi Ekin",
+            "year": "2018",
+            "unstructured": "Istemi Ekin Akkus, Ruichuan Chen, Ivica Rimac, Manuel Stein, Klaus Satzke, Andre Beck, Paarijaat Aditya, and Volker Hilt. 2018. SAND: Towards High-Performance Serverless Computing. In USENIX ATC."
+          },
+          {
+            "key": "e_1_3_2_1_20_1",
+            "volume-title": "BATCH: Machine Learning Inference Serving on Serverless Platforms with Adaptive Batching. In SC20: International Conference for High Performance Computing, Networking, Storage and Analysis.",
+            "author": "Ali Ahsan",
+            "year": "2019",
+            "unstructured": "Ahsan Ali, Riccardo Pinciroli, Feng Yan, and Evgenia Smirni. 2019. BATCH: Machine Learning Inference Serving on Serverless Platforms with Adaptive Batching. In SC20: International Conference for High Performance Computing, Networking, Storage and Analysis."
+          },
+          {
+            "key": "e_1_3_2_1_21_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3267809.3267815"
+          },
+          {
+            "key": "e_1_3_2_1_22_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3419111.3421286"
+          },
+          {
+            "key": "e_1_3_2_1_23_1",
+            "volume-title": "The Rise of Serverless Computing. Commun. ACM",
+            "author": "Castro Paul",
+            "year": "2019",
+            "unstructured": "Paul Castro, Vatche Ishakian, Vinod Muthusamy, and Aleksander Slominski. 2019. The Rise of Serverless Computing. Commun. ACM (2019)."
+          },
+          {
+            "key": "e_1_3_2_1_24_1",
+            "volume-title": "Scheduling Problems in Parallel Query Optimization. In ACM SIGACT-SIGMOD-SIGART Symposium on Principles of Database Systems.",
+            "author": "Chekuri Chandra",
+            "year": "1995",
+            "unstructured": "Chandra Chekuri, Waqar Hasan, and Rajeev Motwani. 1995. Scheduling Problems in Parallel Query Optimization. In ACM SIGACT-SIGMOD-SIGART Symposium on Principles of Database Systems."
+          },
+          {
+            "key": "e_1_3_2_1_25_1",
+            "volume-title": "HUG: Multi-Resource Fairness for Correlated and Elastic Demands. In USENIX NSDI.",
+            "author": "Chowdhury Mosharaf",
+            "year": "2016",
+            "unstructured": "Mosharaf Chowdhury, Zhenhua Liu, Ali Ghodsi, and Ion Stoica. 2016. HUG: Multi-Resource Fairness for Correlated and Elastic Demands. In USENIX NSDI."
+          },
+          {
+            "key": "e_1_3_2_1_26_1",
+            "unstructured": "Jeffrey Dean and Sanjay Ghemawat. 2004. MapReduce: Simplified Data Processing on Large Clusters. In USENIX OSDI."
+          },
+          {
+            "key": "e_1_3_2_1_27_1",
+            "unstructured": "Sadjad Fouladi Francisco Romero Dan Iter Qian Li Shuvo Chatterjee Christos Kozyrakis Matei Zaharia and Keith Winstein. 2019. From Laptop to Lambda: Outsourcing Everyday Jobs to Thousands of Transient Functional Containers. In USENIX ATC."
+          },
+          {
+            "key": "e_1_3_2_1_28_1",
+            "volume-title": "William Zeng, Rahul Bhalerao, Anirudh Sivaraman, George Porter, and Keith Winstein.",
+            "author": "Fouladi Sadjad",
+            "year": "2017",
+            "unstructured": "Sadjad Fouladi, Riad S. Wahby, Brennan Shacklett, Karthikeyan Vasuki Balasubramaniam, William Zeng, Rahul Bhalerao, Anirudh Sivaraman, George Porter, and Keith Winstein. 2017. Encoding, Fast and Slow: Low-Latency Video Processing Using Thousands of Tiny Threads. In USENIX NSDI."
+          },
+          {
+            "key": "e_1_3_2_1_29_1",
+            "volume-title": "Ioannidis",
+            "author": "Garofalakis Minos N.",
+            "year": "1996",
+            "unstructured": "Minos N. Garofalakis and Yannis E. Ioannidis. 1996. Multi-Dimensional Resource Scheduling for Parallel Queries. ACM SIGMOD Rec. (1996)."
+          },
+          {
+            "key": "e_1_3_2_1_30_1",
+            "volume-title": "Ioannidis",
+            "author": "Garofalakis Minos N.",
+            "year": "1997",
+            "unstructured": "Minos N. Garofalakis and Yannis E. Ioannidis. 1997. Parallel Query Scheduling and Optimization with Time- and Space-Shared Resources. In Proceedings of the VLDB Endowment."
+          },
+          {
+            "key": "e_1_3_2_1_31_1",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Robert Grandl Ganesh Ananthanarayanan Srikanth Kandula Sriram Rao and Aditya Akella. 2014. Multi-Resource Packing for Cluster Schedulers. In ACM SIGCOMM.",
+            "DOI": "10.1145/2619239.2626334"
+          },
+          {
+            "key": "e_1_3_2_1_32_1",
+            "unstructured": "Robert Grandl Mosharaf Chowdhury Aditya Akella and Ganesh Ananthanarayanan. 2016. Altruistic Scheduling in Multi-Resource Clusters. In USENIX OSDI."
+          },
+          {
+            "key": "e_1_3_2_1_33_1",
+            "volume-title": "GRAPHENE: Packing and Dependency-Aware Scheduling for Data-Parallel Clusters. In USENIX OSDI.",
+            "author": "Grandl Robert",
+            "year": "2016",
+            "unstructured": "Robert Grandl, Srikanth Kandula, Sriram Rao, Aditya Akella, and Janardhan Kulkarni. 2016. GRAPHENE: Packing and Dependency-Aware Scheduling for Data-Parallel Clusters. In USENIX OSDI."
+          },
+          {
+            "key": "e_1_3_2_1_34_1",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Chien-Chun Hung Ganesh Ananthanarayanan Leana Golubchik Minlan Yu and Mingyang Zhang. 2018. Wide-Area Analytics with Multiple Resources. In EuroSys.",
+            "DOI": "10.1145/3190508.3190528"
+          },
+          {
+            "key": "e_1_3_2_1_35_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/1629575.1629601"
+          },
+          {
+            "key": "e_1_3_2_1_36_1",
+            "volume-title": "Nightcore: Efficient and Scalable Server-less Computing for Latency-Sensitive, Interactive Microservices. In ACM ASP-LOS.",
+            "author": "Jia Zhipeng",
+            "year": "2021",
+            "unstructured": "Zhipeng Jia and Emmett Witchel. 2021. Nightcore: Efficient and Scalable Server-less Computing for Latency-Sensitive, Interactive Microservices. In ACM ASP-LOS."
+          },
+          {
+            "key": "e_1_3_2_1_37_1",
+            "volume-title": "Ion Stoica, and David A. Patterson.",
+            "author": "Jonas Eric",
+            "year": "2019",
+            "unstructured": "Eric Jonas, Johann Schleier-Smith, Vikram Sreekanti, Chia-Che Tsai, Anurag Khandelwal, Qifan Pu, Vaishaal Shankar, Joao Carreira, Karl Krauth, Neeraja J. Yadwadkar, Joseph E. Gonzalez, Raluca Ada Popa, Ion Stoica, and David A. Patterson. 2019. Cloud Programming Simplified: A Berkeley View on Serverless Computing. Commun. ACM (2019)."
+          },
+          {
+            "key": "e_1_3_2_1_38_1",
+            "volume-title": "Pocket: Elastic Ephemeral Storage for Serverless Analytics. In USENIX OSDI.",
+            "author": "Klimovic Ana",
+            "year": "2018",
+            "unstructured": "Ana Klimovic, Yawen Wang, Patrick Stuedi, Animesh Trivedi, Jonas Pfefferle, and Christos Kozyrakis. 2018. Pocket: Elastic Ephemeral Storage for Serverless Analytics. In USENIX OSDI."
+          },
+          {
+            "key": "e_1_3_2_1_39_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.14778/2850578.2850582"
+          },
+          {
+            "key": "e_1_3_2_1_40_1",
+            "volume-title": "Faastlane: Accelerating Function-as-a-Service Workflows. In USENIX ATC.",
+            "author": "Kotni Swaroop",
+            "year": "2021",
+            "unstructured": "Swaroop Kotni, Ajay Nayak, Vinod Ganapathy, and Arkaprava Basu. 2021. Faastlane: Accelerating Function-as-a-Service Workflows. In USENIX ATC."
+          },
+          {
+            "key": "e_1_3_2_1_41_1",
+            "volume-title": "SONIC: Application-aware Data Passing for Chained Serverless Applications. In USENIX ATC.",
+            "author": "Mahgoub Ashraf",
+            "year": "2021",
+            "unstructured": "Ashraf Mahgoub, Karthick Shankar, Subrata Mitra, Ana Klimovic, Somali Chaterji, and Saurabh Bagchi. 2021. SONIC: Application-aware Data Passing for Chained Serverless Applications. In USENIX ATC."
+          },
+          {
+            "key": "e_1_3_2_1_42_1",
+            "volume-title": "Zili Meng, and Mohammad Alizadeh.",
+            "author": "Mao Hongzi",
+            "year": "2019",
+            "unstructured": "Hongzi Mao, Malte Schwarzkopf, Shaileshh Bojja Venkatakrishnan, Zili Meng, and Mohammad Alizadeh. 2019. Learning Scheduling Algorithms for Data Processing Clusters. In ACM SIGCOMM."
+          },
+          {
+            "key": "e_1_3_2_1_43_1",
+            "volume-title": "David DeWitt, and Samuel Madden.",
+            "author": "Perron Matthew",
+            "year": "2020",
+            "unstructured": "Matthew Perron, Raul Castro Fernandez, David DeWitt, and Samuel Madden. 2020. Starling: A Scalable Query Engine on Cloud Functions. In ACM SIGMOD."
+          },
+          {
+            "key": "e_1_3_2_1_44_1",
+            "unstructured": "Qifan Pu Ganesh Ananthanarayanan Peter Bodik Srikanth Kandula Aditya Akella Paramvir Bahl and Ion Stoica. 2015. Low Latency Geo-Distributed Data Analytics. In ACM SIGCOMM."
+          },
+          {
+            "key": "e_1_3_2_1_45_1",
+            "unstructured": "Qifan Pu Shivaram Venkataraman and Ion Stoica. 2019. Shuffling Fast and Slow: Scalable Analytics on Serverless Infrastructure. In USENIX NSDI."
+          },
+          {
+            "key": "e_1_3_2_1_46_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3544216.3544259"
+          },
+          {
+            "key": "e_1_3_2_1_47_1",
+            "volume-title": "Distributed Machine Learning with a Serverless Architecture",
+            "author": "Wang Hao",
+            "unstructured": "Hao Wang, Di Niu, and Baochun Li. 2019. Distributed Machine Learning with a Serverless Architecture. In IEEE INFOCOM."
+          },
+          {
+            "key": "e_1_3_2_1_48_1",
+            "unstructured": "Minchen Yu Tingjia Cao Wei Wang and Ruichuan Chen. 2023. Following the Data Not the Function: Rethinking Function Orchestration in Serverless Computing. In USENIX NSDI."
+          },
+          {
+            "key": "e_1_3_2_1_49_1",
+            "volume-title": "Khaled Elmeleegy, Scott Shenker, and Ion Stoica.",
+            "author": "Zaharia Matei",
+            "year": "2010",
+            "unstructured": "Matei Zaharia, Dhruba Borthakur, Joydeep Sen Sarma, Khaled Elmeleegy, Scott Shenker, and Ion Stoica. 2010. Delay Scheduling: A Simple Technique for Achieving Locality and Fairness in Cluster Scheduling. In EuroSys."
+          },
+          {
+            "key": "e_1_3_2_1_50_1",
+            "volume-title": "Spark: Cluster Computing with Working Sets. In USENIX HotCloud Workshop.",
+            "author": "Zaharia Matei",
+            "year": "2010",
+            "unstructured": "Matei Zaharia, Mosharaf Chowdhury, Michael J. Franklin, Scott Shenker, and Ion Stoica. 2010. Spark: Cluster Computing with Working Sets. In USENIX HotCloud Workshop."
+          },
+          {
+            "key": "e_1_3_2_1_51_1",
+            "volume-title": "Caerus: NIMBLE Task Scheduling for Serverless Analytics. In USENIX NSDI.",
+            "author": "Zhang Hong",
+            "year": "2021",
+            "unstructured": "Hong Zhang, Yupeng Tang, Anurag Khandelwal, Jingrong Chen, and Ion Stoica. 2021. Caerus: NIMBLE Task Scheduling for Serverless Analytics. In USENIX NSDI."
+          }
+        ],
+        "event": {
+          "name": "ACM SIGCOMM '23: ACM SIGCOMM 2023 Conference",
+          "location": "New York NY USA",
+          "acronym": "ACM SIGCOMM '23",
+          "sponsor": [
+            "SIGCOMM ACM Special Interest Group on Data Communication"
+          ]
+        },
+        "container-title": [
+          "Proceedings of the ACM SIGCOMM 2023 Conference"
+        ],
+        "link": [
+          {
+            "URL": "https://dl.acm.org/doi/10.1145/3603269.3604816",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "text-mining"
+          },
+          {
+            "URL": "https://dl.acm.org/doi/pdf/10.1145/3603269.3604816",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2025,
+              6,
+              17
+            ]
+          ],
+          "date-time": "2025-06-17T16:46:41Z",
+          "timestamp": 1750178801000
+        },
+        "score": 30.313126,
+        "resource": {
+          "primary": {
+            "URL": "https://dl.acm.org/doi/10.1145/3603269.3604816"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              2023,
+              9
+            ]
+          ]
+        },
+        "references-count": 51,
+        "alternative-id": [
+          "10.1145/3603269.3604816",
+          "10.1145/3603269"
+        ],
+        "URL": "https://doi.org/10.1145/3603269.3604816",
+        "published": {
+          "date-parts": [
+            [
+              2023,
+              9
+            ]
+          ]
+        },
+        "assertion": [
+          {
+            "value": "2023-09-01",
+            "order": 2,
+            "name": "published",
+            "label": "Published",
+            "group": {
+              "name": "publication_history",
+              "label": "Publication History"
+            }
+          }
+        ]
+      }
+    ],
+    "items-per-page": 2,
+    "query": {
+      "start-index": 0,
+      "search-terms": null
+    }
+  }
+}

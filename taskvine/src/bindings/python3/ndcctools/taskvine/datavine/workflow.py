@@ -76,7 +76,6 @@ class Workflow:
             "python_invocation_serialize_nanoseconds": 0,
             "object_hash_nanoseconds": 0,
             "object_put_rpc_nanoseconds": 0,
-            "object_sharedfs_nanoseconds": 0,
             "object_put_requests": 0,
             "object_put_deduplicated": 0,
             "object_records": 0,
@@ -217,7 +216,7 @@ class Workflow:
         resources=None,
         maximum_attempts=1,
     ):
-        """Register a native persistent builtin without Python execution."""
+        """Register an inline noop/echo call in the shared executor."""
 
         operations = {"noop": 1, "echo": 2}
         if operation not in operations:
@@ -325,7 +324,7 @@ class Workflow:
                 )
             literal_key = (
                 (type(value), value)
-                if isinstance(value, (type(None), bool, int, float, str, bytes))
+                if isinstance(value, (type(None), bool, int, str, bytes))
                 else None
             )
             payload = (
@@ -433,7 +432,7 @@ class Workflow:
             "mode": "streaming" if self.streaming else "sealed",
             "tasks": copy.deepcopy(self._tasks) if copy_records else self._tasks,
             "data": (
-                copy.deepcopy(sorted(self._data, key=lambda item: item["data_id"]))
+                copy.deepcopy(self._data)
                 if copy_records else self._data
             ),
             "requested_outputs": sorted(self._requested),
@@ -485,61 +484,14 @@ class Workflow:
             idempotency_key=idempotency_key, copy_records=True,
         )
 
-    def _require_capabilities(self, client, *, delta=False):
-        try:
-            capabilities = client.workflow_capabilities()
-        except Exception as error:
-            raise RuntimeError(
-                "runtime does not advertise the required Workflow IR capabilities; "
-                "no workflow mutation was attempted"
-            ) from error
-        if _WORKFLOW_SCHEMA not in capabilities.get(
-            "schema_versions", ()
-        ):
-            raise RuntimeError(
-                f"runtime does not support {_WORKFLOW_SCHEMA}; "
-                "no workflow mutation was attempted"
-            )
-        if delta and _WORKFLOW_DELTA_SCHEMA not in capabilities.get(
-            "schema_versions", ()
-        ):
-            raise RuntimeError(
-                f"runtime does not support {_WORKFLOW_DELTA_SCHEMA}; "
-                "no workflow mutation was attempted"
-            )
-        required = {task["executor"]["kind"] for task in self._tasks}
-        missing = required - set(capabilities.get("executor_kinds", ()))
-        if missing:
-            raise RuntimeError(
-                "runtime does not support executor kinds "
-                f"{sorted(missing)}; no workflow mutation was attempted"
-            )
-        if (
-            self.idata_backup != "worker-local"
-            and self.idata_backup not in capabilities.get("idata_backup_modes", ())
-        ):
-            raise RuntimeError(
-                f"runtime does not support idata_backup={self.idata_backup!r}; "
-                "no workflow mutation was attempted"
-            )
-        return capabilities
-
-    def _externalize(self, client, data_start, capabilities):
+    def _externalize(self, client, data_start):
         """Install inline data once, then leave only content identities in IR."""
 
-        if capabilities.get("object_store") != "sharedfs-single-file-sha256-v1":
-            raise RuntimeError(
-                "runtime does not provide the required immutable object store; "
-                "no workflow mutation was attempted"
-            )
         builtin_payloads = {
             task["executor"]["payload_ref"]
             for task in self._tasks
             if task["executor"]["kind"] == "taskvine"
         }
-        inline_invocation_max = int(
-            capabilities.get("inline_invocation_max_bytes", 0)
-        )
         pending = {}
         for record in self._data[data_start:]:
             origin = record["origin"]
@@ -550,7 +502,7 @@ class Workflow:
             if (
                 codec.get("name") == "python/invocation"
                 and codec.get("version") == "1"
-                and 0 < len(payload) <= inline_invocation_max
+                and 0 < len(payload) <= 64 * 1024
             ):
                 self._profile["inline_invocation_records"] += 1
                 self._profile["inline_invocation_bytes"] += len(payload)
@@ -576,7 +528,7 @@ class Workflow:
 
         entries = list(pending.values())
         if entries:
-            parallelism = min(16, len(entries))
+            parallelism = min(4, len(entries))
             started = time.perf_counter_ns()
             installed_objects = client.put_objects(
                 ((payload, digest) for payload, digest, _ in entries),
@@ -594,9 +546,6 @@ class Workflow:
                 self._installed_objects[object_key] = installed
                 self._profile["object_put_rpc_nanoseconds"] += installed.get(
                     "rpc_nanoseconds", 0
-                )
-                self._profile["object_sharedfs_nanoseconds"] += installed.get(
-                    "sharedfs_nanoseconds", 0
                 )
                 self._profile["object_put_requests"] += 1
                 self._profile["object_put_deduplicated"] += int(
@@ -647,8 +596,7 @@ class Workflow:
         self._committed_requested = set(self._requested)
 
     def submit(self, client):
-        capabilities = self._require_capabilities(client)
-        self._externalize(client, 0, capabilities)
+        self._externalize(client, 0)
         info = client.submit_workflow(self._document(copy_records=False))
         self._mark_committed()
         return info
@@ -656,8 +604,7 @@ class Workflow:
     def append(self, client, expected_generation, *, idempotency_key):
         if self.workflow_id is None:
             raise ValueError("append requires an explicit workflow_id")
-        capabilities = self._require_capabilities(client, delta=True)
-        self._externalize(client, self._committed_data, capabilities)
+        self._externalize(client, self._committed_data)
         document = self._delta_document(
             self._committed_tasks,
             self._committed_data,
@@ -676,7 +623,6 @@ class Workflow:
     def seal(self, client, expected_generation):
         if self.workflow_id is None:
             raise ValueError("seal requires an explicit workflow_id")
-        self._require_capabilities(client)
         return client.seal_workflow(self.workflow_id, expected_generation)
 
 
@@ -777,7 +723,6 @@ class WorkflowSession:
             maximum_edges=maximum_edges,
             metadata=metadata,
         )
-        builder._require_capabilities(client, delta=True)
         info = client.submit_workflow(builder.document())
         return cls(client, builder, info["generation"])
 
@@ -798,7 +743,6 @@ class WorkflowSession:
             maximum_tasks=frontier["maximum_tasks"],
             maximum_edges=frontier["maximum_edges"],
         )
-        builder._require_capabilities(client, delta=True)
         builder._next_task_id = int(frontier["maximum_task_id"]) + 1
         builder._next_data_id = int(frontier["maximum_data_id"]) + 1
         return cls(client, builder, info["generation"])
@@ -831,25 +775,12 @@ class WorkflowSession:
         key = idempotency_key or (
             f"{self.workflow_id}-g{self.generation + 1}-{uuid.uuid4().hex}"
         )
-        capabilities = self.builder._require_capabilities(
-            self.client, delta=True
-        )
-        self.builder._externalize(
-            self.client, self.builder._committed_data, capabilities
-        )
-        document = self.builder.delta_document(
-            self.builder._committed_tasks,
-            self.builder._committed_data,
-            self.builder._committed_requested,
-            idempotency_key=key,
-        )
-        if not document["tasks"]:
+        if len(self.builder._tasks) == self.builder._committed_tasks:
             raise ValueError("a dynamic transaction must add at least one task")
-        info = self.client.append_workflow(
-            self.workflow_id, self.generation, document
+        info = self.builder.append(
+            self.client, self.generation, idempotency_key=key
         )
         self.generation = int(info["generation"])
-        self.builder._mark_committed()
         return info
 
     @staticmethod

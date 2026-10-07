@@ -65,6 +65,16 @@ def main():
     callable_document = callable_workflow.document()
     assert native_validate(callable_document)["valid"] is True
 
+    task_environment = copy.deepcopy(callable_document)
+    task_environment["tasks"][0]["executor"]["environment"] = {"PYTHONPATH": "/other-env"}
+    assert native_validate(task_environment)["valid"] is False
+
+    unsupported_retry_filter = copy.deepcopy(callable_document)
+    unsupported_retry_filter["tasks"][0]["retry"] = {
+        "maximum_attempts": 2, "retryable_results": ["success"]
+    }
+    assert native_validate(unsupported_retry_filter)["valid"] is False
+
     invalid_digest = copy.deepcopy(callable_document)
     invalid_digest["tasks"][0]["executor"]["function_digest"] = "A" * 64
     digest_response = native_validate(invalid_digest)
@@ -83,11 +93,21 @@ def main():
     assert legacy_response["valid"] is False
     assert legacy_response["error"] == "value"
 
+    ephemeral = copy.deepcopy(callable_document)
+    ephemeral["policy"]["recovery"] = "none"
+    assert native_validate(ephemeral)["valid"] is True
+
+    invalid_recovery = copy.deepcopy(callable_document)
+    invalid_recovery["policy"]["recovery"] = "sometimes"
+    recovery_response = native_validate(invalid_recovery)
+    assert recovery_response["valid"] is False
+    assert recovery_response["path"] == "$.policy.recovery"
+
     print(
         "DataVine Workflow IR v1 native golden-fixture PASS "
         f"({len(fixtures['valid'])} valid, "
         f"{len(fixtures['invalid'])} invalid, callable-register=1, "
-        "legacy-version-rejected=1)"
+        "legacy-version-rejected=1 recovery-policy=journal|none)"
     )
 
 

@@ -466,14 +466,6 @@ int vine_datavine_data_controller_get_object(
 						 controller->object_store, sha256, data, size);
 }
 
-int vine_datavine_data_controller_object_path(
-		struct vine_datavine_data_controller *controller, const char sha256[65],
-		char *path, size_t path_size)
-{
-	return controller && vine_datavine_object_store_path(
-						 controller->object_store, sha256, path, path_size, 0);
-}
-
 int vine_datavine_data_controller_configure_object_service(
 		struct vine_datavine_data_controller *controller,
 		const char *host, int port, const char *token)
@@ -496,25 +488,37 @@ int vine_datavine_data_controller_configure_object_service(
 	return 1;
 }
 
-const char *vine_datavine_data_controller_object_root(
-		struct vine_datavine_data_controller *controller)
-{
-	return controller
-				   ? vine_datavine_object_store_root(controller->object_store)
-				   : 0;
-}
-
 char *vine_datavine_data_controller_object_ticket(
 		struct vine_datavine_data_controller *controller,
 		const char *sha256)
 {
-	if (!controller || !sha256 || strlen(sha256) != 64)
+	if (!controller || !sha256 || strlen(sha256) != 64 ||
+			!controller->object_host || !controller->object_host[0] ||
+			!controller->object_token || !controller->object_token[0] ||
+			controller->object_port < 1 || controller->object_port > 65535)
 		return 0;
-	char path[PATH_MAX];
-	if (!vine_datavine_data_controller_object_path(
-				controller, sha256, path, sizeof(path)))
+	unsigned char message[84] = "datavine-object-v1:";
+	memcpy(message + 19, sha256, 64);
+	unsigned char signature[EVP_MAX_MD_SIZE];
+	unsigned int signature_size = 0;
+	if (!HMAC(EVP_sha256(), controller->object_token,
+			(int)strlen(controller->object_token), message, 83,
+			signature, &signature_size) || signature_size != 32)
 		return 0;
-	return string_format("datavine-file://%s", path);
+	char encoded[65];
+	static const char hexadecimal[] = "0123456789abcdef";
+	for (size_t index = 0; index < 32; index++) {
+		encoded[index * 2] = hexadecimal[signature[index] >> 4];
+		encoded[index * 2 + 1] = hexadecimal[signature[index] & 15];
+	}
+	encoded[64] = 0;
+	return strchr(controller->object_host, ':')
+			? string_format("datavine://[%s]:%d/%s/%s",
+					controller->object_host, controller->object_port,
+					sha256, encoded)
+			: string_format("datavine://%s:%d/%s/%s",
+					controller->object_host, controller->object_port,
+					sha256, encoded);
 }
 
 int vine_datavine_data_controller_agent_endpoint(
@@ -2604,15 +2608,6 @@ static void commit_job_group(struct vine_datavine_data_controller *controller,
 	}
 }
 
-static void commit_prepared_jobs(struct vine_datavine_data_controller *controller,
-		struct publication_job *jobs,
-		struct agent_persistence_thread_counters *metrics)
-{
-	/* Admission sets persistence_queued under controller->lock, so duplicate
-	 * DataID/generation jobs cannot coexist in this queue. */
-	commit_job_group(controller, jobs, metrics);
-}
-
 static void job_delete(struct publication_job *job)
 {
 	if (!job)
@@ -2775,7 +2770,7 @@ static void *data_worker(void *argument)
 			controller->prepared_head = 0;
 			controller->prepared_tail = 0;
 			pthread_mutex_unlock(&controller->queue_lock);
-			commit_prepared_jobs(controller, batch, metrics);
+			commit_job_group(controller, batch, metrics);
 			while (batch) {
 				struct publication_job *next = batch->next;
 				job_delete(batch);
@@ -3014,23 +3009,6 @@ int vine_datavine_data_controller_result_info(
 		*result = stored->info;
 	pthread_mutex_unlock(&controller->lock);
 	return stored != 0;
-}
-
-int vine_datavine_data_controller_result_path(
-		struct vine_datavine_data_controller *controller,
-		const char *workflow_id, uint64_t data_id,
-		char *path, size_t path_size)
-{
-	if (!controller || !workflow_id || !data_id || !path || !path_size)
-		return 0;
-	pthread_mutex_lock(&controller->lock);
-	struct data_result *stored = result_lookup(controller, workflow_id, data_id);
-	int valid = stored && stored->path &&
-			strlen(stored->path) + 1 <= path_size;
-	if (valid)
-		memcpy(path, stored->path, strlen(stored->path) + 1);
-	pthread_mutex_unlock(&controller->lock);
-	return valid;
 }
 
 int vine_datavine_data_controller_result_descriptors(

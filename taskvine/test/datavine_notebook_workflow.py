@@ -218,7 +218,7 @@ def main():
             # owned by the Controller and needs no Python helper process.
             assert len(python_processes) == 1, python_processes
             assert all(
-                b"datavine_python_executor" in process
+                b"datavine_executor" in process
                 for process in python_processes
             )
             attached.seal()

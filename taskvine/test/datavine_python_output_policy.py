@@ -9,9 +9,9 @@ import tempfile
 
 def main():
     repository = Path(__file__).resolve().parents[2]
-    executor_path = repository / "taskvine/src/tools/datavine_python_executor"
+    executor_path = repository / "taskvine/src/tools/datavine_executor"
     module = importlib.machinery.SourceFileLoader(
-        "datavine_python_executor_policy_test", str(executor_path)
+        "datavine_executor_policy_test", str(executor_path)
     ).load_module()
 
     def split(value):

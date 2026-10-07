@@ -5,8 +5,8 @@ DATAVINE_LINKAGE=${CCTOOLS_HOME}/taskvine/src/datavine/libdatavine.a ${CCTOOLS_H
 LOCAL_LINKAGE+=$(DATAVINE_LINKAGE)
 LOCAL_CCFLAGS+=-I ${CCTOOLS_HOME}/taskvine/src/manager -I ${CCTOOLS_HOME}/taskvine/src/datavine
 
-PROGRAMS = vine_status vine_benchmark datavine_workflow datavine_executor
-SCRIPTS = vine_plot_performance vine_plot_taskgraph vine_plot_workers vine_plot_txn_log vine_submit_workers vine_plot_compose vine_plot_run datavine_python_executor
+PROGRAMS = vine_status vine_benchmark datavine_workflow
+SCRIPTS = vine_plot_performance vine_plot_taskgraph vine_plot_workers vine_plot_txn_log vine_submit_workers vine_plot_compose vine_plot_run datavine_executor
 TEST_PROGRAMS = vine_test datavine_parametric_test datavine_replica_benchmark datavine_controller_benchmark
 TARGETS = $(PROGRAMS) $(TEST_PROGRAMS)
 

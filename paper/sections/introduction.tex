@@ -1,0 +1,82 @@
+\section{Introduction}
+Scientific applications increasingly execute as dependency graphs of short
+computations and intermediate objects. The performance problem extends beyond
+placing a runnable task on a free core: a successor must find its inputs, the
+runtime must preserve those inputs for other consumers or recovery, and a
+worker must distinguish work that is waiting from work that can use a CPU.
+As tasks become shorter, repeated coordination at these boundaries can occupy
+a substantial part of the interval between useful computations.
+
+In a conventional design, the same single-threaded manager handles both
+logical scheduling (dependency checks, dispatch, retries, and completion) and
+data-lifecycle coordination. A large workflow amplifies the latter demand:
+each intermediate input or output can trigger identity lookups, peer-copy or
+checkpoint admission, stage-in or stage-out coordination, acknowledgements,
+and garbage-collection updates. The bytes may move directly between workers,
+but the manager still serializes much of the control and lifetime bookkeeping.
+When these events arrive faster than one reactor can drain them, the manager
+becomes the bottleneck and workers can remain idle even when runnable work
+exists.
+
+Existing systems already exploit local intermediate storage and peer transfer.
+TaskVine manages an ensemble's storage and transfers~\cite{taskvine}; its use in
+high-energy physics demonstrates the importance of both data and function
+execution costs~\cite{hep}. Consequently, a credible next step cannot be to
+rediscover local caching or replace one copy path with another. The question is
+which component should own each decision, and which events must precede a
+successor's execution.
+
+Consider a task whose producer has finished on worker A. Worker B may have an
+execution opportunity before a backup copy has reached persistent storage.
+Waiting for backup before making the successor eligible needlessly orders
+recovery work before computation in the failure-free case. Yet immediately
+preparing every eligible successor can fill B's disk or memory with work that
+will wait in its queue. Increasing concurrent processes can hide some waits,
+but a fixed factor can also intensify competition during compute-heavy phases.
+These are related ordering and admission problems.
+
+Our central design choice is to expose three boundaries: logical dispatch,
+physical input preparation, and execution admission. DataVine's scheduler owns
+DAG eligibility and task attempts; its data controller owns named intermediates,
+replicas, and retention; workers own the final preparation and execution gates.
+A task description can wait cheaply on a worker before its input sandbox is
+prepared. A bounded queue absorbs dispatch latency while a separate execution
+window responds to current CPU, runnable-process, and memory pressure.
+The design preserves explicit coordination at ownership transitions rather than
+claiming that independent components never communicate.
+
+The research contribution is the concrete interaction of these boundaries for
+file-producing scientific tasks. Consumer-driven data lookup, separated storage
+planes, and local scheduling queues all have precedents~\cite{hoplite,pocket,apollo}.
+DataVine does not claim to introduce those primitives. Its hypothesis is that
+allowing a logically eligible task to be assigned before local input readiness,
+while postponing preparation until execution approaches, can reduce coordination
+waiting without staging the full dispatch queue. An aggregate execution window
+then provides a second control over work that actually consumes resources.
+
+This paper makes three contributions. First, it specifies an ownership and
+event-ordering model that separates task success, replica availability, execution
+admission, and requested-output durability. Second, it implements that model
+in an existing runtime, including generation-bound queued-task recall, deferred
+preparation, and opt-in attempt tracing. Third, it provides matched experiments
+that hold task bodies and scientific checks constant while varying preparation,
+window policy, and runtime. These include a complete real-data diphoton analysis,
+expanded function-slot controls, and five-block experiments
+across distinct physical hosts. The results distinguish gains of the implemented
+execution path from unsupported claims that feedback or extra concurrency
+alone explains them.
+
+The central scalability consequence is that serialized logical scheduling does
+not also serialize data-plane service work. The manager remains the single
+owner of logical DAG state and dispatch, while Controller RPC handling and
+durable-output persistence use independent concurrency pools. We measure the
+resulting manager/data-plane separation explicitly and report the shared-state
+boundary where metadata scaling stops.
+
+The scope is intentionally testable. Current routing is local-first, then a
+live peer, with an admitted controller backup as fallback. It is not a learned
+three-way optimizer over peer, controller, and shared filesystem. Likewise,
+the controller is a distinct owner but is not demonstrated to scale without
+bound; worker overcommit is a heuristic with measurable failure modes. We
+report these limits alongside the measurements so that the architecture can
+be assessed independently of broader, unsupported novelty claims.

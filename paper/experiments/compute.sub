@@ -1,0 +1,13 @@
+universe = vanilla
+executable = /users/jzhou24/cctools_repo/datavine/paper/scripts/compute_campaign.sh
+initialdir = /users/jzhou24/cctools_repo/datavine
+request_cpus = 8
+request_memory = 16384MB
+request_disk = 8192MB
+should_transfer_files = NO
+getenv = true
+output = /users/jzhou24/cctools_repo/datavine/paper/results/compute-campaign-v4.stdout
+error = /users/jzhou24/cctools_repo/datavine/paper/results/compute-campaign-v4.stderr
+log = /users/jzhou24/cctools_repo/datavine/paper/results/compute-campaign-v4.condor.log
+notification = Never
+queue 1

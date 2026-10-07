@@ -1,0 +1,117 @@
+\section{Implementation}
+\subsection{Runtime integration}
+DataVine is implemented within the TaskVine codebase using a C workflow
+runtime, scheduler, controller protocol, and worker agent, with a Python
+workflow interface. One workflow process owns a reactor and the sole manager
+API owner. Static graph submission declares task and edge bounds; dynamic
+extension retains the same data-identity and attempt contracts. Python
+functions use a fork-based execution library. Each logical node generates an
+individual physical attempt in the failure-free experiments; retries remain
+visible rather than being hidden as task fusion.
+
+The baseline service demand is therefore mixed: one manager reactor drains
+dependency and dispatch events while also receiving the data-lifecycle events
+caused by intermediate objects. Replica or checkpoint decisions, stage-in and
+stage-out acknowledgements, and object-retention or garbage-collection updates
+all consume that serialized control path, even when the payload itself is
+transferred peer-to-peer. The cost grows with the number of data items and
+their consumers, so a worker-side compute shortage is not required for the
+manager to saturate.
+
+The service keeps the workflow manager's reactor as the serialized owner of
+logical scheduling, while the data-plane endpoint has independent RPC event
+threads and Controller persistence workers. RPC threads process authenticated
+agent metadata and object requests; persistence workers perform the queued
+stream, fsync, verification, and commit path. The default service uses one RPC
+thread and 16 persistence workers. The separation is configurable for the
+scaling validation, but shared metadata state still imposes a measured limit.
+
+The implementation uses explicit generated-input descriptors and data IDs.
+The worker agent handles local materialization and source resolution; the
+logical scheduler need not insert a concrete peer endpoint into every task
+at placement time. Controller requests are authenticated, and the wire
+contracts are versioned. Small callable payloads may be inlined within the
+existing size bound, while larger payloads use the corresponding source path.
+These encoding optimizations reduce some setup work but are not themselves
+the contribution evaluated here.
+
+\subsection{Preparation ablation and observability}
+We added a worker environment control selecting deferred or eager preparation.
+Deferred is the unchanged default. Eager skips only the check that postpones
+agent preparation when an execution-library opportunity is absent. An invalid
+setting produces a notice and retains the deferred behavior. The setting is
+read once per worker process, making each experimental condition explicit and
+stable throughout a trial.
+
+Optional attempt tracing records worker receipt, first preparation start,
+preparation readiness, execution start, and completion. Collection is disabled
+by default and applies only to auxiliary-payload tasks. The additional process
+fields are generic timestamps; DataVine-specific selection and logging remain
+in the worker integration point. This preserves the repository's module
+boundary checks. Each trace is local to one worker clock. We compute local
+intervals and never subtract timestamps from different hosts to infer latency.
+
+For a completed attempt with timestamps $t_r,t_p,t_d,t_e,t_f$, the validation
+checks $0<t_r\leq t_p\leq t_d\leq t_e\leq t_f$. The intervals $t_p-t_r$,
+$t_d-t_p$, $t_e-t_d$, and $t_f-t_e$ distinguish queue waiting, preparation,
+post-preparation waiting, and execution. A missing trace is not interpreted as
+zero waiting. Instrumented functional runs verify one trace per physical
+attempt; uninstrumented campaigns provide the primary performance samples.
+
+\subsection{A stronger concurrency baseline}
+Stock TaskVine fork libraries reject configurations with more function slots
+than library cores. The one-slot-per-core baseline retains that behavior.
+To test whether a speedup can be explained merely by a larger fixed window,
+we also construct an experimental TaskVine control with two or four slots per
+allocated core. This control changes only the startup restriction in a private,
+generated library file. It does not alter repository Poncho sources, advertise
+extra physical CPUs, or increase the worker's actual allocation. The worker's
+slot accounting still determines admitted function calls; native math libraries
+are limited to one thread.
+
+We label these configurations as extended TaskVine throughout the evaluation.
+They are not claimed to be supported stock configurations or a reimplementation
+of DataVine's feedback. Their purpose is to challenge attribution: DataVine
+should be compared against a baseline capable of exposing more concurrency,
+not just against an artificially restrictive one. The generated source hash
+and the exact transformation are retained with the trial evidence.
+
+\subsection{Controlled dependency initialization}
+A generated DataVine executor prototype preloads an explicit module list before
+its readiness handshake. It is selected through the existing executor-path
+configuration and leaves the default executable intact. The artifact records
+the base executable hash, generated hash, and imported modules. The matching
+TaskVine library hoists exactly those modules. Preloading is a deployment
+control, not a new scheduling algorithm or a claim that arbitrary initialized
+libraries can safely be inherited across fork. Native numerical libraries are
+limited to one thread in the measured configuration.
+
+\subsection{Recall destination progress}
+The initial remote experiments exposed a liveness defect in dense least-loaded
+dispatch. A successfully recalled task retained a reserved destination, while
+reoffering other lower-load workers allowed the same incompatible worker to be
+selected repeatedly within a bounded pass. A ready task could consequently
+remain unassigned after all other work drained. The diagnostic trace showed
+one such task still READY with idle execution libraries.
+
+The fix preserves both destination binding and least-loaded preference. At the
+start of each pass, the worker pool compacts stale generation entries and clears
+visit marks. Selection considers each live offered worker at most once during
+that pass. Reoffering an incompatible worker preserves future availability but
+does not hide another worker in the current pass. This adds no per-task worker
+list allocation. A deterministic regression covers repeated offers, unequal
+loads, and recycled worker slots. The original four-worker diagnostic timed
+out before the fix and completed with all results validated after the fix.
+Pre-fix campaign data is retained separately and excluded from the primary
+performance figures.
+
+\subsection{Correctness and compatibility checks}
+The full DataVine regression suite passes \UpgradeRegressionPassed{} gates. Focused
+runtime acceptance executes the same 32-task phase graph under eager and
+deferred preparation, verifies every logical result and physical attempt
+count, and checks all trace orderings. The existing generic TaskVine serverless
+test also passes in a private scratch directory; it covers both direct and
+fork function libraries and validates returned values and file output. These
+checks establish exercised compatibility, not exhaustive correctness for all
+interleavings. The failure-injection experiment complements them by removing
+only worker jobs owned by its own factory.

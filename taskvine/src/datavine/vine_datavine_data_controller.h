@@ -109,8 +109,6 @@ void vine_datavine_data_controller_close(
 int vine_datavine_data_controller_configure_object_service(
 		struct vine_datavine_data_controller *controller,
 		const char *host, int port, const char *token);
-const char *vine_datavine_data_controller_object_root(
-		struct vine_datavine_data_controller *controller);
 int vine_datavine_data_controller_workflow_key(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id, unsigned char key[32]);
@@ -126,9 +124,6 @@ int vine_datavine_data_controller_put_object(
 int vine_datavine_data_controller_get_object(
 		struct vine_datavine_data_controller *controller, const char sha256[65],
 		unsigned char **data, size_t *size);
-int vine_datavine_data_controller_object_path(
-		struct vine_datavine_data_controller *controller, const char sha256[65],
-		char *path, size_t path_size);
 /* Create the one SharedFS result directory owned by a workflow.  Result-path
  * construction is deliberately side-effect free after this call. */
 int vine_datavine_data_controller_prepare_workflow(
@@ -231,10 +226,6 @@ int vine_datavine_data_controller_result_info(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id, uint64_t data_id,
 		struct vine_datavine_workflow_result_info *result);
-int vine_datavine_data_controller_result_path(
-		struct vine_datavine_data_controller *controller,
-		const char *workflow_id, uint64_t data_id,
-		char *path, size_t path_size);
 int vine_datavine_data_controller_result_descriptors(
 		struct vine_datavine_data_controller *controller,
 		const char *workflow_id, const uint64_t *data_ids, size_t count,

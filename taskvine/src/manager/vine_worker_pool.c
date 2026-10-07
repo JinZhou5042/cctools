@@ -17,6 +17,7 @@ struct worker_slot {
 	struct vine_worker_info *worker;
 	uint32_t generation;
 	uint8_t queued;
+	uint8_t considered;
 };
 
 struct ready_entry {
@@ -197,6 +198,66 @@ struct vine_worker_info *vine_worker_pool_take(struct vine_worker_pool *pool)
 		return record->worker;
 	}
 	return 0;
+}
+
+/* Start a bounded scheduling pass. Compact stale generation entries and clear
+ * only the live ready workers' visit marks. Reoffering a worker during this
+ * pass must not let it hide a less-loaded-incompatible task's destination. */
+void vine_worker_pool_begin_pass(struct vine_worker_pool *pool)
+{
+	if (!pool)
+		return;
+	uint32_t retained = 0;
+	for (uint32_t offset = 0; offset < pool->ready_count; offset++) {
+		struct ready_entry entry = pool->ready[(pool->ready_head + offset) %
+				pool->ready_capacity];
+		if (entry.slot >= pool->slot_highwater)
+			continue;
+		struct worker_slot *record = &pool->slots[entry.slot];
+		if (!record->worker || record->generation != entry.generation)
+			continue;
+		record->considered = 0;
+		pool->ready[(pool->ready_head + retained++) % pool->ready_capacity] = entry;
+	}
+	pool->ready_count = retained;
+}
+
+/* Select the least-loaded ready Worker without maintaining another heap.  The
+ * pool is intentionally small (one entry per Worker), and this scan happens
+ * only on the opt-in dense scheduling path. */
+struct vine_worker_info *vine_worker_pool_take_least_loaded(
+		struct vine_worker_pool *pool)
+{
+	if (!pool)
+		return 0;
+	uint32_t best_offset = 0;
+	int best_load = 0;
+	int found = 0;
+	for (uint32_t offset = 0; offset < pool->ready_count; offset++) {
+		uint32_t index = (pool->ready_head + offset) % pool->ready_capacity;
+		struct ready_entry entry = pool->ready[index];
+		if (entry.slot >= pool->slot_highwater)
+			continue;
+		struct worker_slot *record = &pool->slots[entry.slot];
+		if (!record->worker || record->generation != entry.generation)
+			continue;
+		if (record->considered)
+			continue;
+		int load = record->worker->tasks_running;
+		if (!found || load < best_load) {
+			found = 1;
+			best_load = load;
+			best_offset = offset;
+		}
+	}
+	if (!found)
+		return 0;
+	uint32_t best = (pool->ready_head + best_offset) % pool->ready_capacity;
+	struct ready_entry saved = pool->ready[pool->ready_head];
+	pool->ready[pool->ready_head] = pool->ready[best];
+	pool->ready[best] = saved;
+	pool->slots[pool->ready[pool->ready_head].slot].considered = 1;
+	return vine_worker_pool_take(pool);
 }
 
 size_t vine_worker_pool_ready(const struct vine_worker_pool *pool)

@@ -1,0 +1,13 @@
+universe = vanilla
+executable = /users/jzhou24/cctools_repo/datavine/paper/scripts/process_waits_compute.sh
+initialdir = /users/jzhou24/cctools_repo/datavine
+request_cpus = 8
+request_memory = 16384MB
+request_disk = 8192MB
+should_transfer_files = NO
+getenv = true
+output = /users/jzhou24/cctools_repo/datavine/paper/results/process-waits.stdout
+error = /users/jzhou24/cctools_repo/datavine/paper/results/process-waits.stderr
+log = /users/jzhou24/cctools_repo/datavine/paper/results/process-waits.condor.log
+notification = Never
+queue 1

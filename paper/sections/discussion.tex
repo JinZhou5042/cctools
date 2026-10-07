@@ -1,0 +1,61 @@
+\section{Discussion and Limitations}
+\subsection{When separation helps, and when it does not}
+The proposed boundary is most promising when data coordination or input waits
+are large enough to leave useful execution opportunities unfilled, but task
+descriptors are cheap enough to queue. It can be less effective for long,
+purely computational tasks; for short graphs dominated by startup; or for
+workloads whose intermediates overwhelm available storage. A larger window
+cannot manufacture bandwidth once senders, memory channels, or disks saturate.
+An eager preparation policy may outperform deferred preparation when prefetch
+latency matters more than prepared-data occupancy.
+
+The logical scheduler currently uses a least-loaded choice rather than a
+comprehensive locality cost model. Moving replica choice out of placement
+simplifies one boundary but may incur more remote reads. Integrating locality
+hints would require stating whether they are advisory, how stale hints are
+handled, and whether they reintroduce synchronous source coordination. The
+present architecture permits that extension; the present measurements do not
+prove that it is unnecessary.
+
+\subsection{Recovery costs and storage limits}
+Worker-local intermediates expose a different recovery tradeoff from
+background backup. Requested-output durability does not automatically protect
+all intermediate state. Likewise, fsync on a controller-local filesystem
+provides a host-specific contract, not replicated durability across host loss.
+A future controller replication design would need explicit authority transfer,
+log ordering, and failure fencing. Adding a second controller process without
+those rules would not establish the stronger guarantee.
+
+Open workflows can retain data for consumers not yet declared. Storage
+credits, spill policies, and cancellation cleanup therefore deserve separate
+capacity experiments. Memory sampling and declared-memory admission do not
+bound every user allocation, and the current feedback ignores some bottlenecks.
+An extension using transfer-byte credits or independent compute and transfer
+windows should be evaluated against the current simpler policy, including
+cases where extra state and control work make it slower.
+
+\subsection{What the new evidence establishes}
+The complete ATLAS analysis closes the gap between isolated numerical kernels
+and an end-to-end workflow over real scientific data. It does not establish
+production collaboration readiness, heterogeneous deployment, or distributed
+dataset ingestion. The fixed/elastic comparison also changes the interpretation:
+the execution boundaries and their ownership are the evaluated design, while
+feedback remains an implementation choice whose incremental benefit is limited
+on the tested graphs.
+
+Five-block measurements across eight distinct physical hosts provide a larger
+and more controlled scaling study than counting opportunistically colocated
+workers. They still lack exclusive nodes, 16+ hosts, and a controller-capacity
+sweep at fixed application work. The data-heavy results caution against assuming
+that independent data ownership removes every centralized or placement cost.
+Cold-library sensitivity similarly makes dependency preparation part of the
+deployment contract, not an incidental detail that can be omitted from a claim.
+
+Native grouping is now exercised with compatible start-credit semantics and
+expanded windows. A prepared-node assignment policy remains an unimplemented
+baseline; eager preparation alone is narrower than that policy. Exact sender
+traffic and physical prepared-byte accounting remain necessary for stronger
+claims about network or storage savings. Worker-lifetime CPU and ordered local
+traces strengthen attribution but do not replace those measurements.
+Together, these results support explicit ownership of logical scheduling and
+data-lifecycle service as the paper's architectural contribution.

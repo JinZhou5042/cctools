@@ -1,0 +1,658 @@
+{
+  "status": "ok",
+  "message-type": "work-list",
+  "message-version": "1.0.0",
+  "message": {
+    "facets": {},
+    "total-results": 3036293,
+    "items": [
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2026,
+              7,
+              15
+            ]
+          ],
+          "date-time": "2026-07-15T16:45:58Z",
+          "timestamp": 1784133958276,
+          "version": "3.55.0"
+        },
+        "reference-count": 30,
+        "publisher": "IEEE",
+        "license": [
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2024,
+                  5,
+                  27
+                ]
+              ],
+              "date-time": "2024-05-27T00:00:00Z",
+              "timestamp": 1716768000000
+            },
+            "content-version": "stm-asf",
+            "delay-in-days": 0,
+            "URL": "https://doi.org/10.15223/policy-029"
+          },
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2024,
+                  5,
+                  27
+                ]
+              ],
+              "date-time": "2024-05-27T00:00:00Z",
+              "timestamp": 1716768000000
+            },
+            "content-version": "stm-asf",
+            "delay-in-days": 0,
+            "URL": "https://doi.org/10.15223/policy-037"
+          }
+        ],
+        "funder": [
+          {
+            "DOI": "10.13039/100000001",
+            "name": "National Science Foundation",
+            "doi-asserted-by": "publisher",
+            "id": [
+              {
+                "id": "10.13039/100000001",
+                "id-type": "DOI",
+                "asserted-by": "publisher"
+              }
+            ]
+          }
+        ],
+        "content-domain": {
+          "domain": [],
+          "crossmark-restriction": false
+        },
+        "published-print": {
+          "date-parts": [
+            [
+              2024,
+              5,
+              27
+            ]
+          ]
+        },
+        "DOI": "10.1109/ipdps57955.2024.00034",
+        "type": "proceedings-article",
+        "created": {
+          "date-parts": [
+            [
+              2024,
+              7,
+              8
+            ]
+          ],
+          "date-time": "2024-07-08T17:25:04Z",
+          "timestamp": 1720459504000
+        },
+        "page": "300-311",
+        "source": "Crossref",
+        "is-referenced-by-count": 1,
+        "title": [
+          "Adaptive Task-Oriented Resource Allocation for Large Dynamic Workflows on Opportunistic Resources"
+        ],
+        "prefix": "10.1109",
+        "author": [
+          {
+            "given": "Thanh Son",
+            "family": "Phung",
+            "sequence": "first",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Douglas",
+            "family": "Thain",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          }
+        ],
+        "member": "263",
+        "reference": [
+          {
+            "key": "ref1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3307681.3325400"
+          },
+          {
+            "key": "ref2",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.25080/Majora-7b98e3ed-013"
+          },
+          {
+            "key": "ref3",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.5555/3291168.3291210"
+          },
+          {
+            "key": "ref4",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1002/cpe.938"
+          },
+          {
+            "key": "ref5",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1007/10968987_3"
+          },
+          {
+            "key": "ref6",
+            "article-title": "Oracle Grid Engine: An Overview",
+            "volume-title": "Oracle Corporation",
+            "year": "2010"
+          },
+          {
+            "key": "ref7",
+            "volume-title": "Amazon spot instances",
+            "year": "2023"
+          },
+          {
+            "key": "ref8",
+            "volume-title": "Google spot vms",
+            "year": "2023"
+          },
+          {
+            "key": "ref9",
+            "volume-title": "Azure spot virtual machines",
+            "year": "2023"
+          },
+          {
+            "key": "ref10",
+            "volume-title": "Alibaba preemptible instances",
+            "year": "2023"
+          },
+          {
+            "key": "ref11",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/WORKS54523.2021.00008"
+          },
+          {
+            "key": "ref12",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3502181.3531470"
+          },
+          {
+            "key": "ref13",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1016/j.is.2019.01.006"
+          },
+          {
+            "key": "ref14",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/IPDPS49936.2021.00090"
+          },
+          {
+            "key": "ref15",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/TPDS.2017.2762310"
+          },
+          {
+            "key": "ref16",
+            "article-title": "Colmena",
+            "year": "2021"
+          },
+          {
+            "key": "ref17",
+            "article-title": "Topeft/topcoffea: Topcoffea 0.1 (v0.1)",
+            "volume-title": "zenodo",
+            "author": "Basnet",
+            "year": "2021"
+          },
+          {
+            "key": "ref18",
+            "article-title": "Work Queue + Python: A Framework For Scalable Scientific Ensemble Applications",
+            "volume-title": "Workshop on Python for High Performance and Scientific Computing (PyHPC) at the ACM/IEEE International Conference for High Performance Computing, Networking, Storage, and Analysis (Supercomputing)",
+            "author": "Bui"
+          },
+          {
+            "key": "ref19",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3624062.3624277"
+          },
+          {
+            "key": "ref20",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3624062.3624136"
+          },
+          {
+            "key": "ref21",
+            "article-title": "Coffea",
+            "year": "2021"
+          },
+          {
+            "key": "ref22",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/ACCESS.2019.2954169"
+          },
+          {
+            "key": "ref23",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1007/s11761-021-00330-4"
+          },
+          {
+            "key": "ref24",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1016/j.jss.2022.111227"
+          },
+          {
+            "key": "ref25",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1007/s10586-022-03613-3"
+          },
+          {
+            "key": "ref26",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1007/s00607-021-01030-9"
+          },
+          {
+            "key": "ref27",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3078597.3078604"
+          },
+          {
+            "key": "ref28",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3332186.3333041"
+          },
+          {
+            "key": "ref29",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/HPCS48598.2019.9188126"
+          },
+          {
+            "key": "ref30",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/HUST.2016.006"
+          }
+        ],
+        "event": {
+          "name": "2024 IEEE International Parallel and Distributed Processing Symposium (IPDPS)",
+          "location": "San Francisco, CA, USA",
+          "start": {
+            "date-parts": [
+              [
+                2024,
+                5,
+                27
+              ]
+            ]
+          },
+          "end": {
+            "date-parts": [
+              [
+                2024,
+                5,
+                31
+              ]
+            ]
+          }
+        },
+        "container-title": [
+          "2024 IEEE International Parallel and Distributed Processing Symposium (IPDPS)"
+        ],
+        "link": [
+          {
+            "URL": "http://xplorestaging.ieee.org/ielx8/10579076/10579083/10579206.pdf?arnumber=10579206",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2024,
+              7,
+              11
+            ]
+          ],
+          "date-time": "2024-07-11T05:09:34Z",
+          "timestamp": 1720674574000
+        },
+        "score": 67.58628,
+        "resource": {
+          "primary": {
+            "URL": "https://ieeexplore.ieee.org/document/10579206/"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              2024,
+              5,
+              27
+            ]
+          ]
+        },
+        "references-count": 30,
+        "URL": "https://doi.org/10.1109/ipdps57955.2024.00034",
+        "published": {
+          "date-parts": [
+            [
+              2024,
+              5,
+              27
+            ]
+          ]
+        }
+      },
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2026,
+              3,
+              26
+            ]
+          ],
+          "date-time": "2026-03-26T16:15:10Z",
+          "timestamp": 1774541710369,
+          "version": "3.50.1"
+        },
+        "reference-count": 22,
+        "publisher": "Institute of Electrical and Electronics Engineers (IEEE)",
+        "issue": "4",
+        "license": [
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2007,
+                  4,
+                  1
+                ]
+              ],
+              "date-time": "2007-04-01T00:00:00Z",
+              "timestamp": 1175385600000
+            },
+            "content-version": "vor",
+            "delay-in-days": 0,
+            "URL": "https://ieeexplore.ieee.org/Xplorehelp/downloads/license-information/IEEE.html"
+          }
+        ],
+        "content-domain": {
+          "domain": [],
+          "crossmark-restriction": false
+        },
+        "short-container-title": [
+          "IEEE Trans. Wireless Commun."
+        ],
+        "published-print": {
+          "date-parts": [
+            [
+              2007,
+              4
+            ]
+          ]
+        },
+        "DOI": "10.1109/twc.2007.348341",
+        "type": "journal-article",
+        "created": {
+          "date-parts": [
+            [
+              2007,
+              4,
+              30
+            ]
+          ],
+          "date-time": "2007-04-30T21:02:16Z",
+          "timestamp": 1177966936000
+        },
+        "page": "1446-1454",
+        "source": "Crossref",
+        "is-referenced-by-count": 183,
+        "title": [
+          "Opportunistic cooperation by dynamic resource allocation"
+        ],
+        "prefix": "10.1109",
+        "volume": "6",
+        "author": [
+          {
+            "given": "Deniz",
+            "family": "Gunduz",
+            "sequence": "first",
+            "affiliation": [],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          },
+          {
+            "given": "Elza",
+            "family": "Erkip",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          }
+        ],
+        "member": "263",
+        "reference": [
+          {
+            "key": "ref10",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/18.737514"
+          },
+          {
+            "key": "ref11",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/18.923715"
+          },
+          {
+            "key": "ref12",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/TIT.2005.847703"
+          },
+          {
+            "key": "ref13",
+            "article-title": "Resource allocation for wireless relay channels",
+            "author": "liang",
+            "year": "0",
+            "journal-title": "Asilomar Conference on Signals Systems and Computers 2004"
+          },
+          {
+            "key": "ref14",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/TWC.2004.833447"
+          },
+          {
+            "key": "ref15",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/LCOMM.2005.1437354"
+          },
+          {
+            "key": "ref16",
+            "article-title": "User-cooperative transmission with channel feedback in slow fading environment",
+            "author": "cao",
+            "year": "2004",
+            "journal-title": "Proc VTC Fall"
+          },
+          {
+            "key": "ref17",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/ITW.2004.1405347"
+          },
+          {
+            "key": "ref18",
+            "article-title": "On power control with finite rate feedback for cooperative relay networks",
+            "author": "ahmed",
+            "year": "0",
+            "journal-title": "Proc ISIT 2004"
+          },
+          {
+            "key": "ref19",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/CISS.2006.286620"
+          },
+          {
+            "key": "ref4",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/WIRLES.2005.1549624"
+          },
+          {
+            "key": "ref3",
+            "article-title": "Opportunistic cooperation and power control strategies for delay-limited capacity",
+            "author": "gunduz",
+            "year": "0",
+            "journal-title": "Proc 39th Annual Conference on Information Sciences and Systems 2005"
+          },
+          {
+            "key": "ref6",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/VETECF.2004.1404971"
+          },
+          {
+            "key": "ref5",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/TIT.2004.838089"
+          },
+          {
+            "key": "ref8",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/SPAWC.2005.1505912"
+          },
+          {
+            "key": "ref7",
+            "doi-asserted-by": "crossref",
+            "DOI": "10.1109/SPAWC.2005.1506075",
+            "article-title": "Randomized distributed space-time coding for cooperative communication in self-organized networks",
+            "author": "mergen",
+            "year": "2005",
+            "journal-title": "Proc IEEE Workshop on Signal Processing Advances in Wireless Communications (SPAWC)"
+          },
+          {
+            "key": "ref2",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/TCOMM.2003.818096"
+          },
+          {
+            "key": "ref1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/TCOMM.2003.818096"
+          },
+          {
+            "key": "ref9",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/18.771147"
+          },
+          {
+            "key": "ref20",
+            "author": "goodman",
+            "year": "1997",
+            "journal-title": "Wireless Personal Communications"
+          },
+          {
+            "key": "ref22",
+            "article-title": "On the capacity of cheap relay networks",
+            "author": "khojastepour",
+            "year": "0",
+            "journal-title": "Proc 37th Annual Conference on Information Sciences and Systems 2003"
+          },
+          {
+            "key": "ref21",
+            "author": "abramowitz",
+            "year": "1964",
+            "journal-title": "Handbook of Mathematical Functions with Formulas Graphs and Mathematical Tables"
+          }
+        ],
+        "container-title": [
+          "IEEE Transactions on Wireless Communications"
+        ],
+        "link": [
+          {
+            "URL": "http://xplorestaging.ieee.org/ielx5/7693/4155646/04155684.pdf?arnumber=4155684",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2021,
+              11,
+              29
+            ]
+          ],
+          "date-time": "2021-11-29T20:56:23Z",
+          "timestamp": 1638219383000
+        },
+        "score": 34.665176,
+        "resource": {
+          "primary": {
+            "URL": "http://ieeexplore.ieee.org/document/4155684/"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              2007,
+              4
+            ]
+          ]
+        },
+        "references-count": 22,
+        "journal-issue": {
+          "issue": "4"
+        },
+        "URL": "https://doi.org/10.1109/twc.2007.348341",
+        "ISSN": [
+          "1536-1276"
+        ],
+        "issn-type": [
+          {
+            "value": "1536-1276",
+            "type": "print"
+          }
+        ],
+        "published": {
+          "date-parts": [
+            [
+              2007,
+              4
+            ]
+          ]
+        }
+      }
+    ],
+    "items-per-page": 2,
+    "query": {
+      "start-index": 0,
+      "search-terms": null
+    }
+  }
+}

@@ -1,13 +1,13 @@
 # DataVine Controller Performance, 2026-08-27
 
-This campaign freezes Scheduler work and measures the current single-workflow
+This campaign freezes Scheduler work and measures the campaign's single-workflow
 Data Controller. The durable machine-readable record is
 `acceptance/controller-comprehensive-20260827.json`.
 
 ## Result
 
-The Controller is comfortably ahead of the current approximately 20k task/s
-execution path for ordinary one-replica metadata. Direct C metadata operations
+For the recorded workload, ordinary one-replica metadata was faster than
+the approximately 20k task/s execution path measured at that time. Direct C metadata operations
 remain above 8.4M/s at ten million records. One-record TCP RPC reaches 111.5k
 publish/s and 85.4k resolve/s. The practical bottleneck is requested-output
 persistence, not the metadata catalog.
@@ -75,22 +75,14 @@ Late consumers, late and in-flight request promotion, volatile-loss replay,
 Worker loss, owner restart, checkpoint resume, retries, deduplication and replica
 invariants all pass their focused gates.
 
-## Findings and next action
+## Decision and subsequent closure
 
-Keep 16 Controller data threads. Metadata arrays and the replica table are not
-the present production bottleneck. Do not increase the pool to 64 threads.
+The campaign supports retaining 16 Controller data threads and does not justify
+a metadata redesign for its normal one-replica workload. It predates the default
+background-backup policy; the Worker-local controls above explicitly measure
+volatile output behavior, not today's default retention behavior.
 
-Two narrow gaps remain:
-
-1. Agent persistence does not update the existing `publication_*` profiling
-   counters. The files are durable and verified, but the profile incorrectly
-   prints zeros. Add native agent pull, fsync, queue depth and commit latency
-   counters before another optimization campaign.
-2. There is no deterministic ENOSPC/EIO injection test. Add a test-only
-   persistence fault hook and verify bounded retry, terminal error reporting,
-   temporary-file cleanup and replica fallback.
-
-After those observability gates, the next useful optimization target is
-multi-replica resolve only if real workloads maintain several replicas per data
-ID. For the normal one-replica policy, no Controller metadata redesign is
-justified by these results.
+The two original follow-ups are complete: per-thread persistence counters and
+deterministic ENOSPC/EIO injection. Their evidence is maintained in
+[the persistence diagnosis](CONTROLLER_PERSISTENCE_DIAGNOSTIC_20260828.md).
+[The acceptance matrix](acceptance/matrix.md) owns remaining open gates.

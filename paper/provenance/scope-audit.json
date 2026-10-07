@@ -1,0 +1,58 @@
+{
+  "status": "PASS",
+  "starting_head": "c2e9a85be3e52d2b7f0210487a6632b8c03a413e",
+  "changed_sources": [
+    {
+      "path": "DATAVINE_PRODUCTION.md",
+      "before": "280884e5cd51ad01cbae988ef3b98c13a846343b7a296b3cc185b7e89e415df0",
+      "after": "280cc202fd75d02cab126463f0012f0493539edc66701e17482248ce7528bd62"
+    },
+    {
+      "path": "acceptance/README.md",
+      "before": "c7e64ea0e4dc1ea73b325a878819dc406deb0ef2ccb11ea811b2a22248ddf9c1",
+      "after": "7e9a76877b769b2ae72a9b26f5a66acfe7fe93ea3aedb4753f496f7f35c492db"
+    },
+    {
+      "path": "acceptance/scripts/benchmark_worker_churn.py",
+      "before": "2a359a332972665c438d1bd97233718c1ae3fd14b90e10ac48f2ab9aa1d5598d",
+      "after": "dda02b5eaa51d4bed9e6212247fac13dd6867db26b77227c8d8a7ee686dbe2e0"
+    },
+    {
+      "path": "taskvine/src/manager/vine_manager.c",
+      "before": "5a42be2c7ab2b88f3252c05c50b7141802b0c6f273b4d6f5706ea324df11df61",
+      "after": "346395e9662647b1d6963aa7ca05324b6d1c1f6cd219deff2e8baa034a0fd02a"
+    },
+    {
+      "path": "taskvine/src/manager/vine_worker_pool.c",
+      "before": "a8ad0d577dc2914fe3488dad406b5d4be49d412c08b31bf7b4f0a588a52733b5",
+      "after": "eec6b567e06ca7ed607f880f0abfa3f5c0d3b6e52982125df6db259f4481fb7a"
+    },
+    {
+      "path": "taskvine/src/manager/vine_worker_pool.h",
+      "before": "6d0c5bc2faf719ba0366f0d71d70cc5fac39189384e7d59390a59228dd192d1e",
+      "after": "b60605f3a68c3d8871af8ebd211e876719027fdd51367b0d2c5475b54b597e9f"
+    },
+    {
+      "path": "taskvine/src/worker/vine_process.h",
+      "before": "20c2f503668faef858667573ab9ebc141751235bee3b6f05e484ec78df2947bd",
+      "after": "89e4a8ac3670905d31601e8a6959af03e4fcf3dc9a0c02d37a9c9f2495612e1a"
+    },
+    {
+      "path": "taskvine/src/worker/vine_worker.c",
+      "before": "1e7321bd5eabb9f718e930aa9ab9722e2d3ec55cfbe97f4f711d0041ea2bd0e4",
+      "after": "0b8769abdc34deb691aea7b0caec0c197928f0f9a36c8a609efa67da15b202f4"
+    },
+    {
+      "path": "taskvine/test/datavine_worker_pool.c",
+      "before": null,
+      "after": "629bcede61a8728ac12088a80f55ee5d156438a454d4fa1d862c2cbff0107770"
+    },
+    {
+      "path": "taskvine/test/TR_datavine_worker_pool.sh",
+      "before": null,
+      "after": "c8f4a2e103853d88f4188e3d5928d4fa905e6e2219a86b4bbc89805284156532"
+    }
+  ],
+  "preserved_starting_dirty_files": 48,
+  "scope_exception": "Initial root make rebuilt some unrelated ignored objects. No unrelated source edit/deletion. This check covers starting tracked dirty sources, not ignored object history."
+}

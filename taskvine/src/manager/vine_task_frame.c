@@ -64,6 +64,9 @@ int vine_task_frame_build(buffer_t *frame, struct vine_manager *manager,
 	if (task->provides_library) {
 		FRAME_PRINTF("provides_library %s\n", task->provides_library);
 		FRAME_PRINTF("function_slots %d\n", task->function_slots_total);
+		FRAME_PRINTF("function_running_slots %d\n",
+				task->function_slots_running_total);
+		FRAME_PRINTF("function_adaptive %d\n", task->function_adaptive);
 		FRAME_PRINTF("func_exec_mode %d\n", task->func_exec_mode);
 	}
 

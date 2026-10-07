@@ -1,0 +1,12 @@
+universe = vanilla
+executable = /bin/bash
+arguments = /users/jzhou24/cctools_repo/datavine/paper/experiments/upgrade-compute.sh $(mode) $(destination)
+request_cpus = 8
+request_memory = 16384MB
+request_disk = 8192MB
+should_transfer_files = NO
+getenv = true
+output = /users/jzhou24/cctools_repo/datavine/paper/results/$(destination).stdout
+error = /users/jzhou24/cctools_repo/datavine/paper/results/$(destination).stderr
+log = /users/jzhou24/cctools_repo/datavine/paper/results/$(destination).condor.log
+queue

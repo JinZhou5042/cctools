@@ -1,0 +1,9 @@
+make: Entering directory '/users/jzhou24/cctools_repo/datavine/papers/ipdps2027'
+python scripts/plot_results.py
+{"accepted": 25, "campaigns": {"compute-campaign-v2": "RUNNING", "distributed-campaign-v2": "RUNNING"}}
+mkdir -p build
+TEXINPUTS=vendor:/users/jzhou24/cctools_repo/datavine/papers/ipdps2027:/users/jzhou24/cctools_repo/datavine/papers/ipdps2027/sections: BSTINPUTS=vendor: pdflatex -halt-on-error -interaction=nonstopmode -output-directory=build paper.tex > build/latex-pass1.log
+TEXINPUTS=vendor:/users/jzhou24/cctools_repo/datavine/papers/ipdps2027:/users/jzhou24/cctools_repo/datavine/papers/ipdps2027/sections: BSTINPUTS=vendor: bibtex build/paper > build/bibtex.log
+TEXINPUTS=vendor:/users/jzhou24/cctools_repo/datavine/papers/ipdps2027:/users/jzhou24/cctools_repo/datavine/papers/ipdps2027/sections: BSTINPUTS=vendor: pdflatex -halt-on-error -interaction=nonstopmode -output-directory=build paper.tex > build/latex-pass2.log
+TEXINPUTS=vendor:/users/jzhou24/cctools_repo/datavine/papers/ipdps2027:/users/jzhou24/cctools_repo/datavine/papers/ipdps2027/sections: BSTINPUTS=vendor: pdflatex -halt-on-error -interaction=nonstopmode -output-directory=build paper.tex > build/latex-pass3.log
+make: Leaving directory '/users/jzhou24/cctools_repo/datavine/papers/ipdps2027'

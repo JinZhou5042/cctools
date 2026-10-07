@@ -1,0 +1,17 @@
+{
+  "inputs": {
+    "results/compute-campaign-v4/summary.json": "329442fe1189c6521dc47249f97a37e9ac2ba1d742c4987ef20d7facd652e61f",
+    "results/distributed-campaign-v4/summary.json": "14951481dae3aee85bd1bcbfd74d04dbce5a2ea1bf8c4273470804d89a9c1461",
+    "results/preloaded-campaign-v1/summary.json": "8ea91d04d8eb1be609c4c2f7e33c638eecb3148b17c9d17efb4f12eb523de6bc",
+    "results/data-pipeline-v1/summary.json": "fd20ff261f81dc73577c268573e6be36682d061cb8a481cfb984288f1e61aeef",
+    "results/preloaded-data-v1/summary.json": "250e417fd5bcdd475563b781ef86e7577599717008bf13a665e317b067c18efd",
+    "results/regression-recall-fix.json": "924b3dd1364c8518b06e53984dc060e96c93fe20d0e88a87c34b1b05a0283a0e",
+    "results/worker-churn-v3/summary.json": "4860a79defeb0b9a7c9550a76a829b201953920d73c7eb89112d8126b9f0ed42",
+    "results/mechanism-acceptance-v3/deferred/result.json": "a136de0ab010a99779a8fd4f9f909ee3643ab8c63cbf1ec4e4240e68c68c94b2",
+    "results/mechanism-acceptance-v3/eager/result.json": "f317a44225a709f6e840d9a5dc15dcbf9143f9d29d19e4c9d114e9f1c1c4ae96",
+    "scripts/plot_results.py": "b9f2ca65cd15eb2d76829ce2459dab927482fcfdf8012beb957872ffc6ddf67e"
+  },
+  "matplotlib": "3.11.1",
+  "numpy": "2.4.6",
+  "aggregation": "median and full observed range; individual points; no imputed failures"
+}

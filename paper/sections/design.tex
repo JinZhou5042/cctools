@@ -1,0 +1,145 @@
+\section{Design}
+\subsection{State ownership and interfaces}
+Figure~\ref{fig:architecture} identifies the owners of the three decisions.
+The workflow runtime accepts a graph of tasks and named data dependencies.
+The scheduler maintains logical task states, unresolved dependency counts,
+dispatch choices, and retry generations. It does not select a concrete source
+replica for every task input during placement. The data controller maintains
+DataID records, available replicas, invalidation, retention, and backup state.
+Each worker agent maintains its local view of materialized data and performs
+input resolution and movement. The generic TaskVine manager remains the sole
+owner of the underlying task-manager API.
+
+\begin{figure}[t]
+\centering\includegraphics[width=\columnwidth]{architecture.pdf}
+\caption{DataVine ownership and gates. Dashed arrows carry completion and
+lifecycle information; data transfer does not route through the logical
+scheduler. The manager and controller still perform coordination work.}
+\label{fig:architecture}
+\end{figure}
+
+An input reference denotes data identity rather than a placement-time pathname
+on a specific peer. The worker checks for a usable local copy, asks the
+controller for a source when needed, and resolves that identity to a physical
+input in the task sandbox. Replica location can change between dispatch and
+preparation without changing the logical DAG edge. Conversely, a stale source
+is not evidence that the producer's logical output should be accepted from a
+different, obsolete attempt. Generations bind attempts and their control
+messages to the scheduler's current state.
+
+Separation does not remove all per-file work from the workflow runtime.
+Completing a logical attempt still updates pending consumers and coordinates
+mark-dead operations with the controller. The design changes ownership of
+replica decisions, rather than asserting a zero-cost control path. This
+qualification matters at high task rates, where serialized manager send,
+status handling, and lifecycle operations can become dominant.
+
+\subsection{Dispatch before local readiness}
+After a producer's successful physical attempt is accepted, the scheduler
+updates logical dependencies and makes newly eligible consumers dispatchable.
+The scheduler may assign a consumer before its destination has prepared the
+input. The assigned descriptor waits in a bounded worker queue. For the
+fork-based DataVine execution path, the worker first checks whether a suitable
+execution-library opportunity exists; absent one, it postpones the agent's
+preparation operation. Once preparation starts, the agent resolves generated
+inputs and initiates required transfers. Execution remains conditional on
+input readiness, library availability, and resource matching.
+
+This order prevents a deep descriptor queue from automatically becoming an
+equally deep collection of staged sandboxes. It also changes prefetch distance:
+earlier preparation can hide a long transfer, whereas later preparation can
+reduce unnecessary staging. The correct empirical question is where this
+tradeoff changes sign. We therefore implement an eager preparation control
+that bypasses only the preliminary execution-opportunity check. It retains
+all input-readiness and actual execution checks. The control is not an unsafe
+mode that executes without data.
+
+The design does not provide two independently optimized transfer and compute
+windows. Preparation and execution remain related through the library gate;
+input transfer may occupy an opportunity that could otherwise serve another
+call. Decoupling those windows further is a possible extension, but requires
+separate bounds on transfer bytes, sender contention, and prepared-data
+occupancy. We avoid attributing such a mechanism to this implementation.
+
+\subsection{Data path and retention}
+For each generated input, a worker uses a valid local replica when available.
+Otherwise the controller resolves a live source; peer data can be transferred
+directly between workers. A controller backup is eligible as fallback only
+after its admission has completed. This ordering avoids publishing an
+incomplete backup as if it were a usable replica. A peer becoming unavailable
+can trigger a new resolution rather than forcing the scheduler to encode a
+permanent source into the task descriptor.
+
+The default intermediate policy retains live worker copies and performs
+controller backup in the background. Controlled performance comparisons can
+select worker-local intermediates, disabling this backup while preserving
+requested-output handling. These configurations have different recovery
+costs and must not be combined into a single speedup claim. Shared-filesystem
+experiments in the wider artifact explore a possible alternative data path;
+the production worker does not currently choose it through an adaptive
+three-way cost model.
+
+Data lifetime is tied to consumers and requested outputs, not merely to the
+producer's return. Once the graph can establish that an intermediate is no
+longer needed, lifecycle updates permit reclamation. Dynamic graph extension
+makes this more subtle: an open workflow can introduce a future consumer, so
+retained data may accumulate until sealing establishes a closed consumer set.
+A bounded descriptor queue is therefore not a global bound on intermediate
+storage. The controller's retention policy and workflow closure remain part
+of the capacity model.
+
+\subsection{Worker execution feedback}
+The default dispatch capacity is $Q=8C$. The elastic execution window starts
+at $W=2C$ and samples worker pressure every 250\,ms. CPU saturation, runnable
+pressure, and memory are separate signals. In the current policy, CPU at or
+above 95\% together with runnable pressure above $3C$ for two samples reduces
+the window by $C$, with a floor of $2C$. The $3C$ value is a feedback threshold,
+not a hard bound on concurrent processes. Memory pressure at 80\% causes a
+stronger backoff and drain; declared task memory supplies an additional
+admission check.
+
+When calls are waiting, low measured CPU (below 85\%) and memory (below
+70\%) allow multiplicative growth; otherwise an eligible growth step adds
+$C$, capped by configured library slots. The policy holds near its 90\% CPU
+target when the runnable population is at least $C$, and inserts a cooldown
+after backoff. Before increasing $W$, it estimates a memory-limited window
+from the current running count $R$ and measured memory fraction $m$:
+\begin{equation}
+W_{\mathrm{next}}\leftarrow\min\left(W_{\mathrm{candidate}},
+\max\left(R,\left\lfloor0.8R/m\right\rfloor\right)\right).
+\end{equation}
+This guard applies when $R>0$ and $m>0$. A memory-fraction increase above
+0.10 in one sample defers growth to avoid extrapolating from a partially
+faulted-in footprint. These thresholds are implementation choices tested
+against fixed windows, not tuned optima. Shrinking admission does not kill
+running calls: the population drains before newly permitted calls enter.
+
+The policy aims to respond to current aggregate behavior without requiring
+accurate runtime predictions for every task class. It is not a proof of memory
+safety or stability. A task can allocate more memory than declared between
+samples, and low CPU usage does not imply that more processes will help a
+memory-bandwidth-bound workload. Fixed windows at $C$, $2C$, and $4C$ therefore
+remain essential controls. We report the best tested fixed choice as an
+empirical reference, not as an oracle for every possible setting.
+
+\subsection{Recall, failure, and result visibility}
+An assigned task that has not begun execution may be recalled under its
+current generation. The runtime distinguishes that state from a running
+attempt; recall is not process migration. Retrying under a new generation
+must prevent delayed messages from an earlier attempt from advancing the
+new attempt's state. This is especially important when worker loss,
+re-resolution, and completion notification overlap.
+
+Physical success releases logical descendants before background persistence,
+but user-visible requested results wait for durable admission. A completed
+worker task and a completed workflow result are thus deliberately different
+states. Recovery tests exercise worker loss, lifecycle handling, and replay.
+The contract does not give arbitrary user side effects exactly-once semantics.
+A retried task that writes to an external database needs application-level
+idempotence or a stronger transactional interface.
+
+Finally, controller-local storage determines the failure domain. A backup on
+the controller's local temporary filesystem survives a worker's loss but is
+not a cross-host durable service if that controller host disappears. We make
+this assumption explicit rather than generalizing worker-loss tests into a
+claim of controller-host fault tolerance.

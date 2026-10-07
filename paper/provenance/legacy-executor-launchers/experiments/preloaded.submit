@@ -1,0 +1,11 @@
+universe = vanilla
+executable = /users/jzhou24/cctools_repo/datavine/paper/scripts/preloaded_campaign.sh
+request_cpus = 8
+request_memory = 8192MB
+request_disk = 2048MB
+should_transfer_files = NO
+getenv = true
+output = /users/jzhou24/cctools_repo/datavine/paper/results/preloaded-campaign-v1.stdout
+error = /users/jzhou24/cctools_repo/datavine/paper/results/preloaded-campaign-v1.stderr
+log = /users/jzhou24/cctools_repo/datavine/paper/results/preloaded-campaign-v1.condor.log
+queue

@@ -105,7 +105,7 @@ struct vine_process *vine_process_create(struct vine_task *task, vine_process_ty
 
 	/* Note that create_dir recursively creates parents, so a single one is sufficient. */
 
-	if (!create_dir(p->tmpdir, 0777)) {
+	if (!p->task->sandboxless && !create_dir(p->tmpdir, 0777)) {
 		vine_process_delete(p);
 		return 0;
 	}
@@ -254,19 +254,73 @@ int vine_process_execute_and_wait(struct vine_process *p)
 
 int vine_process_invoke_function(struct vine_process *p)
 {
-	char *header = string_format("%d %s %s %s %zu\n", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name, p->task->function_input_length);
-	size_t frame_length = strlen(header) + p->task->function_input_length;
-	ssize_t result = link_printf(p->library_process->library_write_link, time(0) + options->active_timeout, "%zu\n", frame_length);
-	if (result >= 0)
-		result = link_putlstring(p->library_process->library_write_link, header, strlen(header), time(0) + options->active_timeout);
-	if (result >= 0 && p->task->function_input_length)
-		result = link_putlstring(p->library_process->library_write_link, p->task->function_input, p->task->function_input_length, time(0) + options->active_timeout);
+	const char *sandbox = p->task->sandboxless
+			? p->library_process->sandbox : p->sandbox;
+	const char *output_file = p->task->sandboxless
+			? "/dev/null" : p->output_file_name;
+	char header[VINE_LINE_MAX];
+	int header_length = snprintf(header, sizeof(header), "%d %s %s %s %zu\n",
+			p->task->task_id, p->task->command_line, sandbox,
+			output_file, p->task->function_input_length);
+	size_t input_length = p->task->function_input_length;
+	size_t frame_length = header_length > 0 ? (size_t)header_length + input_length : 0;
+	char size_header[32];
+	int size_header_length = snprintf(size_header, sizeof(size_header), "%zu\n",
+			frame_length);
+	ssize_t result = -1;
+	/* Native tickets are small enough to enter the pipe with one write. This
+	 * preserves the generic FunctionCall frame byte-for-byte while removing
+	 * two calls through the formatted link layer per invocation. */
+	unsigned char native_frame[VINE_LINE_MAX + 64];
+	if (header_length > 0 && (size_t)header_length < sizeof(header) &&
+			size_header_length > 0 &&
+			(size_t)size_header_length + frame_length <= sizeof(native_frame)) {
+		size_t offset = 0;
+		memcpy(native_frame + offset, size_header, (size_t)size_header_length);
+		offset += (size_t)size_header_length;
+		memcpy(native_frame + offset, header, (size_t)header_length);
+		offset += (size_t)header_length;
+		if (input_length)
+			memcpy(native_frame + offset, p->task->function_input, input_length);
+		result = link_putlstring(p->library_process->library_write_link,
+				(const char *)native_frame, offset + input_length,
+				time(0) + options->active_timeout);
+	} else if (header_length > 0 && (size_t)header_length < sizeof(header) &&
+			size_header_length > 0) {
+		result = link_putlstring(p->library_process->library_write_link,
+				size_header, (size_t)size_header_length,
+				time(0) + options->active_timeout);
+		if (result >= 0)
+			result = link_putlstring(p->library_process->library_write_link,
+					header, (size_t)header_length,
+					time(0) + options->active_timeout);
+		if (result >= 0 && input_length)
+			result = link_putlstring(p->library_process->library_write_link,
+					p->task->function_input, input_length,
+					time(0) + options->active_timeout);
+	} else {
+		/* Preserve the unbounded generic FunctionCall behavior for unusually
+		 * long commands or sandbox paths. */
+		char *dynamic_header = string_format("%d %s %s %s %zu\n",
+				p->task->task_id, p->task->command_line, sandbox,
+				output_file, input_length);
+		frame_length = strlen(dynamic_header) + input_length;
+		result = link_printf(p->library_process->library_write_link,
+				time(0) + options->active_timeout, "%zu\n", frame_length);
+		if (result >= 0)
+			result = link_putlstring(p->library_process->library_write_link,
+					dynamic_header, strlen(dynamic_header),
+					time(0) + options->active_timeout);
+		if (result >= 0 && input_length)
+			result = link_putlstring(p->library_process->library_write_link,
+					p->task->function_input, input_length,
+					time(0) + options->active_timeout);
+		free(dynamic_header);
+	}
 
 	// conservatively assume that the function starts executing as soon as we send it to the library.
 	// XXX Alternatively, the library could report when the function started.
 	p->execution_start = timestamp_get();
-
-	free(header);
 
 	if (result < 0) {
 		debug(D_VINE, "failed to communicate with library '%s' task %d", p->task->needs_library, p->library_process->pid);
@@ -528,10 +582,13 @@ int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_
 	int len_buffer = atoi(buffer);
 
 	/* now read the buffer, which is the task id of the done function invocation. */
-	char *buffer_data = xxmalloc(len_buffer + 1);
+	char inline_buffer[VINE_LINE_MAX];
+	char *buffer_data = len_buffer < (int)sizeof(inline_buffer)
+			? inline_buffer : xxmalloc((size_t)len_buffer + 1);
 	ok = link_read(p->library_read_link, buffer_data, len_buffer, time(0) + options->active_timeout);
 	if (ok <= 0) {
-		free(buffer_data);
+		if (buffer_data != inline_buffer)
+			free(buffer_data);
 		return 0;
 	}
 
@@ -541,7 +598,8 @@ int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_
 	char *payload = strchr(buffer_data, '\n');
 	if (!payload) {
 		debug(D_VINE, "Invalid message received from library: %s", buffer_data);
-		free(buffer_data);
+		if (buffer_data != inline_buffer)
+			free(buffer_data);
 		return 0;
 	}
 	*payload++ = 0;
@@ -549,14 +607,19 @@ int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_
 	ok = sscanf(buffer_data, "%" SCNu64 " %d %zu", done_task_id, done_exit_code, &declared_length);
 	if (ok != 3 || declared_length != (size_t)(buffer_data + len_buffer - payload)) {
 		debug(D_VINE, "Invalid function result frame from library");
-		free(buffer_data);
+		if (buffer_data != inline_buffer)
+			free(buffer_data);
 		return 0;
 	}
-	*output = xxmalloc(declared_length + 1);
-	memcpy(*output, payload, declared_length);
-	(*output)[declared_length] = 0;
+	*output = 0;
+	if (declared_length) {
+		*output = xxmalloc(declared_length + 1);
+		memcpy(*output, payload, declared_length);
+		(*output)[declared_length] = 0;
+	}
 	*output_length = declared_length;
-	free(buffer_data);
+	if (buffer_data != inline_buffer)
+		free(buffer_data);
 
 	debug(D_VINE, "Received result for function %" PRIu64 ", exit code %d", *done_task_id, *done_exit_code);
 	return 1;

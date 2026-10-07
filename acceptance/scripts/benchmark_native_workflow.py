@@ -16,6 +16,8 @@ import hashlib
 import re
 import shutil
 
+from evidence_layout import log_path
+
 
 def load_workflow_client():
     """Load the client that belongs to this checkout, without an install step."""
@@ -277,7 +279,9 @@ def command_executor(command_argv, output_name):
 def workflow_document(tasks, executor, command_argv, command_output_name,
                       request_result,
                       request_all_outputs=False, dependency_mode="independent",
-                      dag_width=16384):
+                      dag_width=16384,
+                      idata_backup="controller-background",
+                      workflow_recovery="journal"):
     records = []
     data = []
     if executor == "builtin":
@@ -316,13 +320,21 @@ def workflow_document(tasks, executor, command_argv, command_output_name,
             list(range(1, tasks + 1)) if request_all_outputs
             else [tasks] if request_result else []
         ),
-        "policy": {"maximum_tasks": tasks, "maximum_edges": dependency_edges(
-            tasks, dependency_mode, dag_width)},
+        "policy": {
+            "maximum_tasks": tasks,
+            "maximum_edges": dependency_edges(
+                tasks, dependency_mode, dag_width),
+            "idata_backup": idata_backup,
+            "recovery": workflow_recovery,
+        },
     }
 
 
-def streaming_initial(tasks, executor, command_argv, command_output_name,
-                      dependency_mode="independent", dag_width=16384):
+def appendable_initial(tasks, executor, command_argv, command_output_name,
+                       registration="streaming",
+                       dependency_mode="independent", dag_width=16384,
+                       idata_backup="controller-background",
+                       workflow_recovery="journal"):
     data = []
     if executor == "builtin":
         data.append({
@@ -337,15 +349,20 @@ def streaming_initial(tasks, executor, command_argv, command_output_name,
         "schema": "datavine.workflow/v1",
         "workflow_id": f"native-scale-{executor}-{dependency_mode}-{tasks}",
         "idempotency_key": (
-            f"native-scale-{executor}-{tasks}-streaming-"
+            f"native-scale-{executor}-{tasks}-{registration}-"
             f"{hashlib.sha256(json.dumps(command_argv).encode()).hexdigest()[:12]}"
         ),
-        "mode": "streaming",
+        "mode": registration,
         "tasks": [],
         "data": data,
         "requested_outputs": [],
-        "policy": {"maximum_tasks": tasks, "maximum_edges": dependency_edges(
-            tasks, dependency_mode, dag_width)},
+        "policy": {
+            "maximum_tasks": tasks,
+            "maximum_edges": dependency_edges(
+                tasks, dependency_mode, dag_width),
+            "idata_backup": idata_backup,
+            "recovery": workflow_recovery,
+        },
     }
 
 
@@ -410,8 +427,20 @@ def main():
                         help="GPUs requested per worker")
     parser.add_argument("--batch-type", choices=("local", "condor"),
                         default="local")
-    parser.add_argument("--registration", choices=("streaming", "sealed"),
+    parser.add_argument("--registration", choices=("streaming", "staged", "sealed"),
                         default="streaming")
+    parser.add_argument(
+        "--idata-backup",
+        choices=("controller-background", "worker-local"),
+        default="controller-background",
+        help="Controller backup policy for intermediate data",
+    )
+    parser.add_argument(
+        "--workflow-recovery",
+        choices=("journal", "none"),
+        default="journal",
+        help="workflow metadata recovery policy; none is process-lifetime only",
+    )
     parser.add_argument("--executor", choices=("builtin", "command"), default="builtin")
     parser.add_argument(
         "--command-argv-json",
@@ -521,9 +550,9 @@ def main():
                 dir=args.journal_parent.resolve(),
             ))
         journal = (journal_state or root) / "journal"
-        service_log_path = Path(f"{output}.service.log")
+        service_log_path = log_path(output, "service")
         service_log = service_log_path.open("w")
-        factory_log = (Path(f"{output}.factory.log")).open("w")
+        factory_log = log_path(output, "factory").open("w")
         service_environment = dict(
             os.environ,
             DATAVINE_WORKFLOW_METRICS="1",
@@ -589,12 +618,15 @@ def main():
                     args.request_all_outputs,
                     args.dependency_mode,
                     args.dag_width,
+                    args.idata_backup,
+                    args.workflow_recovery,
                 )
                 if args.registration == "sealed"
-                else streaming_initial(
+                else appendable_initial(
                     args.tasks, args.executor, command_argv,
                     args.command_output_name,
-                    args.dependency_mode, args.dag_width,
+                    args.registration, args.dependency_mode, args.dag_width,
+                    args.idata_backup, args.workflow_recovery,
                 )
             )
             build_seconds = time.monotonic() - build_started
@@ -618,7 +650,7 @@ def main():
             delta_build_seconds = 0
             delta_encode_seconds = 0
             append_rpc_seconds = 0
-            if args.registration == "streaming":
+            if args.registration != "sealed":
                 for start in range(1, args.tasks + 1, args.chunk_tasks):
                     stop = min(args.tasks + 1, start + args.chunk_tasks)
                     delta_started = time.monotonic()
@@ -681,7 +713,7 @@ def main():
             if not args.no_requested_output:
                 result_data_id = (
                     args.tasks + 1
-                    if args.executor == "builtin" and args.registration == "streaming"
+                    if args.executor == "builtin" and args.registration != "sealed"
                     else args.tasks
                 )
                 result = client.fetch_workflow_result(
@@ -750,6 +782,8 @@ def main():
                 "gpus_per_worker": args.gpus,
                 "batch_type": args.batch_type,
                 "registration": args.registration,
+                "idata_backup": args.idata_backup,
+                "workflow_recovery": args.workflow_recovery,
                 "scheduling_mode": "worker-first",
                 "dependency_mode": args.dependency_mode,
                 "dag_width": args.dag_width,

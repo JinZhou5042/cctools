@@ -66,6 +66,7 @@ struct stored_workflow {
 	struct stored_transaction *delta_head;
 	struct stored_transaction *delta_tail;
 	int runtime_claimed;
+	int durable;
 };
 
 struct idempotency_record {
@@ -292,7 +293,34 @@ static void add_event(struct stored_workflow *workflow,
 	event->event_id = workflow->info.event_id;
 	event->generation = workflow->info.generation;
 	event->type = type;
-	snprintf(event->digest, sizeof(event->digest), "%s", workflow->info.digest);
+	memcpy(event->digest, workflow->info.digest, sizeof(event->digest));
+}
+
+static void apply_task_event_state(struct stored_workflow *workflow,
+		enum vine_datavine_workflow_event_type type, int64_t task_id,
+		uint32_t attempt, int32_t result)
+{
+	add_event(workflow, type);
+	struct vine_datavine_workflow_event *event =
+			&workflow->events[(workflow->event_start +
+					  workflow->event_count - 1) % STORE_MAX_EVENTS];
+	event->task_id = task_id;
+	event->attempt = attempt;
+	event->result = result;
+	/* The attempt/completion indices only exist to reconstruct a journaled
+	 * workflow after process loss. Ephemeral workflows keep live execution
+	 * state in the reactor and still publish the bounded event window. */
+	if (!workflow->durable)
+		return;
+	if (type == VINE_DATAVINE_WORKFLOW_TASK_SUBMITTED)
+		itable_insert(workflow->attempts, (uint64_t)task_id,
+				(void *)(uintptr_t)attempt);
+	if (type == VINE_DATAVINE_WORKFLOW_TASK_COMPLETED)
+		itable_insert(workflow->completed_tasks, (uint64_t)task_id,
+				(void *)(uintptr_t)attempt);
+	else if (type == VINE_DATAVINE_WORKFLOW_TASK_RETRY ||
+			type == VINE_DATAVINE_WORKFLOW_TASK_FAILED)
+		itable_remove(workflow->completed_tasks, (uint64_t)task_id);
 }
 
 static int apply_task_event(struct vine_datavine_workflow_store *store,
@@ -332,21 +360,7 @@ static int apply_task_event(struct vine_datavine_workflow_store *store,
 		if (!committed)
 			return store_fail(error, VINE_DATAVINE_WORKFLOW_LIMIT, "$", "task event journal commit failed");
 	}
-	add_event(workflow, type);
-	struct vine_datavine_workflow_event *event =
-			&workflow->events[(workflow->event_start +
-							  workflow->event_count - 1) %
-					  STORE_MAX_EVENTS];
-	event->task_id = task_id;
-	event->attempt = attempt;
-	event->result = result;
-	if (type == VINE_DATAVINE_WORKFLOW_TASK_SUBMITTED)
-		itable_insert(workflow->attempts, (uint64_t)task_id, (void *)(uintptr_t)attempt);
-	if (type == VINE_DATAVINE_WORKFLOW_TASK_COMPLETED)
-		itable_insert(workflow->completed_tasks, (uint64_t)task_id, (void *)(uintptr_t)attempt);
-	else if (type == VINE_DATAVINE_WORKFLOW_TASK_RETRY ||
-			type == VINE_DATAVINE_WORKFLOW_TASK_FAILED)
-		itable_remove(workflow->completed_tasks, (uint64_t)task_id);
+	apply_task_event_state(workflow, type, task_id, attempt, result);
 	return 1;
 }
 
@@ -425,6 +439,9 @@ static int apply_submit(struct vine_datavine_workflow_store *store,
 		free(key);
 		return store_fail(error, VINE_DATAVINE_WORKFLOW_LIMIT, "$", "could not build workflow graph indices");
 	}
+	struct jx *policy = jx_lookup(accepted_root, "policy");
+	const char *recovery = policy ? jx_lookup_string(policy, "recovery") : 0;
+	workflow->durable = !recovery || strcmp(recovery, "none");
 	jx_delete(accepted_root);
 	snprintf(workflow->info.workflow_id, sizeof(workflow->info.workflow_id), "%s", workflow_id);
 	snprintf(workflow->info.digest, sizeof(workflow->info.digest), "%s", digest);
@@ -433,7 +450,7 @@ static int apply_submit(struct vine_datavine_workflow_store *store,
 												 : VINE_DATAVINE_WORKFLOW_SEALED;
 	workflow->info.summary = summary;
 	add_event(workflow, VINE_DATAVINE_WORKFLOW_ACCEPTED);
-	if (commit && !vine_datavine_journal_commit(store->journal, STORE_SUBMIT, (const unsigned char *)json, size)) {
+	if (commit && workflow->durable && !vine_datavine_journal_commit(store->journal, STORE_SUBMIT, (const unsigned char *)json, size)) {
 		workflow_delete(workflow);
 		free(key);
 		return store_fail(error, VINE_DATAVINE_WORKFLOW_LIMIT, "$", "workflow journal commit failed");
@@ -500,7 +517,7 @@ static int apply_append_delta(struct vine_datavine_workflow_store *store,
 		free(key);
 		return store_fail(error, VINE_DATAVINE_WORKFLOW_LIMIT, "$", "could not allocate delta transaction");
 	}
-	if (commit) {
+	if (commit && workflow->durable) {
 		unsigned char *payload = malloc(size + 8);
 		if (!payload) {
 			transaction_delete(transaction);
@@ -611,7 +628,8 @@ static int apply_transition(struct vine_datavine_workflow_store *store,
 	vine_datavine_put_u64(payload, expected_generation);
 	vine_datavine_put_u32(payload + 8, (uint32_t)id_size);
 	memcpy(payload + 12, workflow_id, id_size);
-	int committed = !commit || vine_datavine_journal_commit(store->journal, opcode, payload, id_size + 12);
+	int committed = !commit || !workflow->durable ||
+			vine_datavine_journal_commit(store->journal, opcode, payload, id_size + 12);
 	free(payload);
 	if (!committed)
 		return store_fail(error, VINE_DATAVINE_WORKFLOW_LIMIT, "$", "transition journal commit failed");
@@ -1067,7 +1085,7 @@ int vine_datavine_workflow_store_take_runnable(
 					vine_datavine_put_u64(payload, workflow->info.generation);
 					vine_datavine_put_u32(payload + 8, (uint32_t)id_size);
 					memcpy(payload + 12, workflow->workflow_id, id_size);
-					valid = vine_datavine_journal_commit(store->journal,
+					valid = !workflow->durable || vine_datavine_journal_commit(store->journal,
 							STORE_START,
 							payload,
 							id_size + 12);
@@ -1142,7 +1160,7 @@ int vine_datavine_workflow_store_mark_quiescent(
 	}
 	int valid = workflow && workflow->info.state == VINE_DATAVINE_WORKFLOW_RUNNING_OPEN &&
 			workflow->info.generation == expected_generation;
-	if (valid && !vine_datavine_journal_commit(store->journal, STORE_QUIESCENT, (const unsigned char *)workflow_id, strlen(workflow_id)))
+	if (valid && workflow->durable && !vine_datavine_journal_commit(store->journal, STORE_QUIESCENT, (const unsigned char *)workflow_id, strlen(workflow_id)))
 		valid = 0;
 	if (valid) {
 		workflow->info.state = VINE_DATAVINE_WORKFLOW_OPEN_QUIESCENT;
@@ -1207,10 +1225,10 @@ int vine_datavine_workflow_store_record_task_events(
 		store_fail(error, workflow ? VINE_DATAVINE_WORKFLOW_VALUE : VINE_DATAVINE_WORKFLOW_REFERENCE, workflow ? "$.event" : "$.workflow_id", workflow ? "invalid task event batch" : "unknown workflow_id");
 	}
 	size_t payload_size = 8 + id_size + count * 20;
-	unsigned char *payload = valid ? malloc(payload_size) : 0;
-	if (valid && !payload)
+	unsigned char *payload = valid && workflow->durable ? malloc(payload_size) : 0;
+	if (valid && workflow->durable && !payload)
 		valid = 0;
-	if (valid) {
+	if (valid && workflow->durable) {
 		vine_datavine_put_u32(payload, (uint32_t)id_size);
 		vine_datavine_put_u32(payload + 4, (uint32_t)count);
 		memcpy(payload + 8, workflow_id, id_size);
@@ -1228,7 +1246,9 @@ int vine_datavine_workflow_store_record_task_events(
 	}
 	free(payload);
 	for (size_t index = 0; valid && index < count; index++)
-		valid = apply_task_event(store, workflow_id, records[index].type, records[index].task_id, records[index].attempt, records[index].result, error, 0);
+		apply_task_event_state(workflow, records[index].type,
+				records[index].task_id, records[index].attempt,
+				records[index].result);
 	pthread_mutex_unlock(&store->lock);
 	return valid;
 }
@@ -1311,8 +1331,10 @@ int vine_datavine_workflow_store_checkpoint(
 			strlen(workflow_id) > VINE_DATAVINE_WORKFLOW_IDENTIFIER_MAX)
 		return 0;
 	pthread_mutex_lock(&store->lock);
-	int valid = workflow_lookup(store, workflow_id) &&
-			vine_datavine_journal_commit(store->journal, STORE_CHECKPOINT, (const unsigned char *)workflow_id, strlen(workflow_id));
+	struct stored_workflow *workflow = workflow_lookup(store, workflow_id);
+	int valid = workflow && (!workflow->durable ||
+			vine_datavine_journal_commit(store->journal, STORE_CHECKPOINT,
+					(const unsigned char *)workflow_id, strlen(workflow_id)));
 	pthread_mutex_unlock(&store->lock);
 	return valid;
 }

@@ -4,14 +4,12 @@ import concurrent.futures
 import itertools
 import hashlib
 import json
-import os
 import pathlib
 import socket
 import struct
 import threading
 import time
 import urllib.parse
-from queue import Empty, Queue
 
 
 _MAGIC = 0x44564331
@@ -31,12 +29,10 @@ _RESULT_INFO = 28
 _FRONTIER = 29
 _OBJECT_PUT = 30
 _OBJECT_GET = 31
-_OBJECT_PATH = 32
-_RESULT_PATH = 34
 _RESULT_DESCRIPTORS = 36
 _WAIT_TERMINAL = 37
 _RESULT_STREAM = 38
-_OBJECT_PUT_WORKERS = 16
+_OBJECT_PUT_WORKERS = 4
 
 _OPCODE_NAMES = {
     _AUTH: "auth",
@@ -52,8 +48,6 @@ _OPCODE_NAMES = {
     _FRONTIER: "workflow_frontier",
     _OBJECT_PUT: "object_put",
     _OBJECT_GET: "object_get",
-    _OBJECT_PATH: "object_path",
-    _RESULT_PATH: "workflow_result_path",
     _RESULT_DESCRIPTORS: "workflow_result_descriptors",
     _WAIT_TERMINAL: "workflow_wait_terminal",
     _RESULT_STREAM: "workflow_result_stream",
@@ -245,8 +239,6 @@ class WorkflowClient:
         self._local = threading.local()
         self._ids = itertools.count(1)
         self._id_lock = threading.Lock()
-        self._object_root = None
-        self._object_root_lock = threading.Lock()
         self._capabilities = None
         self._capabilities_lock = threading.Lock()
         self._rpc_profile_lock = threading.Lock()
@@ -393,17 +385,11 @@ class WorkflowClient:
     def workflow_capabilities(self):
         with self._capabilities_lock:
             if self._capabilities is None:
-                capabilities = json.loads(self.request(_CAPABILITIES))
-                object_root = pathlib.Path(capabilities.get("object_root", ""))
-                if not object_root.is_absolute():
-                    raise RuntimeError("runtime advertised an unsafe object root")
-                with self._object_root_lock:
-                    self._object_root = object_root
-                self._capabilities = capabilities
+                self._capabilities = json.loads(self.request(_CAPABILITIES))
             return self._capabilities
 
     def put_object(self, payload, sha256=None):
-        """Atomically install one immutable object directly on SharedFS."""
+        """Install one immutable object through the Controller data plane."""
 
         payload = bytes(payload)
         if len(payload) > _MAX_OBJECT:
@@ -421,84 +407,21 @@ class WorkflowClient:
         ):
             raise ValueError("object sha256 must be lowercase hexadecimal")
         encoded_digest = digest.encode("ascii")
-        path, rpc_nanoseconds, path_sharedfs_nanoseconds = (
-            self._shared_object_path(digest, encoded_digest)
-        )
-        deduplicated = path.exists()
-        sharedfs_started = time.perf_counter_ns()
-        if not deduplicated:
-            temporary = path.with_name(
-                f"{path.name}.part-{os.getpid()}-{threading.get_ident()}"
-            )
-            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            try:
-                with os.fdopen(fd, "wb") as stream:
-                    stream.write(payload)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                try:
-                    os.link(temporary, path)
-                except FileExistsError:
-                    deduplicated = True
-                directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
-            finally:
-                try:
-                    temporary.unlink()
-                except FileNotFoundError:
-                    pass
-        sharedfs_nanoseconds = (
-            path_sharedfs_nanoseconds
-            + time.perf_counter_ns() - sharedfs_started
-        )
-        try:
-            status = path.stat()
-        except OSError as error:
-            raise RuntimeError("object store installation disappeared") from error
-        if not path.is_file() or status.st_size != len(payload):
-            raise RuntimeError("object store installed the wrong size or type")
+        rpc_started = time.perf_counter_ns()
+        response = self.request(_OBJECT_PUT, encoded_digest + payload)
+        rpc_nanoseconds = time.perf_counter_ns() - rpc_started
+        if len(response) != 8:
+            raise RuntimeError("invalid Controller object-put response")
+        deduplicated, installed_size = struct.unpack("!II", response)
+        if deduplicated not in (0, 1) or installed_size != len(payload):
+            raise RuntimeError("Controller object-put response mismatch")
         return {
             "sha256": digest,
             "size": len(payload),
-            "deduplicated": deduplicated,
+            "deduplicated": bool(deduplicated),
             "hash_nanoseconds": hash_nanoseconds,
             "rpc_nanoseconds": rpc_nanoseconds,
-            "sharedfs_nanoseconds": sharedfs_nanoseconds,
         }
-
-    def _shared_object_path(self, digest, encoded_digest):
-        """Discover the immutable store root once, then derive sharded paths."""
-
-        rpc_nanoseconds = 0
-        root = self._object_root
-        if root is None:
-            with self._object_root_lock:
-                root = self._object_root
-                if root is None:
-                    started = time.perf_counter_ns()
-                    path_body = self.request(_OBJECT_PATH, encoded_digest)
-                    rpc_nanoseconds = time.perf_counter_ns() - started
-                    try:
-                        path = pathlib.Path(path_body.decode("utf-8"))
-                    except UnicodeDecodeError as error:
-                        raise RuntimeError("invalid SharedFS object path") from error
-                    if (
-                        not path.is_absolute()
-                        or path.name != digest
-                        or path.parent.name != digest[2:4]
-                        or path.parent.parent.name != digest[:2]
-                    ):
-                        raise RuntimeError("unsafe SharedFS object path")
-                    root = path.parents[2]
-                    self._object_root = root
-        path = root / digest[:2] / digest[2:4] / digest
-        started = time.perf_counter_ns()
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        sharedfs_nanoseconds = time.perf_counter_ns() - started
-        return path, rpc_nanoseconds, sharedfs_nanoseconds
 
     def put_objects(self, objects, workers=_OBJECT_PUT_WORKERS):
         """Persist distinct pre-serialized objects with bounded I/O concurrency."""
@@ -524,10 +447,7 @@ class WorkflowClient:
         digest = str(sha256).encode("ascii")
         if len(digest) != 64:
             raise ValueError("object sha256 must contain 64 hexadecimal characters")
-        path = pathlib.Path(self.request(_OBJECT_PATH, digest).decode("utf-8"))
-        if not path.is_absolute() or path.name.encode("ascii") != digest:
-            raise RuntimeError("unsafe SharedFS object path")
-        payload = path.read_bytes()
+        payload = self.request(_OBJECT_GET, digest)
         if hashlib.sha256(payload).hexdigest().encode("ascii") != digest:
             raise RuntimeError("object store returned corrupt content")
         return payload
@@ -677,34 +597,10 @@ class WorkflowClient:
         workers = min(len(identifiers), max(1, int(concurrency)))
         if workers == 1:
             return [self._read_result(item) for item in descriptors]
-        pending = Queue()
-        for index, descriptor in enumerate(descriptors):
-            pending.put((index, descriptor))
-        results = [None] * len(identifiers)
-        failures = Queue()
-
-        def fetcher():
-            try:
-                while True:
-                    try:
-                        index, descriptor = pending.get_nowait()
-                    except Empty:
-                        break
-                    try:
-                        results[index] = self._read_result(descriptor)
-                    finally:
-                        pending.task_done()
-            except BaseException as error:
-                failures.put(error)
-
-        threads = [threading.Thread(target=fetcher) for _ in range(workers)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        if not failures.empty():
-            raise failures.get()
-        return results
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="datavine-result-fetch") as executor:
+            return list(executor.map(self._read_result, descriptors))
 
     def workflow_result_descriptors(self, workflow_id, data_ids):
         identifiers = tuple(int(data_id) for data_id in data_ids)

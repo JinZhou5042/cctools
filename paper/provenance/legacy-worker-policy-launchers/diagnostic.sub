@@ -1,0 +1,13 @@
+universe = vanilla
+executable = /users/jzhou24/cctools_repo/datavine/paper/scripts/diagnostic_compute.sh
+initialdir = /users/jzhou24/cctools_repo/datavine
+request_cpus = 8
+request_memory = 16384MB
+request_disk = 8192MB
+should_transfer_files = NO
+getenv = true
+output = /users/jzhou24/cctools_repo/datavine/paper/results/diagnostic-quadrature-v1.stdout
+error = /users/jzhou24/cctools_repo/datavine/paper/results/diagnostic-quadrature-v1.stderr
+log = /users/jzhou24/cctools_repo/datavine/paper/results/diagnostic-quadrature-v1.condor.log
+notification = Never
+queue 1

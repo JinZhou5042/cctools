@@ -413,6 +413,9 @@ def main():
         env=dict(
             os.environ,
             DATAVINE_WORKFLOW_METRICS="1",
+            # Fault selection matches connected workers to owned Condor jobs.
+            # Production disables this diagnostic log by default.
+            DATAVINE_TASKVINE_TRANSACTION_LOG="1",
             DATAVINE_RUNTIME_INFO_PATH=str(output / "run-info"),
         ),
     )

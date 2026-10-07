@@ -59,6 +59,7 @@ struct vine_process {
 	/* If this is a library process, the number of functions it is currently running. */
 	int functions_running;
 	int64_t function_credit_generation;
+	int64_t function_window_generation;
 	
 	/* If this is a library process, whether the library is ready to execute functions. */
 	int library_ready;
@@ -78,6 +79,10 @@ struct vine_process {
 	struct path_disk_size_info *disk_measurement_state;
 	int auxiliary_prepared;
 	int auxiliary_failed;
+	/* Optional auxiliary-payload tracing; zero disables timestamp collection. */
+	timestamp_t auxiliary_received;
+	timestamp_t auxiliary_prepare_started;
+	timestamp_t auxiliary_prepare_ready;
 };
 
 struct vine_process * vine_process_create( struct vine_task *task, vine_process_type_t type );

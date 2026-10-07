@@ -1,0 +1,349 @@
+--- starting/DATAVINE_PRODUCTION.md
++++ current/DATAVINE_PRODUCTION.md
+@@ -236,3 +236,23 @@
+ PASS results and their limits are in [acceptance/matrix.md](acceptance/matrix.md).
+ Performance comparisons must state executor, Worker topology, output lifecycle,
+ recovery policy and whether asynchronous backup drain is included.
++
++## Paper diagnostics and preparation control
++
++`DATAVINE_PREPARATION_POLICY=deferred` is the default. The `eager` experimental
++control permits input preparation before a library execution opportunity is
++available; it still enforces input readiness and actual execution admission.
++Invalid values retain deferred behavior and emit a notice.
++`DATAVINE_TRACE_ATTEMPTS=1` records worker-local receipt, preparation, execution,
++and completion timestamps for auxiliary-payload attempts. It is disabled by
++default. These timestamps are not synchronized across hosts.
++
++Dense least-loaded dispatch visits each offered Worker at most once in a
++bounded scheduling pass. Reoffering an incompatible low-load Worker must not
++starve a recalled task's reserved destination. The worker-pool regression
++covers repeated offers and stale-generation slot reuse. Worker-removal tests
++explicitly enable `DATAVINE_TASKVINE_TRANSACTION_LOG=1`, because fault selection
++must correlate connected Workers with jobs owned by the test factory.
++
++Paper evidence and reproduction instructions live in
++[papers/ipdps2027](papers/ipdps2027/README.md).
+--- starting/acceptance/README.md
++++ current/acceptance/README.md
+@@ -7,11 +7,12 @@
+ 
+ ## Build and verify
+ 
+-From the repository root, build the configured packages, including the Manager,
+-Worker and Python bindings, then the test-only tools:
++From the repository root, build the DataVine runtime and its TaskVine Manager,
++Worker and Python bindings, then the test-only tools. Keep this build scoped to
++TaskVine; a root build also rebuilds unrelated CCTools packages:
+ 
+ ```sh
+-make -j8
++make -C taskvine/src -j8
+ make -C taskvine/src/tools \
+   datavine_parametric_test datavine_replica_benchmark \
+   datavine_controller_benchmark -j8
+@@ -43,6 +44,7 @@
+ 
+ | Question | Evidence | Scope |
+ |---|---|---|
++| IPDPS 2027 paper and fresh experiments | [Paper package](../papers/ipdps2027/README.md) | Matched campaigns, recall fairness fix, mechanism and recovery gates; see current ledger |
+ | Native scheduling ceiling | [Million-task campaign](million-task-throughput-20260903/INDEX.md) | Repeated 1M no-output native tasks; explicit `recovery:none` |
+ | Larger Worker pool | [Big-pool report](million-task-bigpool-20260903/REPORT.md) | One complete 32x16 point; historical 8x16 comparison, not matched A/B |
+ | Elastic admission and Controller RPC | [Elastic campaign](adaptive-window-20260903/INDEX.md) | Local oracle comparison, recall/eviction, one remote scale point, DVP3/DVP4 |
+--- starting/acceptance/scripts/benchmark_worker_churn.py
++++ current/acceptance/scripts/benchmark_worker_churn.py
+@@ -413,6 +413,9 @@
+         env=dict(
+             os.environ,
+             DATAVINE_WORKFLOW_METRICS="1",
++            # Fault selection matches connected workers to owned Condor jobs.
++            # Production disables this diagnostic log by default.
++            DATAVINE_TASKVINE_TRANSACTION_LOG="1",
+             DATAVINE_RUNTIME_INFO_PATH=str(output / "run-info"),
+         ),
+     )
+--- starting/taskvine/src/manager/vine_manager.c
++++ current/taskvine/src/manager/vine_manager.c
+@@ -3960,13 +3960,14 @@
+ 	int remaining = q->worker_first_dispatch_limit;
+ 	double now_secs = ((double)timestamp_get()) / ONE_SECOND;
+ 	if (q->worker_pool) {
++		vine_worker_pool_begin_pass(q->worker_pool);
+ 		size_t workers = vine_worker_pool_ready(
+ 				q->worker_pool);
+ 		for (size_t index = 0; index < workers && remaining > 0 &&
+ 				skip_list_size(q->ready_tasks); index++) {
+ 			struct vine_worker_info *w = (q->worker_first_least_loaded ||
+ 					q->function_queue_multiplier > 1)
+-					? vine_worker_pool_take_least_loaded(q->worker_pool)
++					? vine_worker_pool_take_least_loaded_once(q->worker_pool)
+ 					: vine_worker_pool_take(q->worker_pool);
+ 			if (!w)
+ 				break;
+--- starting/taskvine/src/manager/vine_worker_pool.c
++++ current/taskvine/src/manager/vine_worker_pool.c
+@@ -17,6 +17,7 @@
+ 	struct vine_worker_info *worker;
+ 	uint32_t generation;
+ 	uint8_t queued;
++	uint8_t considered;
+ };
+ 
+ struct ready_entry {
+@@ -199,11 +200,33 @@
+ 	return 0;
+ }
+ 
++/* Start a bounded scheduling pass. Compact stale generation entries and clear
++ * only the live ready workers' visit marks. Reoffering a worker during this
++ * pass must not let it hide a less-loaded-incompatible task's destination. */
++void vine_worker_pool_begin_pass(struct vine_worker_pool *pool)
++{
++	if (!pool)
++		return;
++	uint32_t retained = 0;
++	for (uint32_t offset = 0; offset < pool->ready_count; offset++) {
++		struct ready_entry entry = pool->ready[(pool->ready_head + offset) %
++				pool->ready_capacity];
++		if (entry.slot >= pool->slot_highwater)
++			continue;
++		struct worker_slot *record = &pool->slots[entry.slot];
++		if (!record->worker || record->generation != entry.generation)
++			continue;
++		record->considered = 0;
++		pool->ready[(pool->ready_head + retained++) % pool->ready_capacity] = entry;
++	}
++	pool->ready_count = retained;
++}
++
+ /* Select the least-loaded ready Worker without maintaining another heap.  The
+  * pool is intentionally small (one entry per Worker), and this scan happens
+  * only on the opt-in dense scheduling path. */
+-struct vine_worker_info *vine_worker_pool_take_least_loaded(
+-		struct vine_worker_pool *pool)
++static struct vine_worker_info *take_least_loaded(
++		struct vine_worker_pool *pool, int once)
+ {
+ 	if (!pool)
+ 		return 0;
+@@ -218,6 +241,8 @@
+ 		struct worker_slot *record = &pool->slots[entry.slot];
+ 		if (!record->worker || record->generation != entry.generation)
+ 			continue;
++		if (once && record->considered)
++			continue;
+ 		int load = record->worker->tasks_running;
+ 		if (!found || load < best_load) {
+ 			found = 1;
+@@ -226,14 +251,27 @@
+ 		}
+ 	}
+ 	if (!found)
+-		return vine_worker_pool_take(pool);
++		return once ? 0 : vine_worker_pool_take(pool);
+ 	uint32_t best = (pool->ready_head + best_offset) % pool->ready_capacity;
+ 	struct ready_entry saved = pool->ready[pool->ready_head];
+ 	pool->ready[pool->ready_head] = pool->ready[best];
+ 	pool->ready[best] = saved;
++	pool->slots[pool->ready[pool->ready_head].slot].considered = 1;
+ 	return vine_worker_pool_take(pool);
+ }
+ 
++struct vine_worker_info *vine_worker_pool_take_least_loaded(
++		struct vine_worker_pool *pool)
++{
++	return take_least_loaded(pool, 0);
++}
++
++struct vine_worker_info *vine_worker_pool_take_least_loaded_once(
++		struct vine_worker_pool *pool)
++{
++	return take_least_loaded(pool, 1);
++}
++
+ size_t vine_worker_pool_ready(const struct vine_worker_pool *pool)
+ {
+ 	return pool ? pool->ready_count : 0;
+--- starting/taskvine/src/manager/vine_worker_pool.h
++++ current/taskvine/src/manager/vine_worker_pool.h
+@@ -20,6 +20,10 @@
+ struct vine_worker_info *vine_worker_pool_take(struct vine_worker_pool *pool);
+ struct vine_worker_info *vine_worker_pool_take_least_loaded(
+ 		struct vine_worker_pool *pool);
++/* Visit each offered worker at most once until the next begin_pass. */
++void vine_worker_pool_begin_pass(struct vine_worker_pool *pool);
++struct vine_worker_info *vine_worker_pool_take_least_loaded_once(
++		struct vine_worker_pool *pool);
+ size_t vine_worker_pool_ready(const struct vine_worker_pool *pool);
+ 
+ #endif
+--- starting/taskvine/src/worker/vine_process.h
++++ current/taskvine/src/worker/vine_process.h
+@@ -79,6 +79,10 @@
+ 	struct path_disk_size_info *disk_measurement_state;
+ 	int auxiliary_prepared;
+ 	int auxiliary_failed;
++	/* Optional auxiliary-payload tracing; zero disables timestamp collection. */
++	timestamp_t auxiliary_received;
++	timestamp_t auxiliary_prepare_started;
++	timestamp_t auxiliary_prepare_ready;
+ };
+ 
+ struct vine_process * vine_process_create( struct vine_task *task, vine_process_type_t type );
+--- starting/taskvine/src/worker/vine_worker.c
++++ current/taskvine/src/worker/vine_worker.c
+@@ -362,6 +362,17 @@
+ 	struct vine_process *p;
+ 	for (visited = 0; visited < size; visited++) {
+ 		p = itable_pop(procs_complete);
++		if (p->auxiliary_received) {
++			debug(D_VINE, "datavine-attempt task=%d received_us=%llu "
++					"prepare_start_us=%llu prepare_ready_us=%llu "
++					"execute_start_us=%llu complete_us=%llu result=%d",
++					p->task->task_id,
++					(unsigned long long)p->auxiliary_received,
++					(unsigned long long)p->auxiliary_prepare_started,
++					(unsigned long long)p->auxiliary_prepare_ready,
++					(unsigned long long)p->execution_start,
++					(unsigned long long)p->execution_end, p->result);
++		}
+ 		if (p->function_output) {
+ 			send_async_message(l,
+ 					"complete %d %d %lld %lld %llu %llu %d %d\n%s",
+@@ -1525,6 +1536,10 @@
+ 	struct vine_process *p = vine_process_create(task, type);
+ 	if (!p)
+ 		return 0;
++	const char *trace_attempts = getenv("DATAVINE_TRACE_ATTEMPTS");
++	if (task->auxiliary_payload_length && trace_attempts &&
++			!strcmp(trace_attempts, "1"))
++		p->auxiliary_received = timestamp_get();
+ 
+ 	itable_insert(procs_table, task_id, p);
+ 
+@@ -2026,6 +2041,22 @@
+ Return true if this process is ready to run at this moment, and match to a library process if needed.
+ */
+ 
++/* An opt-in ablation of preparation timing, restricted to DataVine calls.
++ * Eager preparation does not bypass execution admission or input readiness. */
++static int datavine_eager_preparation(void)
++{
++	static int initialized = 0;
++	static int eager = 0;
++	if (!initialized) {
++		const char *policy = getenv("DATAVINE_PREPARATION_POLICY");
++		eager = policy && !strcmp(policy, "eager");
++		if (policy && strcmp(policy, "eager") && strcmp(policy, "deferred"))
++			debug(D_NOTICE, "unknown DATAVINE_PREPARATION_POLICY=%s; using deferred", policy);
++		initialized = 1;
++	}
++	return eager;
++}
++
+ static int process_ready_to_run_now(struct vine_process *p, struct vine_cache *cache, struct link *manager)
+ {
+ 	struct vine_process *execution_library = 0;
+@@ -2036,11 +2067,13 @@
+ 	 * cheap, recallable descriptor.  Do not stage data or construct a sandbox
+ 	 * until a real execution slot exists. */
+ 	if (p->task->auxiliary_payload_length && p->task->needs_library &&
+-			!execution_library)
++			!execution_library && !datavine_eager_preparation())
+ 		return 0;
+ 	if (p->task->needs_library)
+ 		p->library_process = execution_library;
+ 	if (!p->auxiliary_prepared && !p->auxiliary_failed) {
++		if (p->auxiliary_received && !p->auxiliary_prepare_started)
++			p->auxiliary_prepare_started = timestamp_get();
+ 		enum vine_datavine_agent_prepare_status status =
+ 				vine_datavine_agent_prepare(p);
+ 		if (status == VINE_DATAVINE_AGENT_FAILED)
+@@ -2050,6 +2083,8 @@
+ 			p->auxiliary_prepared = 1;
+ 		else
+ 			return 0;
++		if (p->auxiliary_received && p->auxiliary_prepared)
++			p->auxiliary_prepare_ready = timestamp_get();
+ 	}
+ 	if (p->auxiliary_failed)
+ 		return 0;
+--- /dev/null
++++ current/taskvine/test/datavine_worker_pool.c
+@@ -0,0 +1,56 @@
++/* Regression for recalled tasks stranded behind incompatible low-load workers. */
++#include "vine_worker_pool.h"
++#include "vine_worker_info.h"
++#include <assert.h>
++#include <stdio.h>
++
++int main(void)
++{
++    struct vine_worker_pool *pool = vine_worker_pool_create();
++    struct vine_worker_info workers[4] = {{0}};
++    assert(pool);
++    for (int i = 0; i < 4; i++) {
++        workers[i].tasks_running = i; /* Target 3 is never the least loaded. */
++        assert(vine_worker_pool_offer(pool, &workers[i]));
++    }
++    /* Original repeated least-loaded selection hides target 3 indefinitely. */
++    for (int i = 0; i < 8; i++) {
++        struct vine_worker_info *w = vine_worker_pool_take_least_loaded(pool);
++        assert(w == &workers[0]);
++        assert(vine_worker_pool_offer(pool, w));
++    }
++    for (int pass = 0; pass < 3; pass++) {
++        unsigned seen = 0;
++        vine_worker_pool_begin_pass(pool);
++        for (int i = 0; i < 4; i++) {
++            struct vine_worker_info *w = vine_worker_pool_take_least_loaded_once(pool);
++            assert(w);
++            unsigned bit = 1U << (w - workers);
++            assert(!(seen & bit));
++            seen |= bit;
++            /* Compatibility failure leaves the worker reusable. */
++            assert(vine_worker_pool_offer(pool, w));
++        }
++        assert(seen == 15);
++        assert(!vine_worker_pool_take_least_loaded_once(pool));
++    }
++    /* Compact stale ring entries and survive slot reuse with a new generation. */
++    vine_worker_pool_remove(pool, &workers[1]);
++    vine_worker_pool_remove(pool, &workers[3]);
++    vine_worker_pool_begin_pass(pool);
++    assert(vine_worker_pool_ready(pool) == 2);
++    assert(vine_worker_pool_offer(pool, &workers[1]));
++    vine_worker_pool_begin_pass(pool);
++    unsigned seen = 0;
++    for (int i = 0; i < 3; i++) {
++        struct vine_worker_info *w = vine_worker_pool_take_least_loaded_once(pool);
++        assert(w && w != &workers[3]);
++        unsigned bit = 1U << (w - workers);
++        assert(!(seen & bit));
++        seen |= bit;
++    }
++    assert(seen == 7 && !vine_worker_pool_take_least_loaded_once(pool));
++    vine_worker_pool_delete(pool);
++    puts("PASS: bounded worker visits, destination reachability, stale generations");
++    return 0;
++}
+--- /dev/null
++++ current/taskvine/test/TR_datavine_worker_pool.sh
+@@ -0,0 +1,17 @@
++#!/bin/sh
++set -eu
++case "${1:-run}" in
++prepare|clean) ;;
++run)
++    root=$(cd "$(dirname "$0")/../.." && pwd)
++    trial=$(mktemp -d "${TMPDIR:-/tmp}/datavine-worker-pool-XXXXXX")
++    trap 'rm -rf "$trial"' EXIT HUP INT TERM
++    ${CC:-cc} -std=gnu99 -Wall -Wextra -I"$root/taskvine/src/manager" \
++        -I"$root/taskvine/src" -I"$root/taskvine/src/worker" \
++        -I"$root/dttools/src" -I"$root" \
++        "$root/taskvine/test/datavine_worker_pool.c" \
++        "$root/taskvine/src/manager/vine_worker_pool.c" -o "$trial/test"
++    "$trial/test"
++    ;;
++*) exit 2 ;;
++esac

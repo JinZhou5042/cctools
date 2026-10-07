@@ -1,147 +1,55 @@
-# DataVine dynamic control-plane root fix
+# DataVine dynamic control findings
 
-Date: 2026-08-31
+These are the August 30–31 pilot results, not a fresh measurement of the
+current checkout. Current execution frames and result semantics are defined in
+[DATAVINE_PRODUCTION.md](DATAVINE_PRODUCTION.md).
 
-Status: implemented and acceptance-tested in the current dirty checkout.
-Release provenance is still open.
+## Workload and corrected cause
 
-## Result
+Each completed result determines one to three children. The depth-three graph
+is discovered during execution: 477 tasks and 445 edges from 32 roots, with
+5 ms useful CPU work per task. Both backends used two Condor Workers with four
+cores, exact physical task counts and matching result traces.
 
-The 477-task result-driven Condor workflow fell from the previous DataVine
-median of 5.230 seconds to 1.224 seconds in two new runs. The exact graph,
-result trace and task count did not change. The new DataVine rate was 389.5 to
-389.8 tasks/s. The paired TaskVine runs took 2.364 and 4.339 seconds, so
-DataVine was 1.93x to 3.54x faster in these pairs instead of 1.86x slower in
-the previous campaign.
+The original DataVine median was 5.230 seconds. Each discovered task persisted
+an approximately 250-byte Python invocation as an object: 478 object puts,
+including one reusable callable, for about 123 KiB. Object-put time was
+3.41–4.11 seconds, including 2.67–3.19 seconds in SharedFS operations. The
+1,441 frontend RPCs were extra work, but did not explain most of that penalty.
 
-This is a root data-path correction, not a larger thread pool or a polling
-interval patch.
+Inlining small invocation metadata reduced object puts to one and object-put
+time to about 9.5 ms. Two corrected remote runs took 1.2236 and 1.2246 seconds.
+Their paired TaskVine runs took 2.364 and 4.339 seconds. These are pilot pairs,
+not a general speedup or multi-node scaling claim.
 
-## Corrected diagnosis
+The campaign used transitional execution frames. Those labels and the old
+object fallback are not supported-adaptor guidance: the current implementation
+uses DVP1 source, DVP3 inline callable and DVP4 Controller-RPC reference frames.
 
-The earlier report correctly identified an inefficient frontend protocol, but
-it overstated that protocol as the largest measured wall-time bottleneck. The
-decisive evidence was already present in the adaptor profile:
+## Result stream
 
-| Old Condor run | Total | Object-put wall | SharedFS portion |
-|---|---:|---:|---:|
-| pair 1 | 5.637 s | 4.114 s | 3.189 s |
-| pair 2 | 5.230 s | 3.999 s | 3.185 s |
-| pair 3 | 4.656 s | 3.408 s | 2.673 s |
+The Controller-admitted stream exposes only committed results, independently
+of Scheduler completion. A dedicated authenticated connection resumes after a
+monotonic sequence reconstructed from the data journal. Small committed
+results can be inline; large ones remain descriptors. A terminal frame ends
+the subscription. Protocol details belong in the
+[adaptor guide](taskvine/examples/DATAVINE_WORKFLOW_ADAPTOR.md).
 
-Every dynamically discovered task created a unique Python invocation of only
-about 250 bytes. The adaptor nevertheless treated it as ordinary immutable
-data and performed a full Controller object transaction: hash, RPC, SharedFS
-directory lookup/create, file write, `fsync`, link/rename and later Worker
-read. This happened 477 times. Together with the single reusable function
-object there were 478 object puts for only about 123 KiB of control data.
+The 477-task stream run used 483 frontend requests. Remote stream and polling
+runs both took about 1.224 seconds: inlining produced the wall-time improvement,
+while streaming reduced request traffic. A separate local 10,000-empty-result
+gate delivered the complete durable sequence and terminal state using five
+client RPCs. Its 1,175.6 results/s measures persistence plus delivery, not the
+native no-output scheduler ceiling.
 
-The 1,441 frontend RPCs were a second architectural issue, but local and remote
-A/B tests show they were not responsible for the old four-second penalty.
+## Evidence and remaining scope
 
-## New control/data boundary
+- [Original pilot](acceptance/dynamic-adaptive-fixed-ab-20260830.json)
+- [Correction and stream gates](acceptance/dynamic-control-root-fix-20260831.json)
+- [Later restart and late-consumer gate](acceptance/dynamic-data-management-20260831.json)
+- [Current DVP3/DVP4 and elastic campaign](acceptance/adaptive-window-20260903/REPORT.md)
 
-Python invocation metadata is control-plane state, not a workflow file.
-
-- Invocation payloads up to 64 KiB remain inline in Workflow IR and are placed
-  directly in the physical task's `function_input` frame.
-- The Worker Python executor decodes the new `DVP2` ticket without opening or
-  fetching an invocation object.
-- The reusable callable object remains one content-addressed `DVP1` object and
-  is cached by digest in each Worker executor.
-- An invocation above 64 KiB follows the unchanged DVP1 object path. This is a
-  compatibility and bounded-frame fallback, not file-size placement policy.
-- Generic TaskVine tasks, scheduling and file transfer are unchanged.
-
-The runtime advertises `inline_invocation_max_bytes`; the Python adaptor only
-uses DVP2 when that capability is present. Older runtimes therefore continue
-to receive the old object form.
-
-In the fixed 477-task run, object puts fell from 478 to one. Object-put wall
-time fell from 3.41-4.11 seconds to 9.47-9.53 milliseconds.
-
-## Controller-admitted completion stream
-
-Dynamic control results must not be confused with Scheduler task completion.
-The Scheduler still marks a task done and releases ready children immediately;
-it never waits for Controller persistence. A result is exposed to the frontend
-only after the Controller has pulled it, verified it, called `fsync`, renamed
-it and committed its `DATA_READY_BATCH` record.
-
-The new `controller-admitted-sequence-v1` stream has these properties:
-
-1. The client opens one dedicated authenticated socket and sends one stream
-   request with its last durable sequence.
-2. Controller admission appends `{DataID, attempt}` to a compact array in the
-   same order as durable data-journal records.
-3. An `eventfd` wakes the native epoll owner immediately; no frontend polling
-   request is required.
-4. The server emits result identity, producer identity, codec and SHA-256. A
-   result up to 64 KiB is included in the frame; larger data remains on the
-   existing result path and the frame acts as a descriptor.
-5. Disconnect recovery resumes after the last sequence. Manager restart
-   reconstructs the same sequence by replaying `DATA_READY_BATCH` records.
-6. Terminal workflow state is a final stream frame. Failure and cancellation
-   cannot leave a subscriber waiting indefinitely.
-
-The sequence is an append-only array rather than a hash table. It costs 16
-bytes per requested-result admission, or about 16 MiB for one million results.
-Superseded attempts remain historical sequence entries and are skipped by an
-attempt check. This preserves replay order without duplicating the Controller
-catalog or adding another ownership table.
-
-For the 477-task workflow, stream mode used 483 total RPC requests: 477
-semantic append transactions, one stream subscription and five fixed
-authentication/setup/seal requests. The matched local polling path used 1,654
-requests. Remote stream and poll both took about 1.224 seconds, proving that
-the DVP2 data-path correction produced the wall-time gain while the stream
-mainly removes scaling load and protocol coupling at this size.
-
-## Scale and acceptance
-
-The wider local run discovered 948 tasks and 884 edges on one 16-core Worker.
-DataVine completed in 1.652 seconds at 573.9 tasks/s; TaskVine took 3.441
-seconds at 275.5 tasks/s. DataVine used exactly one stream request and 948
-unbatched append transactions.
-
-A separate static pressure gate sent 10,000 requested empty results through
-Controller durability and one result stream on a 16-core Worker. It delivered
-sequences 1 through 10,000 exactly once, reached terminal `completed`, and
-took 8.506 seconds (1,175.6 results/s). The entire client interaction used five
-RPC requests: two authentications, capabilities, workflow submit and one stream
-subscription. No per-result frontend RPC was issued.
-
-Focused gates cover:
-
-- small DVP2 invocation and exact result;
-- greater-than-64-KiB DVP1 invocation fallback;
-- empty inline result;
-- greater-than-64-KiB descriptor result;
-- disconnect and sequence resume;
-- service restart, journal replay and sequence resume;
-- terminal stream frame;
-- lifecycle/retry/restart, production data plane and module boundaries;
-- warning-clean native and Python builds.
-
-Compact evidence is
-`acceptance/dynamic-control-root-fix-20260831.json`. Raw Condor summaries and
-logs are under
-`/groups/dthain/users/jzhou24/datavine-benchmarks/root-fix-20260831/`.
-
-## Remaining limits
-
-The workload is genuinely dynamic: each completed result determines one to
-three children. One append per discovered child is therefore semantic work,
-not an accidental polling cost. At the measured 574 tasks/s, Python
-serialization is now the largest adaptor ingest stage, but only about 53 ms
-for 948 tasks. Worker execution and the result-to-append dependency chain are
-the larger remaining wall-time components.
-
-The current result stream performs a second local read for an inline control
-result after Controller durability. That read preserves a simple invariant:
-only committed bytes are exposed. Avoiding it would require a deliberately
-bounded post-commit buffer with replay fallback and should only be considered
-after measurement at substantially higher result rates.
-
-This campaign is a dynamic-control acceptance result, not the previously
-planned million-task, 128x16 production-scale claim.
+The retained gates cover inline/descriptor results, disconnect resume, restart
+replay and terminal delivery. Python serialization, executor startup and the
+result-to-append critical path remain distinct from native scheduler throughput.
+No static graph prediction or semantic task batching was used.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single-threaded preloader and per-call fork executor for DataVine Python."""
+"""Persistent DataVine executor: inline builtins and forked Python calls."""
 
 import argparse
 import hashlib
@@ -21,31 +21,15 @@ import cloudpickle
 FRAME_LIMIT = 64 * 1024 * 1024
 SOURCE_TICKET_BASIC = struct.Struct("!4sIQQ")
 SOURCE_TICKET_RETAINED = struct.Struct("!4sIQQI")
-CALLABLE_TICKET_V1 = struct.Struct("!4sIQI32s32s")
-CALLABLE_TICKET_V2 = struct.Struct("!4sIQII32s")
+CALLABLE_TICKET_V3 = struct.Struct("!4sIQII32sQ")
+CALLABLE_TICKET_V4 = struct.Struct("!4sIQI32s32sQQ")
 FUNCTION_CACHE_BYTES = 64 * 1024 * 1024
 FUNCTION_CACHE_ENTRIES = 1024
 MANIFEST_NAME = ".datavine-output-manifest"
 PYTHON_TICKET_MAGIC = b"DVP1"
-PYTHON_INLINE_TICKET_MAGIC = b"DVP2"
+PYTHON_FUNCTION_TICKET_MAGIC = b"DVP3"
+PYTHON_REFERENCE_TICKET_MAGIC = b"DVP4"
 OUTPUT_MANIFEST_MAGIC = "DVM1"
-
-
-class ObjectPuller:
-    """Resolve immutable content keys from the worker-visible SharedFS store."""
-
-    def __init__(self):
-        root = os.environ.get("DATAVINE_OBJECT_ROOT")
-        self.root = Path(root) if root else None
-
-    def get_digest(self, digest):
-        if self.root is None or len(digest) != 32:
-            raise ValueError("invalid DataVine object key")
-        encoded = digest.hex()
-        value = (self.root / encoded[:2] / encoded[2:4] / encoded).read_bytes()
-        if len(value) > FRAME_LIMIT or hashlib.sha256(value).digest() != digest:
-            raise RuntimeError("DataVine SharedFS object digest mismatch")
-        return value
 
 
 class HashingWriter:
@@ -147,7 +131,7 @@ def send_frame(fd, payload):
 
 def send_configuration(fd, task_id, worker_pid):
     body = json.dumps({
-        "name": "datavine-python-v1",
+        "name": "datavine-executor-v1",
         "taskid": task_id,
         "exec_mode": "fork",
     }, separators=(",", ":")).encode()
@@ -159,6 +143,15 @@ def send_result(fd, invocation_id, exit_code, worker_pid, payload=b""):
     header = f"{invocation_id} {exit_code} {len(payload)}\n".encode()
     send_frame(fd, header + payload)
     os.kill(worker_pid, signal.SIGCHLD)
+
+
+def builtin_result(function, payload):
+    if function == "datavine_builtin" and payload[:4] == b"DVB1":
+        if payload[4:] == b"\x01":
+            return 0, b""
+        if payload[4:5] == b"\x02" and b"\x00" not in payload[5:]:
+            return 0, payload[5:]
+    return 2, b""
 
 
 def callable_main(
@@ -211,6 +204,13 @@ def callable_main(
     outputs = tuple(result) if output_count != 1 else (result,)
     if len(outputs) != output_count:
         raise ValueError("Python callable returned the wrong output count")
+
+    # A result with no consumers is deliberately volatile.  The parent only
+    # needs the child's exit status, so avoid the per-call manifest write on
+    # the high-throughput sandboxless path.
+    if not any(retained_outputs):
+        return
+
     entries = []
     serialize_ns = 0
     fsync_ns = 0
@@ -233,6 +233,9 @@ def callable_main(
 
 def source_manifest(retained_outputs, function_ns, task_report=None):
     """Describe indexed source-v1 outputs without copying their payloads."""
+
+    if not any(retained_outputs):
+        return
 
     entries = []
     for index, retained in enumerate(retained_outputs):
@@ -343,7 +346,6 @@ def main():
     children = {}
     functions = OrderedDict()
     function_cache_bytes = 0
-    object_puller = ObjectPuller()
     state = {"stopping": False}
 
     def stop(signum, frame):
@@ -361,13 +363,17 @@ def main():
         if args.in_pipe_fd in readable:
             invocation = read_frame(args.in_pipe_fd)
             if invocation is None:
-                return 0
+                break
             invocation_id, function, sandbox, stdout_path, payload = invocation
+            if function == "datavine_builtin":
+                code, result = builtin_result(function, payload)
+                send_result(args.out_pipe_fd, invocation_id, code, args.worker_pid, result)
+                continue
             payload_id = 0
-            function_id = 0
             function_bytes = None
             invocation_bytes = None
             invocation_digest = None
+            function_ref = 0
             pull_ns = 0
             retained_outputs = None
             valid = False
@@ -398,67 +404,72 @@ def main():
             ):
                 magic = payload[:4]
                 if (
-                    magic == PYTHON_INLINE_TICKET_MAGIC
-                    and len(payload) >= CALLABLE_TICKET_V2.size
+                    magic == PYTHON_REFERENCE_TICKET_MAGIC
+                    and len(payload) >= CALLABLE_TICKET_V4.size
                 ):
                     (
                         magic, reserved, wall_seconds, output_count,
-                        invocation_size, function_digest,
-                    ) = CALLABLE_TICKET_V2.unpack(
-                        payload[:CALLABLE_TICKET_V2.size]
+                        invocation_digest, function_digest, payload_id,
+                        function_ref,
+                    ) = CALLABLE_TICKET_V4.unpack(
+                        payload[:CALLABLE_TICKET_V4.size]
                     )
-                    policy_end = CALLABLE_TICKET_V2.size + output_count
-                    invocation_end = policy_end + invocation_size
+                    policy_end = CALLABLE_TICKET_V4.size + output_count
                     valid = (
                         reserved == 0 and output_count > 0
-                        and 0 < invocation_size <= FRAME_LIMIT
-                        and invocation_end == len(payload)
-                    )
-                    if valid:
-                        retained_outputs = payload[
-                            CALLABLE_TICKET_V2.size:policy_end
-                        ]
-                        invocation_bytes = payload[policy_end:invocation_end]
-                elif magic == PYTHON_TICKET_MAGIC and len(payload) >= CALLABLE_TICKET_V1.size:
-                    (
-                        magic, reserved, wall_seconds, output_count,
-                        invocation_digest, function_digest,
-                    ) = CALLABLE_TICKET_V1.unpack(
-                        payload[:CALLABLE_TICKET_V1.size]
-                    )
-                    policy_end = CALLABLE_TICKET_V1.size + output_count
-                    valid = (
-                        reserved == 0 and output_count > 0
+                        and payload_id > 0 and function_ref > 0
                         and policy_end == len(payload)
                     )
                     if valid:
                         retained_outputs = payload[
-                            CALLABLE_TICKET_V1.size:
-                            policy_end
+                            CALLABLE_TICKET_V4.size:policy_end
                         ]
-                if valid and invocation_bytes is None:
-                    try:
-                        pull_started = time.monotonic_ns()
-                        invocation_bytes = object_puller.get_digest(
-                            invocation_digest
-                        )
-                        pull_ns += time.monotonic_ns() - pull_started
-                    except (OSError, ValueError, RuntimeError):
-                        valid = False
-                    if valid and (
-                        not invocation_bytes or len(invocation_bytes) > FRAME_LIMIT
-                    ):
-                        valid = False
+                        try:
+                            pull_started = time.monotonic_ns()
+                            invocation_bytes = (
+                                Path(sandbox) / "datavine/data" / str(payload_id)
+                            ).read_bytes()
+                            pull_ns += time.monotonic_ns() - pull_started
+                            valid = (
+                                0 < len(invocation_bytes) <= FRAME_LIMIT
+                                and hashlib.sha256(invocation_bytes).digest()
+                                == invocation_digest
+                            )
+                        except OSError:
+                            valid = False
+                elif (
+                    magic == PYTHON_FUNCTION_TICKET_MAGIC
+                    and len(payload) >= CALLABLE_TICKET_V3.size
+                ):
+                    (
+                        magic, reserved, wall_seconds, output_count,
+                        invocation_size, function_digest, function_ref,
+                    ) = CALLABLE_TICKET_V3.unpack(
+                        payload[:CALLABLE_TICKET_V3.size]
+                    )
+                    policy_end = CALLABLE_TICKET_V3.size + output_count
+                    invocation_end = policy_end + invocation_size
+                    valid = (
+                        reserved == 0 and output_count > 0
+                        and 0 < invocation_size <= FRAME_LIMIT
+                        and function_ref > 0
+                        and invocation_end == len(payload)
+                    )
+                    if valid:
+                        retained_outputs = payload[
+                            CALLABLE_TICKET_V3.size:policy_end
+                        ]
+                        invocation_bytes = payload[policy_end:invocation_end]
                 if valid:
                     function_bytes = functions.pop(function_digest, None)
                     if function_bytes is None:
                         try:
                             pull_started = time.monotonic_ns()
-                            function_bytes = object_puller.get_digest(
-                                function_digest
-                            )
+                            function_bytes = (
+                                Path("datavine/data") / str(function_ref)
+                            ).read_bytes()
                             pull_ns += time.monotonic_ns() - pull_started
-                        except (OSError, ValueError, RuntimeError):
+                        except OSError:
                             valid = False
                         if valid and (
                             len(function_bytes) > FUNCTION_CACHE_BYTES
@@ -503,7 +514,9 @@ def main():
                 "sandbox": sandbox,
                 "stdout": str(Path(sandbox) / stdout_path),
                 "manifest": str(Path(sandbox) / MANIFEST_NAME),
-                "manifest_output": retained_outputs is not None,
+                "manifest_output": (
+                    retained_outputs is not None and any(retained_outputs)
+                ),
                 "timed_out": False,
                 "cancelled": False,
             }

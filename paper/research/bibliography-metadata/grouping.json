@@ -1,0 +1,658 @@
+{
+  "status": "ok",
+  "message-type": "work-list",
+  "message-version": "1.0.0",
+  "message": {
+    "facets": {},
+    "total-results": 4722902,
+    "items": [
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2025,
+              10,
+              8
+            ]
+          ],
+          "date-time": "2025-10-08T05:10:24Z",
+          "timestamp": 1759900224658,
+          "version": "build-2065373602"
+        },
+        "reference-count": 19,
+        "publisher": "IEEE",
+        "license": [
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2025,
+                  9,
+                  15
+                ]
+              ],
+              "date-time": "2025-09-15T00:00:00Z",
+              "timestamp": 1757894400000
+            },
+            "content-version": "stm-asf",
+            "delay-in-days": 0,
+            "URL": "https://doi.org/10.15223/policy-029"
+          },
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2025,
+                  9,
+                  15
+                ]
+              ],
+              "date-time": "2025-09-15T00:00:00Z",
+              "timestamp": 1757894400000
+            },
+            "content-version": "stm-asf",
+            "delay-in-days": 0,
+            "URL": "https://doi.org/10.15223/policy-037"
+          }
+        ],
+        "content-domain": {
+          "domain": [],
+          "crossmark-restriction": false
+        },
+        "published-print": {
+          "date-parts": [
+            [
+              2025,
+              9,
+              15
+            ]
+          ]
+        },
+        "DOI": "10.1109/escience65000.2025.00029",
+        "type": "proceedings-article",
+        "created": {
+          "date-parts": [
+            [
+              2025,
+              10,
+              7
+            ]
+          ],
+          "date-time": "2025-10-07T17:34:49Z",
+          "timestamp": 1759858489000
+        },
+        "page": "178-186",
+        "source": "Crossref",
+        "is-referenced-by-count": 0,
+        "title": [
+          "Liberating the Data Aware Scheduler to Achieve Locality in Layered Scientific Workflow Systems"
+        ],
+        "prefix": "10.1109",
+        "author": [
+          {
+            "given": "Colin",
+            "family": "Thomas",
+            "sequence": "first",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame,Department of Computer Science and Engineering,IN"
+              }
+            ],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          },
+          {
+            "given": "Douglas",
+            "family": "Thain",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame,Department of Computer Science and Engineering,IN"
+              }
+            ],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          }
+        ],
+        "member": "263",
+        "reference": [
+          {
+            "year": "2023",
+            "key": "ref1",
+            "article-title": "BeeGFS"
+          },
+          {
+            "key": "ref2",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/CLUSTER.2018.00049"
+          },
+          {
+            "key": "ref3",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3624062.3624277"
+          },
+          {
+            "key": "ref4",
+            "first-page": "301",
+            "article-title": "The power of choice in data-aware cluster scheduling",
+            "volume-title": "Proceedings of the 11th USENIX Conference on Operating Systems Design and Implementation",
+            "author": "Venkataraman"
+          },
+          {
+            "key": "ref5",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3307681.3325400"
+          },
+          {
+            "key": "ref6",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/1755913.1755940"
+          },
+          {
+            "key": "ref7",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1002/cpe.938"
+          },
+          {
+            "key": "ref8",
+            "first-page": "1",
+            "article-title": "Scalable performance of the panasas parallel file system",
+            "volume-title": "FAST",
+            "volume": "8",
+            "author": "Welch"
+          },
+          {
+            "article-title": "Montage: a grid portal and software toolkit for science-grade astronomical image mosaicking",
+            "year": "2010",
+            "author": "Jacob",
+            "key": "ref9"
+          },
+          {
+            "key": "ref10",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.25080/Majora-7b98e3ed-013"
+          },
+          {
+            "key": "ref11",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.5555/3291168.3291210"
+          },
+          {
+            "key": "ref12",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1002/cpe.994"
+          },
+          {
+            "key": "ref13",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1016/j.future.2014.10.008"
+          },
+          {
+            "key": "ref14",
+            "article-title": "Solving the hpc i/o bottleneck: Sun\u2122 lustre\u2122 storage system",
+            "author": "Cochrane",
+            "year": "2009",
+            "journal-title": "Sun BluePrints\u2122 Online, Sun Microsystems"
+          },
+          {
+            "key": "ref15",
+            "first-page": "307",
+            "article-title": "Ceph: a scalable, high-performance distributed file system",
+            "volume-title": "Proceedings of the 7th Symposium on Operating Systems Design and Implementation",
+            "author": "Weil"
+          },
+          {
+            "key": "ref16",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/SC.2016.68"
+          },
+          {
+            "key": "ref17",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/CLUSTER.2017.73"
+          },
+          {
+            "key": "ref18",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/CLUSTER49012.2020.00019"
+          },
+          {
+            "key": "ref19",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.22360/springsim.2017.hpc.009"
+          }
+        ],
+        "event": {
+          "name": "2025 IEEE International Conference on eScience (eScience)",
+          "start": {
+            "date-parts": [
+              [
+                2025,
+                9,
+                15
+              ]
+            ]
+          },
+          "location": "Chicago, IL, USA",
+          "end": {
+            "date-parts": [
+              [
+                2025,
+                9,
+                18
+              ]
+            ]
+          }
+        },
+        "container-title": [
+          "2025 IEEE International Conference on eScience (eScience)"
+        ],
+        "link": [
+          {
+            "URL": "http://xplorestaging.ieee.org/ielx8/11181463/11181464/11181536.pdf?arnumber=11181536",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2025,
+              10,
+              8
+            ]
+          ],
+          "date-time": "2025-10-08T04:54:28Z",
+          "timestamp": 1759899268000
+        },
+        "score": 73.630554,
+        "resource": {
+          "primary": {
+            "URL": "https://ieeexplore.ieee.org/document/11181536/"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              2025,
+              9,
+              15
+            ]
+          ]
+        },
+        "references-count": 19,
+        "URL": "https://doi.org/10.1109/escience65000.2025.00029",
+        "published": {
+          "date-parts": [
+            [
+              2025,
+              9,
+              15
+            ]
+          ]
+        }
+      },
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2026,
+              8,
+              5
+            ]
+          ],
+          "date-time": "2026-08-05T10:07:49Z",
+          "timestamp": 1785924469613,
+          "version": "3.56.0"
+        },
+        "reference-count": 16,
+        "publisher": "Springer Science and Business Media LLC",
+        "issue": "5",
+        "license": [
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2016,
+                  9,
+                  29
+                ]
+              ],
+              "date-time": "2016-09-29T00:00:00Z",
+              "timestamp": 1475107200000
+            },
+            "content-version": "unspecified",
+            "delay-in-days": 0,
+            "URL": "http://www.springer.com/tdm"
+          }
+        ],
+        "funder": [
+          {
+            "DOI": "10.13039/501100003725",
+            "name": "National Research Foundation of Korea",
+            "doi-asserted-by": "publisher",
+            "award": [
+              "2015M3C4A7065646"
+            ],
+            "award-info": [
+              {
+                "award-number": [
+                  "2015M3C4A7065646"
+                ]
+              }
+            ],
+            "id": [
+              {
+                "id": "10.13039/501100003725",
+                "id-type": "DOI",
+                "asserted-by": "publisher"
+              }
+            ]
+          }
+        ],
+        "content-domain": {
+          "domain": [
+            "link.springer.com"
+          ],
+          "crossmark-restriction": false
+        },
+        "short-container-title": [
+          "Int J Parallel Prog"
+        ],
+        "published-print": {
+          "date-parts": [
+            [
+              2017,
+              10
+            ]
+          ]
+        },
+        "DOI": "10.1007/s10766-016-0463-0",
+        "type": "journal-article",
+        "created": {
+          "date-parts": [
+            [
+              2016,
+              9,
+              29
+            ]
+          ],
+          "date-time": "2016-09-29T05:28:55Z",
+          "timestamp": 1475126935000
+        },
+        "page": "1128-1141",
+        "update-policy": "https://doi.org/10.1007/springer_crossmark_policy",
+        "source": "Crossref",
+        "is-referenced-by-count": 18,
+        "title": [
+          "Data-Locality Aware Scientific Workflow Scheduling Methods in HPC Cloud Environments"
+        ],
+        "prefix": "10.1007",
+        "volume": "45",
+        "author": [
+          {
+            "given": "Jieun",
+            "family": "Choi",
+            "sequence": "first",
+            "affiliation": [],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Theodora",
+            "family": "Adufu",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Yoonhee",
+            "family": "Kim",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          }
+        ],
+        "member": "297",
+        "published-online": {
+          "date-parts": [
+            [
+              2016,
+              9,
+              29
+            ]
+          ]
+        },
+        "reference": [
+          {
+            "key": "463_CR1",
+            "doi-asserted-by": "crossref",
+            "first-page": "207",
+            "DOI": "10.1007/s13174-011-0032-0",
+            "volume": "2",
+            "author": "LF Bittencourt",
+            "year": "2011",
+            "unstructured": "Bittencourt, L.F., Madeira, E.R.M.: HCOC: a cost optimization algorithm for workflow scheduling in hybrid clouds. J. Internet Serv. Appl. 2, 207\u2013227 (2011)",
+            "journal-title": "J. Internet Serv. Appl."
+          },
+          {
+            "key": "463_CR2",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Ahn, Y., Kim, Y.: Auto-scaling of virtual resources for scientific workflows on hybrid clouds. In: ScienceCloud \u201914 Proceedings of the 5th ACM Workshop on Scientific Cloud Computing (pp. 47\u201352). (2014)",
+            "DOI": "10.1145/2608029.2608036"
+          },
+          {
+            "key": "463_CR3",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Mao, M., Humphrey, M.: Auto-scaling to minimize cost and meet application deadlines in cloud workflows. In: Proceedings of 2011 International Conference for High Performance Computing, Networking, Storage and Analysis (p. 49). ACM (2011)",
+            "DOI": "10.1145/2063384.2063449"
+          },
+          {
+            "key": "463_CR4",
+            "doi-asserted-by": "crossref",
+            "first-page": "1063",
+            "DOI": "10.1007/s10586-015-0462-8",
+            "volume": "18",
+            "author": "J Choi",
+            "year": "2015",
+            "unstructured": "Choi, J., Ahn, Y., Kim, S., Kim, Y., Choi, J.: VM auto-scaling methods for high throughput computing on hybrid infrastructure. J. Clust. Comput. 18, 1063\u20131073 (2015)",
+            "journal-title": "J. Clust. Comput."
+          },
+          {
+            "key": "463_CR5",
+            "unstructured": "OpenStack, \n                        http://www.OpenStack.org"
+          },
+          {
+            "key": "463_CR6",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Bu, X., Rao, J., Xu, C.-Z.: Interference and locality-aware task scheduling for MapReduce applications in virtual clusters. In: HPDC \u201913 Proceedings of the 22nd International Symposium on High-Performance Parallel and Distributed Computing (pp. 227\u2013238). (2013)",
+            "DOI": "10.1145/2493123.2462904"
+          },
+          {
+            "key": "463_CR7",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Phan, L.T., Zhang, Z., Zheng, Q., Loo, B.T., Lee, I.: An empirical analysis of scheduling techniques for real-time cloud-based data processing. In: SOCA \u201911 Proceedings of the 2011 IEEE International Conference on Service-Oriented Computing and Applications (2011)",
+            "DOI": "10.1109/SOCA.2011.6166240"
+          },
+          {
+            "key": "463_CR8",
+            "unstructured": "Zaharia, M., Konwinski, A., Joseph, A.D., Katz, R., Stoica, I.: Improving MapReduce performance in heterogeneous environments. In: OSDI\u201908 Proceedings of the 8th USENIX Conference on Operating Systems Design and Implementation (pp. 29\u201342). (2008)"
+          },
+          {
+            "key": "463_CR9",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Zaharia, M., Borthakur, D., Sen Sarma, J., Elmeleegy, K., Shenker, S., Stoica, I.: Delay scheduling: a simple technique for achieving locality and fairness in cluster scheduling. In: EuroSys \u201910 Proceedings of the 5th European Conference on Computer Systems (pp. 265\u2013278). (2010)",
+            "DOI": "10.1145/1755913.1755940"
+          },
+          {
+            "key": "463_CR10",
+            "doi-asserted-by": "crossref",
+            "first-page": "70",
+            "DOI": "10.1002/cpe.3617",
+            "volume": "28",
+            "author": "K Wang",
+            "year": "2015",
+            "unstructured": "Wang, K., Qiao, K., Sadooghi, I., Zhou, X., Li, T., Lang, M., Raicu, I.: Load-balanced and locality-aware scheduling for data-intensive workloads at extreme scales. J. Concurr. Comput. Pract. Exp. (CCPE) 28, 70\u201394 (2015)",
+            "journal-title": "J. Concurr. Comput. Pract. Exp. (CCPE)"
+          },
+          {
+            "key": "463_CR11",
+            "unstructured": "Thaha, A.F., Singh, M., Amin, A.H.M., Ahmad, N.M., Kannan, S.: Hadoop in OpenStack: Data-location-aware cluster provisioning. In: Information and Communication Technologies (WICT), 2014 Fourth World Congress on (pp. 296\u2013301). (2014)"
+          },
+          {
+            "key": "463_CR12",
+            "doi-asserted-by": "crossref",
+            "first-page": "359",
+            "DOI": "10.1007/s10723-015-9355-6",
+            "volume": "14",
+            "author": "P Bryk",
+            "year": "2015",
+            "unstructured": "Bryk, P., Malawski, M., Juve, G., Deelman, E.: Storage-aware algorithms for scheduling of workflow ensembles in clouds. J. Grid Comput. 14, 359\u2013378 (2015)",
+            "journal-title": "J. Grid Comput."
+          },
+          {
+            "key": "463_CR13",
+            "unstructured": "Flavors, \n                        http://docs.openstack.org/openstack-ops/content/flavors.html"
+          },
+          {
+            "key": "463_CR14",
+            "unstructured": "Overcommiting on compute nodes, \n                        http://docs.openstack.org/openstack-ops/content/compute_nodes.html"
+          },
+          {
+            "key": "463_CR15",
+            "unstructured": "Montage, \n                        http://montage.ipac.caltech.edu/"
+          },
+          {
+            "issue": "2",
+            "key": "463_CR16",
+            "doi-asserted-by": "crossref",
+            "first-page": "20",
+            "DOI": "10.1088/0067-0049/194/2/20",
+            "volume": "194",
+            "author": "JEG Peek",
+            "year": "2011",
+            "unstructured": "Peek, J.E.G., et al.: The GALFA-HI survey: data release 1. Astrophys. J. Suppl. 194(2), 20 (2011)",
+            "journal-title": "Astrophys. J. Suppl."
+          }
+        ],
+        "container-title": [
+          "International Journal of Parallel Programming"
+        ],
+        "language": "en",
+        "link": [
+          {
+            "URL": "http://link.springer.com/article/10.1007/s10766-016-0463-0/fulltext.html",
+            "content-type": "text/html",
+            "content-version": "vor",
+            "intended-application": "text-mining"
+          },
+          {
+            "URL": "http://link.springer.com/content/pdf/10.1007/s10766-016-0463-0.pdf",
+            "content-type": "application/pdf",
+            "content-version": "vor",
+            "intended-application": "text-mining"
+          },
+          {
+            "URL": "http://link.springer.com/content/pdf/10.1007/s10766-016-0463-0.pdf",
+            "content-type": "application/pdf",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2017,
+              8,
+              6
+            ]
+          ],
+          "date-time": "2017-08-06T22:33:18Z",
+          "timestamp": 1502058798000
+        },
+        "score": 36.29557,
+        "resource": {
+          "primary": {
+            "URL": "http://link.springer.com/10.1007/s10766-016-0463-0"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              2016,
+              9,
+              29
+            ]
+          ]
+        },
+        "references-count": 16,
+        "journal-issue": {
+          "issue": "5",
+          "published-print": {
+            "date-parts": [
+              [
+                2017,
+                10
+              ]
+            ]
+          }
+        },
+        "alternative-id": [
+          "463"
+        ],
+        "URL": "https://doi.org/10.1007/s10766-016-0463-0",
+        "ISSN": [
+          "0885-7458",
+          "1573-7640"
+        ],
+        "issn-type": [
+          {
+            "value": "0885-7458",
+            "type": "print"
+          },
+          {
+            "value": "1573-7640",
+            "type": "electronic"
+          }
+        ],
+        "published": {
+          "date-parts": [
+            [
+              2016,
+              9,
+              29
+            ]
+          ]
+        }
+      }
+    ],
+    "items-per-page": 2,
+    "query": {
+      "start-index": 0,
+      "search-terms": null
+    }
+  }
+}

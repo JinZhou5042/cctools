@@ -187,6 +187,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--records", type=int, required=True)
     parser.add_argument("--connections", type=int, required=True)
+    parser.add_argument("--service-threads", type=int, default=1)
+    parser.add_argument("--data-threads", type=int, default=16)
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument(
         "--latency-sample-stride", type=int, default=0,
@@ -199,7 +201,9 @@ def main():
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     if (args.records < 1 or args.records > 4096 or args.connections < 1 or
-            args.connections > 1000 or args.iterations < 1):
+            args.connections > 1000 or args.iterations < 1 or
+            args.service_threads < 1 or args.service_threads > 64 or
+            args.data_threads < 1 or args.data_threads > 64):
         parser.error("invalid benchmark dimensions")
     if args.latency_sample_stride < 0:
         parser.error("latency sample stride must be nonnegative")
@@ -218,7 +222,9 @@ def main():
                 stdout=subprocess.PIPE,
                 stderr=service_log,
                 text=True,
-                env=dict(os.environ, DATAVINE_WORKFLOW_METRICS="1"),
+                env=dict(os.environ, DATAVINE_WORKFLOW_METRICS="1",
+                         DATAVINE_RPC_THREADS=str(args.service_threads),
+                         DATAVINE_DATA_THREADS=str(args.data_threads)),
             )
             connections = []
             client = None
@@ -329,6 +335,8 @@ def main():
                     "status": "PASS",
                     "records": args.records,
                     "connections": args.connections,
+                    "service_threads": args.service_threads,
+                    "data_threads": args.data_threads,
                     "client_mode": args.client_mode,
                     "iterations": args.iterations,
                     "records_per_request": 1,

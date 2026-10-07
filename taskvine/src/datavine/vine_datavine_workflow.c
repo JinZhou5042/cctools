@@ -320,7 +320,7 @@ static int validate_output_files(struct validation *v, struct jx *files,
 static int validate_executor(struct validation *v, struct jx *executor,
 		const char *path)
 {
-	static const char *const keys[] = {"kind", "version", "payload_ref", "function_ref", "function_digest", "argv", "output_files", "environment", 0};
+	static const char *const keys[] = {"kind", "version", "payload_ref", "function_ref", "function_digest", "argv", "output_files", 0};
 	if (!allowed_keys(v, executor, path, keys) ||
 			!nonempty_string(v, executor, "kind", path, 32) ||
 			!nonempty_string(v, executor, "version", path, 64))
@@ -408,17 +408,6 @@ static int validate_executor(struct validation *v, struct jx *executor,
 	} else {
 		return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "unsupported executor kind");
 	}
-	struct jx *environment = jx_lookup(executor, "environment");
-	if (environment) {
-		if (!jx_istype(environment, JX_OBJECT))
-			return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "environment must be an object");
-		void *iterator = 0;
-		struct jx *value;
-		while ((value = jx_iterate_values(environment, &iterator))) {
-			if (!jx_istype(value, JX_STRING))
-				return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "environment values must be strings");
-		}
-	}
 	return 1;
 }
 
@@ -454,24 +443,11 @@ static int validate_string_map(struct validation *v, struct jx *map,
 static int validate_retry(struct validation *v, struct jx *retry,
 		const char *path)
 {
-	static const char *const keys[] = {"maximum_attempts", "retryable_results", 0};
+	static const char *const keys[] = {"maximum_attempts", 0};
 	if (!jx_istype(retry, JX_OBJECT) || !allowed_keys(v, retry, path, keys))
 		return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "invalid retry object");
 	uint64_t attempts = 0;
-	if (!positive_integer(v, retry, "maximum_attempts", path, &attempts, 0))
-		return 0;
-	struct jx *results = jx_lookup(retry, "retryable_results");
-	if (results) {
-		if (!jx_istype(results, JX_ARRAY))
-			return fail(v, VINE_DATAVINE_WORKFLOW_TYPE, path, "retryable_results must be an array");
-		struct jx *item;
-		void *iterator = 0;
-		while ((item = jx_iterate_array(results, &iterator))) {
-			if (!jx_istype(item, JX_STRING) || !item->u.string_value[0] || strlen(item->u.string_value) > 128)
-				return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, path, "invalid retryable result");
-		}
-	}
-	return 1;
+	return positive_integer(v, retry, "maximum_attempts", path, &attempts, 0);
 }
 
 static int validate_task_defaults(struct validation *v, struct jx *defaults)
@@ -692,12 +668,13 @@ static int validate_document(struct validation *v, struct jx *root,
 	v->maximum_edges = WORKFLOW_MAX_EDGES;
 	struct jx *policy = jx_lookup(root, "policy");
 	if (policy) {
-		static const char *const policy_keys[] = {"maximum_tasks", "maximum_edges", "idata_backup", 0};
+		static const char *const policy_keys[] = {"maximum_tasks", "maximum_edges", "idata_backup", "recovery", 0};
 		if (!allowed_keys(v, policy, "$.policy", policy_keys))
 			return 0;
 		struct jx *maximum_tasks = jx_lookup(policy, "maximum_tasks");
 		struct jx *maximum_edges = jx_lookup(policy, "maximum_edges");
 		struct jx *idata_backup = jx_lookup(policy, "idata_backup");
+		struct jx *recovery = jx_lookup(policy, "recovery");
 		if (maximum_tasks && (!jx_istype(maximum_tasks, JX_INTEGER) || maximum_tasks->u.integer_value < 1))
 			return fail(v, VINE_DATAVINE_WORKFLOW_VALUE, "$.policy.maximum_tasks", "invalid maximum_tasks");
 		if (maximum_edges && (!jx_istype(maximum_edges, JX_INTEGER) || maximum_edges->u.integer_value < 0))
@@ -707,6 +684,11 @@ static int validate_document(struct validation *v, struct jx *root,
 				 strcmp(idata_backup->u.string_value, "controller-background"))))
 			return fail(v, VINE_DATAVINE_WORKFLOW_VALUE,
 					"$.policy.idata_backup", "invalid idata_backup");
+		if (recovery && (!jx_istype(recovery, JX_STRING) ||
+				(strcmp(recovery->u.string_value, "journal") &&
+				 strcmp(recovery->u.string_value, "none"))))
+			return fail(v, VINE_DATAVINE_WORKFLOW_VALUE,
+					"$.policy.recovery", "invalid recovery policy");
 		if (maximum_tasks)
 			v->maximum_tasks = (uint64_t)maximum_tasks->u.integer_value;
 		if (maximum_edges)

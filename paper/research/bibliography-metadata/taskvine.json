@@ -1,0 +1,801 @@
+{
+  "status": "ok",
+  "message-type": "work-list",
+  "message-version": "1.0.0",
+  "message": {
+    "facets": {},
+    "total-results": 5853188,
+    "items": [
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2026,
+              8,
+              1
+            ]
+          ],
+          "date-time": "2026-08-01T17:08:38Z",
+          "timestamp": 1785604118140,
+          "version": "3.56.0"
+        },
+        "publisher-location": "New York, NY, USA",
+        "reference-count": 39,
+        "publisher": "ACM",
+        "license": [
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2023,
+                  11,
+                  12
+                ]
+              ],
+              "date-time": "2023-11-12T00:00:00Z",
+              "timestamp": 1699747200000
+            },
+            "content-version": "vor",
+            "delay-in-days": 0,
+            "URL": "https://www.acm.org/publications/policies/copyright_policy#Background"
+          }
+        ],
+        "funder": [
+          {
+            "name": "NSF",
+            "award": [
+              "OCI-1931348"
+            ],
+            "award-info": [
+              {
+                "award-number": [
+                  "OCI-1931348"
+                ]
+              }
+            ]
+          }
+        ],
+        "content-domain": {
+          "domain": [
+            "dl.acm.org"
+          ],
+          "crossmark-restriction": true
+        },
+        "published-print": {
+          "date-parts": [
+            [
+              2023,
+              11,
+              12
+            ]
+          ]
+        },
+        "DOI": "10.1145/3624062.3624277",
+        "type": "proceedings-article",
+        "created": {
+          "date-parts": [
+            [
+              2023,
+              11,
+              10
+            ]
+          ],
+          "date-time": "2023-11-10T13:53:39Z",
+          "timestamp": 1699624419000
+        },
+        "page": "1978-1988",
+        "update-policy": "https://doi.org/10.1145/crossmark-policy",
+        "source": "Crossref",
+        "is-referenced-by-count": 17,
+        "title": [
+          "TaskVine: Managing In-Cluster Storage for High-Throughput Data Intensive Workflows"
+        ],
+        "prefix": "10.1145",
+        "author": [
+          {
+            "ORCID": "https://orcid.org/0000-0002-2101-1396",
+            "authenticated-orcid": false,
+            "given": "Barry",
+            "family": "Sly-Delgado",
+            "sequence": "first",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame, United States of America"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0000-0001-5382-938X",
+            "authenticated-orcid": false,
+            "given": "Thanh Son",
+            "family": "Phung",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame, United States of America"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0009-0003-1677-5097",
+            "authenticated-orcid": false,
+            "given": "Colin",
+            "family": "Thomas",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame, United States of America"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0009-0001-6161-3148",
+            "authenticated-orcid": false,
+            "given": "David",
+            "family": "Simonetti",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame, United States of America"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0009-0002-2189-7497",
+            "authenticated-orcid": false,
+            "given": "Andrew",
+            "family": "Hennessee",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame, United States of America"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0000-0002-5294-2281",
+            "authenticated-orcid": false,
+            "given": "Ben",
+            "family": "Tovar",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame, United States of America"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0000-0001-5218-1956",
+            "authenticated-orcid": false,
+            "given": "Douglas",
+            "family": "Thain",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame, United States of America"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          }
+        ],
+        "member": "320",
+        "published-online": {
+          "date-parts": [
+            [
+              2023,
+              11,
+              12
+            ]
+          ]
+        },
+        "reference": [
+          {
+            "key": "e_1_3_2_2_1_1",
+            "volume-title": "Dave Bouvier, Martin \u010cech, John Chilton, Dave Clements, Nate Coraor",
+            "author": "Afgan Enis",
+            "year": "2018",
+            "unstructured": "Enis Afgan, Dannon Baker, B\u00e9r\u00e9nice Batut, Marius Van Den\u00a0Beek, Dave Bouvier, Martin \u010cech, John Chilton, Dave Clements, Nate Coraor, Bj\u00f6rn\u00a0A Gr\u00fcning, 2018. The Galaxy platform for accessible, reproducible and collaborative biomedical analyses: 2018 update. Nucleic acids research 46, W1 (2018), W537\u2013W544."
+          },
+          {
+            "key": "e_1_3_2_2_2_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/2443416.2443417"
+          },
+          {
+            "key": "e_1_3_2_2_3_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/CLUSTR.2009.5289188"
+          },
+          {
+            "key": "e_1_3_2_2_4_1",
+            "unstructured": "Altair. [n. d.]. Altair Grid Engine. https://altair.com/grid-engine. Accessed: 2023-03-24."
+          },
+          {
+            "key": "e_1_3_2_2_5_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/SSDM.2004.1311241"
+          },
+          {
+            "key": "e_1_3_2_2_6_1",
+            "unstructured": "Inc Amazon.com. [n. d.]. Amazon Lambda. https://aws.amazon.com/lambda/"
+          },
+          {
+            "key": "e_1_3_2_2_7_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3307681.3325400"
+          },
+          {
+            "key": "e_1_3_2_2_8_1",
+            "doi-asserted-by": "publisher",
+            "unstructured": "Aashwin Basnet Kenneth Bloom Florencia Canelli Sergio\u00a0Sanchez Cruz Jose Enrique\u00a0Palencia Cortezon Juan Rodrigo\u00a0Gonz\u00e1lez Fern\u00e1ndez Andrea\u00a0Trapote Fernandez Reza Goldouzian Barbara\u00a0Alvarez Gonzalez Michael Hildreth Kevin Lannon John Lawrence Sascha\u00a0Pascal Liechti Christopher\u00a0Edward Mcgrady Kelci Mohrman Hannah Nelson Benjamin Tovar Yuyi Wan Andrew Wightman Brian Winer Furong Yan Brent\u00a0R. Yates Henry Yockey and Mateusz Zarucki. 2021. TopEFT/topcoffea: TopCoffea 0.1. https://doi.org/10.5281/zenodo.5258003. https://doi.org/10.5281/zenodo.5258003 Source code: https://github.com/TopEFT/topcoffea.",
+            "DOI": "10.5281/zenodo.5258003"
+          },
+          {
+            "key": "e_1_3_2_2_9_1",
+            "volume-title": "Proceedings of the 25th High Performance Computing Symposium",
+            "author": "Cao Lei",
+            "year": "2017",
+            "unstructured": "Lei Cao, Bradley\u00a0W. Settlemyer, and John Bent. 2017. To Share or Not to Share: Comparing Burst Buffer Architectures. In Proceedings of the 25th High Performance Computing Symposium (Virginia Beach, Virginia) (HPC \u201917). Society for Computer Simulation International, San Diego, CA, USA, Article 4, 10\u00a0pages."
+          },
+          {
+            "key": "e_1_3_2_2_10_1",
+            "volume-title": "Sun Microsystems",
+            "author": "Cochrane Sean",
+            "year": "2009",
+            "unstructured": "Sean Cochrane, Ken Kutzer, and L McIntosh. 2009. Solving the HPC I/O bottleneck: Sun\u2122 Lustre\u2122 storage system. Sun BluePrints\u2122 Online, Sun Microsystems (2009)."
+          },
+          {
+            "key": "e_1_3_2_2_11_1",
+            "unstructured": "Microsoft Corporation. [n. d.]. Microsoft Azure. https://azure.microsoft.com/en-us"
+          },
+          {
+            "key": "e_1_3_2_2_12_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/CCGRID.2008.24"
+          },
+          {
+            "key": "e_1_3_2_2_13_1",
+            "volume-title": "Nextflow enables reproducible computational workflows. Nature biotechnology 35, 4",
+            "author": "Di\u00a0Tommaso Paolo",
+            "year": "2017",
+            "unstructured": "Paolo Di\u00a0Tommaso, Maria Chatzou, Evan\u00a0W Floden, Pablo\u00a0Prieto Barja, Emilio Palumbo, and Cedric Notredame. 2017. Nextflow enables reproducible computational workflows. Nature biotechnology 35, 4 (2017), 316\u2013319."
+          },
+          {
+            "key": "e_1_3_2_2_14_1",
+            "volume-title": "Nix: A Safe and Policy-Free System for Software Deployment.. In LISA, Vol.\u00a04. 79\u201392.",
+            "author": "Dolstra Eelco",
+            "year": "2004",
+            "unstructured": "Eelco Dolstra, Merijn De\u00a0Jonge, Eelco Visser, 2004. Nix: A Safe and Policy-Free System for Software Deployment.. In LISA, Vol.\u00a04. 79\u201392."
+          },
+          {
+            "key": "e_1_3_2_2_15_1",
+            "first-page": "4",
+            "article-title": "XROOTD-A Highly scalable architecture for data access",
+            "volume": "1",
+            "author": "Dorigo Alvise",
+            "year": "2005",
+            "unstructured": "Alvise Dorigo, Peter Elmer, Fabrizio Furano, and Andrew Hanushevsky. 2005. XROOTD-A Highly scalable architecture for data access. WSEAS Transactions on Computers 1, 4.3 (2005), 348\u2013353.",
+            "journal-title": "WSEAS Transactions on Computers"
+          },
+          {
+            "key": "e_1_3_2_2_16_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/2612262.2612269"
+          },
+          {
+            "key": "e_1_3_2_2_17_1",
+            "unstructured": "Python\u00a0Software Foundation. 2008. Python Package Index - PyPI. https://pypi.org/."
+          },
+          {
+            "key": "e_1_3_2_2_18_1",
+            "unstructured": "The Apache\u00a0Software Foundation. [n. d.]. Apache OpenWhisk. https://openwhisk.apache.org/"
+          },
+          {
+            "key": "e_1_3_2_2_19_1",
+            "volume-title": "Status of serverless computing and function-as-a-service (faas) in industry and research. arXiv preprint arXiv:1708.08028",
+            "author": "Fox C",
+            "year": "2017",
+            "unstructured": "Geoffrey\u00a0C Fox, Vatche Ishakian, Vinod Muthusamy, and Aleksander Slominski. 2017. Status of serverless computing and function-as-a-service (faas) in industry and research. arXiv preprint arXiv:1708.08028 (2017)."
+          },
+          {
+            "key": "e_1_3_2_2_20_1",
+            "unstructured": "IBM. [n. d.]. Load Sharing Facility. https://www.ibm.com/products/hpc-workload-management. Accessed: 2023-03-24."
+          },
+          {
+            "key": "e_1_3_2_2_21_1",
+            "unstructured": "Anaconda Inc.2020. Anaconda Software Distribution. https://docs.anaconda.com/."
+          },
+          {
+            "key": "e_1_3_2_2_22_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1371/journal.pone.0177459"
+          },
+          {
+            "key": "e_1_3_2_2_23_1",
+            "volume-title": "Scientific workflow management and the Kepler system. Concurrency and computation: Practice and experience 18, 10",
+            "author": "Lud\u00e4scher Bertram",
+            "year": "2006",
+            "unstructured": "Bertram Lud\u00e4scher, Ilkay Altintas, Chad Berkley, Dan Higgins, Efrat Jaeger, Matthew Jones, Edward\u00a0A Lee, Jing Tao, and Yang Zhao. 2006. Scientific workflow management and the Kepler system. Concurrency and computation: Practice and experience 18, 10 (2006), 1039\u20131065."
+          },
+          {
+            "key": "e_1_3_2_2_24_1",
+            "volume-title": "The BLAST sequence analysis tool. The NCBI handbook",
+            "author": "Madden Tom",
+            "year": "2003",
+            "unstructured": "Tom Madden. 2003. The BLAST sequence analysis tool. The NCBI handbook (2003)."
+          },
+          {
+            "key": "e_1_3_2_2_25_1",
+            "volume-title": "Docker: lightweight linux containers for consistent development and deployment. Linux j 239, 2",
+            "author": "Dirk Merkel",
+            "year": "2014",
+            "unstructured": "Dirk Merkel 2014. Docker: lightweight linux containers for consistent development and deployment. Linux j 239, 2 (2014), 2."
+          },
+          {
+            "key": "e_1_3_2_2_26_1",
+            "unstructured": "Suraj Pandey Karan Vahi Rafael\u00a0Ferreira da Silva and Ewa Deelman. 2018. Event-Based Triggering and Management of Scientific Workflow Ensembles. In HPCAsia."
+          },
+          {
+            "key": "e_1_3_2_2_27_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/CLUSTER49012.2020.00019"
+          },
+          {
+            "key": "e_1_3_2_2_28_1",
+            "volume-title": "Dask: Parallel Computation with Blocked algorithms and Task Scheduling. In SciPy.",
+            "author": "Rocklin Matthew",
+            "year": "2015",
+            "unstructured": "Matthew Rocklin. 2015. Dask: Parallel Computation with Blocked algorithms and Task Scheduling. In SciPy."
+          },
+          {
+            "key": "e_1_3_2_2_29_1",
+            "volume-title": "Proceedings of the 4th annual Linux showcase and conference. 391\u2013430",
+            "author": "Ross B",
+            "year": "2000",
+            "unstructured": "Robert\u00a0B Ross, Rajeev Thakur, 2000. PVFS: A parallel file system for Linux clusters. In Proceedings of the 4th annual Linux showcase and conference. 391\u2013430."
+          },
+          {
+            "key": "e_1_3_2_2_30_1",
+            "volume-title": "GPFS: A Shared-Disk File System for Large Computing Clusters.FAST 2, 19",
+            "author": "Schmuck B",
+            "year": "2002",
+            "unstructured": "Frank\u00a0B Schmuck and Roger\u00a0L Haskin. 2002. GPFS: A Shared-Disk File System for Large Computing Clusters.FAST 2, 19 (2002)."
+          },
+          {
+            "key": "e_1_3_2_2_31_1",
+            "volume-title": "Coffea - Columnar Object Framework For Effective Analysis. CoRR abs/2008.12712",
+            "author": "Smith Nicholas",
+            "year": "2020",
+            "unstructured": "Nicholas Smith, Lindsey Gray, Matteo Cremonesi, Bo Jayatilaka, Oliver Gutsche, Allison Hall, Kevin Pedro, Maria\u00a0Acosta Flechas, Andrew Melo, Stefano Belforte, and Jim Pivarski. 2020. Coffea - Columnar Object Framework For Effective Analysis. CoRR abs/2008.12712 (2020). arXiv:2008.12712https://arxiv.org/abs/2008.12712 Source code: https://github.com/CoffeaTeam/coffea.git."
+          },
+          {
+            "key": "e_1_3_2_2_32_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1002/cpe.v17:2/4"
+          },
+          {
+            "key": "e_1_3_2_2_33_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/ICPP.2016.54"
+          },
+          {
+            "key": "e_1_3_2_2_34_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.5555/2685048.2685072"
+          },
+          {
+            "key": "e_1_3_2_2_35_1",
+            "unstructured": "Logan Ward. 2021 [Online]. Colmena. ExaLearn and Parsl Teams. Available: https://colmena.readthedocs.io/en/latest/index.html."
+          },
+          {
+            "key": "e_1_3_2_2_36_1",
+            "unstructured": "Brent Welch Marc Unangst Zainul Abbasi Garth\u00a0A Gibson Brian Mueller Jason Small Jim Zelenka and Bin Zhou. 2008. Scalable Performance of the Panasas Parallel File System.. In FAST Vol.\u00a08. 1\u201317."
+          },
+          {
+            "key": "e_1_3_2_2_37_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/CLUSTER.2017.73"
+          },
+          {
+            "key": "e_1_3_2_2_38_1",
+            "volume-title": "SLURM: Simple Linux Utility for Resource Management. In Job Scheduling Strategies for Parallel Processing.",
+            "author": "Yoo B.",
+            "year": "2003",
+            "unstructured": "Andy\u00a0B. Yoo, Morris\u00a0A. Jette, and Mark Grondona. 2003. SLURM: Simple Linux Utility for Resource Management. In Job Scheduling Strategies for Parallel Processing."
+          },
+          {
+            "key": "e_1_3_2_2_39_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.5555/3571885.3571930"
+          }
+        ],
+        "event": {
+          "name": "SC-W 2023: Workshops of The International Conference on High Performance Computing, Network, Storage, and Analysis",
+          "location": "Denver CO USA",
+          "acronym": "SC-W 2023"
+        },
+        "container-title": [
+          "Proceedings of the SC '23 Workshops of the International Conference on High Performance Computing, Network, Storage, and Analysis"
+        ],
+        "link": [
+          {
+            "URL": "https://dl.acm.org/doi/10.1145/3624062.3624277",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "text-mining"
+          },
+          {
+            "URL": "https://dl.acm.org/doi/pdf/10.1145/3624062.3624277",
+            "content-type": "application/pdf",
+            "content-version": "vor",
+            "intended-application": "syndication"
+          },
+          {
+            "URL": "https://dl.acm.org/doi/pdf/10.1145/3624062.3624277",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2025,
+              8,
+              21
+            ]
+          ],
+          "date-time": "2025-08-21T03:04:02Z",
+          "timestamp": 1755745442000
+        },
+        "score": 68.93935,
+        "resource": {
+          "primary": {
+            "URL": "https://dl.acm.org/doi/10.1145/3624062.3624277"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              2023,
+              11,
+              12
+            ]
+          ]
+        },
+        "references-count": 39,
+        "alternative-id": [
+          "10.1145/3624062.3624277",
+          "10.1145/3624062"
+        ],
+        "URL": "https://doi.org/10.1145/3624062.3624277",
+        "published": {
+          "date-parts": [
+            [
+              2023,
+              11,
+              12
+            ]
+          ]
+        },
+        "assertion": [
+          {
+            "value": "2023-11-12",
+            "order": 3,
+            "name": "published",
+            "label": "Published",
+            "group": {
+              "name": "publication_history",
+              "label": "Publication History"
+            }
+          }
+        ]
+      },
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2025,
+              6,
+              18
+            ]
+          ],
+          "date-time": "2025-06-18T04:12:41Z",
+          "timestamp": 1750219961573,
+          "version": "3.41.0"
+        },
+        "publisher-location": "New York, NY, USA",
+        "reference-count": 5,
+        "publisher": "ACM",
+        "license": [
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2023,
+                  8,
+                  7
+                ]
+              ],
+              "date-time": "2023-08-07T00:00:00Z",
+              "timestamp": 1691366400000
+            },
+            "content-version": "vor",
+            "delay-in-days": 0,
+            "URL": "https://www.acm.org/publications/policies/copyright_policy#Background"
+          }
+        ],
+        "funder": [
+          {
+            "name": "NSF",
+            "award": [
+              "OCI-1931348"
+            ],
+            "award-info": [
+              {
+                "award-number": [
+                  "OCI-1931348"
+                ]
+              }
+            ]
+          }
+        ],
+        "content-domain": {
+          "domain": [
+            "dl.acm.org"
+          ],
+          "crossmark-restriction": true
+        },
+        "published-print": {
+          "date-parts": [
+            [
+              2023,
+              8,
+              7
+            ]
+          ]
+        },
+        "DOI": "10.1145/3588195.3595953",
+        "type": "proceedings-article",
+        "created": {
+          "date-parts": [
+            [
+              2023,
+              8,
+              7
+            ]
+          ],
+          "date-time": "2023-08-07T20:47:00Z",
+          "timestamp": 1691441220000
+        },
+        "page": "331-332",
+        "update-policy": "https://doi.org/10.1145/crossmark-policy",
+        "source": "Crossref",
+        "is-referenced-by-count": 0,
+        "title": [
+          "Mixed Modality Workflows in TaskVine"
+        ],
+        "prefix": "10.1145",
+        "author": [
+          {
+            "ORCID": "https://orcid.org/0009-0001-6161-3148",
+            "authenticated-orcid": false,
+            "given": "David",
+            "family": "Simonetti",
+            "sequence": "first",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame, South Bend, IN, USA"
+              }
+            ],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0000-0002-5294-2281",
+            "authenticated-orcid": false,
+            "given": "Ben",
+            "family": "Tovar",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame, South Bend, IN, USA"
+              }
+            ],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          },
+          {
+            "ORCID": "https://orcid.org/0000-0001-5218-1956",
+            "authenticated-orcid": false,
+            "given": "Douglas",
+            "family": "Thain",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Notre Dame, South Bend, IN, USA"
+              }
+            ],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          }
+        ],
+        "member": "320",
+        "published-online": {
+          "date-parts": [
+            [
+              2023,
+              8,
+              7
+            ]
+          ]
+        },
+        "reference": [
+          {
+            "doi-asserted-by": "publisher",
+            "key": "e_1_3_2_1_1_1",
+            "DOI": "10.1145/3307681.3325400"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "e_1_3_2_1_2_1",
+            "DOI": "10.1145/3369583.3392683"
+          },
+          {
+            "unstructured": "T. A. S. Foundation. Apache openwhisk.",
+            "key": "e_1_3_2_1_3_1"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "e_1_3_2_1_4_1",
+            "DOI": "10.5555/3027041.3027047"
+          },
+          {
+            "key": "e_1_3_2_1_5_1",
+            "volume-title": "OSDI",
+            "author": "Moritz Ray",
+            "year": "2018",
+            "unstructured": "P. Moritz. Ray: A distributed framework for emerging AI applications. In OSDI, 2018."
+          }
+        ],
+        "event": {
+          "sponsor": [
+            "SIGHPC ACM Special Interest Group on High Performance Computing, Special Interest Group on High Performance Computing",
+            "SIGARCH ACM Special Interest Group on Computer Architecture"
+          ],
+          "acronym": "HPDC '23",
+          "name": "HPDC '23: The 32nd International Symposium on High-Performance Parallel and Distributed Computing",
+          "location": "Orlando FL USA"
+        },
+        "container-title": [
+          "Proceedings of the 32nd International Symposium on High-Performance Parallel and Distributed Computing"
+        ],
+        "link": [
+          {
+            "URL": "https://dl.acm.org/doi/10.1145/3588195.3595953",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "text-mining"
+          },
+          {
+            "URL": "https://dl.acm.org/doi/pdf/10.1145/3588195.3595953",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2025,
+              6,
+              17
+            ]
+          ],
+          "date-time": "2025-06-17T17:49:10Z",
+          "timestamp": 1750182550000
+        },
+        "score": 32.20878,
+        "resource": {
+          "primary": {
+            "URL": "https://dl.acm.org/doi/10.1145/3588195.3595953"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              2023,
+              8,
+              7
+            ]
+          ]
+        },
+        "references-count": 5,
+        "alternative-id": [
+          "10.1145/3588195.3595953",
+          "10.1145/3588195"
+        ],
+        "URL": "https://doi.org/10.1145/3588195.3595953",
+        "published": {
+          "date-parts": [
+            [
+              2023,
+              8,
+              7
+            ]
+          ]
+        },
+        "assertion": [
+          {
+            "value": "2023-08-07",
+            "order": 3,
+            "name": "published",
+            "label": "Published",
+            "group": {
+              "name": "publication_history",
+              "label": "Publication History"
+            }
+          }
+        ]
+      }
+    ],
+    "items-per-page": 2,
+    "query": {
+      "start-index": 0,
+      "search-terms": null
+    }
+  }
+}

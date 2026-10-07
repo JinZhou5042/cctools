@@ -1,0 +1,957 @@
+{
+  "status": "ok",
+  "message-type": "work-list",
+  "message-version": "1.0.0",
+  "message": {
+    "facets": {},
+    "total-results": 1868022,
+    "items": [
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2025,
+              10,
+              6
+            ]
+          ],
+          "date-time": "2025-10-06T18:17:07Z",
+          "timestamp": 1759774627472,
+          "version": "3.37.3"
+        },
+        "reference-count": 25,
+        "publisher": "Springer Science and Business Media LLC",
+        "issue": "5",
+        "license": [
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2017,
+                  7,
+                  31
+                ]
+              ],
+              "date-time": "2017-07-31T00:00:00Z",
+              "timestamp": 1501459200000
+            },
+            "content-version": "tdm",
+            "delay-in-days": 0,
+            "URL": "http://www.springer.com/tdm"
+          }
+        ],
+        "funder": [
+          {
+            "DOI": "10.13039/501100001809",
+            "name": "National Natural Science Foundation of China",
+            "doi-asserted-by": "publisher",
+            "award": [
+              "61472199"
+            ],
+            "award-info": [
+              {
+                "award-number": [
+                  "61472199"
+                ]
+              }
+            ],
+            "id": [
+              {
+                "id": "10.13039/501100001809",
+                "id-type": "DOI",
+                "asserted-by": "publisher"
+              }
+            ]
+          },
+          {
+            "DOI": "10.13039/501100012166",
+            "name": "National Basic Research Program of China",
+            "doi-asserted-by": "crossref",
+            "award": [
+              "2010CB328105"
+            ],
+            "award-info": [
+              {
+                "award-number": [
+                  "2010CB328105"
+                ]
+              }
+            ],
+            "id": [
+              {
+                "id": "10.13039/501100012166",
+                "id-type": "DOI",
+                "asserted-by": "crossref"
+              }
+            ]
+          },
+          {
+            "name": "Tsinghua University Initiative Scientic Research Program",
+            "award": [
+              "20121087999"
+            ],
+            "award-info": [
+              {
+                "award-number": [
+                  "20121087999"
+                ]
+              }
+            ]
+          }
+        ],
+        "content-domain": {
+          "domain": [
+            "link.springer.com"
+          ],
+          "crossmark-restriction": false
+        },
+        "short-container-title": [
+          "Peer-to-Peer Netw. Appl."
+        ],
+        "published-print": {
+          "date-parts": [
+            [
+              2018,
+              9
+            ]
+          ]
+        },
+        "DOI": "10.1007/s12083-017-0590-4",
+        "type": "journal-article",
+        "created": {
+          "date-parts": [
+            [
+              2017,
+              7,
+              30
+            ]
+          ],
+          "date-time": "2017-07-30T22:26:17Z",
+          "timestamp": 1501453577000
+        },
+        "page": "1129-1140",
+        "update-policy": "https://doi.org/10.1007/springer_crossmark_policy",
+        "source": "Crossref",
+        "is-referenced-by-count": 1,
+        "title": [
+          "FTLLS: A fault tolerant, low latency, distributed scheduling approach based on sparrow"
+        ],
+        "prefix": "10.1007",
+        "volume": "11",
+        "author": [
+          {
+            "ORCID": "https://orcid.org/0000-0002-3845-1558",
+            "authenticated-orcid": false,
+            "given": "Wenzhuo",
+            "family": "Li",
+            "sequence": "first",
+            "affiliation": [],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          },
+          {
+            "given": "Chuang",
+            "family": "Lin",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          }
+        ],
+        "member": "297",
+        "published-online": {
+          "date-parts": [
+            [
+              2017,
+              7,
+              31
+            ]
+          ]
+        },
+        "reference": [
+          {
+            "key": "590_CR1",
+            "unstructured": "Amazon ec2. \n                    http://aws.amazon.com/ec2"
+          },
+          {
+            "key": "590_CR2",
+            "unstructured": "Sparrow scheduling platform. \n                    https://github.com/radlab/sparrow"
+          },
+          {
+            "key": "590_CR3",
+            "unstructured": "Borthakur D (2008) Hdfs architecture guide. HADOOP APACHE PROJECT \n                    http://hadoop.apache.org/common/docs/current/hdfsdesign.pdf\n                    \n                   p 39"
+          },
+          {
+            "key": "590_CR4",
+            "first-page": "285",
+            "volume-title": "11th USENIX symposium on operating systems design and implementation (OSDI 14)",
+            "author": "E Boutin",
+            "year": "2014",
+            "unstructured": "Boutin E, Ekanayake J, Lin W, Shi B, Zhou J, Qian Z, Wu M, Zhou L (2014) Apollo: scalable and coordinated scheduling for cloud-scale computing 11th USENIX symposium on operating systems design and implementation (OSDI 14), pp 285\u2013300"
+          },
+          {
+            "key": "590_CR5",
+            "unstructured": "Bryant R, Katz RH, Lazowska ED (2008) Big-data computing: creating revolutionary breakthroughs in commerce, science and society"
+          },
+          {
+            "issue": "5",
+            "key": "590_CR6",
+            "doi-asserted-by": "publisher",
+            "first-page": "561",
+            "DOI": "10.1109/TC.2002.1004595",
+            "volume": "51",
+            "author": "W Chen",
+            "year": "2002",
+            "unstructured": "Chen W, Toueg S, Aguilera MK (2002) On the quality of service of failure detectors. IEEE Trans Comput 51(5):561\u2013580",
+            "journal-title": "IEEE Trans Comput"
+          },
+          {
+            "issue": "1",
+            "key": "590_CR7",
+            "doi-asserted-by": "publisher",
+            "first-page": "107",
+            "DOI": "10.1145/1327452.1327492",
+            "volume": "51",
+            "author": "J Dean",
+            "year": "2008",
+            "unstructured": "Dean J, Ghemawat S (2008) Mapreduce: simplified data processing on large clusters. Commun ACM 51 (1):107\u2013113",
+            "journal-title": "Commun ACM"
+          },
+          {
+            "key": "590_CR8",
+            "unstructured": "Demers A, Keshav S, Shenker S (1989) Analysis and simulation of a fair queueing algorithm ACM SIGCOMM Computer communication review, vol 19. ACM, pp 1\u201312"
+          },
+          {
+            "key": "590_CR9",
+            "first-page": "22",
+            "volume-title": "NSDI, vol 11",
+            "author": "B Hindman",
+            "year": "2011",
+            "unstructured": "Hindman B, Konwinski A, Zaharia M, Ghodsi A, Joseph AD, Katz RH, Shenker S, Stoica I (2011) Mesos: a platform for fine-grained resource sharing in the data center NSDI, vol 11, pp 22\u201322"
+          },
+          {
+            "issue": "4",
+            "key": "590_CR10",
+            "doi-asserted-by": "publisher",
+            "first-page": "409",
+            "DOI": "10.1007/s12083-013-0213-7",
+            "volume": "6",
+            "author": "S Ibrahim",
+            "year": "2013",
+            "unstructured": "Ibrahim S, Jin H, Lu L, He B, Antoniu G, Wu S (2013) Handling partitioning skew in mapreduce using leen. Peer-to-Peer Networking and Applications 6(4):409\u2013424",
+            "journal-title": "Peer-to-Peer Networking and Applications"
+          },
+          {
+            "key": "590_CR11",
+            "volume-title": "CIDR",
+            "author": "M Kornacker",
+            "year": "2015",
+            "unstructured": "Kornacker M, Behm A, Bittorf V, Bobrovytsky T, Ching C, Choi A, Erickson J, Grund M, Hecht D, Jacobs M et al (2015) Impala: a modern, open-source sql engine for hadoop CIDR"
+          },
+          {
+            "key": "590_CR12",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Li W, Lin C (2014) Design and analysis of fault tolerance mechanism for sparrow. In: 2014 IEEE international performance computing and communications conference (IPCCC). IEEE, pp 1\u20137",
+            "DOI": "10.1109/PCCC.2014.7017054"
+          },
+          {
+            "issue": "10",
+            "key": "590_CR13",
+            "doi-asserted-by": "publisher",
+            "first-page": "1094",
+            "DOI": "10.1109/71.963420",
+            "volume": "12",
+            "author": "M Mitzenmacher",
+            "year": "2001",
+            "unstructured": "Mitzenmacher M (2001) The power of two choices in randomized load balancing. IEEE Trans Parallel Distrib Syst 12(10):1094\u20131104",
+            "journal-title": "IEEE Trans Parallel Distrib Syst"
+          },
+          {
+            "key": "590_CR14",
+            "volume-title": "Batch sampling: Low overhead scheduling for sub-second prallel jobs",
+            "author": "K Ousterhout",
+            "year": "2012",
+            "unstructured": "Ousterhout K, Wendell P, Zaharia M, Stoica I (2012) Batch sampling: Low overhead scheduling for sub-second prallel jobs. University of California, Berkeley"
+          },
+          {
+            "key": "590_CR15",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Ousterhout K, Wendell P, Zaharia M, Stoica I (2013) Sparrow: distributed, low latency scheduling. In: Proceedings of the twenty-fourth ACM symposium on operating systems principles. ACM, pp 69\u201384",
+            "DOI": "10.1145/2517349.2522716"
+          },
+          {
+            "key": "590_CR16",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Rasley J, Karanasos K, Kandula S, Fonseca R, Vojnovic M, Rao S (2016) Efficient queue management for cluster scheduling. In: Proceedings of the Eleventh european conference on computer systems. ACM, p 36",
+            "DOI": "10.1145/2901318.2901354"
+          },
+          {
+            "issue": "4",
+            "key": "590_CR17",
+            "doi-asserted-by": "publisher",
+            "first-page": "379",
+            "DOI": "10.1145/2829988.2787481",
+            "volume": "45",
+            "author": "X Ren",
+            "year": "2015",
+            "unstructured": "Ren X, Ananthanarayanan G, Wierman A, Yu M (2015) Hopper: decentralized speculation-aware cluster scheduling at scale. ACM SIGCOMM Computer Communication Review 45(4):379\u2013392",
+            "journal-title": "ACM SIGCOMM Computer Communication Review"
+          },
+          {
+            "key": "590_CR18",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Schwarzkopf M, Konwinski A, Abd-El-Malek M, Wilkes J (2013) Omega: flexible, scalable schedulers for large compute clusters. In: Proceedings of the 8th ACM european conference on computer systems. ACM, pp 351\u2013364",
+            "DOI": "10.1145/2465351.2465386"
+          },
+          {
+            "key": "590_CR19",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Toshniwal A, Taneja S, Shukla A, Ramasamy K, Patel JM, Kulkarni S, Jackson J, Gade K, Fu M, Donham J et al (2014) Storm@ twitter. In: Proceedings of the 2014 ACM SIGMOD international conference on management of data. ACM, pp 147\u2013156",
+            "DOI": "10.1145/2588555.2595641"
+          },
+          {
+            "key": "590_CR20",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Vavilapalli VK, Murthy AC, Douglas C, Agarwal S, Konar M, Evans R, Graves T, Lowe J, Shah H, Seth S et al (2013) Apache hadoop yarn: Yet another resource negotiator. In: Proceedings of the 4th annual symposium on cloud computing. ACM, p 5",
+            "DOI": "10.1145/2523616.2523633"
+          },
+          {
+            "key": "590_CR21",
+            "unstructured": "Xiong N, Vasilakos A, Yang Y et al (2010) An effective failure detector based on general traffic-feature analysis in fault-tolerant networks. Tech. rep., Technical Report"
+          },
+          {
+            "key": "590_CR22",
+            "unstructured": "Xiong N, Vasilakos AV, Wu J, Yang YR, Rindos A, Pan Y A class of practical self-tuning failure detection schemes for distributed networks"
+          },
+          {
+            "key": "590_CR23",
+            "unstructured": "Yu X, Qiao C, Liu Y (2004) Tcp implementations and false time out detection in obs networks. In: INFOCOM 2004. Twenty-Third annualjoint conference of the IEEE computer and communications societies, vol 2. IEEE, pp 774\u2013784"
+          },
+          {
+            "key": "590_CR24",
+            "unstructured": "Zaharia M, Chowdhury M, Das T, Dave A, Ma J, McCauley M, Franklin MJ, Shenker S, Stoica I (2012) Resilient distributed datasets: a fault-tolerant abstraction for in-memory cluster computing. In: Proceedings of the 9th USENIX conference on networked systems design and implementation. USENIX association, pp 2\u20132"
+          },
+          {
+            "key": "590_CR25",
+            "first-page": "10",
+            "volume": "10",
+            "author": "M Zaharia",
+            "year": "2010",
+            "unstructured": "Zaharia M, Chowdhury M, Franklin MJ, Shenker S, Stoica I (2010) Spark: cluster computing with working sets. HotCloud 10:10\u201310",
+            "journal-title": "HotCloud"
+          }
+        ],
+        "container-title": [
+          "Peer-to-Peer Networking and Applications"
+        ],
+        "language": "en",
+        "link": [
+          {
+            "URL": "http://link.springer.com/article/10.1007/s12083-017-0590-4/fulltext.html",
+            "content-type": "text/html",
+            "content-version": "vor",
+            "intended-application": "text-mining"
+          },
+          {
+            "URL": "http://link.springer.com/content/pdf/10.1007/s12083-017-0590-4.pdf",
+            "content-type": "application/pdf",
+            "content-version": "vor",
+            "intended-application": "text-mining"
+          },
+          {
+            "URL": "http://link.springer.com/content/pdf/10.1007/s12083-017-0590-4.pdf",
+            "content-type": "application/pdf",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2020,
+              3,
+              3
+            ]
+          ],
+          "date-time": "2020-03-03T07:30:03Z",
+          "timestamp": 1583220603000
+        },
+        "score": 36.435715,
+        "resource": {
+          "primary": {
+            "URL": "http://link.springer.com/10.1007/s12083-017-0590-4"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              2017,
+              7,
+              31
+            ]
+          ]
+        },
+        "references-count": 25,
+        "journal-issue": {
+          "issue": "5",
+          "published-print": {
+            "date-parts": [
+              [
+                2018,
+                9
+              ]
+            ]
+          }
+        },
+        "alternative-id": [
+          "590"
+        ],
+        "URL": "https://doi.org/10.1007/s12083-017-0590-4",
+        "ISSN": [
+          "1936-6442",
+          "1936-6450"
+        ],
+        "issn-type": [
+          {
+            "type": "print",
+            "value": "1936-6442"
+          },
+          {
+            "type": "electronic",
+            "value": "1936-6450"
+          }
+        ],
+        "published": {
+          "date-parts": [
+            [
+              2017,
+              7,
+              31
+            ]
+          ]
+        },
+        "assertion": [
+          {
+            "value": "27 December 2016",
+            "order": 1,
+            "name": "received",
+            "label": "Received",
+            "group": {
+              "name": "ArticleHistory",
+              "label": "Article History"
+            }
+          },
+          {
+            "value": "12 July 2017",
+            "order": 2,
+            "name": "accepted",
+            "label": "Accepted",
+            "group": {
+              "name": "ArticleHistory",
+              "label": "Article History"
+            }
+          },
+          {
+            "value": "31 July 2017",
+            "order": 3,
+            "name": "first_online",
+            "label": "First Online",
+            "group": {
+              "name": "ArticleHistory",
+              "label": "Article History"
+            }
+          }
+        ]
+      },
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2026,
+              2,
+              13
+            ]
+          ],
+          "date-time": "2026-02-13T13:29:31Z",
+          "timestamp": 1770989371062,
+          "version": "3.50.1"
+        },
+        "reference-count": 33,
+        "publisher": "Association for Computing Machinery (ACM)",
+        "issue": "3",
+        "license": [
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2015,
+                  4,
+                  23
+                ]
+              ],
+              "date-time": "2015-04-23T00:00:00Z",
+              "timestamp": 1429747200000
+            },
+            "content-version": "vor",
+            "delay-in-days": 0,
+            "URL": "https://www.acm.org/publications/policies/copyright_policy#Background"
+          }
+        ],
+        "funder": [
+          {
+            "name": "Algerian Ministry of Higher Education through the DGRSDT"
+          },
+          {
+            "name": "National Science Foundation, award &num; CNS 1018171"
+          }
+        ],
+        "content-domain": {
+          "domain": [
+            "dl.acm.org"
+          ],
+          "crossmark-restriction": true
+        },
+        "short-container-title": [
+          "ACM Trans. Sen. Netw."
+        ],
+        "published-print": {
+          "date-parts": [
+            [
+              2015,
+              5,
+              28
+            ]
+          ]
+        },
+        "abstract": "<jats:p>This article considers the data aggregation scheduling problem, where a collision-free schedule is determined in a distributed way to route the aggregated data from all the sensor nodes to the base station within the least time duration. The algorithm proposed in this article (Distributed algorithm for Integrated tree Construction and data Aggregation (DICA)) intertwines the tree formation and node scheduling to reduce the time latency. Furthermore, while forming the aggregation tree, DICA maximizes the available choices for parent selection at every node, where a parent may have the same, lower, or higher hop count to the base station.</jats:p>\n          <jats:p>The correctness of the DICA is formally proven, and upper bounds for time and communication overhead are derived. Its performance is evaluated through simulation and compared with six delay-aware aggregation algorithms. The results show that DICA outperforms competing schemes. The article also presents a general hardware-in-the-loop framework (DAF) for validating data aggregation schemes on Wireless Sensor Networks (WSNs). The framework factors in practical issues such as clock synchronization and the sensor node hardware. DICA is implemented and validated using this framework on a test bed of sensor motes that runs TinyOS 2.x, and it is compared with a distributed protocol (DAS) that is also implemented using the proposed framework.</jats:p>",
+        "DOI": "10.1145/2744198",
+        "type": "journal-article",
+        "created": {
+          "date-parts": [
+            [
+              2015,
+              4,
+              28
+            ]
+          ],
+          "date-time": "2015-04-28T12:43:57Z",
+          "timestamp": 1430225037000
+        },
+        "page": "1-36",
+        "update-policy": "https://doi.org/10.1145/crossmark-policy",
+        "source": "Crossref",
+        "is-referenced-by-count": 58,
+        "title": [
+          "Distributed Low-Latency Data Aggregation Scheduling in Wireless Sensor Networks"
+        ],
+        "prefix": "10.1145",
+        "volume": "11",
+        "author": [
+          {
+            "given": "Miloud",
+            "family": "Bagaa",
+            "sequence": "first",
+            "affiliation": [
+              {
+                "name": "CERIST, Algiers, Algeria"
+              }
+            ],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          },
+          {
+            "given": "Mohamed",
+            "family": "Younis",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Maryland, Baltimore County, MD, USA"
+              }
+            ],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          },
+          {
+            "given": "Djamel",
+            "family": "Djenouri",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "CERIST, Algiers, Algeria"
+              }
+            ],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          },
+          {
+            "given": "Abdelouahid",
+            "family": "Derhab",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "CoEIA, King Saud University, Riyadh, Saudi Arabia"
+              }
+            ],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          },
+          {
+            "given": "Nadjib",
+            "family": "Badache",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "CERIST, Algiers, Algeria"
+              }
+            ],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          }
+        ],
+        "member": "320",
+        "published-online": {
+          "date-parts": [
+            [
+              2015,
+              4,
+              23
+            ]
+          ]
+        },
+        "reference": [
+          {
+            "key": "e_1_2_1_1_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/SURV.2014.031914.00029"
+          },
+          {
+            "key": "e_1_2_1_2_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/INFCOM.2012.6195676"
+          },
+          {
+            "key": "e_1_2_1_3_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/IWCMC.2014.6906444"
+          },
+          {
+            "key": "e_1_2_1_4_1",
+            "volume-title": "Proceedings of IEEE INFOCOM\u201909",
+            "author": "Bo Yu",
+            "year": "2009",
+            "unstructured": "Yu Bo , Li Jianzhong , and Li Yingshu . 2009 . Distributed data aggregation scheduling in wireless sensor networks . In Proceedings of IEEE INFOCOM\u201909 . 2159--2167. Yu Bo, Li Jianzhong, and Li Yingshu. 2009. Distributed data aggregation scheduling in wireless sensor networks. In Proceedings of IEEE INFOCOM\u201909. 2159--2167."
+          },
+          {
+            "key": "e_1_2_1_5_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1007/11599463_14"
+          },
+          {
+            "key": "e_1_2_1_6_1",
+            "volume-title": "Proc. IEEE DCOSS\u201911",
+            "author": "des Roziers C. B.",
+            "unstructured": "C. B. des Roziers , G. Chelius , T. Ducrocq , E. Fleury , A. Fraboulet , A. Gallais , N. Mitton , T. Noel , E. Valentin , and J. Vandaele . 2011. Two demos using SensLAB: Very large scale open WSN testbed . In Proc. IEEE DCOSS\u201911 . C. B. des Roziers, G. Chelius, T. Ducrocq, E. Fleury, A. Fraboulet, A. Gallais, N. Mitton, T. Noel, E. Valentin, and J. Vandaele. 2011. Two demos using SensLAB: Very large scale open WSN testbed. In Proc. IEEE DCOSS\u201911."
+          },
+          {
+            "key": "e_1_2_1_7_1",
+            "volume-title": "Synchronization protocols and implementation issues in wireless sensor networks: A review",
+            "author": "Djenouri Djamel",
+            "year": "2014",
+            "unstructured": "Djamel Djenouri and Miloud Bagaa . 2014. Synchronization protocols and implementation issues in wireless sensor networks: A review . IEEE Systems Journal PP ( 2014 ), 1--11. DOI:http://dx.doi.org/10.1109/JSYST.2014.2360460 10.1109/JSYST.2014.2360460 Djamel Djenouri and Miloud Bagaa. 2014. Synchronization protocols and implementation issues in wireless sensor networks: A review. IEEE Systems Journal PP (2014), 1--11. DOI:http://dx.doi.org/10.1109/JSYST.2014.2360460"
+          },
+          {
+            "key": "e_1_2_1_8_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1016/j.adhoc.2013.06.001"
+          },
+          {
+            "key": "e_1_2_1_9_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/1644038.1644072"
+          },
+          {
+            "key": "e_1_2_1_10_1",
+            "unstructured": "Shashidhar Rao G Milind Daw Ravi Prakash and S. Venkatesan. 2003. Energy Efficient Schemes for Wireless Sensor Networks with Multiple Mobile Base Stations. (2003).  Shashidhar Rao G Milind Daw Ravi Prakash and S. Venkatesan. 2003. Energy Efficient Schemes for Wireless Sensor Networks with Multiple Mobile Base Stations. (2003)."
+          },
+          {
+            "key": "e_1_2_1_11_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/TNET.2011.2146273"
+          },
+          {
+            "key": "e_1_2_1_12_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/MOBHOC.2009.5336979"
+          },
+          {
+            "key": "e_1_2_1_13_1",
+            "first-page": "3",
+            "article-title": "Forest fire modeling and early detection using wireless sensor networks",
+            "volume": "7",
+            "author": "Hefeeda Mohamed",
+            "year": "2009",
+            "unstructured": "Mohamed Hefeeda and Majid Bagheri . 2009 . Forest fire modeling and early detection using wireless sensor networks . Ad Hoc & Sensor Wireless Networks 7 , 3 - 4 (2009), 169--224. Mohamed Hefeeda and Majid Bagheri. 2009. Forest fire modeling and early detection using wireless sensor networks. Ad Hoc & Sensor Wireless Networks 7, 3-4 (2009), 169--224.",
+            "journal-title": "Ad Hoc & Sensor Wireless Networks"
+          },
+          {
+            "key": "e_1_2_1_14_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/356989.356998"
+          },
+          {
+            "key": "e_1_2_1_15_1",
+            "volume-title": "Proceedings of IEEE INFOCOM\u201907",
+            "author": "Huang S.",
+            "unstructured": "S. Huang , P. Wan , C. Vu , Y. Li , and F. Yao . 2007. Nearly constant approximation for data aggregation scheduling in wireless sensor networks . In Proceedings of IEEE INFOCOM\u201907 . 366--372. S. Huang, P. Wan, C. Vu, Y. Li, and F. Yao. 2007. Nearly constant approximation for data aggregation scheduling in wireless sensor networks. In Proceedings of IEEE INFOCOM\u201907. 366--372."
+          },
+          {
+            "key": "e_1_2_1_16_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/ISCC.2008.4625733"
+          },
+          {
+            "key": "e_1_2_1_17_1",
+            "volume-title": "Proceedings of the 5th Annual IEEE Communications Society Conference on Sensor, Mesh and Ad Hoc Communications and Networks (SECON\u201908)",
+            "author": "Incel O. D.",
+            "unstructured": "O. D. Incel and B. Krishnamachari . 2008. Enhancing the data collection rate of tree-based aggregation in wireless sensor networks . In Proceedings of the 5th Annual IEEE Communications Society Conference on Sensor, Mesh and Ad Hoc Communications and Networks (SECON\u201908) . 569--577. O. D. Incel and B. Krishnamachari. 2008. Enhancing the data collection rate of tree-based aggregation in wireless sensor networks. In Proceedings of the 5th Annual IEEE Communications Society Conference on Sensor, Mesh and Ad Hoc Communications and Networks (SECON\u201908). 569--577."
+          },
+          {
+            "key": "e_1_2_1_18_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/TMC.2011.22"
+          },
+          {
+            "key": "e_1_2_1_19_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/2068897.2068916"
+          },
+          {
+            "key": "e_1_2_1_20_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/844128.844142"
+          },
+          {
+            "key": "e_1_2_1_21_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1007/s11276-010-0282-y"
+          },
+          {
+            "key": "e_1_2_1_22_1",
+            "volume-title": "Proceedings of the 2nd International Conference on Embedded Networked Sensor Systems (SenSys\u201904)",
+            "author": "Mar\u00f3ti M.",
+            "unstructured": "M. Mar\u00f3ti , B. Kusy , G. Simon , and A. L\u00e9dezi . 2004. The flooding synchronization protocol . In Proceedings of the 2nd International Conference on Embedded Networked Sensor Systems (SenSys\u201904) . M. Mar\u00f3ti, B. Kusy, G. Simon, and A. L\u00e9dezi. 2004. The flooding synchronization protocol. In Proceedings of the 2nd International Conference on Embedded Networked Sensor Systems (SenSys\u201904)."
+          },
+          {
+            "key": "e_1_2_1_23_1",
+            "unstructured": "Networkx. http://networkx.lanl.gov.  Networkx. http://networkx.lanl.gov."
+          },
+          {
+            "key": "e_1_2_1_24_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/958491.958506"
+          },
+          {
+            "key": "e_1_2_1_25_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/79.985679"
+          },
+          {
+            "key": "e_1_2_1_26_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/381677.381693"
+          },
+          {
+            "key": "e_1_2_1_27_1",
+            "volume-title": "Proceedings of the 4th International Symposium on Information Processing in Sensor Networks (IPSN\u201905)",
+            "author": "Titzer B. L.",
+            "unstructured": "B. L. Titzer , D. K. Lee , and J. Palsberg . 2005. Avrora: Scalable sensor network simulation with precise timing . In Proceedings of the 4th International Symposium on Information Processing in Sensor Networks (IPSN\u201905) . B. L. Titzer, D. K. Lee, and J. Palsberg. 2005. Avrora: Scalable sensor network simulation with precise timing. In Proceedings of the 4th International Symposium on Information Processing in Sensor Networks (IPSN\u201905)."
+          },
+          {
+            "key": "e_1_2_1_28_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/1530748.1530773"
+          },
+          {
+            "key": "e_1_2_1_29_1",
+            "volume-title": "Proceedings of the 21st Annual Joint Conference of the IEEE Computer and Communications Societies (INFOCOM\u201902)",
+            "author": "Wan Peng-Juan",
+            "unstructured": "Peng-Juan Wan , K. M. Alzoubi , and O. Frieder . 2002. Distributed construction of connected dominating set in wireless ad hoc networks . In Proceedings of the 21st Annual Joint Conference of the IEEE Computer and Communications Societies (INFOCOM\u201902) . 1597--1604. Peng-Juan Wan, K. M. Alzoubi, and O. Frieder. 2002. Distributed construction of connected dominating set in wireless ad hoc networks. In Proceedings of the 21st Annual Joint Conference of the IEEE Computer and Communications Societies (INFOCOM\u201902). 1597--1604."
+          },
+          {
+            "key": "e_1_2_1_30_1",
+            "volume-title": "Proceedings of the 4th International Symposium on Information Processing in Sensor Networks (IPSN\u201905)",
+            "author": "Werner-Allen G.",
+            "unstructured": "G. Werner-Allen , P. Swieskowski , and M. Welsh . 2005. MoteLab: A wireless sensor network testbed . In Proceedings of the 4th International Symposium on Information Processing in Sensor Networks (IPSN\u201905) . G. Werner-Allen, P. Swieskowski, and M. Welsh. 2005. MoteLab: A wireless sensor network testbed. In Proceedings of the 4th International Symposium on Information Processing in Sensor Networks (IPSN\u201905)."
+          },
+          {
+            "key": "e_1_2_1_31_1",
+            "volume-title": "Retrieved",
+            "author": "WISEBED.",
+            "year": "2012",
+            "unstructured": "WISEBED. 2012 . Homepage . Retrieved March 12, 2014, from http://www.wisebed.eu. WISEBED. 2012. Homepage. Retrieved March 12, 2014, from http://www.wisebed.eu."
+          },
+          {
+            "key": "e_1_2_1_32_1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/TPDS.2010.80"
+          },
+          {
+            "key": "e_1_2_1_33_1",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Bo Yu Jianzhong Li and Yingshu Li. 2009. Distributed data aggregation scheduling in wireless sensor networks. In INFOCOM. 2159--2167.  Bo Yu Jianzhong Li and Yingshu Li. 2009. Distributed data aggregation scheduling in wireless sensor networks. In INFOCOM. 2159--2167.",
+            "DOI": "10.1109/INFCOM.2009.5062140"
+          }
+        ],
+        "container-title": [
+          "ACM Transactions on Sensor Networks"
+        ],
+        "language": "en",
+        "link": [
+          {
+            "URL": "https://dl.acm.org/doi/10.1145/2744198",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "text-mining"
+          },
+          {
+            "URL": "https://dl.acm.org/doi/pdf/10.1145/2744198",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2025,
+              6,
+              18
+            ]
+          ],
+          "date-time": "2025-06-18T05:07:16Z",
+          "timestamp": 1750223236000
+        },
+        "score": 28.320107,
+        "resource": {
+          "primary": {
+            "URL": "https://dl.acm.org/doi/10.1145/2744198"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              2015,
+              4,
+              23
+            ]
+          ]
+        },
+        "references-count": 33,
+        "journal-issue": {
+          "issue": "3",
+          "published-print": {
+            "date-parts": [
+              [
+                2015,
+                5,
+                28
+              ]
+            ]
+          }
+        },
+        "alternative-id": [
+          "10.1145/2744198"
+        ],
+        "URL": "https://doi.org/10.1145/2744198",
+        "ISSN": [
+          "1550-4859",
+          "1550-4867"
+        ],
+        "issn-type": [
+          {
+            "value": "1550-4859",
+            "type": "print"
+          },
+          {
+            "value": "1550-4867",
+            "type": "electronic"
+          }
+        ],
+        "published": {
+          "date-parts": [
+            [
+              2015,
+              4,
+              23
+            ]
+          ]
+        },
+        "assertion": [
+          {
+            "value": "2014-03-01",
+            "order": 0,
+            "name": "received",
+            "label": "Received",
+            "group": {
+              "name": "publication_history",
+              "label": "Publication History"
+            }
+          },
+          {
+            "value": "2015-03-01",
+            "order": 1,
+            "name": "accepted",
+            "label": "Accepted",
+            "group": {
+              "name": "publication_history",
+              "label": "Publication History"
+            }
+          },
+          {
+            "value": "2015-04-23",
+            "order": 2,
+            "name": "published",
+            "label": "Published",
+            "group": {
+              "name": "publication_history",
+              "label": "Publication History"
+            }
+          }
+        ]
+      }
+    ],
+    "items-per-page": 2,
+    "query": {
+      "start-index": 0,
+      "search-terms": null
+    }
+  }
+}

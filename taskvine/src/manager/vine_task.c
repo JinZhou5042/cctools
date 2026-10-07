@@ -102,7 +102,12 @@ void vine_task_clean(struct vine_task *t)
 	t->bytes_transferred = 0;
 
 	t->library_task = 0;
+	/* A recall destination is scheduling state, not attempt state.  Preserve it
+	 * while a revoked task transitions back through READY. */
+	char *function_rebalance_target = t->function_rebalance_target;
+	t->function_rebalance_target = 0;
 	vine_function_call_task_reset(t);
+	t->function_rebalance_target = function_rebalance_target;
 
 	free(t->output);
 	t->output = NULL;
@@ -140,6 +145,8 @@ static void retract_mounts_on_reset(struct list *mount_list)
 void vine_task_reset(struct vine_task *t)
 {
 	vine_task_clean(t);
+	free(t->function_rebalance_target);
+	t->function_rebalance_target = 0;
 
 	t->resource_request = CATEGORY_ALLOCATION_FIRST;
 	t->try_count = 0;

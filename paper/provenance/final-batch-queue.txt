@@ -1,0 +1,11 @@
+
+
+-- Schedd: condorfe.crc.nd.edu : <10.32.88.70:9618?... @ 09/06/26 07:32:45
+ ID        OWNER            SUBMITTED     RUN_TIME ST PRI SIZE CMD
+251996.0   jzhou24         8/23 21:10   0+00:00:00 H  0    0.0 run_cuda_example.sh none 3.1_device_properties /groups/dthain/users/jzhou24/hpds-fa26/examples/cuda/03-gpu-execution-model 251996.0
+252002.0   jzhou24         8/23 21:15   0+00:00:00 H  0    0.0 run_cuda_example.sh none 3.1_device_properties /groups/dthain/users/jzhou24/hpds-fa26/examples/cuda/03-gpu-execution-model 252002.0
+
+Total for query: 2 jobs; 0 completed, 0 removed, 0 idle, 0 running, 2 held, 0 suspended 
+Total for jzhou24: 2 jobs; 0 completed, 0 removed, 0 idle, 0 running, 2 held, 0 suspended 
+Total for all users: 3641 jobs; 0 completed, 7 removed, 1416 idle, 2109 running, 109 held, 0 suspended
+

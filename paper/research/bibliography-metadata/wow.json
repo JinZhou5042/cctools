@@ -1,0 +1,983 @@
+{
+  "status": "ok",
+  "message-type": "work-list",
+  "message-version": "1.0.0",
+  "message": {
+    "facets": {},
+    "total-results": 3942321,
+    "items": [
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2026,
+              7,
+              30
+            ]
+          ],
+          "date-time": "2026-07-30T14:26:42Z",
+          "timestamp": 1785421602900,
+          "version": "3.56.0"
+        },
+        "reference-count": 39,
+        "publisher": "IEEE",
+        "license": [
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2025,
+                  5,
+                  19
+                ]
+              ],
+              "date-time": "2025-05-19T00:00:00Z",
+              "timestamp": 1747612800000
+            },
+            "content-version": "stm-asf",
+            "delay-in-days": 0,
+            "URL": "https://doi.org/10.15223/policy-029"
+          },
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2025,
+                  5,
+                  19
+                ]
+              ],
+              "date-time": "2025-05-19T00:00:00Z",
+              "timestamp": 1747612800000
+            },
+            "content-version": "stm-asf",
+            "delay-in-days": 0,
+            "URL": "https://doi.org/10.15223/policy-037"
+          }
+        ],
+        "content-domain": {
+          "domain": [],
+          "crossmark-restriction": false
+        },
+        "published-print": {
+          "date-parts": [
+            [
+              2025,
+              5,
+              19
+            ]
+          ]
+        },
+        "DOI": "10.1109/ccgrid64434.2025.00021",
+        "type": "proceedings-article",
+        "created": {
+          "date-parts": [
+            [
+              2025,
+              6,
+              30
+            ]
+          ],
+          "date-time": "2025-06-30T17:36:08Z",
+          "timestamp": 1751304968000
+        },
+        "page": "525-538",
+        "source": "Crossref",
+        "is-referenced-by-count": 5,
+        "title": [
+          "WOW: Workflow-Aware Data Movement and Task Scheduling for Dynamic Scientific Workflows"
+        ],
+        "prefix": "10.1109",
+        "author": [
+          {
+            "given": "Fabian",
+            "family": "Lehmann",
+            "sequence": "first",
+            "affiliation": [
+              {
+                "name": "Humboldt-Universit&#x00E4;t zu,Berlin,Germany"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Jonathan",
+            "family": "Bader",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Technische Universit&#x00E4;t,Berlin,Germany"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Friedrich",
+            "family": "Tschirpke",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Humboldt-Universit&#x00E4;t zu,Berlin,Germany"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Ninon",
+            "family": "De Mecquenem",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Humboldt-Universit&#x00E4;t zu,Berlin,Germany"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Ansgar",
+            "family": "L\u00f6\u00dfer",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Technische Universit&#x00E4;t,Darmstadt,Germany"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Soeren",
+            "family": "Becker",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Technische Universit&#x00E4;t,Berlin,Germany"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Katarzyna Ewa",
+            "family": "Lewi\u0144ska",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Humboldt-Universit&#x00E4;t zu,Berlin,Germany"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Lauritz",
+            "family": "Thamsen",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "University of Glasgow,UK"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          },
+          {
+            "given": "Ulf",
+            "family": "Leser",
+            "sequence": "additional",
+            "affiliation": [
+              {
+                "name": "Humboldt-Universit&#x00E4;t zu,Berlin,Germany"
+              }
+            ],
+            "role": [
+              {
+                "vocabulary": "crossref",
+                "role": "author"
+              }
+            ]
+          }
+        ],
+        "member": "263",
+        "reference": [
+          {
+            "key": "ref01",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/CCGrid57682.2023.00025"
+          },
+          {
+            "key": "ref02",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1038/nbt.3820"
+          },
+          {
+            "key": "ref03",
+            "article-title": "Common Workflow Scheduler with WOW strategy",
+            "author": "Lehmann",
+            "year": "2025"
+          },
+          {
+            "key": "ref04",
+            "article-title": "Nextflow with the Common Workflow Scheduler Interface for Kubernetes extended with WOW",
+            "author": "Lehmann",
+            "year": "2025"
+          },
+          {
+            "key": "ref05",
+            "article-title": "Experiment Setup for WOW Experiments",
+            "author": "Lehmann"
+          },
+          {
+            "key": "ref06",
+            "article-title": "WOW with Nextflow and Kubernetes Traces and Evaluation",
+            "author": "Lehmann",
+            "year": "2025"
+          },
+          {
+            "key": "ref1",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/BigData47090.2019.9006223"
+          },
+          {
+            "key": "ref2",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1007/s10723-014-9307-6"
+          },
+          {
+            "key": "ref3",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1002/cpe.6719"
+          },
+          {
+            "key": "ref4",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1007/s11227-020-03612-4"
+          },
+          {
+            "key": "ref5",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/SC.2018.00076"
+          },
+          {
+            "key": "ref6",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3183767.3183768"
+          },
+          {
+            "key": "ref7",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3624062.3624277"
+          },
+          {
+            "key": "ref8",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/71.993206"
+          },
+          {
+            "key": "ref9",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/3221269.3221298"
+          },
+          {
+            "key": "ref10",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/SCC49832.2020.00026"
+          },
+          {
+            "key": "ref11",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1007/s10723-015-9329-8"
+          },
+          {
+            "key": "ref12",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/hpcs48598.2019.9188126"
+          },
+          {
+            "key": "ref13",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/CCGrid.2015.95"
+          },
+          {
+            "key": "ref14",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/CCGrid57682.2023.00025"
+          },
+          {
+            "key": "ref15",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1038/s41587-020-0439-x"
+          },
+          {
+            "key": "ref16",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1016/j.omto.2021.11.006"
+          },
+          {
+            "key": "ref17",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1038/s41388-022-02483-8"
+          },
+          {
+            "key": "ref18",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1002/1878-0261.12693"
+          },
+          {
+            "key": "ref19",
+            "article-title": "FORCE on Nextflow: Scalable Analysis of Earth Observation data on Commodity Clusters",
+            "volume-title": "Proc. of the CIKM 2021 Workshops, ser. CEUR Workshop Proc.",
+            "volume": "3052",
+            "author": "Lehmann",
+            "year": "2021"
+          },
+          {
+            "key": "ref20",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/eScience51609.2021.00026"
+          },
+          {
+            "key": "ref21",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/PMBS56514.2022.00014"
+          },
+          {
+            "key": "ref22",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/WORKS.2008.4723958"
+          },
+          {
+            "key": "ref23",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/ACCESS.2021.3067815"
+          },
+          {
+            "key": "ref24",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1007/s10723-015-9355-6"
+          },
+          {
+            "key": "ref25",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1002/cpe.4229"
+          },
+          {
+            "key": "ref26",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/bigdata.2014.7004220"
+          },
+          {
+            "key": "ref27",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/TCC.2017.2754484"
+          },
+          {
+            "key": "ref28",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1145/2503210.2503222"
+          },
+          {
+            "key": "ref29",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/CCGrid.2016.40"
+          },
+          {
+            "key": "ref30",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/BigData.2014.7004214"
+          },
+          {
+            "key": "ref31",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.14778/2002938.2002943"
+          },
+          {
+            "key": "ref32",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.1109/MSST.2010.5496972"
+          },
+          {
+            "key": "ref33",
+            "doi-asserted-by": "publisher",
+            "DOI": "10.14778/3055540.3055551"
+          }
+        ],
+        "event": {
+          "name": "2025 IEEE 25th International Symposium on Cluster, Cloud and Internet Computing (CCGrid)",
+          "location": "Troms\u00f8, Norway",
+          "start": {
+            "date-parts": [
+              [
+                2025,
+                5,
+                19
+              ]
+            ]
+          },
+          "end": {
+            "date-parts": [
+              [
+                2025,
+                5,
+                22
+              ]
+            ]
+          }
+        },
+        "container-title": [
+          "2025 IEEE 25th International Symposium on Cluster, Cloud and Internet Computing (CCGrid)"
+        ],
+        "link": [
+          {
+            "URL": "http://xplorestaging.ieee.org/ielx8/11044421/11044790/11044799.pdf?arnumber=11044799",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2025,
+              7,
+              1
+            ]
+          ],
+          "date-time": "2025-07-01T06:02:30Z",
+          "timestamp": 1751349750000
+        },
+        "score": 72.49861,
+        "resource": {
+          "primary": {
+            "URL": "https://ieeexplore.ieee.org/document/11044799/"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              2025,
+              5,
+              19
+            ]
+          ]
+        },
+        "references-count": 39,
+        "URL": "https://doi.org/10.1109/ccgrid64434.2025.00021",
+        "published": {
+          "date-parts": [
+            [
+              2025,
+              5,
+              19
+            ]
+          ]
+        }
+      },
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2025,
+              10,
+              25
+            ]
+          ],
+          "date-time": "2025-10-25T14:19:25Z",
+          "timestamp": 1761401965141,
+          "version": "3.41.0"
+        },
+        "publisher-location": "Cham",
+        "reference-count": 5,
+        "publisher": "Springer International Publishing",
+        "isbn-type": [
+          {
+            "type": "print",
+            "value": "9783319937120"
+          },
+          {
+            "type": "electronic",
+            "value": "9783319937137"
+          }
+        ],
+        "license": [
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2018,
+                  1,
+                  1
+                ]
+              ],
+              "date-time": "2018-01-01T00:00:00Z",
+              "timestamp": 1514764800000
+            },
+            "content-version": "tdm",
+            "delay-in-days": 0,
+            "URL": "https://www.springer.com/tdm"
+          },
+          {
+            "start": {
+              "date-parts": [
+                [
+                  2018,
+                  1,
+                  1
+                ]
+              ],
+              "date-time": "2018-01-01T00:00:00Z",
+              "timestamp": 1514764800000
+            },
+            "content-version": "vor",
+            "delay-in-days": 0,
+            "URL": "https://www.springer.com/tdm"
+          }
+        ],
+        "content-domain": {
+          "domain": [
+            "link.springer.com"
+          ],
+          "crossmark-restriction": false
+        },
+        "published-print": {
+          "date-parts": [
+            [
+              2018
+            ]
+          ]
+        },
+        "DOI": "10.1007/978-3-319-93713-7_68",
+        "type": "book-chapter",
+        "created": {
+          "date-parts": [
+            [
+              2018,
+              6,
+              12
+            ]
+          ],
+          "date-time": "2018-06-12T00:19:02Z",
+          "timestamp": 1528762742000
+        },
+        "page": "708-714",
+        "update-policy": "https://doi.org/10.1007/springer_crossmark_policy",
+        "source": "Crossref",
+        "is-referenced-by-count": 6,
+        "title": [
+          "Data-Aware Scheduling of Scientific Workflows in Hybrid Clouds"
+        ],
+        "prefix": "10.1007",
+        "author": [
+          {
+            "given": "Amirmohammad",
+            "family": "Pasdar",
+            "sequence": "first",
+            "affiliation": [],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          },
+          {
+            "given": "Khaled",
+            "family": "Almi\u2019ani",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          },
+          {
+            "given": "Young Choon",
+            "family": "Lee",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          }
+        ],
+        "member": "297",
+        "published-online": {
+          "date-parts": [
+            [
+              2018,
+              6,
+              12
+            ]
+          ]
+        },
+        "reference": [
+          {
+            "key": "68_CR1",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Hoseinyfarahabady, M.R., Samani, H.R.D., Leslie, L.M., Lee, Y.C., Zomaya, A.Y.: Handling uncertainty: pareto-efficient BoT scheduling on hybrid clouds. In: International Conference on Parallel Processing (ICPP), pp. 419\u2013428 (2013)",
+            "DOI": "10.1109/ICPP.2013.51"
+          },
+          {
+            "issue": "9",
+            "key": "68_CR2",
+            "doi-asserted-by": "publisher",
+            "first-page": "42",
+            "DOI": "10.1109/MCOM.2012.6295710",
+            "volume": "50",
+            "author": "LF Bittencourt",
+            "year": "2012",
+            "unstructured": "Bittencourt, L.F., Madeira, E.R., Da Fonseca, N.L.: Scheduling in hybrid clouds. IEEE Commun. Mag. 50(9), 42\u201347 (2012)",
+            "journal-title": "IEEE Commun. Mag."
+          },
+          {
+            "key": "68_CR3",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Rahman, M., Li, X., Palit, H.: Hybrid heuristic for scheduling data analytics workflow applications in hybrid cloud environment. In: International Symposium on Parallel and Distributed Processing Workshops and Ph.d. Forum (IPDPSW), pp. 966\u2013974. IEEE",
+            "DOI": "10.1109/IPDPS.2011.243"
+          },
+          {
+            "issue": "10",
+            "key": "68_CR4",
+            "doi-asserted-by": "publisher",
+            "first-page": "2670",
+            "DOI": "10.1109/TPDS.2013.218",
+            "volume": "25",
+            "author": "MRH Farahabady",
+            "year": "2014",
+            "unstructured": "Farahabady, M.R.H., Lee, Y.C., Zomaya, A.Y.: Pareto-optimal cloud bursting. IEEE Trans. Parallel Distrib. Syst. 25(10), 2670\u20132682 (2014)",
+            "journal-title": "IEEE Trans. Parallel Distrib. Syst."
+          },
+          {
+            "issue": "2",
+            "key": "68_CR5",
+            "doi-asserted-by": "publisher",
+            "first-page": "783",
+            "DOI": "10.1007/s11227-013-0890-2",
+            "volume": "66",
+            "author": "WJ Wang",
+            "year": "2013",
+            "unstructured": "Wang, W.J., Chang, Y.S., Lo, W.T., Lee, Y.K.: Adaptive scheduling for parallel tasks with QoS satisfaction for hybrid cloud environments. J. Supercomputing 66(2), 783\u2013811 (2013)",
+            "journal-title": "J. Supercomputing"
+          }
+        ],
+        "container-title": [
+          "Lecture Notes in Computer Science",
+          "Computational Science \u2013 ICCS 2018"
+        ],
+        "language": "en",
+        "link": [
+          {
+            "URL": "https://link.springer.com/content/pdf/10.1007/978-3-319-93713-7_68",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2025,
+              7,
+              5
+            ]
+          ],
+          "date-time": "2025-07-05T02:37:36Z",
+          "timestamp": 1751683056000
+        },
+        "score": 37.89808,
+        "resource": {
+          "primary": {
+            "URL": "https://link.springer.com/10.1007/978-3-319-93713-7_68"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              2018
+            ]
+          ]
+        },
+        "ISBN": [
+          "9783319937120",
+          "9783319937137"
+        ],
+        "references-count": 5,
+        "URL": "https://doi.org/10.1007/978-3-319-93713-7_68",
+        "ISSN": [
+          "0302-9743",
+          "1611-3349"
+        ],
+        "issn-type": [
+          {
+            "type": "print",
+            "value": "0302-9743"
+          },
+          {
+            "type": "electronic",
+            "value": "1611-3349"
+          }
+        ],
+        "published": {
+          "date-parts": [
+            [
+              2018
+            ]
+          ]
+        },
+        "assertion": [
+          {
+            "value": "12 June 2018",
+            "order": 1,
+            "name": "first_online",
+            "label": "First Online",
+            "group": {
+              "name": "ChapterHistory",
+              "label": "Chapter History"
+            }
+          },
+          {
+            "value": "ICCS",
+            "order": 1,
+            "name": "conference_acronym",
+            "label": "Conference Acronym",
+            "group": {
+              "name": "ConferenceInfo",
+              "label": "Conference Information"
+            }
+          },
+          {
+            "value": "International Conference on Computational Science",
+            "order": 2,
+            "name": "conference_name",
+            "label": "Conference Name",
+            "group": {
+              "name": "ConferenceInfo",
+              "label": "Conference Information"
+            }
+          },
+          {
+            "value": "Wuxi",
+            "order": 3,
+            "name": "conference_city",
+            "label": "Conference City",
+            "group": {
+              "name": "ConferenceInfo",
+              "label": "Conference Information"
+            }
+          },
+          {
+            "value": "China",
+            "order": 4,
+            "name": "conference_country",
+            "label": "Conference Country",
+            "group": {
+              "name": "ConferenceInfo",
+              "label": "Conference Information"
+            }
+          },
+          {
+            "value": "2018",
+            "order": 5,
+            "name": "conference_year",
+            "label": "Conference Year",
+            "group": {
+              "name": "ConferenceInfo",
+              "label": "Conference Information"
+            }
+          },
+          {
+            "value": "11 June 2018",
+            "order": 7,
+            "name": "conference_start_date",
+            "label": "Conference Start Date",
+            "group": {
+              "name": "ConferenceInfo",
+              "label": "Conference Information"
+            }
+          },
+          {
+            "value": "13 June 2018",
+            "order": 8,
+            "name": "conference_end_date",
+            "label": "Conference End Date",
+            "group": {
+              "name": "ConferenceInfo",
+              "label": "Conference Information"
+            }
+          },
+          {
+            "value": "18",
+            "order": 9,
+            "name": "conference_number",
+            "label": "Conference Number",
+            "group": {
+              "name": "ConferenceInfo",
+              "label": "Conference Information"
+            }
+          },
+          {
+            "value": "iccs-computsci2018",
+            "order": 10,
+            "name": "conference_id",
+            "label": "Conference ID",
+            "group": {
+              "name": "ConferenceInfo",
+              "label": "Conference Information"
+            }
+          },
+          {
+            "value": "https://www.iccs-meeting.org/iccs2018/",
+            "order": 11,
+            "name": "conference_url",
+            "label": "Conference URL",
+            "group": {
+              "name": "ConferenceInfo",
+              "label": "Conference Information"
+            }
+          },
+          {
+            "value": "Single-blind",
+            "order": 1,
+            "name": "type",
+            "label": "Type",
+            "group": {
+              "name": "ConfEventPeerReviewInformation",
+              "label": "Peer Review Information (provided by the conference organizers)"
+            }
+          },
+          {
+            "value": "EasyChair",
+            "order": 2,
+            "name": "conference_management_system",
+            "label": "Conference Management System",
+            "group": {
+              "name": "ConfEventPeerReviewInformation",
+              "label": "Peer Review Information (provided by the conference organizers)"
+            }
+          },
+          {
+            "value": "406",
+            "order": 3,
+            "name": "number_of_submissions_sent_for_review",
+            "label": "Number of Submissions Sent for Review",
+            "group": {
+              "name": "ConfEventPeerReviewInformation",
+              "label": "Peer Review Information (provided by the conference organizers)"
+            }
+          },
+          {
+            "value": "148",
+            "order": 4,
+            "name": "number_of_full_papers_accepted",
+            "label": "Number of Full Papers Accepted",
+            "group": {
+              "name": "ConfEventPeerReviewInformation",
+              "label": "Peer Review Information (provided by the conference organizers)"
+            }
+          },
+          {
+            "value": "60",
+            "order": 5,
+            "name": "number_of_short_papers_accepted",
+            "label": "Number of Short Papers Accepted",
+            "group": {
+              "name": "ConfEventPeerReviewInformation",
+              "label": "Peer Review Information (provided by the conference organizers)"
+            }
+          },
+          {
+            "value": "36% - The value is computed by the equation \"Number of Full Papers Accepted / Number of Submissions Sent for Review * 100\" and then rounded to a whole number.",
+            "order": 6,
+            "name": "acceptance_rate_of_full_papers",
+            "label": "Acceptance Rate of Full Papers",
+            "group": {
+              "name": "ConfEventPeerReviewInformation",
+              "label": "Peer Review Information (provided by the conference organizers)"
+            }
+          },
+          {
+            "value": "3",
+            "order": 7,
+            "name": "average_number_of_reviews_per_paper",
+            "label": "Average Number of Reviews per Paper",
+            "group": {
+              "name": "ConfEventPeerReviewInformation",
+              "label": "Peer Review Information (provided by the conference organizers)"
+            }
+          },
+          {
+            "value": "3",
+            "order": 8,
+            "name": "average_number_of_papers_per_reviewer",
+            "label": "Average Number of Papers per Reviewer",
+            "group": {
+              "name": "ConfEventPeerReviewInformation",
+              "label": "Peer Review Information (provided by the conference organizers)"
+            }
+          },
+          {
+            "value": "Yes",
+            "order": 9,
+            "name": "external_reviewers_involved",
+            "label": "External Reviewers Involved",
+            "group": {
+              "name": "ConfEventPeerReviewInformation",
+              "label": "Peer Review Information (provided by the conference organizers)"
+            }
+          },
+          {
+            "value": "This content has been made available to all.",
+            "name": "free",
+            "label": "Free to read"
+          }
+        ]
+      }
+    ],
+    "items-per-page": 2,
+    "query": {
+      "start-index": 0,
+      "search-terms": null
+    }
+  }
+}

@@ -102,7 +102,7 @@ def main():
     token = "workflow-execution-test-token"
 
     executor = runpy.run_path(
-        str(repository / "taskvine/src/tools/datavine_python_executor")
+        str(repository / "taskvine/src/tools/datavine_executor")
     )
     frame_payload = bytes(range(256)) * 512
     writes = []
@@ -197,25 +197,6 @@ def main():
         "policy": {"maximum_tasks": 1, "maximum_edges": 0},
     }
 
-    class UnsupportedRuntime:
-        mutated = False
-
-        def workflow_capabilities(self):
-            return {"schema_versions": [], "executor_kinds": []}
-
-        def submit_workflow(self, document):
-            self.mutated = True
-
-    preflight = Workflow("preflight-v1")
-    preflight.request(preflight.command(["/bin/true"]))
-    unsupported = UnsupportedRuntime()
-    try:
-        preflight.submit(unsupported)
-    except RuntimeError as error:
-        assert "no workflow mutation was attempted" in str(error)
-    else:
-        raise AssertionError("unsupported runtime was not rejected")
-    assert not unsupported.mutated
     with tempfile.TemporaryDirectory(prefix="datavine-workflow-execution-") as root:
         root = Path(root)
         service = subprocess.Popen(

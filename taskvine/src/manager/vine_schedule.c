@@ -25,6 +25,7 @@ See the file COPYING for details.
 
 #include <limits.h>
 #include <math.h>
+#include <stdlib.h>
 
 /* check whether worker has all fixed locations required for task */
 int check_fixed_location_worker(struct vine_manager *m, struct vine_worker_info *w, struct vine_task *t)
@@ -225,6 +226,19 @@ int vine_schedule_worker_has_free_slots(struct vine_manager *q,
 
 int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
 {
+	/* A successfully recalled FunctionCall has one destination.  Enforce that
+	 * reservation in the common compatibility gate so both scheduling engines
+	 * observe identical ownership semantics. */
+	if (t->function_rebalance_target) {
+		struct vine_worker_info *target = hash_table_lookup(q->worker_table,
+				t->function_rebalance_target);
+		if (!target) {
+			free(t->function_rebalance_target);
+			t->function_rebalance_target = 0;
+		} else if (target != w) {
+			return 0;
+		}
+	}
 	/* THIS FUNCTION SHOULD NOT MODIFY t IN ANY WAY. */
 	/* Otherwise library templates are modified during the run. */
 

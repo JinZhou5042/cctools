@@ -1,0 +1,15 @@
+{
+  "base": "taskvine/src/tools/datavine_python_executor",
+  "base_sha256": "3e615736d4d1484c6b0e764a7c2f87db590c92c26aa5940758a1efd508f33fbe",
+  "generated_sha256": "307b3386fe084ea31fd408e4e737e945f72e6acbc4df40b218be5b62c852ab81",
+  "modules": [
+    "hashlib",
+    "math",
+    "os",
+    "platform",
+    "tempfile",
+    "time",
+    "numpy"
+  ],
+  "mechanism": "initialize explicit modules before first fork and readiness; existing executor-path override"
+}

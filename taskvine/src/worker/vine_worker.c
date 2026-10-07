@@ -97,6 +97,20 @@ static struct itable *procs_running = NULL;
 /* These are additional pointers into procs_table and should not be deleted */
 static struct list *procs_waiting = NULL;
 
+struct process_usage_record {
+	pid_t pid;
+	uint64_t cpu_ticks;
+	uint64_t rss_pages;
+	char state;
+};
+
+static timestamp_t adaptive_window_last_sample = 0;
+static uint64_t adaptive_window_last_cpu_ticks = 0;
+static double adaptive_window_last_memory = 0;
+static int adaptive_function_window = 0;
+static int adaptive_window_cooldown = 0;
+static int adaptive_window_cpu_pressure_epochs = 0;
+
 /* List of asynchronous messages pending to be sent to the manager */
 static struct list *pending_async_messages = NULL;
 
@@ -302,6 +316,17 @@ void send_complete_tasks(struct link *l)
 	struct vine_process *p;
 	for (visited = 0; visited < size; visited++) {
 		p = itable_pop(procs_complete);
+		if (p->auxiliary_received) {
+			debug(D_VINE, "datavine-attempt task=%d received_us=%llu "
+					"prepare_start_us=%llu prepare_ready_us=%llu "
+					"execute_start_us=%llu complete_us=%llu result=%d",
+					p->task->task_id,
+					(unsigned long long)p->auxiliary_received,
+					(unsigned long long)p->auxiliary_prepare_started,
+					(unsigned long long)p->auxiliary_prepare_ready,
+					(unsigned long long)p->execution_start,
+					(unsigned long long)p->execution_end, p->result);
+		}
 		if (p->function_output) {
 			send_async_message(l,
 					"complete %d %d %lld %lld %llu %llu %d %d\n%s",
@@ -510,6 +535,271 @@ static void send_stats_update(struct link *manager)
 	send_message(manager, "info tasks_running %lld\n", (long long)itable_size(procs_running));
 }
 
+static int read_process_usage(pid_t pid, struct process_usage_record *record)
+{
+	char path[64];
+	snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+	FILE *stream = fopen(path, "r");
+	if (!stream)
+		return 0;
+	char line[4096];
+	int valid = fgets(line, sizeof(line), stream) != 0;
+	fclose(stream);
+	char *tail = valid ? strrchr(line, ')') : 0;
+	if (!tail || tail[1] != ' ')
+		return 0;
+	char *save = 0;
+	char *field = strtok_r(tail + 2, " ", &save);
+	int index = 0;
+	uint64_t cpu = 0;
+	long long rss = 0;
+	char state = '?';
+	while (field) {
+		if (index == 0)
+			state = field[0];
+		else if (index >= 11 && index <= 14)
+			cpu += strtoull(field, 0, 10);
+		else if (index == 21) {
+			rss = strtoll(field, 0, 10);
+			break;
+		}
+		field = strtok_r(0, " ", &save);
+		index++;
+	}
+	if (rss < 0 || index < 21)
+		return 0;
+	*record = (struct process_usage_record){pid, cpu, (uint64_t)rss, state};
+	return 1;
+}
+
+static int measure_worker_process_tree(uint64_t *cpu_ticks,
+		uint64_t *memory_bytes, int *runnable)
+{
+	*cpu_ticks = 0;
+	*memory_bytes = 0;
+	*runnable = 0;
+	/* Linux exposes the exact direct-child list.  Walking it avoids scanning
+	 * every process on a large shared node and turns the 2-second sample into
+	 * O(Worker descendants). */
+	size_t capacity = 64;
+	size_t count = 1;
+	pid_t *stack = malloc(capacity * sizeof(*stack));
+	if (!stack)
+		return 0;
+	stack[0] = getpid();
+	while (count) {
+		pid_t pid = stack[--count];
+		struct process_usage_record record;
+		if (read_process_usage(pid, &record)) {
+			*cpu_ticks += record.cpu_ticks;
+			if (pid != getpid() && record.state == 'R')
+				(*runnable)++;
+			/* RSS is intentionally conservative for forked interpreters, but
+			 * costs one stat read instead of blocking the Worker on every
+			 * descendant's smaps_rollup file. */
+			*memory_bytes += record.rss_pages *
+					(uint64_t)sysconf(_SC_PAGESIZE);
+		}
+		char path[64];
+		snprintf(path, sizeof(path), "/proc/%d/task/%d/children",
+				(int)pid, (int)pid);
+		FILE *children = fopen(path, "r");
+		if (!children)
+			continue;
+		int child = 0;
+		while (fscanf(children, "%d", &child) == 1 && child > 0) {
+			if (count == capacity) {
+				size_t next_capacity = capacity * 2;
+				pid_t *next = realloc(stack,
+						next_capacity * sizeof(*next));
+				if (!next) {
+					fclose(children);
+					free(stack);
+					return 0;
+				}
+				stack = next;
+				capacity = next_capacity;
+			}
+			stack[count++] = (pid_t)child;
+		}
+		fclose(children);
+	}
+	free(stack);
+	return 1;
+}
+
+static int adaptive_functions_running(void)
+{
+	int running = 0;
+	uint64_t task_id;
+	struct vine_process *process;
+	int iteration;
+	ITABLE_ITERATE(procs_running, iteration, task_id, process)
+	{
+		if (process->type == VINE_PROCESS_TYPE_FUNCTION &&
+				process->library_process &&
+				process->library_process->task->function_adaptive)
+			running++;
+	}
+	return running;
+}
+
+static int adaptive_functions_waiting(void)
+{
+	int waiting = 0;
+	struct vine_process *process;
+	LIST_ITERATE(procs_waiting, process)
+	{
+		if (process->type == VINE_PROCESS_TYPE_FUNCTION &&
+				process->task->auxiliary_payload_length)
+			waiting++;
+	}
+	return waiting;
+}
+
+static void update_adaptive_function_window(struct link *manager)
+{
+	timestamp_t now = timestamp_get();
+	const int sample_ms = 250;
+	if (adaptive_window_last_sample &&
+			now - adaptive_window_last_sample < (timestamp_t)sample_ms * 1000)
+		return;
+	int cores = MAX(1, (int)total_resources->cores.total);
+	int maximum = 0;
+	uint64_t library_id;
+	struct vine_process *library;
+	int iteration;
+	ITABLE_ITERATE(procs_running, iteration, library_id, library)
+	{
+		if (library->type == VINE_PROCESS_TYPE_LIBRARY &&
+				library->task->function_adaptive) {
+			maximum = MAX(maximum, library->task->function_slots_total);
+		}
+	}
+	if (!maximum) {
+		adaptive_function_window = 0;
+		adaptive_window_cooldown = 0;
+		adaptive_window_cpu_pressure_epochs = 0;
+		adaptive_window_last_sample = 0;
+		adaptive_window_last_cpu_ticks = 0;
+		adaptive_window_last_memory = 0;
+		return;
+	}
+	int initial = MIN(maximum, 2 * cores);
+	if (!adaptive_function_window)
+		adaptive_function_window = initial;
+	uint64_t cpu_ticks = 0;
+	uint64_t memory_bytes = 0;
+	int runnable = 0;
+	if (!measure_worker_process_tree(&cpu_ticks, &memory_bytes, &runnable))
+		return;
+	double cpu = -1;
+	double memory_limit = (options->memory_total > 0
+			? options->memory_total : total_resources->memory.total) * MEGABYTE;
+	double memory = memory_limit > 0 ? memory_bytes / memory_limit : 0;
+	int running = adaptive_functions_running();
+	int waiting = adaptive_functions_waiting();
+	int previous = adaptive_function_window;
+	int next = previous;
+	const char *action = "initial";
+	if (adaptive_window_last_sample &&
+			cpu_ticks >= adaptive_window_last_cpu_ticks) {
+		double elapsed = (double)(now - adaptive_window_last_sample) / USECOND;
+		cpu = (double)(cpu_ticks - adaptive_window_last_cpu_ticks) /
+				(double)sysconf(_SC_CLK_TCK) / elapsed /
+				MAX(1.0, total_resources->cores.total);
+		action = "hold";
+		if (cpu < 0.95)
+			adaptive_window_cpu_pressure_epochs = 0;
+		if (memory >= 0.80) {
+			adaptive_window_cpu_pressure_epochs = 0;
+			if (previous < running) {
+				action = "memory-drain";
+			} else {
+				next = MAX(1, (next + 1) / 2);
+				adaptive_window_cooldown = 1;
+				action = "memory-backoff";
+			}
+		} else if (cpu >= 0.95) {
+			/* A saturated CPU is not by itself a reason to discard useful
+			 * overlap: sleeping and short-lived children transiently appear
+			 * runnable around fork/exit.  Bound the absolute run queue instead
+			 * of using a workload-dependent runnable/running ratio. */
+			if (runnable <= 3 * cores) {
+				adaptive_window_cpu_pressure_epochs = 0;
+				action = "cpu-saturated";
+			} else if (++adaptive_window_cpu_pressure_epochs < 2) {
+				action = "cpu-confirm";
+			} else {
+				adaptive_window_cpu_pressure_epochs = 0;
+				if (next > 2 * cores) {
+					next = MAX(2 * cores, next - cores);
+					adaptive_window_cooldown = 1;
+					action = "cpu-backoff";
+				} else {
+					action = "cpu-saturated";
+				}
+			}
+		} else if (adaptive_window_cooldown) {
+			adaptive_window_cooldown = 0;
+			action = "cooldown";
+		} else if (waiting > 0) {
+			if (cpu >= 0.90 &&
+					runnable >= cores) {
+				action = "cpu-target";
+			} else {
+				next = cpu < 0.85 &&
+						memory < 0.70
+					? MIN(maximum, next * 2)
+					: MIN(maximum, next + cores);
+				action = "grow";
+			}
+		}
+
+		/* Predict before opening the window: use conservative aggregate RSS
+		 * per running FunctionCall to bound the next wave. Declared per-call
+		 * memory remains the authoritative admission guard. */
+		if (next > previous && running > 0 && memory > 0) {
+			/* Forked calls may still be faulting in pages at the first sample.
+			 * Wait one epoch when RSS is rising quickly rather than doubling
+			 * from a misleading partial footprint. */
+			if (memory - adaptive_window_last_memory > 0.10) {
+				next = previous;
+				action = "memory-warmup";
+			}
+			int memory_window = (int)floor(0.80 * running / memory);
+			next = MIN(next, MAX(running, memory_window));
+			if (next <= previous)
+				action = "memory-hold";
+		}
+		adaptive_function_window = next;
+	}
+	debug(D_VINE,
+			"adaptive-window policy=%s sample_ms=%d previous=%d next=%d running=%d waiting=%d runnable=%d cpu=%.4f memory=%.4f action=%s",
+			"elastic", sample_ms, previous,
+			adaptive_function_window, running, waiting, runnable, cpu, memory,
+			action);
+	adaptive_window_last_sample = now;
+	adaptive_window_last_cpu_ticks = cpu_ticks;
+	adaptive_window_last_memory = memory;
+	ITABLE_ITERATE(procs_running, iteration, library_id, library)
+	{
+		if (library->type != VINE_PROCESS_TYPE_LIBRARY ||
+				!library->task->function_adaptive)
+			continue;
+		int next = MIN(library->task->function_slots_total,
+				adaptive_function_window);
+		if (next == library->task->function_slots_running_total)
+			continue;
+		library->task->function_slots_running_total = next;
+		library->function_window_generation++;
+		send_async_message(manager,
+				"info function-window %d %d %" PRId64 "\n",
+				library->task->task_id, next,
+				library->function_window_generation);
+	}
+}
+
 /*
 Send a periodic keepalive message to the manager, otherwise it will
 think that the worker has crashed and gone away.
@@ -712,6 +1002,8 @@ static int materialize_datavine_function_output(struct vine_process *p)
 {
 	if (!p || p->type != VINE_PROCESS_TYPE_FUNCTION ||
 			!p->task->auxiliary_payload_length)
+		return 1;
+	if (!vine_datavine_agent_needs_output_file(p))
 		return 1;
 	if (p->output_length < 0 || (uint64_t)p->output_length > SIZE_MAX ||
 			(p->output_length && !p->function_output))
@@ -1058,6 +1350,18 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			task->function_slots_requested = n;
 			/* Also set the total number determined by the manager. */
 			task->function_slots_total = n;
+		} else if (parse_i64_field(line, "function_running_slots ", &n)) {
+			if (n < 1 || n > INT_MAX) {
+				vine_task_delete(task);
+				return 0;
+			}
+			task->function_slots_running_total = (int)n;
+		} else if (parse_i64_field(line, "function_adaptive ", &n)) {
+			if (n != 0 && n != 1) {
+				vine_task_delete(task);
+				return 0;
+			}
+			task->function_adaptive = (int)n;
 		} else if (parse_i64_field(line, "func_exec_mode ", &n)) {
 			vine_task_func_exec_mode_t func_exec_mode = n;
 			if (func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_INVALID) {
@@ -1109,6 +1413,10 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 		}
 	}
 
+	/* Older Managers send one function_slots field.  Preserve that protocol by
+	 * treating it as both dispatch and execution capacity. */
+	if (task->provides_library && task->function_slots_running_total < 1)
+		task->function_slots_running_total = task->function_slots_total;
 	return task;
 }
 
@@ -1131,10 +1439,15 @@ static int do_task(struct link *manager, int task_id, time_t stoptime)
 	} else {
 		type = VINE_PROCESS_TYPE_STANDARD;
 	}
+	task->sandboxless = !vine_datavine_agent_task_needs_sandbox(task);
 
 	struct vine_process *p = vine_process_create(task, type);
 	if (!p)
 		return 0;
+	const char *trace_attempts = getenv("DATAVINE_TRACE_ATTEMPTS");
+	if (task->auxiliary_payload_length && trace_attempts &&
+			!strcmp(trace_attempts, "1"))
+		p->auxiliary_received = timestamp_get();
 
 	itable_insert(procs_table, task_id, p);
 
@@ -1279,9 +1592,16 @@ static int do_kill(int task_id)
 static int do_function_revoke(struct link *manager, int task_id, int library_task_id, int64_t generation)
 {
 	struct vine_process *p = itable_lookup(procs_table, task_id);
-	int revoked = p && p->task->needs_library && p->task->library_task_id == library_task_id && p->task->function_credit_generation == generation;
+	int revoked = p && p->task->needs_library &&
+			p->task->library_task_id == library_task_id &&
+			p->task->function_credit_generation == generation &&
+			!itable_lookup(procs_running, task_id) &&
+			!itable_lookup(procs_complete, task_id) &&
+			list_remove(procs_waiting, p) == p;
 	if (revoked) {
-		do_kill(task_id);
+		itable_remove(procs_table, task_id);
+		vine_watcher_remove_process(watcher, p);
+		vine_process_delete(p);
 	}
 	send_message(manager,
 			"info function-revoked %d %d %" PRId64 " %d\n",
@@ -1557,11 +1877,24 @@ static int handle_manager(struct link *manager)
 Return true if this task can run with the resources currently available.
 */
 
-static int task_resources_fit_now(struct vine_task *t)
+static int task_resources_fit_now(struct vine_task *t, int adaptive_function,
+		double adaptive_library_memory)
 {
-	return (cores_allocated + t->resources_requested->cores <= total_resources->cores.total) &&
-	       (memory_allocated + t->resources_requested->memory <= total_resources->memory.total) &&
-	       ((t->needs_library || disk_allocated + t->resources_requested->disk <= total_resources->disk.total)) && (gpus_allocated + t->resources_requested->gpus <= total_resources->gpus.total);
+	double memory_limit = total_resources->memory.total *
+			(adaptive_function ? 0.80 : 1.0);
+	double effective_memory = adaptive_function
+			? MAX(0, memory_allocated - adaptive_library_memory)
+			: memory_allocated;
+	/* A Python child has interpreter/COW bookkeeping beyond the user's
+	 * declared payload.  Reserve 15% before launch so the hard 80% Worker
+	 * boundary is predictive rather than a reaction after pages fault in. */
+	double requested_memory = effective_memory + t->resources_requested->memory;
+	if (adaptive_function)
+		requested_memory *= 1.15;
+	return (adaptive_function ||
+			cores_allocated + t->resources_requested->cores <= total_resources->cores.total) &&
+			(requested_memory <= memory_limit) &&
+			((t->needs_library || disk_allocated + t->resources_requested->disk <= total_resources->disk.total)) && (gpus_allocated + t->resources_requested->gpus <= total_resources->gpus.total);
 	// XXX Disk is constantly shrinking, and library disk requests are currently static. Once we generate some files things will hang.
 }
 
@@ -1590,7 +1923,7 @@ static struct vine_process *find_running_library_for_function(const char *librar
 {
 	if (library_task_id > 0) {
 		struct vine_process *p = itable_lookup(procs_running, library_task_id);
-		if (p && p->task->provides_library && !strcmp(p->task->provides_library, library_name) && p->library_ready && p->functions_running < p->task->function_slots_total) {
+		if (p && p->task->provides_library && !strcmp(p->task->provides_library, library_name) && p->library_ready && p->functions_running < p->task->function_slots_running_total) {
 			return p;
 		}
 		return 0;
@@ -1603,7 +1936,7 @@ static struct vine_process *find_running_library_for_function(const char *librar
 	ITABLE_ITERATE(procs_running, iteration, task_id, p)
 	{
 		if (p->task->provides_library && !strcmp(p->task->provides_library, library_name)) {
-			if (p->library_ready && p->functions_running < p->task->function_slots_total) {
+			if (p->library_ready && p->functions_running < p->task->function_slots_running_total) {
 				return p;
 			}
 		}
@@ -1618,7 +1951,21 @@ Return true if this process is ready to run at this moment, and match to a libra
 
 static int process_ready_to_run_now(struct vine_process *p, struct vine_cache *cache, struct link *manager)
 {
+	struct vine_process *execution_library = 0;
+	if (p->task->needs_library)
+		execution_library = find_running_library_for_function(
+				p->task->needs_library, p->task->library_task_id);
+	/* DataVine fork calls which exceed the current execution window remain a
+	 * cheap, recallable descriptor.  Do not stage data or construct a sandbox
+	 * until a real execution slot exists. */
+	if (p->task->auxiliary_payload_length && p->task->needs_library &&
+			!execution_library)
+		return 0;
+	if (p->task->needs_library)
+		p->library_process = execution_library;
 	if (!p->auxiliary_prepared && !p->auxiliary_failed) {
+		if (p->auxiliary_received && !p->auxiliary_prepare_started)
+			p->auxiliary_prepare_started = timestamp_get();
 		enum vine_datavine_agent_prepare_status status =
 				vine_datavine_agent_prepare(p);
 		if (status == VINE_DATAVINE_AGENT_FAILED)
@@ -1628,19 +1975,23 @@ static int process_ready_to_run_now(struct vine_process *p, struct vine_cache *c
 			p->auxiliary_prepared = 1;
 		else
 			return 0;
+		if (p->auxiliary_received && p->auxiliary_prepared)
+			p->auxiliary_prepare_ready = timestamp_get();
 	}
 	if (p->auxiliary_failed)
 		return 0;
-	if (!task_resources_fit_now(p->task))
-		return 0;
-
 	if (p->task->needs_library) {
 		/* Here is where we attach a function to a specific library. */
-		p->library_process = find_running_library_for_function(
-				p->task->needs_library, p->task->library_task_id);
 		if (!p->library_process)
 			return 0;
 	}
+	int adaptive_function = p->library_process &&
+			p->library_process->task->function_adaptive;
+	double adaptive_library_memory = adaptive_function
+			? p->library_process->task->resources_requested->memory : 0;
+	if (!task_resources_fit_now(p->task, adaptive_function,
+			adaptive_library_memory))
+		return 0;
 
 	vine_cache_status_t status = vine_sandbox_ensure(p, cache, manager, procs_table);
 	if (status != VINE_CACHE_STATUS_READY)
@@ -1882,6 +2233,12 @@ static void check_libraries_ready(struct link *manager)
 						library_process->task->task_id,
 						library_process->task->function_slots_total,
 						library_process->function_credit_generation);
+				library_process->function_window_generation++;
+				send_message(manager,
+						"info function-window %d %d %" PRId64 "\n",
+						library_process->task->task_id,
+						library_process->task->function_slots_running_total,
+						library_process->function_window_generation);
 			} else {
 				/* Kill library if it fails the startup check. */
 				debug(D_VINE,
@@ -2021,6 +2378,7 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		/* Check all known libraries if they are ready to execute functions. */
 		check_libraries_ready(manager);
+		update_adaptive_function_window(manager);
 
 		/* deliver queued asynchronous messages if available */
 		deliver_async_messages(manager);

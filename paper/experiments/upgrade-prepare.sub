@@ -1,0 +1,12 @@
+universe = vanilla
+executable = /bin/bash
+arguments = /users/jzhou24/cctools_repo/datavine/paper/experiments/upgrade-prepare.sh
+request_cpus = 4
+request_memory = 8192MB
+request_disk = 1024MB
+should_transfer_files = NO
+getenv = true
+output = /users/jzhou24/cctools_repo/datavine/paper/results/atlas-oracle.stdout
+error = /users/jzhou24/cctools_repo/datavine/paper/results/atlas-oracle.stderr
+log = /users/jzhou24/cctools_repo/datavine/paper/results/atlas-oracle.condor.log
+queue

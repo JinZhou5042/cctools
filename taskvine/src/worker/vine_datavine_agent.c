@@ -71,7 +71,6 @@ struct agent_workflow {
 	struct local_object *objects;
 	size_t capacity;
 	size_t count;
-	struct agent_workflow *next;
 };
 
 struct task_spec {
@@ -92,7 +91,7 @@ struct task_spec {
 static struct vine_cache *agent_cache;
 static char agent_transfer_host[VINE_DATAVINE_AGENT_HOST_MAX];
 static uint16_t agent_transfer_port;
-static struct agent_workflow *agent_workflows;
+static struct agent_workflow *agent_workflow;
 static int agent_waiting_data;
 static unsigned int agent_diagnostic_failures;
 
@@ -183,6 +182,51 @@ static int string_field(const struct task_spec *spec, uint32_t offset,
 	return 1;
 }
 
+static int spec_has_retained_output(const struct task_spec *spec)
+{
+	for (uint32_t index = 0; index < spec->output_count; index++) {
+		const unsigned char *record = spec->outputs +
+				(size_t)index * VINE_DATAVINE_TASK_SPEC_OUTPUT;
+		if (vine_datavine_get_u32(record + 12) &
+				VINE_DATAVINE_TASK_OUTPUT_RETAIN)
+			return 1;
+	}
+	return 0;
+}
+
+int vine_datavine_agent_needs_sandbox(struct vine_process *process)
+{
+	struct task_spec spec;
+	int parsed = spec_parse(process, &spec);
+	if (parsed != 1 || spec_has_retained_output(&spec))
+		return 1;
+	for (uint32_t index = 0; index < spec.input_count; index++) {
+		const unsigned char *record = spec.inputs +
+				(size_t)index * VINE_DATAVINE_TASK_SPEC_INPUT;
+		if (vine_datavine_get_u32(record + 12) !=
+				VINE_DATAVINE_TASK_INPUT_FUNCTION_URI)
+			return 1;
+	}
+	return 0;
+}
+
+int vine_datavine_agent_task_needs_sandbox(struct vine_task *task)
+{
+	/* Only FunctionCalls communicate their result through the executor pipe.
+	 * Ordinary commands still need their sandbox-backed stdout path even when
+	 * their DataVine outputs are not retained. */
+	if (!task || !task->needs_library)
+		return 1;
+	struct vine_process process = {.task = task};
+	return vine_datavine_agent_needs_sandbox(&process);
+}
+
+int vine_datavine_agent_needs_output_file(struct vine_process *process)
+{
+	struct task_spec spec;
+	return spec_parse(process, &spec) != 1 || spec_has_retained_output(&spec);
+}
+
 static int local_reserve(struct agent_workflow *workflow, size_t capacity)
 {
 	if (workflow->capacity >= capacity)
@@ -231,16 +275,12 @@ static struct local_object *local_get(struct agent_workflow *workflow,
 
 static struct agent_workflow *workflow_get(const struct task_spec *spec)
 {
-	for (struct agent_workflow *workflow = agent_workflows; workflow;
-			workflow = workflow->next) {
-		if (workflow->workflow_slot == spec->workflow_slot) {
-			if (memcmp(workflow->workflow_key, spec->workflow_key, 32) ||
-					strcmp(workflow->controller_host,
-						spec->controller_host) ||
-					workflow->controller_port != spec->controller_port)
-				return 0;
-			return workflow;
-		}
+	if (agent_workflow) {
+		return agent_workflow->workflow_slot == spec->workflow_slot &&
+				!memcmp(agent_workflow->workflow_key, spec->workflow_key, 32) &&
+				!strcmp(agent_workflow->controller_host, spec->controller_host) &&
+				agent_workflow->controller_port == spec->controller_port
+				? agent_workflow : 0;
 	}
 	struct agent_workflow *workflow = calloc(1, sizeof(*workflow));
 	if (!workflow)
@@ -256,8 +296,7 @@ static struct agent_workflow *workflow_get(const struct task_spec *spec)
 		workflow->session_epoch = 1;
 	workflow->request_id = 1;
 	workflow->fd = -1;
-	workflow->next = agent_workflows;
-	agent_workflows = workflow;
+	agent_workflow = workflow;
 	return workflow;
 }
 
@@ -495,12 +534,14 @@ static int hash_file(const char *path, uint64_t *size,
 }
 
 static int sandbox_link(struct vine_process *process, uint64_t data_id,
-		const char *cache_path)
+		const char *cache_path, int library_scope)
 {
+	const char *sandbox = library_scope && process->library_process
+			? process->library_process->sandbox : process->sandbox;
 	char directory[4096];
 	char target[4096];
 	if (snprintf(directory, sizeof(directory), "%s/datavine/data",
-			process->sandbox) >= (int)sizeof(directory) ||
+			sandbox) >= (int)sizeof(directory) ||
 			snprintf(target, sizeof(target), "%s/%llu", directory,
 					(unsigned long long)data_id) >= (int)sizeof(target) ||
 			!create_dir(directory, 0700))
@@ -513,11 +554,13 @@ static int sandbox_link(struct vine_process *process, uint64_t data_id,
 static int sandbox_copy(struct vine_process *process, uint64_t data_id,
 		const char *source)
 {
+	const char *sandbox = process->task->sandboxless && process->library_process
+			? process->library_process->sandbox : process->sandbox;
 	char directory[4096];
 	char target[4096];
 	char temporary[4096];
 	if (snprintf(directory, sizeof(directory), "%s/datavine/data",
-			process->sandbox) >= (int)sizeof(directory) ||
+			sandbox) >= (int)sizeof(directory) ||
 			snprintf(target, sizeof(target), "%s/%llu", directory,
 					(unsigned long long)data_id) >= (int)sizeof(target) ||
 			snprintf(temporary, sizeof(temporary), "%s.part.%ld", target,
@@ -844,7 +887,7 @@ static int prepare_generated(struct vine_process *process,
 					local->generation, local->object_token))
 			return -1;
 		char *path = vine_cache_data_path(agent_cache, name);
-		int valid = path && sandbox_link(process, data_id, path);
+		int valid = path && sandbox_link(process, data_id, path, 0);
 		free(path);
 		if (valid)
 			return 1;
@@ -886,7 +929,7 @@ static int prepare_local_file(struct vine_process *process, uint64_t data_id,
 
 static int prepare_uri(struct vine_process *process,
 		struct agent_workflow *workflow, uint64_t data_id,
-		const char *uri, size_t uri_size)
+		const char *uri, size_t uri_size, int library_scope)
 {
 	struct local_object *local = local_get(workflow, data_id, 1);
 	if (!local)
@@ -903,7 +946,8 @@ static int prepare_uri(struct vine_process *process,
 				local->generation, local->object_token))
 			return -1;
 		char *ready_path = vine_cache_data_path(agent_cache, ready_name);
-		int linked = ready_path && sandbox_link(process, data_id, ready_path);
+		int linked = ready_path && sandbox_link(process, data_id, ready_path,
+				library_scope);
 		free(ready_path);
 		if (linked) {
 			local->fetch_failures = 0;
@@ -944,7 +988,7 @@ static int prepare_uri(struct vine_process *process,
 		local->flags = LOCAL_READY;
 	}
 	char *path = vine_cache_data_path(agent_cache, name);
-	int valid = path && sandbox_link(process, data_id, path);
+	int valid = path && sandbox_link(process, data_id, path, library_scope);
 	free(path);
 	if (valid) {
 		local->fetch_failures = 0;
@@ -1009,10 +1053,12 @@ enum vine_datavine_agent_prepare_status vine_datavine_agent_prepare(
 			if (string_field(&spec, offset, length, &uri))
 				ready = prepare_local_file(process, data_id, uri, length);
 		} else if (kind == VINE_DATAVINE_TASK_INPUT_URI ||
+				kind == VINE_DATAVINE_TASK_INPUT_FUNCTION_URI ||
 				kind == VINE_DATAVINE_TASK_INPUT_URI_EPHEMERAL) {
 			const char *uri = 0;
 			if (string_field(&spec, offset, length, &uri))
-				ready = prepare_uri(process, workflow, data_id, uri, length);
+				ready = prepare_uri(process, workflow, data_id, uri, length,
+						kind == VINE_DATAVINE_TASK_INPUT_FUNCTION_URI);
 		}
 		if (ready < 0) {
 			agent_diagnostic_failure("prepare-input", data_id, 0, 0);
@@ -1038,6 +1084,10 @@ enum vine_datavine_agent_commit_status vine_datavine_agent_commit(
 	if (spec_parse(process, &spec) != 1)
 		return process && process->task &&
 			!process->task->auxiliary_payload_length;
+	/* A discarded output has no Worker replica, so it needs neither a file nor
+	 * a Controller session. Its logical DataID still completes normally. */
+	if (!spec_has_retained_output(&spec))
+		return VINE_DATAVINE_AGENT_COMMIT_READY;
 	struct agent_workflow *workflow = workflow_get(&spec);
 	if (!workflow)
 		return VINE_DATAVINE_AGENT_COMMIT_IO_FAILED;
@@ -1242,9 +1292,8 @@ static void workflow_progress(struct agent_workflow *workflow)
 
 void vine_datavine_agent_progress(void)
 {
-	for (struct agent_workflow *workflow = agent_workflows; workflow;
-			workflow = workflow->next)
-		workflow_progress(workflow);
+	if (agent_workflow)
+		workflow_progress(agent_workflow);
 }
 
 int vine_datavine_agent_waiting(void)
@@ -1256,12 +1305,11 @@ int vine_datavine_agent_waiting(void)
 
 void vine_datavine_agent_shutdown(void)
 {
-	while (agent_workflows) {
-		struct agent_workflow *next = agent_workflows->next;
-		connection_close(agent_workflows);
-		free(agent_workflows->objects);
-		free(agent_workflows);
-		agent_workflows = next;
+	if (agent_workflow) {
+		connection_close(agent_workflow);
+		free(agent_workflow->objects);
+		free(agent_workflow);
+		agent_workflow = 0;
 	}
 	agent_cache = 0;
 	agent_transfer_host[0] = 0;

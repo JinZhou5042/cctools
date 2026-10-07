@@ -534,6 +534,9 @@ static vine_result_code_t vine_manager_put_task_streaming(
 	if (t->provides_library) {
 		vine_manager_send(q, w, "provides_library %s\n", t->provides_library);
 		vine_manager_send(q, w, "function_slots %d\n", t->function_slots_total);
+		vine_manager_send(q, w, "function_running_slots %d\n",
+				t->function_slots_running_total);
+		vine_manager_send(q, w, "function_adaptive %d\n", t->function_adaptive);
 		vine_manager_send(q, w, "func_exec_mode %d\n", t->func_exec_mode);
 	}
 

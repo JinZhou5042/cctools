@@ -70,6 +70,7 @@ struct vine_task {
 	 * interprets it; ordinary TaskVine tasks leave it empty. */
 	char *auxiliary_payload;
 	size_t auxiliary_payload_length;
+	int sandboxless; /**< Worker-local hint to omit an unused task sandbox. */
 	char *provides_library;			   /**< If this is a LibraryTask, the name of the library provided. */
 	int function_slots_requested;		   /**< If this is a LibraryTask, the number of function slots requested by the user. -1 causes the number of slots to match the number of cores. */
 	vine_task_func_exec_mode_t func_exec_mode; /**< If this a LibraryTask, the execution mode of its functions. */
@@ -102,12 +103,17 @@ struct vine_task {
 	int forsaken_attempts;			  /**< Number of times the task was submitted to a worker but failed to start execution. */
 	int workers_slow;			  /**< Number of times this task has been terminated for running too long. */
 	int function_slots_total;		  /**< If a library, the total number of function slots usable. */
+	int function_slots_running_total;	  /**< Worker execution window; total remains the dispatch window. */
+	int function_slots_started;		  /**< Manager-observed functions past the Worker start boundary. */
+	int function_adaptive;			  /**< If the Worker may adapt the execution window. */
 	int function_slots_inuse;		  /**< If a library, the number of functions currently running. */
 	int function_slots_reported_free;	  /**< Pull credits most recently reported by the Worker. */
 	int64_t function_credit_generation;	  /**< Monotonic Worker credit generation. */
+	int64_t function_window_generation;	  /**< Monotonic Worker execution-window generation. */
 	int function_slot_credit_held;		  /**< If this function task currently owns one executor credit. */
 	int function_start_acknowledged;	  /**< If the Worker acknowledged that this function began execution. */
 	int function_start_revoke_pending;	  /**< If the Manager is waiting for a generation-bound revoke acknowledgement. */
+	char *function_rebalance_target;	  /**< Recall destination Worker key, or null. */
 	timestamp_t time_when_function_start_ack; /**< Manager receipt time of the Worker start acknowledgement. */
 
 	/***** Results of task once it has reached completion. *****/

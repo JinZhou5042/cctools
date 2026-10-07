@@ -1,0 +1,238 @@
+\section{Evaluation}
+\subsection{Questions and experimental contract}
+We ask whether the separated boundaries help a complete scientific analysis,
+whether fixed concurrency or dependency initialization explains the gain,
+and how the result changes across physical hosts. The primary evidence comprises
+\UpgradeTrials{} accepted trials in five randomized blocks per configuration.
+Figures show medians and observed ranges. With five samples we report paired
+ratios and wins, not precise population confidence intervals.
+
+Colocated controls use two four-core workers with disjoint affinity within an
+eight-CPU allocation. Application studies use their own
+allocation. The control continuation retains complete comparison blocks and
+reruns an interrupted block in full; it never pairs runtimes from different
+allocations. Physical-host scaling holds eight persistent batch allocations
+on eight distinct hosts of the same machine class and selects nested subsets
+of one, two, four, and eight hosts, with eight CPUs per worker. All task records
+must match an admitted worker's declared CPU set. These are CPU shares with
+explicit affinity, not exclusive whole-node reservations. Other users and
+submission-host load can still introduce contention.
+
+Each trial starts a fresh service or manager, admits its complete pool, then
+times graph construction, submission, execution, every sink fetch, and local
+sink fsync. DataVine also admits requested outputs durably at its controller;
+the persistence operation count is consequently not identical. Worker-local
+intermediates are used in both backends. Pool admission is excluded and
+recorded separately. Libraries have no additional readiness barrier, so
+residual library startup remains inside the interval.
+The TaskVine baseline uses the ordinary FuturesExecutor and temporary-output
+path in the same checkout, including its shared function-credit implementation;
+it is not a separately built, unmodified upstream release.
+
+Python is 3.10 with NumPy 1.26.4; the analysis additionally uses Uproot 5.6.8,
+Awkward 2.8.7, and Vector 1.6.3. Dependencies are copied to node-local storage
+before colocated campaigns. Both libraries explicitly preload the same
+modules before forking, except in the labeled cold controls. DataVine's
+generated executor exists before service startup, and its hash must match
+the executable actually received by every worker. This check caught and
+excluded an earlier harness version that silently deployed the default
+executor. Failed, interrupted, and incompatible trials remain diagnostic
+artifacts; none contributes a zero bar or a replacement success.
+
+\subsection{Serialized scheduling and concurrent data-plane work}
+The first architectural claim is that data-lifecycle service demand need not
+consume the manager's scheduling reactor. In the conventional single-reactor
+path, dependency scheduling and dispatch share that reactor with replica or
+checkpoint coordination, stage-in/out acknowledgements, and retention or
+garbage-collection updates. The workflow process retains one owner for
+logical scheduling and TaskVine manager state, but the service endpoint handles
+data-plane RPC connections with an independent event-thread pool, while
+requested-output persistence runs in a separate Controller data-worker pool.
+The current-build validation exposes both counts as
+\texttt{DATAVINE\_RPC\_THREADS} and \texttt{DATAVINE\_DATA\_THREADS}; defaults
+remain one RPC thread and 16 data workers. The manager never becomes the path
+for the durable output bytes, although it still receives the corresponding
+completion and lifecycle notifications.
+
+Table~\ref{tab:controller-decoupling} holds the single-thread scheduling
+service and workload fixed while changing only the Controller data-worker
+count. Two repetitions at each point produced 26.9, 43.9, and 63.7 tasks/s
+medians for one, four, and 16 data workers, respectively, a 2.37$\times$
+median improvement from one to 16. Every run completed 256 one-MiB outputs
+and verified all 268 MiB of durable bytes. The manager's owner-execute time
+was 6.9--27.6 ms across these runs, while the end-to-end service interval was
+3.1--14.6 s. This separates the manager's scheduling control path from the
+measured durability work, while exposing local-filesystem variability. The
+experiment does not claim that all data operations scale linearly; it tests
+whether data-plane work that would otherwise share the manager's serialized
+service path can be served concurrently.
+
+\input{results/controller-decoupling-table.tex}
+
+The worker-local control completes the same 256 tasks at 461.7 and 453.1
+tasks/s with one and 16 data workers, respectively, and creates no durable
+Controller files. Manager owner-execute time remains 1.59 and 1.58 ms. Thus
+the thread-sensitive cost is in requested-output data management, while the
+logical scheduling path remains stable.
+
+An unbatched metadata-RPC control processed 39.5k publish and 37.8k resolve
+records/s with one client connection. Sixteen concurrent connections reached
+91.5k and 84.6k records/s even with one RPC event thread; 16 event threads
+reached 98.9k publish records/s. The small incremental gain and the resolve
+plateau are expected: metadata still uses shared controller state. The result
+supports independent data-plane concurrency and identifies its remaining
+serialization boundary; it does not claim unlimited Controller scaling.
+The complete protocol regression with 16 RPC and 16 data threads passed
+submission, restart, compare-and-swap append, journal recovery, corruption
+rejection, the 1024-connection cap, and object-store deduplication.
+The raw summary and source fingerprints are retained with the artifact.
+
+\subsection{Complete ATLAS Open Data analysis}
+We port the existing diphoton analysis accompanying ATLAS Open Data educational
+materials~\cite{atlas-open-data}. The complete available sample contains 16
+ROOT files, 9,861,498,743 bytes, and 36,564,144 collision events. The DAG has
+374 read/decompression tasks, 374 photon-selection tasks, and 54 reduction
+tasks: 802 individual attempts. Reads cover at most 100,000 events each;
+selection consumes the actual jagged arrays, and an eight-way reduction
+combines selection counts and the diphoton-mass histogram. There are no
+synthetic sleeps or substituted numerical kernels in this application.
+
+An independent run of the existing full-file analysis pins every input hash,
+all seven selection counts, and all 60 histogram bins. Every accepted runtime
+run agrees exactly, including 553,456 selected events. We preserve the reference
+selection, including its permissive eta OR predicate; the purpose is runtime
+equivalence, not a revised physics selection. A diagnostic implementation that
+rearranged float32 mass arithmetic changed five selected events and was rejected.
+The accepted version preserves the reference Vector operation order.
+Exact numerical acceptance is platform-specific: a TaskVine replay on a second
+platform selected 553,458 events against the primary reference's 553,456.
+The unchanged independent reference on that platform reproduced every observed cut
+and bin difference. We retain the rejected run, provide independently generated
+platform-specific manifests, and do not assume cross-platform bitwise identity.
+The primary performance figures continue to use the original allocation.
+
+The complete ROOT dataset is copied and hashed once before the application
+campaign. That setup cost is retained but excluded from workflow time. Reading,
+decompression, selection, array serialization, intermediate delivery, reduction,
+and durable sink admission remain inside the timer. OS caches are not flushed.
+This is a complete educational analysis over real data on one compute host;
+it is not a production collaboration analysis or distributed input-store study.
+
+\begin{figure}[t]
+\centering\includegraphics[width=\columnwidth]{upgrade-application.pdf}
+\caption{The full 36.56-million-event ATLAS analysis. Five paired blocks,
+802 individual tasks per run, and exact agreement with the independent oracle.
+Bars are medians; whiskers are observed ranges.}
+\label{fig:application}
+\end{figure}
+DataVine fixed and elastic complete in median \UpgradeAtlasFixedMedian{} and
+\UpgradeAtlasElasticMedian{} seconds, versus \UpgradeAtlasTVMedian{} seconds
+for TaskVine. Median paired completion-time ratios are
+\UpgradeAtlasFixedSpeedup{} and \UpgradeAtlasElasticSpeedup{}, respectively.
+The close fixed/elastic result is evidence against attributing this application
+gain primarily to feedback. The comparison supports the implemented execution
+path under the stated initialization and storage contract.
+
+\subsection{Matched concurrency and preparation controls}
+CPU chains contain 64 independent lanes of eight 50-ms process-CPU tasks,
+with 1-KiB outputs. Hash chains use the same 512-task graph with 1-MiB outputs;
+each consumer checks its parents' payload hashes. The phase DAG contains 256
+tasks alternating 100-ms CPU work and actual node-local writes, fsync, and
+reads with 256-KiB payloads and fan-in. Task bodies, graph structure, logical
+result visibility, and sink acceptance are identical across backends.
+
+\begin{figure*}[t]
+\centering\includegraphics[width=.96\textwidth]{upgrade-controls.pdf}
+\caption{Concurrency and preparation controls, five paired blocks each.
+DV fixed uses one execution slot per core; DV elastic adapts its window;
+DV eager also advances preparation. TV 4C is the explicitly extended fork
+library with four slots per allocated core, not four times the CPU allocation.}
+\label{fig:controls}
+\end{figure*}
+\begin{table}[t]
+\centering\small
+\caption{Median completion time in seconds for the matched controls.}
+\input{results/upgrade-controls-table.tex}
+\end{table}
+The extended TaskVine control removes only the generated fork-library startup
+guard against slots exceeding cores. Its physical allocation remains fixed.
+It challenges the explanation that extra concurrency alone is sufficient.
+Within DataVine, fixed, elastic, and eager controls are close on these graphs;
+there is no consistent case here for making the adaptive window the principal
+research contribution. End-to-end differences also include serialization,
+graph submission, and result processing. They are not a factorial isolation
+of scheduler and data-controller costs.
+
+\subsection{Scaling across distinct physical hosts}
+\begin{figure*}[t]
+\centering\includegraphics[width=.96\textwidth]{upgrade-scaling.pdf}
+\caption{Fixed-size 2,048-task graphs on nested subsets of eight persistent,
+distinct physical hosts, eight CPU shares per host. Five paired blocks;
+medians and ranges. Nodes are not exclusively reserved.}
+\label{fig:scaling}
+\end{figure*}
+The scaling graph has 256 lanes and eight stages. CPU tasks consume 100 ms
+each and emit 1 KiB; the data case generates and hashes 1 MiB per task with
+minimal additional CPU work. Separating these cases avoids interpreting a
+CPU scaling result as a data-path scaling result. The same persistent pool
+is used throughout; a continuation retains all completed non-grouping trials
+and resumes the original randomized order after incompatible grouping trials
+are removed from the comparison.
+
+\input{results/upgrade-scaling-summary.tex}
+The data-path result is particularly consequential: more remote endpoints can
+add scheduling and delivery work without shortening the critical path. These
+measurements bound the useful envelope of this implementation. They do not
+establish controller capacity at 16 or more nodes, nor isolate whether manager
+serialization, placement, or data-controller service dominates every plateau.
+
+\subsection{Initialization, instrumentation, and CPU accounting}
+The attribution campaign holds a single allocation and executes five paired
+blocks at 1-KiB and 1-MiB payload sizes. It compares preloaded and cold libraries,
+and instrumented and uninstrumented execution, independently for each backend.
+This avoids inferring a cold-start effect from two different hardware campaigns.
+
+\input{results/upgrade-attribution-summary.tex}
+The cold controls retain DataVine's startup disadvantage rather than treating
+preloading as a free default. Users must provision an explicit, fork-compatible
+dependency environment. The prototype's executable override is now fail-closed:
+an explicitly missing or non-executable path cannot silently select a different
+executor. Performance evidence remains attached to its exact measured binaries;
+the subsequent compatibility repairs have separate regression evidence.
+
+Worker-lifetime CPU accounting includes worker and library startup and shutdown.
+Task-body CPU excludes deserialization and some import costs. Optional process
+sampling is non-atomic, and summed RSS can count shared pages repeatedly.
+\begin{table}[t]
+\centering\small
+\caption{Median CPU seconds. DV uses fixed admission. Worker lifetime aggregates
+both worker process trees; it excludes manager, controller, and client CPU.}
+\input{results/upgrade-cpu-table.tex}
+\end{table}
+Similar task-body CPU and different worker-lifetime CPU support an explanation
+involving runtime and library overhead, rather than cheaper numerical work.
+They do not establish total cluster CPU savings: some work can move to the
+controller, and the two timer scopes must not be subtracted as a full accounting.
+The artifact separately reports these scopes and manager send/status timers.
+Manager file-byte counters exclude peer traffic; we do not label them total
+network bytes. Validation of 5,120 local-clock traces confirms one ordered
+trace per instrumented physical attempt. Reconstructed stage occupancy counts
+describe tasks in each stage, not physical prepared-data bytes.
+
+\subsection{Correctness, failure injection, and remaining scope}
+The retained measured build passes \UpgradeRegressionPassed{} DataVine regression
+gates. The current configurable service build additionally passes the native
+workflow protocol regression with both one and 16 RPC event threads and one and
+16 Controller data workers.
+Explicit invalid-executor tests require failure before service contact.
+The runner verifies the loaded Python extension and records binary hashes,
+preventing an installed older extension from masquerading as this build.
+
+The retained recovery experiment removes three owned worker jobs from a
+1,024-task workflow and validates all identities and 16 sinks after 18
+resubmissions. Focused eager/deferred runs validate 32 ordered attempts per
+mode, and generic serverless execution remains covered. These are exercised
+semantics, not exhaustive failure coverage. Whole-node 16+ scaling,
+prepared-node assignment, and exact sender-level traffic and prepared-byte
+accounting remain open. Requested-output fsync is not controller-host-loss
+durability, and no arbitrary external-side-effect exactly-once claim is made.

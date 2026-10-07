@@ -1,0 +1,72 @@
+ M .gitignore
+ M CONTROLLER_PERFORMANCE_20260827.md
+ M CONTROLLER_PERSISTENCE_DIAGNOSTIC_20260828.md
+ M CONTROLLER_REMOTE_FANIN_20260828.md
+ M DATAVINE_DATA_INTENSIVE_BENCHMARK.md
+ M DATAVINE_DYNAMIC_ADAPTIVE_20260830.md
+ M DATAVINE_DYNAMIC_CONTROL_20260831.md
+ M DATAVINE_HANDOFF_20260827.md
+ M DATAVINE_PRODUCTION.md
+ M acceptance/README.md
+ M acceptance/matrix.md
+ M acceptance/scripts/benchmark_1024_workflows.py
+ M acceptance/scripts/benchmark_native_workflow.py
+ M acceptance/scripts/benchmark_peer_vs_controller.py
+ M acceptance/scripts/profile_object_ingest.py
+ M agent-plans.md
+ M progress.md
+ M taskvine/examples/DATAVINE_WORKFLOW_ADAPTOR.md
+ M taskvine/src/bindings/python3/ndcctools/taskvine/datavine/workflow.py
+ M taskvine/src/bindings/python3/ndcctools/taskvine/datavine/workflow_client.py
+ M taskvine/src/datavine/vine_datavine_data_controller.c
+ M taskvine/src/datavine/vine_datavine_data_controller.h
+ M taskvine/src/datavine/vine_datavine_object_store.c
+ M taskvine/src/datavine/vine_datavine_object_store.h
+ M taskvine/src/datavine/vine_datavine_protocol.h
+ M taskvine/src/datavine/vine_datavine_rpc.c
+ M taskvine/src/datavine/vine_datavine_workflow.c
+ M taskvine/src/datavine/vine_datavine_workflow_runtime.c
+ M taskvine/src/datavine/vine_datavine_workflow_store.c
+ M taskvine/src/manager/vine_function_call.c
+ M taskvine/src/manager/vine_function_call.h
+ M taskvine/src/manager/vine_manager.c
+ M taskvine/src/manager/vine_manager.h
+ M taskvine/src/manager/vine_manager_put.c
+ M taskvine/src/manager/vine_perf_log.c
+ M taskvine/src/manager/vine_schedule.c
+ M taskvine/src/manager/vine_task.c
+ M taskvine/src/manager/vine_task.h
+ M taskvine/src/manager/vine_task_frame.c
+ M taskvine/src/manager/vine_task_info.c
+ M taskvine/src/manager/vine_worker_info.c
+ M taskvine/src/manager/vine_worker_info.h
+ M taskvine/src/manager/vine_worker_pool.c
+ M taskvine/src/manager/vine_worker_pool.h
+ M taskvine/src/tools/datavine_executor.c
+ M taskvine/src/tools/datavine_python_executor
+ M taskvine/src/worker/vine_datavine_agent.c
+ M taskvine/src/worker/vine_datavine_agent.h
+ M taskvine/src/worker/vine_process.c
+ M taskvine/src/worker/vine_process.h
+ M taskvine/src/worker/vine_worker.c
+ M taskvine/test/datavine_module_boundaries.py
+ M taskvine/test/datavine_production_data_plane.py
+ M taskvine/test/datavine_workflow_ir.py
+ M taskvine/test/datavine_workflow_service.py
+?? DATAVINE_MAP.md
+?? acceptance/adaptive-concurrency-20260902/
+?? acceptance/adaptive-window-20260903/
+?? acceptance/helpers/
+?? acceptance/maintenance-20260906.md
+?? acceptance/million-task-bigpool-20260903/
+?? acceptance/million-task-throughput-20260903/
+?? acceptance/scripts/benchmark_adaptive_concurrency.py
+?? acceptance/scripts/benchmark_sharedfs_direct.py
+?? acceptance/scripts/benchmark_storage_crossover_dense.py
+?? acceptance/scripts/evidence_layout.py
+?? acceptance/scripts/render_adaptive_concurrency.py
+?? acceptance/scripts/render_storage_benchmarks.py
+?? acceptance/scripts/summarize_storage_crossover_dense.py
+?? acceptance/storage-crossover-20260901/
+?? acceptance/storage-matrix-20260901/
+?? papers/

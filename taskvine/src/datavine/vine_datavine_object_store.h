@@ -21,10 +21,6 @@ struct vine_datavine_object_store *vine_datavine_object_store_open(
 void vine_datavine_object_store_close(
 		struct vine_datavine_object_store *store);
 
-/* Stable SharedFS root used to resolve immutable content keys. */
-const char *vine_datavine_object_store_root(
-		struct vine_datavine_object_store *store);
-
 /* The caller supplies the lowercase SHA-256 of data.  A successful put is
  * durable and atomic; an existing identical object is a successful no-op. */
 int vine_datavine_object_store_put(
@@ -35,11 +31,6 @@ int vine_datavine_object_store_put(
 int vine_datavine_object_store_get(
 		struct vine_datavine_object_store *store, const char digest[65],
 		unsigned char **data, size_t *size);
-
-/* Resolve the canonical SharedFS path for an object. */
-int vine_datavine_object_store_path(
-		struct vine_datavine_object_store *store, const char digest[65],
-		char *path, size_t path_size, int create_directories);
 
 int vine_datavine_object_store_metrics(
 		struct vine_datavine_object_store *store,

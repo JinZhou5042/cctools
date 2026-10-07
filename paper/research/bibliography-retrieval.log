@@ -1,0 +1,12 @@
+taskvine [(['TaskVine: Managing In-Cluster Storage for High-Throughput Data Intensive Workflows'], '10.1145/3624062.3624277'), (['Mixed Modality Workflows in TaskVine'], '10.1145/3588195.3595953')]
+hep [(['Reshaping High Energy Physics Applications for Near-Interactive Execution Using TaskVine'], '10.1109/sc41406.2024.00068'), (['High Energy Physics Applications'], '10.1007/978-1-4684-8586-8_15')]
+grouping [(['Liberating the Data Aware Scheduler to Achieve Locality in Layered Scientific Workflow Systems'], '10.1109/escience65000.2025.00029'), (['Data-Locality Aware Scientific Workflow Scheduling Methods in HPC Cloud Environments'], '10.1007/s10766-016-0463-0')]
+hoplite [(['Fault-tolerant distributed systems based on broadcast communication'], '10.1109/icdcs.1989.37940'), (['Task allocation in fault-tolerant distributed systems'], '10.1007/bf01257086')]
+pocket [(['InfiniStore: Elastic Serverless Cloud Storage'], '10.14778/3587136.3587139'), (['Ditto: Efficient Serverless Analytics with Elastic Parallelism'], '10.1145/3603269.3604816')]
+exoflow [(['Exactly Once Execution'], '10.1007/springerreference_64913'), (['Exactly Once Execution'], '10.1007/978-0-387-39940-9_2603')]
+wow [(['WOW: Workflow-Aware Data Movement and Task Scheduling for Dynamic Scientific Workflows'], '10.1109/ccgrid64434.2025.00021'), (['Data-Aware Scheduling of Scientific Workflows in Hybrid Clouds'], '10.1007/978-3-319-93713-7_68')]
+apollo [(['Scalable Fog Computing Orchestration for Reliable Cloud Task Scheduling'], '10.3390/app112210996'), (['On Coordinated Scheduling of Radio and Computing Resources in Cloud-RAN'], '10.1109/tnsm.2022.3222068')]
+sparrow [(['FTLLS: A fault tolerant, low latency, distributed scheduling approach based on sparrow'], '10.1007/s12083-017-0590-4'), (['Distributed Low-Latency Data Aggregation Scheduling in Wireless Sensor Networks'], '10.1145/2744198')]
+adaptive [(['Adaptive Task-Oriented Resource Allocation for Large Dynamic Workflows on Opportunistic Resources'], '10.1109/ipdps57955.2024.00034'), (['Opportunistic cooperation by dynamic resource allocation'], '10.1109/twc.2007.348341')]
+legion HTTP Error 429: Too Many Requests
+parsl HTTP Error 429: Too Many Requests

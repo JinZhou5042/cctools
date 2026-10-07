@@ -1,7 +1,8 @@
 # DataVine workflow adaptor contract
 
 An adaptor builds `datavine.workflow/v1`, performs capability negotiation, and
-sends transactions. It must not schedule tasks, construct TaskVine tasks,
+sends transactions to one workflow service process per workflow. It must not
+schedule tasks, construct TaskVine tasks,
 project completions, retry work, or implement persistence/pruning policy.
 
 The JSON contract is
@@ -37,7 +38,11 @@ Response header, 24 bytes:
 
 Workflow opcodes are: auth `1`, submit `20`, append `21`, seal `22`, describe
 `23`, watch `24`, cancel `25`, capabilities `26`, fetch-result `27`, and
-result-info `28`. First send auth with the token bytes, then capabilities with
+result-info `28`. Dynamic clients also use frontier `29`, object-put/get
+`30`/`31`, result descriptors `36`, wait-terminal `37`, and result-stream `38`.
+The complete opcode definition is in
+[`vine_datavine_protocol.h`](../src/datavine/vine_datavine_protocol.h).
+First send auth with the token bytes, then capabilities with
 an empty payload. Reject an unsupported schema or executor before mutation.
 
 Submit payload is canonical Workflow IR JSON. Append payload is
@@ -57,3 +62,26 @@ attempt, producer TaskID/output slot, requested status, and codec.
 The minimal direct implementation is
 [`datavine_workflow_go.go`](datavine_workflow_go.go). The POSIX-shell example
 uses the stable CLI in [`datavine_workflow_shell.sh`](datavine_workflow_shell.sh).
+
+## Dynamic clients and object transport
+
+Check advertised capabilities before submitting. Current callable invocations
+use DVP3 for small inline payloads and DVP4 signed Controller-RPC references for
+large payloads; source execution uses DVP1. Do not copy transitional frame
+labels or Controller-local path assumptions from old benchmark reports.
+[The production contract](../../DATAVINE_PRODUCTION.md) owns those semantics.
+
+For `controller-admitted-sequence-v1`, open a dedicated authenticated socket
+and send opcode 38 with
+`u16 id_length, u32 inline_max_bytes, u64 after_sequence, id bytes`.
+`inline_max_bytes` is at most 65536. Responses use the normal 24-byte header
+and a `DVS1` body. Resume with the last consumed sequence after disconnect;
+consume the terminal frame. These are durable Controller result admissions,
+not Scheduler completion events.
+
+Use the Python client's
+[`WorkflowResultStream`](../src/bindings/python3/ndcctools/taskvine/datavine/workflow_client.py)
+as the maintained frame-decoding reference. The Go and shell examples above
+cover basic workflow submission; they are not a complete dynamic protocol
+implementation. Metadata recovery and requested-result persistence are separate
+policies; adaptors must not infer result durability from task completion.

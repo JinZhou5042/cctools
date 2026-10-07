@@ -53,9 +53,6 @@ int vine_datavine_scheduler_mark_pending(
 		struct vine_datavine_scheduler *scheduler, int64_t task_id);
 enum vine_datavine_task_state vine_datavine_scheduler_task_state(
 		struct vine_datavine_scheduler *scheduler, int64_t task_id);
-/* Roll back one DONE task without disturbing DONE dependents or running work. */
-int vine_datavine_scheduler_rollback_done(
-		struct vine_datavine_scheduler *scheduler, int64_t task_id);
 /* Rebuild from a packed little-endian set of already-DONE TaskIDs. */
 int vine_datavine_scheduler_rebuild(
 		struct vine_datavine_scheduler *scheduler,

@@ -85,6 +85,19 @@ void vine_worker_account_task_completed(struct vine_worker_info *worker,
 	}
 }
 
+void vine_worker_account_task_retrieved(struct vine_worker_info *worker,
+		struct vine_task *task)
+{
+	if (worker->tasks_committed > 0)
+		worker->tasks_committed--;
+	if (worker->tasks_waiting_retrieval > 0)
+		worker->tasks_waiting_retrieval--;
+	struct rmsummary *box = task->current_resource_box;
+	if (box)
+		worker->resources->disk.inuse = MAX(0,
+				worker->resources->disk.inuse - box->disk);
+}
+
 void vine_worker_delete(struct vine_worker_info *w)
 {
 	if (w->link)

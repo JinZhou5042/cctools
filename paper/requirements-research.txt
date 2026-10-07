@@ -1,0 +1,7 @@
+numpy==1.26.4
+uproot==5.6.8
+awkward==2.8.7
+awkward-cpp==48
+vector==1.6.3
+psutil==7.0.0
+cloudpickle==3.1.2

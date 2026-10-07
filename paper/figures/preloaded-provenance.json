@@ -1,0 +1,6 @@
+{
+  "inputs": {
+    "scripts/plot_preloaded.py": "f062ba2ed36c853872f0e19390b14f11a2a2f6ebca3a471ed9d3df91d3dde9c6",
+    "results/preloaded-campaign-v1/summary.json": "8ea91d04d8eb1be609c4c2f7e33c638eecb3148b17c9d17efb4f12eb523de6bc"
+  }
+}

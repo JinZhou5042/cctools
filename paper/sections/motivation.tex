@@ -1,0 +1,74 @@
+\section{Background and Motivation}
+\subsection{Four events that need not coincide}
+For a producer $u$ and consumer $v$, distinguish producer success $S_u$,
+consumer dispatch $D_v$, consumer input readiness $R_v$, and consumer execution
+$E_v$. A valid execution requires the relevant inputs at $E_v$; it does not
+inherently require those inputs to be present on the selected worker at $D_v$.
+For an intermediate with asynchronous backup, denote backup admission by $B_u$.
+A policy may permit $S_u \prec D_v$ and $R_v \prec E_v$ without imposing
+$B_u \prec D_v$. This is an ordering permission, not a guarantee that a
+particular transfer or backup finishes before another event.
+
+Requested outputs introduce a different boundary. A user observing a final
+result needs the service's promised durability, so physical task completion
+alone cannot establish workflow-result availability. Separating these events
+allows the runtime to move successors forward while retaining a stronger
+condition at the user-visible result interface.
+
+The bottleneck is observable before introducing a new scheduling policy.
+Figure~\ref{fig:bottleneck-motivation}(a) increases one-MiB durable objects
+from 64 to 1,024 at a fixed four-worker topology: service time grows from
+0.87 to 13.64 seconds while manager owner work stays below 28 ms after
+isolation. In (b), 4 GiB remote fan-in throughput falls from 542.8 to
+442.9 MiB/s as endpoints grow from 16 to 64, with Controller CPU near
+36--37 seconds. The matched 20,000-task comparison (c)--(d) sends 64.1 MiB
+through the coupled manager and completes in 160.4 seconds, versus 0.04 MiB
+and 10.0 seconds for the separated path (16.1$\times$ median). These results
+motivate separating logical scheduling from data-lifecycle service.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=.98\textwidth]{bottleneck-motivation.pdf}
+\caption{Motivation evidence from real runs. (a) Fixed four-worker by two-core
+scale-up with one-MiB durable outputs; the data-plane service interval grows
+with objects while manager owner work stays small after separation. (b) Remote
+Controller fan-in with 4 GiB total payload; adding endpoints exposes a shared
+service boundary. (c)--(d) Matched 20,000-task data-intensive comparison: the
+coupled path carries manager data-plane traffic and is slower, while the
+separated path keeps payload service outside the scheduler. Bars use retained
+medians; source hashes and raw runs are in the artifact.}
+\label{fig:bottleneck-motivation}
+\end{figure*}
+
+\subsection{Queue depth is not executable capacity}
+Let $Q$ be the maximum number of assigned function calls on a worker, and $W$
+its current execution window. For $C$ allocated cores, a queue with $Q>C$
+can buffer descriptors without requiring $Q$ executing processes or $Q$ fully
+prepared input sandboxes. A conventional single limit obscures which form of
+concurrency is increasing. DataVine makes $Q$ and $W$ distinct and uses the
+availability of an execution opportunity to gate preparation.
+
+A simple operational decomposition helps interpret measurements. A task's
+observed worker residence includes waiting before preparation, preparation
+itself, waiting after preparation, and execution. Increasing $Q$ primarily
+changes what work is available locally; increasing $W$ changes competition
+among executing or input-waiting calls. Neither necessarily reduces the
+critical path. On a computation-bound phase, more processes may only increase
+contention. On a data-waiting phase, a larger window may expose otherwise idle
+CPU capacity. Measurements must therefore cover both regimes and transitions.
+
+\subsection{What the motivating comparison must preserve}
+A comparison against a baseline that sends every intermediate through a central
+client would not isolate DataVine's control boundary. Our TaskVine baseline uses
+its futures interface, temporary intermediate outputs, fork-based function
+libraries, and the same kernel code. It benefits from the existing runtime's
+peer-transfer and caching machinery. Every graph retains individual tasks;
+there is no task fusion or replacing a chain with a single process.
+
+Task grouping also advances some dependency knowledge toward workers~\cite{grouping}.
+It must not be dismissed as fusion. Similarly, workflow-aware prefetch can
+overlap movement and computation even if assignment requires prepared inputs.
+The relevant distinction is the event at which assignment becomes legal, not
+whether a system has asynchronous operations. Our eager/deferred ablation
+isolates preparation timing within DataVine; it is not presented as a complete
+reimplementation of either grouping or a prepared-node scheduler.

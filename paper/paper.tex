@@ -1,0 +1,28 @@
+\documentclass[conference,10pt,letterpaper]{IEEEtran}
+\usepackage{graphicx,booktabs,amsmath,amssymb,url}
+\usepackage[hidelinks]{hyperref}
+\graphicspath{{figures/}}
+\newcommand{\system}{DataVine}
+\newcommand{\aicredit}{\par\noindent{\footnotesize Drafting assistance: OpenAI Codex~\cite{codex}.}\par}
+\input{results/numbers.tex}
+\input{results/preloaded-numbers.tex}
+\input{results/upgrade-numbers.tex}
+\title{DataVine: Separating Task Dispatch, Data Readiness, and Execution Admission in Scientific Workflows}
+\author{\IEEEauthorblockN{Anonymous submission draft}}
+\begin{document}
+\maketitle
+\input{sections/abstract}
+\input{sections/introduction}
+\input{sections/motivation}
+\input{sections/design}
+\input{sections/implementation}
+\input{sections/evaluation-upgrade}
+\input{sections/discussion}
+\input{sections/related}
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+\section*{Acknowledgments}
+OpenAI Codex~\cite{codex} assisted with research synthesis, implementation,
+experiment scripts, and drafting throughout this manuscript. The paper remains
+an evidence-backed research draft requiring author review before submission.
+\end{document}

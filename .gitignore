@@ -36,6 +36,7 @@
 !/acceptance/dynamic-data-management-20260831.json
 !/acceptance/production-baseline-20260901.json
 !/DATAVINE_HANDOFF_20260827.md
+!/DATAVINE_MAP.md
 !/CONTROLLER_PERFORMANCE_20260827.md
 !/CONTROLLER_REMOTE_FANIN_20260828.md
 !/CONTROLLER_PERSISTENCE_DIAGNOSTIC_20260828.md
@@ -43,6 +44,10 @@
 !/acceptance/controller-local-tmp-20260827/**
 !/acceptance/rigorous-validation-20260827/
 !/acceptance/rigorous-validation-20260827/**
+!/acceptance/storage-matrix-20260901/
+!/acceptance/storage-matrix-20260901/**
+!/acceptance/storage-crossover-20260901/
+!/acceptance/storage-crossover-20260901/**
 *.o
 *.swp
 cctools.test.log
@@ -65,7 +70,6 @@ cctools.lint.out
 **/vine-run-info/
 /taskvine/src/tools/datavine_directory_test
 /taskvine/src/tools/datavine_controller_benchmark
-/taskvine/src/tools/datavine_executor
 /taskvine/src/tools/datavine_index_test
 /taskvine/src/tools/datavine_parametric_test
 /taskvine/src/tools/datavine_readiness_test
@@ -84,3 +88,12 @@ config.mk
 site/
 work_queue/src/work_queue_example
 dttools/src/jx_repl
+
+# Retain campaign evidence while excluding regenerable Python caches.
+!/acceptance/adaptive-concurrency-20260902/**
+!/acceptance/adaptive-window-20260903/**
+!/acceptance/million-task-throughput-20260903/**
+!/acceptance/million-task-bigpool-20260903/**
+!/acceptance/maintenance-20260906.md
+__pycache__/
+*.pyc

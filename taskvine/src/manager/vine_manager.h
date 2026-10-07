@@ -91,6 +91,7 @@ struct vine_manager {
 
 	struct link *manager_link; /* Listening TCP connection for accepting new workers. */
 	struct link_info *poll_table; /* Table for polling on all connected workers. */
+	struct vine_worker_info **poll_workers; /* Worker paired with each poll entry. */
 	int poll_table_size;	      /* Number of entries in poll_table. */
 
 	/* Security configuration */
@@ -238,6 +239,15 @@ struct vine_manager {
 	timestamp_t transient_error_interval;	   /* microseconds between new attempts on task rescheduling and using a file replica as source after a failure. */
 	int64_t next_function_grant_generation;	   /* Unique generation assigned to each function grant. */
 	timestamp_t function_start_timeout;	   /* Time allowed for a Worker to acknowledge a function start. */
+	int function_queue_multiplier;		   /* Opt-in dispatch window / initial execution window. */
+	int function_rebalance_limit;		   /* Maximum queued grants recalled in one Manager turn. */
+	uint64_t function_rebalance_rounds;
+	uint64_t function_recalls_sent;
+	uint64_t function_recalls_succeeded;
+	uint64_t function_recalls_missed;
+	uint64_t function_window_updates;
+	int function_window_min;
+	int function_window_max;
 	timestamp_t function_start_check_interval; /* Interval for scanning only outstanding grants. */
 	timestamp_t time_last_function_start_check;
 
@@ -268,8 +278,19 @@ struct vine_manager {
 	 * path remains unchanged for direct baseline comparisons. */
 	int worker_first_scheduling;
 	int worker_first_dispatch_limit;
+	int worker_first_least_loaded;
 	struct vine_worker_pool *worker_pool;
+	/* Opt-in trusted-submitter fast paths. Generic TaskVine keeps task history and the
+	 * ordinary retrieval/resource recount path by default. */
+	int fast_task_completion;
+	int incremental_worker_accounting;
+	int task_info_enabled;
+	int trusted_task_submissions;
 };
+
+/* Internal library lifecycle hook used by FunctionCall rebalancing. */
+struct vine_task *vine_manager_send_library_to_worker(struct vine_manager *q,
+		struct vine_worker_info *w, const char *name);
 
 /*
 These are not public API functions, but utility methods that may

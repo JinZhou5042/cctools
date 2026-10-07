@@ -1,0 +1,31 @@
+\begin{abstract}
+Scientific workflow runtimes must decide when a task is logically eligible,
+where its inputs should be obtained, and when a worker should execute it.
+Binding these decisions to a single admission event can leave computation
+waiting for data coordination; advancing them independently can instead
+create excessive staging and resource pressure. DataVine makes these three
+decisions explicit. A logical scheduler dispatches eligible task descriptions,
+a data controller owns intermediate identities and replica lifetimes, and
+worker agents resolve inputs when execution opportunities approach. A bounded
+worker queue is distinct from a feedback-controlled execution window. Physical
+completion can release descendants before background backup, while requested
+outputs have a separate durable-admission boundary. The implementation retains
+individual task attempts and supports recall of queued, unstarted work.
+Logical scheduling remains single-owner while Controller RPC handling and
+durable-output persistence use independent data-plane concurrency pools.
+We evaluate a complete ATLAS Open Data diphoton analysis, concurrency and
+preparation controls and 2,048-task graphs across one
+to eight distinct physical hosts. The analysis processes 36.56 million events
+with exact agreement in all selection counts and histogram bins. Under matched
+dependency preloading, DataVine elastic has a median paired completion-time
+advantage of $\UpgradeAtlasElasticSpeedup{}\times$ over TaskVine. Fixed admission is
+competitive with elastic admission; cold initialization and distributed
+data-heavy chains expose substantial limitations. The artifact contains
+\UpgradeTrials{} accepted trials in five randomized blocks per configuration
+and \UpgradeRegressionPassed{} passing regression gates. The evidence supports
+an explicit execution-boundary design, while limiting claims about adaptive
+control and data-path scalability.\cite{codex}
+\end{abstract}
+\begin{IEEEkeywords}
+scientific workflows, distributed runtime, intermediate data, admission control
+\end{IEEEkeywords}

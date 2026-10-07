@@ -5,7 +5,7 @@ Date: 2026-08-28
 ## Outcome
 
 Simultaneous large requested outputs are the first practical Controller data
-plane bottleneck. The current 16-thread Controller sustains about 0.49-0.53
+plane bottleneck. The campaign's 16-thread Controller sustained about 0.49-0.53
 GiB/s from remote Workers into durable Controller-local `/tmp`. The useful
 concurrency knee is 16 Workers. Raising fan-in to 32 or 64 Workers does not add
 bandwidth; it reduces throughput and increases open descriptors.
@@ -100,22 +100,6 @@ after that, the active 10-gigabit port becomes the next limit. The second Intel
 X520 port exists but is down with no carrier and was not tested. Evidence is
 `acceptance/controller-network-ceiling-20260828.json`.
 
-## Capacity implication
-
-Use 0.48 GiB/s as the conservative sustained planning rate for this host. It
-is just below the slowest 16-Worker large-output guard:
-
-```text
-minimum drain time = total requested bytes / 0.48 GiB/s
-backlog growth     = aggregate producer rate - 0.48 GiB/s
-```
-
-For example, 128 simultaneous 64-MiB outputs form an 8-GiB burst and need at
-least about 17 seconds to drain. One thousand such outputs form 62.5 GiB and
-need about 2.2 minutes. More Workers shorten computation but cannot shorten
-this persistence tail unless total requested bytes or the durable data path
-changes.
-
 ## New issue found
 
 The first “unrequested” command test used stdout rather than a declared output
@@ -133,14 +117,15 @@ ordinary TaskVine behavior must remain unchanged.
 ## Decisions
 
 - Keep 16 Controller data threads.
-- Keep unrequested/no-consumer outputs Worker-local.
-- Treat approximately 0.48 GiB/s as the conservative remote requested-output
-  capacity, and apply backpressure if producers can exceed it for long bursts.
+- The explicit Worker-local control disables persistence; current default
+  backup policy is defined in [the contract](DATAVINE_PRODUCTION.md).
+- The measured capacity applies to this host and campaign, not every
+  deployment. Requested-output drain time must be included when relevant.
 - Queue-depth and persistence-stage timing is now complete. It attributes
   50.6% of 1-MiB active work to `fsync` and 21.8% to the post-write SHA-256
   reread; see `CONTROLLER_PERSISTENCE_DIAGNOSTIC_20260828.md`.
-- Fix the DataVine-only dead-stdout transfer separately; it is avoidable
-  network traffic, not a reason to alter the retention architecture.
+- Track the DataVine-only dead-stdout transfer in [the matrix](acceptance/matrix.md);
+  this historical observation is not a fresh reproduction.
 
 Machine-readable evidence is
 `acceptance/controller-remote-fanin-20260828.json`. Some 4-Worker cases were

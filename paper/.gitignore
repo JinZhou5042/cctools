@@ -1,0 +1,9 @@
+!*.md
+!*.json
+!*.pdf
+build/*
+!build/paper.pdf
+__pycache__/
+*.pyc
+.deps/
+results/*/contact.json

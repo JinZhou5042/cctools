@@ -9,6 +9,16 @@ CONFIGURED_PYTHON=$(sed -n 's/^CCTOOLS_PYTHON_TEST_EXEC=//p' "$ROOT/config.mk")
 REGRESSION_PYTHON=${DATAVINE_TEST_PYTHON:-$CONFIGURED_PYTHON}
 PARAMETRIC_TEST="$ROOT/taskvine/src/tools/datavine_parametric_test"
 BUILT_PARAMETRIC_TEST=0
+REGRESSION_BINDINGS=${DATAVINE_TEST_BINDINGS:-"$ROOT/test_support/python_modules/python3"}
+
+# The C tools below come from this checkout. Test the matching Python extension
+# as well, rather than silently importing an older installed environment.
+if [ ! -f "$REGRESSION_BINDINGS/ndcctools/taskvine/_cvine.so" ]; then
+    echo "build the TaskVine Python bindings or set DATAVINE_TEST_BINDINGS" >&2
+    exit 2
+fi
+export PYTHONPATH="$REGRESSION_BINDINGS${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONNOUSERSITE=1 REGRESSION_BINDINGS
 
 cleanup_generated_test_tool()
 {
@@ -57,12 +67,19 @@ mkdir -p "$(dirname "$REPORT")"
 export ROOT TEST_DIR TIMEOUT_SECONDS REPORT
 "$REGRESSION_PYTHON" - <<'PY'
 import json
+import hashlib
 import os
 import pathlib
 import signal
 import subprocess
 import tempfile
 import time
+from ndcctools.taskvine import _cvine
+
+binding = pathlib.Path(_cvine.__file__).resolve()
+expected = (pathlib.Path(os.environ['REGRESSION_BINDINGS']) / 'ndcctools/taskvine/_cvine.so').resolve()
+if binding != expected:
+    raise RuntimeError('regression imported an unexpected Python extension: ' + str(binding))
 
 test_dir = pathlib.Path(os.environ["TEST_DIR"])
 timeout = int(os.environ["TIMEOUT_SECONDS"])
@@ -116,6 +133,18 @@ report = {
     "test_count": len(results),
     "passed_count": sum(item["passed"] for item in results),
     "results": results,
+    "python_extension": str(binding),
+    "fingerprints": {
+        str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in [binding,
+            test_dir.parent / 'src/tools/datavine_workflow',
+            test_dir.parent / 'src/worker/vine_worker',
+            test_dir.parent / 'src/manager/vine_manager.c',
+            test_dir.parent / 'src/manager/vine_function_call.c',
+            test_dir.parent.parent / 'acceptance/scripts/run_regression.sh',
+            *sorted(test_dir.glob('TR_datavine_*.sh')),
+            *sorted(test_dir.glob('datavine_*.py'))]
+    },
 }
 path = pathlib.Path(os.environ["REPORT"])
 path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

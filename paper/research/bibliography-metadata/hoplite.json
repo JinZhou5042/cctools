@@ -1,0 +1,632 @@
+{
+  "status": "ok",
+  "message-type": "work-list",
+  "message-version": "1.0.0",
+  "message": {
+    "facets": {},
+    "total-results": 9782332,
+    "items": [
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2025,
+              3,
+              22
+            ]
+          ],
+          "date-time": "2025-03-22T08:38:39Z",
+          "timestamp": 1742632719858
+        },
+        "reference-count": 18,
+        "publisher": "IEEE Comput. Soc. Press",
+        "content-domain": {
+          "domain": [],
+          "crossmark-restriction": false
+        },
+        "DOI": "10.1109/icdcs.1989.37940",
+        "type": "proceedings-article",
+        "created": {
+          "date-parts": [
+            [
+              2003,
+              1,
+              7
+            ]
+          ],
+          "date-time": "2003-01-07T14:15:12Z",
+          "timestamp": 1041948912000
+        },
+        "page": "129-134",
+        "source": "Crossref",
+        "is-referenced-by-count": 17,
+        "title": [
+          "Fault-tolerant distributed systems based on broadcast communication"
+        ],
+        "prefix": "10.1109",
+        "author": [
+          {
+            "given": "P.M.",
+            "family": "Melliar-Smith",
+            "sequence": "first",
+            "affiliation": [],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          },
+          {
+            "given": "L.E.",
+            "family": "Moser",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          }
+        ],
+        "member": "263",
+        "reference": [
+          {
+            "doi-asserted-by": "publisher",
+            "key": "ref10",
+            "DOI": "10.1145/7531.7533"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "ref11",
+            "DOI": "10.1145/3149.214121"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "ref12",
+            "DOI": "10.1145/62546.62547"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "ref13",
+            "DOI": "10.1145/2166.357215"
+          },
+          {
+            "year": "0",
+            "key": "ref14"
+          },
+          {
+            "year": "0",
+            "key": "ref15"
+          },
+          {
+            "year": "1981",
+            "author": "moss",
+            "journal-title": "Nested Transactions An Approach to Reliable Distributed Computing",
+            "key": "ref16"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "ref17",
+            "DOI": "10.1109/TSE.1986.6312888"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "ref18",
+            "DOI": "10.1109/CMPCON.1988.4907"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "ref4",
+            "DOI": "10.1145/2080.357392"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "ref3",
+            "DOI": "10.1145/41457.37515"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "ref6",
+            "DOI": "10.1145/989.357400"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "ref5",
+            "DOI": "10.1145/214419.214420"
+          },
+          {
+            "key": "ref8",
+            "first-page": "200",
+            "article-title": "Atomic broadcast: From simple message diffusion to Byzantine agreement",
+            "author": "cristian",
+            "year": "1985",
+            "journal-title": "IEEE Fault Tolerant Computing Systems"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "ref7",
+            "DOI": "10.1145/214438.214439"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "ref2",
+            "DOI": "10.1145/7351.7478"
+          },
+          {
+            "doi-asserted-by": "publisher",
+            "key": "ref1",
+            "DOI": "10.1145/800221.806714"
+          },
+          {
+            "year": "1984",
+            "journal-title": "Red Book VIII 2",
+            "key": "ref9"
+          }
+        ],
+        "event": {
+          "name": "[1989] Proceedings. The 9th International Conference on Distributed Computing Systems",
+          "location": "Newport Beach, CA, USA"
+        },
+        "container-title": [
+          "[1989] Proceedings. The 9th International Conference on Distributed Computing Systems"
+        ],
+        "link": [
+          {
+            "URL": "http://xplorestaging.ieee.org/ielx2/248/1532/00037940.pdf?arnumber=37940",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2017,
+              3,
+              8
+            ]
+          ],
+          "date-time": "2017-03-08T17:04:01Z",
+          "timestamp": 1488992641000
+        },
+        "score": 39.464424,
+        "resource": {
+          "primary": {
+            "URL": "http://ieeexplore.ieee.org/document/37940/"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              null
+            ]
+          ]
+        },
+        "references-count": 18,
+        "URL": "https://doi.org/10.1109/icdcs.1989.37940"
+      },
+      {
+        "indexed": {
+          "date-parts": [
+            [
+              2025,
+              10,
+              24
+            ]
+          ],
+          "date-time": "2025-10-24T16:29:16Z",
+          "timestamp": 1761323356046
+        },
+        "reference-count": 25,
+        "publisher": "Springer Science and Business Media LLC",
+        "issue": "3",
+        "license": [
+          {
+            "start": {
+              "date-parts": [
+                [
+                  1983,
+                  9,
+                  1
+                ]
+              ],
+              "date-time": "1983-09-01T00:00:00Z",
+              "timestamp": 431222400000
+            },
+            "content-version": "tdm",
+            "delay-in-days": 0,
+            "URL": "http://www.springer.com/tdm"
+          }
+        ],
+        "content-domain": {
+          "domain": [],
+          "crossmark-restriction": false
+        },
+        "short-container-title": [
+          "Acta Informatica"
+        ],
+        "published-print": {
+          "date-parts": [
+            [
+              1983,
+              9
+            ]
+          ]
+        },
+        "DOI": "10.1007/bf01257086",
+        "type": "journal-article",
+        "created": {
+          "date-parts": [
+            [
+              2005,
+              3,
+              23
+            ]
+          ],
+          "date-time": "2005-03-23T20:01:07Z",
+          "timestamp": 1111608067000
+        },
+        "page": "261-281",
+        "source": "Crossref",
+        "is-referenced-by-count": 84,
+        "title": [
+          "Task allocation in fault-tolerant distributed systems"
+        ],
+        "prefix": "10.1007",
+        "volume": "20",
+        "author": [
+          {
+            "given": "Joseph A.",
+            "family": "Bannister",
+            "sequence": "first",
+            "affiliation": [],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          },
+          {
+            "given": "Kishor S.",
+            "family": "Trivedi",
+            "sequence": "additional",
+            "affiliation": [],
+            "role": [
+              {
+                "role": "author",
+                "vocabulary": "crossref"
+              }
+            ]
+          }
+        ],
+        "member": "297",
+        "reference": [
+          {
+            "key": "CR1",
+            "doi-asserted-by": "crossref",
+            "first-page": "341",
+            "DOI": "10.1109/TSE.1979.234201",
+            "volume": "SE-5",
+            "author": "S.H. Bokhari",
+            "year": "1979",
+            "unstructured": "Bokhari, S.H.: Dual Processor Scheduling with Dynamic Reassignment. IEEE Trans. Software Engrg. SE-5, 341?349 (1979)",
+            "journal-title": "IEEE Trans. Software Engrg."
+          },
+          {
+            "key": "CR2",
+            "doi-asserted-by": "crossref",
+            "first-page": "191",
+            "DOI": "10.1145/1010629.805490",
+            "volume": "10",
+            "author": "R.M. Bryant",
+            "year": "1981",
+            "unstructured": "Bryant, R.M., Agre, J.R.: A Queueing Network Approach to the Module Allocation Problem in Distributed Systems. Performance Evaluation Review10, 191?204 (1981)",
+            "journal-title": "Performance Evaluation Review"
+          },
+          {
+            "key": "CR3",
+            "doi-asserted-by": "crossref",
+            "first-page": "249",
+            "DOI": "10.1137/0204021",
+            "volume": "4",
+            "author": "A. Chandra",
+            "year": "1975",
+            "unstructured": "Chandra, A., Wong, C.K.: Worst Case Analysis of a Placement Algorithm Related to Storage Allocation. SIAM J. Comput.4, 249?263 (1975)",
+            "journal-title": "SIAM J. Comput."
+          },
+          {
+            "key": "CR4",
+            "doi-asserted-by": "crossref",
+            "first-page": "401",
+            "DOI": "10.1109/TSE.1982.235574",
+            "volume": "SE-8",
+            "author": "T.C.K. Chou",
+            "year": "1982",
+            "unstructured": "Chou, T.C.K., Abraham, J.A.: Load Balancing in Distributed Systems. IEEE Trans. Software Engrg. SE-8, 401?412 (1982)",
+            "journal-title": "IEEE Trans. Software Engrg."
+          },
+          {
+            "key": "CR5",
+            "doi-asserted-by": "crossref",
+            "first-page": "57",
+            "DOI": "10.1109/MC.1980.1653419",
+            "volume": "13",
+            "author": "W.W. Chu",
+            "year": "1980",
+            "unstructured": "Chu, W.W., Holloway, L.J., Lan, M.-T., Efe, K.: Task Allocation in Distributed Data Processing. IEEE Comput.13, 57?69 (1980)",
+            "journal-title": "IEEE Comput."
+          },
+          {
+            "key": "CR6",
+            "doi-asserted-by": "crossref",
+            "first-page": "127",
+            "DOI": "10.1287/opre.26.1.127",
+            "volume": "26",
+            "author": "S.K. Dhall",
+            "year": "1978",
+            "unstructured": "Dhall, S.K., Liu, C.L.: On a Real-Time Scheduling Problem. Operations Research26, 127?140 (1978)",
+            "journal-title": "Operations Research"
+          },
+          {
+            "key": "CR7",
+            "doi-asserted-by": "crossref",
+            "first-page": "50",
+            "DOI": "10.1109/MC.1982.1654050",
+            "volume": "15",
+            "author": "K. Efe",
+            "year": "1982",
+            "unstructured": "Efe, K.: Heuristic Models of Task Assignment and Scheduling in Distributed Systems. Computer15, 50?56 (1982)",
+            "journal-title": "Computer"
+          },
+          {
+            "key": "CR8",
+            "unstructured": "Garey, M.R., Johnson, D.S.: Computers and Intractability: A Guide to the Theory of NP-Completeness. Freeman, W.H. (ed.). San Francisco 1979"
+          },
+          {
+            "key": "CR9",
+            "doi-asserted-by": "crossref",
+            "first-page": "249",
+            "DOI": "10.1109/TC.1982.1675981",
+            "volume": "C-31",
+            "author": "R.M. Geist",
+            "year": "1982",
+            "unstructured": "Geist, R.M., Trivedi, K.S.: Optimal Design of Multilevel Storage Hierarchies. IEEE Trans. Comput. C-31, 249?260 (1982)",
+            "journal-title": "IEEE Trans. Comput."
+          },
+          {
+            "key": "CR10",
+            "first-page": "353",
+            "volume": "76",
+            "author": "V.B. Gylys",
+            "year": "1976",
+            "unstructured": "Gylys, V.B., Edwards, J.A.: Optimal Partitioning of Workload for Distributed Systems. Digest of Papers. COMPCON76, 353?357 (1976)",
+            "journal-title": "Digest of Papers. COMPCON"
+          },
+          {
+            "key": "CR11",
+            "doi-asserted-by": "crossref",
+            "first-page": "410",
+            "DOI": "10.1109/TC.1982.1676018",
+            "volume": "C-31",
+            "author": "J.P. Ignizio",
+            "year": "1982",
+            "unstructured": "Ignizio, J.P., Palmer, D.F., Murphy, C.M.: A Multicriteria Approach to Supersystem Architecture Definition. IEEE Trans. Comput. C-31, 410?418 (1982)",
+            "journal-title": "IEEE Trans. Comput."
+          },
+          {
+            "key": "CR12",
+            "unstructured": "Leung, J.Y-T., Whitehead, J.: On the Complexity of Fixed-Priority Scheduling of Real-Time Tasks. Proceedings of the Eighteenth Annual Allerton Conference on Communication. Control and Computing, pp. 464?470, 1980"
+          },
+          {
+            "key": "CR13",
+            "doi-asserted-by": "crossref",
+            "first-page": "46",
+            "DOI": "10.1145/321738.321743",
+            "volume": "20",
+            "author": "C.L. Liu",
+            "year": "1973",
+            "unstructured": "Liu, C.L., Layland, J.W.: Scheduling Algorithms for Multiprogramming in a Hard-Real-Time Environment. J. ACM20, 46?61 (1973)",
+            "journal-title": "J. ACM"
+          },
+          {
+            "key": "CR14",
+            "doi-asserted-by": "crossref",
+            "first-page": "41",
+            "DOI": "10.1109/TC.1982.1675884",
+            "volume": "C-31",
+            "author": "P.-Y.R. Ma",
+            "year": "1982",
+            "unstructured": "Ma, P.-Y.R., Lee, E.Y.S., Tsuchiya, M.: A Task Allocation Model for Distributed Computing Systems. IEEE Trans. Comput. C-31, 41?47 (1982)",
+            "journal-title": "IEEE Trans. Comput."
+          },
+          {
+            "key": "CR15",
+            "doi-asserted-by": "crossref",
+            "first-page": "291",
+            "DOI": "10.1109/TC.1979.1675348",
+            "volume": "C-28",
+            "author": "G.S. Rao",
+            "year": "1979",
+            "unstructured": "Rao, G.S., Stone, H.S., Hu, T.C.: Assignment of Tasks in a Distributed Proceesor System with Limited Memory. IEEE Trans. Comput. C-28, 291?299 (1979)",
+            "journal-title": "IEEE Trans. Comput."
+          },
+          {
+            "key": "CR16",
+            "unstructured": "Ratner, R.S., Shapiro, E.B., Zeidler, H.M., Wahlstrom, S.E., Clark, C.B., Goldberg, J.: Design of a Fault Tolerant Airborne Digital Computer, vol. 2: Computational Requirements and Technology. SRI Final Report, NASA Contract NAS1-10920, 1973"
+          },
+          {
+            "key": "CR17",
+            "volume-title": "Computer Structures: Principles and Examples",
+            "author": "D.P. Siewiorek",
+            "year": "1982",
+            "unstructured": "Siewiorek, D.P., Gordon Bell, C., Newell, A.: Computer Structures: Principles and Examples. New York: McGraw-Hill 1982"
+          },
+          {
+            "key": "CR18",
+            "doi-asserted-by": "crossref",
+            "first-page": "85",
+            "DOI": "10.1109/TSE.1977.233840",
+            "volume": "SE-3",
+            "author": "H.S. Stone",
+            "year": "1977",
+            "unstructured": "Stone, H.S.: Multiprocessor Scheduling with the Aid of Network Flow Algorithms. IEEE Trans. Software Engrg. SE-3, 85?93 (1977)",
+            "journal-title": "IEEE Trans. Software Engrg."
+          },
+          {
+            "key": "CR19",
+            "doi-asserted-by": "crossref",
+            "first-page": "97",
+            "DOI": "10.1109/C-M.1978.218272",
+            "volume": "11",
+            "author": "H.S. Stone",
+            "year": "1978",
+            "unstructured": "Stone, H.S., Bokhari, S.H.: Control of Distributed Processes. Computer11, 97?106 (1978)",
+            "journal-title": "Computer"
+          },
+          {
+            "key": "CR20",
+            "doi-asserted-by": "crossref",
+            "first-page": "457",
+            "DOI": "10.1145/322203.322208",
+            "volume": "27",
+            "author": "K.S. Trivedi",
+            "year": "1980",
+            "unstructured": "Trivedi, K.S., Wagner, R.A., Sigmon, T.M.: Optimal Selection of CPU Speed. Device Capacities, and File Assignments. JACM27, 457?473 (1980)",
+            "journal-title": "JACM"
+          },
+          {
+            "key": "CR21",
+            "doi-asserted-by": "crossref",
+            "first-page": "540",
+            "DOI": "10.1109/TSMC.1978.4310018",
+            "volume": "SMC-8",
+            "author": "J.L. Uhrig",
+            "year": "1978",
+            "unstructured": "Uhrig, J.L.: Mathematical Programming Approaches to System Partitioning. IEEE Trans. Syst. Man, Cybernetics SMC-8, 540?548 (1978)",
+            "journal-title": "IEEE Trans. Syst. Man, Cybernetics"
+          },
+          {
+            "key": "CR22",
+            "doi-asserted-by": "crossref",
+            "unstructured": "Wagner, R.A., Trivedi, K.S.: Hardware Configuration Selection Through Discretizing a Continuous Variable Solution. In: Proc. 7th IFIP Int. Symp. Comp. Performance Modeling, Measurement, and Evaluation. Toronto, Canada, pp. 127?142, 1980",
+            "DOI": "10.1145/800199.806156"
+          },
+          {
+            "key": "CR23",
+            "unstructured": "Weinstock, C.B.: SIFT: System Design and Implementation. Proc. Tenth International Symposium Fault Tolerant Computing, pp. 75?77, 1980"
+          },
+          {
+            "key": "CR24",
+            "unstructured": "Wensley, J.H., Goldberg, J., Green, M.W., Kautz, W.H., Levitt, K.N., Mills, M.E., Shostak, R.E., Whiting-O'Keefe, P.M., Zeidler, H.M.: Design Study of Software-Implemented Fault-Tolerance (SIFT) Computer. SRI Interim Technical Report 1, NASA Contract NAS1-13792, 1978"
+          },
+          {
+            "key": "CR25",
+            "doi-asserted-by": "crossref",
+            "first-page": "1240",
+            "DOI": "10.1109/PROC.1978.11114",
+            "volume": "66",
+            "author": "J.H. Wensley",
+            "year": "1978",
+            "unstructured": "Wensley, J.H., Lamport, L., Goldberg, J., Green, M., Levitt, K.N., Melliar-Smith, P.M., Shostak, R., Weinstock, C.B.: SIFT: Design and Analysis of a Fault-Tolerant Computer for Aircraft Control. Proc. IEEE66, 1240?1255 (1978)",
+            "journal-title": "Proc. IEEE"
+          }
+        ],
+        "container-title": [
+          "Acta Informatica"
+        ],
+        "language": "en",
+        "link": [
+          {
+            "URL": "http://link.springer.com/content/pdf/10.1007/BF01257086.pdf",
+            "content-type": "application/pdf",
+            "content-version": "vor",
+            "intended-application": "text-mining"
+          },
+          {
+            "URL": "http://link.springer.com/article/10.1007/BF01257086/fulltext.html",
+            "content-type": "text/html",
+            "content-version": "vor",
+            "intended-application": "text-mining"
+          },
+          {
+            "URL": "http://link.springer.com/content/pdf/10.1007/BF01257086",
+            "content-type": "unspecified",
+            "content-version": "vor",
+            "intended-application": "similarity-checking"
+          }
+        ],
+        "deposited": {
+          "date-parts": [
+            [
+              2019,
+              5,
+              2
+            ]
+          ],
+          "date-time": "2019-05-02T10:58:41Z",
+          "timestamp": 1556794721000
+        },
+        "score": 38.343082,
+        "resource": {
+          "primary": {
+            "URL": "http://link.springer.com/10.1007/BF01257086"
+          }
+        },
+        "issued": {
+          "date-parts": [
+            [
+              1983,
+              9
+            ]
+          ]
+        },
+        "references-count": 25,
+        "journal-issue": {
+          "issue": "3",
+          "published-print": {
+            "date-parts": [
+              [
+                1983,
+                9
+              ]
+            ]
+          }
+        },
+        "alternative-id": [
+          "BF01257086"
+        ],
+        "URL": "https://doi.org/10.1007/bf01257086",
+        "ISSN": [
+          "0001-5903",
+          "1432-0525"
+        ],
+        "issn-type": [
+          {
+            "value": "0001-5903",
+            "type": "print"
+          },
+          {
+            "value": "1432-0525",
+            "type": "electronic"
+          }
+        ],
+        "published": {
+          "date-parts": [
+            [
+              1983,
+              9
+            ]
+          ]
+        }
+      }
+    ],
+    "items-per-page": 2,
+    "query": {
+      "start-index": 0,
+      "search-terms": null
+    }
+  }
+}

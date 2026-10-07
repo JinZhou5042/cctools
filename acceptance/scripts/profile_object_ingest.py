@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure cold and deduplicated SharedFS object ingest without worker noise."""
+"""Measure cold and deduplicated Controller-RPC ingest without Worker noise."""
 
 import argparse
 import hashlib
@@ -47,9 +47,6 @@ def timed_put(client, objects, workers):
         "rpc_seconds_aggregate": sum(
             result["rpc_nanoseconds"] for result in results
         ) / 1e9,
-        "sharedfs_seconds_aggregate": sum(
-            result["sharedfs_nanoseconds"] for result in results
-        ) / 1e9,
     }
 
 
@@ -89,7 +86,7 @@ def main():
     args.scratch_parent.mkdir(parents=True, exist_ok=True)
     artifact = {
         "artifact_type": "datavine-object-ingest-profile",
-        "schema_version": 1,
+        "schema_version": 2,
         "objects": args.objects,
         "payload_bytes": args.payload_bytes,
         "runs": [

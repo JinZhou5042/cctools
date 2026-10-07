@@ -1,0 +1,31 @@
+{
+  "inputs": {
+    "results/upgrade-controls-v4/summary.json": "13d20dfd4b712f1564fb66bc0381e30e9d627c0fff33fede4f79ef4896fa2eda",
+    "results/upgrade-controls-v4/plan.json": "2a98d133547afd665f81bf09c8dd18f8402bbfe35d98fb410d9ee0cbcc028efe",
+    "results/upgrade-controls-v3/summary.json": "88f284f6f29c7b05575e3606529182b8ba17eb72dca1771fa7b40cf5015ec645",
+    "results/upgrade-application-v4/summary.json": "f0e7a9b8729b2c258e4a29187bf9799d9c580cd356519aa3a19b7943a5e4584a",
+    "results/upgrade-application-v4/plan.json": "52aca057783f65cdf1a9c7bed2f819f03853b3a4f9d977d4954ac16963c49e25",
+    "results/upgrade-attribution-v2/summary.json": "5f0d6020ec209f712ff7d62c1a5d09dd31448753118451bd34fc3ebb0fc1ab0d",
+    "results/upgrade-attribution-v2/plan.json": "16c232d89aa943e9e1dedaa9824d637f5d7bb7fc27400fc8a001a9ddb2da2f12",
+    "results/upgrade-node-scaling-v3/summary.json": "0418f98f25125224ea6eff6dd605fc8aa3d212dfb88060d7169aaccbd6fce008",
+    "results/upgrade-node-scaling-v3/plan.json": "7d6e050492d2a02b287e907fa78565b89ce0a0af8222fa0473cb1e2838b01658",
+    "results/upgrade-node-scaling-v2/summary.json": "0422446ac9e9a0e4ae2cb27e8e35e98c8fa9ae96bc39da86fce790b4fdeff281",
+    "results/upgrade-grouping-v3/summary.json": "54c83a58a1e22488813ae01a5dfc0c17fdf9f29ec023a511d12439a4a7fa8906",
+    "results/upgrade-grouping-v3/plan.json": "1da469022a610a4cb38c60da6e32d7b4dcb173f59933464aa949d26324ed1510",
+    "results/upgrade-traces.json": "982c7f0d0572e945764b3ad059b801126b24f90377d7f475b00b002f4a30c957",
+    "results/upgrade-regression-final-v3.json": "2a662e6f6328e038795b24a7e9d6fe14f8cdf0ba6662d3214bf6814fde6c57c1",
+    "scripts/summarize_upgrade.py": "e3f72b3804747aa6b7b6546cb5389aae276bcbb9c1bc5c808a51b849cca3d081"
+  },
+  "outputs": {
+    "figures/upgrade-application.pdf": "bce31a37c2a6d0d2320ed02be3c436edbcaf0eb4f4e114b698d14d603b68f705",
+    "figures/upgrade-controls.pdf": "f1fc8a126aa8fb190df6a6e5fc8c5adf49d857f8c78921886c045856a5fa7416",
+    "figures/upgrade-grouping.pdf": "e016258ae1b323aaa6acc80c181918803213f7303e3b4e799d2873e5bc4a96d3",
+    "figures/upgrade-scaling.pdf": "7bc768c7b537f1fe94961e7e6f018e1ca115882b78bfc4c9bda22b99e0294931",
+    "results/upgrade-attribution-summary.tex": "dcb8f3d09759551af6b0137b7c232005018e4cec2fbc6c21c60455024d4e61d1",
+    "results/upgrade-controls-table.tex": "41e3c0b5045910c82c4feec8d64d225ef10d41c28c9927dd196378b226e7c5dc",
+    "results/upgrade-cpu-table.tex": "3411875d9bdb984e6b216282ebd4c88d2e71f3916d57acd06f994a30696f1af2",
+    "results/upgrade-grouping-table.tex": "5531ab6e873c69241f476ba30d73ed1f1362c92095404f619947380a0d15f8d5",
+    "results/upgrade-numbers.tex": "b4e230ecccb90cf771a22fbbc8abb6bda55fa16c5b84a6848d102764cc39d878",
+    "results/upgrade-scaling-summary.tex": "8f3b334954528280b4e89af6e42214e186f224a848982a590a18ebfcebd2c234"
+  }
+}

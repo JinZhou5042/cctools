@@ -203,8 +203,7 @@ struct vine_datavine_workflow_runtime *vine_datavine_workflow_runtime_start(
 		struct vine_datavine_workflow_store *store,
 		struct vine_datavine_data_controller *data_controller,
 		struct vine_manager *manager,
-		const char *native_executor_path,
-		const char *python_executor_path);
+		const char *executor_path);
 void vine_datavine_workflow_runtime_run(
 		struct vine_datavine_workflow_runtime *runtime,
 		volatile sig_atomic_t *external_stopping);

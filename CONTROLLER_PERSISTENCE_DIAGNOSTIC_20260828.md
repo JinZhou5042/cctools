@@ -4,7 +4,7 @@ Date: 2026-08-28
 
 ## Result
 
-The current remote requested-output ceiling is explained by the existing 16
+The measured remote requested-output ceiling is explained by the existing 16
 data threads spending most of their active time in `fsync`, followed by a full
 SHA-256 reread of every newly durable file. Queue admission, rename, close,
 journal commit, Scheduler and metadata RPC are not material limits.
@@ -76,34 +76,17 @@ not silently claim otherwise.
 The 64-MiB point was excluded because Condor did not admit the exact 16-Worker
 inventory. No partial-inventory result was counted.
 
-## Is `fsync` necessary?
+## Persistence contract and fault gate
 
-Yes, for the current requested-output failure contract. A successful `write`,
-`close` or `rename` only says that the kernel accepted the operation; delayed
-allocation and writeback failures such as `ENOSPC` or `EIO` can first become
-visible at `fsync`. The Controller must observe that result before it installs
-the requested-output metadata, otherwise it could advertise a result whose
-bytes were never made locally durable.
+The [production contract](DATAVINE_PRODUCTION.md) owns the required `fsync`,
+digest verification and atomic-rename semantics. Removing `fsync` would change
+failure behavior; this campaign did not authorize that policy change.
 
-This guarantee is deliberately narrow. The Controller does not `fsync` the
-containing directory after rename, and Controller-local `/tmp` is explicitly
-not a Controller-host crash, reboot or cross-host durability mechanism.
-`fsync` protects the current runtime against delayed local persistence failure;
-it does not turn `/tmp` into permanent storage.
-
-Removing `fsync` is valid only after changing the contract to allow metadata
-commit after page-cache acceptance and accepting possible loss on later local
-writeback failure. That is a policy change, not a transparent optimization.
-
-The contract now has a deterministic Linux regression gate. A test-only
-`LD_PRELOAD` shim returns `ENOSPC` or `EIO` only for Controller private `.part`
-file `fsync` calls while a test-owned marker exists; production code has no
-fault-injection branch. Each case forces all eight internal persistence
-attempts to fail and proves that no descriptor, final file or terminal workflow
-appears. After Worker and Controller shutdown, no `.part` file remains. Removing
-the marker and restarting the same journal recomputes the producer, commits one
-result, and a second restart fetches it without a Worker. This closes the
-previous deterministic persistence-fault gate.
+The deterministic Linux `LD_PRELOAD` gate forces ENOSPC/EIO at private result
+file `fsync`, verifies no phantom descriptor or leaked temporary file, then
+restarts the same journal and commits exactly one result. A second restart
+fetches it without a Worker. Production has no fault-injection branch.
+Evidence: [persistence faults](acceptance/controller-persistence-faults-20260828.json).
 
 ## Follow-up optimization experiments
 
@@ -149,9 +132,8 @@ the same semantic change has a theoretical ceiling near 3.75x.
   output-producing tasks complete together on each Worker. It is secondary to
   durability and does not justify adding a connection pool yet.
 - `link_stream_to_fd` intentionally remains untouched, so this diagnostic
-  cannot separate socket read from local write inside the stream stage. That
-  split should only be added if the SHA-reread experiment fails to explain the
-  remaining gap.
+  cannot separate socket read from local write inside the stream stage. A future
+  investigation needs a measured reason to split that stage further.
 
 Machine-readable evidence is
 `acceptance/controller-persistence-diagnostic-20260828.json`; fault-gate

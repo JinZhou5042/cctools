@@ -1,0 +1,579 @@
+#!/usr/bin/env python3
+"""Single-threaded preloader and per-call fork executor for DataVine Python."""
+
+import argparse
+import hashlib
+import json
+import os
+from collections import OrderedDict
+from pathlib import Path
+import select
+import signal
+import struct
+import sys
+import time
+
+# Preload the serializer before forking. User source imports reuse these pages,
+# while every child still has an independent interpreter and GIL.
+import cloudpickle
+
+
+# Paper experiment: initialize the same modules as the TaskVine hoisted library.
+# OPENBLAS_NUM_THREADS and OMP_NUM_THREADS are set to 1 by the trial environment.
+# This controlled module set is not a promise that arbitrary imports are fork-safe.
+import importlib as _paper_importlib
+for _paper_module in ['hashlib', 'math', 'os', 'platform', 'tempfile', 'time', 'numpy']:
+    _paper_importlib.import_module(_paper_module)
+del _paper_module, _paper_importlib
+
+FRAME_LIMIT = 64 * 1024 * 1024
+SOURCE_TICKET_BASIC = struct.Struct("!4sIQQ")
+SOURCE_TICKET_RETAINED = struct.Struct("!4sIQQI")
+CALLABLE_TICKET_V3 = struct.Struct("!4sIQII32sQ")
+CALLABLE_TICKET_V4 = struct.Struct("!4sIQI32s32sQQ")
+FUNCTION_CACHE_BYTES = 64 * 1024 * 1024
+FUNCTION_CACHE_ENTRIES = 1024
+MANIFEST_NAME = ".datavine-output-manifest"
+PYTHON_TICKET_MAGIC = b"DVP1"
+PYTHON_FUNCTION_TICKET_MAGIC = b"DVP3"
+PYTHON_REFERENCE_TICKET_MAGIC = b"DVP4"
+OUTPUT_MANIFEST_MAGIC = "DVM1"
+
+
+class HashingWriter:
+    """Hash serialized bytes in the only write pass."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.digest = hashlib.sha256()
+        self.size = 0
+
+    def write(self, value):
+        written = self.stream.write(value)
+        if written is None:
+            written = len(value)
+        self.digest.update(memoryview(value)[:written])
+        self.size += written
+        return written
+
+    def flush(self):
+        return self.stream.flush()
+
+    def fileno(self):
+        return self.stream.fileno()
+
+
+def write_manifest(
+    entries, pull_ns, decode_ns, function_ns, serialize_ns, fsync_ns,
+    task_report=None,
+):
+    payload = "{}\n{}\n{}M {} {} {} {} {}\n".format(
+        OUTPUT_MANIFEST_MAGIC,
+        len(entries),
+        "".join(f"{size} {digest}\n" for size, digest in entries),
+        pull_ns,
+        decode_ns,
+        function_ns,
+        serialize_ns,
+        fsync_ns,
+    )
+    if task_report is not None:
+        read_bytes, cpu_ms = task_report
+        payload += f"R {int(read_bytes)} {int(cpu_ms)}\n"
+    payload = payload.encode("ascii")
+    temporary = Path(MANIFEST_NAME + ".part")
+    with temporary.open("wb") as stream:
+        stream.write(payload)
+    os.replace(temporary, MANIFEST_NAME)
+
+
+def read_exact(fd, size):
+    chunks = []
+    while size:
+        chunk = os.read(fd, size)
+        if not chunk:
+            raise EOFError("short invocation frame")
+        chunks.append(chunk)
+        size -= len(chunk)
+    return b"".join(chunks)
+
+
+def read_frame(fd):
+    digits = bytearray()
+    while len(digits) < 32:
+        byte = os.read(fd, 1)
+        if not byte:
+            return None
+        if byte == b"\n":
+            break
+        if byte < b"0" or byte > b"9":
+            raise ValueError("invalid invocation length")
+        digits.extend(byte)
+    if not digits:
+        raise ValueError("empty invocation length")
+    size = int(digits)
+    if size < 1 or size > FRAME_LIMIT:
+        raise ValueError("invocation exceeds frame limit")
+    frame = read_exact(fd, size)
+    header, separator, payload = frame.partition(b"\n")
+    if not separator:
+        raise ValueError("invocation has no header terminator")
+    fields = header.decode("utf-8").split(" ", 4)
+    if len(fields) != 5:
+        raise ValueError("invalid invocation header")
+    invocation_id, function, sandbox, stdout_path, payload_size = fields
+    if int(payload_size) != len(payload):
+        raise ValueError("invocation payload length mismatch")
+    return int(invocation_id), function, sandbox, stdout_path, payload
+
+
+def send_frame(fd, payload):
+    for part in (str(len(payload)).encode(), b"\n", payload):
+        remaining = memoryview(part)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written < 1:
+                raise OSError("short library frame write")
+            remaining = remaining[written:]
+
+
+def send_configuration(fd, task_id, worker_pid):
+    body = json.dumps({
+        "name": "datavine-python-v1",
+        "taskid": task_id,
+        "exec_mode": "fork",
+    }, separators=(",", ":")).encode()
+    send_frame(fd, body)
+    os.kill(worker_pid, signal.SIGCHLD)
+
+
+def send_result(fd, invocation_id, exit_code, worker_pid, payload=b""):
+    header = f"{invocation_id} {exit_code} {len(payload)}\n".encode()
+    send_frame(fd, header + payload)
+    os.kill(worker_pid, signal.SIGCHLD)
+
+
+def callable_main(
+    data_root, invocation_bytes, function_bytes, retained_outputs, pull_ns=0,
+):
+    payload = cloudpickle.loads(invocation_bytes)
+    output_count = payload["output_count"]
+    output_files = payload.get("output_files")
+    if not isinstance(output_count, int) or output_count < 1:
+        raise ValueError("Python invocation has invalid output count")
+    if not isinstance(output_files, list) or len(output_files) != output_count:
+        raise ValueError("Python invocation has invalid output files")
+    if len(retained_outputs) != output_count:
+        raise ValueError("Python invocation has invalid output policy")
+    output_paths = []
+    for path, retained in zip(output_files, retained_outputs):
+        target = Path(path)
+        if target.is_absolute() or ".." in target.parts or target.name != str(target):
+            raise ValueError("Python invocation output path is unsafe")
+        # TaskVine requires every declared output to exist even when user code
+        # fails or is killed. The controller publishes only successful tasks,
+        # and successful serialization atomically replaces this placeholder.
+        if retained:
+            target.touch()
+        output_paths.append(target if retained else None)
+
+    def decode(value):
+        kind, body = value
+        if kind == "ref":
+            with (data_root / str(body)).open("rb") as stream:
+                return cloudpickle.load(stream)
+        if kind == "tuple":
+            return tuple(decode(item) for item in body)
+        if kind == "list":
+            return [decode(item) for item in body]
+        if kind == "dict":
+            return {decode(key): decode(item) for key, item in body}
+        if kind == "pickle":
+            return cloudpickle.loads(body)
+        raise ValueError("unknown Python invocation value kind")
+
+    decode_started = time.monotonic_ns()
+    function = cloudpickle.loads(function_bytes)
+    args = tuple(decode(value) for value in payload["args"])
+    kwargs = {key: decode(value) for key, value in payload["kwargs"].items()}
+    decode_ns = time.monotonic_ns() - decode_started
+    function_started = time.monotonic_ns()
+    result = function(*args, **kwargs)
+    function_ns = time.monotonic_ns() - function_started
+    outputs = tuple(result) if output_count != 1 else (result,)
+    if len(outputs) != output_count:
+        raise ValueError("Python callable returned the wrong output count")
+
+    # A result with no consumers is deliberately volatile.  The parent only
+    # needs the child's exit status, so avoid the per-call manifest write on
+    # the high-throughput sandboxless path.
+    if not any(retained_outputs):
+        return
+
+    entries = []
+    serialize_ns = 0
+    fsync_ns = 0
+    for target, value in zip(output_paths, outputs):
+        if target is None:
+            entries.append((0, "0" * 64))
+            continue
+        temporary = target.with_name(f"{target.name}.part-{os.getpid()}")
+        with temporary.open("wb") as stream:
+            writer = HashingWriter(stream)
+            serialize_started = time.monotonic_ns()
+            cloudpickle.dump(value, writer)
+            serialize_ns += time.monotonic_ns() - serialize_started
+            entries.append((writer.size, writer.digest.hexdigest()))
+        os.replace(temporary, target)
+    write_manifest(
+        entries, pull_ns, decode_ns, function_ns, serialize_ns, fsync_ns
+    )
+
+
+def source_manifest(retained_outputs, function_ns, task_report=None):
+    """Describe indexed source-v1 outputs without copying their payloads."""
+
+    if not any(retained_outputs):
+        return
+
+    entries = []
+    for index, retained in enumerate(retained_outputs):
+        if not retained:
+            entries.append((0, "0" * 64))
+            continue
+        path = Path(f"datavine-python-output-{index}")
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as stream:
+            while True:
+                block = stream.read(1024 * 1024)
+                if not block:
+                    break
+                digest.update(block)
+                size += len(block)
+        entries.append((size, digest.hexdigest()))
+    write_manifest(entries, 0, 0, function_ns, 0, 0, task_report)
+
+
+def child_main(
+    sandbox, stdout_path, payload_id, inherited_fds, function_bytes=None,
+    invocation_bytes=None, retained_outputs=None, pull_ns=0,
+):
+    exit_code = 1
+    try:
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        os.setsid()
+        for fd in inherited_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        os.chdir(sandbox)
+        output = os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.dup2(output, sys.stdout.fileno())
+        os.dup2(output, sys.stderr.fileno())
+        os.close(output)
+        data_root = Path("datavine/data")
+        if data_root.is_dir():
+            for item in data_root.iterdir():
+                if item.name.isdigit():
+                    os.environ[f"DATAVINE_DATA_{item.name}"] = str(item)
+        if function_bytes is None:
+            source_path = data_root / str(payload_id)
+            source = source_path.read_text(encoding="utf-8")
+            namespace = {"__name__": "__main__", "__file__": str(source_path)}
+            function_started = time.monotonic_ns()
+            exec(compile(source, str(source_path), "exec"), namespace, namespace)
+            function_ns = time.monotonic_ns() - function_started
+            if retained_outputs is not None:
+                report = None
+                if isinstance(namespace.get("read_bytes"), int) and isinstance(
+                    namespace.get("cpu_ms"), int
+                ):
+                    report = (namespace["read_bytes"], namespace["cpu_ms"])
+                source_manifest(retained_outputs, function_ns, report)
+        else:
+            callable_main(
+                data_root, invocation_bytes, function_bytes,
+                retained_outputs, pull_ns,
+            )
+        exit_code = 0
+    except BaseException:
+        import traceback
+
+        traceback.print_exc()
+    finally:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except BaseException:
+            exit_code = exit_code or 1
+        os._exit(exit_code)
+
+
+def exit_code(status):
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        return 128 + os.WTERMSIG(status)
+    return 1
+
+
+def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--in-pipe-fd", type=int, required=True)
+    parser.add_argument("--out-pipe-fd", type=int, required=True)
+    parser.add_argument("--task-id", type=int, required=True)
+    parser.add_argument("--worker-pid", type=int, required=True)
+    parser.add_argument("--library-cores", type=int, default=0)
+    parser.add_argument("--function-slots", type=int, default=1)
+    args = parser.parse_args()
+    if args.task_id < 1 or args.worker_pid < 1 or args.function_slots < 1:
+        return 2
+    notify_read, notify_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+
+    def child_ready(signum, frame):
+        del signum, frame
+        try:
+            os.write(notify_write, b"x")
+        except BlockingIOError:
+            pass
+
+    signal.signal(signal.SIGCHLD, child_ready)
+    send_configuration(args.out_pipe_fd, args.task_id, args.worker_pid)
+    parent_pid = os.getppid()
+    children = {}
+    functions = OrderedDict()
+    function_cache_bytes = 0
+    state = {"stopping": False}
+
+    def stop(signum, frame):
+        del signum, frame
+        state["stopping"] = True
+
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+    while not state["stopping"]:
+        if os.getppid() != parent_pid or parent_pid == 1:
+            break
+        readable, _, _ = select.select(
+            (args.in_pipe_fd, notify_read), (), (), 1.0
+        )
+        if args.in_pipe_fd in readable:
+            invocation = read_frame(args.in_pipe_fd)
+            if invocation is None:
+                return 0
+            invocation_id, function, sandbox, stdout_path, payload = invocation
+            payload_id = 0
+            function_bytes = None
+            invocation_bytes = None
+            invocation_digest = None
+            function_ref = 0
+            pull_ns = 0
+            retained_outputs = None
+            valid = False
+            if function == "datavine_python_source" and len(payload) == SOURCE_TICKET_BASIC.size:
+                magic, reserved, payload_id, wall_seconds = SOURCE_TICKET_BASIC.unpack(payload)
+                valid = magic == PYTHON_TICKET_MAGIC and reserved == 0 and payload_id > 0
+            elif (
+                function == "datavine_python_source"
+                and len(payload) >= SOURCE_TICKET_RETAINED.size
+            ):
+                (
+                    magic, reserved, payload_id, wall_seconds, output_count,
+                ) = SOURCE_TICKET_RETAINED.unpack(payload[:SOURCE_TICKET_RETAINED.size])
+                policy_end = SOURCE_TICKET_RETAINED.size + output_count
+                valid = (
+                    magic == PYTHON_TICKET_MAGIC and reserved == 0
+                    and payload_id > 0 and output_count > 0
+                    and policy_end == len(payload)
+                )
+                if valid:
+                    retained_outputs = payload[
+                        SOURCE_TICKET_RETAINED.size:
+                        policy_end
+                    ]
+            elif (
+                function == "datavine_python_callable"
+                and len(payload) >= 4
+            ):
+                magic = payload[:4]
+                if (
+                    magic == PYTHON_REFERENCE_TICKET_MAGIC
+                    and len(payload) >= CALLABLE_TICKET_V4.size
+                ):
+                    (
+                        magic, reserved, wall_seconds, output_count,
+                        invocation_digest, function_digest, payload_id,
+                        function_ref,
+                    ) = CALLABLE_TICKET_V4.unpack(
+                        payload[:CALLABLE_TICKET_V4.size]
+                    )
+                    policy_end = CALLABLE_TICKET_V4.size + output_count
+                    valid = (
+                        reserved == 0 and output_count > 0
+                        and payload_id > 0 and function_ref > 0
+                        and policy_end == len(payload)
+                    )
+                    if valid:
+                        retained_outputs = payload[
+                            CALLABLE_TICKET_V4.size:policy_end
+                        ]
+                        try:
+                            pull_started = time.monotonic_ns()
+                            invocation_bytes = (
+                                Path(sandbox) / "datavine/data" / str(payload_id)
+                            ).read_bytes()
+                            pull_ns += time.monotonic_ns() - pull_started
+                            valid = (
+                                0 < len(invocation_bytes) <= FRAME_LIMIT
+                                and hashlib.sha256(invocation_bytes).digest()
+                                == invocation_digest
+                            )
+                        except OSError:
+                            valid = False
+                elif (
+                    magic == PYTHON_FUNCTION_TICKET_MAGIC
+                    and len(payload) >= CALLABLE_TICKET_V3.size
+                ):
+                    (
+                        magic, reserved, wall_seconds, output_count,
+                        invocation_size, function_digest, function_ref,
+                    ) = CALLABLE_TICKET_V3.unpack(
+                        payload[:CALLABLE_TICKET_V3.size]
+                    )
+                    policy_end = CALLABLE_TICKET_V3.size + output_count
+                    invocation_end = policy_end + invocation_size
+                    valid = (
+                        reserved == 0 and output_count > 0
+                        and 0 < invocation_size <= FRAME_LIMIT
+                        and function_ref > 0
+                        and invocation_end == len(payload)
+                    )
+                    if valid:
+                        retained_outputs = payload[
+                            CALLABLE_TICKET_V3.size:policy_end
+                        ]
+                        invocation_bytes = payload[policy_end:invocation_end]
+                if valid:
+                    function_bytes = functions.pop(function_digest, None)
+                    if function_bytes is None:
+                        try:
+                            pull_started = time.monotonic_ns()
+                            function_bytes = (
+                                Path("datavine/data") / str(function_ref)
+                            ).read_bytes()
+                            pull_ns += time.monotonic_ns() - pull_started
+                        except OSError:
+                            valid = False
+                        if valid and (
+                            len(function_bytes) > FUNCTION_CACHE_BYTES
+                            or hashlib.sha256(function_bytes).digest()
+                            != function_digest
+                        ):
+                            valid = False
+                        if valid:
+                            while functions and (
+                                len(functions) >= FUNCTION_CACHE_ENTRIES
+                                or function_cache_bytes + len(function_bytes)
+                                > FUNCTION_CACHE_BYTES
+                            ):
+                                _, evicted = functions.popitem(last=False)
+                                function_cache_bytes -= len(evicted)
+                            functions[function_digest] = function_bytes
+                            function_cache_bytes += len(function_bytes)
+                    else:
+                        functions[function_digest] = function_bytes
+            if not valid:
+                send_result(args.out_pipe_fd, invocation_id, 2, args.worker_pid)
+                continue
+            try:
+                pid = os.fork()
+            except OSError:
+                pid = -1
+            if pid == 0:
+                child_main(
+                    sandbox, stdout_path, payload_id,
+                    (args.in_pipe_fd, args.out_pipe_fd, notify_read, notify_write),
+                    function_bytes,
+                    invocation_bytes,
+                    retained_outputs,
+                    pull_ns,
+                )
+            if pid < 0:
+                send_result(args.out_pipe_fd, invocation_id, 3, args.worker_pid)
+                continue
+            children[pid] = {
+                "invocation_id": invocation_id,
+                "deadline": time.monotonic() + wall_seconds if wall_seconds else None,
+                "sandbox": sandbox,
+                "stdout": str(Path(sandbox) / stdout_path),
+                "manifest": str(Path(sandbox) / MANIFEST_NAME),
+                "manifest_output": (
+                    retained_outputs is not None and any(retained_outputs)
+                ),
+                "timed_out": False,
+                "cancelled": False,
+            }
+        if notify_read in readable:
+            try:
+                while os.read(notify_read, 4096):
+                    pass
+            except BlockingIOError:
+                pass
+        now = time.monotonic()
+        for pid, child in list(children.items()):
+            if not child["cancelled"] and not Path(child["sandbox"]).is_dir():
+                child["cancelled"] = True
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if child["deadline"] and now >= child["deadline"] and not child["timed_out"]:
+                child["timed_out"] = True
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        while children:
+            pid, status = os.waitpid(-1, os.WNOHANG)
+            if pid <= 0:
+                break
+            child = children.pop(pid, None)
+            if child:
+                if child["cancelled"]:
+                    continue
+                code = 124 if child["timed_out"] else exit_code(status)
+                try:
+                    payload_path = (
+                        child["manifest"]
+                        if code == 0 and child["manifest_output"]
+                        else child["stdout"]
+                    )
+                    payload = Path(payload_path).read_bytes()
+                except OSError:
+                    payload = b""
+                    code = code or 1
+                if len(payload) > FRAME_LIMIT:
+                    payload = b"DataVine Python output exceeds 64 MiB"
+                    code = 125
+                send_result(
+                    args.out_pipe_fd, child["invocation_id"], code,
+                    args.worker_pid, payload,
+                )
+    for pid in children:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    while children:
+        try:
+            pid, _ = os.waitpid(-1, 0)
+        except ChildProcessError:
+            break
+        children.pop(pid, None)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -63,7 +63,8 @@ def main():
                 )
                 client = WorkflowClient(contact["endpoint"], token)
                 capabilities = client.workflow_capabilities()
-                assert capabilities["object_store"] == "sharedfs-single-file-sha256-v1"
+                assert capabilities["object_store"] == "controller-rpc-sha256-v1"
+                assert "object_root" not in capabilities
                 assert capabilities["object_max_bytes"] == 64 * 1024 * 1024 - 64
                 assert capabilities["inline_invocation_max_bytes"] == 64 * 1024
                 assert capabilities["result_stream"] == (
@@ -118,6 +119,7 @@ def main():
                 assert profile["object_put_parallelism"] == 2, profile
                 assert profile["inline_invocation_records"] == 1, profile
                 assert profile["object_put_wall_nanoseconds"] > 0, profile
+                assert profile["object_put_rpc_nanoseconds"] > 0, profile
                 assert profile["python_value_serialize_nanoseconds"] > 0
                 client.close()
             finally:
@@ -132,11 +134,11 @@ def main():
         assert token.encode() not in journal_bytes
         assert journal_bytes.count(b'"base64"') == 1
         worker_log = worker_log_path.read_text()
-        direct_pulls = worker_log.count("cache: transferring datavine-file://")
-        # The ordinary shared value uses Worker cache transfer. Function and
-        # invocation eData bypass scheduler mounts and are pulled by the
-        # persistent worker-local Python executor.
-        assert direct_pulls == 1, direct_pulls
+        controller_pulls = worker_log.count("cache: transferring datavine://")
+        # The ordinary value and the callable are both immutable Controller
+        # objects staged by the Worker data agent. The inline invocation never
+        # becomes a file or a scheduler-owned payload.
+        assert controller_pulls == 2, controller_pulls
         service_metrics = [
             line for line in service_log_path.read_text().splitlines()
             if f"datavine workflow {workflow_id} " in line
@@ -149,8 +151,8 @@ def main():
 
     print(
         "DataVine production data plane PASS tasks=64 input=4MiB "
-        "object-records=3 unique-put=2 local-dedup=1 worker-cache-pulls=1 "
-        "executor-object-pull=1 inline-invocation=1 "
+        "object-records=3 unique-put=2 local-dedup=1 controller-pulls=2 "
+        "inline-invocation=1 "
         "IR-control-base64=1 token-leak=0 "
         "profile=dominant-stage"
     )

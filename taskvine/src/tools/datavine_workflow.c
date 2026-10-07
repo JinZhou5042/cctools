@@ -27,6 +27,21 @@
 
 static volatile sig_atomic_t stopping;
 
+static int configured_thread_count(const char *name, int fallback)
+{
+	const char *value = getenv(name);
+	if (!value || !value[0])
+		return fallback;
+	char *end = 0;
+	errno = 0;
+	unsigned long parsed = strtoul(value, &end, 10);
+	if (errno || end == value || *end || parsed < 1 || parsed > 64) {
+		fprintf(stderr, "datavine_workflow: %s must be an integer from 1 to 64\n", name);
+		return -1;
+	}
+	return (int)parsed;
+}
+
 static int sibling_executable(const char *name, char result[PATH_MAX])
 {
 	ssize_t size = readlink("/proc/self/exe", result, PATH_MAX - 1);
@@ -43,19 +58,6 @@ static int sibling_executable(const char *name, char result[PATH_MAX])
 	return access(result, X_OK) == 0;
 }
 
-static int native_executor_path(char result[PATH_MAX])
-{
-	const char *override = getenv("DATAVINE_EXECUTOR_PATH");
-	return (override && realpath(override, result) && access(result, X_OK) == 0) ||
-	       sibling_executable("datavine_executor", result);
-}
-
-static int python_executor_path(char result[PATH_MAX])
-{
-	const char *override = getenv("DATAVINE_PYTHON_EXECUTOR_PATH");
-	return (override && realpath(override, result) && access(result, X_OK) == 0) ||
-	       sibling_executable("datavine_python_executor", result);
-}
 
 struct rpc_client {
 	int fd;
@@ -453,6 +455,9 @@ static int serve(int argc, char **argv)
 		fprintf(stderr, "datavine_workflow: invalid port\n");
 		return 2;
 	}
+	int rpc_threads = configured_thread_count("DATAVINE_RPC_THREADS", 1);
+	if (rpc_threads < 1)
+		return 2;
 	char default_profile[PATH_MAX];
 	if (!getenv("DATAVINE_PROFILE_PATH") &&
 			!getenv("DATAVINE_WORKFLOW_METRICS")) {
@@ -475,7 +480,7 @@ static int serve(int argc, char **argv)
 	}
 	advertised_host[sizeof(advertised_host) - 1] = 0;
 	struct vine_datavine_rpc_server *server = vine_datavine_rpc_server_create(
-			"0.0.0.0", port, argv[3], 1, argv[2]);
+			"0.0.0.0", port, argv[3], rpc_threads, argv[2]);
 	if (!server) {
 		fprintf(stderr, "datavine_workflow: could not start native service\n");
 		return 1;
@@ -489,10 +494,8 @@ static int serve(int argc, char **argv)
 		vine_datavine_rpc_server_delete(server);
 		return 1;
 	}
-	char native_executor[PATH_MAX];
-	char python_executor[PATH_MAX];
-	if (!native_executor_path(native_executor) ||
-			!python_executor_path(python_executor)) {
+	char executor[PATH_MAX];
+	if (!sibling_executable("datavine_executor", executor)) {
 		fprintf(stderr, "datavine_workflow: could not locate datavine_executor\n");
 		vine_delete(manager);
 		vine_datavine_rpc_server_delete(server);
@@ -509,8 +512,7 @@ static int serve(int argc, char **argv)
 											   vine_datavine_rpc_server_workflow_store(server),
 											   vine_datavine_rpc_server_data_controller(server),
 											   manager,
-											   native_executor,
-											   python_executor)
+											   executor)
 									 : 0;
 	if (!runtime) {
 		fprintf(stderr, "datavine_workflow: could not start native workflow runtime\n");

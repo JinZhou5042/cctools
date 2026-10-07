@@ -109,7 +109,11 @@ def assert_resource_bounds(process, endpoint):
         slow.append(connection)
     time.sleep(0.5)
     service_fds = len(list(Path(f"/proc/{process.pid}/fd").iterdir()))
-    assert service_fds <= 1060, service_fds
+    # Each configured RPC event thread owns one epoll descriptor and one
+    # notification descriptor.  Keep the connection cap fixed while allowing
+    # that explicit data-plane concurrency to account for its small overhead.
+    rpc_threads = int(os.environ.get("DATAVINE_RPC_THREADS", "1"))
+    assert service_fds <= 1060 + 2 * max(0, rpc_threads - 1), service_fds
     for connection in slow:
         connection.close()
     time.sleep(0.2)
@@ -202,7 +206,7 @@ def main():
                 "datavine.workflow-delta/v1",
             ]
             assert "taskvine" in capabilities["executor_kinds"]
-            assert capabilities["object_store"] == "sharedfs-single-file-sha256-v1"
+            assert capabilities["object_store"] == "controller-rpc-sha256-v1"
 
             object_payload = b"shared immutable python argument"
 

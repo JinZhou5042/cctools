@@ -6,6 +6,7 @@
 
 struct vine_cache;
 struct vine_process;
+struct vine_task;
 
 enum vine_datavine_agent_prepare_status {
 	VINE_DATAVINE_AGENT_NOT_TASK = 0,
@@ -29,5 +30,10 @@ enum vine_datavine_agent_commit_status vine_datavine_agent_commit(
 		struct vine_process *process);
 void vine_datavine_agent_progress(void);
 int vine_datavine_agent_waiting(void);
+/* False only for a valid DataVine task with no inputs and no output that the
+ * Worker must retain. Ordinary TaskVine tasks conservatively return true. */
+int vine_datavine_agent_needs_sandbox(struct vine_process *process);
+int vine_datavine_agent_task_needs_sandbox(struct vine_task *task);
+int vine_datavine_agent_needs_output_file(struct vine_process *process);
 
 #endif

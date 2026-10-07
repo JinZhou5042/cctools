@@ -152,43 +152,6 @@ assert "vine_declare_temp" not in controller_source
 assert "vine_fetch_file" not in controller_source
 assert "vine_fetch_file" not in runtime_source
 
-# A loss closure can contain both a generated value and one of its ancestors.
-# Every queued output must be made Controller-PENDING before the bounded replay
-# window dispatches any member, and producers must precede consumers so waiting
-# children cannot fill that bounded window and exclude their own producers.
-assert runtime_source.count("parametric_recovery_arm(") == 3
-assert runtime_source.count("parametric_recovery_order(") == 3
-assert runtime_source.count("explicit_recovery_arm(") == 4
-explicit_loss_begin = runtime_source.index("static int apply_workflow_losses(")
-explicit_loss_end = runtime_source.index("static int build_scheduler(")
-explicit_loss_path = runtime_source[explicit_loss_begin:explicit_loss_end]
-assert explicit_loss_path.index("explicit_recovery_arm(") < explicit_loss_path.index(
-    "record_recovery_invalidations("
-)
-loss_begin = runtime_source.index("static int apply_parametric_losses(")
-loss_end = runtime_source.index("static int parametric_recovery_begin(")
-loss_path = runtime_source[loss_begin:loss_end]
-assert loss_path.index("parametric_recovery_order(") < loss_path.index(
-    "parametric_recovery_arm("
-)
-restart_begin = runtime_source.index("if (!recovered_applied) {")
-first_replay_submit = runtime_source.index(
-    "submit_batch(runtime, &context);", restart_begin
-)
-restart_path = runtime_source[restart_begin:first_replay_submit]
-assert restart_path.index("parametric_recovery_order(") < restart_path.index(
-    "parametric_recovery_arm("
-)
-bounded_replay_begin = runtime_source.index(
-    "while (context->valid && resources->recovery_head < resources->recovery_tail &&\n"
-    "\t\t\t*context->running < submission_window"
-)
-bounded_replay = runtime_source[bounded_replay_begin : runtime_source.index(
-    "while ((resources->parametric ||", bounded_replay_begin
-)]
-assert "resources->parametric\n\t\t\t\t\t? materialize_parametric(" in bounded_replay
-assert ": materialize(runtime->manager," in bounded_replay
-assert "vine_task_set_priority(physical, 1e12)" in bounded_replay
 for removed in (
     "pthread_create",
     "execution_mailbox",
@@ -199,31 +162,16 @@ for removed in (
 ):
     assert removed not in runtime_source, removed
 assert "runtime_main(runtime);" in runtime_source
-assert "resources->recovery_state = valid\n" in runtime_source
-assert "if (data_losses != observed_data_losses &&" not in runtime_source
-assert "recovery_queue_compact(resources)" in explicit_loss_path
-assert explicit_loss_path.count("recovery_queue_reverse(") == 4
-assert "failure_stage = \"recovery_requeue\"" in runtime_source
-assert (
-    "(!*context->recovery_inflight &&\n"
-    "\t\t\t !resources->recovery_awaiting_admission &&\n"
-    "\t\t\t resources->recovery_head == resources->recovery_tail)"
-) in runtime_source
-assert "static int recovery_poll_admissions(" in runtime_source
-assert "The COMPLETED recovery event is recorded by admission polling." in runtime_source
-assert (
-    "!resources.parametric && !recovery_attempt &&\n"
-    "\t\t\t\t\ttask_result == -(int32_t)VINE_RESULT_FORSAKEN)"
-) in runtime_source
 
-python_executor = (source / "tools/datavine_python_executor").read_text()
+python_executor = (source / "tools/datavine_executor").read_text()
 assert "HashingWriter" in python_executor
 assert "DVM1" in python_executor
 assert "DVP1" in python_executor
-assert "DVP2" in python_executor
-for removed in ("DVM2", "DVP3", "DVP4", "DVP5", "DVP6", "DVP7", "DVP8", "DVP9", "urllib.parse"):
+assert "DVP3" in python_executor
+assert "DVP4" in python_executor
+for removed in ("DVM2", "DVP2", "DVP5", "DVP6", "DVP7", "DVP8", "DVP9", "urllib.parse"):
     assert removed not in python_executor, removed
-assert "class ObjectPuller" in python_executor
+assert "class ObjectPuller" not in python_executor
 assert "base64" not in python_executor
 for removed in (
     "DurabilityNotifier",

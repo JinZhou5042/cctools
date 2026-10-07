@@ -38,12 +38,9 @@ void vine_task_info_delete(struct vine_task_info *ti)
 
 void vine_task_info_add(struct vine_manager *q, struct vine_task *t)
 {
-	if (!t->resources_allocated) {
+	if (!q->task_info_enabled || !t->resources_allocated) {
 		return;
 	}
-
-	struct vine_stats s;
-	vine_get_stats(q, &s);
 
 	struct vine_task_info *ti = vine_task_info_create(t);
 

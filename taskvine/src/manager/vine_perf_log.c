@@ -50,6 +50,12 @@ void vine_perf_log_write_header(struct vine_manager *q)
 
 void vine_perf_log_write_update(struct vine_manager *q, int force)
 {
+	/* This hook is reached on several per-task transitions. When no
+	 * performance log is configured, a full Manager statistics snapshot is
+	 * pure overhead. */
+	if (!q->perf_logfile)
+		return;
+
 	struct vine_stats s;
 
 	timestamp_t now = timestamp_get();
@@ -61,10 +67,6 @@ void vine_perf_log_write_update(struct vine_manager *q, int force)
 	debug(D_VINE, "workers connections -- known: %d, connecting: %d", s.workers_connected, s.workers_init);
 
 	q->time_last_log_stats = now;
-
-	if (!q->perf_logfile) {
-		return;
-	}
 
 	buffer_t B;
 	buffer_init(&B);

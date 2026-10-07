@@ -44,7 +44,8 @@ static inline void vine_datavine_put_u64(unsigned char *buffer, uint64_t value)
 #define VINE_DATAVINE_RPC_MAGIC UINT32_C(0x44564331)
 #define VINE_DATAVINE_RPC_VERSION 1
 #define VINE_DATAVINE_PYTHON_TICKET_MAGIC "DVP1"
-#define VINE_DATAVINE_PYTHON_INLINE_TICKET_MAGIC "DVP2"
+#define VINE_DATAVINE_PYTHON_FUNCTION_TICKET_MAGIC "DVP3"
+#define VINE_DATAVINE_PYTHON_REFERENCE_TICKET_MAGIC "DVP4"
 #define VINE_DATAVINE_PYTHON_INLINE_INVOCATION_MAX 65536
 #define VINE_DATAVINE_RESULT_STREAM_INLINE_MAX 65536
 #define VINE_DATAVINE_OUTPUT_MANIFEST_MAGIC "DVM1"
@@ -73,6 +74,7 @@ enum vine_datavine_task_input_kind {
 	VINE_DATAVINE_TASK_INPUT_URI = 1,
 	VINE_DATAVINE_TASK_INPUT_URI_EPHEMERAL = 2,
 	VINE_DATAVINE_TASK_INPUT_LOCAL_FILE = 3,
+	VINE_DATAVINE_TASK_INPUT_FUNCTION_URI = 4,
 };
 
 enum vine_datavine_task_output_flags {
@@ -108,9 +110,8 @@ enum vine_datavine_rpc_opcode {
 	VINE_DATAVINE_RPC_WORKFLOW_FRONTIER = 29,
 	VINE_DATAVINE_RPC_OBJECT_PUT = 30,
 	VINE_DATAVINE_RPC_OBJECT_GET = 31,
-	VINE_DATAVINE_RPC_OBJECT_PATH = 32,
-	/* 33 is reserved after removing redundant SharedFS registration. */
-	VINE_DATAVINE_RPC_WORKFLOW_RESULT_PATH = 34,
+	/* 32-33 are reserved after removing direct object-path exposure. */
+	/* 34 was the unused single-result path operation; use descriptors. */
 	/* 35 was the retired Worker-direct persistence acknowledgement. */
 	VINE_DATAVINE_RPC_WORKFLOW_RESULT_DESCRIPTORS = 36,
 	VINE_DATAVINE_RPC_WORKFLOW_WAIT_TERMINAL = 37,

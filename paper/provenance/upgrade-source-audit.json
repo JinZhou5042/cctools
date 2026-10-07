@@ -1,0 +1,73 @@
+{
+  "status": "PASS",
+  "files": [
+    {
+      "path": "taskvine/src/manager/vine_manager.c",
+      "before": "346395e9662647b1d6963aa7ca05324b6d1c1f6cd219deff2e8baa034a0fd02a",
+      "after": "0244dbf563d24e07b59ddddb701a0c7cce230dae7ca8e4ef067d6877a30aa6ff",
+      "baseline": "provenance/pre-upgrade/taskvine/src/manager/vine_manager.c"
+    },
+    {
+      "path": "taskvine/src/manager/vine_task_groups.c",
+      "before": "8444ccf32a0cf973add0acc5fe22a96d977faf32f1d5b12dbbc51c529ae5ef3b",
+      "after": "3600dfc3620f05fe304ffd694e5c8d8a948879d111856e4d73b17c6bb9520e00",
+      "baseline": "provenance/pre-upgrade/taskvine/src/manager/vine_task_groups.c"
+    },
+    {
+      "path": "taskvine/src/manager/vine_function_call.c",
+      "before": "162f059fe70d1bc9f004bffb4bc1bdc607511e351ade5906983ae4faa8a5c16a",
+      "after": "f4875e34dd91ca4facf4c78c0b4d310e6a8cfe0abf33bc9397153863261d78be",
+      "baseline": "provenance/measured-upgrade-v1/taskvine/src/manager/vine_function_call.c"
+    },
+    {
+      "path": "taskvine/src/tools/datavine_workflow.c",
+      "before": "dc74a7967792eab2ad6af6997575f2d2d42cb26488a6c4175123b2d3223b3d7d",
+      "after": "b90bec91a2eead6ca26b2898a3a7bd0b20e002977eda505fb81ef4afb7528add",
+      "baseline": "HEAD"
+    },
+    {
+      "path": "acceptance/scripts/run_regression.sh",
+      "before": "0cc813cc06243ac534c76c53c3de79a5f70ac961598c849024d88956b38ff734",
+      "after": "63aee041fb35d35325a4f658afdcd1619840edc36e5ae9c6b83090adfbb7781c",
+      "baseline": "HEAD"
+    },
+    {
+      "path": "taskvine/test/datavine_task_groups.py",
+      "before": null,
+      "after": "9fa261dcf6969bbe4a652163ee9609a0234367842009b2ed3013e5dcb4e42ad1",
+      "baseline": "new"
+    },
+    {
+      "path": "taskvine/test/TR_datavine_task_groups.sh",
+      "before": null,
+      "after": "10666c7e891bb23c72d56a3746d9873f61a25134738f6ef2ffbe706329db3b97",
+      "baseline": "new"
+    },
+    {
+      "path": "taskvine/test/datavine_group_disconnect.py",
+      "before": null,
+      "after": "84299b9f773c5815188412e5504715d986f355b792291423b5d805701bde033f",
+      "baseline": "new"
+    },
+    {
+      "path": "taskvine/test/TR_datavine_group_disconnect.sh",
+      "before": null,
+      "after": "5ccea8e3596239a03cde5b45bf7d5d82280ce81e3dca0169c21e3e43ee4fad14",
+      "baseline": "new"
+    },
+    {
+      "path": "taskvine/test/datavine_executor_override.py",
+      "before": null,
+      "after": "1fb7d1373fc4b1b2218297516f18fc0d9d6315c460e4b1008ccc915b71f4c3aa",
+      "baseline": "new"
+    },
+    {
+      "path": "taskvine/test/TR_datavine_executor_override.sh",
+      "before": null,
+      "after": "2618eefb32f37e3f29aaeaa433011ae308773a1bd39ec5f3d5ae678826ac2f6a",
+      "baseline": "new"
+    }
+  ],
+  "patch_sha256": "4ad70468cdbebeddcb6b068c5617eff586e0ab3e805cb1c14bae11368a902f01",
+  "scope": "User-requested research upgrade only; inherited implementation changes are excluded from this review patch."
+}

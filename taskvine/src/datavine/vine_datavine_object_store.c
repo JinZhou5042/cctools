@@ -137,12 +137,6 @@ void vine_datavine_object_store_close(
 	free(store);
 }
 
-const char *vine_datavine_object_store_root(
-		struct vine_datavine_object_store *store)
-{
-	return store ? store->root : 0;
-}
-
 int vine_datavine_object_store_put(
 		struct vine_datavine_object_store *store, const char digest[65],
 		const void *data, size_t size, int *deduplicated)
@@ -243,7 +237,8 @@ int vine_datavine_object_store_get(
 		else
 			break;
 	}
-	int valid = used == length && close(fd) == 0 &&
+	int closed = close(fd) == 0;
+	int valid = used == length && closed &&
 			digest_matches(buffer, length, digest);
 	if (!valid) {
 		free(buffer);
@@ -257,20 +252,6 @@ int vine_datavine_object_store_get(
 failure:
 	atomic_fetch_add(&store->failures, 1);
 	return 0;
-}
-
-int vine_datavine_object_store_path(
-		struct vine_datavine_object_store *store, const char digest[65],
-		char *path, size_t path_size, int create_directories)
-{
-	if (!path || !path_size)
-		return 0;
-	char resolved[PATH_MAX];
-	if (!object_path(store, digest, resolved, create_directories) ||
-			strlen(resolved) + 1 > path_size)
-		return 0;
-	memcpy(path, resolved, strlen(resolved) + 1);
-	return 1;
 }
 
 int vine_datavine_object_store_metrics(

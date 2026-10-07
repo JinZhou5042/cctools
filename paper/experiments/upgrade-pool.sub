@@ -1,0 +1,13 @@
+universe = vanilla
+executable = /groups/dthain/users/jzhou24/miniconda/envs/datavine/bin/python
+arguments = /users/jzhou24/cctools_repo/datavine/paper/scripts/research_pool_agent.py --pool /users/jzhou24/cctools_repo/datavine/paper/results/reserved-pool-v1 --index $(Process)
+request_cpus = 64
+request_memory = 16384MB
+request_disk = 8192MB
+requirements = (TARGET.TotalCpus == 64) && regexp("disc-store-", TARGET.Machine)
+should_transfer_files = NO
+getenv = true
+output = /users/jzhou24/cctools_repo/datavine/paper/results/pool-$(Process).stdout
+error = /users/jzhou24/cctools_repo/datavine/paper/results/pool-$(Process).stderr
+log = /users/jzhou24/cctools_repo/datavine/paper/results/pool.condor.log
+queue 8

@@ -18,6 +18,11 @@ void vine_worker_pool_remove(struct vine_worker_pool *pool,
 int vine_worker_pool_offer(struct vine_worker_pool *pool,
 		struct vine_worker_info *worker);
 struct vine_worker_info *vine_worker_pool_take(struct vine_worker_pool *pool);
+/* Take the least-loaded worker not yet visited in this scheduling pass. */
+struct vine_worker_info *vine_worker_pool_take_least_loaded(
+		struct vine_worker_pool *pool);
+/* Visit each offered worker at most once until the next begin_pass. */
+void vine_worker_pool_begin_pass(struct vine_worker_pool *pool);
 size_t vine_worker_pool_ready(const struct vine_worker_pool *pool);
 
 #endif

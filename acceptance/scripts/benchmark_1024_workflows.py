@@ -623,9 +623,6 @@ def classify_regression(case, tv_runs, dv_runs, ratio_ci):
             "object_put_wall_seconds": median_ingest_metric(
                 dv_runs, "object_put_wall_nanoseconds"
             ) / 1e9,
-            "object_sharedfs_aggregate_seconds": median_ingest_metric(
-                dv_runs, "object_sharedfs_nanoseconds"
-            ) / 1e9,
             "object_rpc_aggregate_seconds": median_ingest_metric(
                 dv_runs, "object_put_rpc_nanoseconds"
             ) / 1e9,

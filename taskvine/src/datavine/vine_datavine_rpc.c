@@ -102,6 +102,19 @@ struct vine_datavine_rpc_server {
 	atomic_size_t active_connections;
 };
 
+static size_t configured_data_threads(void)
+{
+	const char *value = getenv("DATAVINE_DATA_THREADS");
+	if (!value || !value[0])
+		return 16;
+	char *end = 0;
+	errno = 0;
+	unsigned long parsed = strtoul(value, &end, 10);
+	if (errno || end == value || *end || parsed < 1 || parsed > 64)
+		return 0;
+	return (size_t)parsed;
+}
+
 static int validate_object_ticket(struct vine_datavine_rpc_server *server,
 		const unsigned char *ticket, size_t ticket_size,
 		char object_digest[65])
@@ -870,28 +883,6 @@ static uint32_t workflow_result_info(struct vine_datavine_rpc_server *server,
 	return VINE_DATAVINE_RPC_OK;
 }
 
-static uint32_t workflow_result_path(struct vine_datavine_rpc_server *server,
-		const unsigned char *payload, size_t size,
-		unsigned char **result, size_t *result_size)
-{
-	char workflow_id[VINE_DATAVINE_WORKFLOW_IDENTIFIER_MAX + 1];
-	char path[PATH_MAX];
-	if (!server->data_controller ||
-			!decode_workflow_id(payload, size, 12, 0, workflow_id) ||
-			!vine_datavine_data_controller_result_path(server->data_controller,
-					workflow_id,
-					vine_datavine_get_u64(payload + 4),
-					path,
-					sizeof(path)))
-		return VINE_DATAVINE_RPC_NOT_FOUND;
-	*result_size = strlen(path);
-	*result = malloc(*result_size);
-	if (!*result)
-		return VINE_DATAVINE_RPC_INTERNAL;
-	memcpy(*result, path, *result_size);
-	return VINE_DATAVINE_RPC_OK;
-}
-
 static uint32_t workflow_result_descriptors(
 		struct vine_datavine_rpc_server *server,
 		const unsigned char *payload, size_t size,
@@ -965,12 +956,10 @@ static uint32_t workflow_capabilities(
 		const unsigned char *payload, size_t payload_size,
 		unsigned char **result, size_t *result_size)
 {
-	const char *object_root = vine_datavine_data_controller_object_root(
-			server->data_controller);
-	if (payload_size || !object_root)
+	if (payload_size || !server->data_controller)
 		return VINE_DATAVINE_RPC_INVALID;
 	struct jx *document = jx_objectv(
-			"schema_versions", jx_arrayv(jx_string(VINE_DATAVINE_WORKFLOW_SCHEMA_NAME), jx_string(VINE_DATAVINE_WORKFLOW_DELTA_SCHEMA_NAME), NULL), "executor_kinds", jx_arrayv(jx_string("command"), jx_string("python"), jx_string("taskvine"), NULL), "digest", jx_string("sha1"), "append", jx_string("delta-cas-v1"), "results", jx_string("durable-bytes"), "frontier", jx_boolean(1), "wait_terminal", jx_boolean(1), "result_stream", jx_string("controller-admitted-sequence-v1"), "result_stream_inline_max_bytes", jx_integer(VINE_DATAVINE_RESULT_STREAM_INLINE_MAX), "result_identity", jx_string("sha256+attempt+producer+codec"), "selective_results", jx_boolean(1), "idata_backup_modes", jx_arrayv(jx_string("worker-local"), jx_string("controller-background"), NULL), "idata_backup_default", jx_string("controller-background"), "object_store", jx_string("sharedfs-single-file-sha256-v1"), "object_max_bytes", jx_integer(67108800), "object_root", jx_string(object_root), "inline_invocation_max_bytes", jx_integer(VINE_DATAVINE_PYTHON_INLINE_INVOCATION_MAX), "physical_submission_window", jx_integer(VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW), "physical_recovery_reserve", jx_integer(VINE_DATAVINE_WORKFLOW_RECOVERY_RESERVE), NULL);
+			"schema_versions", jx_arrayv(jx_string(VINE_DATAVINE_WORKFLOW_SCHEMA_NAME), jx_string(VINE_DATAVINE_WORKFLOW_DELTA_SCHEMA_NAME), NULL), "executor_kinds", jx_arrayv(jx_string("command"), jx_string("python"), jx_string("taskvine"), NULL), "digest", jx_string("sha1"), "append", jx_string("delta-cas-v1"), "results", jx_string("durable-bytes"), "frontier", jx_boolean(1), "wait_terminal", jx_boolean(1), "result_stream", jx_string("controller-admitted-sequence-v1"), "result_stream_inline_max_bytes", jx_integer(VINE_DATAVINE_RESULT_STREAM_INLINE_MAX), "result_identity", jx_string("sha256+attempt+producer+codec"), "selective_results", jx_boolean(1), "idata_backup_modes", jx_arrayv(jx_string("worker-local"), jx_string("controller-background"), NULL), "idata_backup_default", jx_string("controller-background"), "object_store", jx_string("controller-rpc-sha256-v1"), "object_max_bytes", jx_integer(67108800), "inline_invocation_max_bytes", jx_integer(VINE_DATAVINE_PYTHON_INLINE_INVOCATION_MAX), "physical_submission_window", jx_integer(VINE_DATAVINE_WORKFLOW_SUBMISSION_WINDOW), "physical_recovery_reserve", jx_integer(VINE_DATAVINE_WORKFLOW_RECOVERY_RESERVE), NULL);
 	char *encoded = document ? jx_print_string(document) : 0;
 	jx_delete(document);
 	if (!encoded)
@@ -1049,27 +1038,6 @@ static uint32_t backup_get(struct vine_datavine_rpc_server *server,
 	return VINE_DATAVINE_RPC_OK;
 }
 
-static uint32_t object_path(struct vine_datavine_rpc_server *server,
-		const unsigned char *payload, size_t size,
-		unsigned char **result, size_t *result_size)
-{
-	if (!server->data_controller || size != 64)
-		return VINE_DATAVINE_RPC_INVALID;
-	char digest[65];
-	char path[PATH_MAX];
-	memcpy(digest, payload, 64);
-	digest[64] = 0;
-	if (!vine_datavine_data_controller_object_path(
-				server->data_controller, digest, path, sizeof(path)))
-		return VINE_DATAVINE_RPC_REJECTED;
-	*result_size = strlen(path);
-	*result = malloc(*result_size);
-	if (!*result)
-		return VINE_DATAVINE_RPC_INTERNAL;
-	memcpy(*result, path, *result_size);
-	return VINE_DATAVINE_RPC_OK;
-}
-
 static uint32_t dispatch_request(struct vine_datavine_rpc_server *server,
 		uint16_t opcode, const unsigned char *payload, size_t payload_size,
 		unsigned char **result, size_t *result_size)
@@ -1092,16 +1060,12 @@ static uint32_t dispatch_request(struct vine_datavine_rpc_server *server,
 		status = workflow_fetch_result(server, payload, payload_size, result, result_size);
 	} else if (opcode == VINE_DATAVINE_RPC_WORKFLOW_RESULT_INFO) {
 		status = workflow_result_info(server, payload, payload_size, result, result_size);
-	} else if (opcode == VINE_DATAVINE_RPC_WORKFLOW_RESULT_PATH) {
-		status = workflow_result_path(server, payload, payload_size, result, result_size);
 	} else if (opcode == VINE_DATAVINE_RPC_WORKFLOW_RESULT_DESCRIPTORS) {
 		status = workflow_result_descriptors(server, payload, payload_size, result, result_size);
 	} else if (opcode == VINE_DATAVINE_RPC_OBJECT_PUT) {
 		status = object_put(server, payload, payload_size, result, result_size);
 	} else if (opcode == VINE_DATAVINE_RPC_OBJECT_GET) {
 		status = object_get(server, payload, payload_size, result, result_size);
-	} else if (opcode == VINE_DATAVINE_RPC_OBJECT_PATH) {
-		status = object_path(server, payload, payload_size, result, result_size);
 	} else if (opcode == VINE_DATAVINE_RPC_WORKFLOW_CAPABILITIES) {
 		status = workflow_capabilities(server, payload, payload_size, result, result_size);
 	} else {
@@ -1530,10 +1494,16 @@ struct vine_datavine_rpc_server *vine_datavine_rpc_server_create(
 	server->token = strdup(token);
 	server->token_length = strlen(token);
 	server->thread_count = 0;
+	size_t data_threads = configured_data_threads();
+	if (!data_threads) {
+		free(server);
+		return 0;
+	}
 	server->threads = calloc((size_t)threads, sizeof(*server->threads));
 	server->workflow_store = vine_datavine_workflow_store_open(workflow_journal_path);
 	server->data_controller = vine_datavine_data_controller_open(
-			workflow_journal_path, 16, vine_datavine_workflow_store_journal(server->workflow_store));
+			workflow_journal_path, data_threads,
+			vine_datavine_workflow_store_journal(server->workflow_store));
 	server->listen_fd = listen_socket(host, port, &server->port);
 	if (!server->token || !server->threads || !server->workflow_store ||
 			!server->data_controller ||
