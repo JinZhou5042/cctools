@@ -34,6 +34,7 @@ struct vine_graph_executor {
 
 	task_priority_mode_t task_priority_mode; // schedule order before submit
 	double failure_injection_step_percent;	 // optional worker release steps for tests
+	double checkpoint_threshold_sec; // report temp outputs whose recovery cost exceeds this threshold
 	double progress_bar_update_interval_sec;
 };
 

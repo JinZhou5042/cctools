@@ -27,6 +27,9 @@ int vine_manager_data_service_get(struct vine_manager *manager, const char *ip, 
 /* Declare a regular local file as a workflow-cached Manager URL. Return NULL on failure.
  * The caller keeps the local source unchanged until undeclaration. */
 struct vine_file *vine_manager_data_service_declare_file(struct vine_manager *manager, const char *source_path);
+/* Query a readable local disk copy without starting a transfer. Includes published Manager URLs.
+ * Temporary files have no local copy until a retrieval path registers one. */
+int vine_manager_data_service_has_local_file(struct vine_manager *manager, struct vine_file *file);
 /* Remove the published name. Already open transfers retain their file descriptors. */
 void vine_manager_data_service_unexport(struct vine_manager_data_service *ds, struct vine_file *file);
 

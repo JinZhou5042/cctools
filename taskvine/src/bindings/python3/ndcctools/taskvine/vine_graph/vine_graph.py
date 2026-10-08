@@ -37,6 +37,7 @@ class VineGraphConfig:
             "failure-injection-step-percent": -1,
             "task-priority-mode": "largest-input-first",
             "prune-depth": 1,
+            "checkpoint-threshold-sec": 20.0,
             "output-dir": "./outputs",
             "progress-bar-update-interval-sec": 0.1,
             "print-graph-details": 0,

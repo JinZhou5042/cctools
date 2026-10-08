@@ -63,6 +63,7 @@ class vine_graph(object):
     thisown = property(lambda x: x.this.own(), lambda x, v: x.this.own(v), doc="The membership flag")
     __repr__ = _swig_repr
     nodes = property(_vine_graph_capi.vine_graph_nodes_get, _vine_graph_capi.vine_graph_nodes_set)
+    recovery_time_by_node = property(_vine_graph_capi.vine_graph_recovery_time_by_node_get, _vine_graph_capi.vine_graph_recovery_time_by_node_set)
     outfile_cachename_to_node = property(_vine_graph_capi.vine_graph_outfile_cachename_to_node_get, _vine_graph_capi.vine_graph_outfile_cachename_to_node_set)
     file_id_to_file = property(_vine_graph_capi.vine_graph_file_id_to_file_get, _vine_graph_capi.vine_graph_file_id_to_file_set)
     output_dir = property(_vine_graph_capi.vine_graph_output_dir_get, _vine_graph_capi.vine_graph_output_dir_set)
@@ -130,6 +131,7 @@ class vine_graph_executor(object):
     total_postprocessing_time_us = property(_vine_graph_capi.vine_graph_executor_total_postprocessing_time_us_get, _vine_graph_capi.vine_graph_executor_total_postprocessing_time_us_set)
     task_priority_mode = property(_vine_graph_capi.vine_graph_executor_task_priority_mode_get, _vine_graph_capi.vine_graph_executor_task_priority_mode_set)
     failure_injection_step_percent = property(_vine_graph_capi.vine_graph_executor_failure_injection_step_percent_get, _vine_graph_capi.vine_graph_executor_failure_injection_step_percent_set)
+    checkpoint_threshold_sec = property(_vine_graph_capi.vine_graph_executor_checkpoint_threshold_sec_get, _vine_graph_capi.vine_graph_executor_checkpoint_threshold_sec_set)
     progress_bar_update_interval_sec = property(_vine_graph_capi.vine_graph_executor_progress_bar_update_interval_sec_get, _vine_graph_capi.vine_graph_executor_progress_bar_update_interval_sec_set)
 
     def __init__(self):

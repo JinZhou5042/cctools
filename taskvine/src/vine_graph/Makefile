@@ -10,7 +10,7 @@ MODULE_DIR   := $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/vine_graph
 TEST_MODULE_DIR := $(CCTOOLS_HOME)/test_support/python_modules/$(CCTOOLS_PYTHON_TEST_DIR)/ndcctools/taskvine/vine_graph
 MODULE_NAME  := vine_graph_capi
 
-SOURCES   := vine_graph_node.c vine_graph.c vine_graph_executor.c
+SOURCES   := vine_graph_node.c vine_graph.c vine_graph_executor.c vine_graph_recovery.c
 OBJECTS   := $(SOURCES:%.c=%.o)
 SWIG_WRAP := vine_graph_wrap.c
 WRAP_OBJ  := vine_graph_wrap.o
@@ -38,7 +38,7 @@ $(SWIG_WRAP): vine_graph.i vine_graph.h vine_graph_executor.h vine_graph_node.h
 $(WRAP_OBJ): $(SWIG_WRAP)
 	$(CCTOOLS_CC) -o $@ -c $(CCTOOLS_INTERNAL_CCFLAGS) $(LOCAL_CCFLAGS) $(CCTOOLS_PYTHON3_CCFLAGS) -w -fPIC -DNDEBUG $<
 
-$(OBJECTS): %.o: %.c vine_graph.h vine_graph_executor.h vine_graph_node.h
+$(OBJECTS): %.o: %.c vine_graph.h vine_graph_executor.h vine_graph_node.h vine_graph_recovery.h
 	$(CCTOOLS_CC) -o $@ -c $(CCTOOLS_INTERNAL_CCFLAGS) $(LOCAL_CCFLAGS) -fPIC -DNDEBUG $<
 
 $(PYMODULE): $(WRAP_OBJ) $(OBJECTS)

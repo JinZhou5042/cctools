@@ -383,6 +383,7 @@ struct vine_graph *vine_graph_create(const char *runtime_dir)
 	g->output_dir = xxstrdup(runtime_dir);	   // default to current working directory
 
 	g->nodes = itable_create(0);
+	g->recovery_time_by_node = itable_create(0);
 	g->outfile_cachename_to_node = hash_table_create(0, 0);
 	g->file_id_to_file = itable_create(0);
 
@@ -454,6 +455,8 @@ void vine_graph_delete(struct vine_graph *g)
 	free(g->output_dir);
 
 	itable_delete(g->nodes);
+	itable_clear(g->recovery_time_by_node, free);
+	itable_delete(g->recovery_time_by_node);
 	hash_table_delete(g->outfile_cachename_to_node);
 
 

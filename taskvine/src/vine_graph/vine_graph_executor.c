@@ -1,4 +1,5 @@
 #include <inttypes.h>
+#include <math.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,6 +8,7 @@
 
 #include "debug.h"
 #include "vine_graph_executor.h"
+#include "vine_graph_recovery.h"
 #include "macros.h"
 #include "progress_bar.h"
 #include "random.h"
@@ -60,6 +62,7 @@ static void vine_graph_executor_init_runtime(struct vine_graph_executor *e)
 	e->total_postprocessing_time_us = 0;
 	e->task_priority_mode = TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST;
 	e->failure_injection_step_percent = -1.0;
+	e->checkpoint_threshold_sec = 20.0;
 	e->progress_bar_update_interval_sec = 0.1;
 }
 
@@ -361,6 +364,7 @@ int vine_graph_executor_add_task_output_file(struct vine_graph_executor *e, uint
 
 	itable_insert(g->file_id_to_file, file_id, file);
 	vine_graph_io_mount_add(node->extra_outputs, file, task_path);
+	hash_table_insert(g->outfile_cachename_to_node, vine_file_cached_name(file), node);
 	return 0;
 }
 
@@ -417,6 +421,14 @@ int vine_graph_executor_tune(struct vine_graph_executor *e, const char *name, co
 			debug(D_ERROR, "invalid priority mode: %s", value);
 			return -1;
 		}
+
+	} else if (strcmp(name, "checkpoint-threshold-sec") == 0) {
+		char *end;
+		double threshold = strtod(value, &end);
+		if (end == value || *end || !isfinite(threshold) || threshold <= 0) {
+			return -1;
+		}
+		e->checkpoint_threshold_sec = threshold;
 
 	} else if (strcmp(name, "progress-bar-update-interval-sec") == 0) {
 		double val = atof(value);
@@ -631,15 +643,6 @@ static struct vine_graph_node *vine_graph_executor_node_from_task(struct vine_gr
 	return NULL;
 }
 
-/* Return non-zero if the completed node retains output on a Manager-local file. */
-static int vine_graph_node_is_anchored(const struct vine_graph_node *n)
-{
-	if (!n || !n->completed) {
-		return 0;
-	}
-	return n->outfile && vine_file_type(n->outfile) == VINE_FILE;
-}
-
 /* Return non-zero when a temporary output file has a recovery task that is neither initial nor finished. */
 static int vine_graph_node_is_mid_recovery(const struct vine_graph_node *n)
 {
@@ -678,7 +681,7 @@ static int vine_graph_executor_try_cut_node(struct vine_graph_executor *e, struc
 	struct vine_graph_node *c;
 	LIST_ITERATE(n->children, c)
 	{
-		if ((!vine_graph_node_is_anchored(c) && !c->cut) || vine_graph_node_is_mid_recovery(c)) {
+		if ((!vine_graph_node_is_anchored(e->manager, c) && !c->cut) || vine_graph_node_is_mid_recovery(c)) {
 			return 0; // wait for anchored, cut, or non-recovery children
 		}
 	}
@@ -1111,6 +1114,9 @@ void vine_graph_executor_execute(struct vine_graph_executor *e)
 			if (!vine_graph_executor_validate_task_or_retry(e, node, task)) {
 				continue;
 			}
+
+			double execution_time_sec = vine_task_get_metric(task, "time_workers_execute_last") / 1e6;
+			vine_graph_recovery_record_completion(e, node, execution_time_sec);
 
 			if (vine_task_get_recovery_source_task_id(task) > 0) {
 				e->completed_recovery_tasks++;

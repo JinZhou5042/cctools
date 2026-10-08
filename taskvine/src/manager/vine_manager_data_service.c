@@ -399,3 +399,20 @@ void vine_manager_data_service_unexport(struct vine_manager_data_service *ds, st
 		free(path);
 	}
 }
+
+int vine_manager_data_service_has_local_file(struct vine_manager *manager, struct vine_file *file)
+{
+	if (!file) {
+		return 0;
+	}
+	if (file->type == VINE_FILE) {
+		return access(file->source, R_OK) == 0;
+	}
+	if (manager && manager->ds && file->type == VINE_URL && string_prefix_is(file->source, "manager://")) {
+		char *path = string_format("%s/%s", manager->ds->export_directory, file->cached_name);
+		int available = access(path, R_OK) == 0;
+		free(path);
+		return available;
+	}
+	return 0;
+}

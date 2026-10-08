@@ -8,6 +8,7 @@
 
 struct vine_graph {
 	struct itable *nodes;
+	struct itable *recovery_time_by_node; // node ID -> owned double, completion-time estimate in seconds
 	struct hash_table *outfile_cachename_to_node;
 	/** Maps FileHandle and execution-data ids to their declared vine_file. */
 	struct itable *file_id_to_file;
