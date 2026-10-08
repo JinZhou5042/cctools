@@ -6,6 +6,7 @@ See the file COPYING for details.
 
 #include "vine_cache.h"
 #include "vine_cache_file.h"
+#include "vine_datapool.h"
 #include "vine_mount.h"
 #include "vine_process.h"
 #include "vine_sandbox.h"
@@ -14,6 +15,7 @@ See the file COPYING for details.
 #include "vine_protocol.h"
 #include "vine_transfer.h"
 
+#include "address.h"
 #include "copy_stream.h"
 #include "debug.h"
 #include "domain_name_cache.h"
@@ -41,7 +43,10 @@ struct vine_cache {
 	struct hash_table *pending_transfers;
 	struct hash_table *processing_transfers;
 	char *cache_dir;
+	struct vine_datapool *datapool; /* Own the optional memory copies for these cache records. */
 	int max_transfer_procs;
+	char manager_ip[LINK_ADDRESS_MAX]; /* This holds the control connection peer address inherited by download processes. */
+	int manager_transfer_port; /* This holds the Manager-supplied port and is zero until configured. */
 };
 
 static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager);
@@ -50,13 +55,26 @@ static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *
 Create the cache manager structure for a given cache directory.
 */
 
-struct vine_cache *vine_cache_create(const char *cache_dir, int max_procs)
+struct vine_cache *vine_cache_create(const char *cache_dir, int max_procs, uint64_t memory_limit)
 {
-	struct vine_cache *c = malloc(sizeof(*c));
+	struct vine_cache *c = calloc(1, sizeof(*c));
+	if (!c) {
+		return NULL;
+	}
+	c->cache_dir = strdup(cache_dir);
+	if (!c->cache_dir) {
+		free(c);
+		return NULL;
+	}
+	c->datapool = vine_datapool_create(c->cache_dir, memory_limit);
+	if (!c->datapool) {
+		free(c->cache_dir);
+		free(c);
+		return NULL;
+	}
 	c->table = hash_table_create(0, 0);
 	c->pending_transfers = hash_table_create(0, 0);
 	c->processing_transfers = hash_table_create(0, 0);
-	c->cache_dir = strdup(cache_dir);
 	c->max_transfer_procs = max_procs;
 	return c;
 }
@@ -228,6 +246,7 @@ void vine_cache_delete(struct vine_cache *c)
 	hash_table_delete(c->pending_transfers);
 	hash_table_delete(c->processing_transfers);
 
+	vine_datapool_delete(c->datapool);
 	hash_table_clear(c->table, (void *)vine_cache_file_delete);
 	hash_table_delete(c->table);
 	free(c->cache_dir);
@@ -238,7 +257,17 @@ void vine_cache_delete(struct vine_cache *c)
 
 char *vine_cache_data_path(struct vine_cache *c, const char *cachename)
 {
-	return string_format("%s/%s", c->cache_dir, cachename);
+	return vine_datapool_disk_path(c->datapool, cachename);
+}
+
+/* The stable disk path remains separate from the optional memory read path. */
+char *vine_cache_read_path(struct vine_cache *c, const char *cachename)
+{
+	struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
+	if (f && f->status == VINE_CACHE_STATUS_READY && f->memory_bytes) {
+		return xxstrdup(f->memory_path);
+	}
+	return vine_cache_data_path(c, cachename);
 }
 
 /* Get the full path to the metadata of a cached file. This result must be freed. */
@@ -270,18 +299,27 @@ and writing out the metadata to the proper location.
 int vine_cache_add_file(
 		struct vine_cache *c, const char *cachename, const char *transfer_path, vine_cache_level_t level, int mode, uint64_t size, time_t mtime, timestamp_t start_time, timestamp_t transfer_time, struct link *manager)
 {
-	char *data_path = vine_cache_data_path(c, cachename);
+	struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
+	/* A ready object already owns its disk and optional memory copies. */
+	if (f && f->status == VINE_CACHE_STATUS_READY) {
+		char *disk_path = vine_cache_data_path(c, cachename);
+		if (strcmp(transfer_path, disk_path)) {
+			trash_file(transfer_path);
+		}
+		free(disk_path);
+		if (manager) {
+			vine_worker_send_cache_update(manager, cachename, f);
+		}
+		return 1;
+	}
 	char *meta_path = vine_cache_meta_path(c, cachename);
-
-	int result = 0;
-
-	if (rename(transfer_path, data_path) == 0) {
-		struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
-		if (f) {
-			/* If the file object is already present, we are providing the missing data. */
-		} else {
-			/* If not, we are declaring a completely new file. */
-			f = vine_cache_file_create(VINE_CACHE_FILE, "manager", 0);
+	int created = !f;
+	if (created) {
+		f = vine_cache_file_create(VINE_CACHE_FILE, "manager", 0);
+	}
+	int result = vine_datapool_store(c->datapool, f, cachename, transfer_path, size);
+	if (result) {
+		if (created) {
 			hash_table_insert(c->table, cachename, f);
 		}
 
@@ -299,14 +337,14 @@ int vine_cache_add_file(
 		vine_cache_file_save_metadata(f, meta_path);
 
 		/* Inform the manager that we now have the file */
-		vine_worker_send_cache_update(manager, cachename, f);
+		if (manager) {
+			vine_worker_send_cache_update(manager, cachename, f);
+		}
 
 		result = 1;
-	} else {
-		result = 0;
+	} else if (created) {
+		vine_cache_file_delete(f);
 	}
-
-	free(data_path);
 	free(meta_path);
 
 	return result;
@@ -425,7 +463,7 @@ int vine_cache_remove(struct vine_cache *c, const char *cachename, struct link *
 	 * Other states except PENDING have already sent messages, either cache-update or cache-invalid,
 	 * so we only send cache-invalid for transfers in PENDING state. */
 
-	if (f->status == VINE_CACHE_STATUS_PENDING) {
+	if (manager && f->status == VINE_CACHE_STATUS_PENDING) {
 		char *msg = string_format("File '%s' removed in PENDING state.", cachename);
 		vine_worker_send_cache_invalid(manager, cachename, msg);
 		free(msg);
@@ -434,12 +472,12 @@ int vine_cache_remove(struct vine_cache *c, const char *cachename, struct link *
 	hash_table_remove(c->pending_transfers, cachename);
 	hash_table_remove(c->processing_transfers, cachename);
 
-	/* Then remove the disk state associated with the file. */
-	char *data_path = vine_cache_data_path(c, cachename);
+	/* The datapool manages placement within the existing file lifecycle. */
+	if (!vine_datapool_remove(c->datapool, f, cachename)) {
+		return 0;
+	}
 	char *meta_path = vine_cache_meta_path(c, cachename);
-	trash_file(data_path);
 	trash_file(meta_path);
-	free(data_path);
 	free(meta_path);
 
 	/* Now we can remove the data structure. */
@@ -546,17 +584,10 @@ static int rewrite_source_to_ip(struct vine_cache_file *f, char **error_message)
 	return 1;
 }
 
-/*
-Transfer a single input file from a worker url to a local file name.
-*/
-static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, char **error_message)
+/* Share the original Worker transfer sequence without changing its timeout or result handling. */
+static int do_peer_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *addr, int port_num, const char *source_path, const char *password, char **error_message)
 {
-	int port_num;
-	char addr[VINE_LINE_MAX], source_path[VINE_LINE_MAX];
 	struct link *worker_link;
-
-	// expect the form: workerip://host:port/path/to/file
-	sscanf(f->source, "workerip://%256[^:]:%d/%s", addr, &port_num, source_path);
 
 	debug(D_VINE, "cache: setting up worker transfer file %s", f->source);
 
@@ -570,8 +601,8 @@ static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, c
 		return 0;
 	}
 
-	if (options->password) {
-		if (!link_auth_password(worker_link, options->password, time(0) + 5)) {
+	if (password) {
+		if (!link_auth_password(worker_link, password, time(0) + 5)) {
 			*error_message = string_format("Could not authenticate to peer worker at %s:%d", addr, port_num);
 			link_close(worker_link);
 			return 0;
@@ -581,13 +612,14 @@ static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, c
 	/* XXX A fixed timeout of 900 certainly can't be right! */
 
 	char *transfer_dir = vine_cache_transfer_path(c, ".");
-	int64_t totalsize;
+	int64_t totalsize = 0;
 	int mode, mtime;
 
 	if (!vine_transfer_request_any(worker_link, source_path, transfer_dir, &totalsize, &mode, &mtime, time(0) + 900, error_message)) {
 		if (error_message && *error_message == NULL) {
 			*error_message = string_format("Could not transfer file from %s", f->source);
 		}
+		free(transfer_dir);
 		link_close(worker_link);
 		return 0;
 	}
@@ -601,9 +633,42 @@ static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, c
 	return 1;
 }
 
+/* Parse the Worker source and use the original peer transfer sequence. */
+static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, char **error_message)
+{
+	int port_num;
+	char addr[VINE_LINE_MAX], source_path[VINE_LINE_MAX];
+
+	// expect the form: workerip://host:port/path/to/file
+	sscanf(f->source, "workerip://%256[^:]:%d/%s", addr, &port_num, source_path);
+
+	return do_peer_transfer(c, f, addr, port_num, source_path, options->password, error_message);
+}
+
+/* Save the control connection peer address and the advertised Manager data port. */
+int vine_cache_set_manager_transfer(struct vine_cache *c, const char *ip, int port)
+{
+	if (!ip || strlen(ip) >= sizeof(c->manager_ip) || !address_is_valid_ip(ip) || port < 1 || port > 65535 ||
+			(c->manager_transfer_port && (c->manager_transfer_port != port || strcmp(c->manager_ip, ip)))) {
+		return 0;
+	}
+	strcpy(c->manager_ip, ip);
+	c->manager_transfer_port = port;
+	return 1;
+}
+
+/* Download through the Manager data port using the original peer transfer sequence. */
+static int do_manager_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, char **error_message)
+{
+	if (!c->manager_transfer_port) {
+		*error_message = string_format("Manager has not advertised its data port");
+		return 0;
+	}
+	return do_peer_transfer(c, f, c->manager_ip, c->manager_transfer_port, cachename, options->password, error_message);
+}
+
 /*
-Transfer a single object into the cache,
-whether by worker or via curl.
+Transfer a single object into the cache from a Worker, Manager, or URL.
 Use a temporary transfer path while downloading,
 and then rename it into the proper place.
 */
@@ -615,9 +680,11 @@ static int do_transfer(struct vine_cache *c, struct vine_cache_file *f, const ch
 
 	int result = 0;
 
-	if (strncmp(f->source, "workerip://", 11) == 0) {
+	if (string_prefix_is(f->source, VINE_TRANSFER_MANAGER_PREFIX)) {
+		result = do_manager_transfer(c, f, cachename, error_message);
+	} else if (string_prefix_is(f->source, VINE_TRANSFER_WORKER_IP_PREFIX)) {
 		result = do_worker_transfer(c, f, cachename, error_message);
-	} else if (strncmp(f->source, "worker://", 9) == 0) {
+	} else if (string_prefix_is(f->source, VINE_TRANSFER_WORKER_PREFIX)) {
 		result = rewrite_source_to_ip(f, error_message);
 		if (result) {
 			result = do_worker_transfer(c, f, cachename, error_message);
@@ -626,8 +693,9 @@ static int do_transfer(struct vine_cache *c, struct vine_cache_file *f, const ch
 		result = do_curl_transfer(c, f, transfer_path, cache_path, error_message);
 	}
 
-	if (!result)
+	if (!result) {
 		trash_file(transfer_path);
+	}
 
 	free(transfer_path);
 	free(cache_path);

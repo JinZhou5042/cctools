@@ -14,6 +14,7 @@ struct vine_worker_options {
 	int64_t cores_total;
 	int64_t disk_total;
 	int64_t memory_total;
+	uint64_t cache_memory_bytes; /* Reserve this fixed memory budget for data rather than tasks. */
 	time_t manual_wall_time_option;
 
 	/* -1 means not given as a command line option. */

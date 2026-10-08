@@ -168,6 +168,8 @@ int vine_transfer_put_any(struct link *lnk, struct vine_cache *cache, const char
 	int r;
 
 	if (path_within_dir(cached_path, workspace->cache_dir)) {
+		free(cached_path);
+		cached_path = vine_cache_read_path(cache, filename);
 		r = vine_transfer_put_internal(lnk, cached_path, path_basename(filename), xfer_mode, stoptime);
 	} else {
 		/* Same reply as an unreadable file in vine_transfer_put_internal. */

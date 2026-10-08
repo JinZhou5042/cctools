@@ -97,7 +97,7 @@ and then link it into the sandbox at the desired location.
 
 static int stage_input_file(struct vine_process *p, struct vine_mount *m, struct vine_file *f, struct vine_cache *cache)
 {
-	char *cache_path = vine_cache_data_path(cache, f->cached_name);
+	char *cache_path = vine_cache_read_path(cache, f->cached_name);
 	char *sandbox_path = vine_sandbox_full_path(p, m->remote_name);
 
 	int result = 0;

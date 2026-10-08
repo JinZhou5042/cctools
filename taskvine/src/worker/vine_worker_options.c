@@ -122,7 +122,8 @@ void vine_worker_options_show_help(const char *cmd, struct vine_worker_options *
 	printf(" %-30s Set the number of GPUs reported by this worker. If not given, or less than 0,\n", "--gpus=<n>");
 	printf(" %-30s then try to detect gpus available.\n", "");
 
-	printf(" %-30s Manually set the amount of memory (in MB) reported by this worker.\n", "--memory=<mb>");
+	printf(" %-30s Reserve MB exclusively for cached data, excluded from task memory. Default is 0.\n", "--cache-memory=<mb>");
+	printf(" %-30s Set total memory in MB before reserving data cache memory.\n", "--memory=<mb>");
 	printf(" %-30s If not given, or less than 1, then try to detect memory available.\n", "");
 
 	printf(" %-30s Manually set the amount of disk (in MB) reported by this worker.\n", "--disk=<mb>");
@@ -155,6 +156,7 @@ enum {
 	LONG_OPT_DEBUG_RELEASE,
 	LONG_OPT_CORES,
 	LONG_OPT_MEMORY,
+	LONG_OPT_CACHE_MEMORY,
 	LONG_OPT_DISK,
 	LONG_OPT_DISK_PERCENT,
 	LONG_OPT_GPUS,
@@ -203,6 +205,7 @@ static const struct option long_options[] = {{"advertise", no_argument, 0, 'a'},
 		{"bandwidth", required_argument, 0, LONG_OPT_BANDWIDTH},
 		{"cores", required_argument, 0, LONG_OPT_CORES},
 		{"memory", required_argument, 0, LONG_OPT_MEMORY},
+		{"cache-memory", required_argument, 0, LONG_OPT_CACHE_MEMORY},
 		{"disk", required_argument, 0, LONG_OPT_DISK},
 		{"disk-percent", required_argument, 0, LONG_OPT_DISK_PERCENT},
 		{"gpus", required_argument, 0, LONG_OPT_GPUS},
@@ -392,6 +395,16 @@ void vine_worker_options_get(struct vine_worker_options *options, int argc, char
 				options->cores_total = atoi(optarg);
 			}
 			break;
+		case LONG_OPT_CACHE_MEMORY: {
+			char *end;
+			errno = 0;
+			unsigned long long mb = strtoull(optarg, &end, 10);
+			if (errno || optarg[0] < '0' || optarg[0] > '9' || *end || mb > UINT32_MAX) {
+				fatal("--cache-memory must be an integer between 0 and 4294967295 MB");
+			}
+			options->cache_memory_bytes = (uint64_t)mb * UINT64_C(1048576);
+			break;
+		}
 		case LONG_OPT_MEMORY:
 			if (!strncmp(optarg, "all", 3)) {
 				options->memory_total = 0;

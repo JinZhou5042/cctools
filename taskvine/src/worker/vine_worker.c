@@ -409,6 +409,8 @@ and apply any local options that override it.
 
 static void measure_worker_resources()
 {
+	/* Reserve the full data budget even when the datapool is empty. */
+	int64_t cache_memory_mb = options->cache_memory_bytes / MEGA;
 	static int disk_set = 0;
 	static time_t last_resources_measurement = 0;
 	if (time(0) < last_resources_measurement + options->check_resources_interval) {
@@ -423,6 +425,7 @@ static void measure_worker_resources()
 		r->cores.total = options->cores_total;
 	if (options->memory_total > 0)
 		r->memory.total = options->memory_total;
+	r->memory.total = MAX(0, r->memory.total - cache_memory_mb);
 	if (options->gpus_total > -1)
 		r->gpus.total = options->gpus_total;
 
@@ -1320,6 +1323,11 @@ static int handle_manager(struct link *manager)
 	if (recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
 		if (sscanf(line, "task %" SCNd64, &task_id) == 1) {
 			r = do_task(manager, task_id, time(0) + options->active_timeout);
+		} else if (sscanf(line, "manager_transfer_port %" SCNd64, &length) == 1) {
+			char manager_ip[LINK_ADDRESS_MAX];
+			int manager_port;
+			r = length > 0 && length <= 65535 && link_address_remote(manager, manager_ip, &manager_port) &&
+				vine_cache_set_manager_transfer(cache_manager, manager_ip, (int)length);
 		} else if (sscanf(line, "put %s %d %" SCNd64, filename_encoded, &cache_level, &length) == 3) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = do_put(manager, filename, cache_level, length);
@@ -1931,11 +1939,17 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	vine_workspace_prepare(workspace);
 
 	/* Start the cache manager and scan for existing files. */
-	cache_manager = vine_cache_create(workspace->cache_dir, options->max_transfer_procs);
+	cache_manager = vine_cache_create(workspace->cache_dir, options->max_transfer_procs, options->cache_memory_bytes);
+	if (!cache_manager) {
+		debug(D_VINE, "Could not create the cache with the configured data memory budget");
+		link_close(manager);
+		vine_workspace_cleanup(workspace);
+		return 0;
+	}
 	vine_cache_load(cache_manager);
 
 	/* Start the transfer server, which serves up the cache directory. */
-	if (!vine_transfer_server_start(cache_manager, options->transfer_port_min, options->transfer_port_max)) {
+	if (!vine_transfer_server_start(cache_manager, manager, options->transfer_port_min, options->transfer_port_max)) {
 		fprintf(stderr, "vine_worker: unable to bind transfer port (check --transfer-port or cluster permissions)\n");
 	}
 

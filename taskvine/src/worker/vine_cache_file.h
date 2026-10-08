@@ -27,6 +27,9 @@ struct vine_cache_file {
 	timestamp_t stop_time;
 	pid_t pid;
 	vine_cache_status_t status;
+	/* The datapool owns placement information within this existing record. */
+	uint64_t memory_bytes; /* This counts the memory copy in whole pages. */
+	char *memory_path; /* This owns the memory copy path, which forwards to disk after eviction. */
 
 	/* Metadata info stored in disk in .meta file. */
 	vine_file_type_t original_type; // original type of the object: file, url, temp, etc..

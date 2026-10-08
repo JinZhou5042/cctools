@@ -4,11 +4,18 @@ This software is distributed under the GNU General Public License.
 See the file COPYING for details.
 */
 
+/* Send and receive cached files and directories using the Worker transfer protocol. */
+
 #ifndef VINE_TRANSFER_H
 #define VINE_TRANSFER_H
 
 #include "vine_cache.h"
 #include "link.h"
+
+/* These prefixes identify sources handled by the native transfer protocols. */
+#define VINE_TRANSFER_MANAGER_PREFIX "manager://"
+#define VINE_TRANSFER_WORKER_PREFIX "worker://"
+#define VINE_TRANSFER_WORKER_IP_PREFIX "workerip://"
 
 typedef enum {
 	VINE_TRANSFER_MODE_ANY,

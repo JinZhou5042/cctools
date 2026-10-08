@@ -88,6 +88,7 @@ struct vine_manager {
 	char *uuid;          /* Unique identifier of manager when reported to catalog. */
 	struct hash_table *properties;   /* Set of additional properties to report to catalog server. */
 
+	struct vine_manager_data_service *ds; /* Own the data listener and bidirectional transfer executors. */
 	struct link *manager_link;       /* Listening TCP connection for accepting new workers. */
 	struct link_info *poll_table;    /* Table for polling on all connected workers. */
 	int poll_table_size;             /* Number of entries in poll_table. */

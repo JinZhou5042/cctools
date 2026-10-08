@@ -44,13 +44,20 @@ typedef enum {
 	VINE_CACHE_STATUS_UNKNOWN,      /**< File is not known at all to the cache manager. */
 } vine_cache_status_t;
 
-struct vine_cache * vine_cache_create( const char *cachedir, int max_procs );
+/* Create a cache with a fixed data memory budget in bytes. */
+struct vine_cache *vine_cache_create(const char *cachedir, int max_procs, uint64_t memory_limit);
+/* Save the control connection peer address and the Manager data port. */
+int vine_cache_set_manager_transfer(struct vine_cache *c, const char *ip, int port);
+
 void vine_cache_delete( struct vine_cache *c );
 void vine_cache_load( struct vine_cache *c );
 void vine_cache_scan( struct vine_cache *c, struct link *manager );
 void vine_cache_prune( struct vine_cache *c, vine_cache_level_t level );
 
 char *vine_cache_data_path( struct vine_cache *c, const char *cachename );
+/* Return a memory copy when available, otherwise return the authoritative disk path. */
+char *vine_cache_read_path(struct vine_cache *c, const char *cachename);
+
 char *vine_cache_meta_path( struct vine_cache *c, const char *cachename );
 char *vine_cache_transfer_path( struct vine_cache *c, const char *cachename );
 char *vine_cache_error_path( struct vine_cache *c, const char *cachename );

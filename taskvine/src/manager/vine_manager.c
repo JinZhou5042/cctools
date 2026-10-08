@@ -5,6 +5,7 @@ See the file COPYING for details.
 */
 
 #include "vine_manager.h"
+#include "vine_manager_data_service.h"
 #include "vine_blocklist.h"
 #include "vine_counters.h"
 #include "vine_current_transfers.h"
@@ -1673,6 +1674,9 @@ static vine_msg_code_t handle_taskvine(struct vine_manager *q, struct vine_worke
 		w->draining = 1;
 		return VINE_MSG_FAILURE;
 	}
+	if (!vine_manager_send(q, w, "manager_transfer_port %d\n", vine_manager_data_service_port(q->ds))) {
+		return VINE_MSG_FAILURE;
+	}
 
 	return VINE_MSG_PROCESSED;
 }
@@ -2707,7 +2711,10 @@ static int build_poll_table(struct vine_manager *q)
 	q->poll_table[0].link = q->manager_link;
 	q->poll_table[0].events = LINK_READ;
 	q->poll_table[0].revents = 0;
-	n = 1;
+
+	/* Reserve two entries for data requests and transfer completions. */
+	vine_manager_data_service_poll(q->ds, &q->poll_table[1]);
+	n = 3;
 
 	// For every worker in the hash table, add an item to the poll table
 	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
@@ -4129,6 +4136,14 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 		link_address_local(q->manager_link, address, &q->port);
 	}
 
+	q->ds = vine_manager_data_service_create();
+	if (!q->ds) {
+		link_close(q->manager_link);
+		free(runtime_dir);
+		free(q);
+		return NULL;
+	}
+
 	debug(D_VINE, "manager start");
 
 	q->runtime_directory = runtime_dir;
@@ -4528,6 +4543,8 @@ void vine_delete(struct vine_manager *q)
 	/* now that the manager is shutting down, worker removals are not an invalid event, so we
 	 * disable the immediate recovery to avoid submitting recovery tasks for lost files */
 	q->immediate_recovery = 0;
+	vine_manager_data_service_delete(q->ds);
+	q->ds = NULL;
 
 	vine_fair_write_workflow_info(q);
 
@@ -5216,8 +5233,10 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 	int i;
 	int workers_failed = 0;
 
-	/* Consider all active connections of any kind. */
-	for (i = 1; i < n; i++) {
+	vine_manager_data_service_handle(q);
+
+	/* Consider the Worker control connections. */
+	for (i = 3; i < n; i++) {
 
 		/* If there is pending input data on that connection. */
 		if (q->poll_table[i].revents) {

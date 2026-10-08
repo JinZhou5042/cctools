@@ -114,7 +114,7 @@ static void vine_transfer_process(struct vine_cache *cache)
 	}
 }
 
-int vine_transfer_server_start(struct vine_cache *cache, int port_min, int port_max)
+int vine_transfer_server_start(struct vine_cache *cache, struct link *manager, int port_min, int port_max)
 {
 	transfer_link = link_serve_range(port_min, port_max);
 
@@ -124,7 +124,8 @@ int vine_transfer_server_start(struct vine_cache *cache, int port_min, int port_
 
 	transfer_server_pid = fork();
 	if (transfer_server_pid == 0) {
-		// consider closing additional resources here?
+		/* Close only the inherited descriptor without flushing or shutting down the Worker TLS session. */
+		close(link_fd(manager));
 		change_process_title("vine_worker [transfer server]");
 		vine_transfer_process(cache);
 		_exit(0);
