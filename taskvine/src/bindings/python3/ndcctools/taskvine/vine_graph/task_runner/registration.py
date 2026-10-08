@@ -3,20 +3,8 @@
 # See the file COPYING for details.
 
 import os
-import uuid
-import cloudpickle
-import copy
-import dataclasses
-import types
-import time
-import random
-import hashlib
-import collections
-import collections.abc
 
-from ..workflow import FileHandle, TaskHandle, TaskOutputHandle, TaskOutputWrapper, Workflow, _TaskOutputAttribute
-from .execution import run_scheduler_keys
-from ndcctools.taskvine.utils import load_variable_from_library
+from .execution import run_node
 
 
 class TaskRunnerRegistration:
@@ -28,23 +16,8 @@ class TaskRunnerRegistration:
 
         self.task = None
 
-        # These modules are included in the generated function context so task calls can execute directly.
-        self.hoisting_modules = [
-            os, cloudpickle, copy, dataclasses, uuid, hashlib, random, types, collections, collections.abc, time,
-            Workflow, FileHandle, TaskHandle, TaskOutputHandle, TaskOutputWrapper, _TaskOutputAttribute,
-            load_variable_from_library, run_scheduler_keys
-        ]
-
-        # Environment files are sent with the task runner context and exposed under their remote paths.
+        self.hoisting_modules = [run_node]
         self.env_files = {}
-
-        # The context loader rebuilds the Workflow object in the remote function context.
-        self.context_loader_func = None
-        self.context_loader_args = []
-        self.context_loader_kwargs = {}
-
-        self.local_path = None
-        self.remote_path = None
 
     def set_cores(self, cores):
         self.cores = cores
@@ -60,19 +33,13 @@ class TaskRunnerRegistration:
         assert isinstance(new_env_files, dict), "new_env_files must be a dictionary"
         self.env_files.update(new_env_files)
 
-    def set_context_loader(self, context_loader_func, context_loader_args=[], context_loader_kwargs={}):
-        self.context_loader_func = context_loader_func
-        self.context_loader_args = context_loader_args
-        self.context_loader_kwargs = context_loader_kwargs
-
     def install(self):
         assert self.name is not None, "Task runner name must be set before installing (use set_name method)"
         assert self.cores is not None, "Task runner cores must be set before installing (use set_cores method)"
 
         self.task = self.vine_graph.create_library_from_functions(
             self.name,
-            run_scheduler_keys,
-            library_context_info=[self.context_loader_func, self.context_loader_args, self.context_loader_kwargs],
+            run_node,
             add_env=False,
             function_infile_load_mode="json",
             hoisting_modules=self.hoisting_modules,

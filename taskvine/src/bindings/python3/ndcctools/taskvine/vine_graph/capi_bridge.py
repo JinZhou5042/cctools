@@ -62,10 +62,6 @@ class VineGraphCapiBridge:
             self._c_graph, wk2sk[parent_workflow_key], wk2sk[child_workflow_key]
         )
 
-    def group_chain_like_tasks(self):
-        """Merge maximal singleton linear chains into supernodes (C vine_graph_group_chain_like_tasks)."""
-        return vine_graph_capi.vine_graph_group_chain_like_tasks(self._c_graph)
-
     def compute_topology_metrics(self):
         """Finalize the C graph and compute topology metrics."""
         vine_graph_capi.vine_graph_executor_finalize(self._c_executor)
@@ -96,7 +92,7 @@ class VineGraphCapiBridge:
             raise RuntimeError(f"failed to declare input file {file_id}: {source_path}")
 
     def add_task_input_file(self, workflow_key, file_id, task_path):
-        """Mount a declared FileHandle into a task."""
+        """Mount a declared file into a task."""
         task_id = self._workflow_key_to_scheduler_key.get(workflow_key)
         if task_id is None:
             raise KeyError(f"Workflow key not found: {workflow_key}")

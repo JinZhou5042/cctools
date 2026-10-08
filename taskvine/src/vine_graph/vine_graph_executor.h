@@ -27,7 +27,6 @@ struct vine_graph_executor {
 	timestamp_t makespan_us;		   // workflow span in microseconds
 	timestamp_t time_spent_on_cut_propagation; // time spent in cut propagation
 	uint64_t completed_recovery_tasks;	   // recovery completions seen this run
-	uint64_t pfs_usage_bytes;		   // bytes credited for shared filesystem outputs
 	/** Sum of @c vine_graph_executor_submit_node preprocessing intervals across all nodes (microseconds). */
 	uint64_t total_preprocessing_time_us;
 	/** Sum of @c vine_graph_executor_run_completion_postprocess intervals across all completions (microseconds). */

@@ -156,101 +156,6 @@ static struct list *vine_graph_extract_weak_components(struct vine_graph *g)
 	return components;
 }
 
-/**
- * Compute the heavy score of a node in the executor graph.
- * @param node Reference to the node.
- * @return Heavy score.
- */
-static double vine_graph_node_compute_heavy_score(struct vine_graph_node *node)
-{
-	if (!node) {
-		return 0;
-	}
-
-	double up_score = node->depth * node->upstream_subgraph_size * node->fan_in;
-	double down_score = node->height * node->downstream_subgraph_size * node->fan_out;
-
-	return up_score / (down_score + 1);
-}
-
-static void vine_graph_node_set_local_output_file(struct vine_graph_node *node)
-{
-	node->outfile_type = VINE_GRAPH_NODE_OUTFILE_TYPE_LOCAL;
-}
-
-static void vine_graph_node_set_temp_output_file(struct vine_graph_node *node)
-{
-	node->outfile_type = VINE_GRAPH_NODE_OUTFILE_TYPE_TEMP;
-}
-
-/**
- * Compute upstream/downstream subgraph sizes and heavy scores for each node.
- * This is expensive (can approach transitive-closure cost) and should only be
- * invoked when heavy-score-based checkpoint selection is enabled.
- */
-static void vine_graph_compute_topology_scores(struct vine_graph *g, struct list *topo_order)
-{
-	if (!g || !topo_order) {
-		return;
-	}
-
-	struct vine_graph_node *node;
-	struct vine_graph_node *parent_node;
-	struct vine_graph_node *child_node;
-
-	struct itable *upstream_map = itable_create(0);	  // reachable ancestors per node
-	struct itable *downstream_map = itable_create(0); // reachable descendants per node
-	uint64_t nid_tmp;
-	int iteration;
-	ITABLE_ITERATE(g->nodes, iteration, nid_tmp, node)
-	{
-		struct set *upstream = set_create(0);
-		struct set *downstream = set_create(0);
-		itable_insert(upstream_map, node->node_id, upstream);
-		itable_insert(downstream_map, node->node_id, downstream);
-	}
-
-	LIST_ITERATE(topo_order, node)
-	{
-		struct set *upstream = itable_lookup(upstream_map, node->node_id);
-		LIST_ITERATE(node->parents, parent_node)
-		{
-			struct set *parent_upstream = itable_lookup(upstream_map, parent_node->node_id);
-			set_insert_set(upstream, parent_upstream); // in-place union, not set_union
-			set_insert(upstream, parent_node);
-		}
-	}
-
-	LIST_ITERATE_REVERSE(topo_order, node)
-	{
-		struct set *downstream = itable_lookup(downstream_map, node->node_id);
-		LIST_ITERATE(node->children, child_node)
-		{
-			struct set *child_downstream = itable_lookup(downstream_map, child_node->node_id);
-			set_insert_set(downstream, child_downstream); // in-place union, not set_union
-			set_insert(downstream, child_node);
-		}
-	}
-
-	LIST_ITERATE(topo_order, node)
-	{
-		node->upstream_subgraph_size = set_size(itable_lookup(upstream_map, node->node_id));
-		node->downstream_subgraph_size = set_size(itable_lookup(downstream_map, node->node_id));
-		node->fan_in = list_size(node->parents);
-		node->fan_out = list_size(node->children);
-		set_delete(itable_lookup(upstream_map, node->node_id));
-		set_delete(itable_lookup(downstream_map, node->node_id));
-	}
-
-	itable_delete(upstream_map);
-	itable_delete(downstream_map);
-
-	LIST_ITERATE(topo_order, node)
-	{
-		node->heavy_score = vine_graph_node_compute_heavy_score(node); // ranks checkpoint candidates
-	}
-}
-
 /*************************************************************/
 /* Public APIs */
 /*************************************************************/
@@ -283,27 +188,8 @@ int vine_graph_tune(struct vine_graph *g, const char *name, const char *value)
 		}
 		g->prune_depth = k;
 
-	} else if (strcmp(name, "checkpoint-fraction") == 0) {
-		double fraction = atof(value);
-		if (fraction < 0.0 || fraction > 1.0) {
-			debug(D_ERROR, "invalid checkpoint fraction: %s (must be between 0.0 and 1.0)", value);
-			return -1;
-		}
-		g->checkpoint_fraction = fraction;
-
-	} else if (strcmp(name, "checkpoint-dir") == 0) {
-		if (mkdir(value, 0777) != 0 && errno != EEXIST) {
-			debug(D_ERROR, "failed to mkdir %s (errno=%d)", value, errno);
-			return -1;
-		}
-		free(g->checkpoint_dir);
-		g->checkpoint_dir = xxstrdup(value);
-
 	} else if (strcmp(name, "print-graph-details") == 0) {
 		g->print_graph_details = (atoi(value) == 1) ? 1 : 0;
-	} else if (strcmp(name, "chain-grouping-enabled") == 0) {
-		/* Stays aligned with Python's --task-group. When zero the executor never merges chain members. */
-		g->chain_grouping_enabled = (atoi(value) != 0) ? 1 : 0;
 	} else {
 		debug(D_ERROR, "invalid parameter name: %s", name);
 		return -1;
@@ -365,28 +251,8 @@ void vine_graph_set_task_runner_function_name(struct vine_graph *g, const char *
 }
 
 /**
- * Get the heavy score of a node in the executor graph.
- * @param g Reference to the executor graph.
- * @param node_id Reference to the node id.
- * @return The heavy score.
- */
-double vine_graph_get_node_heavy_score(const struct vine_graph *g, uint64_t node_id)
-{
-	if (!g) {
-		return -1;
-	}
-
-	struct vine_graph_node *node = itable_lookup(g->nodes, node_id);
-	if (!node) {
-		return -1;
-	}
-
-	return node->heavy_score;
-}
-
-/**
- * Compute the topology metrics of the executor graph, including depth, height, upstream and downstream counts,
- * heavy scores, and weakly connected components. Must be called after all nodes and dependencies are added.
+ * Compute depth, height, and output storage for each node.
+ * Call after all nodes and dependencies are added.
  * @param g Reference to the executor graph.
  */
 void vine_graph_finalize(struct vine_graph *g)
@@ -428,63 +294,9 @@ void vine_graph_finalize(struct vine_graph *g)
 		}
 	}
 
-	int total_nodes = list_size(topo_order);
-	int total_target_nodes = 0;
 	LIST_ITERATE(topo_order, node)
 	{
-		if (node->is_target) {
-			total_target_nodes++;
-		}
-	}
-
-	/*
-	 * Pick how many non-target nodes become shared-filesystem checkpoints.
-	 * If zero, skip heavy-score passes entirely.
-	 */
-	int checkpoint_count = (int)((total_nodes - total_target_nodes) * g->checkpoint_fraction);
-	if (checkpoint_count < 0) {
-		checkpoint_count = 0;
-	}
-
-	if (checkpoint_count > 0) {
-		vine_graph_compute_topology_scores(g, topo_order); // expensive, only if ranking needed
-
-		struct priority_queue *sorted_nodes = priority_queue_create(total_nodes);
-		LIST_ITERATE(topo_order, node)
-		{
-			priority_queue_push(sorted_nodes, node, node->heavy_score);
-		}
-
-		int assigned_checkpoint_count = 0;
-		while ((node = priority_queue_pop(sorted_nodes))) {
-			if (node->is_target) {
-				vine_graph_node_set_local_output_file(node); // targets keep managed local returns
-				continue;
-			}
-			if (assigned_checkpoint_count < checkpoint_count) {
-				/*
-				 * Top heavy_score nodes checkpoint to shared storage under checkpoint_dir.
-				 * No vine_file handle for that mode.
-				 */
-				node->outfile_type = VINE_GRAPH_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM;
-				char *shared_file_system_outfile_path = string_format("%s/%s", g->checkpoint_dir, node->outfile_remote_name);
-				free(node->outfile_remote_name);
-				node->outfile_remote_name = shared_file_system_outfile_path;
-				assigned_checkpoint_count++;
-			} else {
-				vine_graph_node_set_temp_output_file(node); // remaining nodes use temp storage
-			}
-		}
-		priority_queue_delete(sorted_nodes);
-	} else {
-		LIST_ITERATE(topo_order, node)
-		{
-			if (node->is_target) {
-				vine_graph_node_set_local_output_file(node);
-			} else {
-				vine_graph_node_set_temp_output_file(node); // no checkpoint budget, all non-targets are temp
-			}
-		}
+		node->outfile_type = node->is_target ? VINE_GRAPH_NODE_OUTFILE_TYPE_LOCAL : VINE_GRAPH_NODE_OUTFILE_TYPE_TEMP;
 	}
 
 	if (g->print_graph_details) {
@@ -573,21 +385,17 @@ struct vine_graph *vine_graph_create(const char *runtime_dir)
 
 	struct vine_graph *g = xxmalloc(sizeof(struct vine_graph));
 
-	g->checkpoint_dir = xxstrdup(runtime_dir); // default to current working directory
 	g->output_dir = xxstrdup(runtime_dir);	   // default to current working directory
 
 	g->nodes = itable_create(0);
-	g->super_leader_to_members = itable_create(0);
 	g->outfile_cachename_to_node = hash_table_create(0, 0);
 	g->file_id_to_file = itable_create(0);
-	g->supernode_leader_child_to_input_source = hash_table_create(0, 0);
 
 	cctools_uuid_t task_runner_library_name_id;
 	cctools_uuid_create(&task_runner_library_name_id);
 	g->task_runner_library_name = xxstrdup(task_runner_library_name_id.str);
 
 	g->task_runner_function_name = NULL;
-	g->checkpoint_fraction = 0.0;
 
 	/* Default prune-depth: release a TEMP node as soon as all of its
 	 * direct children have completed. Set to 0 via tune("prune-depth") to
@@ -595,7 +403,6 @@ struct vine_graph *vine_graph_create(const char *runtime_dir)
 	g->prune_depth = 1;
 
 	g->print_graph_details = 0;
-	g->chain_grouping_enabled = 0;
 
 	return g;
 }
@@ -630,364 +437,6 @@ void vine_graph_add_dependency(struct vine_graph *g, uint64_t parent_id, uint64_
 }
 
 /**
- * Copy a list of struct vine_graph_node * into a new list in the same order (pointer values only, not deep copy).
- * Snapshots parents/children before mutating edges during supernode rewire. Caller frees the new list.
- */
-static struct list *vine_graph_node_list_copy(struct list *src)
-{
-	struct list *dst = list_create();
-	if (!src) {
-		return dst;
-	}
-	struct vine_graph_node *x;
-	LIST_ITERATE(src, x)
-	{
-		list_push_tail(dst, x);
-	}
-	return dst;
-}
-
-/**
- * After supernode registration: for each node in mset, remove internal edges (both ends in mset).
- * Rewire edges that cross the group boundary through leader. mset contains leader plus all non-leader members.
- */
-static void vine_graph_supernode_rewire(struct vine_graph *g, struct vine_graph_node *leader, struct set *mset)
-{
-	struct vine_graph_node *m;
-	uint64_t nid;
-	int iteration;
-	ITABLE_ITERATE(g->nodes, iteration, nid, m)
-	{
-		if (!set_lookup(mset, m)) {
-			continue;
-		}
-
-		struct list *psnap = vine_graph_node_list_copy(m->parents);
-		struct vine_graph_node *p;
-		while ((p = list_pop_head(psnap))) {
-			if (set_lookup(mset, p)) {
-				vine_graph_node_remove_dependency(p, m);
-			} else {
-				vine_graph_node_remove_dependency(p, m);
-				vine_graph_node_ensure_dependency(p, leader);
-			}
-		}
-		list_delete(psnap);
-
-		struct list *csnap = vine_graph_node_list_copy(m->children);
-		struct vine_graph_node *c;
-		while ((c = list_pop_head(csnap))) {
-			if (set_lookup(mset, c)) {
-				vine_graph_node_remove_dependency(m, c);
-			} else {
-				vine_graph_node_remove_dependency(m, c);
-				vine_graph_node_ensure_dependency(leader, c);
-				/*
-				 * Scheduling sees leader->c; data still flows from member m (e.g. chain tail).
-				 * Record so materialize mounts m->outfile, not the leader's primary outfile.
-				 */
-				if (m != leader) {
-					char *lckey = string_format("%" PRIu64 ",%" PRIu64, leader->node_id, c->node_id);
-					/*
-					 * The table keeps the first insert if the same key is stored twice. Drop the
-					 * old mapping explicitly so the node that truly produces the file for c wins.
-					 */
-					hash_table_remove(g->supernode_leader_child_to_input_source, lckey);
-					hash_table_insert(g->supernode_leader_child_to_input_source, lckey, m);
-					free(lckey);
-				}
-			}
-		}
-		list_delete(csnap);
-	}
-}
-
-/**
- * Resolve the leader struct vine_graph_node * for any node in a supernode (singleton maps to itself).
- * Returns NULL if g or n is NULL or the leader id is missing from g.
- */
-struct vine_graph_node *vine_graph_supernode_leader_node(struct vine_graph *g, struct vine_graph_node *n)
-{
-	if (!g || !n) {
-		return NULL;
-	}
-	return itable_lookup(g->nodes, n->super_leader_id);
-}
-
-/**
- * List of non-leader member nodes for leader_id. Owned by the graph; do not free.
- * Items are struct vine_graph_node *. NULL if g is NULL or there is no entry.
- */
-struct list *vine_graph_supernode_nonleader_members(struct vine_graph *g, uint64_t leader_id)
-{
-	if (!g) {
-		return NULL;
-	}
-	return itable_lookup(g->super_leader_to_members, leader_id);
-}
-
-/**
- * Register a supernode: validate members, rewire externals to leader_id, set super_leader_id on all members,
- * clear fired_parents, and store non-leaders in super_leader_to_members. Nodes and plain deps must exist first.
- * Returns 0 on success, -1 on error (see debug log).
- */
-int vine_graph_supernode_register(struct vine_graph *g, uint64_t leader_id, const uint64_t *member_ids, int n_member_ids)
-{
-	if (!g || member_ids == NULL || n_member_ids < 1) {
-		debug(D_ERROR, "vine_graph_supernode_register: invalid arguments");
-		return -1;
-	}
-
-	struct vine_graph_node *leader = itable_lookup(g->nodes, leader_id);
-	if (!leader) {
-		debug(D_ERROR, "vine_graph_supernode_register: leader %" PRIu64 " not found", leader_id);
-		return -1;
-	}
-
-	struct set *seen = set_create(0);
-	struct set *mset = set_create(0);
-	set_insert(mset, leader);
-
-	for (int i = 0; i < n_member_ids; i++) {
-		uint64_t mid = member_ids[i];
-		if (mid == leader_id) {
-			debug(D_ERROR, "vine_graph_supernode_register: member list must not contain leader %" PRIu64, leader_id);
-			set_delete(seen);
-			set_delete(mset);
-			return -1;
-		}
-		if (set_lookup(seen, (void *)(uintptr_t)mid)) {
-			debug(D_ERROR, "vine_graph_supernode_register: duplicate member %" PRIu64, mid);
-			set_delete(seen);
-			set_delete(mset);
-			return -1;
-		}
-
-		struct vine_graph_node *mn = itable_lookup(g->nodes, mid);
-		if (!mn) {
-			debug(D_ERROR, "vine_graph_supernode_register: member node %" PRIu64 " not found", mid);
-			set_delete(seen);
-			set_delete(mset);
-			return -1;
-		}
-		if (mn->super_leader_id != mn->node_id) {
-			debug(D_ERROR,
-					"vine_graph_supernode_register: node %" PRIu64 " already belongs to leader %" PRIu64,
-					mid,
-					mn->super_leader_id);
-			set_delete(seen);
-			set_delete(mset);
-			return -1;
-		}
-		set_insert(seen, (void *)(uintptr_t)mid);
-		set_insert(mset, mn);
-	}
-	set_delete(seen);
-
-	if (leader->super_leader_id != leader->node_id) {
-		debug(D_ERROR,
-				"vine_graph_supernode_register: leader %" PRIu64 " already belongs to group %" PRIu64,
-				leader_id,
-				leader->super_leader_id);
-		set_delete(mset);
-		return -1;
-	}
-
-	if (itable_lookup(g->super_leader_to_members, leader_id)) {
-		debug(D_ERROR, "vine_graph_supernode_register: leader %" PRIu64 " already registered", leader_id);
-		set_delete(mset);
-		return -1;
-	}
-
-	vine_graph_supernode_rewire(g, leader, mset);
-
-	struct vine_graph_node *x;
-	uint64_t xid;
-	int iteration;
-	ITABLE_ITERATE(g->nodes, iteration, xid, x)
-	{
-		if (set_lookup(mset, x)) {
-			x->super_leader_id = leader_id;
-			vine_graph_node_clear_fired_parents(x);
-		}
-	}
-
-	struct list *nonleaders = list_create();
-	for (int i = 0; i < n_member_ids; i++) {
-		struct vine_graph_node *mn = itable_lookup(g->nodes, member_ids[i]);
-		list_push_tail(nonleaders, mn);
-	}
-	itable_insert(g->super_leader_to_members, leader_id, nonleaders);
-
-	set_delete(mset);
-	return 0;
-}
-
-/** Exactly one child pointer, or NULL if not exactly one. */
-static struct vine_graph_node *vine_graph_node_only_child(struct vine_graph_node *n)
-{
-	if (!n || list_size(n->children) != 1) {
-		return NULL;
-	}
-	struct vine_graph_node *c;
-	LIST_ITERATE(n->children, c)
-	{
-		return c;
-	}
-	return NULL;
-}
-
-/** Exactly one parent pointer, or NULL if not exactly one. */
-static struct vine_graph_node *vine_graph_node_only_parent(struct vine_graph_node *n)
-{
-	if (!n || list_size(n->parents) != 1) {
-		return NULL;
-	}
-	struct vine_graph_node *p;
-	LIST_ITERATE(n->parents, p)
-	{
-		return p;
-	}
-	return NULL;
-}
-
-/* File mounts need separate TaskVine sandboxes, so they form chain-group boundaries. */
-static int vine_graph_node_allows_chain_grouping(struct vine_graph_node *n)
-{
-	return n && list_size(n->extra_inputs) == 0 && list_size(n->extra_outputs) == 0;
-}
-
-/**
- * Head of a maximal linear chain: singleton, and not strictly inside such a chain from the left
- * (no parent, fan-in > 1, or unique parent has fan-out > 1).
- */
-static int vine_graph_node_is_chain_head(struct vine_graph_node *n)
-{
-	if (!vine_graph_node_is_supernode_leader(n) || !vine_graph_node_allows_chain_grouping(n)) {
-		return 0;
-	}
-	if (list_size(n->parents) == 0) {
-		return 1;
-	}
-	if (list_size(n->parents) > 1) {
-		return 1;
-	}
-	struct vine_graph_node *p = vine_graph_node_only_parent(n);
-	return p && (!vine_graph_node_allows_chain_grouping(p) || list_size(p->children) > 1);
-}
-
-struct pending_chain_group {
-	uint64_t leader_id;
-	uint64_t *member_ids;
-	int n_members;
-};
-
-int vine_graph_group_chain_like_tasks(struct vine_graph *g)
-{
-	if (!g) {
-		return -1;
-	}
-	if (!g->chain_grouping_enabled) {
-		return 0;
-	}
-
-	/*
-	 * Registering a supernode rewires the graph. Find every chain on the original adjacency
-	 * first, then register them, so a half-updated graph does not confuse later chain walks.
-	 */
-	struct list *pending = list_create();
-
-	uint64_t nid;
-	struct vine_graph_node *n;
-	int iteration;
-	ITABLE_ITERATE(g->nodes, iteration, nid, n)
-	{
-		if (!vine_graph_node_is_chain_head(n)) {
-			continue;
-		}
-		if (list_size(n->children) != 1) {
-			continue;
-		}
-
-		struct list *chain = list_create();
-		struct vine_graph_node *cur = n;
-		for (;;) {
-			list_push_tail(chain, cur);
-			if (list_size(cur->children) != 1) {
-				break;
-			}
-			struct vine_graph_node *c = vine_graph_node_only_child(cur);
-			if (!c || !vine_graph_node_is_supernode_leader(c) || !vine_graph_node_allows_chain_grouping(c)) {
-				break;
-			}
-			if (c->is_target) {
-				/* Leave the retrieval or output consumer as its own task outside the merged chain. */
-				break;
-			}
-			if (list_size(c->parents) != 1) {
-				break;
-			}
-			if (vine_graph_node_only_parent(c) != cur) {
-				break;
-			}
-			cur = c;
-		}
-
-		int L = list_size(chain);
-		if (L < 2) {
-			list_delete(chain);
-			continue;
-		}
-
-		struct pending_chain_group *pc = xxmalloc(sizeof(*pc));
-		pc->leader_id = n->node_id;
-		pc->n_members = L - 1;
-		pc->member_ids = xxmalloc((size_t)(L - 1) * sizeof(uint64_t));
-		int mi = 0;
-		int first = 1;
-		struct vine_graph_node *x;
-		LIST_ITERATE(chain, x)
-		{
-			if (first) {
-				first = 0;
-				continue;
-			}
-			pc->member_ids[mi++] = x->node_id;
-		}
-		list_push_tail(pending, pc);
-		list_delete(chain);
-	}
-
-	int groups = 0;
-	struct pending_chain_group *pc;
-	while ((pc = (struct pending_chain_group *)list_pop_head(pending))) {
-		if (vine_graph_supernode_register(g, pc->leader_id, pc->member_ids, pc->n_members) == 0) {
-			groups++;
-		}
-		free(pc->member_ids);
-		free(pc);
-	}
-	list_delete(pending);
-
-	return groups;
-}
-
-struct vine_graph_node *vine_graph_input_producer_node(struct vine_graph *g, struct vine_graph_node *parent, struct vine_graph_node *child)
-{
-	if (!g || !parent || !child) {
-		return parent;
-	}
-	if (!g->chain_grouping_enabled || !g->supernode_leader_child_to_input_source) {
-		return parent;
-	}
-
-	char *k = string_format("%" PRIu64 ",%" PRIu64, parent->node_id, child->node_id);
-	struct vine_graph_node *src = (struct vine_graph_node *)hash_table_lookup(g->supernode_leader_child_to_input_source, k);
-	free(k);
-	return src ? src : parent;
-}
-
-/**
  * Delete an executor graph instance.
  * @param g Reference to the executor graph.
  */
@@ -997,21 +446,7 @@ void vine_graph_delete(struct vine_graph *g)
 		return;
 	}
 
-	uint64_t lid;
-	struct list *mems;
 	int iteration;
-	if (g->super_leader_to_members) {
-		ITABLE_ITERATE(g->super_leader_to_members, iteration, lid, mems)
-		{
-			(void)lid;
-			if (mems) {
-				list_delete(mems);
-			}
-		}
-		itable_delete(g->super_leader_to_members);
-		g->super_leader_to_members = NULL;
-	}
-
 	uint64_t nid;
 	struct vine_graph_node *node;
 	ITABLE_ITERATE(g->nodes, iteration, nid, node)
@@ -1021,13 +456,11 @@ void vine_graph_delete(struct vine_graph *g)
 
 	free(g->task_runner_library_name);
 	free(g->task_runner_function_name);
-	free(g->checkpoint_dir);
 	free(g->output_dir);
 
 	itable_delete(g->nodes);
 	hash_table_delete(g->outfile_cachename_to_node);
 
-	hash_table_delete(g->supernode_leader_child_to_input_source);
 
 	itable_delete(g->file_id_to_file);
 

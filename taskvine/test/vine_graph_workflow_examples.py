@@ -10,7 +10,6 @@ import tempfile
 from pathlib import Path
 
 import cloudpickle
-import ndcctools.taskvine.vine_graph.vine_graph as vine_graph_mod
 from ndcctools.taskvine.vine_graph import FileHandle, TaskHandle, TaskOutputHandle, VineGraph, Workflow
 
 TEST_DIR = Path(__file__).resolve().parent
@@ -455,7 +454,7 @@ def _sink_tasks(workflow):
 
 
 def _run_vine_graph(
-    graph, n, task_group, port, port_file, logs, tag, out_dir, ckpt_dir,
+    graph, n, port, port_file, logs, tag, out_dir,
     priority, manager_name, libcores,
 ):
     run_info = logs / tag
@@ -466,13 +465,6 @@ def _run_vine_graph(
     corner_target = TaskHandle(wf, wf._corner_target_id) if graph == "corner-cases" else None
     targets = [corner_target, wf._corner_file_target] if corner_target is not None else _sink_tasks(wf)
 
-    def context_loader(graph_pkl):
-        cwd = os.getcwd()
-        if cwd not in sys.path:
-            sys.path.insert(0, cwd)
-        return {"graph": cloudpickle.loads(graph_pkl)}
-
-    vine_graph_mod.context_loader_func = context_loader
     try:
         cloudpickle.register_pickle_by_value(sys.modules[__name__])
     except Exception:
@@ -484,12 +476,10 @@ def _run_vine_graph(
 
         m.set_params(
             {
-                "checkpoint-dir": str(ckpt_dir),
                 "extra-task-output-size-mb": [0.0, 0.0],
                 "extra-task-sleep-time": [0.0, 0.0],
                 "libcores": libcores,
                 "output-dir": str(out_dir),
-                "task-group": task_group,
                 "task-priority-mode": priority,
                 "wait-for-workers": 1,
             }
@@ -510,7 +500,6 @@ def _run_vine_graph(
 def run_graph(
     graph,
     n=None,
-    task_group=0,
     port=0,
     port_file=None,
     work_root=None,
@@ -524,8 +513,7 @@ def run_graph(
     delete_root = work_root is None
     logs = root / "logs"
     out_d = root / "out" / tag
-    ckpt = root / "ckpt" / tag
-    for d in (logs, out_d, ckpt):
+    for d in (logs, out_d):
         d.mkdir(parents=True, exist_ok=True)
 
     def on_alarm(signum, frame):
@@ -539,13 +527,11 @@ def run_graph(
             return _run_vine_graph(
                 graph,
                 n,
-                task_group,
                 port,
                 port_file,
                 logs,
                 tag,
                 out_d,
-                ckpt,
                 priority,
                 manager_name,
                 libcores,
@@ -564,7 +550,6 @@ def main():
     p.add_argument("port_file", nargs="?")
     p.add_argument("-G", "--graph", nargs="+")
     p.add_argument("--case", action="append", dest="cases")
-    p.add_argument("--task-group", type=int, default=0)
     p.add_argument("--task-priority-mode", default="random")
     p.add_argument("--port", type=int, default=0)
     p.add_argument("--manager-name")
@@ -593,7 +578,6 @@ def main():
                 res = run_graph(
                     g,
                     n,
-                    task_group=args.task_group,
                     port=args.port if args.port == 0 else args.port + i,
                     port_file=args.port_file,
                     work_root=root,

@@ -26,8 +26,9 @@ all: $(PYMODULE_BINDING)
 
 $(PYMODULE_BINDING): $(PYMODULE)
 	cp $(PYMODULE) $(PYMODULE_BINDING)
+	cp $(MODULE_NAME).py $(PY_MODULE_DIR)/$(MODULE_NAME).py
 
-$(SWIG_WRAP): vine_graph.i vine_graph.h vine_graph_executor.h
+$(SWIG_WRAP): vine_graph.i vine_graph.h vine_graph_executor.h vine_graph_node.h
 	$(CCTOOLS_SWIG) -python -threads -relativeimport \
 		-I$(CCTOOLS_HOME)/taskvine/src/manager \
 		-I$(CCTOOLS_HOME)/dttools/src \
@@ -37,7 +38,7 @@ $(SWIG_WRAP): vine_graph.i vine_graph.h vine_graph_executor.h
 $(WRAP_OBJ): $(SWIG_WRAP)
 	$(CCTOOLS_CC) -o $@ -c $(CCTOOLS_INTERNAL_CCFLAGS) $(LOCAL_CCFLAGS) $(CCTOOLS_PYTHON3_CCFLAGS) -w -fPIC -DNDEBUG $<
 
-%.o: %.c vine_graph.h vine_graph_executor.h vine_graph_node.h
+$(OBJECTS): %.o: %.c vine_graph.h vine_graph_executor.h vine_graph_node.h
 	$(CCTOOLS_CC) -o $@ -c $(CCTOOLS_INTERNAL_CCFLAGS) $(LOCAL_CCFLAGS) -fPIC -DNDEBUG $<
 
 $(PYMODULE): $(WRAP_OBJ) $(OBJECTS)

@@ -41,7 +41,6 @@ struct vine_graph_node *vine_graph_node_create(uint64_t node_id)
 
 	node->is_target = 0;
 	node->node_id = node_id;
-	node->super_leader_id = node_id;
 
 	node->task = NULL;
 	node->task_runner_arg_file = NULL;
@@ -59,17 +58,11 @@ struct vine_graph_node *vine_graph_node_create(uint64_t node_id)
 	node->cut = 0;
 	node->released_by_prune_depth = 0;
 	node->outfile_size_bytes = 0;
-	node->pfs_credited_bytes = 0;
 	node->in_resubmit_queue = 0;
 	node->last_failure_time = 0;
 
 	node->depth = -1;
 	node->height = -1;
-	node->upstream_subgraph_size = -1;
-	node->downstream_subgraph_size = -1;
-	node->fan_in = -1;
-	node->fan_out = -1;
-	node->heavy_score = -1;
 
 	node->critical_path_time = -1;
 	node->preprocessing_time_us = 0;
@@ -94,15 +87,6 @@ static int vine_graph_node_dependency_exists(struct vine_graph_node *parent, str
 	return 0;
 }
 
-void vine_graph_node_remove_dependency(struct vine_graph_node *parent, struct vine_graph_node *child)
-{
-	if (!parent || !child) {
-		return;
-	}
-	list_remove(child->parents, parent);
-	list_remove(parent->children, child);
-}
-
 void vine_graph_node_ensure_dependency(struct vine_graph_node *parent, struct vine_graph_node *child)
 {
 	if (!parent || !child || vine_graph_node_dependency_exists(parent, child)) {
@@ -113,21 +97,9 @@ void vine_graph_node_ensure_dependency(struct vine_graph_node *parent, struct vi
 }
 
 /**
- * Drop fired_parents so executor scheduling can recount parents (e.g. after supernode merge rewires edges).
- */
-void vine_graph_node_clear_fired_parents(struct vine_graph_node *n)
-{
-	if (!n || !n->fired_parents) {
-		return;
-	}
-	set_delete(n->fired_parents);
-	n->fired_parents = NULL;
-}
-
-/**
  * Construct the task arguments for the node.
  * @param node Reference to the node object.
- * @return The task arguments in JSON format: {"fn_args": ["node_id"], "fn_kwargs": {}} (string for run_scheduler_keys).
+ * @return The task arguments in JSON format: {"fn_args": ["node_id"], "fn_kwargs": {}} (string for run_node).
  */
 char *vine_graph_node_construct_task_arguments(struct vine_graph_node *node)
 {
@@ -189,7 +161,7 @@ void vine_graph_node_debug_print(struct vine_graph_node *node)
 		debug(D_VINE, "outfile_type: %s", type_str);
 		debug(D_VINE, "outfile_cached_name: %s", cached_name ? cached_name : "(null)");
 	} else {
-		debug(D_VINE, "outfile_type: SHARED_FILE_SYSTEM or none");
+		debug(D_VINE, "outfile_type: not declared");
 	}
 
 	char *parent_ids = NULL; // comma separated parent ids for logging

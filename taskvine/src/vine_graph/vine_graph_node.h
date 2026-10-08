@@ -22,26 +22,19 @@ struct vine_graph_io_mount {
 typedef enum {
 	VINE_GRAPH_NODE_OUTFILE_TYPE_LOCAL = 0,		 // staged file under graph output_dir
 	VINE_GRAPH_NODE_OUTFILE_TYPE_TEMP,		 // TaskVine temp blob
-	VINE_GRAPH_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM, // path on shared storage, no vine_file
 } vine_graph_node_outfile_type_t;
 
 /** The node object. */
 struct vine_graph_node {
 	uint64_t node_id; // graph assigned id
-	/**
-	 * Supernode leader id for scheduling: equals @c node_id for a single-node group.
-	 * After @c vine_graph_supernode_register, every member shares the same leader id.
-	 */
-	uint64_t super_leader_id;
 	int is_target; // if set, output is retrieved when the task completes
 
 	struct vine_task *task;
 	struct vine_file *task_runner_arg_file; // JSON args buffer for the runner
-	struct vine_file *outfile;		// NULL when output is PFS only
+	struct vine_file *outfile;		// Manager-owned output, declared during finalize
 	char *outfile_remote_name;
 	size_t outfile_size_bytes;
 	vine_graph_node_outfile_type_t outfile_type;
-	size_t pfs_credited_bytes; // contribution to executor pfs_usage_bytes
 
 	struct list *parents;
 	struct list *children;
@@ -52,7 +45,7 @@ struct vine_graph_node {
 	 */
 	struct list *extra_outputs;
 	/**
-	 * FileHandle inputs beyond those implied by Python-result dependencies. Same lifecycle
+	 * FileHandle and execution-data inputs beyond Python-result dependencies. Same lifecycle
 	 * as @c extra_outputs: queued at graph build, wired on @c vine_task at materialize.
 	 */
 	struct list *extra_inputs;
@@ -68,11 +61,6 @@ struct vine_graph_node {
 
 	int depth;
 	int height;
-	int upstream_subgraph_size;
-	int downstream_subgraph_size;
-	int fan_in;
-	int fan_out;
-	double heavy_score;
 
 	timestamp_t critical_path_time;
 	/** Latest @c vine_graph_executor_submit_node interval for this node (microseconds); graph total is on @c struct vine_graph_executor. */
@@ -88,24 +76,13 @@ struct vine_graph_node {
 struct vine_graph_node *vine_graph_node_create(uint64_t node_id);
 
 /**
- * Remove parent->child from both endpoints' parents/children lists (no-op if NULL).
- * Used when rewiring supernodes so stale edges do not corrupt fan-in/out.
- */
-void vine_graph_node_remove_dependency(struct vine_graph_node *parent, struct vine_graph_node *child);
-
-/**
  * Add parent->child if that edge is not already present (idempotent).
  */
 void vine_graph_node_ensure_dependency(struct vine_graph_node *parent, struct vine_graph_node *child);
 
-/**
- * Drop fired_parents so executor scheduling can recount parents (e.g. after supernode merge rewires edges).
- */
-void vine_graph_node_clear_fired_parents(struct vine_graph_node *n);
-
 /** Create the task arguments for a node.
 @param node Reference to the node.
-@return The task arguments in JSON format: {"fn_args": ["node_id"], "fn_kwargs": {}} (string id for run_scheduler_keys).
+@return The task arguments in JSON format: {"fn_args": ["node_id"], "fn_kwargs": {}} (string id for run_node).
 */
 char *vine_graph_node_construct_task_arguments(struct vine_graph_node *node);
 

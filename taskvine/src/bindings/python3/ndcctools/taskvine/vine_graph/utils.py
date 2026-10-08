@@ -1,10 +1,4 @@
-import cloudpickle
 import os
-
-
-def context_loader_func(graph_pkl):
-    graph = cloudpickle.loads(graph_pkl)
-    return {"graph": graph}
 
 
 def remove_tree_contents(root_dir):

@@ -3,14 +3,13 @@
 # See the file COPYING for details.
 
 
-import sys
 import time
 import copy
 import dataclasses
-from collections import defaultdict, deque
+import cloudpickle
+from collections import deque
 
-from ndcctools.taskvine.utils import load_variable_from_library
-from ..workflow import _TaskOutputAttribute
+from ..workflow import Workflow, TaskOutputWrapper, _TaskOutputAttribute
 
 
 def _resolve_nested_legacy_tasks(obj, memo=None):
@@ -87,8 +86,18 @@ def _resolve_nested_legacy_tasks(obj, memo=None):
 
 
 def compute_task(workflow, task_expr):
+    """Execute locally using the Manager's Workflow metadata."""
     func_id, args, kwargs = task_expr
-    func = workflow.callables[func_id]
+
+    def file_path(handle):
+        if handle.workflow_id != workflow._workflow_id:
+            raise ValueError("file belongs to a different Workflow")
+        return workflow.file_input_path(handle.file_id)
+
+    return _compute_task(workflow.callables[func_id], args, kwargs, workflow.load_task_output, file_path)
+
+
+def _compute_task(func, args, kwargs, load_output, file_path):
     cache = {}
 
     def _follow_path(value, path):
@@ -106,7 +115,7 @@ def compute_task(workflow, task_expr):
 
     def on_ref(r):
         if r.task_id not in cache:
-            x = workflow.load_task_output(r.task_id)
+            x = load_output(r.task_id)
             cache[r.task_id] = x
         else:
             x = cache[r.task_id]
@@ -114,13 +123,8 @@ def compute_task(workflow, task_expr):
             return _follow_path(x, r.path)
         return x
 
-    def on_file(f):
-        if f.workflow_id != workflow._workflow_id:
-            raise ValueError("file belongs to a different Workflow")
-        return workflow.file_input_path(f.file_id)
-
-    r_args, r_kwargs = workflow._visit_task_output_refs(
-        (args, kwargs), on_ref, rewrite=True, on_file=on_file
+    r_args, r_kwargs = Workflow._visit_task_output_refs(
+        (args, kwargs), on_ref, rewrite=True, on_file=file_path
     )
 
     r_args, r_kwargs = _resolve_nested_legacy_tasks((r_args, r_kwargs))
@@ -128,123 +132,36 @@ def compute_task(workflow, task_expr):
     return func(*r_args, **r_kwargs)
 
 
-def topo_sort_group_scheduler_keys(workflow, member_scheduler_keys):
-    """Return a topological order of scheduler keys for one batched task-runner call.
+def run_node(node_id):
+    """Load one node's execution description, call its function, and write its output."""
+    if isinstance(node_id, bool) or not isinstance(node_id, (int, str)):
+        raise TypeError("run_node expects one positive node ID")
+    node_id = int(node_id)
+    if node_id < 1:
+        raise ValueError("run_node expects one positive node ID")
+    # Pickle preserves arbitrary Python task keys in this node's upstream-reference table.
+    with open(f"vine-graph-edata-node-{node_id}.pkl", "rb") as stream:
+        manifest = cloudpickle.load(stream)
+    objects = {}
 
-    Edges count only when both endpoints lie in the batch. Ties are broken by the order keys
-    appear in the argument list which usually matches the CSV written by C with the leader first.
-    """
-    # Kahn tie-break uses the order keys were listed because plain sets forget that order.
-    ordered = []
-    seen = set()
-    for k in member_scheduler_keys:
-        kk = int(k)
-        if kk not in seen:
-            seen.add(kk)
-            ordered.append(kk)
+    def load(file_id):
+        if file_id not in objects:
+            with open(f"vine-graph-edata-{file_id}", "rb") as stream:
+                objects[file_id] = cloudpickle.load(stream)
+        return objects[file_id]
 
-    nodes = set(ordered)
-    order_index = {k: i for i, k in enumerate(ordered)}
-    adj = defaultdict(set)
-    indeg = {k: 0 for k in nodes}
+    def load_output(task_key):
+        return TaskOutputWrapper.load_from_path(manifest["inputs"][task_key])
 
-    # Restrict Workflow to this batch: edge parent_sk -> child_sk only when both endpoints are members.
-    # Aligns with the C executor DAG via the same parents_of as Python Workflow.
-    for child_sk in nodes:
-        wk_child = workflow.scheduler_key_to_task_id[child_sk]
-        for wk_parent in workflow.parents_of.get(wk_child, ()):
-            parent_sk = workflow.task_id_to_scheduler_key[wk_parent]
-            if parent_sk in nodes and child_sk not in adj[parent_sk]:
-                adj[parent_sk].add(child_sk)
-                indeg[child_sk] += 1
+    def file_path(handle):
+        return manifest["files"][handle.file_id]
 
-    # Kahn: serial execution order within this task-runner call.
-    q = deque(k for k in ordered if indeg[k] == 0)
-    out = []
-    while q:
-        u = q.popleft()
-        out.append(u)
-        ready_next = []
-        for v in adj[u]:
-            indeg[v] -= 1
-            if indeg[v] == 0:
-                ready_next.append(v)
-        ready_next.sort(key=lambda x: order_index[x])
-        for v in ready_next:
-            q.append(v)
-    if len(out) != len(nodes):
-        raise ValueError("task_group: cycle among members per Workflow graph")
-    return out
-
-
-def run_single_workflow_node(workflow, scheduler_key):
-    """Run one node: scheduler_key -> workflow_key, execute, write outfile for downstream refs."""
-    workflow_key = workflow.scheduler_key_to_task_id[scheduler_key]
-    task_expr = workflow.task_dict[workflow_key]
-
-    output = compute_task(workflow, task_expr)
-
-    time.sleep(workflow.extra_task_sleep_time[workflow_key])
-
-    workflow.save_task_output(workflow_key, output)
-
-
-def _scheduler_keys_spec_to_list(scheduler_keys_spec):
-    """
-    Normalize task-runner input payload to a list of integer scheduler keys.
-    Primary wire form is one comma-separated string (e.g. ``\"1,2,3\"``).
-    Also accepts a bare int (legacy JSON) or a list of ints/strings from json.
-    """
-    if isinstance(scheduler_keys_spec, str):
-        parts = [p.strip() for p in scheduler_keys_spec.split(",") if p.strip()]
-        if not parts:
-            raise ValueError("run_scheduler_keys: empty scheduler key list after parsing")
-        return [int(p, 10) for p in parts]
-    if isinstance(scheduler_keys_spec, int):
-        return [scheduler_keys_spec]
-    if isinstance(scheduler_keys_spec, list):
-        if not scheduler_keys_spec:
-            raise ValueError("run_scheduler_keys: empty list")
-        return [int(x) for x in scheduler_keys_spec]
-    raise TypeError(
-        f"run_scheduler_keys: expected str, int, or list of keys, got {type(scheduler_keys_spec).__name__}"
-    )
-
-
-def _workflow_from_task_runner_context():
-    """
-    Resolve the Workflow from the TaskVine function context.
-
-    The normal path is ``ndcctools.taskvine.utils.load_variable_from_library``.
-    Keep a ``__main__`` lookup first so generated function scripts that inject
-    context directly into their own module namespace also work.
-    """
-    main = sys.modules.get("__main__")
-    g = getattr(main, "graph", None) if main is not None else None
-    if g is not None:
-        return g
-    return load_variable_from_library("graph")
-
-
-def run_scheduler_keys(scheduler_keys_spec):
-    """Task runner entry that parses keys, orders them, runs each node, and writes outfiles."""
-    workflow = _workflow_from_task_runner_context()
-    keys = _scheduler_keys_spec_to_list(scheduler_keys_spec)
-    ordered = topo_sort_group_scheduler_keys(workflow, keys)
-    leader_sk = keys[0]
-    # The infile from C lists the leader first. Kahn might pick another indeg-zero key first which
-    # would reorder writes and confuse executor validation, so move the leader to the front
-    # when it has no parent that is also inside this batch.
-    if ordered[0] != leader_sk:
-        batch = set(ordered)
-        wk_leader = workflow.scheduler_key_to_task_id[leader_sk]
-        for wkp in workflow.parents_of.get(wk_leader, ()):
-            psk = workflow.task_id_to_scheduler_key[wkp]
-            if psk in batch:
-                raise ValueError(
-                    f"run_scheduler_keys: leader {leader_sk} must run first but has intra-batch parent {psk}"
-                )
-        ordered = [leader_sk] + [sk for sk in ordered if sk != leader_sk]
-
-    for sk in ordered:
-        run_single_workflow_node(workflow, sk)
+    function = load(manifest["callable"])
+    args = tuple(load(file_id) for file_id in manifest["args"])
+    kwargs = {name: load(file_id) for name, file_id in manifest["kwargs"].items()}
+    output = _compute_task(function, args, kwargs, load_output, file_path)
+    del function, args, kwargs
+    objects.clear()
+    time.sleep(manifest["sleep"])
+    with open(manifest["output"], "wb") as stream:
+        cloudpickle.dump(TaskOutputWrapper(output, extra_size_mb=manifest["output_size_mb"]), stream)

@@ -1,11 +1,11 @@
 from .registration import TaskRunnerRegistration
 from .execution import (
     compute_task,
-    run_scheduler_keys,
+    run_node,
 )
 
 __all__ = [
     "TaskRunnerRegistration",
-    "run_scheduler_keys",
+    "run_node",
     "compute_task",
 ]

@@ -161,14 +161,15 @@ class Workflow:
             self._callable_index[func] = idx
         return idx
 
-    def _visit_task_output_refs(self, obj, on_ref, *, rewrite: bool, on_file=None):
+    @classmethod
+    def _visit_task_output_refs(cls, obj, on_ref, *, rewrite: bool, on_file=None):
         memo = {}
         active_immutable = set()
 
         def dict_key_contains_ref(key, seen):
             if isinstance(key, (TaskOutputHandle, TaskHandle, FileHandle)):
                 return True
-            if key is None or isinstance(key, self._LEAF_TYPES):
+            if key is None or isinstance(key, cls._LEAF_TYPES):
                 return False
             oid = id(key)
             if oid in seen:
@@ -207,7 +208,7 @@ class Workflow:
             if isinstance(x, TaskHandle):
                 raise TypeError("TaskHandle cannot be used as an argument directly; use task.output()")
 
-            if x is None or isinstance(x, self._LEAF_TYPES):
+            if x is None or isinstance(x, cls._LEAF_TYPES):
                 return x if rewrite else None
 
             oid = id(x)
@@ -444,6 +445,11 @@ class Workflow:
         with open(self.outfile_remote_name[workflow_key], "wb") as f:
             wrapped_output = TaskOutputWrapper(output, extra_size_mb=self.extra_task_output_size_mb[workflow_key])
             cloudpickle.dump(wrapped_output, f)
+
+    def _task_edata(self, workflow_key):
+        """Expose the callable and top-level arguments to the Manager's staging layer."""
+        func_id, args, kwargs = self.task_dict[workflow_key]
+        return self.callables[func_id], args, kwargs
 
     def load_task_output(self, workflow_key):
         return TaskOutputWrapper.load_from_path(self.outfile_remote_name[workflow_key])

@@ -5,7 +5,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "buffer.h"
 #include "debug.h"
 #include "vine_graph_executor.h"
 #include "macros.h"
@@ -43,73 +42,6 @@ static uint64_t vine_graph_executor_count_completed_user_nodes(const struct vine
 	return n;
 }
 
-/*
- * The leader's task has passed validation. Mark that node completed and, when chain grouping
- * applies, mark every non-leader in the same group. Those members did not receive their own
- * vine tasks because they ran inside the leader's single submission.
- */
-static void vine_graph_executor_mark_user_node_completed_after_success(struct vine_graph *g, struct vine_graph_node *leader)
-{
-	if (!g || !leader) {
-		return;
-	}
-
-	leader->completed = 1;
-
-	if (!g->chain_grouping_enabled) {
-		return;
-	}
-
-	struct list *smems = vine_graph_supernode_nonleader_members(g, leader->node_id);
-	if (!smems) {
-		return;
-	}
-
-	struct vine_graph_node *m;
-	LIST_ITERATE(smems, m)
-	{
-		if (!m->completed) {
-			m->completed = 1;
-		}
-	}
-}
-
-/*
- * Build the JSON payload for the runner infile argument. Field fn_args[0] names the scheduler
- * keys that run_scheduler_keys should execute. A merged chain passes one comma-separated string
- * such as "1,2,3". A singleton passes a single id. The payload must be one JSON string in that
- * slot instead of an array that mixes strings and bare numbers.
- */
-static char *vine_graph_executor_format_runner_infile_json(struct vine_graph *g, struct vine_graph_node *node)
-{
-	if (!g || !node) {
-		return NULL;
-	}
-
-	if (!g->chain_grouping_enabled) {
-		return string_format("{\"fn_args\":[\"%" PRIu64 "\"],\"fn_kwargs\":{}}", node->node_id);
-	}
-
-	struct list *mems = vine_graph_supernode_nonleader_members(g, node->node_id);
-	if (!mems || list_size(mems) == 0) {
-		return string_format("{\"fn_args\":[\"%" PRIu64 "\"],\"fn_kwargs\":{}}", node->node_id);
-	}
-
-	buffer_t buf;
-	buffer_init(&buf);
-	buffer_printf(&buf, "{\"fn_args\":[\"%" PRIu64 "", node->node_id);
-	struct vine_graph_node *m;
-	LIST_ITERATE(mems, m)
-	{
-		buffer_printf(&buf, ",%" PRIu64 "", m->node_id);
-	}
-	buffer_printf(&buf, "\"],\"fn_kwargs\":{}}");
-
-	char *s = xxstrdup(buffer_tostring(&buf));
-	buffer_free(&buf);
-	return s;
-}
-
 static void vine_graph_io_mount_add(struct list *lst, struct vine_file *f, const char *remote_name)
 {
 	struct vine_graph_io_mount *m = xxmalloc(sizeof(*m));
@@ -142,7 +74,6 @@ static void vine_graph_executor_init_runtime(struct vine_graph_executor *e)
 	e->makespan_us = 0;
 	e->completed_recovery_tasks = 0;
 	e->time_spent_on_cut_propagation = 0;
-	e->pfs_usage_bytes = 0;
 	e->total_preprocessing_time_us = 0;
 	e->total_postprocessing_time_us = 0;
 	e->task_priority_mode = TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST;
@@ -217,11 +148,6 @@ void vine_graph_executor_delete(struct vine_graph_executor *e)
 			switch (node->outfile_type) {
 			case VINE_GRAPH_NODE_OUTFILE_TYPE_TEMP:
 				break;
-			case VINE_GRAPH_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
-				if (node->outfile_remote_name) {
-					unlink(node->outfile_remote_name);
-				}
-				break;
 			case VINE_GRAPH_NODE_OUTFILE_TYPE_LOCAL:
 				if (node->outfile && vine_file_source(node->outfile)) {
 					unlink(vine_file_source(node->outfile));
@@ -270,8 +196,10 @@ static struct vine_task *vine_graph_executor_make_vine_task(struct vine_graph_ex
 	}
 
 	struct vine_task *t = vine_task_create(g->task_runner_function_name);
+	if (!t) {
+		return NULL;
+	}
 	vine_task_set_library_required(t, g->task_runner_library_name);
-	vine_task_addref(t); // keep alive across vine_submit and vine_wait
 	return t;
 }
 
@@ -312,44 +240,23 @@ static void vine_graph_executor_materialize_node(struct vine_graph_executor *e, 
 		vine_task_add_output(t, m->file, m->remote_name, VINE_TRANSFER_ALWAYS);
 	}
 
-	/*
-	 * When chains are merged, only the leader submits a task, but that task must list every
-	 * member's declared outputs so the manager can track each outfile by node id.
-	 */
-	if (g->chain_grouping_enabled && vine_graph_node_is_supernode_leader(node)) {
-		struct list *mems = vine_graph_supernode_nonleader_members(g, node->node_id);
-		if (mems) {
-			struct vine_graph_node *m;
-			LIST_ITERATE(mems, m)
-			{
-				if (m->outfile) {
-					vine_task_add_output(t, m->outfile, m->outfile_remote_name, VINE_TRANSFER_ALWAYS);
-				}
-				LIST_ITERATE(m->extra_outputs, item)
-				{
-					struct vine_graph_io_mount *em = (struct vine_graph_io_mount *)item;
-					vine_task_add_output(t, em->file, em->remote_name, VINE_TRANSFER_ALWAYS);
-				}
-			}
-		}
-	}
-
 	struct vine_graph_node *parent_node;
 	LIST_ITERATE(node->parents, parent_node)
 	{
-		struct vine_graph_node *src = vine_graph_input_producer_node(g, parent_node, node);
-		if (src && src->outfile) {
-			vine_task_add_input(t, src->outfile, src->outfile_remote_name, VINE_TRANSFER_ALWAYS);
+		if (parent_node && parent_node->outfile) {
+			vine_task_add_input(t, parent_node->outfile, parent_node->outfile_remote_name, VINE_TRANSFER_ALWAYS);
 		}
 	}
 
 	LIST_ITERATE(node->extra_inputs, item)
 	{
 		struct vine_graph_io_mount *m = (struct vine_graph_io_mount *)item;
-		vine_task_add_input(t, m->file, m->remote_name, VINE_TRANSFER_ALWAYS);
+		if (!vine_task_add_input(t, m->file, m->remote_name, VINE_TRANSFER_ALWAYS)) {
+			goto fail_task;
+		}
 	}
 
-	char *task_arguments = vine_graph_executor_format_runner_infile_json(g, node);
+	char *task_arguments = vine_graph_node_construct_task_arguments(node);
 	if (!task_arguments) {
 		goto fail_task;
 	}
@@ -361,7 +268,7 @@ static void vine_graph_executor_materialize_node(struct vine_graph_executor *e, 
 	}
 	vine_task_add_input(t, arg_file, "infile", VINE_TRANSFER_ALWAYS);
 
-	node->task = t;
+	node->task = vine_task_addref(t); // keep alive across vine_submit and vine_wait after construction succeeds
 	node->task_runner_arg_file = arg_file;
 	return;
 
@@ -371,7 +278,6 @@ fail_task:
 
 /*
  * Declare the output vine_file for this node from outfile_type.
- * Shared filesystem outputs may leave outfile unset.
  */
 static void vine_graph_executor_declare_node_outfile(struct vine_graph_executor *e, struct vine_graph_node *node)
 {
@@ -389,8 +295,6 @@ static void vine_graph_executor_declare_node_outfile(struct vine_graph_executor 
 	}
 	case VINE_GRAPH_NODE_OUTFILE_TYPE_TEMP:
 		node->outfile = vine_declare_temp(e->manager);
-		break;
-	case VINE_GRAPH_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
 		break;
 	}
 }
@@ -592,25 +496,23 @@ static double vine_graph_executor_calculate_task_priority(struct vine_graph_exec
 	case TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST:
 		LIST_ITERATE(node->parents, parent_node)
 		{
-			struct vine_graph_node *src = vine_graph_input_producer_node(g, parent_node, node);
-			if (!src || !src->outfile) {
+			if (!parent_node || !parent_node->outfile) {
 				continue;
 			}
-			priority += (double)vine_file_size(src->outfile);
+			priority += (double)vine_file_size(parent_node->outfile);
 		}
 		break;
 	case TASK_PRIORITY_MODE_LARGEST_STORAGE_FOOTPRINT_FIRST:
 		LIST_ITERATE(node->parents, parent_node)
 		{
-			struct vine_graph_node *src = vine_graph_input_producer_node(g, parent_node, node);
-			if (!src || !src->outfile) {
+			if (!parent_node || !parent_node->outfile) {
 				continue;
 			}
 			if (!parent_node->task) {
 				continue;
 			}
 			timestamp_t parent_task_completion_time = vine_task_get_metric(parent_node->task, "time_workers_execute_last");
-			priority += (double)vine_file_size(src->outfile) * (double)parent_task_completion_time;
+			priority += (double)vine_file_size(parent_node->outfile) * (double)parent_task_completion_time;
 		}
 		break;
 	}
@@ -669,17 +571,10 @@ record_preprocessing: {
 }
 }
 
-/*
- * Return true when this node is allowed to submit. If chain grouping is active, only the
- * supernode leader may submit because other members are executed inside the leader's task.
- */
+/* Return true when this node is ready to submit. */
 static int vine_graph_node_ready_for_submission(struct vine_graph_executor *e, struct vine_graph_node *node)
 {
-	struct vine_graph *g = e ? e->graph : NULL;
 	if (!e || !node || node->remaining_parents_count != 0 || node->completed) {
-		return 0;
-	}
-	if (g && g->chain_grouping_enabled && !vine_graph_node_is_supernode_leader(node)) {
 		return 0;
 	}
 	if (node->in_resubmit_queue) {
@@ -766,64 +661,13 @@ static struct vine_graph_node *vine_graph_executor_node_from_task(struct vine_gr
 	return NULL;
 }
 
-/* Update shared-filesystem byte counters when a node's credited output size changes. */
-static void vine_graph_executor_account_pfs_write(struct vine_graph_executor *e, struct vine_graph_node *n, size_t new_size)
-{
-	struct vine_graph *g = e ? e->graph : NULL;
-	if (!g || !n) {
-		return;
-	}
-
-	size_t prev = n->pfs_credited_bytes;
-	if (new_size == prev) {
-		return;
-	}
-
-	if (new_size > prev) {
-		e->pfs_usage_bytes += (new_size - prev);
-	} else {
-		e->pfs_usage_bytes -= (prev - new_size); // retry may produce a smaller file
-	}
-	n->pfs_credited_bytes = new_size;
-
-	debug(D_VINE,
-			"pfs write: node %" PRIu64 " size=%zu (prev=%zu) usage=%" PRIu64,
-			n->node_id,
-			new_size,
-			prev,
-			e->pfs_usage_bytes);
-}
-
-/* Remove a node's credited bytes from the shared-filesystem usage total. */
-static void vine_graph_executor_account_pfs_delete(struct vine_graph_executor *e, struct vine_graph_node *n)
-{
-	struct vine_graph *g = e ? e->graph : NULL;
-	if (!g || !n) {
-		return;
-	}
-
-	size_t credited = n->pfs_credited_bytes;
-	if (credited == 0) {
-		return;
-	}
-
-	e->pfs_usage_bytes -= credited;
-	n->pfs_credited_bytes = 0;
-
-	debug(D_VINE,
-			"pfs delete: node %" PRIu64 " size=%zu usage=%" PRIu64,
-			n->node_id,
-			credited,
-			e->pfs_usage_bytes);
-}
-
-/* Return non-zero if the completed node retains output on local disk or a shared filesystem path. */
+/* Return non-zero if the completed node retains output on a Manager-local file. */
 static int vine_graph_node_is_anchored(const struct vine_graph_node *n)
 {
 	if (!n || !n->completed) {
 		return 0;
 	}
-	return n->outfile_type == VINE_GRAPH_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM || n->outfile_type == VINE_GRAPH_NODE_OUTFILE_TYPE_LOCAL;
+	return n->outfile_type == VINE_GRAPH_NODE_OUTFILE_TYPE_LOCAL;
 }
 
 /* Return non-zero when a temporary output file has a recovery task that is neither initial nor finished. */
@@ -847,12 +691,6 @@ static void vine_graph_executor_delete_node_output(struct vine_graph_executor *e
 	case VINE_GRAPH_NODE_OUTFILE_TYPE_TEMP:
 		if (n->outfile) {
 			vine_prune_file(e->manager, n->outfile);
-		}
-		break;
-	case VINE_GRAPH_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM:
-		vine_graph_executor_account_pfs_delete(e, n);
-		if (n->outfile_remote_name) {
-			unlink(n->outfile_remote_name);
 		}
 		break;
 	case VINE_GRAPH_NODE_OUTFILE_TYPE_LOCAL:
@@ -1066,41 +904,21 @@ static void vine_graph_executor_run_completion_postprocess(struct vine_graph_exe
 #define RESUBMIT_SCAN_LIMIT 100
 #define RESUBMIT_COOLDOWN_USECS ((timestamp_t)1000000)
 
-/*
- * Queue a retry after failure. With chain grouping the queue stores the leader so one retry
- * resubmits the whole merged task. Without grouping the failing node itself is the leader.
- */
+/* Queue this node for retry after failure. */
 static void vine_graph_executor_queue_node_retry(struct vine_graph_executor *e, struct vine_graph_node *node)
 {
-	struct vine_graph *g = e ? e->graph : NULL;
-	if (!g || !node) {
+	if (!e || !e->graph || !node || node->in_resubmit_queue) {
 		return;
 	}
-
-	struct vine_graph_node *leader = node;
-	if (g->chain_grouping_enabled) {
-		struct vine_graph_node *mapped = vine_graph_supernode_leader_node(g, node);
-		if (mapped) {
-			leader = mapped;
-		}
-	}
-	if (!leader) {
-		return;
-	}
-
-	if (leader->in_resubmit_queue) {
-		return;
-	}
-
-	leader->last_failure_time = timestamp_get();
-	list_push_tail(e->resubmit_queue, leader);
-	leader->in_resubmit_queue = 1;
+	node->last_failure_time = timestamp_get();
+	list_push_tail(e->resubmit_queue, node);
+	node->in_resubmit_queue = 1;
 }
 
 /*
  * Process the resubmit queue after cooldown. A ready head is popped, its failed task is torn down,
  * and vine_graph_executor_submit_node runs again. If the head is still cooling off, rotate it to the tail so
- * other leaders behind it are not stuck forever while the driver waits.
+ * other nodes behind it are not stuck forever while the driver waits.
  */
 static void vine_graph_executor_drain_resubmit_queue(struct vine_graph_executor *e)
 {
@@ -1149,40 +967,9 @@ static void vine_graph_executor_drain_resubmit_queue(struct vine_graph_executor 
 }
 
 /*
- * Verify status and on-disk outputs (primary outfile only).
- * On failure enqueue a retry for the node.
- */
-static int vine_graph_executor_validate_node_outputs_or_retry(struct vine_graph_executor *e, struct vine_graph_node *retry_node, struct vine_graph_node *output_node, struct vine_task *task)
-{
-	switch (output_node->outfile_type) {
-	case VINE_GRAPH_NODE_OUTFILE_TYPE_SHARED_FILE_SYSTEM: {
-		struct stat info;
-		// shared path may lag behind a successful task result code
-		if (stat(output_node->outfile_remote_name, &info) < 0) {
-			debug(D_VINE, "Task %d succeeded but missing sharedfs output %s", vine_task_get_id(task), output_node->outfile_remote_name);
-			vine_graph_executor_queue_node_retry(e, retry_node);
-			return 0;
-		}
-		output_node->outfile_size_bytes = info.st_size;
-		vine_graph_executor_account_pfs_write(e, output_node, (size_t)info.st_size);
-		break;
-	}
-	case VINE_GRAPH_NODE_OUTFILE_TYPE_LOCAL:
-	case VINE_GRAPH_NODE_OUTFILE_TYPE_TEMP:
-		if (output_node->outfile) {
-			output_node->outfile_size_bytes = vine_file_size(output_node->outfile);
-		}
-		break;
-	}
-
-	return 1;
-}
-
-/*
  * Verify one extra output mount after a successful task (VINE_FILE paths must exist).
  */
-static int vine_graph_executor_validate_io_mount_or_retry(
-		struct vine_graph_executor *e, struct vine_graph_node *retry_node, struct vine_graph_io_mount *mount, struct vine_task *task)
+static int vine_graph_executor_validate_io_mount_or_retry(struct vine_graph_executor *e, struct vine_graph_node *node, struct vine_graph_io_mount *mount, struct vine_task *task)
 {
 	if (!mount || !mount->file) {
 		return 1;
@@ -1202,7 +989,7 @@ static int vine_graph_executor_validate_io_mount_or_retry(
 						vine_task_get_id(task),
 						mount->remote_name ? mount->remote_name : "?",
 						vine_file_source(f));
-				vine_graph_executor_queue_node_retry(e, retry_node);
+				vine_graph_executor_queue_node_retry(e, node);
 				return 0;
 			}
 		}
@@ -1216,16 +1003,15 @@ static int vine_graph_executor_validate_io_mount_or_retry(
 /*
  * Primary outfile (per node outfile_type) plus every extra_outputs mount declared for that graph node.
  */
-static int vine_graph_executor_validate_all_declared_outputs_or_retry(
-		struct vine_graph_executor *e, struct vine_graph_node *retry_node, struct vine_graph_node *output_node, struct vine_task *task)
+static int vine_graph_executor_validate_all_declared_outputs_or_retry(struct vine_graph_executor *e, struct vine_graph_node *node, struct vine_task *task)
 {
-	if (!vine_graph_executor_validate_node_outputs_or_retry(e, retry_node, output_node, task)) {
-		return 0;
+	if (node->outfile) {
+		node->outfile_size_bytes = vine_file_size(node->outfile);
 	}
 	void *item;
-	LIST_ITERATE(output_node->extra_outputs, item)
+	LIST_ITERATE(node->extra_outputs, item)
 	{
-		if (!vine_graph_executor_validate_io_mount_or_retry(e, retry_node, (struct vine_graph_io_mount *)item, task)) {
+		if (!vine_graph_executor_validate_io_mount_or_retry(e, node, (struct vine_graph_io_mount *)item, task)) {
 			return 0;
 		}
 	}
@@ -1234,10 +1020,9 @@ static int vine_graph_executor_validate_all_declared_outputs_or_retry(
 
 static int vine_graph_executor_validate_task_or_retry(struct vine_graph_executor *e, struct vine_graph_node *node, struct vine_task *task)
 {
-	struct vine_graph *g = e ? e->graph : NULL;
 	/*
 	 * Returning zero means the completion is rejected, a retry is enqueued, and the progress
-	 * bar must not advance because the batch did not truly succeed yet.
+	 * bar must not advance because the node did not succeed yet.
 	 */
 	if (vine_task_get_result(task) != VINE_RESULT_SUCCESS || vine_task_get_exit_code(task) != 0) {
 		debug(D_VINE,
@@ -1249,25 +1034,8 @@ static int vine_graph_executor_validate_task_or_retry(struct vine_graph_executor
 		return 0;
 	}
 
-	if (!vine_graph_executor_validate_all_declared_outputs_or_retry(e, node, node, task)) {
+	if (!vine_graph_executor_validate_all_declared_outputs_or_retry(e, node, task)) {
 		return 0;
-	}
-
-	/*
-	 * One vine task may carry outputs for the whole supernode. Validate every grouped member's
-	 * declared files against that same task, not only the leader's primary outfile.
-	 */
-	if (g && g->chain_grouping_enabled) {
-		struct list *mems = vine_graph_supernode_nonleader_members(g, node->node_id);
-		if (mems) {
-			struct vine_graph_node *m;
-			LIST_ITERATE(mems, m)
-			{
-				if (!vine_graph_executor_validate_all_declared_outputs_or_retry(e, node, m, task)) {
-					return 0;
-				}
-			}
-		}
 	}
 
 	return 1;
@@ -1340,8 +1108,7 @@ void vine_graph_executor_execute(struct vine_graph_executor *e)
 
 	/*
 	 * Stop the main loop once every graph node reports completed. Count completed nodes directly
-	 * instead of relying on progress bar ticks because grouped members can flip to completed in
-	 * a single completion event and the bar would miss intermediate steps.
+	 * instead of relying on progress bar ticks that also include recovery tasks.
 	 */
 	while (vine_graph_executor_count_completed_user_nodes(g) < user_node_total) {
 		if (interrupted) {
@@ -1395,7 +1162,7 @@ void vine_graph_executor_execute(struct vine_graph_executor *e)
 				e->makespan_us = e->time_last_task_retrieved - e->time_first_task_dispatched;
 
 				first_completion = !node->completed;
-				vine_graph_executor_mark_user_node_completed_after_success(g, node);
+				node->completed = 1;
 
 				if (first_completion) {
 					if (user_tasks_part->current == 0) {
