@@ -217,9 +217,7 @@ class VineGraph(Manager):
         topo_order = py_graph.get_topological_order()
 
         for k in topo_order:
-            node_id = bridge.add_node(k)
-            py_graph.task_id_to_scheduler_key[k] = node_id
-            py_graph.scheduler_key_to_task_id[node_id] = k
+            bridge.add_node(k)
             for pk in py_graph.parents_of[k]:
                 bridge.add_dependency(pk, k)
 
@@ -256,7 +254,7 @@ class VineGraph(Manager):
         bridge.compute_topology_metrics()
 
         # Save the finalized output names for node manifests and result loading.
-        for k in py_graph.task_id_to_scheduler_key:
+        for k in py_graph.task_dict:
             outfile_remote_name = bridge.get_node_outfile_remote_name(k)
             py_graph.outfile_remote_name[k] = outfile_remote_name
 
@@ -313,7 +311,7 @@ class VineGraph(Manager):
             for file_id in dict.fromkeys(file_ids):
                 bridge.add_task_input_file(key, file_id, f"vine-graph-edata-{file_id}")
 
-            node_id = py_graph.task_id_to_scheduler_key[key]
+            node_id = bridge.get_node_id(key)
             remote_name = f"vine-graph-edata-node-{node_id}.pkl"
             path = os.path.join(directory, remote_name)
             with open(path, "wb") as stream:
@@ -334,7 +332,7 @@ class VineGraph(Manager):
             sys.stdout.write("\n")
         sys.stdout.flush()
 
-    def _execute_workflow_local(self, py_graph):
+    def _execute_workflow_local(self, py_graph, bridge):
         """Run the workflow locally in topological order."""
         out_dir = os.path.abspath(self.get_param("output-dir"))
         os.makedirs(out_dir, exist_ok=True)
@@ -357,7 +355,7 @@ class VineGraph(Manager):
             self._print_local_progress(0, n, t0)
             last_update = time.time()
             for i, k in enumerate(order, 1):
-                task_dir = os.path.join(out_dir, ".vine_graph_tasks", f"task-{py_graph.task_id_to_scheduler_key[k]}")
+                task_dir = os.path.join(out_dir, ".vine_graph_tasks", f"task-{bridge.get_node_id(k)}")
                 os.makedirs(task_dir, exist_ok=True)
                 remove_tree_contents(task_dir)
                 for task_path in py_graph.output_files_by_task.get(k, {}):
@@ -444,7 +442,7 @@ class VineGraph(Manager):
         try:
             if local_execute:
                 print("=== local-execute: running Workflow in process (no workers)", flush=True)
-                makespan_s = self._execute_workflow_local(py_graph)
+                makespan_s = self._execute_workflow_local(py_graph, bridge)
                 completed_recovery_tasks = 0
             else:
                 edata_directory = tempfile.TemporaryDirectory(prefix="vine-graph-edata-", dir=self.staging_directory)

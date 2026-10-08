@@ -30,27 +30,28 @@ class VineGraphCapiBridge:
         self._c_graph = vine_graph_capi.vine_graph_executor_create_graph(c_taskvine)
         self._c_executor = vine_graph_capi.vine_graph_executor_create(c_taskvine, self._c_graph)
         self._workflow_key_to_scheduler_key = {}
-        self._scheduler_key_to_workflow_key = {}
 
     def tune(self, name, value):
         """Forward a tuning parameter to the C vine_graph executor."""
         if vine_graph_capi.vine_graph_executor_tune(self._c_executor, name, value) != 0:
             raise RuntimeError(f"Failed to tune executor parameter {name!r}={value!r}")
 
-    def add_node(self, workflow_key, is_target=None):
+    def add_node(self, workflow_key):
         """Create a C node and record its workflow key."""
         node_id = vine_graph_capi.vine_graph_executor_add_node(self._c_executor)
         self._workflow_key_to_scheduler_key[workflow_key] = node_id
-        self._scheduler_key_to_workflow_key[node_id] = workflow_key
-        if is_target is not None and bool(is_target):
-            vine_graph_capi.vine_graph_set_target(self._c_graph, node_id)
         return node_id
+
+    def get_node_id(self, workflow_key):
+        """Return the C node ID owned by this bridge."""
+        try:
+            return self._workflow_key_to_scheduler_key[workflow_key]
+        except KeyError:
+            raise KeyError(f"Workflow key not found: {workflow_key}") from None
 
     def set_target(self, workflow_key):
         """Mark a node as a target."""
-        node_id = self._workflow_key_to_scheduler_key.get(workflow_key)
-        if node_id is None:
-            raise KeyError(f"Workflow key not found: {workflow_key}")
+        node_id = self.get_node_id(workflow_key)
         vine_graph_capi.vine_graph_set_target(self._c_graph, node_id)
 
     def add_dependency(self, parent_workflow_key, child_workflow_key):
@@ -68,10 +69,8 @@ class VineGraphCapiBridge:
 
     def get_node_outfile_remote_name(self, workflow_key):
         """Return the output path assigned by the C graph."""
-        if workflow_key not in self._workflow_key_to_scheduler_key:
-            raise KeyError(f"Workflow key not found: {workflow_key}")
         return vine_graph_capi.vine_graph_get_node_outfile_remote_name(
-            self._c_graph, self._workflow_key_to_scheduler_key[workflow_key]
+            self._c_graph, self.get_node_id(workflow_key)
         )
 
     def get_task_runner_library_name(self):
@@ -93,9 +92,7 @@ class VineGraphCapiBridge:
 
     def add_task_input_file(self, workflow_key, file_id, task_path):
         """Mount a declared file into a task."""
-        task_id = self._workflow_key_to_scheduler_key.get(workflow_key)
-        if task_id is None:
-            raise KeyError(f"Workflow key not found: {workflow_key}")
+        task_id = self.get_node_id(workflow_key)
         if vine_graph_capi.vine_graph_executor_add_task_input_file(
             self._c_executor, task_id, file_id, task_path
         ) != 0:
@@ -103,9 +100,7 @@ class VineGraphCapiBridge:
 
     def add_task_output_file(self, workflow_key, file_id, task_path, is_target=False):
         """Declare and mount a task-produced FileHandle."""
-        task_id = self._workflow_key_to_scheduler_key.get(workflow_key)
-        if task_id is None:
-            raise KeyError(f"Workflow key not found: {workflow_key}")
+        task_id = self.get_node_id(workflow_key)
         if vine_graph_capi.vine_graph_executor_add_task_output_file(
             self._c_executor, task_id, file_id, task_path, int(bool(is_target))
         ) != 0:

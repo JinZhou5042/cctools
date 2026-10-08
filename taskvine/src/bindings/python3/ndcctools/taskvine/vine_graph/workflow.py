@@ -147,8 +147,6 @@ class Workflow:
 
         self.outfile_remote_name = collections.defaultdict(lambda: None)   # workflow_key -> remote outfile name, will be set by the executor graph
 
-        self.task_id_to_scheduler_key = {}                  # workflow_key -> scheduler key (C node id)
-        self.scheduler_key_to_task_id = {}                  # scheduler key -> workflow_key
 
         self.extra_task_output_size_mb = {}  # workflow_key -> extra size in MB
         self.extra_task_sleep_time = {}      # workflow_key -> extra sleep time in seconds

@@ -18,12 +18,6 @@ struct vine_graph_io_mount {
 	char *remote_name;
 };
 
-/** The storage type of the node's output file. */
-typedef enum {
-	VINE_GRAPH_NODE_OUTFILE_TYPE_LOCAL = 0,		 // staged file under graph output_dir
-	VINE_GRAPH_NODE_OUTFILE_TYPE_TEMP,		 // TaskVine temp blob
-} vine_graph_node_outfile_type_t;
-
 /** The node object. */
 struct vine_graph_node {
 	uint64_t node_id; // graph assigned id
@@ -33,8 +27,6 @@ struct vine_graph_node {
 	struct vine_file *task_runner_arg_file; // JSON args buffer for the runner
 	struct vine_file *outfile;		// Manager-owned output, declared during finalize
 	char *outfile_remote_name;
-	size_t outfile_size_bytes;
-	vine_graph_node_outfile_type_t outfile_type;
 
 	struct list *parents;
 	struct list *children;
@@ -62,7 +54,6 @@ struct vine_graph_node {
 	int depth;
 	int height;
 
-	timestamp_t critical_path_time;
 	/** Latest @c vine_graph_executor_submit_node interval for this node (microseconds); graph total is on @c struct vine_graph_executor. */
 	uint64_t preprocessing_time_us;
 	/** Latest @c vine_graph_executor_run_completion_postprocess interval for this node (microseconds); graph total on executor. */
@@ -95,11 +86,5 @@ void vine_graph_node_delete(struct vine_graph_node *node);
 @param node Reference to the node.
 */
 void vine_graph_node_debug_print(struct vine_graph_node *node);
-
-/** Update the critical path time of a node.
-@param node Reference to the node.
-@param execution_time Reference to the execution time of the node.
-*/
-void vine_graph_node_update_critical_path_time(struct vine_graph_node *node, timestamp_t execution_time);
 
 #endif // VINE_GRAPH_NODE_H

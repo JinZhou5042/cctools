@@ -251,7 +251,7 @@ void vine_graph_set_task_runner_function_name(struct vine_graph *g, const char *
 }
 
 /**
- * Compute depth, height, and output storage for each node.
+ * Compute depth and height for each node.
  * Call after all nodes and dependencies are added.
  * @param g Reference to the executor graph.
  */
@@ -292,11 +292,6 @@ void vine_graph_finalize(struct vine_graph *g)
 				node->height = child_node->height + 1;
 			}
 		}
-	}
-
-	LIST_ITERATE(topo_order, node)
-	{
-		node->outfile_type = node->is_target ? VINE_GRAPH_NODE_OUTFILE_TYPE_LOCAL : VINE_GRAPH_NODE_OUTFILE_TYPE_TEMP;
 	}
 
 	if (g->print_graph_details) {

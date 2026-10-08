@@ -13,27 +13,8 @@
 /*************************************************************/
 
 /**
- * Update the critical path time of a node.
- * @param node Reference to the node object.
- * @param execution_time Reference to the execution time of the node.
- */
-void vine_graph_node_update_critical_path_time(struct vine_graph_node *node, timestamp_t execution_time)
-{
-	timestamp_t max_parent_critical_path_time = 0;
-	struct vine_graph_node *parent_node;
-	LIST_ITERATE(node->parents, parent_node)
-	{
-		if (parent_node->critical_path_time > max_parent_critical_path_time) {
-			max_parent_critical_path_time = parent_node->critical_path_time;
-		}
-	}
-	node->critical_path_time = max_parent_critical_path_time + execution_time;
-}
-
-/**
- * Create a new node owned by the C-side graph.
- * @param node_id Graph-assigned identifier that keeps C and Python in sync.
- * @return Newly allocated node.
+ * Create a node with empty dependency and file-mount lists.
+ * @param node_id Identifier assigned by the graph.
  */
 struct vine_graph_node *vine_graph_node_create(uint64_t node_id)
 {
@@ -46,7 +27,6 @@ struct vine_graph_node *vine_graph_node_create(uint64_t node_id)
 	node->task_runner_arg_file = NULL;
 	node->outfile = NULL;
 	node->outfile_remote_name = string_format("outfile_node_%" PRIu64, node->node_id);
-	node->outfile_type = VINE_GRAPH_NODE_OUTFILE_TYPE_TEMP;
 
 	node->parents = list_create();
 	node->children = list_create();
@@ -57,14 +37,12 @@ struct vine_graph_node *vine_graph_node_create(uint64_t node_id)
 	node->completed = 0;
 	node->cut = 0;
 	node->released_by_prune_depth = 0;
-	node->outfile_size_bytes = 0;
 	node->in_resubmit_queue = 0;
 	node->last_failure_time = 0;
 
 	node->depth = -1;
 	node->height = -1;
 
-	node->critical_path_time = -1;
 	node->preprocessing_time_us = 0;
 	node->postprocessing_time_us = 0;
 
