@@ -286,7 +286,7 @@ class VineGraph(Manager):
                 path = os.path.join(directory, f"vine-graph-edata-{next_file_id}")
                 with open(path, "wb") as stream:
                     cloudpickle.dump(value, stream)
-                bridge.declare_input_file(next_file_id, path)
+                bridge.declare_input_file(next_file_id, path, export=True)
                 object_files[identity] = next_file_id
             return object_files[identity]
 
@@ -317,7 +317,7 @@ class VineGraph(Manager):
             with open(path, "wb") as stream:
                 cloudpickle.dump(manifest, stream)
             next_file_id += 1
-            bridge.declare_input_file(next_file_id, path)
+            bridge.declare_input_file(next_file_id, path, export=True)
             bridge.add_task_input_file(key, next_file_id, remote_name)
 
     def _print_local_progress(self, done, total, started_at):

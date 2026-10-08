@@ -15,6 +15,7 @@
 #include "xxmalloc.h"
 
 #include "taskvine.h"
+#include "vine_manager_data_service.h"
 
 static volatile sig_atomic_t interrupted = 0;
 
@@ -316,14 +317,15 @@ void vine_graph_executor_finalize(struct vine_graph_executor *e)
 	}
 }
 
-int vine_graph_executor_declare_input_file(struct vine_graph_executor *e, uint64_t file_id, const char *source_path)
+int vine_graph_executor_declare_input_file(struct vine_graph_executor *e, uint64_t file_id, const char *source_path, int export_input)
 {
 	struct vine_graph *g = e ? e->graph : NULL;
 	if (!g || !file_id || !source_path || itable_lookup(g->file_id_to_file, file_id)) {
 		return -1;
 	}
 
-	struct vine_file *file = vine_declare_file(e->manager, source_path, VINE_CACHE_LEVEL_WORKFLOW, 0);
+	struct vine_file *file = export_input ? vine_manager_data_service_declare_file(e->manager, source_path) :
+		vine_declare_file(e->manager, source_path, VINE_CACHE_LEVEL_WORKFLOW, 0);
 	if (!file) {
 		return -1;
 	}

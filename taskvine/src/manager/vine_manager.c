@@ -4136,7 +4136,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 		link_address_local(q->manager_link, address, &q->port);
 	}
 
-	q->ds = vine_manager_data_service_create();
+	q->ds = vine_manager_data_service_create(runtime_dir);
 	if (!q->ds) {
 		link_close(q->manager_link);
 		free(runtime_dir);
@@ -6687,6 +6687,8 @@ void vine_undeclare_file(struct vine_manager *m, struct vine_file *f)
 	if (!m) {
 		return;
 	}
+
+	vine_manager_data_service_unexport(m->ds, f);
 
 	/* First prune the file on all workers */
 	vine_prune_file(m, f);

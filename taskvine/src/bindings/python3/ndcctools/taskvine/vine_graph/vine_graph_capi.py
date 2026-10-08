@@ -154,8 +154,8 @@ def vine_graph_executor_add_node(e):
 def vine_graph_executor_finalize(e):
     return _vine_graph_capi.vine_graph_executor_finalize(e)
 
-def vine_graph_executor_declare_input_file(e, file_id, source_path):
-    return _vine_graph_capi.vine_graph_executor_declare_input_file(e, file_id, source_path)
+def vine_graph_executor_declare_input_file(e, file_id, source_path, export_input):
+    return _vine_graph_capi.vine_graph_executor_declare_input_file(e, file_id, source_path, export_input)
 
 def vine_graph_executor_add_task_output_file(e, task_id, file_id, task_path, is_target):
     return _vine_graph_capi.vine_graph_executor_add_task_output_file(e, task_id, file_id, task_path, is_target)

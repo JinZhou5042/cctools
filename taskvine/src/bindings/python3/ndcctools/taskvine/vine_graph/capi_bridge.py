@@ -83,10 +83,10 @@ class VineGraphCapiBridge:
             self._c_graph, task_runner_function.__name__
         )
 
-    def declare_input_file(self, file_id, source_path):
-        """Declare one frontend file."""
+    def declare_input_file(self, file_id, source_path, export=False):
+        """Declare one frontend file, optionally publishing it for asynchronous Worker pulls."""
         if vine_graph_capi.vine_graph_executor_declare_input_file(
-            self._c_executor, file_id, source_path
+            self._c_executor, file_id, source_path, export
         ) != 0:
             raise RuntimeError(f"failed to declare input file {file_id}: {source_path}")
 

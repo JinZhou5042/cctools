@@ -42,7 +42,8 @@ struct vine_graph *vine_graph_executor_create_graph(struct vine_manager *manager
 void vine_graph_executor_delete(struct vine_graph_executor *e);
 uint64_t vine_graph_executor_add_node(struct vine_graph_executor *e);
 void vine_graph_executor_finalize(struct vine_graph_executor *e);
-int vine_graph_executor_declare_input_file(struct vine_graph_executor *e, uint64_t file_id, const char *source_path);
+/* Export serialized edata for asynchronous delivery. Ordinary frontend files keep their existing path. */
+int vine_graph_executor_declare_input_file(struct vine_graph_executor *e, uint64_t file_id, const char *source_path, int export_input);
 int vine_graph_executor_add_task_output_file(struct vine_graph_executor *e, uint64_t task_id, uint64_t file_id, const char *task_path, int is_target);
 int vine_graph_executor_add_task_input_file(struct vine_graph_executor *e, uint64_t task_id, uint64_t file_id, const char *task_path);
 const char *vine_graph_executor_get_file_target_path(struct vine_graph_executor *e, uint64_t file_id);

@@ -5,11 +5,12 @@
 #define VINE_MANAGER_DATA_SERVICE_H
 
 struct vine_manager;
+struct vine_file;
 struct vine_manager_data_service;
 struct link_info;
 
 /* Create a data listener and a bounded executor pool. */
-struct vine_manager_data_service *vine_manager_data_service_create(void);
+struct vine_manager_data_service *vine_manager_data_service_create(const char *runtime_directory);
 /* Cancel outstanding transfers and release their resources without invoking callbacks. */
 void vine_manager_data_service_delete(struct vine_manager_data_service *ds);
 /* Return the data port advertised to Workers. */
@@ -22,5 +23,11 @@ void vine_manager_data_service_handle(struct vine_manager *manager);
  * A successful submission calls complete on the Manager thread with one for success or zero for failure.
  * The caller owns argument until completion or Manager deletion. */
 int vine_manager_data_service_get(struct vine_manager *manager, const char *ip, int port, const char *name, const char *path, void (*complete)(void *, int), void *argument);
+
+/* Declare a regular local file as a workflow-cached Manager URL. Return NULL on failure.
+ * The caller keeps the local source unchanged until undeclaration. */
+struct vine_file *vine_manager_data_service_declare_file(struct vine_manager *manager, const char *source_path);
+/* Remove the published name. Already open transfers retain their file descriptors. */
+void vine_manager_data_service_unexport(struct vine_manager_data_service *ds, struct vine_file *file);
 
 #endif

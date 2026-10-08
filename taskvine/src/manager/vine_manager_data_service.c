@@ -9,6 +9,7 @@
 #include "stringtools.h"
 #include "thread_pool.h"
 #include "url_encode.h"
+#include "unlink_recursive.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -29,7 +30,7 @@
 
 /* Each job moves from a request to a transfer and then back to the Manager for cleanup. */
 enum transfer_state {
-	TRANSFER_REQUEST, /* Read the requested cache name before looking it up on the Manager thread. */
+	TRANSFER_REQUEST, /* Read a cache name and serve its export, or ask the Manager to look it up. */
 	TRANSFER_SEND,	  /* Send the declared local file or buffer to the Worker. */
 	TRANSFER_RECEIVE, /* Fetch a Worker file into a temporary local path. */
 	TRANSFER_DONE,	  /* Deliver the result and release the job on the Manager thread. */
@@ -37,6 +38,7 @@ enum transfer_state {
 
 /* Own the data listener and bounded jobs without maintaining another file table. */
 struct vine_manager_data_service {
+	char *export_directory;       /* Own the fixed directory of published cache names. */
 	struct link *listener;	     /* Accept incoming Worker data connections. */
 	struct link *notification;   /* Wake the Manager when an executor finishes a step. */
 	int notify_fd;		     /* Write completion notifications to this pipe. */
@@ -109,7 +111,7 @@ static int receive_file(struct transfer_job *job)
 	return valid;
 }
 
-static int send_file(struct transfer_job *job)
+static int send_file(struct transfer_job *job, int fd)
 {
 	struct vine_file *file = job->file;
 	struct stat info;
@@ -120,10 +122,12 @@ static int send_file(struct transfer_job *job)
 		return link_printf(job->link, stoptime, "file %s %zu %o 0\n", encoded, file->size, file->mode ? file->mode : 0600) >= 0 &&
 		       link_write(job->link, file->data, file->size, stoptime) == (int64_t)file->size;
 	}
-	int fd = file && file->type == VINE_FILE ? open(file->source, O_RDONLY | O_CLOEXEC) : -1;
+	if (fd < 0 && file && file->type == VINE_FILE) {
+		fd = open(file->source, O_RDONLY | O_CLOEXEC);
+	}
 	int valid = fd >= 0 && fstat(fd, &info) == 0 && S_ISREG(info.st_mode);
 	if (valid) {
-		valid = link_printf(job->link, stoptime, "file %s %" PRId64 " %o %ld\n", encoded, (int64_t)info.st_size, file->mode ? file->mode : (info.st_mode & 0777), (long)info.st_mtime) >= 0 &&
+		valid = link_printf(job->link, stoptime, "file %s %" PRId64 " %o %ld\n", encoded, (int64_t)info.st_size, file && file->mode ? file->mode : (info.st_mode & 0777), (long)info.st_mtime) >= 0 &&
 			link_stream_from_fd(job->link, fd, info.st_size, stoptime) == info.st_size;
 	} else {
 		link_printf(job->link, stoptime, "error %s %d\n", encoded, ENOENT);
@@ -161,8 +165,18 @@ static void transfer_run(void *argument)
 			url_decode(encoded, job->name, sizeof(job->name));
 		}
 		job->state = valid ? TRANSFER_SEND : TRANSFER_DONE;
+		/* Exported objects need no Manager table lookup or borrowed vine_file. */
+		if (valid && job->name[0] && !strchr(job->name, '/') && strcmp(job->name, ".") && strcmp(job->name, "..")) {
+			char *path = string_format("%s/%s", ds->export_directory, job->name);
+			int fd = open(path, O_RDONLY | O_CLOEXEC);
+			free(path);
+			if (fd >= 0) {
+				job->success = send_file(job, fd);
+				job->state = TRANSFER_DONE;
+			}
+		}
 	} else {
-		job->success = send_file(job);
+		job->success = send_file(job, -1);
 		job->state = TRANSFER_DONE;
 	}
 	pthread_mutex_lock(&ds->lock);
@@ -179,7 +193,7 @@ static void transfer_run(void *argument)
 	pthread_mutex_unlock(&ds->lock);
 }
 
-struct vine_manager_data_service *vine_manager_data_service_create(void)
+struct vine_manager_data_service *vine_manager_data_service_create(const char *runtime_directory)
 {
 	struct vine_manager_data_service *ds = calloc(1, sizeof(*ds));
 	if (!ds) {
@@ -189,6 +203,13 @@ struct vine_manager_data_service *vine_manager_data_service_create(void)
 	pthread_mutex_init(&ds->lock, NULL);
 	ds->jobs = list_create();
 	ds->ready = list_create();
+	ds->export_directory = string_format("%s/staging/exports-XXXXXX", runtime_directory);
+	if (!mkdtemp(ds->export_directory)) {
+		free(ds->export_directory);
+		ds->export_directory = NULL;
+		vine_manager_data_service_delete(ds);
+		return NULL;
+	}
 	int descriptors[2];
 	if (pipe(descriptors) < 0) {
 		vine_manager_data_service_delete(ds);
@@ -237,6 +258,10 @@ void vine_manager_data_service_delete(struct vine_manager_data_service *ds)
 	}
 	if (ds->notify_fd >= 0) {
 		close(ds->notify_fd);
+	}
+	if (ds->export_directory) {
+		unlink_recursive(ds->export_directory);
+		free(ds->export_directory);
 	}
 	pthread_mutex_destroy(&ds->lock);
 	free(ds);
@@ -330,4 +355,47 @@ int vine_manager_data_service_get(struct vine_manager *manager, const char *ip, 
 		return 0;
 	}
 	return 1;
+}
+
+struct vine_file *vine_manager_data_service_declare_file(struct vine_manager *manager, const char *source_path)
+{
+	char *source = realpath(source_path, NULL);
+	if (!source) {
+		return NULL;
+	}
+	struct stat info;
+	if (stat(source, &info) != 0 || !S_ISREG(info.st_mode)) {
+		free(source);
+		return NULL;
+	}
+
+	/* Use native URL identity and dispatch, with the local export as its backing store. */
+	struct vine_file *file = vine_file_url("manager://", VINE_CACHE_LEVEL_WORKFLOW, 0);
+	if (!file) {
+		free(source);
+		return NULL;
+	}
+	free(file->source);
+	file->source = string_format("manager://%s", file->cached_name);
+	file->size = info.st_size;
+	file->mtime = info.st_mtime;
+	file->mode = info.st_mode & 0777;
+	char *path = string_format("%s/%s", manager->ds->export_directory, file->cached_name);
+	int result = symlink(source, path);
+	free(path);
+	free(source);
+	if (result != 0) {
+		vine_file_delete(file);
+		return NULL;
+	}
+	return vine_manager_declare_file(manager, file);
+}
+
+void vine_manager_data_service_unexport(struct vine_manager_data_service *ds, struct vine_file *file)
+{
+	if (ds && file->type == VINE_URL && string_prefix_is(file->source, "manager://")) {
+		char *path = string_format("%s/%s", ds->export_directory, file->cached_name);
+		unlink(path);
+		free(path);
+	}
 }
