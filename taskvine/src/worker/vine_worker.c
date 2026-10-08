@@ -8,7 +8,6 @@ See the file COPYING for details.
 #include "vine_cache_file.h"
 #include "vine_catalog.h"
 #include "vine_file.h"
-#include "vine_gpus.h"
 #include "vine_manager.h"
 #include "vine_mount.h"
 #include "vine_process.h"
@@ -56,6 +55,7 @@ See the file COPYING for details.
 #include "trash.h"
 #include "unlink_recursive.h"
 #include "url_encode.h"
+#include "xpu_tracker.h"
 #include "xxmalloc.h"
 
 #include <assert.h>
@@ -124,6 +124,10 @@ static int64_t cores_allocated = 0;
 static int64_t memory_allocated = 0;
 static int64_t disk_allocated = 0;
 static int64_t gpus_allocated = 0;
+
+/* Trackers for specific cores and gpus units in use. */
+struct xpu_tracker *gpu_tracker = 0;
+struct xpu_tracker *core_tracker = 0;
 
 /***************************************************************/
 /*     State of Interactions Between Manager and Worker        */
@@ -210,6 +214,7 @@ __attribute__((format(printf, 2, 3))) void send_message(struct link *l, const ch
 	link_vprintf(l, time(0) + options->active_timeout, fmt, va);
 
 	va_end(va);
+	va_end(debug_va);
 }
 
 /*
@@ -274,7 +279,9 @@ void send_async_message(struct link *l, const char *fmt, ...)
 	va_list va;
 	char *message = malloc(VINE_LINE_MAX);
 	va_start(va, fmt);
-	vsprintf(message, fmt, va);
+	/* Use vsnprintf (not vsprintf) so an over-length message is truncated
+	 * rather than overflowing this fixed-size heap buffer. */
+	vsnprintf(message, VINE_LINE_MAX, fmt, va);
 	va_end(va);
 
 	list_push_tail(pending_async_messages, message);
@@ -434,7 +441,11 @@ static void measure_worker_resources()
 	r->disk.inuse = measure_worker_disk();
 	r->tag = last_task_received;
 
-	vine_gpus_init(r->gpus.total);
+	/* Create a tracker for specific gpus and cores, if not already created. */
+	if (!gpu_tracker)
+		gpu_tracker = xpu_tracker_create("gpus", r->gpus.total);
+	if (!core_tracker)
+		core_tracker = xpu_tracker_create("cores", r->cores.total);
 
 	last_resources_measurement = time(0);
 }
@@ -636,8 +647,14 @@ static int start_process(struct vine_process *p, struct link *manager)
 	memory_allocated += t->resources_requested->memory;
 	disk_allocated += t->resources_requested->disk;
 	gpus_allocated += t->resources_requested->gpus;
+
+	/* Mark which specific cores and gpus are assigned. */
+	if (t->resources_requested->cores > 0) {
+		xpu_tracker_alloc(core_tracker, t->resources_requested->cores, t->task_id);
+	}
+
 	if (t->resources_requested->gpus > 0) {
-		vine_gpus_allocate(t->resources_requested->gpus, t->task_id);
+		xpu_tracker_alloc(gpu_tracker, t->resources_requested->gpus, t->task_id);
 	}
 
 	/* Now start the process (or function) running. */
@@ -679,7 +696,8 @@ static void reap_process(struct vine_process *p, struct link *manager)
 	disk_allocated -= p->task->resources_requested->disk;
 	gpus_allocated -= p->task->resources_requested->gpus;
 
-	vine_gpus_free(p->task->task_id);
+	xpu_tracker_free(gpu_tracker, p->task->task_id);
+	xpu_tracker_free(core_tracker, p->task->task_id);
 
 	if (manager) {
 		vine_sandbox_stageout(p, cache_manager, manager);
@@ -1377,6 +1395,12 @@ static int task_resources_fit_now(struct vine_task *t)
 	       (memory_allocated + t->resources_requested->memory <= total_resources->memory.total) &&
 	       ((t->needs_library || disk_allocated + t->resources_requested->disk <= total_resources->disk.total)) && (gpus_allocated + t->resources_requested->gpus <= total_resources->gpus.total);
 	// XXX Disk is constantly shrinking, and library disk requests are currently static. Once we generate some files things will hang.
+	// Known limitation: the disk check above is skipped entirely whenever t->needs_library is
+	// true, so library/function-call tasks are never weighed against total_resources->disk.total.
+	// As functions write output/temp files, worker disk keeps shrinking with no enforcement for
+	// this task class. A real fix needs a real (even approximate) per-function disk accounting
+	// so this branch can re-enable the disk.total check for library/function tasks instead of
+	// bypassing it. Left as a known gap rather than a tracked issue for now.
 }
 
 /*
@@ -1513,13 +1537,13 @@ static int enforce_worker_limits(struct link *manager)
 {
 	if (options->disk_total > 0 && total_resources->disk.inuse > options->disk_total) {
 		fprintf(stderr,
-				"vine_worker: %s used more than declared disk space (--disk - < disk used) %" PRIu64 " < %" PRIu64 " MB\n",
+				"vine_worker: %s used more than declared disk space (--disk - < disk used) %" PRIu64 " < %lf MB\n",
 				workspace->workspace_dir,
 				options->disk_total,
 				total_resources->disk.inuse);
 
 		if (manager) {
-			send_message(manager, "info disk_exhausted %lld\n", (long long)total_resources->disk.inuse);
+			send_message(manager, "info disk_exhausted %lf\n", total_resources->disk.inuse);
 		}
 
 		return 0;
@@ -1527,12 +1551,12 @@ static int enforce_worker_limits(struct link *manager)
 
 	if (options->memory_total > 0 && total_resources->memory.inuse > options->memory_total) {
 		fprintf(stderr,
-				"vine_worker: used more than declared memory (--memory < memory used) %" PRIu64 " < %" PRIu64 " MB\n",
+				"vine_worker: used more than declared memory (--memory < memory used) %" PRIu64 " < %lf MB\n",
 				options->memory_total,
 				total_resources->memory.inuse);
 
 		if (manager) {
-			send_message(manager, "info memory_exhausted %lld\n", (long long)total_resources->memory.inuse);
+			send_message(manager, "info memory_exhausted %lf\n", total_resources->memory.inuse);
 		}
 
 		return 0;
@@ -1557,12 +1581,12 @@ static int enforce_worker_promises(struct link *manager)
 
 	if (options->disk_total > 0 && total_resources->disk.total < options->disk_total) {
 		fprintf(stderr,
-				"vine_worker: has less than the promised disk space (--disk > disk total) %" PRIu64 " < %" PRIu64 " MB\n",
+				"vine_worker: has less than the promised disk space (--disk > disk total) %" PRIu64 " < %lf MB\n",
 				options->disk_total,
 				total_resources->disk.total);
 
 		if (manager) {
-			send_message(manager, "info disk_error %lld\n", (long long)total_resources->disk.total);
+			send_message(manager, "info disk_error %lf\n", total_resources->disk.total);
 		}
 
 		return 0;
@@ -1634,6 +1658,7 @@ static void check_libraries_ready(struct link *manager)
 	uint64_t library_task_id;
 	struct vine_process *library_process;
 	int iteration;
+	struct list *failed_libraries = list_create();
 
 	struct link_info library_link_info;
 	library_link_info.events = LINK_READ;
@@ -1654,12 +1679,12 @@ static void check_libraries_ready(struct link *manager)
 				debug(D_VINE, "Library %s reports ready to execute functions.", library_process->task->provides_library);
 				library_process->library_ready = 1;
 			} else {
-				/* Kill library if it fails the startup check. */
+				/* Collect failed libraries so procs_running is not re-iterated here. */
 				debug(D_VINE,
 						"Library %s task id %" PRIu64 " verification failed (unexpected response). Killing it.",
 						library_process->task->provides_library,
 						library_task_id);
-				handle_failed_library_process(library_process, manager);
+				list_push_tail(failed_libraries, library_process);
 			}
 		} else {
 			/* The library is running and the link has no readable data, do nothing until the
@@ -1668,6 +1693,12 @@ static void check_libraries_ready(struct link *manager)
 
 		library_link_info.revents = 0;
 	}
+
+	while ((library_process = list_pop_head(failed_libraries))) {
+		handle_failed_library_process(library_process, manager);
+	}
+
+	list_delete(failed_libraries);
 }
 
 /* Start working for the (newly connected) manager on this given link. */
@@ -1975,7 +2006,12 @@ static struct list *interfaces_to_list(const char *canonical_host_or_addr, int p
 		for (void *i = NULL; (host_alias = jx_iterate_array(host_aliases, &i));) {
 			const char *address = jx_lookup_string(host_alias, "address");
 
-			if (address && strcmp(canonical_host_or_addr, address) == 0) {
+			if (!address) {
+				warn(D_NOTICE, "Skipping interface entry with missing or invalid 'address' field.");
+				continue;
+			}
+
+			if (strcmp(canonical_host_or_addr, address) == 0) {
 				found_canonical = 1;
 			}
 
@@ -2339,7 +2375,7 @@ int main(int argc, char *argv[])
 
 	/* Display the available resources once at startup. */
 	measure_worker_resources();
-	printf("vine_worker: using %" PRId64 " cores, %" PRId64 " MB memory, %" PRId64 " MB disk, %" PRId64 " gpus\n",
+	printf("vine_worker: using %lf cores, %lf MB memory, %lf MB disk, %lf gpus\n",
 			total_resources->cores.total,
 			total_resources->memory.total,
 			total_resources->disk.total,

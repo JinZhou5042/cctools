@@ -99,7 +99,7 @@ int check_worker_have_enough_resources(struct vine_manager *q, struct vine_worke
 	int iteration;
 	ITABLE_ITERATE(w->current_tasks, iteration, task_id, ti)
 	{
-		if (ti->provides_library && ti->function_slots_inuse == 0) {
+		if (ti->state == VINE_TASK_RUNNING && ti->provides_library && ti->function_slots_inuse == 0) {
 			worker_net_resources->disk.inuse -= ti->current_resource_box->disk;
 			worker_net_resources->cores.inuse -= ti->current_resource_box->cores;
 			worker_net_resources->memory.inuse -= ti->current_resource_box->memory;
@@ -143,10 +143,11 @@ int check_worker_have_enough_disk_with_inputs(struct vine_manager *q, struct vin
 			continue;
 		}
 
-		available -= m->file->size;
+		/* available is in MB, file sizes are in bytes. */
+		available -= BYTES_TO_MEGABYTES(m->file->size);
 
 		if (available < 0) {
-			ok = 1;
+			ok = 0;
 			break;
 		}
 	}
@@ -389,7 +390,7 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 
 		/* if task groups are enabled, skip workers that are running a group task */
 		if (q->task_groups_enabled) {
-			if (w->current_tasks && itable_size(w->current_tasks) > 0) {
+			if (w->tasks_committed > 0) {
 				int iteration_group;
 				uint64_t tidg;
 				struct vine_task *tg;
@@ -451,7 +452,7 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 			break;
 		case VINE_SCHEDULE_TIME:
 			/* Find the worker that produced the fastest runtime of prior tasks. */
-			priority = w->total_tasks_complete == 0 ? HUGE_VAL : -(w->total_task_time + w->total_transfer_time) / w->total_tasks_complete;
+			priority = w->total_tasks_complete == 0 ? HUGE_VAL : -(double)(w->total_task_time + w->total_transfer_time) / w->total_tasks_complete;
 			break;
 		case VINE_SCHEDULE_FCFS:
 			/* Deprecated, same as random */
@@ -513,7 +514,7 @@ static vine_resource_bitmask_t is_task_larger_than_worker(struct vine_manager *q
 
 	if ((double)w->resources->disk.total < l->disk) {
 		set = set | DISK_BIT;
-	} else if ((double)w->resources->disk.total - w->resources->disk.inuse && itable_size(w->current_tasks) < 1) {
+	} else if ((double)w->resources->disk.total - w->resources->disk.inuse < l->disk && itable_size(w->current_tasks) < 1) {
 		/* also trigger disk if worker's cache does not allow to run any task anymore */
 		set = set | DISK_BIT;
 	}
