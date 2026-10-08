@@ -15,6 +15,9 @@ typedef enum {
 	TASK_PRIORITY_MODE_LARGEST_STORAGE_FOOTPRINT_FIRST
 } task_priority_mode_t;
 
+/* Python receives an opaque handle. Internal fields remain available only to C. */
+struct vine_graph_executor;
+#ifndef SWIG
 struct vine_graph_executor {
 	struct vine_graph *graph;     // DAG executed by this executor
 	struct vine_manager *manager; // TaskVine runtime
@@ -37,6 +40,7 @@ struct vine_graph_executor {
 	double checkpoint_threshold_sec; // report temp outputs whose recovery cost exceeds this threshold
 	double progress_bar_update_interval_sec;
 };
+#endif
 
 struct vine_graph_executor *vine_graph_executor_create(struct vine_manager *manager, struct vine_graph *graph);
 struct vine_graph *vine_graph_executor_create_graph(struct vine_manager *manager);

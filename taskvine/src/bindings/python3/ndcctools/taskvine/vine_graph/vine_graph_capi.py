@@ -59,25 +59,6 @@ class _SwigNonDynamicMeta(type):
 
 
 import cvine
-class vine_graph(object):
-    thisown = property(lambda x: x.this.own(), lambda x, v: x.this.own(v), doc="The membership flag")
-    __repr__ = _swig_repr
-    nodes = property(_vine_graph_capi.vine_graph_nodes_get, _vine_graph_capi.vine_graph_nodes_set)
-    recovery_time_by_node = property(_vine_graph_capi.vine_graph_recovery_time_by_node_get, _vine_graph_capi.vine_graph_recovery_time_by_node_set)
-    outfile_cachename_to_node = property(_vine_graph_capi.vine_graph_outfile_cachename_to_node_get, _vine_graph_capi.vine_graph_outfile_cachename_to_node_set)
-    file_id_to_file = property(_vine_graph_capi.vine_graph_file_id_to_file_get, _vine_graph_capi.vine_graph_file_id_to_file_set)
-    output_dir = property(_vine_graph_capi.vine_graph_output_dir_get, _vine_graph_capi.vine_graph_output_dir_set)
-    task_runner_library_name = property(_vine_graph_capi.vine_graph_task_runner_library_name_get, _vine_graph_capi.vine_graph_task_runner_library_name_set)
-    task_runner_function_name = property(_vine_graph_capi.vine_graph_task_runner_function_name_get, _vine_graph_capi.vine_graph_task_runner_function_name_set)
-    prune_depth = property(_vine_graph_capi.vine_graph_prune_depth_get, _vine_graph_capi.vine_graph_prune_depth_set)
-    print_graph_details = property(_vine_graph_capi.vine_graph_print_graph_details_get, _vine_graph_capi.vine_graph_print_graph_details_set)
-
-    def __init__(self):
-        _vine_graph_capi.vine_graph_swiginit(self, _vine_graph_capi.new_vine_graph())
-    __swig_destroy__ = _vine_graph_capi.delete_vine_graph
-
-# Register vine_graph in _vine_graph_capi:
-_vine_graph_capi.vine_graph_swigregister(vine_graph)
 
 def vine_graph_create(runtime_dir):
     return _vine_graph_capi.vine_graph_create(runtime_dir)
@@ -115,31 +96,6 @@ TASK_PRIORITY_MODE_FIFO = _vine_graph_capi.TASK_PRIORITY_MODE_FIFO
 TASK_PRIORITY_MODE_LIFO = _vine_graph_capi.TASK_PRIORITY_MODE_LIFO
 TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST = _vine_graph_capi.TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST
 TASK_PRIORITY_MODE_LARGEST_STORAGE_FOOTPRINT_FIRST = _vine_graph_capi.TASK_PRIORITY_MODE_LARGEST_STORAGE_FOOTPRINT_FIRST
-class vine_graph_executor(object):
-    thisown = property(lambda x: x.this.own(), lambda x, v: x.this.own(v), doc="The membership flag")
-    __repr__ = _swig_repr
-    graph = property(_vine_graph_capi.vine_graph_executor_graph_get, _vine_graph_capi.vine_graph_executor_graph_set)
-    manager = property(_vine_graph_capi.vine_graph_executor_manager_get, _vine_graph_capi.vine_graph_executor_manager_set)
-    task_id_to_node = property(_vine_graph_capi.vine_graph_executor_task_id_to_node_get, _vine_graph_capi.vine_graph_executor_task_id_to_node_set)
-    resubmit_queue = property(_vine_graph_capi.vine_graph_executor_resubmit_queue_get, _vine_graph_capi.vine_graph_executor_resubmit_queue_set)
-    time_first_task_dispatched = property(_vine_graph_capi.vine_graph_executor_time_first_task_dispatched_get, _vine_graph_capi.vine_graph_executor_time_first_task_dispatched_set)
-    time_last_task_retrieved = property(_vine_graph_capi.vine_graph_executor_time_last_task_retrieved_get, _vine_graph_capi.vine_graph_executor_time_last_task_retrieved_set)
-    makespan_us = property(_vine_graph_capi.vine_graph_executor_makespan_us_get, _vine_graph_capi.vine_graph_executor_makespan_us_set)
-    time_spent_on_cut_propagation = property(_vine_graph_capi.vine_graph_executor_time_spent_on_cut_propagation_get, _vine_graph_capi.vine_graph_executor_time_spent_on_cut_propagation_set)
-    completed_recovery_tasks = property(_vine_graph_capi.vine_graph_executor_completed_recovery_tasks_get, _vine_graph_capi.vine_graph_executor_completed_recovery_tasks_set)
-    total_preprocessing_time_us = property(_vine_graph_capi.vine_graph_executor_total_preprocessing_time_us_get, _vine_graph_capi.vine_graph_executor_total_preprocessing_time_us_set)
-    total_postprocessing_time_us = property(_vine_graph_capi.vine_graph_executor_total_postprocessing_time_us_get, _vine_graph_capi.vine_graph_executor_total_postprocessing_time_us_set)
-    task_priority_mode = property(_vine_graph_capi.vine_graph_executor_task_priority_mode_get, _vine_graph_capi.vine_graph_executor_task_priority_mode_set)
-    failure_injection_step_percent = property(_vine_graph_capi.vine_graph_executor_failure_injection_step_percent_get, _vine_graph_capi.vine_graph_executor_failure_injection_step_percent_set)
-    checkpoint_threshold_sec = property(_vine_graph_capi.vine_graph_executor_checkpoint_threshold_sec_get, _vine_graph_capi.vine_graph_executor_checkpoint_threshold_sec_set)
-    progress_bar_update_interval_sec = property(_vine_graph_capi.vine_graph_executor_progress_bar_update_interval_sec_get, _vine_graph_capi.vine_graph_executor_progress_bar_update_interval_sec_set)
-
-    def __init__(self):
-        _vine_graph_capi.vine_graph_executor_swiginit(self, _vine_graph_capi.new_vine_graph_executor())
-    __swig_destroy__ = _vine_graph_capi.delete_vine_graph_executor
-
-# Register vine_graph_executor in _vine_graph_capi:
-_vine_graph_capi.vine_graph_executor_swigregister(vine_graph_executor)
 
 def vine_graph_executor_create(manager, graph):
     return _vine_graph_capi.vine_graph_executor_create(manager, graph)

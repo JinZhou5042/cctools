@@ -23,7 +23,7 @@ from . import vine_graph_capi  # noqa: E402
 
 
 class VineGraphCapiBridge:
-    """Thin bridge around the SWIG bindings."""
+    """Own opaque C handles and Python-key translation; access C state only through API functions."""
 
     def __init__(self, c_taskvine):
         """Create the backing C vine_graph objects."""

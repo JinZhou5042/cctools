@@ -85,16 +85,17 @@ def _resolve_nested_legacy_tasks(obj, memo=None):
     return obj
 
 
-def compute_task(workflow, task_expr):
-    """Execute locally using the Manager's Workflow metadata."""
+def compute_task(run, task_expr):
+    """Execute locally using this run's result and file resolvers."""
+    workflow = run.workflow
     func_id, args, kwargs = task_expr
 
     def file_path(handle):
         if handle.workflow_id != workflow._workflow_id:
             raise ValueError("file belongs to a different Workflow")
-        return workflow.file_input_path(handle.file_id)
+        return run.local_file_path(handle.file_id)
 
-    return _compute_task(workflow.callables[func_id], args, kwargs, workflow.load_task_output, file_path)
+    return _compute_task(workflow.callables[func_id], args, kwargs, run.load_task_output, file_path)
 
 
 def _compute_task(func, args, kwargs, load_output, file_path):

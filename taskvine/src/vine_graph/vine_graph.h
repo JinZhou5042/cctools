@@ -6,6 +6,9 @@
 
 #include "vine_graph_node.h"
 
+/* Python receives an opaque handle. Internal fields remain available only to C. */
+struct vine_graph;
+#ifndef SWIG
 struct vine_graph {
 	struct itable *nodes;
 	struct itable *recovery_time_by_node; // node ID -> owned double, completion-time estimate in seconds
@@ -21,6 +24,7 @@ struct vine_graph {
 
 	int print_graph_details;
 };
+#endif
 
 // Public graph API (declarations below)
 

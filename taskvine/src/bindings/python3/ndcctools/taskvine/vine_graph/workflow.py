@@ -123,6 +123,7 @@ class TaskHandle:
 # The Workflow is a directed acyclic graph (DAG) that represents the logical dependencies between tasks.
 # It is used to build the C executor graph.
 class Workflow:
+    """Reusable task, argument, dependency, and file declarations, independent of any execution."""
 
     _LEAF_TYPES = (str, bytes, bytearray, memoryview, int, float, bool, type(None))
 
@@ -142,14 +143,6 @@ class Workflow:
         self.output_files = {}                 # file_id -> (producer task id, task-relative path)
         self.output_files_by_task = collections.defaultdict(dict)  # task id -> relative path -> file_id
         self.file_consumers = collections.defaultdict(set) # file_id -> consumer task ids
-        self._local_execute = False
-        self._local_file_paths = {}
-
-        self.outfile_remote_name = collections.defaultdict(lambda: None)   # workflow_key -> remote outfile name, will be set by the executor graph
-
-
-        self.extra_task_output_size_mb = {}  # workflow_key -> extra size in MB
-        self.extra_task_sleep_time = {}      # workflow_key -> extra sleep time in seconds
 
     def _intern_callable(self, func):
         idx = self._callable_index.get(func)
@@ -425,32 +418,10 @@ class Workflow:
         self.output_files_by_task[task_id][normalized] = file_id
         return FileHandle(self._workflow_id, file_id)
 
-    def file_input_path(self, file_id):
-        """Resolve a FileHandle to the path visible to the current task."""
-        if self._local_execute:
-            if file_id in self._local_file_paths:
-                return self._local_file_paths[file_id]
-            if file_id in self.input_files:
-                return self.input_files[file_id]
-            raise RuntimeError(f"file {file_id} is not available yet")
-        if file_id in self.input_files:
-            base = os.path.basename(self.input_files[file_id])
-        else:
-            base = os.path.basename(self.output_files[file_id][1])
-        return f"vine-graph-file-{file_id}-{base}"
-
-    def save_task_output(self, workflow_key, output):
-        with open(self.outfile_remote_name[workflow_key], "wb") as f:
-            wrapped_output = TaskOutputWrapper(output, extra_size_mb=self.extra_task_output_size_mb[workflow_key])
-            cloudpickle.dump(wrapped_output, f)
-
     def _task_edata(self, workflow_key):
         """Expose the callable and top-level arguments to the Manager's staging layer."""
         func_id, args, kwargs = self.task_dict[workflow_key]
         return self.callables[func_id], args, kwargs
-
-    def load_task_output(self, workflow_key):
-        return TaskOutputWrapper.load_from_path(self.outfile_remote_name[workflow_key])
 
     def get_topological_order(self):
         indegree = {}
