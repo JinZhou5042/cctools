@@ -23,12 +23,15 @@ from . import vine_graph_capi  # noqa: E402
 
 
 class VineGraphCapiBridge:
-    """Own opaque C handles and Python-key translation; access C state only through API functions."""
+    """Own the opaque C executor handle and the Python-key translation. Every C failure becomes an exception."""
 
-    def __init__(self, c_taskvine):
-        """Create the backing C vine_graph objects."""
-        self._c_graph = vine_graph_capi.vine_graph_executor_create_graph(c_taskvine)
-        self._c_executor = vine_graph_capi.vine_graph_executor_create(c_taskvine, self._c_graph)
+    def __init__(self, c_taskvine, task_runner_library_name, task_runner_function_name):
+        """Create the backing C executor, whose nodes run one function of one library."""
+        self._c_executor = vine_graph_capi.vine_graph_executor_create(
+            c_taskvine, task_runner_library_name, task_runner_function_name
+        )
+        if not self._c_executor:
+            raise MemoryError("Could not create graph executor")
         self._workflow_key_to_scheduler_key = {}
 
     def tune(self, name, value):
@@ -39,6 +42,8 @@ class VineGraphCapiBridge:
     def add_node(self, workflow_key):
         """Create a C node and record its workflow key."""
         node_id = vine_graph_capi.vine_graph_executor_add_node(self._c_executor)
+        if not node_id:
+            raise MemoryError(f"Could not add graph node for {workflow_key!r}")
         self._workflow_key_to_scheduler_key[workflow_key] = node_id
         return node_id
 
@@ -51,42 +56,30 @@ class VineGraphCapiBridge:
 
     def set_target(self, workflow_key):
         """Mark a node as a target."""
-        node_id = self.get_node_id(workflow_key)
-        vine_graph_capi.vine_graph_set_target(self._c_graph, node_id)
+        if vine_graph_capi.vine_graph_executor_set_target(self._c_executor, self.get_node_id(workflow_key)) != 0:
+            raise RuntimeError(f"failed to mark target {workflow_key!r}")
 
     def add_dependency(self, parent_workflow_key, child_workflow_key):
         """Add an edge between two existing nodes."""
-        wk2sk = self._workflow_key_to_scheduler_key
-        if parent_workflow_key not in wk2sk or child_workflow_key not in wk2sk:
-            raise KeyError("parent or child workflow_key missing in mapping; call add_node() first")
-        vine_graph_capi.vine_graph_add_dependency(
-            self._c_graph, wk2sk[parent_workflow_key], wk2sk[child_workflow_key]
-        )
+        parent, child = self.get_node_id(parent_workflow_key), self.get_node_id(child_workflow_key)
+        if vine_graph_capi.vine_graph_executor_add_dependency(self._c_executor, parent, child) != 0:
+            raise RuntimeError(f"failed to add dependency {parent_workflow_key!r} -> {child_workflow_key!r}")
 
-    def compute_topology_metrics(self):
-        """Finalize the C graph and compute topology metrics."""
-        vine_graph_capi.vine_graph_executor_finalize(self._c_executor)
+    def finalize(self):
+        """Validate the C graph and declare result outputs after the graph is complete."""
+        if vine_graph_capi.vine_graph_executor_finalize(self._c_executor) != 0:
+            raise RuntimeError("failed to finalize the graph: it has a cycle or an output could not be declared")
 
     def get_node_outfile_remote_name(self, workflow_key):
         """Return the output path assigned by the C graph."""
-        return vine_graph_capi.vine_graph_get_node_outfile_remote_name(
-            self._c_graph, self.get_node_id(workflow_key)
+        return vine_graph_capi.vine_graph_executor_get_node_outfile_remote_name(
+            self._c_executor, self.get_node_id(workflow_key)
         )
 
-    def get_task_runner_library_name(self):
-        """Return the generated task runner library name."""
-        return vine_graph_capi.vine_graph_get_task_runner_library_name(self._c_graph)
-
-    def set_task_runner_function(self, task_runner_function):
-        """Set the worker-side task runner entry point."""
-        vine_graph_capi.vine_graph_set_task_runner_function_name(
-            self._c_graph, task_runner_function.__name__
-        )
-
-    def declare_input_file(self, file_id, source_path, export=False):
-        """Declare one frontend file, optionally publishing it for asynchronous Worker pulls."""
+    def declare_input_file(self, file_id, source_path, vault=False):
+        """Declare one frontend file, optionally placing it in the vault for asynchronous Worker pulls."""
         if vine_graph_capi.vine_graph_executor_declare_input_file(
-            self._c_executor, file_id, source_path, export
+            self._c_executor, file_id, source_path, vault
         ) != 0:
             raise RuntimeError(f"failed to declare input file {file_id}: {source_path}")
 
@@ -114,24 +107,20 @@ class VineGraphCapiBridge:
         return path
 
     def execute(self):
-        """Execute the graph."""
-        vine_graph_capi.vine_graph_executor_execute(self._c_executor)
+        """Execute the graph. A run that cannot continue, such as one with a lost edata file, raises."""
+        if vine_graph_capi.vine_graph_executor_execute(self._c_executor) != 0:
+            raise RuntimeError("vine_graph execution stopped; see the Manager debug log for the cause")
 
     def get_makespan_us(self):
         """Return the graph makespan in microseconds."""
         return vine_graph_capi.vine_graph_executor_get_makespan_us(self._c_executor)
-
-    def get_total_recovery_tasks(self):
-        """Return the total number of submitted recovery tasks."""
-        return vine_graph_capi.vine_graph_executor_get_total_recovery_tasks(self._c_executor)
 
     def get_completed_recovery_tasks(self):
         """Return the number of completed recovery tasks."""
         return vine_graph_capi.vine_graph_executor_get_completed_recovery_tasks(self._c_executor)
 
     def delete(self):
-        """Delete the backing C graph."""
-        vine_graph_capi.vine_graph_executor_delete(self._c_executor)
-        self._c_executor = None
-        vine_graph_capi.vine_graph_delete(self._c_graph)
-        self._c_graph = None
+        """Delete the backing C executor and its graph."""
+        if self._c_executor is not None:
+            vine_graph_capi.vine_graph_executor_delete(self._c_executor)
+            self._c_executor = None

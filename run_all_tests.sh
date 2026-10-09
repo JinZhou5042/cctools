@@ -46,15 +46,37 @@ SUCCESS=0
 FAILURE=0
 SKIP=0
 START_TIME=$(date +%s)
+test_root=$(pwd)
+test_directories=""
 for package in ${CCTOOLS_PACKAGES_TEST}; do
-	if [ -d "${package}/test" ]; then
-		cd "./${package}/test"
-		for script in TR_*; do
-			if [ -x "$script" ]; then
-				printf "%-66s" "--- Testing ${package}/test/${script} ... "
+	test_directories="$test_directories ${package}/test"
+	if [ "$package" = taskvine ]; then
+		test_directories="$test_directories taskvine/src/vine_graph/test"
+	fi
+done
+for test_directory in ${test_directories}; do
+	if [ -d "$test_directory" ]; then
+		cd "$test_root/$test_directory"
+		scripts="TR_*"
+		if [ "$test_directory" = taskvine/src/vine_graph/test ]; then
+			scripts="vine_graph_data.py vine_graph_edata.py vine_graph_recovery.py vine_graph_dask_adaptor.py"
+			graph_python=$(sed -n 's/^CCTOOLS_PYTHON_TEST_EXEC=//p' "$test_root/config.mk")
+			graph_python_dir=$(sed -n 's/^CCTOOLS_PYTHON_TEST_DIR=//p' "$test_root/config.mk")
+		fi
+		for script in $scripts; do
+			if [ -x "$script" ] || [ "${script##*.}" = py ]; then
+				printf "%-66s" "--- Testing ${test_directory}/${script} ... "
 				TEST_START_TIME=$(date +%s)
 				(
-					"./${script}" check_needed
+					if [ "${script##*.}" = py ]; then
+						[ -n "$graph_python" ] || exit 1
+						"$graph_python" -c 'import cloudpickle' || exit 1
+						if [ "$script" = vine_graph_dask_adaptor.py ]; then
+							"$graph_python" -c 'import dask' || exit 1
+						fi
+					else
+						"./${script}" check_needed
+					fi
 				) >> "$CCTOOLS_TEST_LOG" 2>&1
 				result=$?
 				if [ "$result" -ne 0 ]; then
@@ -62,6 +84,11 @@ for package in ${CCTOOLS_PACKAGES_TEST}; do
 				else
 					skip=0
 					(
+						if [ "${script##*.}" = py ]; then
+							export PYTHONPATH="$test_root/test_support/python_modules/$graph_python_dir:${PYTHONPATH:-}"
+							export PATH="$(dirname "$graph_python"):$PATH"
+							exec "$graph_python" "$script"
+						fi
 						echo "======== ${script} PREPARE ========"
 						"./${script}" prepare
 						result=$?
@@ -85,19 +112,19 @@ for package in ${CCTOOLS_PACKAGES_TEST}; do
 				if [ "$skip" -eq 1 ]; then
 					SKIP=$((SKIP+1))
 					echo "skipped ${TEST_ELAPSED}s"
-					echo "=== Test ${package}/test/${script}: skipped." >> $CCTOOLS_TEST_LOG
+					echo "=== Test ${test_directory}/${script}: skipped." >> $CCTOOLS_TEST_LOG
 				elif [ "$result" -eq 0 ]; then
 					SUCCESS=$((SUCCESS+1))
 					echo "success ${TEST_ELAPSED}s"
-					echo "=== Test ${package}/test/${script}: success." >> $CCTOOLS_TEST_LOG
+					echo "=== Test ${test_directory}/${script}: success." >> $CCTOOLS_TEST_LOG
 				else
 					FAILURE=$((FAILURE+1))
 					echo "failure ${TEST_ELAPSED}s"
-					echo "=== Test ${package}/test/${script}: failure." >> $CCTOOLS_TEST_LOG
+					echo "=== Test ${test_directory}/${script}: failure." >> $CCTOOLS_TEST_LOG
 				fi
 			fi
 		done
-		cd ../..
+		cd "$test_root"
 	fi
 done
 STOP_TIME=$(date +%s)

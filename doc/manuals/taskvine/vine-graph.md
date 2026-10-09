@@ -8,10 +8,12 @@ runs it with TaskVine. A `Workflow` records the tasks and their dependencies;
 
 The main objects are:
 
-- `Workflow`: owns a graph and all handles created for that graph.
+- `Workflow`: a reusable description of tasks, dependencies, and the handles
+  created for them. The same workflow may be run more than once.
 - `TaskHandle`: identifies a task. `workflow.add_task()` returns one.
 - `TaskOutputHandle`: represents a task's Python return value, or a selected
-  part of that value. Obtain one with `task.output()`.
+  part of that value. Obtain one with `task.output()`. Use `[key]` to select
+  an item and `.attr(name)` to select an attribute.
 - `FileHandle`: represents an existing frontend file or a file produced in a
   task sandbox.
 - `VineGraph`: a TaskVine manager that executes a completed workflow.
@@ -276,21 +278,67 @@ Parameters may be supplied through the `params` argument to `run()` or through
 
 Useful parameters include:
 
-| Parameter | Purpose |
-| --- | --- |
-| `local-execute` | Run in process when set to `1`; use TaskVine workers when `0`. |
-| `output-dir` | Store serialized results; local mode also stores task sandboxes here. |
-| `checkpoint-dir` | Store executor checkpoints here. |
-| `libcores` | Number of cores assigned to the task-runner library. |
+| Parameter | Default | Purpose |
+| --- | --- | --- |
+| `local-execute` | `0` | Run in process when set to `1`; use TaskVine workers when `0`. |
+| `output-dir` | `./outputs` | Parent directory for per-run data. See below. |
+| `libcores` | `16` | Number of cores assigned to the task-runner library. |
+| `vault-disk-limit` | `1536` | Gigabytes of checkpointed task outputs the manager may store. `0` means unlimited. |
+
+Unrecognized parameter names are passed to the TaskVine manager as tuning
+parameters.
+
+Each `run()` creates a new `vine-graph-run-*` directory under `output-dir`.
+It holds serialized task results and, in local mode, task sandboxes. After a
+successful run, only the paths of `FileHandle` targets returned by `run()` are
+kept; everything else in that directory is removed. A failed or interrupted
+run removes the whole directory. Original input files are never modified.
+
+The `checkpoint-dir`, `checkpoint-fraction`, and `checkpoint-threshold-sec`
+parameters are no longer supported and raise `ValueError`.
+
+## Checkpoints and worker loss
+
+Every intermediate task output is copied from a worker to the manager in the
+background after its task completes. Outputs of longer-running tasks are copied
+first. Copies use spare transfer capacity only: workers fetching data from the
+manager always come first. When the stored copies reach `vault-disk-limit`, new
+copies wait until space is freed. An output that is no longer needed is
+removed, along with its copy or any copy in progress.
+
+If workers are lost while the manager is still running, new workers can fetch
+checkpointed outputs from the manager instead of rerunning their producers.
+Outputs without checkpoints are recomputed. Checkpoints last only for the
+current run and are removed when it ends; they do not allow a run to resume
+after the manager exits.
 
 ## Run the project regression tests
 
-From the repository root:
+The tests are Python scripts in `taskvine/src/vine_graph/test`. Tests that
+need workers start local workers from this repository's build. After building the repository, use the Python
+environment selected at configuration time. From the repository root:
 
 ```bash
-cd taskvine/test
-./TR_vine_graph_workflow_examples.sh prepare
-./TR_vine_graph_workflow_examples.sh run
-./TR_vine_graph_dask_adaptor.sh prepare
-./TR_vine_graph_dask_adaptor.sh run
+export PYTHONPATH="$PWD/test_support/python_modules/python3${PYTHONPATH:+:$PYTHONPATH}"
+cd taskvine/src/vine_graph/test
+python3 vine_graph_workflow_examples.py
+python3 vine_graph_dask_adaptor.py
+python3 vine_graph_recovery.py
+python3 vine_graph_checkpoint.py
 ```
+
+| Script | Coverage |
+| --- | --- |
+| `vine_graph_workflow_examples.py` | Workflow examples and corner cases. |
+| `vine_graph_dask_adaptor.py` | Dask graph conversion. Requires `dask`. |
+| `vine_graph_data.py` | Example graphs on the worker data path, including large graphs. |
+| `vine_graph_edata.py` | Per-task serialized callables and arguments. |
+| `vine_graph_boundaries.py` | Reusing one workflow across local and worker runs. |
+| `vine_graph_lifecycle.py` | Run cleanup at each failure point. |
+| `vine_graph_recovery.py` | Checkpoint order and the manager disk limit with workers. |
+| `vine_graph_checkpoint.py` | Recovery from manager checkpoints after every worker cache is lost. |
+| `vine_graph_worker_churn.py` | A three-minute run that replaces a worker every 20 seconds. |
+| `vine_graph_scale.py` | A 4,000-node graph under worker churn, total cache loss, and a small manager disk limit. |
+
+`run_all_tests.sh` runs `vine_graph_data.py`, `vine_graph_edata.py`,
+`vine_graph_recovery.py`, and `vine_graph_dask_adaptor.py`.

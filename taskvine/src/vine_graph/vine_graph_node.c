@@ -7,6 +7,7 @@
 #include "xxmalloc.h"
 
 #include "vine_graph_node.h"
+#include "vine_file.h"
 
 /*************************************************************/
 /* Public APIs */
@@ -30,7 +31,7 @@ struct vine_graph_node *vine_graph_node_create(uint64_t node_id)
 
 	node->parents = list_create();
 	node->children = list_create();
-	node->extra_outputs = list_create();
+	node->outputs = list_create();
 	node->extra_inputs = list_create();
 	node->remaining_parents_count = 0;
 	node->fired_parents = NULL;
@@ -41,10 +42,10 @@ struct vine_graph_node *vine_graph_node_create(uint64_t node_id)
 	node->last_failure_time = 0;
 
 	node->depth = -1;
-	node->height = -1;
 
 	node->preprocessing_time_us = 0;
 	node->postprocessing_time_us = 0;
+	node->execution_time_us = 0;
 
 	return node;
 }
@@ -63,6 +64,14 @@ static int vine_graph_node_dependency_exists(struct vine_graph_node *parent, str
 		}
 	}
 	return 0;
+}
+
+void vine_graph_node_add_output(struct vine_graph_node *node, struct vine_file *file, const char *remote_name)
+{
+	struct vine_graph_io_mount *mount = xxmalloc(sizeof(*mount));
+	mount->file = vine_file_addref(file);
+	mount->remote_name = xxstrdup(remote_name);
+	list_push_tail(node->outputs, mount);
 }
 
 void vine_graph_node_ensure_dependency(struct vine_graph_node *parent, struct vine_graph_node *child)
@@ -88,96 +97,6 @@ char *vine_graph_node_construct_task_arguments(struct vine_graph_node *node)
 }
 
 /**
- * Print the info of the node.
- * @param node Reference to the node object.
- */
-void vine_graph_node_debug_print(struct vine_graph_node *node)
-{
-	if (!node) {
-		return;
-	}
-
-	debug(D_VINE, "---------------- Node Info ----------------");
-	debug(D_VINE, "node_id: %" PRIu64, node->node_id);
-	debug(D_VINE, "preprocessing_time_us (last): %" PRIu64, node->preprocessing_time_us);
-	debug(D_VINE, "postprocessing_time_us (last): %" PRIu64, node->postprocessing_time_us);
-
-	if (!node->task) {
-		debug(D_VINE, "task: (none yet)");
-		debug(D_VINE, "-------------------------------------------");
-		return;
-	}
-
-	debug(D_VINE, "task_id: %d", vine_task_get_id(node->task));
-	debug(D_VINE, "depth: %d", node->depth);
-	debug(D_VINE, "height: %d", node->height);
-
-	if (node->outfile_remote_name) {
-		debug(D_VINE, "outfile_remote_name: %s", node->outfile_remote_name);
-	}
-
-	if (node->outfile) {
-		const char *type_str = "UNKNOWN";
-		switch (vine_file_type(node->outfile)) {
-		case VINE_FILE:
-			type_str = "VINE_FILE";
-			break;
-		case VINE_TEMP:
-			type_str = "VINE_TEMP";
-			break;
-		case VINE_URL:
-			type_str = "VINE_URL";
-			break;
-		case VINE_BUFFER:
-			type_str = "VINE_BUFFER";
-			break;
-		case VINE_MINI_TASK:
-			type_str = "VINE_MINI_TASK";
-			break;
-		}
-		const char *cached_name = vine_file_cached_name(node->outfile);
-		debug(D_VINE, "outfile_type: %s", type_str);
-		debug(D_VINE, "outfile_cached_name: %s", cached_name ? cached_name : "(null)");
-	} else {
-		debug(D_VINE, "outfile_type: not declared");
-	}
-
-	char *parent_ids = NULL; // comma separated parent ids for logging
-	struct vine_graph_node *p;
-	LIST_ITERATE(node->parents, p)
-	{
-		if (!parent_ids) {
-			parent_ids = string_format("%" PRIu64, p->node_id);
-		} else {
-			char *tmp = string_format("%s, %" PRIu64, parent_ids, p->node_id);
-			free(parent_ids);
-			parent_ids = tmp;
-		}
-	}
-
-	char *child_ids = NULL; // comma separated child ids for logging
-	struct vine_graph_node *c;
-	LIST_ITERATE(node->children, c)
-	{
-		if (!child_ids) {
-			child_ids = string_format("%" PRIu64, c->node_id);
-		} else {
-			char *tmp = string_format("%s, %" PRIu64, child_ids, c->node_id);
-			free(child_ids);
-			child_ids = tmp;
-		}
-	}
-
-	debug(D_VINE, "parents: %s", parent_ids ? parent_ids : "(none)");
-	debug(D_VINE, "children: %s", child_ids ? child_ids : "(none)");
-
-	free(parent_ids);
-	free(child_ids);
-
-	debug(D_VINE, "-------------------------------------------");
-}
-
-/**
  * Delete the node and all of its associated resources.
  * @param node Reference to the node object.
  */
@@ -194,15 +113,6 @@ void vine_graph_node_delete(struct vine_graph_node *node)
 	vine_task_delete(node->task);
 	node->task = NULL;
 
-	if (node->task_runner_arg_file) {
-		vine_file_delete(node->task_runner_arg_file);
-		node->task_runner_arg_file = NULL;
-	}
-	if (node->outfile) {
-		vine_file_delete(node->outfile);
-		node->outfile = NULL;
-	}
-
 	list_delete(node->parents);
 	list_delete(node->children);
 
@@ -212,12 +122,13 @@ void vine_graph_node_delete(struct vine_graph_node *node)
 		free(m);
 	}
 	list_delete(node->extra_inputs);
-	while (list_size(node->extra_outputs) > 0) {
-		struct vine_graph_io_mount *m = list_pop_head(node->extra_outputs);
+	while (list_size(node->outputs) > 0) {
+		struct vine_graph_io_mount *m = list_pop_head(node->outputs);
+		vine_file_delete(m->file);
 		free(m->remote_name);
 		free(m);
 	}
-	list_delete(node->extra_outputs);
+	list_delete(node->outputs);
 
 	if (node->fired_parents) {
 		set_delete(node->fired_parents);

@@ -6,27 +6,8 @@ import collections
 import collections.abc
 import copy
 import dataclasses
-import cloudpickle
 import os
 import uuid
-
-
-# Lightweight wrapper around task results that optionally pads the payload. The
-# padding lets tests model large outputs without altering the logical result.
-class TaskOutputWrapper:
-    def __init__(self, result, extra_size_mb=None):
-        self.result = result
-        self.extra_obj = bytearray(int(extra_size_mb * 1024 * 1024)) if extra_size_mb and extra_size_mb > 0 else None
-
-    @staticmethod
-    def load_from_path(path):
-        try:
-            with open(path, "rb") as f:
-                result_obj = cloudpickle.load(f)
-                assert isinstance(result_obj, TaskOutputWrapper), "Loaded object is not of type TaskOutputWrapper"
-                return result_obj.result
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Task result file not found at {path}")
 
 
 # A reference to a task output. This is used to represent the output of a task as a dependency of another task.
@@ -448,6 +429,3 @@ class Workflow:
     def sink_tasks(self):
         """Return handles for tasks with no downstream children."""
         return [self._task_handle(key) for key in self.task_dict if not self.children_of.get(key)]
-
-    def finalize(self):
-        """Finalize the workflow. Dependencies are recorded when tasks are added."""

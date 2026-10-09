@@ -175,6 +175,7 @@ static void delete_uncacheable_files(struct vine_manager *q, struct vine_worker_
 static int release_worker(struct vine_manager *q, struct vine_worker_info *w);
 
 struct vine_task *send_library_to_worker(struct vine_manager *q, struct vine_worker_info *w, const char *name);
+static struct vine_task *remove_library_instances(struct vine_manager *q, const char *name);
 
 /*
 Log timezone context at manager startup so timestamp-based logs can be
@@ -3442,6 +3443,24 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 		}
 
 		/*
+		Files in the data service vault are delivered through the data port, whatever their type.
+		A VINE_FILE in the vault is Manager-local data, such as graph edata. A VINE_TEMP in the vault is
+		a task output with a checkpoint copy, such as graph idata, so it stays recoverable after the copy
+		is removed. Like any URL source, the vault entry is limited by file-source-max-transfers.
+		*/
+		if (vine_manager_data_service_vault_contains(q, m->file)) {
+			char *source = string_format("manager://%s", m->file->cached_name);
+			if (vine_current_transfers_url_in_use(q, source) >= q->file_source_max_transfers) {
+				free(source);
+				return 0;
+			}
+			m->substitute = vine_file_substitute_url(m->file, source, NULL);
+			free(source);
+			debug(D_VINE, "vault hit: task %d file %s", t->task_id, m->file->cached_name);
+			continue;
+		}
+
+		/*
 		If no match was found, the behavior depends on the original file type.
 		URLs can fetch from the original if capacity is available.
 		TEMPs can only fetch from peers, so no match is fatal.
@@ -5016,7 +5035,8 @@ struct vine_task *send_library_to_worker(struct vine_manager *q, struct vine_wor
 	then remove it and notify the user that this template might be broken
 	*/
 	if (original->library_failed_count > q->max_library_retries) {
-		vine_manager_remove_library(q, name);
+		/* The application may still hold this template, so it is retired without being freed. */
+		remove_library_instances(q, name);
 		debug(D_VINE | D_NOTICE, "library %s has reached the maximum failure count %d, it has been removed\n", name, q->max_library_retries);
 		return 0;
 	}
@@ -5085,7 +5105,8 @@ void vine_manager_install_library(struct vine_manager *q, struct vine_task *t, c
 	t->time_when_submitted = timestamp_get();
 }
 
-void vine_manager_remove_library(struct vine_manager *q, const char *name)
+/* Cancel every instance of a library and remove its template from the table. Return the template, or NULL. */
+static struct vine_task *remove_library_instances(struct vine_manager *q, const char *name)
 {
 	char *worker_key;
 	struct vine_worker_info *w;
@@ -5100,9 +5121,18 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 			itable_remove(w->current_libraries, library->task_id);
 			library = vine_schedule_find_library(q, w, name);
 		}
-		hash_table_remove(q->library_templates, name);
+	}
 
-		debug(D_VINE, "All instances and the template for library %s have been removed", name);
+	debug(D_VINE, "All instances and the template for library %s have been removed", name);
+	return hash_table_remove(q->library_templates, name);
+}
+
+void vine_manager_remove_library(struct vine_manager *q, const char *name)
+{
+	/* The Manager owns an installed template, and the caller releases its own handle. Instances are copies. */
+	struct vine_task *library_template = remove_library_instances(q, name);
+	if (library_template) {
+		vine_task_delete(library_template);
 	}
 }
 
@@ -6107,6 +6137,10 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 	} else if (!strcmp(name, "worker-source-max-transfers")) {
 		q->worker_source_max_transfers = MAX(1, (int)value);
 
+	} else if (!strcmp(name, "vault-disk-limit")) {
+		/* Gigabytes of checkpoint data the data service vault may hold. Zero means unlimited. */
+		vine_manager_data_service_vault_set_limit(q->ds, (int64_t)(MAX(0, value) * 1e9));
+
 	} else if (!strcmp(name, "load-from-shared-filesystem")) {
 		q->load_from_shared_fs_enabled = !!((int)value);
 
@@ -6635,6 +6669,11 @@ int vine_prune_file(struct vine_manager *m, struct vine_file *f)
 
 	int pruned_replica_count = 0;
 
+	/* A vault entry of a temporary file is one of its replicas. A VINE_FILE vault entry is Manager-local data. */
+	if (f->type == VINE_TEMP) {
+		vine_manager_data_service_vault_remove(m->ds, f);
+	}
+
 	/* delete all of the replicas present at remote workers. */
 	struct set *source_workers = hash_table_lookup(m->file_worker_table, f->cached_name);
 	if (source_workers && set_size(source_workers) > 0) {
@@ -6690,7 +6729,7 @@ void vine_undeclare_file(struct vine_manager *m, struct vine_file *f)
 		return;
 	}
 
-	vine_manager_data_service_unexport(m->ds, f);
+	vine_manager_data_service_vault_remove(m->ds, f);
 
 	/* First prune the file on all workers */
 	vine_prune_file(m, f);

@@ -188,9 +188,11 @@ static void do_debug(int64_t flags, const char *fmt, va_list args)
 
 	if (debug_write == debug_file_write || debug_write == debug_stderr_write || debug_write == debug_stdout_write) {
 		struct timeval tv;
+		struct tm tm_storage;
 		struct tm *tm;
 		gettimeofday(&tv, 0);
-		tm = localtime(&tv.tv_sec);
+		/* Background threads also log, so use the reentrant form instead of the shared static result. */
+		tm = localtime_r(&tv.tv_sec, &tm_storage);
 
 		/*
 		If the TZ environment variable is not set, then every single call

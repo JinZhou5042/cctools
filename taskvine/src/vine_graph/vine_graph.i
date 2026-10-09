@@ -1,4 +1,4 @@
-/* SWIG interface for local executor graph API bindings */
+/* SWIG interface for the vine_graph executor. The graph module is internal and is not wrapped. */
 %module vine_graph_capi
 
 %{
@@ -10,10 +10,7 @@
 %include "stdint.i"
 %include "int_sizes.h"
 
-/* uint64_t[] + length: not mapped yet; expose via VineGraphExecutor when needed. */
-
 /* Import existing SWIG interface for type information (do not wrap again) */
 %import "../bindings/python3/taskvine.i"
 
-%include "vine_graph.h"
 %include "vine_graph_executor.h"

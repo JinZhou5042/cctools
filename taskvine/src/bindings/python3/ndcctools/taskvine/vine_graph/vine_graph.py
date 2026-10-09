@@ -5,9 +5,8 @@
 from ndcctools.taskvine.manager import Manager
 
 from .adaptors import VineGraphDaskAdaptor
-from .task_runner import TaskRunnerRegistration, compute_task, run_node
-from .workflow import FileHandle, Workflow, TaskHandle, TaskOutputHandle
-from .capi_bridge import VineGraphCapiBridge
+from .task_runner import TaskRunnerRegistration, compute_task
+from .workflow import FileHandle, Workflow, TaskHandle
 from .run_state import WorkflowRun, file_remote_name
 from .utils import color_text, remove_tree_contents
 
@@ -15,7 +14,6 @@ import cloudpickle
 import os
 import signal
 import sys
-import tempfile
 import time
 
 
@@ -32,26 +30,21 @@ class VineGraphConfig:
             "enforce-worker-eviction-interval": -1,
             "shift-disk-load": 0,
             "clean-redundant-replicas": 0,
+            # Gigabytes of idata checkpoints the Manager vault may hold. Zero means unlimited.
+            "vault-disk-limit": 1536,
         }
         self.executor_tuning = {
-            "failure-injection-step-percent": -1,
             "task-priority-mode": "largest-input-first",
             "prune-depth": 1,
-            "checkpoint-threshold-sec": 20.0,
             "output-dir": "./outputs",
             "progress-bar-update-interval-sec": 0.1,
-            "print-graph-details": 0,
         }
         self.task_runner = {
             "libcores": 16,
         }
         self.execution = {
-            "schedule": "worst",
-            "extra-task-output-size-mb": [0, 0],
-            "extra-task-sleep-time": [0, 0],
             # 1 = run Workflow in-process (topological order), no workers / no task runner library; stdout stays on frontend.
             "local-execute": 0,
-
         }
 
     def _sections(self):
@@ -68,6 +61,8 @@ class VineGraphConfig:
             raise ValueError("vine_graph executes one node per task; grouping is no longer supported")
         if param_name in ("checkpoint-dir", "checkpoint-fraction"):
             raise ValueError("vine_graph filesystem checkpoints are no longer supported")
+        if param_name == "checkpoint-threshold-sec":
+            raise ValueError("vine_graph checkpoints every idata file; use vault-disk-limit to bound Manager disk")
         for section in self._sections():
             if param_name in section:
                 section[param_name] = new_value
@@ -108,7 +103,6 @@ class VineGraph(Manager):
         print(f"=== Manager name: {color_text(self.name, 92)}")
         print(f"=== Manager port: {color_text(self.port, 92)}")
         print(f"=== Runtime directory: {color_text(self.runtime_directory, 92)}")
-        self._sigint_received = False
 
     def get_param(self, param_name):
         """Return a parameter value."""
@@ -133,62 +127,6 @@ class VineGraph(Manager):
         for k, v in self.params.executor_tuning.items():
             bridge.tune(k, str(v))
 
-    def _rep_key(self, k, r):
-        return k if r == 0 else ("__rep", r, k)
-
-    def _replicate_graph(self, task_dict, target_keys, repeats):
-        if repeats <= 1:
-            return task_dict, target_keys
-        if isinstance(task_dict, Workflow):
-            old_workflow = task_dict
-            if old_workflow.input_files or old_workflow.output_files:
-                raise ValueError("repeats cannot be combined with FileHandle dependencies")
-            new_workflow = Workflow()
-            new_workflow.callables = list(old_workflow.callables)
-            new_workflow._callable_index = dict(old_workflow._callable_index)
-            for r in range(repeats):
-                def rewriter(ref):
-                    return TaskOutputHandle(
-                        self._rep_key(ref.task_id, r),
-                        ref.path,
-                        workflow_id=new_workflow._workflow_id,
-                    )
-
-                def _rewrite(obj):
-                    return old_workflow._visit_task_output_refs(obj, rewriter, rewrite=True)
-
-                for k, (func_id, args, kwargs) in old_workflow.task_dict.items():
-                    new_args, new_kwargs = _rewrite((args, kwargs))
-                    new_workflow._add_task_with_key(
-                        self._rep_key(k, r),
-                        old_workflow.callables[func_id],
-                        *new_args,
-                        **new_kwargs,
-                    )
-            new_workflow.finalize()
-            executor_targets = list(target_keys)
-            for r in range(1, repeats):
-                executor_targets.extend(self._rep_key(k, r) for k in target_keys if k in old_workflow.task_dict)
-            return new_workflow, executor_targets
-        else:
-            temp_workflow = Workflow()
-            expanded = {}
-            for r in range(repeats):
-                def rewriter(ref):
-                    return TaskOutputHandle(self._rep_key(ref.task_id, r), ref.path)
-
-                def _rewrite(obj):
-                    return temp_workflow._visit_task_output_refs(obj, rewriter, rewrite=True)
-
-                for k, v in task_dict.items():
-                    func, args, kwargs = v
-                    new_args, new_kwargs = _rewrite((args, kwargs))
-                    expanded[self._rep_key(k, r)] = (func, new_args, new_kwargs)
-            executor_targets = list(target_keys)
-            for r in range(1, repeats):
-                executor_targets.extend(self._rep_key(k, r) for k in target_keys if k in task_dict)
-            return expanded, executor_targets
-
     def build_workflow(self, task_dict):
         if isinstance(task_dict, Workflow):
             workflow = task_dict
@@ -200,69 +138,41 @@ class VineGraph(Manager):
                 assert callable(func), f"Task {k} does not have a callable"
                 workflow._add_task_with_key(k, func, *args, **kwargs)
 
-        workflow.finalize()
-
         return workflow
 
-    def build_capi_bridge(self, py_graph, target_keys):
-        """Build the C vine_graph mirror from the Python graph."""
-        assert py_graph is not None, "Python graph must be built before building the VineGraphCapiBridge"
-
-        bridge = VineGraphCapiBridge(self._taskvine)
-
-        bridge.set_task_runner_function(run_node)
-
+    def build_capi_bridge(self, run, target_keys, file_target_ids=()):
+        """Populate the run-owned C graph. Partial construction is covered by the run scope."""
+        py_graph, bridge = run.workflow, run.bridge
         self.tune_manager()
         self.tune_capi_bridge(bridge)
-
-        topo_order = py_graph.get_topological_order()
-
-        for k in topo_order:
-            bridge.add_node(k)
-            for pk in py_graph.parents_of.get(k, ()):
-                bridge.add_dependency(pk, k)
-
-        for k in target_keys:
-            bridge.set_target(k)
-
-        return bridge
-
-    def build_workflow_and_capi_bridge(self, task_dict, target_keys, file_target_ids=()):
-        """Build the Python graph and its C mirror."""
-        py_graph = self.build_workflow(task_dict)
-
-        # Ignore requested targets that are not in the graph.
-        missing_keys = [k for k in target_keys if k not in py_graph.task_dict]
+        bridge.tune("output-dir", run.output_dir)
+        for key in py_graph.get_topological_order():
+            bridge.add_node(key)
+            for parent in py_graph.parents_of.get(key, ()):
+                bridge.add_dependency(parent, key)
+        missing_keys = [key for key in target_keys if key not in py_graph.task_dict]
         if missing_keys:
             print(f"=== Warning: the following target keys are not in the graph: {','.join(map(str, missing_keys))}")
-        target_keys = list(set(target_keys) - set(missing_keys))
-
-        bridge = self.build_capi_bridge(py_graph, target_keys)
-
-        # Declare each FileHandle once, then mount it on its producer/consumers.
+        for key in target_keys:
+            if key in py_graph.task_dict:
+                bridge.set_target(key)
         for file_id, source_path in py_graph.input_files.items():
-            bridge.declare_input_file(file_id, source_path)
+            bridge.declare_input_file(file_id, run.stage_input(file_id, source_path))
         file_target_ids = set(file_target_ids)
-        for file_id, (workflow_key, task_path) in py_graph.output_files.items():
-            bridge.add_task_output_file(
-                workflow_key, file_id, task_path, is_target=file_id in file_target_ids
-            )
+        for file_id, (key, task_path) in py_graph.output_files.items():
+            bridge.add_task_output_file(key, file_id, task_path, is_target=file_id in file_target_ids)
         for file_id, consumers in py_graph.file_consumers.items():
-            task_path = file_remote_name(py_graph, file_id)
-            for workflow_key in consumers:
-                bridge.add_task_input_file(workflow_key, file_id, task_path)
+            for key in consumers:
+                bridge.add_task_input_file(key, file_id, file_remote_name(py_graph, file_id))
+        bridge.finalize()
 
-        bridge.compute_topology_metrics()
-
-        return py_graph, bridge
-
-    def build_task_runner_registration(self, bridge, hoisting_modules, env_files):
+    def build_task_runner_registration(self, run, hoisting_modules, env_files):
         """Build the TaskVine task runner registration."""
         task_runner_registration = TaskRunnerRegistration(self)
         task_runner_registration.add_hoisting_modules(hoisting_modules)
         task_runner_registration.add_env_files(env_files)
         task_runner_registration.set_cores(self.get_param("libcores"))
-        task_runner_registration.set_name(bridge.get_task_runner_library_name())
+        task_runner_registration.set_name(run.task_runner_library_name)
 
         return task_runner_registration
 
@@ -283,7 +193,7 @@ class VineGraph(Manager):
                 path = os.path.join(directory, f"vine-graph-edata-{next_file_id}")
                 with open(path, "wb") as stream:
                     cloudpickle.dump(value, stream)
-                bridge.declare_input_file(next_file_id, path, export=True)
+                bridge.declare_input_file(next_file_id, path, vault=True)
                 object_files[identity] = next_file_id
             return object_files[identity]
 
@@ -301,8 +211,6 @@ class VineGraph(Manager):
                 "inputs": {parent: bridge.get_node_outfile_remote_name(parent) for parent in py_graph.parents_of.get(key, ())},
                 "files": files_by_task.get(key, {}),
                 "output": bridge.get_node_outfile_remote_name(key),
-                "sleep": run.task_options[key][1],
-                "output_size_mb": run.task_options[key][0],
             }
             file_ids = [manifest["callable"], *manifest["args"], *manifest["kwargs"].values()]
             for file_id in dict.fromkeys(file_ids):
@@ -314,7 +222,7 @@ class VineGraph(Manager):
             with open(path, "wb") as stream:
                 cloudpickle.dump(manifest, stream)
             next_file_id += 1
-            bridge.declare_input_file(next_file_id, path, export=True)
+            bridge.declare_input_file(next_file_id, path, vault=True)
             bridge.add_task_input_file(key, next_file_id, remote_name)
 
     def _print_local_progress(self, done, total, started_at):
@@ -385,7 +293,6 @@ class VineGraph(Manager):
         env_files=None,
         from_dask=False,
         expand_subgraphs=False,
-        repeats=1,
     ):
         """Build the graph, run it, and return the requested results."""
         requested_targets = list(targets or [])
@@ -419,29 +326,20 @@ class VineGraph(Manager):
             result_items = [("task", target, target) for target in requested_targets]
 
         scheduler_targets = [key for kind, _, key in result_items if kind == "task"]
-        task_dict, scheduler_targets = self._replicate_graph(task_dict, scheduler_targets, repeats)
 
-        py_graph, bridge = self.build_workflow_and_capi_bridge(
-            task_dict, scheduler_targets, file_target_ids
-        )
+        py_graph = self.build_workflow(task_dict)
         local_execute = bool(self.get_param("local-execute"))
-        task_runner_registration = None
-        edata_directory = None
-
-        try:
-            run = WorkflowRun(
-                py_graph, bridge, self.get_param("output-dir"),
-                self.get_param("extra-task-output-size-mb"), self.get_param("extra-task-sleep-time"),
-            )
+        with WorkflowRun(self, py_graph) as run:
+            self.build_capi_bridge(run, scheduler_targets, file_target_ids)
+            bridge = run.bridge
             if local_execute:
                 print("=== local-execute: running Workflow in process (no workers)", flush=True)
                 makespan_s = self._execute_workflow_local(run)
                 completed_recovery_tasks = 0
             else:
-                edata_directory = tempfile.TemporaryDirectory(prefix="vine-graph-edata-", dir=self.staging_directory)
-                self._stage_node_edata(run, edata_directory.name)
-                task_runner_registration = self.build_task_runner_registration(bridge, hoisting_modules, env_files)
-                task_runner_registration.install()
+                self._stage_node_edata(run, run.edata_directory)
+                task_runner_registration = self.build_task_runner_registration(run, hoisting_modules, env_files)
+                run.install_runner(task_runner_registration)
                 bridge.execute()
                 makespan_s = round(bridge.get_makespan_us() / 1e6, 6)
                 completed_recovery_tasks = bridge.get_completed_recovery_tasks()
@@ -461,21 +359,10 @@ class VineGraph(Manager):
                 elif key in py_graph.input_files:
                     results[public_target] = py_graph.input_files[key]
                 elif local_execute:
-                    results[public_target] = run.local_file_path(key)
+                    results[public_target] = run.retain_file(run.local_file_path(key))
                 else:
-                    results[public_target] = os.path.abspath(bridge.get_file_target_path(key))
+                    results[public_target] = run.retain_file(os.path.abspath(bridge.get_file_target_path(key)))
             return results
-        finally:
-            try:
-                if task_runner_registration is not None:
-                    task_runner_registration.uninstall()
-            finally:
-                try:
-                    bridge.delete()
-                finally:
-                    if edata_directory is not None:
-                        edata_directory.cleanup()
 
     def _on_sigint(self, signum, frame):
-        self._sigint_received = True
         raise KeyboardInterrupt

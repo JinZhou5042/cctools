@@ -21,7 +21,7 @@ vine_wrap.c: taskvine.i
 	@echo "SWIG taskvine.i (python)"
 	@$(CCTOOLS_SWIG) -o vine_wrap.c -outdir ndcctools/taskvine -python -I$(CCTOOLS_HOME)/dttools/src -I$(CCTOOLS_HOME)/taskvine/src/manager taskvine.i
 
-$(DSPYTHONSO): vine_wrap.o $(EXTERNAL_DEPENDENCIES)
+$(DSPYTHONSO): vine_wrap.o $(CCTOOLS_HOME)/taskvine/src/manager/libtaskvine.a $(EXTERNAL_DEPENDENCIES)
 
 test:
 

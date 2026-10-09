@@ -1229,7 +1229,7 @@ class LibraryTask(Task):
     # @param library_name       The name of this Library.
     def __init__(self, fn, library_name):
         Task.__init__(self, fn)
-        self._manager_will_free = True
+        # Python frees a library that is never installed. Installation hands it to the Manager.
         self.provides_library(library_name)
 
 

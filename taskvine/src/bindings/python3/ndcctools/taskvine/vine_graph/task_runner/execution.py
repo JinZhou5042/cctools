@@ -3,13 +3,24 @@
 # See the file COPYING for details.
 
 
-import time
 import copy
 import dataclasses
 import cloudpickle
 from collections import deque
 
-from ..workflow import Workflow, TaskOutputWrapper, _TaskOutputAttribute
+from ..workflow import Workflow, _TaskOutputAttribute
+
+
+def save_task_output(path, value):
+    """Write one task's Python result. The Manager and Workers share this format."""
+    with open(path, "wb") as stream:
+        cloudpickle.dump(value, stream)
+
+
+def load_task_output(path):
+    """Read one task's Python result written by save_task_output."""
+    with open(path, "rb") as stream:
+        return cloudpickle.load(stream)
 
 
 def _resolve_nested_legacy_tasks(obj, memo=None):
@@ -152,7 +163,7 @@ def run_node(node_id):
         return objects[file_id]
 
     def load_output(task_key):
-        return TaskOutputWrapper.load_from_path(manifest["inputs"][task_key])
+        return load_task_output(manifest["inputs"][task_key])
 
     def file_path(handle):
         return manifest["files"][handle.file_id]
@@ -163,6 +174,4 @@ def run_node(node_id):
     output = _compute_task(function, args, kwargs, load_output, file_path)
     del function, args, kwargs
     objects.clear()
-    time.sleep(manifest["sleep"])
-    with open(manifest["output"], "wb") as stream:
-        cloudpickle.dump(TaskOutputWrapper(output, extra_size_mb=manifest["output_size_mb"]), stream)
+    save_task_output(manifest["output"], output)

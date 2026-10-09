@@ -126,6 +126,10 @@ static vine_result_code_t vine_manager_get_file_contents(struct vine_manager *q,
 	}
 
 	int fd = open(local_name, O_WRONLY | O_TRUNC | O_CREAT, 0777);
+	if (fd < 0 && errno == EACCES && unlink(local_name) == 0) {
+		/* A retrieved file keeps the read-only mode of the Worker cache. A rerun task replaces that copy. */
+		fd = open(local_name, O_WRONLY | O_TRUNC | O_CREAT, 0777);
+	}
 	if (fd < 0) {
 		debug(D_NOTICE, "Cannot open file %s for writing: %s", local_name, strerror(errno));
 		link_soak(w->link, length, stoptime);

@@ -3,6 +3,7 @@
 #include "vine_worker_info.h"
 #include "vine_file_replica_table.h"
 #include "vine_manager.h"
+#include "vine_manager_data_service.h"
 #include "vine_manager_put.h"
 #include "vine_file_replica.h"
 #include "vine_task.h"
@@ -207,8 +208,8 @@ static int attempt_replication(struct vine_manager *q, struct vine_file *f)
 /*************************************************************/
 
 /**
-Check if a temporary file exists somewhere in all workers.
-Returns 1 if at least one CREATING or READY replica exists, 0 otherwise.
+Check whether a temporary file has a complete vault entry at the Manager or a Worker replica.
+Returns 1 for a vault entry or at least one CREATING or READY Worker replica, 0 otherwise.
 
 We accept both CREATING and READY replicas as available sources, since a CREATING
 replica may already exist physically but hasn't yet received the cache-update
@@ -223,6 +224,10 @@ int vine_temp_exists_somewhere(struct vine_manager *q, struct vine_file *f)
 {
 	if (!q || !f || f->type != VINE_TEMP || f->state != VINE_FILE_STATE_CREATED) {
 		return 0;
+	}
+
+	if (vine_manager_data_service_vault_contains(q, f)) {
+		return 1;
 	}
 
 	struct set *workers = hash_table_lookup(q->file_worker_table, f->cached_name);

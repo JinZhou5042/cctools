@@ -86,7 +86,6 @@ def graphed_plan_to_workflow(plan, key_prefix="graphed"):
             process_task.output(),
         )
 
-    workflow.finalize()
     return workflow, previous_task
 
 
