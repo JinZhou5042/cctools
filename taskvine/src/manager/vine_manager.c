@@ -4191,6 +4191,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->factory_table = hash_table_create(0, 0);
 	q->current_transfer_table = hash_table_create(0, 0);
+	q->current_transfer_url_table = hash_table_create(0, 0);
 	q->task_group_table = itable_create(0);
 	q->group_id_counter = 1;
 	q->fetch_factory = 0;
@@ -4581,6 +4582,7 @@ void vine_delete(struct vine_manager *q)
 
 	vine_current_transfers_clear(q);
 	hash_table_delete(q->current_transfer_table);
+	hash_table_delete(q->current_transfer_url_table);
 
 	vine_task_groups_clear(q);
 	itable_delete(q->task_group_table);
