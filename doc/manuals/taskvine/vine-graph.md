@@ -163,9 +163,45 @@ and runs one task per core, so workers of any size can join. Stop the worker
 with `Ctrl-C`.
 
 The Executor installs that library once and keeps it for its lifetime.
-`library_modules` lists modules the library imports when it starts on a
-worker, and `library_files` maps local files to names in the library sandbox,
-such as Python modules the tasks import.
+`library_files` maps local files to names in the library sandbox, such as
+Python modules the tasks import.
+
+## Sharing modules and data across tasks
+
+The library on each worker starts each task as a copy of itself, and the copy
+keeps everything the library has already loaded. Anything loaded once into the
+library is therefore free for every task on that worker.
+
+`library_modules` names modules the library imports when it starts, as module
+objects or names. Tasks then skip the import, which saves seconds for packages
+such as `torch`.
+
+`hoist` gives the library objects to load when it starts, by name. A task
+argument `vg.Hoisted(name)` stands for that object, and the task receives it
+without loading it:
+
+```python
+import ndcctools.taskvine.vine_graph as vg
+
+
+def predict(model, value):
+    return model["weight"] * value
+
+
+model = {"weight": 3}
+with vg.Executor(port=9123, library_modules=["numpy"], hoist={"model": model}) as executor:
+    futures = [executor.submit(predict, vg.Hoisted("model"), value) for value in range(100)]
+    print([future.result() for future in futures])
+```
+
+A Graph can use `vg.Hoisted(name)` too, and keeps only the name, so the
+Executor that runs it supplies the object. Each task gets its own copy of a
+hoisted object, so a change a task makes stays within that task. Hoisted
+objects are given when the Executor is created and stay in the library on every
+worker until the Executor closes. They suit a few large objects that most tasks
+use, such as a model or a lookup table. Every worker loads all of them, and a
+library that holds many small Python objects starts each task more slowly, so
+pass data that only some tasks read as ordinary arguments.
 
 ## HTCondor workers
 
@@ -394,7 +430,7 @@ collection and non-collection values in that dictionary.
 ## Executor settings
 
 `vg.Executor(port, name, *, local, output_dir, library_modules, library_files,
-params, **manager_options)` takes:
+hoist, params, **manager_options)` takes:
 
 | Argument | Default | Purpose |
 | --- | --- | --- |
@@ -402,8 +438,9 @@ params, **manager_options)` takes:
 | `name` | `None` | Manager name that workers look up in the catalog. |
 | `local` | `False` | Run each task in this process, without TaskVine, for debugging. |
 | `output_dir` | `./outputs` | Parent of the directory that holds file results returned by `result()`. |
-| `library_modules` | `()` | Modules the library imports when it starts on a worker. |
+| `library_modules` | `()` | Modules, or module names, the library imports when it starts on a worker. |
 | `library_files` | `None` | Local files given to the library, as `{local_path: name}`. |
+| `hoist` | `None` | Objects the library loads when it starts, as `{name: object}`, read by tasks through `vg.Hoisted(name)`. |
 | `params` | `None` | Settings applied with `set_params()`. |
 
 Other keyword arguments, such as `ssl` or `run_info_path`, go to the TaskVine

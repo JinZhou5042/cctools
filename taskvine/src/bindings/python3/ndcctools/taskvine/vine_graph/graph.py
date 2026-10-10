@@ -51,6 +51,31 @@ class File(_Symbol):
         return f"File({self.path!r})"
 
 
+class Hoisted(_Symbol):
+    """An object that the Executor loads once into the library on each Worker, named by the hoist argument of the
+    Executor. A task that takes vg.Hoisted(name) as an argument receives that object. Every task gets its own copy, so
+    changes a task makes to it stay within that task."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name):
+        if not isinstance(name, str) or not name:
+            raise TypeError("a hoisted object is named by a non-empty string")
+        self.name = name
+
+    def _as_ref(self):
+        return self
+
+    def __eq__(self, other):
+        return isinstance(other, Hoisted) and other.name == self.name
+
+    def __hash__(self):
+        return hash((Hoisted, self.name))
+
+    def __repr__(self):
+        return f"Hoisted({self.name!r})"
+
+
 @dataclasses.dataclass(frozen=True)
 class _Attribute:
     """A selection step that reads an attribute, as opposed to an item."""
@@ -311,6 +336,7 @@ class Graph:
         self._children = collections.defaultdict(set)  # key -> keys in this graph that read its result or files
         self._reads = {}  # key -> File and _FileRef objects the task reads, in first-use order
         self._outputs = collections.defaultdict(dict)  # key -> sandbox path -> NodeFile it writes
+        self._hoisted = {}  # key -> names of the hoisted objects the task reads, for tasks that read any
 
     def __getstate__(self):
         state = dict(self.__dict__)
@@ -364,6 +390,7 @@ class Graph:
         parents = {}  # (graph id, key) -> None, as an ordered set
         results = {}  # (graph id, key) of tasks whose result it reads -> None, as an ordered set
         reads = {}  # identity of each file read -> its File or _FileRef
+        hoisted = {}  # names of hoisted objects -> None, as an ordered set
 
         def replace(symbol):
             if on_symbol is not None:
@@ -372,6 +399,9 @@ class Graph:
             if not foreign and hasattr(symbol.source if isinstance(symbol, _Selection) else symbol, "_executor"):
                 raise TypeError("a Graph cannot hold a Future; use Executor.submit() for tasks built from Futures")
             ref = symbol._as_ref()
+            if isinstance(ref, Hoisted):
+                hoisted.setdefault(ref.name, None)
+                return ref
             if isinstance(ref, File):
                 reads.setdefault(ref, ref)
                 return ref
@@ -392,6 +422,8 @@ class Graph:
         self._parents[key] = tuple(parents)
         self._results[key] = tuple(results)
         self._reads[key] = tuple(reads.values())
+        if hoisted:
+            self._hoisted[key] = tuple(hoisted)
         for graph_id, parent in parents:
             if graph_id is None:
                 self._children[parent].add(key)

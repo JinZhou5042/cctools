@@ -240,13 +240,19 @@ class Executor:
     Graph or a Future holds the task, and lets them go afterwards.
 
     local=True runs each task in this process when it is submitted, for debugging, without TaskVine. output_dir holds
-    the directory of file results that result() returns, which stay after close. library_modules are imported by the
-    library that runs tasks on each Worker, and library_files maps local paths to names in its sandbox. params holds
-    settings for set_params(), and other keyword arguments go to the TaskVine Manager.
+    the directory of file results that result() returns, which stay after close. params holds settings for
+    set_params(), and other keyword arguments go to the TaskVine Manager.
+
+    The library that runs tasks on each Worker prepares itself once when it starts, and every task inherits what it
+    prepared. It imports library_modules, given as modules or module names such as "torch", so tasks do not import
+    them again, and loads hoist, a dictionary from names to objects. A task that takes vg.Hoisted(name) as an argument
+    receives its own copy of that object without loading it. Hoisted objects stay in the library on every Worker until
+    the Executor closes, so they suit a few large objects that most tasks use. library_files maps local paths to names
+    in the library sandbox.
     """
 
     def __init__(self, port=cvine.VINE_DEFAULT_PORT, name=None, *, local=False, output_dir="./outputs",
-                 library_modules=(), library_files=None, params=None, **manager_options):
+                 library_modules=(), library_files=None, hoist=None, params=None, **manager_options):
         self._local = bool(local)
         self._closed = False
         self._manager = None
@@ -259,6 +265,10 @@ class Executor:
         self._graphs = weakref.WeakValueDictionary({self._dynamic._id: self._dynamic})
         self._numbers = {}  # (graph id, key) of each submitted task -> number that names its files
         self._labels = {}  # (graph id, key) -> how messages name the task, which outlives its Graph
+        # Hoisted objects, each serialized on its own: name -> bytes. A local Executor loads one copy per task, as
+        # forked tasks get on Workers, and a Worker library loads them from a file.
+        self._hoisted = _serialize_hoisted(hoist)
+        library_modules = [library.module_name(module) for module in library_modules]
         self._last_number = 0
         self._declared_outputs = {}  # (graph id, key) -> output paths the task declared when it was submitted
         self._file_numbers = {}  # file identity -> number that names the file in sandboxes
@@ -307,6 +317,8 @@ class Executor:
             if not self._local:
                 self._close_executor_on(port)
                 self._start(port, name, library_modules, library_files, manager_options)
+                # Workers load the hoisted objects from the library's file, so this process keeps only their names.
+                self._hoisted = dict.fromkeys(self._hoisted)
             _open_executors.add(self)
             self.set_params(params or {})
             if _in_notebook():
@@ -336,8 +348,12 @@ class Executor:
         self._manager = Manager(port=port, name=name, **manager_options)
         for setting, value in MANAGER_TUNING.items():
             self._tune_manager(setting, value)
+        hoisted_path = None
+        if self._hoisted:
+            hoisted_path = os.path.join(self._run_dir, library.HOISTED)
+            library.save_hoisted(hoisted_path, self._hoisted)
         library_name, function_name = self._resources.enter_context(
-            library.installed(self._manager, library_modules, library_files))
+            library.installed(self._manager, library_modules, library_files, hoisted_path))
         self._executor = capi.vine_graph_executor_create(self._manager._taskvine, library_name, function_name)
         if not self._executor:
             raise MemoryError("could not create the graph executor")
@@ -558,6 +574,9 @@ class Executor:
         before it was queued can be submitted again."""
         graph_id, key = task
         graph = self._graphs[graph_id]
+        for name in graph._hoisted.get(key, ()):
+            if name not in self._hoisted:
+                raise KeyError(f"no hoisted object named {name!r}; give it to Executor(hoist={{...}})")
         for ref in graph._reads[key]:
             if isinstance(ref, File) and not os.path.isfile(ref.path):
                 raise FileNotFoundError(ref.path)
@@ -788,7 +807,7 @@ class Executor:
         if graph_id == self._dynamic._id:
             # Only a Future could reach this call again, so its function and arguments go too.
             for table in (self._dynamic._tasks, self._dynamic._parents, self._dynamic._results, self._dynamic._reads,
-                          self._dynamic._children, self._dynamic._outputs):
+                          self._dynamic._children, self._dynamic._outputs, self._dynamic._hoisted):
                 table.pop(key, None)
 
     def _drop_staged(self, names):
@@ -1067,7 +1086,8 @@ class Executor:
             output = library.run_task(
                 func, args, kwargs,
                 lambda parent: library.load_result(self._local_result_path(_resolve(graph_id, parent))),
-                lambda identity: self._local_file_path(_resolve_file(graph_id, identity)))
+                lambda identity: self._local_file_path(_resolve_file(graph_id, identity)),
+                lambda name: cloudpickle.loads(self._hoisted[name]))
             for task_path in outputs:
                 local_path = os.path.abspath(os.path.join(task_dir, task_path))
                 if not os.path.isfile(local_path):
@@ -1117,6 +1137,21 @@ class Executor:
         path = directory / str(len(self._input_files) + 1)
         path.symlink_to(source)
         return str(path)
+
+
+def _serialize_hoisted(hoist):
+    """Serialize each hoisted object on its own and return {name: bytes}, so an unpicklable object or a bad name fails
+    the Executor before it starts."""
+    if hoist is None:
+        return {}
+    if not isinstance(hoist, dict):
+        raise TypeError("hoist takes a dictionary from names to objects")
+    hoisted = {}
+    for name, value in hoist.items():
+        if not isinstance(name, str) or not name:
+            raise TypeError("a hoisted object is named by a non-empty string")
+        hoisted[name] = cloudpickle.dumps(value)
+    return hoisted
 
 
 def _resolve(graph_id, reference):

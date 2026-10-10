@@ -10,10 +10,17 @@ function and its arguments by sandbox path, and the sandbox paths of the results
 returns the function's result, which the TaskVine library writes to RESULT as {"Result", "Success", "Reason"}. A
 function that raises ends the task process with a non-zero status after printing its traceback, because the library
 otherwise reports exceptions with status zero. Local execution calls run_task() too, so both run a function alike.
+
+The library prepares itself once when it starts, in its own process: it imports the modules it was given, then loads
+the hoisted objects from one file, HOISTED, which maps each name to the object serialized on its own. Every task it
+forks inherits both, so tasks neither import those modules nor load those objects again.
 """
 
 import contextlib
+import gc
+import importlib
 import os
+import types
 import shutil
 import sys
 import traceback
@@ -22,22 +29,31 @@ from pathlib import Path
 
 import cloudpickle
 
-from .graph import File, _Attribute, _Ref, replace_symbols
+from .graph import File, Hoisted, _Attribute, _Ref, replace_symbols
 
 # Sandbox path of the manifest that describes the task.
 MANIFEST = "vine-graph-node.pkl"
 # Sandbox path where the TaskVine library writes the result of a function call.
 RESULT = "outfile"
+# Library sandbox path of the hoisted objects.
+HOISTED = "vine-graph-hoisted.pkl"
+
+# The hoisted objects of this library process, by name, which forked tasks inherit.
+_hoisted = {}
 
 
 @contextlib.contextmanager
-def installed(manager, modules=(), files=None):
+def installed(manager, modules=(), files=None, hoisted=None):
     """Install the library on a Manager, yield its name and the name of the function every task calls, and remove
-    the library with its files on exit. The library imports modules when it starts, and files maps local paths to
-    names in the library sandbox. The name is unique, so an Executor never reaches a library instance of an earlier
-    Executor that Workers have not removed yet."""
+    the library with its files on exit. When the library starts, it imports modules, given as module objects or
+    names, and loads hoisted, the local path of a file written by save_hoisted(). files maps local paths to names in
+    the library sandbox. The name is unique, so an Executor never reaches a library instance of an earlier Executor
+    that Workers have not removed yet."""
     name = f"vine-graph-{uuid.uuid4().hex}"
-    files = files or {}
+    module_names = [module_name(module) for module in modules]
+    files = dict(files or {})
+    if hoisted:
+        files[hoisted] = HOISTED
     for local in files:
         if not os.path.exists(local):
             raise FileNotFoundError(f"Local file {local} not found")
@@ -46,7 +62,8 @@ def installed(manager, modules=(), files=None):
     inputs = []
     try:
         try:
-            library = manager.create_library_from_functions(name, run_node, add_env=False, hoisting_modules=list(modules))
+            context = [prepare, [module_names, HOISTED if hoisted else None], {}]
+            library = manager.create_library_from_functions(name, run_node, add_env=False, library_context_info=context)
         finally:
             # Library construction is synchronous, so new cache directories belong to this library.
             generated = set(cache_root.iterdir()) - before if cache_root.exists() else set()
@@ -68,6 +85,34 @@ def installed(manager, modules=(), files=None):
             finally:
                 for directory in generated:
                     shutil.rmtree(directory)
+
+
+def save_hoisted(path, blobs):
+    """Write hoisted objects, given as {name: serialized object}, to the file the library loads when it starts."""
+    with open(path, "wb") as stream:
+        cloudpickle.dump(blobs, stream)
+
+
+def module_name(module):
+    """Return the name of a module given as a module object or a name."""
+    if isinstance(module, types.ModuleType):
+        return module.__name__
+    if isinstance(module, str) and module:
+        return module
+    raise TypeError(f"library_modules takes modules or module names, not {module!r}")
+
+
+def prepare(module_names, hoisted_path):
+    """Prepare this library process when it starts: import the modules, then load the hoisted objects, which may need
+    them. Freezing what was loaded keeps the garbage collector from touching that memory, so forked tasks share it
+    instead of copying it."""
+    for name in module_names:
+        importlib.import_module(name)
+    if hoisted_path:
+        with open(hoisted_path, "rb") as stream:
+            blobs = cloudpickle.load(stream)
+        _hoisted.update((name, cloudpickle.loads(blob)) for name, blob in blobs.items())
+    gc.freeze()
 
 
 def save_result(path, value):
@@ -100,12 +145,18 @@ def _select(value, steps):
     return value
 
 
-def run_task(func, args, kwargs, load_task_result, file_path):
+def run_task(func, args, kwargs, load_task_result, file_path, load_hoisted_object):
     """Call func after replacing each reference in its arguments: a task result with load_task_result((graph id,
-    key)) and a file with file_path(file_identity(file)). Other arguments reach func unchanged."""
+    key)), a file with file_path(file_identity(file)), and a hoisted object with load_hoisted_object(name). Other
+    arguments reach func unchanged. A result or hoisted object read twice is one object."""
     results = {}
+    hoisted = {}
 
     def replace(ref):
+        if isinstance(ref, Hoisted):
+            if ref.name not in hoisted:
+                hoisted[ref.name] = load_hoisted_object(ref.name)
+            return hoisted[ref.name]
         if isinstance(ref, _Ref):
             task = (ref.graph_id, ref.key)
             if task not in results:
@@ -152,7 +203,7 @@ def _run_node():
     args = tuple(load(task_path) for task_path in manifest["args"])
     kwargs = {name: load(task_path) for name, task_path in manifest["kwargs"].items()}
     output = run_task(function, args, kwargs, lambda task: load_result(manifest["inputs"][task]),
-                      manifest["files"].__getitem__)
+                      manifest["files"].__getitem__, _hoisted.__getitem__)
     del function, args, kwargs
     objects.clear()
     return output

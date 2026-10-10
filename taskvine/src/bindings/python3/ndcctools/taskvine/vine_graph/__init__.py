@@ -15,7 +15,7 @@ on TaskVine Workers and returns a Future for each submitted task:
         print(executor.run(graph, [total])[total])
 """
 
-from .graph import File, Graph, Node, NodeFile
+from .graph import File, Graph, Hoisted, Node, NodeFile
 from .executor import Executor, Future, Progress, TaskError
 
-__all__ = ["Graph", "Node", "NodeFile", "File", "Executor", "Future", "Progress", "TaskError"]
+__all__ = ["Graph", "Node", "NodeFile", "File", "Hoisted", "Executor", "Future", "Progress", "TaskError"]
