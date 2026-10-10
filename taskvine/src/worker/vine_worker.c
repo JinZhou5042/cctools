@@ -409,8 +409,6 @@ and apply any local options that override it.
 
 static void measure_worker_resources()
 {
-	/* Reserve the full data budget even when the datapool is empty. */
-	int64_t cache_memory_mb = options->cache_memory_bytes / MEGA;
 	static int disk_set = 0;
 	static time_t last_resources_measurement = 0;
 	if (time(0) < last_resources_measurement + options->check_resources_interval) {
@@ -425,7 +423,6 @@ static void measure_worker_resources()
 		r->cores.total = options->cores_total;
 	if (options->memory_total > 0)
 		r->memory.total = options->memory_total;
-	r->memory.total = MAX(0, r->memory.total - cache_memory_mb);
 	if (options->gpus_total > -1)
 		r->gpus.total = options->gpus_total;
 
@@ -1939,13 +1936,7 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	vine_workspace_prepare(workspace);
 
 	/* Start the cache manager and scan for existing files. */
-	cache_manager = vine_cache_create(workspace->cache_dir, options->max_transfer_procs, options->cache_memory_bytes);
-	if (!cache_manager) {
-		debug(D_VINE, "Could not create the cache with the configured data memory budget");
-		link_close(manager);
-		vine_workspace_cleanup(workspace);
-		return 0;
-	}
+	cache_manager = vine_cache_create(workspace->cache_dir, options->max_transfer_procs);
 	vine_cache_load(cache_manager);
 
 	/* Start the transfer server, which serves up the cache directory. */

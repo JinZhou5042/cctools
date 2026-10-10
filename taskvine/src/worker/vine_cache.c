@@ -6,7 +6,6 @@ See the file COPYING for details.
 
 #include "vine_cache.h"
 #include "vine_cache_file.h"
-#include "vine_datapool.h"
 #include "vine_mount.h"
 #include "vine_process.h"
 #include "vine_sandbox.h"
@@ -43,7 +42,6 @@ struct vine_cache {
 	struct hash_table *pending_transfers;
 	struct hash_table *processing_transfers;
 	char *cache_dir;
-	struct vine_datapool *datapool; /* Own the optional memory copies for these cache records. */
 	int max_transfer_procs;
 	char manager_ip[LINK_ADDRESS_MAX]; /* This holds the control connection peer address inherited by download processes. */
 	int manager_transfer_port; /* This holds the Manager-supplied port and is zero until configured. */
@@ -55,27 +53,16 @@ static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *
 Create the cache manager structure for a given cache directory.
 */
 
-struct vine_cache *vine_cache_create(const char *cache_dir, int max_procs, uint64_t memory_limit)
+struct vine_cache *vine_cache_create(const char *cache_dir, int max_procs)
 {
-	struct vine_cache *c = calloc(1, sizeof(*c));
-	if (!c) {
-		return NULL;
-	}
-	c->cache_dir = strdup(cache_dir);
-	if (!c->cache_dir) {
-		free(c);
-		return NULL;
-	}
-	c->datapool = vine_datapool_create(c->cache_dir, memory_limit);
-	if (!c->datapool) {
-		free(c->cache_dir);
-		free(c);
-		return NULL;
-	}
+	struct vine_cache *c = malloc(sizeof(*c));
 	c->table = hash_table_create(0, 0);
 	c->pending_transfers = hash_table_create(0, 0);
 	c->processing_transfers = hash_table_create(0, 0);
+	c->cache_dir = strdup(cache_dir);
 	c->max_transfer_procs = max_procs;
+	c->manager_ip[0] = 0;
+	c->manager_transfer_port = 0;
 	return c;
 }
 
@@ -246,7 +233,6 @@ void vine_cache_delete(struct vine_cache *c)
 	hash_table_delete(c->pending_transfers);
 	hash_table_delete(c->processing_transfers);
 
-	vine_datapool_delete(c->datapool);
 	hash_table_clear(c->table, (void *)vine_cache_file_delete);
 	hash_table_delete(c->table);
 	free(c->cache_dir);
@@ -257,17 +243,7 @@ void vine_cache_delete(struct vine_cache *c)
 
 char *vine_cache_data_path(struct vine_cache *c, const char *cachename)
 {
-	return vine_datapool_disk_path(c->datapool, cachename);
-}
-
-/* The stable disk path remains separate from the optional memory read path. */
-char *vine_cache_read_path(struct vine_cache *c, const char *cachename)
-{
-	struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
-	if (f && f->status == VINE_CACHE_STATUS_READY && f->memory_bytes) {
-		return xxstrdup(f->memory_path);
-	}
-	return vine_cache_data_path(c, cachename);
+	return string_format("%s/%s", c->cache_dir, cachename);
 }
 
 /* Get the full path to the metadata of a cached file. This result must be freed. */
@@ -299,27 +275,18 @@ and writing out the metadata to the proper location.
 int vine_cache_add_file(
 		struct vine_cache *c, const char *cachename, const char *transfer_path, vine_cache_level_t level, int mode, uint64_t size, time_t mtime, timestamp_t start_time, timestamp_t transfer_time, struct link *manager)
 {
-	struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
-	/* A ready object already owns its disk and optional memory copies. */
-	if (f && f->status == VINE_CACHE_STATUS_READY) {
-		char *disk_path = vine_cache_data_path(c, cachename);
-		if (strcmp(transfer_path, disk_path)) {
-			trash_file(transfer_path);
-		}
-		free(disk_path);
-		if (manager) {
-			vine_worker_send_cache_update(manager, cachename, f);
-		}
-		return 1;
-	}
+	char *data_path = vine_cache_data_path(c, cachename);
 	char *meta_path = vine_cache_meta_path(c, cachename);
-	int created = !f;
-	if (created) {
-		f = vine_cache_file_create(VINE_CACHE_FILE, "manager", 0);
-	}
-	int result = vine_datapool_store(c->datapool, f, cachename, transfer_path, size);
-	if (result) {
-		if (created) {
+
+	int result = 0;
+
+	if (rename(transfer_path, data_path) == 0) {
+		struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
+		if (f) {
+			/* If the file object is already present, we are providing the missing data. */
+		} else {
+			/* If not, we are declaring a completely new file. */
+			f = vine_cache_file_create(VINE_CACHE_FILE, "manager", 0);
 			hash_table_insert(c->table, cachename, f);
 		}
 
@@ -337,14 +304,14 @@ int vine_cache_add_file(
 		vine_cache_file_save_metadata(f, meta_path);
 
 		/* Inform the manager that we now have the file */
-		if (manager) {
-			vine_worker_send_cache_update(manager, cachename, f);
-		}
+		vine_worker_send_cache_update(manager, cachename, f);
 
 		result = 1;
-	} else if (created) {
-		vine_cache_file_delete(f);
+	} else {
+		result = 0;
 	}
+
+	free(data_path);
 	free(meta_path);
 
 	return result;
@@ -463,7 +430,7 @@ int vine_cache_remove(struct vine_cache *c, const char *cachename, struct link *
 	 * Other states except PENDING have already sent messages, either cache-update or cache-invalid,
 	 * so we only send cache-invalid for transfers in PENDING state. */
 
-	if (manager && f->status == VINE_CACHE_STATUS_PENDING) {
+	if (f->status == VINE_CACHE_STATUS_PENDING) {
 		char *msg = string_format("File '%s' removed in PENDING state.", cachename);
 		vine_worker_send_cache_invalid(manager, cachename, msg);
 		free(msg);
@@ -472,12 +439,12 @@ int vine_cache_remove(struct vine_cache *c, const char *cachename, struct link *
 	hash_table_remove(c->pending_transfers, cachename);
 	hash_table_remove(c->processing_transfers, cachename);
 
-	/* The datapool manages placement within the existing file lifecycle. */
-	if (!vine_datapool_remove(c->datapool, f, cachename)) {
-		return 0;
-	}
+	/* Then remove the disk state associated with the file. */
+	char *data_path = vine_cache_data_path(c, cachename);
 	char *meta_path = vine_cache_meta_path(c, cachename);
+	trash_file(data_path);
 	trash_file(meta_path);
+	free(data_path);
 	free(meta_path);
 
 	/* Now we can remove the data structure. */

@@ -490,7 +490,7 @@ TaskVine manager
   with its own port and a vault on the manager disk
         |
 TaskVine workers
-  cache, optional memory copies, transfers between workers
+  disk cache, transfers between workers
 ```
 
 The manager and the workers are general TaskVine code. Everything that knows
