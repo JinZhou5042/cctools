@@ -157,9 +157,10 @@ vine_worker -M vine-graph-example --cores 4
 Workers find the manager by its name through the TaskVine catalog, or connect
 to its port directly. Workers also fetch data from a second port of the
 manager. If a firewall admits only some ports, give the Executor a range of
-two, such as `port=(9123, 9124)`, so that both ports are known. Each worker runs one instance of the library that runs
-tasks, which takes the whole worker and runs one task per core, so workers of
-any size can join. Stop the worker with `Ctrl-C`.
+two, such as `port=(9123, 9124)`, so that both ports are known. Each worker
+runs one instance of the library that runs tasks, which takes the whole worker
+and runs one task per core, so workers of any size can join. Stop the worker
+with `Ctrl-C`.
 
 The Executor installs that library once and keeps it for its lifetime.
 `library_modules` lists modules the library imports when it starts on a
@@ -436,7 +437,9 @@ Lost workers are handled by TaskVine and do not count as failures.
 
 `future.result()` raises the task's `TaskError`, whose message includes the
 traceback printed where the function ran. `error.task` is the Node of the task
-and `error.source` the Node of the task whose own failure explains it.
+and `error.source` the Node of the task whose own failure explains it, or
+`None` when the program no longer holds that task through its Graph or a
+Future. The message names both tasks either way.
 `executor.run()` raises a `TaskError` once its targets finished, preferring a
 task that failed on its own. A failed task stays failed in its Executor: fix
 the cause, then add the task again or run the Graph in a new Executor.
@@ -461,6 +464,146 @@ checkpointed results from the manager instead of rerunning their producers.
 Results without checkpoints are recomputed. Checkpoints last only as long as
 the Executor; they do not allow a program to resume after it exits.
 
+## How it works
+
+This section describes the parts of Vine Graph and how a task moves through
+them. It is meant for people who maintain the code, or who need to reason about
+its behavior when workers fail.
+
+### Components
+
+```
+Python program
+  vg.Graph, vg.Executor, vg.Future, adaptors.from_dask
+        |
+Python package (taskvine/src/bindings/python3/ndcctools/taskvine/vine_graph)
+  graph.py      what to run: tasks and the data they read, no runtime state
+  executor.py   where to run: the manager, the C executor, and two threads
+  library.py    how a task runs on a worker
+        |   vine_graph_executor.h, the only C interface
+C executor (taskvine/src/vine_graph)
+  vine_graph.c            nodes are tasks, edges are the files between them
+  vine_graph_executor.c   submission, failures, releases, checkpoints, fetches
+        |   TaskVine API
+TaskVine manager
+  scheduling, files, recovery tasks, libraries, and a data service
+  with its own port and a vault on the manager disk
+        |
+TaskVine workers
+  cache, optional memory copies, transfers between workers
+```
+
+The manager and the workers are general TaskVine code. Everything that knows
+about graphs lives in the C executor and the Python package.
+
+### The Python package
+
+`graph.py` replaces the Nodes, selections, and files in a task's arguments with
+small references. It replaces all arguments in one pass, so an object passed as
+two arguments is still one object when the task runs. A Graph refers to its own
+tasks without its id, and the id is not pickled, so a loaded or copied Graph is
+a new Graph.
+
+`executor.py` uses two threads. The thread that calls `submit()` checks the
+arguments, serializes them, queues the calls into C, and returns. A background
+thread is the only one that calls into C. It runs the queued calls in order,
+advances the run, and publishes which tasks finished and which results can be
+read. `result()`, `done()`, and `progress()` only read what it published, so an
+interrupt ends a wait without affecting the run. Queuing a call wakes the
+background thread from its wait in the manager, so the call is handled at once
+even while workers are busy.
+
+`library.py` is the TaskVine library that runs the tasks. Each Executor
+installs one library under a unique name. Every task calls its `run_node()`
+function, which reads a manifest in the task sandbox, loads the function and
+its arguments, calls it, and returns the result for the library to write. A
+function that raises prints its traceback and exits with an error status.
+
+A local Executor starts no manager, no C executor, and no background thread. It
+runs each task in the calling thread when the task is submitted, through the
+same code in `library.py` that runs tasks on workers, and checks its settings by
+the same rules as the C executor.
+
+### Data
+
+Vine Graph moves three kinds of data:
+
+| Kind | Contents | Location | Removed |
+| --- | --- | --- | --- |
+| Arguments | The function and each argument of a task, serialized into separate files. An object passed to several tasks is stored once. | Manager disk, served to workers from the data port | When the program can no longer ask for any task that uses them, and none of those tasks can run again |
+| Results | The return value of a task, and any files it writes | Worker caches, as TaskVine temporary files | When every task that reads them has a durable result |
+| Checkpoints | Copies of results | The vault, a directory on the manager disk | With the result they copy |
+
+Workers fetch arguments and checkpoints from the manager's data port. They
+fetch results from each other, or from the vault when no worker has a copy.
+
+### The life of a task
+
+1. `submit()` serializes the function and arguments, writes a manifest that
+   names every file the task reads, and queues the task.
+2. The background thread declares those files in C, adds a node with its
+   inputs and outputs, and submits it. The node's parents are the tasks that
+   write the files it reads. A node may read only results of nodes submitted
+   before it, so the graph can grow while it runs and never forms a cycle.
+3. Once its parents complete, the C executor submits a TaskVine task that runs
+   in the library. Ready tasks are ordered by `task-priority-mode`.
+4. A worker fetches the task's inputs and runs it. Its result stays in the
+   worker cache.
+5. When the task returns, the C executor marks the node completed, queues its
+   results for checkpointing, releases results that are no longer needed, and
+   submits the tasks it unblocked. A failure is handled as described under
+   Task failures.
+6. A Future pins the result it stands for and asks for it to be copied into the
+   vault as soon as the task completes. `result()` reads that copy.
+
+### Releasing results
+
+A result is removed from the workers once every task that reads it has a
+durable result, which means one that is copied into the vault or was itself
+removed. A lost result then needs only its own task to run again, never a chain
+of earlier tasks. A result that a Future pins is never removed. Removing a
+result also removes its checkpoint, cancels a copy in progress, or withdraws it
+from the checkpoint queue. One completion can remove results several levels
+upstream.
+
+A recovery task runs because another task needs its result now. When it
+completes, the results it read may be removed, but its own result waits until
+the tasks that read it complete. Removing it at once would let worker churn
+lose it again before it is read.
+
+When the vault is full, new checkpoints are refused and the rule stays the
+same. Results wait on the workers until downstream tasks are done or the vault
+has room again, and the manager prints a notice once. Removing results as soon
+as their readers complete would keep worker disks smaller, but a lost result
+could then need a long chain of tasks to run again, and with workers leaving
+all the time that work never catches up. Keeping a few more levels does not
+help, because consecutive tasks of a chain tend to run on the same worker.
+
+### Checkpoints
+
+Every result is queued for checkpointing when its task completes, and results
+of longer-running tasks are copied first. The data service runs all transfers
+on one pool of 16 connections. Workers fetching data come first: four
+connections are reserved for them, and a worker request that finds no free
+connection cancels the newest checkpoint copy. A failed or cancelled copy is
+queued again after the manager's `transient-error-interval`.
+
+### Arguments and recovery
+
+The C executor reports a task as released only once no lost result can need
+it, so a released task runs again only if the program asks for its result.
+The Executor keeps a task's arguments while the program can still ask for the
+task, through its Graph or a Future, or while the task has not been released
+or failed. After that it deletes them from the manager and the workers, and
+drops its own reference to the original objects. An object shared by several
+tasks stays until the last of them goes.
+
+### Closing
+
+Closing an Executor stops the background thread, cancels its tasks,
+undeclares its files, removes its library, and deletes the data of the run
+except file results whose paths `result()` returned.
+
 ## Run the project regression tests
 
 The tests are Python scripts in `taskvine/src/vine_graph/test`. Tests that
@@ -483,6 +626,7 @@ python3 vine_graph_checkpoint.py
 | `vine_graph_notebook.py` | A notebook session in a real Jupyter kernel. Requires `jupyter_client` and `ipykernel`. |
 | `vine_graph_workflow_examples.py` | Example graphs, argument corner cases, and rejected graphs. |
 | `vine_graph_dynamic.py` | Tasks submitted while others run, isolated failures, recomputed results, notebook use, and shared graphs. |
+| `vine_graph_release.py` | Arguments removed once the program lets go of their tasks, and recovery after every worker is lost. |
 | `vine_graph_dask_adaptor.py` | Dask graph conversion. Requires `dask`. |
 | `vine_graph_data.py` | Example graphs on the worker data path, including large graphs. |
 | `vine_graph_edata.py` | Per-task serialized callables and arguments. |
@@ -491,8 +635,9 @@ python3 vine_graph_checkpoint.py
 | `vine_graph_recovery.py` | Checkpoint order and the manager disk limit with workers. |
 | `vine_graph_checkpoint.py` | Recovery from manager checkpoints after every worker cache is lost. |
 | `vine_graph_worker_churn.py` | A three-minute run that replaces a worker every 20 seconds. |
-| `vine_graph_scale.py` | A 4,000-node graph under worker churn, total cache loss, and a small manager disk limit. |
+| `vine_graph_scale.py` | A 4,000-node graph under worker churn, total cache loss, and a small manager disk limit, with worker disk use measured. |
 
 `run_all_tests.sh` runs `vine_graph_interface.py`, `vine_graph_data.py`,
-`vine_graph_edata.py`, `vine_graph_dynamic.py`, `vine_graph_recovery.py`,
-`vine_graph_dask_adaptor.py`, and `vine_graph_notebook.py`.
+`vine_graph_edata.py`, `vine_graph_dynamic.py`, `vine_graph_release.py`,
+`vine_graph_recovery.py`, `vine_graph_dask_adaptor.py`, and
+`vine_graph_notebook.py`.
