@@ -259,11 +259,29 @@ submitted tasks completed, failed, or are still waiting, as a `vg.Progress`.
 with every task that reads its result. It returns `False` when the task had
 already finished, and `future.cancelled()` tells whether `cancel()` stopped it.
 
+A background thread advances the run, in scripts and notebooks alike, for as
+long as the Executor is open. It uses no CPU while nothing is running and stops
+when the Executor closes, which also happens at interpreter exit. A local
+Executor (`local=True`) runs tasks in the calling thread and starts no thread.
+While a background thread runs, `os.fork()` and the `fork` start method of
+`multiprocessing` can deadlock the child process, as in any multithreaded
+Python program. Use `subprocess`, or the `spawn` or `forkserver` start method,
+which is the default on Linux since Python 3.14. When a script prints to the
+terminal while tasks run, its output may interleave with the progress bar, which
+`set_params({"progress-bar": 0})` turns off.
+
 While a Future exists, the Executor keeps the data it stands for, so tasks
 submitted later read it directly. Data that no Future refers to is removed once
 the tasks that read it complete, including the results of a finished
 `executor.run()`. Submitting the task again runs it again. A Future cannot be
 pickled; pickle the Graph instead.
+
+The Executor also keeps the function and arguments of each task, so it can run
+the task again when a worker loses its result. It lets them go, on the manager
+and on the workers, once nothing can ask for the task anymore: the Graph is
+gone, or a call submitted with `executor.submit()` has no Future left. A
+long-running notebook therefore holds only the data its variables still refer
+to.
 
 ## Notebooks
 
@@ -331,6 +349,10 @@ with vg.Executor(port=9123) as executor:
 `graph.node(key)` returns the Node with a key, `graph.sinks()` the Nodes that
 no other task reads, and iterating a Graph yields all its Nodes. A `vg.File`
 stands for a path on the machine that runs the Executor.
+
+A loaded or copied Graph is a Graph of its own. An Executor runs it from the
+start, even when the original ran in the same Executor, and the copy and the
+original may grow apart independently.
 
 ## Dask graphs
 
@@ -426,8 +448,13 @@ Every task result is copied from a worker to the manager in the background
 after its task completes. Results of longer-running tasks are copied first.
 Copies use spare transfer capacity only: workers fetching data from the
 manager always come first. When the stored copies reach `vault-disk-limit`, new
-copies wait until space is freed. A result that is no longer needed is removed,
-along with its copy or any copy in progress.
+copies wait until space is freed, and the manager prints a notice once. A
+result is removed from its worker only after the results of the tasks that read
+it are copied, so a lost result never needs more than its producer to run again.
+While the limit is reached, results therefore stay on workers longer and worker
+disk use grows until downstream tasks finish. Raise `vault-disk-limit` if that
+happens. A result that is no longer needed is removed, along with its copy or
+any copy in progress.
 
 If workers are lost while the Executor is open, new workers can fetch
 checkpointed results from the manager instead of rerunning their producers.

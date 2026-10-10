@@ -499,7 +499,7 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 	}
 	int64_t size = (int64_t)file->size;
 	if (!required && ds->vault_limit > 0 && ds->vault_used + ds->vault_reserved + size > ds->vault_limit) {
-		return VINE_CHECKPOINT_BUSY;
+		return VINE_CHECKPOINT_FULL;
 	}
 	struct vine_worker_info *worker = vine_file_replica_table_find_worker(manager, file->cached_name);
 	if (!worker || strlen(file->cached_name) >= VINE_DATA_LINE_MAX / 3) {

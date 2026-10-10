@@ -35,7 +35,7 @@ def from_dask(dsk, expand_subgraphs=False):
         graph._add(key, func, args, kwargs)
     for key, parents in graph._parents.items():
         for graph_id, parent in parents:
-            if graph_id == graph._id and parent not in graph._tasks:
+            if graph_id is None and parent not in graph._tasks:
                 raise ValueError(f"task {key!r} reads {parent!r}, which is not in the Dask graph")
     return graph
 

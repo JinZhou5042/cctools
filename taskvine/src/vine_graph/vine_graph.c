@@ -17,6 +17,7 @@ struct vine_graph *vine_graph_create(void)
 	g->nodes = itable_create(0);
 	g->files = itable_create(0);
 	g->producers = hash_table_create(0, 0);
+	g->last_file_id = 0;
 	return g;
 }
 
@@ -43,8 +44,8 @@ struct vine_graph_node *vine_graph_get_node(const struct vine_graph *g, uint64_t
 
 uint64_t vine_graph_add_file(struct vine_graph *g, struct vine_file *file)
 {
-	/* Files are never removed, so ids are dense and start from one. */
-	uint64_t file_id = itable_size(g->files) + 1;
+	/* Ids start from one and are never reused, because the frontend may undeclare a file it provided. */
+	uint64_t file_id = ++g->last_file_id;
 	itable_insert(g->files, file_id, file);
 	return file_id;
 }
@@ -52,6 +53,11 @@ uint64_t vine_graph_add_file(struct vine_graph *g, struct vine_file *file)
 struct vine_file *vine_graph_get_file(const struct vine_graph *g, uint64_t file_id)
 {
 	return itable_lookup(g->files, file_id);
+}
+
+struct vine_file *vine_graph_remove_file(struct vine_graph *g, uint64_t file_id)
+{
+	return itable_remove(g->files, file_id);
 }
 
 int vine_graph_add_mount(struct vine_graph *g, uint64_t node_id, uint64_t file_id, const char *task_path, int is_output)
@@ -70,7 +76,7 @@ int vine_graph_add_mount(struct vine_graph *g, uint64_t node_id, uint64_t file_i
 		hash_table_insert(g->producers, vine_file_cached_name(file), node);
 	}
 	struct vine_graph_mount *mount = xxcalloc(1, sizeof(*mount));
-	mount->file = file;
+	mount->file = vine_file_addref(file);
 	mount->task_path = xxstrdup(task_path);
 	list_push_tail(is_output ? node->outputs : node->inputs, mount);
 	return 0;
@@ -141,6 +147,7 @@ static void vine_graph_mounts_delete(struct list *mounts)
 {
 	struct vine_graph_mount *mount;
 	while ((mount = list_pop_head(mounts))) {
+		vine_file_delete(mount->file);
 		free(mount->task_path);
 		free(mount);
 	}

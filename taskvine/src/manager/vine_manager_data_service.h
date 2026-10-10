@@ -16,11 +16,12 @@ struct vine_file;
 struct vine_manager_data_service;
 struct link_info;
 
-/* Result of a checkpoint request. Both refusals leave nothing behind and can be retried later. */
+/* Result of a checkpoint request. Every refusal leaves nothing behind and can be retried later. */
 typedef enum {
 	VINE_CHECKPOINT_ADMITTED = 1,	/* Started, already in progress, or already in the vault. */
-	VINE_CHECKPOINT_BUSY = 0,	/* No free transfer slot outside the Worker reserve, or the vault is full. */
+	VINE_CHECKPOINT_BUSY = 0,	/* No free transfer slot outside the Worker reserve. */
 	VINE_CHECKPOINT_NO_SOURCE = -1, /* The file is not a temporary file with a ready Worker replica. */
+	VINE_CHECKPOINT_FULL = -2,	/* The vault limit leaves no room for the file. */
 } vine_manager_checkpoint_result_t;
 
 /* Create a data listener and a bounded executor pool. */

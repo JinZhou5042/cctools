@@ -84,6 +84,9 @@ def vine_graph_executor_add_node(e):
 def vine_graph_executor_declare_file(e, source_path, vault):
     return _vine_graph_capi.vine_graph_executor_declare_file(e, source_path, vault)
 
+def vine_graph_executor_undeclare_file(e, file_id):
+    return _vine_graph_capi.vine_graph_executor_undeclare_file(e, file_id)
+
 def vine_graph_executor_add_output(e, node_id, task_path):
     return _vine_graph_capi.vine_graph_executor_add_output(e, node_id, task_path)
 
@@ -113,6 +116,9 @@ def vine_graph_executor_wake(e):
 
 def vine_graph_executor_next_finished(e):
     return _vine_graph_capi.vine_graph_executor_next_finished(e)
+
+def vine_graph_executor_next_released(e):
+    return _vine_graph_capi.vine_graph_executor_next_released(e)
 
 def vine_graph_executor_get_node_state(e, node_id):
     return _vine_graph_capi.vine_graph_executor_get_node_state(e, node_id)

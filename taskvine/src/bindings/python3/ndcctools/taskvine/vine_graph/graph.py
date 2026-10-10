@@ -151,7 +151,8 @@ class _Selection(_Selectable):
 
 class _Ref(_Symbol):
     """The result of task key in the graph with graph_id, followed by selection steps. A graph_id of None means the
-    graph the reference is stored in. References are what task arguments hold, so arguments never carry a graph."""
+    graph the reference is stored in, which is how a Graph refers to its own tasks. References are what task arguments
+    hold, so arguments never carry a graph."""
 
     __slots__ = ("graph_id", "key", "steps")
 
@@ -165,7 +166,8 @@ class _Ref(_Symbol):
 
 
 class _FileRef(_Symbol):
-    """The file that task key in the graph with graph_id writes at path in its sandbox."""
+    """The file that task key in the graph with graph_id writes at path in its sandbox. A graph_id of None means the
+    graph the reference is stored in."""
 
     __slots__ = ("graph_id", "key", "path")
 
@@ -293,17 +295,31 @@ def replace_symbols(value, replace):
 
 class Graph:
     """Tasks and the data they pass to each other. Graph.add() records a call without running it, and its Node
-    stands for the call's result. A Graph is a description: an Executor runs it, and it may be pickled and shared."""
+    stands for the call's result. A Graph is a description: an Executor runs it, and it may be pickled and shared.
+    A copy, such as an unpickled Graph, is a Graph of its own, which an Executor runs independently of the original."""
 
     def __init__(self):
+        # Identifies this Graph object while it exists. A Graph refers to its own tasks with graph id None, so the id
+        # is not part of its state and every copy gets a new one.
         self._id = uuid.uuid4().hex
         self._next_key = 1
         self._tasks = {}  # key -> (function, args, kwargs), with symbols replaced by references
-        self._parents = {}  # key -> (graph id, key) of every task whose result or file it reads, in first-use order
+        # key -> (graph id, key) of every task whose result or file it reads, in first-use order. The graph id is None
+        # for a task of this graph.
+        self._parents = {}
         self._results = {}  # key -> (graph id, key) of every task whose result it reads, in first-use order
         self._children = collections.defaultdict(set)  # key -> keys in this graph that read its result or files
         self._reads = {}  # key -> File and _FileRef objects the task reads, in first-use order
         self._outputs = collections.defaultdict(dict)  # key -> sandbox path -> NodeFile it writes
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        del state["_id"]
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._id = uuid.uuid4().hex
 
     def add(self, func, /, *args, **kwargs):
         """Add a call of func with these arguments and return its Node. Nodes, their selections and files, and
@@ -359,8 +375,8 @@ class Graph:
             if isinstance(ref, File):
                 reads.setdefault(ref, ref)
                 return ref
-            graph_id = self._id if ref.graph_id is None else ref.graph_id
-            if graph_id != self._id and not foreign:
+            graph_id = None if ref.graph_id in (None, self._id) else ref.graph_id
+            if graph_id is not None and not foreign:
                 raise ValueError("a task reads a Node of another Graph")
             parents.setdefault((graph_id, ref.key), None)
             if isinstance(ref, _FileRef):
@@ -377,7 +393,7 @@ class Graph:
         self._results[key] = tuple(results)
         self._reads[key] = tuple(reads.values())
         for graph_id, parent in parents:
-            if graph_id == self._id:
+            if graph_id is None:
                 self._children[parent].add(key)
         return Node(self, key)
 

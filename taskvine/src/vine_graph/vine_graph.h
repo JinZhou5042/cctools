@@ -22,7 +22,7 @@
 
 /* A file mounted in a node's task sandbox. */
 struct vine_graph_mount {
-	struct vine_file *file; // borrowed, see struct vine_graph files
+	struct vine_file *file; // a reference of its own, so undeclaring the file leaves the mount valid
 	char *task_path;	// path inside the task sandbox
 	int pins;		// on an output, frontend references that keep it from being released
 };
@@ -55,6 +55,7 @@ struct vine_graph_node {
 struct vine_graph {
 	struct itable *nodes;	      // node id -> owned node
 	struct itable *files;	      // file id -> declared vine_file, borrowed until the executor undeclares it
+	uint64_t last_file_id;	      // id given to the latest recorded file
 	struct hash_table *producers; // output cache name -> borrowed producer node
 };
 
@@ -72,6 +73,9 @@ uint64_t vine_graph_add_file(struct vine_graph *g, struct vine_file *file);
 
 /* Look up a file by id. Return NULL when the id is unknown. */
 struct vine_file *vine_graph_get_file(const struct vine_graph *g, uint64_t file_id);
+
+/* Forget a recorded file and return it, or NULL when the id is unknown. Mounts of the file keep their references. */
+struct vine_file *vine_graph_remove_file(struct vine_graph *g, uint64_t file_id);
 
 /* Mount a recorded file at task_path as an input or output of a node that is not submitted yet. A file has at most one
  * producer. Return zero, or -1 for an unknown or submitted node, an unknown file, or a second producer. */

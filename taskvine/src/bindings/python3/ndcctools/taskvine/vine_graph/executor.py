@@ -15,12 +15,14 @@ wait and never interrupts the run."""
 
 import atexit
 import collections
+import contextlib
 import ctypes
 import dataclasses
 import html
 import importlib
 import os
 import shutil
+import signal
 import sys
 import tempfile
 import threading
@@ -92,7 +94,8 @@ def _close_open_executors():
 
 class TaskError(RuntimeError):
     """A task failed, or it could not run because a task it depends on failed. task is the Node of the task, and
-    source the Node of the task whose own failure explains it."""
+    source the Node of the task whose own failure explains it, or None when nothing holds that task anymore: its Graph
+    is gone, or it was a call without a Future. The message names both tasks either way."""
 
     def __init__(self, message, task, source):
         super().__init__(message)
@@ -233,6 +236,8 @@ class Executor:
     also discards every result when the block raises. A background thread advances the run, so tasks keep running
     while the program does other work, and progress() reports how far they got. Interrupting a wait or a submission
     leaves the Executor usable, so a notebook can continue in the next cell, where a progress bar follows the run.
+    The Executor keeps the function and arguments of a task, to run it again when a Worker loses its result, while its
+    Graph or a Future holds the task, and lets them go afterwards.
 
     local=True runs each task in this process when it is submitted, for debugging, without TaskVine. output_dir holds
     the directory of file results that result() returns, which stay after close. library_modules are imported by the
@@ -248,16 +253,15 @@ class Executor:
         self._executor = None  # opaque C executor handle
         self._resources = ExitStack()
 
-        # State the caller's thread owns: what was submitted and how its files are named and staged.
+        # State the caller's thread owns: what was submitted and how its files are named.
         self._dynamic = Graph()  # tasks submitted as calls
-        self._graphs = {self._dynamic._id: self._dynamic}  # graph id -> Graph of every submitted task
+        # graph id -> Graph of submitted tasks, held weakly: a Graph the user drops lets its tasks go.
+        self._graphs = weakref.WeakValueDictionary({self._dynamic._id: self._dynamic})
         self._numbers = {}  # (graph id, key) of each submitted task -> number that names its files
+        self._labels = {}  # (graph id, key) -> how messages name the task, which outlives its Graph
         self._last_number = 0
         self._declared_outputs = {}  # (graph id, key) -> output paths the task declared when it was submitted
         self._file_numbers = {}  # file identity -> number that names the file in sandboxes
-        # Top-level argument objects staged so far, by identity: id(object) -> (object, sandbox name, local path).
-        # Holding the object keeps its id from being reused.
-        self._edata = {}
         self._local_paths = {}  # file identity -> local path of a file a local task wrote
         self._local_seconds = 0.0
         self._keep_paths = set()
@@ -269,6 +273,8 @@ class Executor:
         self._output_files = {}  # (graph id, key, path) -> C file id of a file the task writes
         self._input_files = {}  # absolute path of a File -> C file id
         self._edata_files = {}  # sandbox name of a staged object -> C file id
+        self._futures = collections.Counter()  # (graph id, key) -> live Futures that stand for the task
+        self._released = set()  # tasks whose outputs C released, and which nobody asked for since
 
         # State both threads share, guarded by the lock. The background thread notifies the condition when it
         # publishes changes, and the caller's thread notifies it when it queues calls.
@@ -279,6 +285,13 @@ class Executor:
         self._counts = {COMPLETED: 0, FAILED: 0}
         self._path_requests = []
         self._cancelled = set()  # (graph id, key) of tasks that cancel() stopped
+        # Staged objects, shared by identity across tasks: id(object) -> (object, sandbox name, local path). Holding the
+        # object keeps its id from being reused. A staged file lives while a task that holds it may still run.
+        self._edata = {}
+        self._edata_names = {}  # sandbox name -> (id of its object, or None for a manifest, local path)
+        self._edata_holders = collections.Counter()  # sandbox name -> tasks that hold the file
+        self._staged = {}  # (graph id, key) -> sandbox names of the staged files the task holds
+        self._graph_tasks = collections.defaultdict(set)  # graph id -> keys of its submitted tasks
         self._run_error = None  # why the run stopped as a whole
         self._driver = None
         self._display = None
@@ -382,6 +395,8 @@ class Executor:
             failed = True
             raise
         finally:
+            # A closed Executor that the program still holds keeps none of the staged objects.
+            self._edata.clear()
             if self._run_dir is not None:
                 self._remove_run_data(remove_all=failed or not self._keep_paths)
                 self._run_dir = None
@@ -429,8 +444,9 @@ class Executor:
         for setting, value in params.items():
             if setting in EXECUTOR_TUNING:
                 # The C executor owns the rules, which a local Executor follows too.
-                if capi.vine_graph_executor_check_setting(setting, str(value)) != 0:
-                    raise ValueError(f"invalid value {value!r} for {setting}")
+                problem = capi.vine_graph_executor_check_setting(setting, str(value))
+                if problem:
+                    raise ValueError(f"invalid value {value!r} for {setting}: {problem}")
                 if not self._local:
                     self._call(lambda setting=setting, value=value: self._tune_executor(setting, value))
             elif not self._local:
@@ -442,7 +458,7 @@ class Executor:
         except Exception:
             status = -1
         if status != 0:
-            raise ValueError(f"Unrecognized parameter: {setting}")
+            raise ValueError(f"unknown setting {setting!r}: it is neither a vine_graph setting nor TaskVine Manager tuning")
 
     def _tune_executor(self, setting, value):
         if capi.vine_graph_executor_tune(self._executor, setting, str(value)) != 0:
@@ -479,7 +495,7 @@ class Executor:
             source = symbol.source if hasattr(symbol, "source") else symbol
             node = source.node if isinstance(source, NodeFile) else source
             if isinstance(node, Node):
-                self._graphs.setdefault(node.graph._id, node.graph)
+                self._add_graph(node.graph)
 
         key = self._dynamic._next_key
         self._dynamic._next_key += 1
@@ -494,7 +510,7 @@ class Executor:
         node = target.node if isinstance(target, NodeFile) else target
         if node.key not in node.graph._tasks:
             raise KeyError(f"no task with key {node.key!r}")
-        self._graphs.setdefault(node.graph._id, node.graph)
+        self._add_graph(node.graph)
         task = (node.graph._id, node.key)
         self._submit_with_ancestors(task)
         if isinstance(target, NodeFile) and target.path not in self._declared_outputs[task]:
@@ -502,11 +518,18 @@ class Executor:
         future = Future(self, target)
         if not self._local:
             key = self._data_key(target)
-            # The Future keeps its data, which is fetched to the Manager as soon as the task completes.
-            self._enqueue(lambda: self._pin(key))
-            # Closing the Executor releases every pin, so unpinning at interpreter exit could only reach freed state.
-            weakref.finalize(future, self._enqueue, lambda: self._unpin(key)).atexit = False
+            with _deferred_interrupts():
+                # The Future keeps its data, which is fetched to the Manager as soon as the task completes. Closing the
+                # Executor releases every pin, so unpinning at interpreter exit could only reach freed state.
+                self._enqueue(lambda: self._hold(task, key))
+                weakref.finalize(future, self._enqueue, lambda: self._unhold(task, key)).atexit = False
         return future
+
+    def _add_graph(self, graph):
+        if graph._id not in self._graphs:
+            self._graphs[graph._id] = graph
+            # Collection may happen in any thread, so the background thread lets the Graph's tasks go.
+            weakref.finalize(graph, _graph_collected, weakref.ref(self), graph._id).atexit = False
 
     def _submit_with_ancestors(self, task):
         """Submit a task after every ancestor that is not submitted yet, upstream first."""
@@ -526,7 +549,7 @@ class Executor:
             if graph is None or key not in graph._tasks:
                 raise KeyError(f"no submitted Graph has a task with key {key!r}")
             visiting.append((current, True))
-            visiting.extend((parent, False) for parent in graph._parents[key])
+            visiting.extend((_resolve(graph_id, parent), False) for parent in graph._parents[key])
         for current in order:
             self._submit_task(current)
 
@@ -538,50 +561,63 @@ class Executor:
         for ref in graph._reads[key]:
             if isinstance(ref, File) and not os.path.isfile(ref.path):
                 raise FileNotFoundError(ref.path)
-            if not isinstance(ref, File) and ref.path not in self._declared_outputs.get((ref.graph_id, ref.key), ()):
+            if not isinstance(ref, File) and ref.path not in self._declared_outputs.get(_resolve(graph_id, ref), ()):
                 raise ValueError(f"the file {ref.path!r} was declared after its task was submitted")
         self._last_number += 1
         self._numbers[task] = self._last_number
+        self._labels[task] = repr(Node(graph, key))
         self._declared_outputs[task] = tuple(graph._outputs.get(key, {}))
+        names = []
         submitted = False
         try:
             if self._local:
                 self._run_local(task)
+                submitted = True
             else:
-                plan = self._plan(task)
-                self._enqueue(lambda: self._submit_node(plan))
-            submitted = True
+                plan = self._plan(task, names)
+                with _deferred_interrupts(), self._lock:
+                    self._staged[task] = names
+                    self._graph_tasks[graph_id].add(key)
+                    self._enqueue(lambda: self._submit_node(plan))
+                    submitted = True
         finally:
             if not submitted:
                 del self._numbers[task]
+                del self._labels[task]
                 del self._declared_outputs[task]
+                with self._lock:
+                    self._staged.pop(task, None)
+                    self._drop_staged(names)
 
-    def _plan(self, task):
-        """Stage a task's arguments and manifest, and return what the background thread declares and mounts."""
+    def _plan(self, task, names):
+        """Stage a task's arguments and manifest, and return what the background thread declares and mounts. The
+        sandbox name of every staged file the task holds is added to names."""
         graph_id, key = task
         graph = self._graphs[graph_id]
         func, args, kwargs = graph._tasks[key]
-        files = {library.file_identity(ref): self._file_task_path(library.file_identity(ref)) for ref in graph._reads[key]}
+        # The manifest is keyed by the references as the arguments hold them, and the Executor resolves them.
+        files = {library.file_identity(ref): self._file_task_path(_resolve_file(graph_id, library.file_identity(ref)))
+                 for ref in graph._reads[key]}
         staged = {
-            "callable": self._stage_object(func),
-            "args": [self._stage_object(value) for value in args],
-            "kwargs": {name: self._stage_object(value) for name, value in kwargs.items()},
+            "callable": self._stage_object(func, names),
+            "args": [self._stage_object(value, names) for value in args],
+            "kwargs": {argument: self._stage_object(value, names) for argument, value in kwargs.items()},
         }
         # The manifest names every file the task reads by its sandbox path.
         manifest = {
             "callable": staged["callable"][0],
             "args": [name for name, _ in staged["args"]],
             "kwargs": {argument: name for argument, (name, _) in staged["kwargs"].items()},
-            "inputs": {parent: self._result_task_path(parent) for parent in graph._results[key]},
+            "inputs": {parent: self._result_task_path(_resolve(graph_id, parent)) for parent in graph._results[key]},
             "files": files,
         }
         return {
             "task": task,
             "outputs": self._declared_outputs[task],
-            "results": [(parent, self._result_task_path(parent)) for parent in graph._results[key]],
-            "files": list(files.items()),
+            "results": [(_resolve(graph_id, parent), name) for parent, name in manifest["inputs"].items()],
+            "files": [(_resolve_file(graph_id, identity), name) for identity, name in files.items()],
             "edata": list(dict.fromkeys([staged["callable"], *staged["args"], *staged["kwargs"].values()])),
-            "manifest": self._stage(manifest),
+            "manifest": self._stage_object(manifest, names, share=False),
         }
 
     def _stage(self, value):
@@ -598,12 +634,25 @@ class Executor:
             raise
         return name, path
 
-    def _stage_object(self, value):
+    def _stage_object(self, value, names, share=True):
+        """Return the sandbox name and local path of a staged object, staging it unless it is staged already, and add
+        its name to names, which holds the file for a task."""
         # Share top-level objects by identity, not content. Independent pickle streams do not preserve aliases nested
         # across different objects or callable closures.
-        if id(value) not in self._edata:
-            self._edata[id(value)] = (value, *self._stage(value))
-        return self._edata[id(value)][1:]
+        with self._lock:
+            entry = self._edata.get(id(value)) if share else None
+            if entry is not None:
+                self._edata_holders[entry[1]] += 1
+                names.append(entry[1])
+                return entry[1:]
+        name, path = self._stage(value)
+        with self._lock:
+            if share:
+                self._edata[id(value)] = (value, name, path)
+            self._edata_names[name] = (id(value) if share else None, path)
+            self._edata_holders[name] += 1
+        names.append(name)
+        return name, path
 
     def _enqueue(self, command):
         """Queue a call into C for the background thread. Garbage collection may call this from any thread."""
@@ -651,6 +700,10 @@ class Executor:
         self._result_files[task] = self._add_output(node, library.RESULT)
         for path in plan["outputs"]:
             self._output_files[(graph_id, key, path)] = self._add_output(node, path)
+        with self._lock:
+            # A released task that a new task reads runs again.
+            self._released.difference_update(parent for parent, _ in plan["results"])
+            self._released.difference_update(identity[1:3] for identity, _ in plan["files"] if identity[0] == "output")
         for parent, name in plan["results"]:
             self._add_input(node, self._result_files[parent], name)
         for identity, name in plan["files"]:
@@ -699,13 +752,66 @@ class Executor:
         task, path = key
         return self._result_files[task] if path is None else self._output_files[(task[0], task[1], path)]
 
-    def _pin(self, key):
+    def _hold(self, task, key):
+        """Pin the data of a new Future and fetch it. A released task that is asked for again runs again."""
+        with self._lock:
+            self._futures[task] += 1
+            self._released.discard(task)
         file = self._file_of(key)
         self._check(capi.vine_graph_executor_pin_file(self._executor, file), "failed to pin a result")
         self._check(capi.vine_graph_executor_fetch_file(self._executor, file), "failed to fetch a result")
 
-    def _unpin(self, key):
+    def _unhold(self, task, key):
         capi.vine_graph_executor_unpin_file(self._executor, self._file_of(key))
+        with self._lock:
+            self._futures[task] -= 1
+            if not self._futures[task]:
+                del self._futures[task]
+            self._let_go(task)
+
+    def _graph_gone(self, graph_id):
+        with self._lock:
+            for key in self._graph_tasks.pop(graph_id, ()):
+                self._let_go((graph_id, key))
+
+    def _let_go(self, task):
+        """Free the staged files of a task that nothing holds and that will not run again. The user holds a task through
+        its Graph or a Future. A failed task never runs again, and neither does a released one unless asked for."""
+        graph_id, key = task
+        if task not in self._staged or self._futures[task] or graph_id in self._graphs and graph_id != self._dynamic._id:
+            return
+        entry = self._finished.get(task)
+        if task not in self._released and (entry is None or entry[0] != FAILED):
+            return
+        self._released.discard(task)
+        self._drop_staged(self._staged.pop(task))
+        if graph_id == self._dynamic._id:
+            # Only a Future could reach this call again, so its function and arguments go too.
+            for table in (self._dynamic._tasks, self._dynamic._parents, self._dynamic._results, self._dynamic._reads,
+                          self._dynamic._children, self._dynamic._outputs):
+                table.pop(key, None)
+
+    def _drop_staged(self, names):
+        """Let go of staged files that a task held, and free each one that no task holds anymore."""
+        for name in names:
+            self._edata_holders[name] -= 1
+            if self._edata_holders[name]:
+                continue
+            del self._edata_holders[name]
+            identity, path = self._edata_names.pop(name)
+            if identity is not None:
+                del self._edata[identity]
+            # The C file exists once the background thread declared it, which every queued plan does before this runs.
+            self._enqueue(lambda name=name, path=path: self._free_staged(name, path))
+
+    def _free_staged(self, name, path):
+        file = self._edata_files.pop(name, None)
+        if file is not None:
+            capi.vine_graph_executor_undeclare_file(self._executor, file)
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
 
     def _advance(self):
         """Run queued calls, advance the run for about a second, and publish what happened. Return False when the run
@@ -740,7 +846,8 @@ class Executor:
         return error is None
 
     def _publish_finished(self):
-        """Publish the tasks that completed or failed since the last call."""
+        """Publish the tasks that completed or failed since the last call, and let go of tasks that will not run
+        again."""
         finished = []
         while node := capi.vine_graph_executor_next_finished(self._executor):
             task = self._tasks[node]
@@ -749,9 +856,15 @@ class Executor:
                 finished.append((task, (FAILED, source, capi.vine_graph_executor_get_node_error(self._executor, node))))
             else:
                 finished.append((task, (COMPLETED, None, None)))
+        released = []
+        while node := capi.vine_graph_executor_next_released(self._executor):
+            released.append(self._tasks[node])
         with self._changed:
             for task, entry in finished:
                 self._set_finished(task, entry)
+            self._released.update(released)
+            for task in [*released, *(task for task, entry in finished if entry[0] == FAILED)]:
+                self._let_go(task)
             self._changed.notify_all()
 
     # Published state, shared by both threads.
@@ -851,19 +964,22 @@ class Executor:
                 self._changed.wait(0.5 if remaining is None else min(remaining, 0.5))
 
     def _node(self, task):
-        return Node(self._graphs[task[0]], task[1])
+        """Return the Node of a task, or None when nothing holds the task anymore."""
+        graph = self._graphs.get(task[0])
+        return Node(graph, task[1]) if graph is not None and task[1] in graph._tasks else None
 
     def _error(self, task):
         if self._finished_state(task) != FAILED:
             return None
         _, source, message = self._finished_entry(task)
         task_node, source_node = self._node(task), self._node(source)
+        task_label, source_label = self._labels[task], self._labels[source]
         # A function failure ends with its traceback. Lines the library writes before it are not about the function.
         start = message.find("Traceback (most recent call last):")
         message = f"\n{message[start:]}" if start >= 0 else f" {message}"
         if source == task:
-            return TaskError(f"task {task_node!r} failed:{message}", task_node, source_node)
-        return TaskError(f"task {task_node!r} did not run because task {source_node!r} failed:{message}", task_node,
+            return TaskError(f"task {task_label} failed:{message}", task_node, source_node)
+        return TaskError(f"task {task_label} did not run because task {source_label} failed:{message}", task_node,
                          source_node)
 
     def _cancel(self, task):
@@ -933,7 +1049,7 @@ class Executor:
         graph_id, key = task
         graph = self._graphs[graph_id]
         for parent in graph._parents[key]:
-            entry = self._finished[parent]
+            entry = self._finished[_resolve(graph_id, parent)]
             if entry[0] == FAILED:
                 self._set_finished(task, (FAILED, entry[1], entry[2]))
                 return
@@ -948,9 +1064,10 @@ class Executor:
         started = time.time()
         os.chdir(task_dir)
         try:
-            output = library.run_task(func, args, kwargs,
-                                      lambda parent: library.load_result(self._local_result_path(parent)),
-                                      self._local_file_path)
+            output = library.run_task(
+                func, args, kwargs,
+                lambda parent: library.load_result(self._local_result_path(_resolve(graph_id, parent))),
+                lambda identity: self._local_file_path(_resolve_file(graph_id, identity)))
             for task_path in outputs:
                 local_path = os.path.abspath(os.path.join(task_dir, task_path))
                 if not os.path.isfile(local_path):
@@ -1000,6 +1117,41 @@ class Executor:
         path = directory / str(len(self._input_files) + 1)
         path.symlink_to(source)
         return str(path)
+
+
+def _resolve(graph_id, reference):
+    """Return the task (graph id, key) of a reference stored in the graph with graph_id, as a (graph id, key) pair or a
+    _Ref or _FileRef. A Graph refers to its own tasks with graph id None."""
+    reference_graph_id, key = reference if isinstance(reference, tuple) else (reference.graph_id, reference.key)
+    return (graph_id if reference_graph_id is None else reference_graph_id, key)
+
+
+def _resolve_file(graph_id, identity):
+    """Return a library.file_identity() whose output file reference is resolved like _resolve()."""
+    if identity[0] != "output":
+        return identity
+    return ("output", *_resolve(graph_id, identity[1:3]), identity[3])
+
+
+@contextlib.contextmanager
+def _deferred_interrupts():
+    """Hold back SIGINT while a short change of Executor state completes, and deliver it afterwards, so an interrupt
+    never leaves a task queued but unrecorded. Only the main thread receives SIGINT."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def _graph_collected(executor_reference, graph_id):
+    """Let the tasks of a collected Graph go. Collection may happen in any thread, so the background thread does it."""
+    executor = executor_reference()
+    if executor is not None and not executor._local:
+        executor._enqueue(lambda: executor._graph_gone(graph_id))
 
 
 def _drive(executor_reference):

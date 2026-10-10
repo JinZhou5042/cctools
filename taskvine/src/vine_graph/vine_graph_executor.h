@@ -62,16 +62,18 @@ struct vine_graph_executor *vine_graph_executor_create(struct vine_manager *mana
  * Deleting an executor whose run has not finished cancels the run. */
 void vine_graph_executor_delete(struct vine_graph_executor *e);
 
-/* Apply one setting. Return zero, or -1 for an unknown name or invalid value.
+/* Apply one setting. Return zero, or -1 for an unknown name or invalid value, which
+ * vine_graph_executor_check_setting explains.
  * task-priority-mode     Order of ready nodes: largest-input-first (default), depth-first, or fifo.
  * max-retries            Failed attempts allowed per node for infrastructure failures (default 5).
  * progress-bar           Draw a progress bar on standard output: 1 (default) or 0.
  * progress-bar-update-interval-sec  Seconds between progress bar updates (default 0.1). */
 int vine_graph_executor_tune(struct vine_graph_executor *e, const char *name, const char *value);
 
-/* Return zero if vine_graph_executor_tune would accept a setting, or -1. A frontend that also runs tasks without an
- * executor, such as for debugging, checks settings by the same rules. */
-int vine_graph_executor_check_setting(const char *name, const char *value);
+/* Return NULL if vine_graph_executor_tune would accept a setting, or a static string that explains what the setting
+ * accepts. A frontend reports it, and one that also runs tasks without an executor, such as for debugging, checks
+ * settings by the same rules. */
+const char *vine_graph_executor_check_setting(const char *name, const char *value);
 
 /* Add a node and return its id. */
 uint64_t vine_graph_executor_add_node(struct vine_graph_executor *e);
@@ -80,6 +82,11 @@ uint64_t vine_graph_executor_add_node(struct vine_graph_executor *e);
  * Manager's data service, which suits many small files staged for the run. The file must stay readable until the
  * run ends. Its loss fails the nodes that read it, because it cannot be recomputed. */
 uint64_t vine_graph_executor_declare_file(struct vine_graph_executor *e, const char *source_path, int vault);
+
+/* Undeclare a file the frontend provided, removing its vault entry and its copies on Workers. The frontend calls this
+ * only when no node that may still run reads the file under any id: every reader failed, or was released and will not
+ * be asked for again. Return zero, or -1 for an unknown file or a node output. */
+int vine_graph_executor_undeclare_file(struct vine_graph_executor *e, uint64_t file_id);
 
 /* Declare a file that a node not yet submitted writes at task_path in its sandbox, and return its id. */
 uint64_t vine_graph_executor_add_output(struct vine_graph_executor *e, uint64_t node_id, const char *task_path);
@@ -118,6 +125,10 @@ void vine_graph_executor_wake(struct vine_graph_executor *e);
 /* Return the next node that completed or failed since the last call, or zero when none did. A completed node whose
  * outputs later cannot be restored is reported again as failed. */
 uint64_t vine_graph_executor_next_finished(struct vine_graph_executor *e);
+/* Return the next node whose outputs were released since the last call, or zero when none was. A release waits until
+ * every child is durable, so a released node runs again only when the frontend asks for its outputs, by pinning them
+ * or by submitting a node that reads them. */
+uint64_t vine_graph_executor_next_released(struct vine_graph_executor *e);
 /* Return the state of a node. */
 vine_graph_node_state_t vine_graph_executor_get_node_state(const struct vine_graph_executor *e, uint64_t node_id);
 /* Return the node whose own failure made this node fail, which is the node itself or one it depends on, or zero

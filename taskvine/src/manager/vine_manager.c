@@ -667,11 +667,10 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 			original->library_failed_count++;
 			original->time_when_last_failure = timestamp_get();
 		}
-		debug(D_VINE | D_NOTICE, "Library %s failed on worker %s (%s)", t->provides_library, w->hostname, w->addrport);
 		if (q->watch_library_logfiles) {
-			debug(D_VINE | D_NOTICE, ", check the library log file %s\n", t->library_log_path);
+			debug(D_VINE | D_NOTICE, "Library %s failed on worker %s (%s), check the library log file %s", t->provides_library, w->hostname, w->addrport, t->library_log_path);
 		} else {
-			debug(D_VINE | D_NOTICE, ", enable watch-library-logfiles for debug\n");
+			debug(D_VINE | D_NOTICE, "Library %s failed on worker %s (%s), enable watch-library-logfiles for debug", t->provides_library, w->hostname, w->addrport);
 		}
 	} else {
 		/* Update task stats for this completion. */

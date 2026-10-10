@@ -59,7 +59,7 @@ for test_directory in ${test_directories}; do
 		cd "$test_root/$test_directory"
 		scripts="TR_*"
 		if [ "$test_directory" = taskvine/src/vine_graph/test ]; then
-			scripts="vine_graph_interface.py vine_graph_data.py vine_graph_edata.py vine_graph_dynamic.py vine_graph_recovery.py vine_graph_dask_adaptor.py vine_graph_notebook.py"
+			scripts="vine_graph_interface.py vine_graph_data.py vine_graph_edata.py vine_graph_dynamic.py vine_graph_release.py vine_graph_recovery.py vine_graph_dask_adaptor.py vine_graph_notebook.py"
 			graph_python=$(sed -n 's/^CCTOOLS_PYTHON_TEST_EXEC=//p' "$test_root/config.mk")
 			graph_python_dir=$(sed -n 's/^CCTOOLS_PYTHON_TEST_DIR=//p' "$test_root/config.mk")
 		fi

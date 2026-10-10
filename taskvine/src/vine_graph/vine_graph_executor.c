@@ -40,12 +40,15 @@ struct vine_graph_executor {
 	struct priority_queue *checkpoint_queue; // borrowed idata awaiting admission, longest producer first
 	struct list *checkpoint_completed;	 // borrowed files whose checkpoint the Manager published
 	struct list *checkpoint_failed;		 // borrowed files whose checkpoint failed or was preempted, to requeue
+	timestamp_t checkpoint_retry_time;	 // when failed files are requeued, so a lost source is not retried at once
 	struct set *checkpoint_pending;		 // queued or in-flight files; release withdraws them
 	uint64_t checkpoint_sequence;		 // completion order used to break equal checkpoint priorities
 
 	struct set *fetch_pending;  // borrowed pinned outputs requested at the Manager and not in the vault yet
 	struct itable *vault_paths; // vine_file address -> owned path of a fetched output in the vault
 	struct list *finished;	    // borrowed nodes that completed or failed and were not reported yet
+	struct list *released;	    // borrowed nodes whose outputs were released and were not reported yet
+	int vault_full_noticed;	    // the user was told once that the vault is full
 
 	vine_graph_priority_mode_t priority_mode; // order of ready nodes
 	int max_retries;			  // failed attempts allowed per node before it fails
@@ -95,6 +98,7 @@ struct vine_graph_executor *vine_graph_executor_create(struct vine_manager *mana
 	e->fetch_pending = set_create(0);
 	e->vault_paths = itable_create(0);
 	e->finished = list_create();
+	e->released = list_create();
 	e->priority_mode = VINE_GRAPH_PRIORITY_LARGEST_INPUT_FIRST;
 	e->max_retries = 5;
 	e->show_progress_bar = 1;
@@ -171,31 +175,28 @@ void vine_graph_executor_delete(struct vine_graph_executor *e)
 	set_delete(e->fetch_pending);
 	itable_delete(e->vault_paths);
 	list_delete(e->finished);
+	list_delete(e->released);
 	free(e->library_name);
 	free(e->function_name);
 	free(e->error);
 	free(e);
 }
 
-/* Parse a non-negative integer setting. Return zero, or -1 for an invalid value. */
-static int vine_graph_parse_count(const char *name, const char *value, int *count)
+/* Parse a non-negative integer setting. Return NULL, or what the setting accepts for an invalid value. */
+static const char *vine_graph_parse_count(const char *value, int *count)
 {
 	char *end;
 	long parsed = strtol(value, &end, 10);
 	if (end == value || *end || parsed < 0 || parsed > INT_MAX) {
-		debug(D_ERROR, "invalid %s: %s (must be a non-negative integer)", name, value);
-		return -1;
+		return "it must be a non-negative integer";
 	}
 	*count = (int)parsed;
-	return 0;
+	return NULL;
 }
 
-int vine_graph_executor_tune(struct vine_graph_executor *e, const char *name, const char *value)
+/* Apply a setting. Return NULL, or a static explanation of what the setting accepts. */
+static const char *vine_graph_executor_apply_setting(struct vine_graph_executor *e, const char *name, const char *value)
 {
-	if (!e || !name || !value) {
-		return -1;
-	}
-
 	if (strcmp(name, "task-priority-mode") == 0) {
 		if (strcmp(value, "largest-input-first") == 0) {
 			e->priority_mode = VINE_GRAPH_PRIORITY_LARGEST_INPUT_FIRST;
@@ -204,28 +205,42 @@ int vine_graph_executor_tune(struct vine_graph_executor *e, const char *name, co
 		} else if (strcmp(value, "fifo") == 0) {
 			e->priority_mode = VINE_GRAPH_PRIORITY_FIFO;
 		} else {
-			debug(D_ERROR, "invalid task-priority-mode: %s (use largest-input-first, depth-first, or fifo)", value);
-			return -1;
+			return "use largest-input-first, depth-first, or fifo";
 		}
-		return 0;
+		return NULL;
 	} else if (strcmp(name, "max-retries") == 0) {
-		return vine_graph_parse_count(name, value, &e->max_retries);
+		return vine_graph_parse_count(value, &e->max_retries);
 	} else if (strcmp(name, "progress-bar") == 0) {
-		return vine_graph_parse_count(name, value, &e->show_progress_bar);
+		return vine_graph_parse_count(value, &e->show_progress_bar);
 	} else if (strcmp(name, "progress-bar-update-interval-sec") == 0) {
 		double interval = atof(value);
 		e->progress_bar_update_interval_sec = interval > 0 ? interval : 0.1;
-		return 0;
+		return NULL;
 	}
-	debug(D_ERROR, "invalid vine_graph parameter: %s", name);
-	return -1;
+	return "it is not a vine_graph setting";
 }
 
-int vine_graph_executor_check_setting(const char *name, const char *value)
+int vine_graph_executor_tune(struct vine_graph_executor *e, const char *name, const char *value)
 {
+	if (!e || !name || !value) {
+		return -1;
+	}
+	const char *problem = vine_graph_executor_apply_setting(e, name, value);
+	if (problem) {
+		debug(D_VINE, "invalid value %s for %s: %s", value, name, problem);
+		return -1;
+	}
+	return 0;
+}
+
+const char *vine_graph_executor_check_setting(const char *name, const char *value)
+{
+	if (!name || !value) {
+		return "a setting needs a name and a value";
+	}
 	/* Tuning only records settings, so a scratch executor applies the same rules without a Manager. */
 	struct vine_graph_executor scratch = {0};
-	return vine_graph_executor_tune(&scratch, name, value);
+	return vine_graph_executor_apply_setting(&scratch, name, value);
 }
 
 /*************************************************************/
@@ -244,6 +259,23 @@ uint64_t vine_graph_executor_declare_file(struct vine_graph_executor *e, const c
 	}
 	struct vine_file *file = vault ? vine_manager_data_service_declare_file(e->manager, source_path) : vine_declare_file(e->manager, source_path, VINE_CACHE_LEVEL_WORKFLOW, 0);
 	return file ? vine_graph_add_file(e->graph, file) : 0;
+}
+
+int vine_graph_executor_undeclare_file(struct vine_graph_executor *e, uint64_t file_id)
+{
+	struct vine_file *file = e ? vine_graph_get_file(e->graph, file_id) : NULL;
+	if (!file || vine_graph_get_producer(e->graph, file)) {
+		return -1;
+	}
+	vine_graph_remove_file(e->graph, file_id);
+	vine_graph_executor_forget_vault_path(e, file);
+	/* As in vine_graph_executor_delete, the first id of a path declared twice undeclares the shared file. */
+	if (vine_manager_lookup_file(e->manager, vine_file_cached_name(file)) == file) {
+		vine_undeclare_file(e->manager, file);
+	} else {
+		vine_file_delete(file);
+	}
+	return 0;
 }
 
 uint64_t vine_graph_executor_add_output(struct vine_graph_executor *e, uint64_t node_id, const char *task_path)
@@ -450,7 +482,8 @@ static int vine_graph_executor_node_is_durable(struct vine_graph_executor *e, st
 /* Prune the node's temporary outputs once every submitted child is durable and the frontend pins none of them. A lost
  * output then needs at most its parent, never a chain of released ancestors. A consumer submitted after the release
  * makes TaskVine recompute the output, so pins keep outputs that may still be read. Pruning wins over checkpointing.
- * Return non-zero when the node was released. */
+ * While the vault is full, children cannot become durable, so their parents stay on Workers until downstream nodes
+ * complete or the vault has room again. Return non-zero when the node was released. */
 static int vine_graph_executor_try_release(struct vine_graph_executor *e, struct vine_graph_node *node)
 {
 	if (node->released || !node->completed) {
@@ -477,6 +510,7 @@ static int vine_graph_executor_try_release(struct vine_graph_executor *e, struct
 		vine_prune_file(e->manager, mount->file);
 	}
 	node->released = 1;
+	list_push_tail(e->released, node);
 	debug(D_VINE, "released node %" PRIu64, node->node_id);
 	return 1;
 }
@@ -511,14 +545,33 @@ static void vine_graph_executor_release_from(struct vine_graph_executor *e, stru
 static void vine_graph_executor_checkpoint_complete(void *argument, struct vine_file *file, int success)
 {
 	struct vine_graph_executor *e = argument;
-	list_push_tail(success ? e->checkpoint_completed : e->checkpoint_failed, file);
-	/* The Manager's wait returns, so the executor reports a fetched output and fills the freed slot at once. */
-	vine_wake(e->manager);
+	if (success) {
+		list_push_tail(e->checkpoint_completed, file);
+		/* The Manager's wait returns, so the executor reports a fetched output and fills the freed slot at once. */
+		vine_wake(e->manager);
+		return;
+	}
+	/* Like a transient transfer error, a failed receive is retried after the Manager's transient error interval. A
+	 * source that just disconnected otherwise fails every retry until the Manager notices. */
+	if (list_size(e->checkpoint_failed) == 0) {
+		e->checkpoint_retry_time = timestamp_get() + e->manager->transient_error_interval;
+	}
+	list_push_tail(e->checkpoint_failed, file);
 }
 
-/* Settle reported results, then admit queued files in priority order until the Manager refuses.
- * BUSY means no slot or vault space, so admission stops. A file without a ready source is set aside for this round
- * so it does not block lower-priority files. Results of released files are ignored. */
+/* Tell the user once that the vault is full, so intermediate data stays on Workers longer. */
+static void vine_graph_executor_note_vault_full(struct vine_graph_executor *e)
+{
+	if (!e->vault_full_noticed) {
+		e->vault_full_noticed = 1;
+		debug(D_NOTICE | D_VINE, "the vault is full, so outputs wait on Workers until the vault has room or the nodes that read them are released, and Worker disk use grows meanwhile; raise the manager tuning vault-disk-limit to keep it near the live frontier");
+	}
+}
+
+/* Settle reported results, then admit queued files in priority order until the Manager refuses. Failed files return
+ * to the queue once their retry time passed. BUSY means no free slot, and FULL means no vault space. Either stops
+ * admission. A file without a ready source is set aside for this round so
+ * it does not block lower-priority files. Results of released files are ignored. */
 static void vine_graph_executor_process_checkpoints(struct vine_graph_executor *e)
 {
 	struct vine_file *file;
@@ -528,7 +581,7 @@ static void vine_graph_executor_process_checkpoints(struct vine_graph_executor *
 			vine_graph_executor_release_from(e, vine_graph_get_producer(e->graph, file), 0);
 		}
 	}
-	while ((file = list_pop_head(e->checkpoint_failed))) {
+	while (timestamp_get() >= e->checkpoint_retry_time && (file = list_pop_head(e->checkpoint_failed))) {
 		if (set_lookup(e->checkpoint_pending, file)) {
 			vine_graph_executor_push_checkpoint(e, vine_graph_get_producer(e->graph, file), file);
 		}
@@ -542,6 +595,10 @@ static void vine_graph_executor_process_checkpoints(struct vine_graph_executor *
 		double priority = priority_queue_get_top_priority(e->checkpoint_queue);
 		vine_manager_checkpoint_result_t result = vine_manager_data_service_checkpoint(e->manager, file, vine_graph_executor_checkpoint_complete, e);
 		if (result == VINE_CHECKPOINT_BUSY) {
+			break;
+		}
+		if (result == VINE_CHECKPOINT_FULL) {
+			vine_graph_executor_note_vault_full(e);
 			break;
 		}
 		priority_queue_pop(e->checkpoint_queue);
@@ -945,6 +1002,12 @@ void vine_graph_executor_wake(struct vine_graph_executor *e)
 uint64_t vine_graph_executor_next_finished(struct vine_graph_executor *e)
 {
 	struct vine_graph_node *node = e ? list_pop_head(e->finished) : NULL;
+	return node ? node->node_id : 0;
+}
+
+uint64_t vine_graph_executor_next_released(struct vine_graph_executor *e)
+{
+	struct vine_graph_node *node = e ? list_pop_head(e->released) : NULL;
 	return node ? node->node_id : 0;
 }
 
