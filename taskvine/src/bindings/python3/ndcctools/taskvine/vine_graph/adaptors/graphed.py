@@ -1,11 +1,11 @@
 import contextlib
 from collections import OrderedDict
 
-from ..workflow import Workflow
+from ..graph import Graph
 
 
-class _VineGraphGraphedResources:
-    """Small WorkerResources-compatible cache for one VineGraph task."""
+class _GraphedResources:
+    """Small WorkerResources-compatible cache for one graph task."""
 
     def __init__(self, max_open=128):
         self._handles = OrderedDict()
@@ -44,7 +44,7 @@ def _graphed_empty(empty_ref):
 def _graphed_process(process_ref, partition):
     """Run one graphed Plan process task."""
     process = process_ref[0]
-    resources = _VineGraphGraphedResources()
+    resources = _GraphedResources()
     try:
         return process(partition, resources)
     finally:
@@ -62,41 +62,20 @@ def _validate_static_plan(plan):
         if not hasattr(plan, attr):
             raise TypeError(f"graphed plan is missing required attribute {attr!r}")
     if getattr(plan, "next_tasks", None) is not None:
-        raise ValueError("VineGraphGraphedAdaptor only supports static graphed plans")
+        raise ValueError("only static graphed plans can be converted")
     if getattr(plan, "stop", None) is not None:
-        raise ValueError("VineGraphGraphedAdaptor does not support graphed StopCondition yet")
+        raise ValueError("graphed plans with a StopCondition cannot be converted yet")
 
 
-def graphed_plan_to_workflow(plan, key_prefix="graphed"):
-    """Convert a static graphed Plan into a VineGraph Workflow."""
+def graphed_plan_to_graph(plan):
+    """Convert a static graphed Plan into a Graph, and return the Graph and the Node of the final result."""
     _validate_static_plan(plan)
 
-    workflow = Workflow()
+    graph = Graph()
     tasks = sorted(tuple(plan.tasks), key=lambda task: task.key)
 
-    empty_task = workflow.add_task(_graphed_empty, [plan.empty])
-
-    previous_task = empty_task
+    previous = graph.add(_graphed_empty, [plan.empty])
     for task in tasks:
-        process_task = workflow.add_task(_graphed_process, [plan.process], task.partition)
-        previous_task = workflow.add_task(
-            _graphed_combine,
-            [plan.combine],
-            previous_task.output(),
-            process_task.output(),
-        )
-
-    return workflow, previous_task
-
-
-class VineGraphGraphedAdaptor:
-    """Convert a static graphed Plan into a VineGraph Workflow."""
-
-    def __init__(self, plan, key_prefix="graphed"):
-        self.plan = plan
-        self.converted, self.target = graphed_plan_to_workflow(plan, key_prefix=key_prefix)
-        self.targets = [self.target]
-
-    @property
-    def task_dict(self):
-        return self.converted
+        process = graph.add(_graphed_process, [plan.process], task.partition)
+        previous = graph.add(_graphed_combine, [plan.combine], previous, process)
+    return graph, previous

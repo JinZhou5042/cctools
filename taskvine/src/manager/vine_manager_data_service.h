@@ -40,6 +40,9 @@ void vine_manager_data_service_handle(struct vine_manager *manager);
  * An in-progress request keeps its original callback. Removing the vault entry cancels the receive and drops
  * its callback. */
 vine_manager_checkpoint_result_t vine_manager_data_service_checkpoint(struct vine_manager *manager, struct vine_file *file, void (*complete)(void *, struct vine_file *, int), void *argument);
+/* Request a temporary file that the application needs now. It behaves as a checkpoint, except that it is admitted
+ * beyond the vault limit, so only slots and a ready Worker replica can refuse it. */
+vine_manager_checkpoint_result_t vine_manager_data_service_fetch(struct vine_manager *manager, struct vine_file *file, void (*complete)(void *, struct vine_file *, int), void *argument);
 
 /* Declare a regular local file as a workflow-cached VINE_FILE served through the vault. Return NULL on failure.
  * The caller keeps the local source unchanged until undeclaration. */
@@ -51,6 +54,9 @@ int vine_manager_data_service_has_local_file(struct vine_manager *manager, struc
 void vine_manager_data_service_vault_remove(struct vine_manager_data_service *ds, struct vine_file *file);
 /* Return non-zero when the vault holds a complete entry for this file. Does not touch the filesystem. */
 int vine_manager_data_service_vault_contains(struct vine_manager *manager, struct vine_file *file);
+/* Return a newly allocated path of the file's vault entry, or NULL when the vault holds none. The entry stays until
+ * the file is pruned or undeclared. */
+char *vine_manager_data_service_vault_path(struct vine_manager *manager, struct vine_file *file);
 /* Limit the bytes of checkpoint entries, including receives in progress. Zero means unlimited.
  * Declared local files are not counted because the vault only links to them. */
 void vine_manager_data_service_vault_set_limit(struct vine_manager_data_service *ds, int64_t bytes);

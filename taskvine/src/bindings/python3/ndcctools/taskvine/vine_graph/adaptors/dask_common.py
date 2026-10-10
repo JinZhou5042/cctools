@@ -1,6 +1,6 @@
-"""Shared helpers for Dask-to-VineGraph adaptor modules."""
+"""Shared helpers for the Dask adaptor modules."""
 
-from ..workflow import TaskOutputHandle
+from ..graph import _Ref
 
 
 def identity(value):
@@ -9,23 +9,23 @@ def identity(value):
 
 
 def build_task_expr(func, args, kwargs):
-    """Build the normalized ``Workflow`` task-expression tuple."""
+    """Build the normalized Graph task-expression tuple."""
     return func, tuple(args), dict(kwargs)
 
 
-def resolve_graph_key_if_task(obj, workflow_keys):
+def resolve_graph_key_if_task(obj, graph_keys):
     """Return the matching graph key when ``obj`` denotes an existing Dask task."""
-    if isinstance(obj, TaskOutputHandle):
+    if isinstance(obj, _Ref):
         return None
     try:
-        if obj in workflow_keys:
+        if obj in graph_keys:
             return obj
     except TypeError:
         pass
     if hasattr(obj, "item") and callable(obj.item):
         try:
             item = obj.item()
-            if item in workflow_keys:
+            if item in graph_keys:
                 return item
         except Exception:
             pass

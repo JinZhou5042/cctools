@@ -17,62 +17,42 @@ try:
 except Exception:
     dts = None
 
-from .legacy_dask_adaptor import expand_legacy_subgraph_dsk
+from .legacy_dask_adaptor import call_with_nested_tasks, expand_legacy_subgraph_dsk
 from .dask_common import (
     build_task_expr,
     identity,
     resolve_graph_key_if_task,
 )
 from .dask_task_spec import DaskTaskSpecConverter
-from ..workflow import TaskOutputHandle, Workflow
+from ..graph import Graph, _Ref
 
 
-def _apply_with_kwargs_kvlist(func, args_list, kwargs_kvlist):
-    """Call ``func`` when kwargs are encoded as ``[[key, value], ...]``."""
-    return func(*args_list, **{key: value for key, value in kwargs_kvlist})
+def from_dask(dsk, expand_subgraphs=False):
+    """Convert a Dask graph, a dictionary of Dask collections or task specifications, into a Graph whose keys are the
+    Dask keys."""
+    graph = Graph()
+    for key, (func, args, kwargs) in _DaskConverter(dsk, expand_subgraphs).tasks.items():
+        graph._add(key, func, args, kwargs)
+    for key, parents in graph._parents.items():
+        for graph_id, parent in parents:
+            if graph_id == graph._id and parent not in graph._tasks:
+                raise ValueError(f"task {key!r} reads {parent!r}, which is not in the Dask graph")
+    return graph
 
 
-def workflow_to_dask_graph(workflow):
-    assert isinstance(workflow, Workflow), "workflow must be a Workflow"
-
-    def ref_to_key(ref):
-        return ref.task_id
-
-    dsk = {}
-    for workflow_key, (func_id, args, kwargs) in workflow.task_dict.items():
-        func = workflow.callables[func_id]
-        new_args = workflow._visit_task_output_refs(args, ref_to_key, rewrite=True)
-        new_kwargs = workflow._visit_task_output_refs(kwargs, ref_to_key, rewrite=True)
-
-        if new_kwargs:
-            dsk[workflow_key] = (_apply_with_kwargs_kvlist, func, list(new_args), [[k, v] for k, v in new_kwargs.items()])
-        else:
-            dsk[workflow_key] = (func, *new_args)
-
-    return dsk
-
-
-class VineGraphDaskAdaptor:
-    """Convert Dask graph forms into VineGraph ``Workflow`` task expressions."""
+class _DaskConverter:
+    """Convert Dask graph forms into Graph task expressions."""
 
     def __init__(self, task_dict, expand_subgraphs=False):
-        if isinstance(task_dict, Workflow):
-            self.converted = task_dict
-            return
-
         self._expand_subgraphs = expand_subgraphs
         normalized = self._normalize_task_dict(task_dict)
-        self.converted = self._convert_to_workflow_tasks(normalized)
-
-    @property
-    def task_dict(self):
-        return self.converted
+        self.tasks = self._convert_to_graph_tasks(normalized)
 
     def _normalize_task_dict(self, task_dict):
         if self._is_dask_collection_dict(task_dict):
             task_dict = self._dask_collections_to_task_dict(task_dict)
         else:
-            # Plain dicts are VineGraph sexprs; don't let Dask reinterpret kwargs dicts.
+            # Plain dicts hold task expressions; don't let Dask reinterpret kwargs dicts.
             task_dict = dict(task_dict)
 
         if self._expand_subgraphs and not dts and task_dict:
@@ -99,19 +79,19 @@ class VineGraphDaskAdaptor:
             hlg = hlg.to_dict() if hasattr(hlg, "to_dict") else dict(hlg)
         return ensure_dict(hlg)
 
-    def _convert_to_workflow_tasks(self, task_dict):
+    def _convert_to_graph_tasks(self, task_dict):
         if not task_dict:
             return {}
 
         converted = {}
-        workflow_keys = set(task_dict.keys())
+        graph_keys = set(task_dict.keys())
         task_spec = DaskTaskSpecConverter(dts) if dts else None
 
         for key, value in task_dict.items():
             if task_spec and task_spec.is_node(value):
-                converted[key] = task_spec.convert_node(key, value, workflow_keys)
+                converted[key] = task_spec.convert_node(key, value, graph_keys)
             else:
-                converted[key] = self._convert_legacy_task(value, workflow_keys)
+                converted[key] = self._convert_legacy_task(value, graph_keys)
 
         if task_spec:
             while True:
@@ -119,21 +99,21 @@ class VineGraphDaskAdaptor:
                 if not pending:
                     break
                 for key, node in pending:
-                    converted[key] = task_spec.convert_node(key, node, workflow_keys)
+                    converted[key] = task_spec.convert_node(key, node, graph_keys)
 
         return converted
 
-    def _convert_legacy_task(self, sexpr, workflow_keys):
+    def _convert_legacy_task(self, sexpr, graph_keys):
         try:
-            if not isinstance(sexpr, (list, tuple)) and sexpr in workflow_keys:
-                return build_task_expr(identity, [TaskOutputHandle(sexpr)], {})
+            if not isinstance(sexpr, (list, tuple)) and sexpr in graph_keys:
+                return build_task_expr(identity, [_Ref(None, sexpr)], {})
         except TypeError:
             pass
 
-        if not isinstance(sexpr, (list, tuple)):
-            return build_task_expr(identity, [sexpr], {})
-        if not sexpr:
-            raise TypeError("Task definition must be a non-empty tuple/list")
+        # A legacy task is a tuple that starts with a callable. Any other value, such as a list, is data that may
+        # refer to other keys and hold nested tasks.
+        if not isinstance(sexpr, tuple) or not sexpr or not callable(sexpr[0]):
+            return build_task_expr(call_with_nested_tasks, [identity, self._wrap_dependency(sexpr, graph_keys)], {})
 
         func = sexpr[0]
         tail = sexpr[1:]
@@ -142,26 +122,26 @@ class VineGraphDaskAdaptor:
         else:
             raw_args, raw_kwargs = tail, {}
 
-        args = tuple(self._wrap_dependency(arg, workflow_keys) for arg in raw_args)
-        kwargs = {key: self._wrap_dependency(value, workflow_keys) for key, value in raw_kwargs.items()}
-        return func, args, kwargs
+        args = tuple(self._wrap_dependency(arg, graph_keys) for arg in raw_args)
+        kwargs = {key: self._wrap_dependency(value, graph_keys) for key, value in raw_kwargs.items()}
+        return call_with_nested_tasks, (func, *args), kwargs
 
-    def _wrap_dependency(self, obj, workflow_keys):
-        if isinstance(obj, TaskOutputHandle):
+    def _wrap_dependency(self, obj, graph_keys):
+        if isinstance(obj, _Ref):
             return obj
 
-        key = resolve_graph_key_if_task(obj, workflow_keys)
+        key = resolve_graph_key_if_task(obj, graph_keys)
         if key is not None:
-            return TaskOutputHandle(key)
+            return _Ref(None, key)
 
         if isinstance(obj, list):
-            return [self._wrap_dependency(value, workflow_keys) for value in obj]
+            return [self._wrap_dependency(value, graph_keys) for value in obj]
         if isinstance(obj, tuple):
-            return tuple(self._wrap_dependency(value, workflow_keys) for value in obj)
+            return tuple(self._wrap_dependency(value, graph_keys) for value in obj)
         if isinstance(obj, Mapping):
-            return {key: self._wrap_dependency(value, workflow_keys) for key, value in obj.items()}
+            return {key: self._wrap_dependency(value, graph_keys) for key, value in obj.items()}
         if isinstance(obj, set):
-            return {self._wrap_dependency(value, workflow_keys) for value in obj}
+            return {self._wrap_dependency(value, graph_keys) for value in obj}
         if isinstance(obj, frozenset):
-            return frozenset(self._wrap_dependency(value, workflow_keys) for value in obj)
+            return frozenset(self._wrap_dependency(value, graph_keys) for value in obj)
         return obj

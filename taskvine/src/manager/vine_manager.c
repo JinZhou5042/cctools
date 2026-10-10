@@ -2713,9 +2713,10 @@ static int build_poll_table(struct vine_manager *q)
 	q->poll_table[0].events = LINK_READ;
 	q->poll_table[0].revents = 0;
 
-	/* Reserve two entries for data requests and transfer completions. */
+	/* Reserve two entries for data requests and transfer completions, and one for wakes from other threads. */
 	vine_manager_data_service_poll(q->ds, &q->poll_table[1]);
-	n = 3;
+	q->poll_table[3] = (struct link_info){q->wake_link, LINK_READ, 0};
+	n = 4;
 
 	// For every worker in the hash table, add an item to the poll table
 	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
@@ -4156,14 +4157,28 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	}
 
 	q->ds = vine_manager_data_service_create(runtime_dir);
-	if (!q->ds) {
+	int wake[2] = {-1, -1};
+	if (q->ds && pipe(wake) == 0) {
+		q->wake_link = link_attach_to_fd(wake[0]);
+	}
+	if (!q->wake_link) {
+		if (wake[0] >= 0) {
+			close(wake[0]);
+			close(wake[1]);
+		}
+		vine_manager_data_service_delete(q->ds);
 		link_close(q->manager_link);
 		free(runtime_dir);
 		free(q);
 		return NULL;
 	}
+	q->wake_fd = wake[1];
+	for (int i = 0; i < 2; i++) {
+		fcntl(wake[i], F_SETFD, FD_CLOEXEC);
+		fcntl(wake[i], F_SETFL, O_NONBLOCK);
+	}
 
-	debug(D_VINE, "manager start");
+	debug(D_VINE, "manager start on port %d with data port %d", q->port, vine_manager_data_service_port(q->ds));
 
 	q->runtime_directory = runtime_dir;
 
@@ -4461,6 +4476,11 @@ int vine_port(struct vine_manager *q)
 	}
 }
 
+int vine_data_port(struct vine_manager *q)
+{
+	return q ? vine_manager_data_service_port(q->ds) : 0;
+}
+
 void vine_set_scheduler(struct vine_manager *q, vine_schedule_t algorithm)
 {
 	q->worker_selection_algorithm = algorithm;
@@ -4649,6 +4669,8 @@ void vine_delete(struct vine_manager *q)
 	hash_table_delete(q->properties);
 
 	free(q->poll_table);
+	link_close(q->wake_link);
+	close(q->wake_fd);
 	free(q->ssl_cert);
 	free(q->ssl_key);
 
@@ -5001,6 +5023,8 @@ int vine_submit(struct vine_manager *q, struct vine_task *t)
 	vine_category_lookup_or_create(q, t->category);
 
 	change_task_state(q, t, VINE_TASK_READY);
+	/* The new task may be dispatched at once, so the next wait polls workers without sleeping first. */
+	q->nothing_happened_last_wait_cycle = 0;
 
 	t->time_when_submitted = timestamp_get();
 	q->stats->tasks_submitted++;
@@ -5216,6 +5240,13 @@ struct vine_task *vine_wait(struct vine_manager *q, int timeout)
 	return vine_wait_for_tag(q, NULL, timeout);
 }
 
+void vine_wake(struct vine_manager *q)
+{
+	/* Only the write touches the manager, so any thread may call this. A full pipe already holds a wake. */
+	ssize_t result = write(q->wake_fd, "x", 1);
+	(void)result;
+}
+
 struct vine_task *vine_wait_for_tag(struct vine_manager *q, const char *tag, int timeout)
 {
 	return vine_wait_internal(q, timeout, tag, -1);
@@ -5267,8 +5298,16 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 
 	vine_manager_data_service_handle(q);
 
+	if (q->poll_table[3].revents) {
+		/* Several wakes before this poll end the same wait. */
+		char buffer[64];
+		while (read(link_fd(q->wake_link), buffer, sizeof(buffer)) > 0) {
+		}
+		q->woken = 1;
+	}
+
 	/* Consider the Worker control connections. */
-	for (i = 3; i < n; i++) {
+	for (i = 4; i < n; i++) {
 
 		/* If there is pending input data on that connection. */
 		if (q->poll_table[i].revents) {
@@ -5475,6 +5514,9 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 	int events = 0;
 	print_password_warning(q);
 
+	/* A wake that arrived during an earlier wait was answered when that wait returned. */
+	q->woken = 0;
+
 	// compute stoptime
 	time_t stoptime = (timeout == VINE_WAIT_FOREVER) ? 0 : time(0) + timeout;
 
@@ -5510,6 +5552,11 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			if (t && (!q->prefer_dispatch || skip_list_size(q->ready_tasks) == 0 || !sent_in_previous_cycle)) {
 				break;
 			}
+		}
+
+		// return to the application, which another thread asked for with vine_wake.
+		if (q->woken) {
+			break;
 		}
 
 		// retrieve worker status messages

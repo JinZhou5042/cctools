@@ -61,23 +61,23 @@ struct vine_manager_data_service {
 /* Hold one transfer until its completion is consumed by the Manager. A job with a file is a checkpoint receive
  * that fetches the file from a Worker into the vault. A job without one serves a Worker request from the vault. */
 struct transfer_job {
-	struct vine_manager_data_service *owner;		  /* Borrow the service that owns this job. */
-	int done;						  /* Set under the lock when the executor finishes. */
-	struct link *link;					  /* Own the active peer connection. */
-	struct vine_file *file;					  /* Hold the checkpointed file. NULL for a Worker request. */
-	char *password;						  /* Copy the Manager password for peer authentication. */
-	char name[VINE_DATA_LINE_MAX];				  /* Identify the requested cache object. */
-	char *ip;						  /* Own the source Worker address for a receive. */
-	int port;						  /* Identify the source Worker data port. */
-	char *path;						  /* Own the vault path of a receive. */
-	int cancelled;						  /* Prevent a cancelled receive from renaming its file. */
-	int removed;						  /* Mark a receive whose vault entry was removed. Never published. */
-	int success;						  /* Report whether the transfer completed. */
-	int64_t reserved;					  /* Own vault bytes reserved for a receive. */
-	int64_t received;					  /* Record the bytes published by a successful receive. */
-	void (*complete)(void *, struct vine_file *, int);	  /* Report a checkpoint result on the Manager thread. */
-	void *argument;						  /* Borrow the caller's completion context. */
-	char *transfer_id;					  /* Own the record that counts a receive against its source. */
+	struct vine_manager_data_service *owner;	   /* Borrow the service that owns this job. */
+	int done;					   /* Set under the lock when the executor finishes. */
+	struct link *link;				   /* Own the active peer connection. */
+	struct vine_file *file;				   /* Hold the checkpointed file. NULL for a Worker request. */
+	char *password;					   /* Copy the Manager password for peer authentication. */
+	char name[VINE_DATA_LINE_MAX];			   /* Identify the requested cache object. */
+	char *ip;					   /* Own the source Worker address for a receive. */
+	int port;					   /* Identify the source Worker data port. */
+	char *path;					   /* Own the vault path of a receive. */
+	int cancelled;					   /* Prevent a cancelled receive from renaming its file. */
+	int removed;					   /* Mark a receive whose vault entry was removed. Never published. */
+	int success;					   /* Report whether the transfer completed. */
+	int64_t reserved;				   /* Own vault bytes reserved for a receive. */
+	int64_t received;				   /* Record the bytes published by a successful receive. */
+	void (*complete)(void *, struct vine_file *, int); /* Report a checkpoint result on the Manager thread. */
+	void *argument;					   /* Borrow the caller's completion context. */
+	char *transfer_id;				   /* Own the record that counts a receive against its source. */
 };
 
 static void job_delete(struct transfer_job *job)
@@ -315,6 +315,11 @@ struct vine_manager_data_service *vine_manager_data_service_create(const char *r
 	fcntl(descriptors[1], F_SETFD, FD_CLOEXEC);
 	fcntl(descriptors[1], F_SETFL, O_NONBLOCK);
 	ds->listener = link_serve(0);
+	if (!ds->listener) {
+		const char *low = getenv("TCP_LOW_PORT");
+		const char *high = getenv("TCP_HIGH_PORT");
+		debug(D_NOTICE, "no free port for the manager's data listener in the port range %s-%s; give the manager a range with a free port besides its own", low ? low : "default", high ? high : "default");
+	}
 	/* Let many Workers wait for a slot in the kernel instead of retrying dropped connections. */
 	if (ds->listener) {
 		listen(link_fd(ds->listener), SOMAXCONN);
@@ -465,7 +470,8 @@ void vine_manager_data_service_handle(struct vine_manager *manager)
 	}
 }
 
-vine_manager_checkpoint_result_t vine_manager_data_service_checkpoint(struct vine_manager *manager, struct vine_file *file, void (*complete)(void *, struct vine_file *, int), void *argument)
+/* Admit a receive of a temporary file into the vault. A required receive is admitted beyond the vault limit. */
+static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manager, struct vine_file *file, int required, void (*complete)(void *, struct vine_file *, int), void *argument)
 {
 	struct vine_manager_data_service *ds = manager->ds;
 	if (!file || file->type != VINE_TEMP) {
@@ -492,7 +498,7 @@ vine_manager_checkpoint_result_t vine_manager_data_service_checkpoint(struct vin
 		return VINE_CHECKPOINT_BUSY;
 	}
 	int64_t size = (int64_t)file->size;
-	if (ds->vault_limit > 0 && ds->vault_used + ds->vault_reserved + size > ds->vault_limit) {
+	if (!required && ds->vault_limit > 0 && ds->vault_used + ds->vault_reserved + size > ds->vault_limit) {
 		return VINE_CHECKPOINT_BUSY;
 	}
 	struct vine_worker_info *worker = vine_file_replica_table_find_worker(manager, file->cached_name);
@@ -520,9 +526,18 @@ vine_manager_checkpoint_result_t vine_manager_data_service_checkpoint(struct vin
 	char *source = string_format("%s/%s", worker->transfer_url, file->cached_name);
 	job->transfer_id = vine_current_transfers_add(manager, NULL, worker, source);
 	free(source);
-	debug(D_VINE, "checkpoint started: %s from %s:%d size=%" PRId64 " vault_used=%" PRId64 " vault_reserved=%" PRId64 " vault_limit=%" PRId64,
-			file->cached_name, worker->transfer_host, worker->transfer_port, size, ds->vault_used, ds->vault_reserved, ds->vault_limit);
+	debug(D_VINE, "checkpoint started: %s from %s:%d size=%" PRId64 " required=%d vault_used=%" PRId64 " vault_reserved=%" PRId64 " vault_limit=%" PRId64, file->cached_name, worker->transfer_host, worker->transfer_port, size, required, ds->vault_used, ds->vault_reserved, ds->vault_limit);
 	return VINE_CHECKPOINT_ADMITTED;
+}
+
+vine_manager_checkpoint_result_t vine_manager_data_service_checkpoint(struct vine_manager *manager, struct vine_file *file, void (*complete)(void *, struct vine_file *, int), void *argument)
+{
+	return admit_receive(manager, file, 0, complete, argument);
+}
+
+vine_manager_checkpoint_result_t vine_manager_data_service_fetch(struct vine_manager *manager, struct vine_file *file, void (*complete)(void *, struct vine_file *, int), void *argument)
+{
+	return admit_receive(manager, file, 1, complete, argument);
 }
 
 /* Declare Manager-local data served through the vault, such as graph edata (serialized callables and arguments).
@@ -609,6 +624,14 @@ void vine_manager_data_service_vault_remove(struct vine_manager_data_service *ds
 int vine_manager_data_service_vault_contains(struct vine_manager *manager, struct vine_file *file)
 {
 	return manager && manager->ds && file && file->cached_name && hash_table_lookup(manager->ds->vault_table, file->cached_name) != NULL;
+}
+
+char *vine_manager_data_service_vault_path(struct vine_manager *manager, struct vine_file *file)
+{
+	if (!vine_manager_data_service_vault_contains(manager, file)) {
+		return NULL;
+	}
+	return string_format("%s/%s", manager->ds->vault_directory, file->cached_name);
 }
 
 void vine_manager_data_service_vault_set_limit(struct vine_manager_data_service *ds, int64_t bytes)

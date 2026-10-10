@@ -4,6 +4,7 @@
 
 from . import cvine
 
+import contextlib
 import os
 
 
@@ -15,21 +16,27 @@ def get_c_constant(constant):
     return getattr(cvine, constant)
 
 
-def set_port_range(port):
-    """ Sets the range for CCTools to look for free ports. """
-    if isinstance(port, int):
-        low_port = port
-        high_port = port
-    else:
-        try:
-            low_port, high_port = port
-        except Exception:
-            raise ValueError("port should be a single integer, or a sequence of two integers")
-
+@contextlib.contextmanager
+def port_range(port):
+    """ Set the range in which CCTools looks for free ports while the block runs, and restore the previous range
+    afterwards, so that processes started later choose their own ports. """
+    try:
+        low_port, high_port = port
+    except Exception:
+        raise ValueError("port should be a single integer, or a sequence of two integers")
     if low_port > high_port:
         raise TypeError("high_port {} cannot be smaller than low_port {}".format(high_port, low_port))
+    previous = {name: os.environ.get(name) for name in ("TCP_LOW_PORT", "TCP_HIGH_PORT")}
     os.environ["TCP_LOW_PORT"] = str(low_port)
     os.environ["TCP_HIGH_PORT"] = str(high_port)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 # helper function that allows a function call to access a variable from a library's state

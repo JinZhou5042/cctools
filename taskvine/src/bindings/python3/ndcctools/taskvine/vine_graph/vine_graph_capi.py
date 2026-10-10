@@ -59,56 +59,79 @@ class _SwigNonDynamicMeta(type):
 
 
 import cvine
-TASK_PRIORITY_MODE_RANDOM = _vine_graph_capi.TASK_PRIORITY_MODE_RANDOM
-TASK_PRIORITY_MODE_DEPTH_FIRST = _vine_graph_capi.TASK_PRIORITY_MODE_DEPTH_FIRST
-TASK_PRIORITY_MODE_BREADTH_FIRST = _vine_graph_capi.TASK_PRIORITY_MODE_BREADTH_FIRST
-TASK_PRIORITY_MODE_FIFO = _vine_graph_capi.TASK_PRIORITY_MODE_FIFO
-TASK_PRIORITY_MODE_LIFO = _vine_graph_capi.TASK_PRIORITY_MODE_LIFO
-TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST = _vine_graph_capi.TASK_PRIORITY_MODE_LARGEST_INPUT_FIRST
-TASK_PRIORITY_MODE_LARGEST_STORAGE_FOOTPRINT_FIRST = _vine_graph_capi.TASK_PRIORITY_MODE_LARGEST_STORAGE_FOOTPRINT_FIRST
+VINE_GRAPH_RUNNING = _vine_graph_capi.VINE_GRAPH_RUNNING
+VINE_GRAPH_DONE = _vine_graph_capi.VINE_GRAPH_DONE
+VINE_GRAPH_FAILED = _vine_graph_capi.VINE_GRAPH_FAILED
+VINE_GRAPH_NODE_WAITING = _vine_graph_capi.VINE_GRAPH_NODE_WAITING
+VINE_GRAPH_NODE_COMPLETED = _vine_graph_capi.VINE_GRAPH_NODE_COMPLETED
+VINE_GRAPH_NODE_FAILED = _vine_graph_capi.VINE_GRAPH_NODE_FAILED
 
-def vine_graph_executor_create(manager, task_runner_library_name, task_runner_function_name):
-    return _vine_graph_capi.vine_graph_executor_create(manager, task_runner_library_name, task_runner_function_name)
+def vine_graph_executor_create(manager, library_name, function_name):
+    return _vine_graph_capi.vine_graph_executor_create(manager, library_name, function_name)
 
 def vine_graph_executor_delete(e):
     return _vine_graph_capi.vine_graph_executor_delete(e)
 
-def vine_graph_executor_add_node(e):
-    return _vine_graph_capi.vine_graph_executor_add_node(e)
-
-def vine_graph_executor_set_target(e, node_id):
-    return _vine_graph_capi.vine_graph_executor_set_target(e, node_id)
-
-def vine_graph_executor_add_dependency(e, parent_id, child_id):
-    return _vine_graph_capi.vine_graph_executor_add_dependency(e, parent_id, child_id)
-
-def vine_graph_executor_declare_input_file(e, file_id, source_path, vault):
-    return _vine_graph_capi.vine_graph_executor_declare_input_file(e, file_id, source_path, vault)
-
-def vine_graph_executor_add_task_output_file(e, task_id, file_id, task_path, is_target):
-    return _vine_graph_capi.vine_graph_executor_add_task_output_file(e, task_id, file_id, task_path, is_target)
-
-def vine_graph_executor_add_task_input_file(e, task_id, file_id, task_path):
-    return _vine_graph_capi.vine_graph_executor_add_task_input_file(e, task_id, file_id, task_path)
-
-def vine_graph_executor_finalize(e):
-    return _vine_graph_capi.vine_graph_executor_finalize(e)
-
-def vine_graph_executor_get_node_outfile_remote_name(e, node_id):
-    return _vine_graph_capi.vine_graph_executor_get_node_outfile_remote_name(e, node_id)
-
-def vine_graph_executor_get_file_target_path(e, file_id):
-    return _vine_graph_capi.vine_graph_executor_get_file_target_path(e, file_id)
-
 def vine_graph_executor_tune(e, name, value):
     return _vine_graph_capi.vine_graph_executor_tune(e, name, value)
 
-def vine_graph_executor_execute(e):
-    return _vine_graph_capi.vine_graph_executor_execute(e)
+def vine_graph_executor_check_setting(name, value):
+    return _vine_graph_capi.vine_graph_executor_check_setting(name, value)
+
+def vine_graph_executor_add_node(e):
+    return _vine_graph_capi.vine_graph_executor_add_node(e)
+
+def vine_graph_executor_declare_file(e, source_path, vault):
+    return _vine_graph_capi.vine_graph_executor_declare_file(e, source_path, vault)
+
+def vine_graph_executor_add_output(e, node_id, task_path):
+    return _vine_graph_capi.vine_graph_executor_add_output(e, node_id, task_path)
+
+def vine_graph_executor_add_input(e, node_id, file_id, task_path):
+    return _vine_graph_capi.vine_graph_executor_add_input(e, node_id, file_id, task_path)
+
+def vine_graph_executor_submit_node(e, node_id):
+    return _vine_graph_capi.vine_graph_executor_submit_node(e, node_id)
+
+def vine_graph_executor_pin_file(e, file_id):
+    return _vine_graph_capi.vine_graph_executor_pin_file(e, file_id)
+
+def vine_graph_executor_unpin_file(e, file_id):
+    return _vine_graph_capi.vine_graph_executor_unpin_file(e, file_id)
+
+def vine_graph_executor_fetch_file(e, file_id):
+    return _vine_graph_capi.vine_graph_executor_fetch_file(e, file_id)
+
+def vine_graph_executor_get_local_path(e, file_id):
+    return _vine_graph_capi.vine_graph_executor_get_local_path(e, file_id)
+
+def vine_graph_executor_wait(e, timeout):
+    return _vine_graph_capi.vine_graph_executor_wait(e, timeout)
+
+def vine_graph_executor_wake(e):
+    return _vine_graph_capi.vine_graph_executor_wake(e)
+
+def vine_graph_executor_next_finished(e):
+    return _vine_graph_capi.vine_graph_executor_next_finished(e)
+
+def vine_graph_executor_get_node_state(e, node_id):
+    return _vine_graph_capi.vine_graph_executor_get_node_state(e, node_id)
+
+def vine_graph_executor_get_failure_source(e, node_id):
+    return _vine_graph_capi.vine_graph_executor_get_failure_source(e, node_id)
+
+def vine_graph_executor_get_node_error(e, node_id):
+    return _vine_graph_capi.vine_graph_executor_get_node_error(e, node_id)
+
+def vine_graph_executor_get_error(e):
+    return _vine_graph_capi.vine_graph_executor_get_error(e)
 
 def vine_graph_executor_get_makespan_us(e):
     return _vine_graph_capi.vine_graph_executor_get_makespan_us(e)
 
 def vine_graph_executor_get_completed_recovery_tasks(e):
     return _vine_graph_capi.vine_graph_executor_get_completed_recovery_tasks(e)
+
+def vine_graph_executor_cancel_node(e, node_id):
+    return _vine_graph_capi.vine_graph_executor_cancel_node(e, node_id)
 

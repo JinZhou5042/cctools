@@ -584,6 +584,22 @@ or `qdel` as appropriate. If you forget to remove them, they will exit
 automatically after fifteen minutes. (This can be adjusted with the `-t`
 option to `worker`.)
 
+### Ports and Firewalls
+
+A manager listens on two ports: `m.port`, where workers connect to receive
+tasks, and `m.data_port`, where workers fetch data the manager keeps for them.
+`vine.Manager(9123)` listens on port 9123 and takes any free port for data.
+If only some ports are open to workers, give the manager a range instead:
+`vine.Manager([9123, 9124])` takes the first free port of the range for tasks
+and the next one for data. A range of a single port leaves no port for data,
+so the manager cannot start.
+
+Creating a manager does not change the environment of the program. Workers
+that the program starts afterwards choose their own ports. The `TCP_LOW_PORT`
+and `TCP_HIGH_PORT` environment variables, if you set them, bound every port
+that is not given explicitly, including the data port of a manager given a
+single port.
+
 ### Project Names and the Catalog Server
 
 Keeping track of the manager's hostname and port can get cumbersome, especially

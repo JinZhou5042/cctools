@@ -1,6 +1,23 @@
 import hashlib
 
 
+def _evaluate_nested_task(value):
+    """Evaluate the legacy Dask tasks inside a value as Dask does: a task is a tuple that starts with a callable, and
+    lists are searched for tasks. Any other value is data."""
+    if isinstance(value, list):
+        return [_evaluate_nested_task(item) for item in value]
+    if type(value) is tuple and value and callable(value[0]):
+        return value[0](*(_evaluate_nested_task(item) for item in value[1:]))
+    return value
+
+
+def call_with_nested_tasks(func, *args, **kwargs):
+    """Call func of a legacy Dask task after evaluating the tasks nested in its arguments. Only tasks converted from a
+    legacy Dask graph run through this, so other arguments of other tasks reach their functions unchanged."""
+    return func(*(_evaluate_nested_task(arg) for arg in args),
+                **{name: _evaluate_nested_task(value) for name, value in kwargs.items()})
+
+
 def _legacy_subgraph_key(*parts):
     """Stable short key for expanded legacy Dask subgraph tasks."""
     return hashlib.sha256("".join(str(p) for p in parts).encode("utf-8")).hexdigest()[:20]

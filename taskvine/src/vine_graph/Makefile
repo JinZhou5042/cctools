@@ -10,7 +10,7 @@ MODULE_DIR   := $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/vine_graph
 TEST_MODULE_DIR := $(CCTOOLS_HOME)/test_support/python_modules/$(CCTOOLS_PYTHON_TEST_DIR)/ndcctools/taskvine/vine_graph
 MODULE_NAME  := vine_graph_capi
 
-SOURCES   := vine_graph_node.c vine_graph.c vine_graph_executor.c
+SOURCES   := vine_graph.c vine_graph_executor.c
 OBJECTS   := $(SOURCES:%.c=%.o)
 SWIG_WRAP := vine_graph_wrap.c
 WRAP_OBJ  := vine_graph_wrap.o
@@ -28,7 +28,7 @@ $(PYMODULE_BINDING): $(PYMODULE)
 	cp $(PYMODULE) $(PYMODULE_BINDING)
 	cp $(MODULE_NAME).py $(PY_MODULE_DIR)/$(MODULE_NAME).py
 
-$(SWIG_WRAP): vine_graph.i vine_graph.h vine_graph_executor.h vine_graph_node.h
+$(SWIG_WRAP): vine_graph.i vine_graph.h vine_graph_executor.h
 	$(CCTOOLS_SWIG) -python -threads -relativeimport \
 		-I$(CCTOOLS_HOME)/taskvine/src/manager \
 		-I$(CCTOOLS_HOME)/dttools/src \
@@ -38,7 +38,7 @@ $(SWIG_WRAP): vine_graph.i vine_graph.h vine_graph_executor.h vine_graph_node.h
 $(WRAP_OBJ): $(SWIG_WRAP)
 	$(CCTOOLS_CC) -o $@ -c $(CCTOOLS_INTERNAL_CCFLAGS) $(LOCAL_CCFLAGS) $(CCTOOLS_PYTHON3_CCFLAGS) -w -fPIC -DNDEBUG $<
 
-$(OBJECTS): %.o: %.c vine_graph.h vine_graph_executor.h vine_graph_node.h
+$(OBJECTS): %.o: %.c vine_graph.h vine_graph_executor.h
 	$(CCTOOLS_CC) -o $@ -c $(CCTOOLS_INTERNAL_CCFLAGS) $(LOCAL_CCFLAGS) -fPIC -DNDEBUG $<
 
 $(PYMODULE): $(WRAP_OBJ) $(OBJECTS)
@@ -53,13 +53,11 @@ install: all
 	rm -f $(MODULE_DIR)/capi_bridge.py
 	cp $(PYMODULE) $(MODULE_DIR)
 	cp $(MODULE_NAME).py $(MODULE_DIR)
-	cp $(PY_MODULE_DIR)/capi_bridge.py $(MODULE_DIR)
 	mkdir -p $(TEST_MODULE_DIR)
 	rm -f $(TEST_MODULE_DIR)/vine_graph_capi.py $(TEST_MODULE_DIR)/_vine_graph_capi.$(CCTOOLS_DYNAMIC_SUFFIX)
 	rm -f $(TEST_MODULE_DIR)/capi_bridge.py
 	cp $(PYMODULE) $(TEST_MODULE_DIR)
 	cp $(MODULE_NAME).py $(TEST_MODULE_DIR)
-	cp $(MODULE_DIR)/capi_bridge.py $(TEST_MODULE_DIR)
 
 clean:
 	rm -f *.o

@@ -28,7 +28,7 @@ from .task import (
     Task,
 )
 from .utils import (
-    set_port_range,
+    port_range,
     get_c_constant,
 )
 from . import vine_cache as vc
@@ -119,8 +119,6 @@ class Manager(object):
         else:
             self._staging_explicit = None
 
-        set_port_range(port)
-
         if status_display_interval and status_display_interval >= 1:
             self._info_widget = JupyterDisplay(interval=status_display_interval)
 
@@ -138,8 +136,13 @@ class Manager(object):
 
             ssl_key, ssl_cert = self._setup_ssl(ssl, run_info_path)
 
-            # use port = 0, as a port range has been set with set_port_range
-            self._taskvine = cvine.vine_ssl_create(0, ssl_key, ssl_cert)
+            # A single port goes to the C manager directly. A range reaches it through the environment only while the
+            # manager is created, so processes started later, such as local workers, choose their own ports.
+            if isinstance(port, int):
+                self._taskvine = cvine.vine_ssl_create(port, ssl_key, ssl_cert)
+            else:
+                with port_range(port):
+                    self._taskvine = cvine.vine_ssl_create(0, ssl_key, ssl_cert)
 
             if ssl_key:
                 self._using_ssl = True
@@ -319,6 +322,16 @@ class Manager(object):
     @property
     def port(self):
         return cvine.vine_port(self._taskvine)
+
+    ##
+    # Get the port on which the manager serves data to workers. Behind a
+    # firewall, give the manager a range of two ports so that both are known.
+    # @code
+    # >>> print(q.data_port)
+    # @endcode
+    @property
+    def data_port(self):
+        return cvine.vine_data_port(self._taskvine)
 
     ##
     # Whether the manager is using ssl to talk to workers
@@ -1136,9 +1149,8 @@ class Manager(object):
     # @param hoisting_modules  A list of modules imported at the preamble of library, including packages, functions and classes.
     # @param exec_mode       Execution mode that the library should use to run function calls. Either 'direct' or 'fork'
     # @param library_context_info   A list containing [library_context_func, library_context_args, library_context_kwargs]. Used to create the library context on remote nodes.
-    # @param function_infile_load_mode   The mode to load infile for function tasks inside this library.
     # @returns               A task to be used with @ref ndcctools.taskvine.manager.Manager.install_library.
-    def create_library_from_functions(self, library_name, *function_list, poncho_env=None, init_command=None, add_env=True, hoisting_modules=None, exec_mode='fork', library_context_info=None, function_infile_load_mode='cloudpickle'):
+    def create_library_from_functions(self, library_name, *function_list, poncho_env=None, init_command=None, add_env=True, hoisting_modules=None, exec_mode='fork', library_context_info=None):
         # Delay loading of poncho until here, to avoid bringing in poncho dependencies unless needed.
         # Ensure poncho python library is available.
         from ndcctools.poncho import package_serverize
@@ -1160,8 +1172,7 @@ class Manager(object):
                                                                add_env=add_env,
                                                                exec_mode=exec_mode,
                                                                hoisting_modules=hoisting_modules,
-                                                               library_context_info=library_context_info,
-                                                               function_infile_load_mode=function_infile_load_mode)
+                                                               library_context_info=library_context_info)
 
         # Create path for caching library code and environment based on function hash.
         library_cache_dir_name = "vine-library-cache"
@@ -1209,8 +1220,7 @@ class Manager(object):
                                                need_pack=need_pack,
                                                exec_mode=exec_mode,
                                                hoisting_modules=hoisting_modules,
-                                               library_context_info=library_context_info,
-                                               function_infile_load_mode=function_infile_load_mode)
+                                               library_context_info=library_context_info)
 
             # enable correct permissions for library code
             os.chmod(library_code_path, 0o775)

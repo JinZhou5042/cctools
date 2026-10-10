@@ -92,6 +92,9 @@ struct vine_manager {
 	struct link *manager_link;       /* Listening TCP connection for accepting new workers. */
 	struct link_info *poll_table;    /* Table for polling on all connected workers. */
 	int poll_table_size;             /* Number of entries in poll_table. */
+	struct link *wake_link;          /* Read end of the pipe that vine_wake() writes to from other threads. */
+	int wake_fd;                     /* Write end of that pipe. */
+	int woken;                       /* A wake arrived during the current vine_wait(), which then returns. */
 
 	/* Security configuration */
 

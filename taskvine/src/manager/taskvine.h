@@ -1084,6 +1084,15 @@ process).
 */
 struct vine_task *vine_wait(struct vine_manager *m, int timeout);
 
+/** Make a blocking @ref vine_wait return soon, from any thread.
+An application whose thread waits in @ref vine_wait can call this from another thread to regain control, for example
+after it queued work that the waiting thread hands to the manager. The wait returns after its current step, with or
+without a completed task. A wake that arrives while no wait runs makes the next wait return after one step.
+This is the only manager function that is safe to call from another thread, and only while the manager exists.
+@param m A manager object
+*/
+void vine_wake(struct vine_manager *m);
+
 /** Wait for a task with a given task to complete.
 Similar to @ref vine_wait, but guarantees that the returned task has the specified tag.
 @param m A manager object
@@ -1139,6 +1148,15 @@ Rather than assuming a specific port, the user should simply call this function 
 @return The port the manager is listening on.
 */
 int vine_port(struct vine_manager *m);
+
+/** Get the port on which the manager serves data to workers.
+Workers connect to this port, in addition to @ref vine_port, to fetch files the manager keeps for them.
+It is a free port of the range set by TCP_LOW_PORT and TCP_HIGH_PORT when the manager is created,
+so a range of two ports places both listening ports of the manager behind a firewall.
+@param m A manager object
+@return The data port of the manager.
+*/
+int vine_data_port(struct vine_manager *m);
 
 /** Change the project name for a given manager.
 @param m A manager object
