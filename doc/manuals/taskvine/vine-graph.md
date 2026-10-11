@@ -203,6 +203,20 @@ use, such as a model or a lookup table. Every worker loads all of them, and a
 library that holds many small Python objects starts each task more slowly, so
 pass data that only some tasks read as ordinary arguments.
 
+`edata_cache` does the same for the functions and arguments of tasks without
+naming them. It is a budget in bytes. The first `submit()` or `run()` call
+serializes the functions and arguments of the tasks it submits, takes them
+from smallest to largest until the next one does not fit, and gives them to
+the library before any of those tasks runs. Tasks then read these objects from
+the library instead of fetching a file each. The choice is made once: objects
+of later calls are fetched as files, so submit a whole graph with one `run()`
+call to cover all of it.
+
+```python
+with vg.Executor(port=9123, edata_cache=1 << 30) as executor:
+    results = executor.run(graph)
+```
+
 ## HTCondor workers
 
 Start the program:
@@ -441,6 +455,7 @@ hoist, params, **manager_options)` takes:
 | `library_modules` | `()` | Modules, or module names, the library imports when it starts on a worker. |
 | `library_files` | `None` | Local files given to the library, as `{local_path: name}`. |
 | `hoist` | `None` | Objects the library loads when it starts, as `{name: object}`, read by tasks through `vg.Hoisted(name)`. |
+| `edata_cache` | `0` | Bytes of task functions and arguments from the first `submit()` or `run()` call that the library loads when it starts, smallest first. |
 | `params` | `None` | Settings applied with `set_params()`. |
 
 Other keyword arguments, such as `ssl` or `run_info_path`, go to the TaskVine

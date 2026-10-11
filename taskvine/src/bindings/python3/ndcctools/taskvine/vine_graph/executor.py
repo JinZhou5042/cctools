@@ -249,10 +249,15 @@ class Executor:
     receives its own copy of that object without loading it. Hoisted objects stay in the library on every Worker until
     the Executor closes, so they suit a few large objects that most tasks use. library_files maps local paths to names
     in the library sandbox.
+
+    edata_cache is a budget in bytes for function and argument objects that the library loads when it starts, so tasks
+    do not fetch their files. The first submit() or run() call decides them once: of the objects it stages, the
+    smallest go into the library until the next one does not fit, and the library is installed before any of its
+    tasks run. Objects that later calls stage are fetched as files. The default, zero, caches nothing.
     """
 
     def __init__(self, port=cvine.VINE_DEFAULT_PORT, name=None, *, local=False, output_dir="./outputs",
-                 library_modules=(), library_files=None, hoist=None, params=None, **manager_options):
+                 library_modules=(), library_files=None, hoist=None, edata_cache=0, params=None, **manager_options):
         self._local = bool(local)
         self._closed = False
         self._manager = None
@@ -269,6 +274,14 @@ class Executor:
         # forked tasks get on Workers, and a Worker library loads them from a file.
         self._hoisted = _serialize_hoisted(hoist)
         library_modules = [library.module_name(module) for module in library_modules]
+        if not isinstance(edata_cache, int) or edata_cache < 0:
+            raise ValueError("edata_cache takes a number of bytes, zero or more")
+        self._edata_cache = edata_cache
+        # Until the first submit() or run() decides the cached edata, the library waits to be installed, and calls
+        # into C that the caller queues meanwhile are held, so no task reaches C before the library caches its edata.
+        self._library_pending = bool(edata_cache) and not self._local
+        self._held = None
+        self._cached_edata = frozenset()  # sandbox names of staged objects that the library loads
         self._last_number = 0
         self._declared_outputs = {}  # (graph id, key) -> output paths the task declared when it was submitted
         self._file_numbers = {}  # file identity -> number that names the file in sandboxes
@@ -351,10 +364,13 @@ class Executor:
         hoisted_path = None
         if self._hoisted:
             hoisted_path = os.path.join(self._run_dir, library.HOISTED)
-            library.save_hoisted(hoisted_path, self._hoisted)
-        library_name, function_name = self._resources.enter_context(
-            library.installed(self._manager, library_modules, library_files, hoisted_path))
-        self._executor = capi.vine_graph_executor_create(self._manager._taskvine, library_name, function_name)
+            library.save_objects(hoisted_path, self._hoisted)
+        self._library_name = library.unique_name()
+        self._library_options = (library_modules, library_files, hoisted_path)
+        if not self._library_pending:
+            self._install_library(None)
+        self._executor = capi.vine_graph_executor_create(self._manager._taskvine, self._library_name,
+                                                         library.run_node.__name__)
         if not self._executor:
             raise MemoryError("could not create the graph executor")
         for setting, value in EXECUTOR_TUNING.items():
@@ -363,6 +379,64 @@ class Executor:
             self._tune_executor("progress-bar", 0)
         self._edata_dir = self._resources.enter_context(
             tempfile.TemporaryDirectory(prefix="vine-graph-edata-", dir=self._manager.staging_directory))
+
+    def _install_library(self, edata_path):
+        """Install the library, which loads the cached edata at edata_path, if any, when it starts on a Worker."""
+        modules, files, hoisted_path = self._library_options
+        self._resources.enter_context(
+            library.installed(self._manager, self._library_name, modules, files, hoisted_path, edata_path))
+
+    @contextlib.contextmanager
+    def _first_submission(self):
+        """Around the first submit() or run() call of an Executor that caches edata, hold the calls into C that it
+        queues. Afterwards, install the library with the smallest objects that the call staged, then release them."""
+        if not self._library_pending or self._held is not None:
+            yield
+            return
+        with self._changed:
+            self._held = []
+        try:
+            yield
+        finally:
+            with _deferred_interrupts():
+                self._library_pending = False
+                path = None
+                try:
+                    path = self._save_edata_cache()
+                finally:
+                    with self._changed:
+                        held, self._held = self._held, None
+                        if not self._closed:
+                            self._commands.append(lambda: self._install_library(path))
+                            self._commands.extend(held)
+                            self._changed.notify_all()
+                            capi.vine_graph_executor_wake(self._executor)
+
+    def _save_edata_cache(self):
+        """Write the smallest staged objects that fit in edata_cache bytes to the file the library loads, and return
+        its path, or None when no object fits."""
+        with self._lock:
+            staged = [(name, path) for name, (identity, path) in self._edata_names.items() if identity is not None]
+        # Equal sizes keep the order of staging.
+        candidates = sorted((os.path.getsize(path), order, name, path) for order, (name, path) in enumerate(staged))
+        chosen = {}
+        total = 0
+        for size, _, name, path in candidates:
+            if total + size > self._edata_cache:
+                break
+            with open(path, "rb") as stream:
+                chosen[name] = stream.read()
+            total += size
+        if not chosen:
+            return None
+        path = os.path.join(self._run_dir, library.EDATA_CACHE)
+        library.save_objects(path, chosen)
+        self._cached_edata = frozenset(chosen)
+        # Only the library file holds cached objects, so their staged files go now, and the vault never sees them.
+        with self._lock:
+            for name in chosen:
+                os.unlink(self._edata_names[name][1])
+        return path
 
     # Lifetime.
 
@@ -528,7 +602,12 @@ class Executor:
             raise KeyError(f"no task with key {node.key!r}")
         self._add_graph(node.graph)
         task = (node.graph._id, node.key)
-        self._submit_with_ancestors(task)
+        with self._first_submission():
+            self._submit_with_ancestors(task)
+            future = self._new_future(task, target)
+        return future
+
+    def _new_future(self, task, target):
         if isinstance(target, NodeFile) and target.path not in self._declared_outputs[task]:
             raise ValueError(f"the file {target.path!r} was declared after its task was submitted")
         future = Future(self, target)
@@ -678,6 +757,9 @@ class Executor:
         with self._changed:
             if self._closed:
                 return
+            if self._held is not None:
+                self._held.append(command)
+                return
             self._commands.append(command)
             self._changed.notify_all()
             if self._driver is not None:
@@ -733,11 +815,13 @@ class Executor:
             else:
                 file = self._output_files[identity[1:]]
             self._add_input(node, file, name)
+        # The library holds the cached objects, so tasks neither mount nor fetch their files.
         for name, path in [*plan["edata"], plan["manifest"]]:
-            if name not in self._edata_files:
+            if name not in self._edata_files and name not in self._cached_edata:
                 self._edata_files[name] = self._declare_file(path, vault=True)
         for name, _ in plan["edata"]:
-            self._add_input(node, self._edata_files[name], name)
+            if name not in self._cached_edata:
+                self._add_input(node, self._edata_files[name], name)
         self._add_input(node, self._edata_files[plan["manifest"][0]], library.MANIFEST)
         self._check(capi.vine_graph_executor_submit_node(self._executor, node), f"failed to submit task {key!r}")
 
@@ -938,7 +1022,8 @@ class Executor:
         NodeFiles, or Files, and default to the tasks no other task reads. A failure raises the TaskError of a task
         that failed on its own, in preference to the tasks that could not run because of it."""
         targets = graph.sinks() if targets is None else list(targets)
-        futures = [self.submit(target) for target in targets]
+        with self._first_submission():
+            futures = [self.submit(target) for target in targets]
         self.wait(futures)
         errors = [error for error in (future.exception() for future in futures) if error is not None]
         if errors:

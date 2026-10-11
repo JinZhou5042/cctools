@@ -965,8 +965,9 @@ vine_graph_status_t vine_graph_executor_wait(struct vine_graph_executor *e, int 
 			vine_graph_executor_fail_run(e, string_format("library %s failed to start on workers too many times and was removed; check that workers can run it, and set the manager tuning watch-library-logfiles to 1 to keep its logs", e->library_name));
 			break;
 		}
-		vine_graph_executor_process_checkpoints(e);
+		/* Fetches come first, so a receive slot freed during the last wait goes to an output the caller waits for. */
 		vine_graph_executor_process_fetches(e);
+		vine_graph_executor_process_checkpoints(e);
 		vine_graph_executor_update_progress_bar(e);
 		/* The caller learns at once that a node finished or that a fetched output became readable. Results that
 		 * arrived during the last Manager wait are settled above before any return. */

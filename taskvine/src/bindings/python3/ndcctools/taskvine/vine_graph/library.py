@@ -12,8 +12,10 @@ function that raises ends the task process with a non-zero status after printing
 otherwise reports exceptions with status zero. Local execution calls run_task() too, so both run a function alike.
 
 The library prepares itself once when it starts, in its own process: it imports the modules it was given, then loads
-the hoisted objects from one file, HOISTED, which maps each name to the object serialized on its own. Every task it
-forks inherits both, so tasks neither import those modules nor load those objects again.
+the hoisted objects from one file, HOISTED, which maps each name to the object serialized on its own, and the cached
+edata from another, EDATA_CACHE, which maps sandbox names of staged objects to their serialized bytes. Every task it
+forks inherits all of them, so tasks neither import those modules nor load those objects again, and a task reads a
+cached object instead of the file that its manifest names.
 """
 
 import contextlib
@@ -37,23 +39,33 @@ MANIFEST = "vine-graph-node.pkl"
 RESULT = "outfile"
 # Library sandbox path of the hoisted objects.
 HOISTED = "vine-graph-hoisted.pkl"
+# Library sandbox path of the cached edata.
+EDATA_CACHE = "vine-graph-edata-cache.pkl"
 
 # The hoisted objects of this library process, by name, which forked tasks inherit.
 _hoisted = {}
+# The cached edata of this library process, by the sandbox name of its staged file, which forked tasks inherit.
+_edata = {}
+
+
+def unique_name():
+    """Return a new library name. An Executor never reaches a library instance of an earlier Executor that Workers
+    have not removed yet."""
+    return f"vine-graph-{uuid.uuid4().hex}"
 
 
 @contextlib.contextmanager
-def installed(manager, modules=(), files=None, hoisted=None):
-    """Install the library on a Manager, yield its name and the name of the function every task calls, and remove
-    the library with its files on exit. When the library starts, it imports modules, given as module objects or
-    names, and loads hoisted, the local path of a file written by save_hoisted(). files maps local paths to names in
-    the library sandbox. The name is unique, so an Executor never reaches a library instance of an earlier Executor
-    that Workers have not removed yet."""
-    name = f"vine-graph-{uuid.uuid4().hex}"
+def installed(manager, name, modules=(), files=None, hoisted=None, edata_cache=None):
+    """Install the library named name on a Manager, yield the name of the function every task calls, and remove the
+    library with its files on exit. When the library starts, it imports modules, given as module objects or names,
+    and loads hoisted and edata_cache, local paths of files written by save_objects(). files maps local paths to names
+    in the library sandbox."""
     module_names = [module_name(module) for module in modules]
     files = dict(files or {})
     if hoisted:
         files[hoisted] = HOISTED
+    if edata_cache:
+        files[edata_cache] = EDATA_CACHE
     for local in files:
         if not os.path.exists(local):
             raise FileNotFoundError(f"Local file {local} not found")
@@ -62,7 +74,7 @@ def installed(manager, modules=(), files=None, hoisted=None):
     inputs = []
     try:
         try:
-            context = [prepare, [module_names, HOISTED if hoisted else None], {}]
+            context = [prepare, [module_names, HOISTED if hoisted else None, EDATA_CACHE if edata_cache else None], {}]
             library = manager.create_library_from_functions(name, run_node, add_env=False, library_context_info=context)
         finally:
             # Library construction is synchronous, so new cache directories belong to this library.
@@ -72,7 +84,7 @@ def installed(manager, modules=(), files=None, hoisted=None):
             library.add_input(inputs[-1], remote)
         # Without a resource request, each instance takes its whole Worker with one function slot per core.
         manager.install_library(library)
-        yield name, run_node.__name__
+        yield run_node.__name__
     finally:
         try:
             # Removing the library also undeclares the code that the Manager generated for it.
@@ -87,8 +99,8 @@ def installed(manager, modules=(), files=None, hoisted=None):
                     shutil.rmtree(directory)
 
 
-def save_hoisted(path, blobs):
-    """Write hoisted objects, given as {name: serialized object}, to the file the library loads when it starts."""
+def save_objects(path, blobs):
+    """Write objects, given as {name: serialized object}, to a file the library loads when it starts."""
     with open(path, "wb") as stream:
         cloudpickle.dump(blobs, stream)
 
@@ -102,16 +114,17 @@ def module_name(module):
     raise TypeError(f"library_modules takes modules or module names, not {module!r}")
 
 
-def prepare(module_names, hoisted_path):
-    """Prepare this library process when it starts: import the modules, then load the hoisted objects, which may need
-    them. Freezing what was loaded keeps the garbage collector from touching that memory, so forked tasks share it
-    instead of copying it."""
+def prepare(module_names, hoisted_path, edata_path=None):
+    """Prepare this library process when it starts: import the modules, then load the hoisted objects and the cached
+    edata, which may need them. Freezing what was loaded keeps the garbage collector from touching that memory, so
+    forked tasks share it instead of copying it."""
     for name in module_names:
         importlib.import_module(name)
-    if hoisted_path:
-        with open(hoisted_path, "rb") as stream:
-            blobs = cloudpickle.load(stream)
-        _hoisted.update((name, cloudpickle.loads(blob)) for name, blob in blobs.items())
+    for path, objects in ((hoisted_path, _hoisted), (edata_path, _edata)):
+        if path:
+            with open(path, "rb") as stream:
+                blobs = cloudpickle.load(stream)
+            objects.update((name, cloudpickle.loads(blob)) for name, blob in blobs.items())
     gc.freeze()
 
 
@@ -194,6 +207,8 @@ def _run_node():
     objects = {}
 
     def load(task_path):
+        if task_path in _edata:
+            return _edata[task_path]
         if task_path not in objects:
             with open(task_path, "rb") as stream:
                 objects[task_path] = cloudpickle.load(stream)
