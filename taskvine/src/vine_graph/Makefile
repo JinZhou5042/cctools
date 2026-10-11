@@ -48,7 +48,7 @@ install: all
 	mkdir -p $(CCTOOLS_INSTALL_DIR)/$(PROJECT_NAME)/include
 	cp $(CCTOOLS_HOME)/taskvine/src/manager/taskvine.h $(CCTOOLS_INSTALL_DIR)/$(PROJECT_NAME)/include/
 	mkdir -p $(MODULE_DIR)
-	rm -f $(MODULE_DIR)/graph.py $(MODULE_DIR)/graph_capi.py $(MODULE_DIR)/_graph_capi.$(CCTOOLS_DYNAMIC_SUFFIX)
+	rm -f $(MODULE_DIR)/graph_capi.py $(MODULE_DIR)/_graph_capi.$(CCTOOLS_DYNAMIC_SUFFIX)
 	rm -f $(MODULE_DIR)/vine_graph_capi.py $(MODULE_DIR)/_vine_graph_capi.$(CCTOOLS_DYNAMIC_SUFFIX)
 	rm -f $(MODULE_DIR)/capi_bridge.py
 	cp $(PYMODULE) $(MODULE_DIR)
