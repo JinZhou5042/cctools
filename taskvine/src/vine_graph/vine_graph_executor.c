@@ -39,7 +39,7 @@ struct vine_graph_executor {
 	struct itable *task_id_to_node;		 // maps Manager task id to graph node after submission
 	struct priority_queue *checkpoint_queue; // borrowed idata awaiting admission, longest producer first
 	struct list *checkpoint_completed;	 // borrowed files whose checkpoint the Manager published
-	struct list *checkpoint_failed;		 // borrowed files whose checkpoint failed or was preempted, to requeue
+	struct list *checkpoint_failed;		 // borrowed files whose checkpoint failed, to requeue
 	timestamp_t checkpoint_retry_time;	 // when failed files are requeued, so a lost source is not retried at once
 	struct set *checkpoint_pending;		 // queued or in-flight files; release withdraws them
 	uint64_t checkpoint_sequence;		 // completion order used to break equal checkpoint priorities

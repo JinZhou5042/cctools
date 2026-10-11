@@ -2,8 +2,8 @@
  * The vault is a directory under the Manager staging directory. Each entry is named by a cache name and is the only
  * data a Worker can fetch from the data port: a symlink to a declared local file, or a retrieved checkpoint.
  * The vault table indexes these entries by cache name for queries on the Manager thread.
- * Worker requests always take priority over checkpoint receives for the shared transfer slots: receives never use
- * the slots reserved for Worker requests, and a Worker request preempts a receive when every slot is busy.
+ * Each direction has slots of its own: 128 for Worker requests served from the vault, and 128 for checkpoint receives
+ * into it, so neither direction waits for the other.
  * The Manager thread owns file lookup and completion callbacks. Executors only perform network and file I/O.
  * All entry points except executor functions run on the Manager thread. */
 #ifndef VINE_MANAGER_DATA_SERVICE_H
@@ -19,7 +19,7 @@ struct link_info;
 /* Result of a checkpoint request. Every refusal leaves nothing behind and can be retried later. */
 typedef enum {
 	VINE_CHECKPOINT_ADMITTED = 1,	/* Started, already in progress, or already in the vault. */
-	VINE_CHECKPOINT_BUSY = 0,	/* No free transfer slot outside the Worker reserve. */
+	VINE_CHECKPOINT_BUSY = 0,	/* Every receive slot is in use. */
 	VINE_CHECKPOINT_NO_SOURCE = -1, /* The file is not a temporary file with a ready Worker replica. */
 	VINE_CHECKPOINT_FULL = -2,	/* The vault limit leaves no room for the file. */
 } vine_manager_checkpoint_result_t;
@@ -35,9 +35,9 @@ void vine_manager_data_service_poll(struct vine_manager_data_service *ds, struct
 /* Accept connections and process a bounded batch of executor results. */
 void vine_manager_data_service_handle(struct vine_manager *manager);
 
-/* Request a checkpoint of a temporary file into the vault through the shared bounded pool.
+/* Request a checkpoint of a temporary file into the vault through a receive slot.
  * When admitted, the Manager thread later calls complete with one when the complete file is published, or with zero
- * when the receive fails or is preempted by a Worker request. An existing vault entry completes immediately.
+ * when the receive fails. An existing vault entry completes immediately.
  * An in-progress request keeps its original callback. Removing the vault entry cancels the receive and drops
  * its callback. */
 vine_manager_checkpoint_result_t vine_manager_data_service_checkpoint(struct vine_manager *manager, struct vine_file *file, void (*complete)(void *, struct vine_file *, int), void *argument);

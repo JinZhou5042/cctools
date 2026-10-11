@@ -30,12 +30,17 @@
 /* Maximum size of a native data request or response header, including the terminator. */
 #define VINE_DATA_LINE_MAX 4096
 
-/* Default data connection budget and idle timeout in seconds. */
-#define VINE_DATA_CONNECTIONS_DEFAULT 16U
-#define VINE_DATA_IDLE_SECONDS 60
+/* Transfer slots of each direction: Worker requests served from the vault, and checkpoint receives into it. Neither
+ * direction uses or waits for the slots of the other. */
+#define VINE_DATA_REQUEST_SLOTS 128U
+#define VINE_DATA_RECEIVE_SLOTS 128U
 
-/* Slots that checkpoint receives never use, so arriving Worker requests find a free slot without preemption. */
-#define VINE_DATA_WORKER_RESERVED_SLOTS 4U
+/* Executors for both directions. A cancelled receive releases its slot before its executor returns, so each receive
+ * slot has a spare executor. */
+#define VINE_DATA_THREADS (VINE_DATA_REQUEST_SLOTS + 2 * VINE_DATA_RECEIVE_SLOTS)
+
+/* Seconds a Worker request may stay idle. */
+#define VINE_DATA_IDLE_SECONDS 60
 
 /* Seconds a checkpoint receive may spend connecting to its source Worker. */
 #define VINE_DATA_CHECKPOINT_CONNECT_SECONDS 5
@@ -102,22 +107,15 @@ static int job_is_active_receive(struct transfer_job *job)
 	return job->file && !job->cancelled;
 }
 
-/* Count jobs that still hold a transfer slot, and optionally the receives among them.
- * A cancelled receive releases its slot immediately. */
-static unsigned active_job_count(struct vine_manager_data_service *ds, unsigned *receives)
+/* Count the jobs of one direction that hold a slot: Worker requests, or receives. A cancelled receive releases its
+ * slot immediately. */
+static unsigned slots_in_use(struct vine_manager_data_service *ds, int receives)
 {
 	unsigned count = 0;
-	unsigned receiving = 0;
 	struct transfer_job *job;
 	LIST_ITERATE(ds->jobs, job)
 	{
-		if (!job->cancelled) {
-			count++;
-			receiving += job->file != NULL;
-		}
-	}
-	if (receives) {
-		*receives = receiving;
+		count += receives ? job_is_active_receive(job) : !job->file;
 	}
 	return count;
 }
@@ -262,29 +260,6 @@ static void cancel_receive(struct vine_manager_data_service *ds, struct transfer
 	pthread_mutex_unlock(&ds->lock);
 }
 
-/* Give a Worker request priority by cancelling the most recently admitted receive, which has the least progress.
- * A receive that already finished only waits for the Manager thread and frees no executor, so it is skipped.
- * The receive reports failure through its callback so the caller can request it again later. */
-static int preempt_receive(struct vine_manager_data_service *ds)
-{
-	struct transfer_job *youngest = NULL;
-	struct transfer_job *job;
-	pthread_mutex_lock(&ds->lock);
-	LIST_ITERATE(ds->jobs, job)
-	{
-		if (job_is_active_receive(job) && !job->done) {
-			youngest = job;
-		}
-	}
-	pthread_mutex_unlock(&ds->lock);
-	if (!youngest) {
-		return 0;
-	}
-	debug(D_VINE, "checkpoint preempted: %s", youngest->name);
-	cancel_receive(ds, youngest);
-	return 1;
-}
-
 struct vine_manager_data_service *vine_manager_data_service_create(const char *runtime_directory)
 {
 	struct vine_manager_data_service *ds = calloc(1, sizeof(*ds));
@@ -325,7 +300,7 @@ struct vine_manager_data_service *vine_manager_data_service_create(const char *r
 		listen(link_fd(ds->listener), SOMAXCONN);
 	}
 	/* Cancelled receives release their slots before their executors return, so allow one spare executor per slot. */
-	ds->threads = thread_pool_create(2 * VINE_DATA_CONNECTIONS_DEFAULT);
+	ds->threads = thread_pool_create(VINE_DATA_THREADS);
 	if (!ds->listener || !ds->notification || !ds->threads || !ds->vault_table) {
 		vine_manager_data_service_delete(ds);
 		return NULL;
@@ -388,17 +363,9 @@ int vine_manager_data_service_port(struct vine_manager_data_service *ds)
 
 void vine_manager_data_service_poll(struct vine_manager_data_service *ds, struct link_info *entries)
 {
-	/* Watch the listener while a slot is free or a receive can be preempted. Otherwise connections wait in the
-	 * kernel backlog without waking the Manager repeatedly. */
-	int accepting = active_job_count(ds, NULL) < VINE_DATA_CONNECTIONS_DEFAULT;
-	struct transfer_job *job;
-	LIST_ITERATE(ds->jobs, job)
-	{
-		if (accepting) {
-			break;
-		}
-		accepting = job_is_active_receive(job);
-	}
+	/* Watch the listener while a request slot is free. Otherwise connections wait in the kernel backlog without
+	 * waking the Manager repeatedly. */
+	int accepting = slots_in_use(ds, 0) < VINE_DATA_REQUEST_SLOTS;
 	entries[0] = (struct link_info){ds->listener, accepting ? LINK_READ : 0, 0};
 	entries[1] = (struct link_info){ds->notification, LINK_READ, 0};
 }
@@ -412,8 +379,8 @@ static void vault_insert(struct vine_manager_data_service *ds, struct vine_file 
 }
 
 /* Release a finished receive: return its reservation, publish its file, and report the result.
- * Success means the file was renamed into the vault before any cancellation, so a preempted receive that already
- * finished still publishes. Only a removed receive, whose name vault removal already unlinked, never publishes. */
+ * Success means the file was renamed into the vault before any cancellation. A removed receive, whose name vault
+ * removal already unlinked, never publishes. */
 static void finish_receive(struct vine_manager *manager, struct transfer_job *job)
 {
 	struct vine_manager_data_service *ds = manager->ds;
@@ -436,7 +403,7 @@ static void finish_receive(struct vine_manager *manager, struct transfer_job *jo
 void vine_manager_data_service_handle(struct vine_manager *manager)
 {
 	struct vine_manager_data_service *ds = manager->ds;
-	for (unsigned i = 0; i < 2 * VINE_DATA_CONNECTIONS_DEFAULT; i++) {
+	for (unsigned i = 0; i < VINE_DATA_THREADS; i++) {
 		pthread_mutex_lock(&ds->lock);
 		struct transfer_job *job = list_pop_head(ds->ready);
 		pthread_mutex_unlock(&ds->lock);
@@ -451,11 +418,7 @@ void vine_manager_data_service_handle(struct vine_manager *manager)
 		}
 		job_delete(job);
 	}
-	/* Worker requests always take priority over checkpoint receives. */
-	while (link_usleep(ds->listener, 0, 1, 0)) {
-		if (active_job_count(ds, NULL) >= VINE_DATA_CONNECTIONS_DEFAULT && !preempt_receive(ds)) {
-			break;
-		}
+	while (slots_in_use(ds, 0) < VINE_DATA_REQUEST_SLOTS && link_usleep(ds->listener, 0, 1, 0)) {
 		struct link *link = link_accept(ds->listener, time(NULL));
 		if (!link) {
 			break;
@@ -491,10 +454,7 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 			return VINE_CHECKPOINT_ADMITTED;
 		}
 	}
-	/* Receives never take the slots reserved for Worker requests. */
-	unsigned receives;
-	unsigned active = active_job_count(ds, &receives);
-	if (active >= VINE_DATA_CONNECTIONS_DEFAULT || receives >= VINE_DATA_CONNECTIONS_DEFAULT - VINE_DATA_WORKER_RESERVED_SLOTS) {
+	if (slots_in_use(ds, 1) >= VINE_DATA_RECEIVE_SLOTS) {
 		return VINE_CHECKPOINT_BUSY;
 	}
 	int64_t size = (int64_t)file->size;

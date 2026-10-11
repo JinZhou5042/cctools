@@ -619,11 +619,10 @@ help, because consecutive tasks of a chain tend to run on the same worker.
 ### Checkpoints
 
 Every result is queued for checkpointing when its task completes, and results
-of longer-running tasks are copied first. The data service runs all transfers
-on one pool of 16 connections. Workers fetching data come first: four
-connections are reserved for them, and a worker request that finds no free
-connection cancels the newest checkpoint copy. A failed or cancelled copy is
-queued again after the manager's `transient-error-interval`.
+of longer-running tasks are copied first. The data service handles up to 128
+workers fetching data and up to 128 checkpoint copies at once, and neither
+direction waits for the other. A failed copy is queued again after the
+manager's `transient-error-interval`.
 
 ### Arguments and recovery
 
