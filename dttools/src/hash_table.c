@@ -33,7 +33,7 @@ struct hash_table {
 	int ibucket;
 	struct entry *ientry;
 	int iteration_index;
-	int need_compact;
+	int need_compact; /* entries marked deleted since the last compaction */
 };
 
 struct hash_table *hash_table_create(int bucket_count, hash_func_t func)
@@ -203,6 +203,9 @@ static int hash_table_double_buckets(struct hash_table *h)
 			if (!e->deleted) {
 				e->next = NULL;
 				insert_to_buckets_aux(new_buckets, new_count, e);
+			} else {
+				free(e->key);
+				free(e);
 			}
 			e = f;
 		}
@@ -246,6 +249,9 @@ static int hash_table_reduce_buckets(struct hash_table *h)
 			if (!e->deleted) {
 				e->next = NULL;
 				insert_to_buckets_aux(new_buckets, new_count, e);
+			} else {
+				free(e->key);
+				free(e);
 			}
 			e = f;
 		}
@@ -332,6 +338,12 @@ int hash_table_insert(struct hash_table *h, const char *key, const void *value)
 		e = e->next;
 	}
 
+	/* A table that is never iterated is never compacted, so compact once deleted entries outnumber the rest. A new
+	 * entry ends any iteration in progress, so no iterator is left on a freed entry. */
+	if (h->need_compact > h->size + h->bucket_count) {
+		hash_table_compact(h);
+	}
+
 	e = (struct entry *)xxmalloc(sizeof(struct entry));
 
 	e->key = xxstrdup(key);
@@ -372,7 +384,7 @@ void *hash_table_remove(struct hash_table *h, const char *key)
 				return 0;
 			}
 			e->deleted = 1;
-			h->need_compact = 1;
+			h->need_compact++;
 			value = e->value;
 
 			h->size--;
