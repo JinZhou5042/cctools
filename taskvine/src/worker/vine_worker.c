@@ -1716,21 +1716,24 @@ static void check_libraries_ready(struct link *manager)
 	list_delete(failed_libraries);
 }
 
+/* Signal handlers write a byte here, so a signal that arrives just before the main loop waits still ends the wait. */
+static int wake_pipe[2] = {-1, -1};
+static struct link *wake_link = NULL;
+
+static void wake_main_loop(void)
+{
+	int saved_errno = errno;
+	/* A failed write means the pipe is full, which already wakes the loop. */
+	if (write(wake_pipe[1], "", 1) < 0) {
+	}
+	errno = saved_errno;
+}
+
 /* Start working for the (newly connected) manager on this given link. */
 
 static void vine_worker_serve_manager(struct link *manager)
 {
-	sigset_t mask;
-
 	debug(D_VINE, "working for manager at %s:%d.\n", current_manager_address->addr, current_manager_address->port);
-
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGCHLD);
-	sigaddset(&mask, SIGTERM);
-	sigaddset(&mask, SIGQUIT);
-	sigaddset(&mask, SIGINT);
-	sigaddset(&mask, SIGUSR1);
-	sigaddset(&mask, SIGUSR2);
 
 	reset_idle_timer();
 
@@ -1753,18 +1756,8 @@ static void vine_worker_serve_manager(struct link *manager)
 			break;
 		}
 
-		/*
-		link_usleep will cause the worker to sleep for a time until
-		interrupted by a SIGCHILD signal.  However, the signal could
-		have been delivered while we were outside of the wait function,
-		setting sigchld_received_flag.  In that case, do not block
-		but proceed with the
-
-		There is a still a (very small) race condition in that the
-		signal could be received between the check and link_usleep,
-		hence a maximum wait time of five seconds is enforced.
-		*/
-
+		/* Wait for the manager or a signal. A flag set before the wait skips it, and the wake pipe ends it for a
+		 * signal that arrives in between. */
 		int wait_msec = 5000;
 
 		if (sigchld_received_flag) {
@@ -1772,9 +1765,12 @@ static void vine_worker_serve_manager(struct link *manager)
 			sigchld_received_flag = 0;
 		}
 
-		int manager_activity = link_usleep_mask(manager, wait_msec * 1000, &mask, 1, 0);
-		if (manager_activity < 0)
-			break;
+		struct link_info waits[2] = {{manager, LINK_READ, 0}, {wake_link, LINK_READ, 0}};
+		int ready = link_poll(waits, wake_link ? 2 : 1, wait_msec);
+		char drain[64];
+		while (wake_link && read(wake_pipe[0], drain, sizeof(drain)) > 0) {
+		}
+		int manager_activity = ready > 0 && (waits[0].revents & LINK_READ);
 
 		int ok = 1;
 		if (manager_activity) {
@@ -2226,11 +2222,13 @@ static void handle_abort(int sig)
 {
 	abort_flag = 1;
 	abort_signal_received = sig;
+	wake_main_loop();
 }
 
 static void handle_sigchld(int sig)
 {
 	sigchld_received_flag = 1;
+	wake_main_loop();
 }
 
 struct list *parse_manager_addresses(const char *specs, int default_port)
@@ -2365,6 +2363,15 @@ int main(int argc, char *argv[])
 	signal(SIGUSR1, handle_abort);
 	signal(SIGUSR2, handle_abort);
 	signal(SIGCHLD, handle_sigchld);
+
+	/* Neither end of the wake pipe blocks, and tasks do not inherit it. */
+	if (pipe(wake_pipe) == 0) {
+		for (int i = 0; i < 2; i++) {
+			fcntl(wake_pipe[i], F_SETFL, O_NONBLOCK);
+			fcntl(wake_pipe[i], F_SETFD, FD_CLOEXEC);
+		}
+		wake_link = link_attach_to_fd(wake_pipe[0]);
+	}
 
 	/* Create the workspace directory and move there. */
 	workspace = vine_workspace_create(options->workspace_dir);
