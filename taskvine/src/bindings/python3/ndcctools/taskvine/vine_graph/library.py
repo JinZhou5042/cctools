@@ -5,8 +5,9 @@
 """The TaskVine library that runs the tasks of an Executor on Workers.
 
 An Executor installs one library with installed() and removes it when it closes. Every task calls run_node(), the
-library's only function, without arguments. The task sandbox holds a manifest at MANIFEST that names the files of the
-function and its arguments by sandbox path, and the sandbox paths of the results and files the task reads. run_node()
+library's only function, without arguments. The task sandbox holds a manifest at MANIFEST with the function and the
+arguments of the task, small ones serialized inside it and larger ones as staged files named by sandbox path, and the
+sandbox paths of the results and files the task reads. run_node()
 returns the function's result, which the TaskVine library writes to RESULT as {"Result", "Success", "Reason"}. A
 function that raises ends the task process with a non-zero status after printing its traceback, because the library
 otherwise reports exceptions with status zero. Local execution calls run_task() too, so both run a function alike.
@@ -206,13 +207,18 @@ def _run_node():
         manifest = cloudpickle.load(stream)
     objects = {}
 
-    def load(task_path):
-        if task_path in _edata:
-            return _edata[task_path]
-        if task_path not in objects:
-            with open(task_path, "rb") as stream:
-                objects[task_path] = cloudpickle.load(stream)
-        return objects[task_path]
+    def load(entry):
+        # An entry is the index of an object serialized inside the manifest, or the sandbox path of a staged file,
+        # which the library may hold already.
+        if entry not in objects:
+            if isinstance(entry, int):
+                objects[entry] = cloudpickle.loads(manifest["objects"][entry])
+            elif entry in _edata:
+                objects[entry] = _edata[entry]
+            else:
+                with open(entry, "rb") as stream:
+                    objects[entry] = cloudpickle.load(stream)
+        return objects[entry]
 
     function = load(manifest["callable"])
     args = tuple(load(task_path) for task_path in manifest["args"])

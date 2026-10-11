@@ -205,9 +205,10 @@ pass data that only some tasks read as ordinary arguments.
 
 `edata_cache` does the same for the functions and arguments of tasks without
 naming them. It is a budget in bytes. The first `submit()` or `run()` call
-serializes the functions and arguments of the tasks it submits, takes them
-from smallest to largest until the next one does not fit, and gives them to
-the library before any of those tasks runs. Tasks then read these objects from
+serializes the functions and arguments of the tasks it submits, takes those
+larger than 4 KB from smallest to largest until the next one does not fit,
+and gives them to the library before any of those tasks runs. Smaller objects
+need no cache, because they already travel with each task. Tasks then read these objects from
 the library instead of fetching a file each. The choice is made once: objects
 of later calls are fetched as files, so submit a whole graph with one `run()`
 call to cover all of it.
@@ -582,7 +583,7 @@ Vine Graph moves three kinds of data:
 
 | Kind | Contents | Location | Removed |
 | --- | --- | --- | --- |
-| Arguments | The function and each argument of a task, serialized into separate files. An object passed to several tasks is stored once. | Manager disk, served to workers from the data port | When the program can no longer ask for any task that uses them, and none of those tasks can run again |
+| Arguments | The function and each argument of a task, serialized one by one. Objects up to 4 KB travel inside the task's manifest; larger ones are files, and an object passed to several tasks is stored once. | Manager disk, served to workers from the data port | When the program can no longer ask for any task that uses them, and none of those tasks can run again |
 | Results | The return value of a task, and any files it writes | Worker caches, as TaskVine temporary files | When every task that reads them has a durable result |
 | Checkpoints | Copies of results | The vault, a directory on the manager disk | With the result they copy |
 

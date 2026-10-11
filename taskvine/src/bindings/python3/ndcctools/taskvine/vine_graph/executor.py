@@ -77,6 +77,13 @@ EXECUTOR_TUNING = {
 COMPLETED = "completed"
 FAILED = "failed"
 
+# Bytes up to which a serialized function or argument travels inside the manifest of its task. Larger objects become
+# staged files, which every task that passes the same object shares. A file of its own takes at least one 4 KiB page
+# on disk, so a smaller object is never cheaper as a file. References to other tasks and small values, which are usually
+# different in every task, then add no file at all, and a small object that tasks share is copied at most this many
+# bytes per task.
+INLINE_LIMIT = 4096
+
 
 # Open Executors. Creating an Executor on the port of an open one, as rerunning a notebook cell does, closes the open
 # one first, and every Executor still open is closed before the interpreter tears its modules down.
@@ -217,6 +224,36 @@ class _Call:
         except Exception as error:
             self.error = error
         self.finished = True
+
+
+class _Serialized:
+    """A pickle target that keeps the first limit bytes in memory and moves everything to a file at path only when the
+    pickle grows past them."""
+
+    def __init__(self, path, limit):
+        self.path = path
+        self.limit = limit
+        self.buffer = bytearray()
+        self.stream = None
+
+    def write(self, data):
+        if self.stream is None:
+            if len(self.buffer) + len(data) <= self.limit:
+                self.buffer += data
+                return len(data)
+            self.stream = open(self.path, "wb")
+            self.stream.write(self.buffer)
+            self.buffer = None
+        return self.stream.write(data)
+
+    def close(self):
+        if self.stream is not None:
+            self.stream.close()
+
+    def discard(self):
+        if self.stream is not None:
+            self.stream.close()
+            os.unlink(self.path)
 
 
 class _PathRequest:
@@ -696,58 +733,81 @@ class Executor:
         # The manifest is keyed by the references as the arguments hold them, and the Executor resolves them.
         files = {library.file_identity(ref): self._file_task_path(_resolve_file(graph_id, library.file_identity(ref)))
                  for ref in graph._reads[key]}
-        staged = {
-            "callable": self._stage_object(func, names),
-            "args": [self._stage_object(value, names) for value in args],
-            "kwargs": {argument: self._stage_object(value, names) for argument, value in kwargs.items()},
-        }
-        # The manifest names every file the task reads by its sandbox path.
+        # The manifest holds each small object serialized inside it, and names each larger one by the sandbox path of
+        # its staged file. An object passed as several arguments of the task is one entry, so it stays one object.
+        inline = []
+        entries = {}
+
+        def stage(value):
+            if id(value) not in entries:
+                entries[id(value)] = self._stage_argument(value, names, inline)
+            return entries[id(value)]
+
         manifest = {
-            "callable": staged["callable"][0],
-            "args": [name for name, _ in staged["args"]],
-            "kwargs": {argument: name for argument, (name, _) in staged["kwargs"].items()},
+            "objects": inline,
+            "callable": stage(func),
+            "args": [stage(value) for value in args],
+            "kwargs": {argument: stage(value) for argument, value in kwargs.items()},
             "inputs": {parent: self._result_task_path(_resolve(graph_id, parent)) for parent in graph._results[key]},
             "files": files,
         }
+        with self._lock:
+            edata = [(name, self._edata_names[name][1]) for name in names]
         return {
             "task": task,
             "outputs": self._declared_outputs[task],
             "results": [(_resolve(graph_id, parent), name) for parent, name in manifest["inputs"].items()],
             "files": [(_resolve_file(graph_id, identity), name) for identity, name in files.items()],
-            "edata": list(dict.fromkeys([staged["callable"], *staged["args"], *staged["kwargs"].values()])),
-            "manifest": self._stage_object(manifest, names, share=False),
+            "edata": edata,
+            "manifest": self._stage_manifest(manifest, names),
         }
 
-    def _stage(self, value):
-        """Serialize one argument object for the vault and return its sandbox name and local path."""
+    def _stage(self, value, inline_limit=0):
+        """Serialize one object. Return None and its bytes when they fit in inline_limit, and otherwise write them to
+        a new staged file and return its sandbox name and local path. Small objects never touch the disk, and a large
+        one is written as it is serialized instead of being held in memory."""
         self._last_number += 1
         name = f"vine-graph-edata-{self._last_number}"
-        path = os.path.join(self._edata_dir, name)
+        target = _Serialized(os.path.join(self._edata_dir, name), inline_limit)
         try:
-            with open(path, "wb") as stream:
-                cloudpickle.dump(value, stream)
+            cloudpickle.dump(value, target)
+            target.close()
         except BaseException:
             # A long-lived Executor would otherwise keep the partial file of a failed or interrupted submission.
-            os.unlink(path)
+            target.discard()
             raise
-        return name, path
+        if target.stream is None:
+            return None, bytes(target.buffer)
+        return name, target.path
 
-    def _stage_object(self, value, names, share=True):
-        """Return the sandbox name and local path of a staged object, staging it unless it is staged already, and add
-        its name to names, which holds the file for a task."""
+    def _stage_argument(self, value, names, inline):
+        """Return how the manifest refers to the function or an argument of a task: the index of its bytes in inline
+        when it is small, or else the sandbox name of its staged file, staging it unless it is staged already. The name
+        of a staged file is added to names, which holds the file for the task."""
         # Share top-level objects by identity, not content. Independent pickle streams do not preserve aliases nested
         # across different objects or callable closures.
         with self._lock:
-            entry = self._edata.get(id(value)) if share else None
+            entry = self._edata.get(id(value))
             if entry is not None:
                 self._edata_holders[entry[1]] += 1
                 names.append(entry[1])
-                return entry[1:]
-        name, path = self._stage(value)
+                return entry[1]
+        name, staged = self._stage(value, INLINE_LIMIT)
+        if name is None:
+            inline.append(staged)
+            return len(inline) - 1
         with self._lock:
-            if share:
-                self._edata[id(value)] = (value, name, path)
-            self._edata_names[name] = (id(value) if share else None, path)
+            self._edata[id(value)] = (value, name, staged)
+            self._edata_names[name] = (id(value), staged)
+            self._edata_holders[name] += 1
+        names.append(name)
+        return name
+
+    def _stage_manifest(self, manifest, names):
+        """Stage the manifest of a task as a file of its own, which the task holds, and return its name and path."""
+        name, path = self._stage(manifest)
+        with self._lock:
+            self._edata_names[name] = (None, path)
             self._edata_holders[name] += 1
         names.append(name)
         return name, path
