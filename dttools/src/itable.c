@@ -31,7 +31,7 @@ struct itable {
 	int ibucket;
 	struct entry *ientry;
 	int iteration_index;
-	int need_compact;
+	int need_compact; /* entries marked deleted since the last compaction */
 };
 
 struct itable *itable_create(int bucket_count)
@@ -136,6 +136,8 @@ static int itable_reduce_buckets(struct itable *h)
 			if (!e->deleted) {
 				e->next = NULL;
 				itable_insert_to_buckets_aux(new_buckets, new_count, e);
+			} else {
+				free(e);
 			}
 			e = f;
 		}
@@ -240,6 +242,8 @@ static int itable_double_buckets(struct itable *h)
 			if (!e->deleted) {
 				e->next = NULL;
 				itable_insert_to_buckets_aux(new_buckets, new_count, e);
+			} else {
+				free(e);
 			}
 			e = f;
 		}
@@ -281,6 +285,12 @@ int itable_insert(struct itable *h, UINT64_T key, const void *value)
 		e = e->next;
 	}
 
+	/* A table that is never iterated is never compacted, so compact once deleted entries outnumber the rest. A new
+	 * entry ends any iteration in progress, so no iterator is left on a freed entry. */
+	if (h->need_compact > h->size + h->bucket_count) {
+		itable_compact(h);
+	}
+
 	e = (struct entry *)malloc(sizeof(struct entry));
 	if (!e)
 		return 0;
@@ -317,7 +327,7 @@ void *itable_remove(struct itable *h, UINT64_T key)
 				return 0;
 			}
 			e->deleted = 1;
-			h->need_compact = 1;
+			h->need_compact++;
 			value = e->value;
 
 			h->size--;

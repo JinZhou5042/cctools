@@ -30,7 +30,7 @@ struct set {
 	int ibucket;
 	struct entry *ientry;
 	int iteration_index;
-	int need_compact;
+	int need_compact; /* entries marked deleted since the last compaction */
 };
 
 struct set *set_create(int bucket_count)
@@ -140,6 +140,8 @@ static int set_reduce_buckets(struct set *s)
 			if (!e->deleted) {
 				e->next = NULL;
 				set_insert_to_buckets_aux(new_buckets, new_count, e);
+			} else {
+				free(e);
 			}
 			e = f;
 		}
@@ -265,6 +267,8 @@ static int set_double_buckets(struct set *s)
 			if (!e->deleted) {
 				e->next = NULL;
 				set_insert_to_buckets_aux(new_buckets, new_count, e);
+			} else {
+				free(e);
 			}
 			e = f;
 		}
@@ -303,6 +307,13 @@ int set_insert(struct set *s, const void *element)
 			return 1;
 		}
 		e = e->next;
+	}
+
+	/* A table that is never iterated is never compacted, so compact once deleted entries outnumber the rest. A new
+	 * entry ends any iteration in progress, so no iterator is left on a freed entry. */
+	if (s->need_compact > s->size + s->bucket_count) {
+		set_compact(s);
+		index = key % s->bucket_count;
 	}
 
 	e = (struct entry *)malloc(sizeof(struct entry));
@@ -366,7 +377,7 @@ int set_remove(struct set *s, const void *element)
 				return 0;
 			}
 			e->deleted = 1;
-			s->need_compact = 1;
+			s->need_compact++;
 			s->size--;
 			return 1;
 		}
