@@ -624,6 +624,16 @@ int vine_cache_set_manager_transfer(struct vine_cache *c, const char *ip, int po
 	return 1;
 }
 
+int vine_cache_get_manager_transfer(struct vine_cache *c, char *ip, int *port)
+{
+	if (!c->manager_transfer_port) {
+		return 0;
+	}
+	strcpy(ip, c->manager_ip);
+	*port = c->manager_transfer_port;
+	return 1;
+}
+
 /* Download through the Manager data port using the original peer transfer sequence. */
 static int do_manager_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, char **error_message)
 {

@@ -17,6 +17,7 @@ See the file COPYING for details.
 #include "url_encode.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -36,14 +37,28 @@ pid_t transfer_server_pid = 0;
 /* Specific port for the transfer server to listen on.  Zero means choose any available. */
 int vine_transfer_server_port = 0;
 
-/* Handle a single request for a transfer request from a peer. */
+/* Answer one get request on an authenticated connection. */
 
-static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
+static void vine_transfer_serve_request(struct link *lnk, struct vine_cache *cache, time_t command_stoptime)
 {
 	char line[VINE_LINE_MAX];
 	char filename_encoded[VINE_LINE_MAX];
 	char filename[VINE_LINE_MAX];
 
+	if (link_readline(lnk, line, sizeof(line), command_stoptime)) {
+		if (sscanf(line, "get %s", filename_encoded) == 1) {
+			url_decode(filename_encoded, filename, sizeof(filename));
+			vine_transfer_put_any(lnk, cache, filename, VINE_TRANSFER_MODE_ANY, time(0) + transfer_timeout);
+		} else {
+			debug(D_VINE, "invalid peer transfer message: %s\n", line);
+		}
+	}
+}
+
+/* Handle a single request for a transfer request from a peer. */
+
+static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
+{
 	change_process_title("vine_worker [transfer]");
 
 	if (options->password) {
@@ -53,14 +68,7 @@ static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
 		}
 	}
 
-	if (link_readline(lnk, line, sizeof(line), time(0) + command_timeout)) {
-		if (sscanf(line, "get %s", filename_encoded) == 1) {
-			url_decode(filename_encoded, filename, sizeof(filename));
-			vine_transfer_put_any(lnk, cache, filename, VINE_TRANSFER_MODE_ANY, time(0) + transfer_timeout);
-		} else {
-			debug(D_VINE, "invalid peer transfer message: %s\n", line);
-		}
-	}
+	vine_transfer_serve_request(lnk, cache, time(0) + command_timeout);
 }
 
 static void vine_transfer_process(struct vine_cache *cache)
@@ -140,6 +148,45 @@ int vine_transfer_server_start(struct vine_cache *cache, struct link *manager, i
 		transfer_link = NULL;
 		return 0;
 	}
+	return 1;
+}
+
+/* The Manager sends its get request once an executor takes the connection, which may wait in its listener backlog. */
+#define VINE_CONNECT_BACK_REQUEST_SECONDS 60
+
+int vine_transfer_server_connect_back(struct vine_cache *cache, struct link *manager, uint64_t token)
+{
+	char ip[LINK_ADDRESS_MAX];
+	int port;
+	if (!vine_cache_get_manager_transfer(cache, ip, &port)) {
+		debug(D_VINE, "connect back: the manager has not sent its data port");
+		return 0;
+	}
+	/* The intermediate process exits at once, so the worker reaps it here and init reaps the sender. */
+	pid_t pid = fork();
+	if (pid < 0) {
+		debug(D_VINE, "connect back: could not fork: %s", strerror(errno));
+		return 0;
+	}
+	if (pid == 0) {
+		if (fork() == 0) {
+			/* Close only the inherited descriptor without flushing or shutting down the Worker TLS session. */
+			close(link_fd(manager));
+			change_process_title("vine_worker [connect back]");
+			struct link *lnk = link_connect(ip, port, time(0) + command_timeout);
+			if (lnk) {
+				if ((!options->password || link_auth_password(lnk, options->password, time(0) + command_timeout)) &&
+						link_printf(lnk, time(0) + command_timeout, "connect-back %" PRIu64 "\n", token) >= 0) {
+					vine_transfer_serve_request(lnk, cache, time(0) + VINE_CONNECT_BACK_REQUEST_SECONDS);
+				}
+				link_close(lnk);
+			} else {
+				debug(D_VINE, "connect back: could not connect to %s:%d: %s", ip, port, strerror(errno));
+			}
+		}
+		_exit(0);
+	}
+	waitpid(pid, NULL, 0);
 	return 1;
 }
 

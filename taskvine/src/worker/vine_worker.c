@@ -614,6 +614,9 @@ static void report_worker_ready(struct link *manager)
 
 	send_features(manager);
 	send_transfer_address(manager);
+	if (options->connect_back) {
+		send_async_message(manager, "info connect-back 1\n");
+	}
 	send_async_message(manager, "info worker-end-time %" PRId64 "\n", (int64_t)DIV_INT_ROUND_UP(options->end_time, USECOND));
 
 	if (options->factory_name) {
@@ -1313,6 +1316,7 @@ static int handle_manager(struct link *manager)
 	char transfer_id[VINE_LINE_MAX];
 	int64_t length;
 	int64_t task_id = 0;
+	uint64_t token;
 	int mode, n;
 	int r = 0;
 	int cache_level;
@@ -1320,6 +1324,10 @@ static int handle_manager(struct link *manager)
 	if (recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
 		if (sscanf(line, "task %" SCNd64, &task_id) == 1) {
 			r = do_task(manager, task_id, time(0) + options->active_timeout);
+		} else if (sscanf(line, "connect-back %" SCNu64, &token) == 1) {
+			/* A failure only fails this receive, which the manager retries. */
+			vine_transfer_server_connect_back(cache_manager, manager, token);
+			r = 1;
 		} else if (sscanf(line, "manager_transfer_port %" SCNd64, &length) == 1) {
 			char manager_ip[LINK_ADDRESS_MAX];
 			int manager_port;

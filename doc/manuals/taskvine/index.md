@@ -594,6 +594,14 @@ If only some ports are open to workers, give the manager a range instead:
 and the next one for data. A range of a single port leaves no port for data,
 so the manager cannot start.
 
+Workers also listen on a transfer port, from which other workers and the
+manager copy their files. If the manager cannot reach that port, for example
+because the workers run behind a cluster firewall or a NAT, start the workers
+with `--connect-back` (with `vine_factory`, `-E --connect-back`). Each worker
+then connects to the manager's data port to send the files the manager asks
+for, so it needs no port that the manager can reach. Workers still copy files
+from each other through their transfer ports.
+
 Creating a manager does not change the environment of the program. Workers
 that the program starts afterwards choose their own ports. The `TCP_LOW_PORT`
 and `TCP_HIGH_PORT` environment variables, if you set them, bound every port

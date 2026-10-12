@@ -6,10 +6,12 @@
 #include "vine_worker_info.h"
 #include "debug.h"
 #include "hash_table.h"
+#include "itable.h"
 #include "link.h"
 #include "link_auth.h"
 #include "list.h"
 #include "macros.h"
+#include "random.h"
 #include "stringtools.h"
 #include "thread_pool.h"
 #include "url_encode.h"
@@ -45,6 +47,10 @@
 /* Seconds a checkpoint receive may spend connecting to its source Worker. */
 #define VINE_DATA_CHECKPOINT_CONNECT_SECONDS 5
 
+/* Seconds a receive waits for a Worker that connects back. The connection may wait in the listener backlog while every
+ * request slot is busy. */
+#define VINE_DATA_CONNECT_BACK_SECONDS 30
+
 /* Own the data listener, bounded jobs, the index of vault entries, and the vault disk budget. */
 struct vine_manager_data_service {
 	char *vault_directory;		/* Own the fixed directory of published cache names. */
@@ -61,6 +67,9 @@ struct vine_manager_data_service {
 	pthread_mutex_t lock;		/* Protect the ready queue, cancellation, completion, and active links. */
 	pthread_cond_t finished;	/* Wake vault removal after a cancelled receive finishes. */
 	int stopping;			/* Prevent new connections while executors are being stopped. */
+	struct itable *waiting;		/* Maps token -> receive waiting for its Worker to connect back. */
+	uint64_t next_token;		/* Token of the next receive from a Worker that connects back. Never zero. */
+	time_t next_expiry;		/* Earliest time to look for receives whose Worker did not connect back. */
 };
 
 /* Hold one transfer until its completion is consumed by the Manager. A job with a file is a checkpoint receive
@@ -83,6 +92,8 @@ struct transfer_job {
 	void (*complete)(void *, struct vine_file *, int); /* Report a checkpoint result on the Manager thread. */
 	void *argument;					   /* Borrow the caller's completion context. */
 	char *transfer_id;				   /* Own the record that counts a receive against its source. */
+	uint64_t token;					   /* Nonzero while the receive waits for its Worker to connect back. */
+	time_t deadline;				   /* Fail a waiting receive after this time. */
 };
 
 static void job_delete(struct transfer_job *job)
@@ -177,15 +188,77 @@ static int send_file(struct transfer_job *job, int fd)
 	return valid;
 }
 
-/* Serve one Worker request from the vault without any Manager table lookup. */
+/* Return a finished job to the Manager thread. Called with the lock held. */
+static void job_finish_locked(struct vine_manager_data_service *ds, struct transfer_job *job)
+{
+	if (job->link) {
+		link_close(job->link);
+		job->link = NULL;
+	}
+	job->done = 1;
+	list_push_tail(ds->ready, job);
+	pthread_cond_broadcast(&ds->finished);
+	/* At most one notification per admitted job is outstanding. */
+	ssize_t result;
+	do {
+		result = write(ds->notify_fd, "x", 1);
+	} while (result < 0 && errno == EINTR);
+}
+
+/* Fail a receive that still waits for its Worker to connect back. Called with the lock held. */
+static void stop_waiting_locked(struct vine_manager_data_service *ds, struct transfer_job *job)
+{
+	itable_remove(ds->waiting, job->token);
+	job->token = 0;
+	job->success = 0;
+	job_finish_locked(ds, job);
+}
+
+static void transfer_run(void *argument);
+
+/* Hand the connection of a Worker that connected back to the receive waiting for it. The receive then runs on an
+ * executor of its own, so the connection holds a request slot only until it is identified. */
+static int attach_connect_back(struct transfer_job *job, uint64_t token)
+{
+	struct vine_manager_data_service *ds = job->owner;
+	pthread_mutex_lock(&ds->lock);
+	struct transfer_job *receive = token ? itable_lookup(ds->waiting, token) : NULL;
+	if (receive && !ds->stopping) {
+		itable_remove(ds->waiting, token);
+		receive->token = 0;
+		receive->link = job->link;
+		job->link = NULL;
+	} else {
+		receive = NULL;
+	}
+	pthread_mutex_unlock(&ds->lock);
+	if (!receive) {
+		debug(D_VINE, "data service: no receive waits for connect-back token %" PRIu64, token);
+		return 0;
+	}
+	if (!thread_pool_submit(ds->threads, transfer_run, receive)) {
+		pthread_mutex_lock(&ds->lock);
+		receive->success = 0;
+		job_finish_locked(ds, receive);
+		pthread_mutex_unlock(&ds->lock);
+	}
+	return 1;
+}
+
+/* Serve one Worker request from the vault without any Manager table lookup, or pass a connection that a Worker opened
+ * to send a file to the receive waiting for it. */
 static int serve_request(struct transfer_job *job)
 {
 	struct vine_manager_data_service *ds = job->owner;
 	char line[VINE_DATA_LINE_MAX], encoded[VINE_DATA_LINE_MAX];
 	int used = 0;
+	uint64_t token = 0;
 	int valid = (!job->password || link_auth_password(job->link, job->password, time(NULL) + 5)) &&
-		    link_readline(job->link, line, sizeof(line), time(NULL) + VINE_DATA_IDLE_SECONDS) &&
-		    sscanf(line, "get %4095s%n", encoded, &used) == 1 && !line[used];
+		    link_readline(job->link, line, sizeof(line), time(NULL) + VINE_DATA_IDLE_SECONDS);
+	if (valid && sscanf(line, "connect-back %" SCNu64 "%n", &token, &used) == 1 && !line[used]) {
+		return attach_connect_back(job, token);
+	}
+	valid = valid && sscanf(line, "get %4095s%n", encoded, &used) == 1 && !line[used];
 	if (!valid) {
 		return 0;
 	}
@@ -205,11 +278,15 @@ static void transfer_run(void *argument)
 	struct vine_manager_data_service *ds = job->owner;
 	pthread_mutex_lock(&ds->lock);
 	int stopping = ds->stopping || job->cancelled;
+	/* A Worker that connected back has already opened and authenticated the connection. */
+	struct link *link = job->link;
 	pthread_mutex_unlock(&ds->lock);
 	if (stopping) {
 		job->success = 0;
+	} else if (job->file && link) {
+		job->success = receive_file(job);
 	} else if (job->file) {
-		struct link *link = link_connect(job->ip, job->port, time(NULL) + VINE_DATA_CHECKPOINT_CONNECT_SECONDS);
+		link = link_connect(job->ip, job->port, time(NULL) + VINE_DATA_CHECKPOINT_CONNECT_SECONDS);
 		pthread_mutex_lock(&ds->lock);
 		job->link = link;
 		stopping = ds->stopping || job->cancelled;
@@ -219,18 +296,7 @@ static void transfer_run(void *argument)
 		job->success = serve_request(job);
 	}
 	pthread_mutex_lock(&ds->lock);
-	if (job->link) {
-		link_close(job->link);
-		job->link = NULL;
-	}
-	job->done = 1;
-	list_push_tail(ds->ready, job);
-	pthread_cond_broadcast(&ds->finished);
-	/* At most one notification per admitted job is outstanding. */
-	ssize_t result;
-	do {
-		result = write(ds->notify_fd, "x", 1);
-	} while (result < 0 && errno == EINTR);
+	job_finish_locked(ds, job);
 	pthread_mutex_unlock(&ds->lock);
 }
 
@@ -241,6 +307,13 @@ static int job_submit(struct vine_manager *manager, struct transfer_job *job)
 	job->owner = ds;
 	job->password = manager->password ? strdup(manager->password) : NULL;
 	list_push_tail(ds->jobs, job);
+	if (job->token) {
+		/* A receive from a Worker that connects back waits without an executor until its connection arrives. */
+		pthread_mutex_lock(&ds->lock);
+		itable_insert(ds->waiting, job->token, job);
+		pthread_mutex_unlock(&ds->lock);
+		return 1;
+	}
 	if (!thread_pool_submit(ds->threads, transfer_run, job)) {
 		list_remove(ds->jobs, job);
 		job_delete(job);
@@ -249,15 +322,46 @@ static int job_submit(struct vine_manager *manager, struct transfer_job *job)
 	return 1;
 }
 
-/* Cancel a receive without waiting for it. Its socket is shut down so a connected executor returns promptly. */
+/* Cancel a receive without waiting for it. Its socket is shut down so a connected executor returns promptly, and a
+ * receive that waits for its Worker to connect back finishes at once. */
 static void cancel_receive(struct vine_manager_data_service *ds, struct transfer_job *job)
 {
 	pthread_mutex_lock(&ds->lock);
 	job->cancelled = 1;
-	if (job->link) {
+	if (job->token) {
+		stop_waiting_locked(ds, job);
+	} else if (job->link) {
 		shutdown(link_fd(job->link), SHUT_RDWR);
 	}
 	pthread_mutex_unlock(&ds->lock);
+}
+
+/* Fail receives whose Worker did not connect back in time. They are few, at most one per receive slot, and they are
+ * checked at most once a second. */
+static void expire_connect_backs(struct vine_manager_data_service *ds)
+{
+	time_t now = time(NULL);
+	if (now < ds->next_expiry) {
+		return;
+	}
+	ds->next_expiry = now + 1;
+	struct list *expired = list_create();
+	pthread_mutex_lock(&ds->lock);
+	int iteration;
+	uint64_t token;
+	struct transfer_job *job;
+	ITABLE_ITERATE(ds->waiting, iteration, token, job)
+	{
+		if (job->deadline <= now) {
+			list_push_tail(expired, job);
+		}
+	}
+	while ((job = list_pop_head(expired))) {
+		debug(D_VINE, "checkpoint %s: its Worker did not connect back", job->name);
+		stop_waiting_locked(ds, job);
+	}
+	pthread_mutex_unlock(&ds->lock);
+	list_delete(expired);
 }
 
 struct vine_manager_data_service *vine_manager_data_service_create(const char *runtime_directory)
@@ -272,6 +376,8 @@ struct vine_manager_data_service *vine_manager_data_service_create(const char *r
 	ds->jobs = list_create();
 	ds->ready = list_create();
 	ds->vault_table = hash_table_create(0, 0);
+	ds->waiting = itable_create(0);
+	ds->next_token = (uint64_t)random_int64() | 1;
 	ds->vault_directory = string_format("%s/staging/vault-XXXXXX", runtime_directory);
 	if (!mkdtemp(ds->vault_directory)) {
 		free(ds->vault_directory);
@@ -301,7 +407,7 @@ struct vine_manager_data_service *vine_manager_data_service_create(const char *r
 	}
 	/* Cancelled receives release their slots before their executors return, so allow one spare executor per slot. */
 	ds->threads = thread_pool_create(VINE_DATA_THREADS);
-	if (!ds->listener || !ds->notification || !ds->threads || !ds->vault_table) {
+	if (!ds->listener || !ds->notification || !ds->threads || !ds->vault_table || !ds->waiting) {
 		vine_manager_data_service_delete(ds);
 		return NULL;
 	}
@@ -331,6 +437,9 @@ void vine_manager_data_service_delete(struct vine_manager_data_service *ds)
 	}
 	list_delete(ds->jobs);
 	list_delete(ds->ready);
+	if (ds->waiting) {
+		itable_delete(ds->waiting);
+	}
 	if (ds->listener) {
 		link_close(ds->listener);
 	}
@@ -403,6 +512,7 @@ static void finish_receive(struct vine_manager *manager, struct transfer_job *jo
 void vine_manager_data_service_handle(struct vine_manager *manager)
 {
 	struct vine_manager_data_service *ds = manager->ds;
+	expire_connect_backs(ds);
 	for (unsigned i = 0; i < VINE_DATA_THREADS; i++) {
 		pthread_mutex_lock(&ds->lock);
 		struct transfer_job *job = list_pop_head(ds->ready);
@@ -477,6 +587,15 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 	job->reserved = size;
 	job->complete = complete;
 	job->argument = argument;
+	uint64_t token = 0;
+	if (worker->transfer_connect_back) {
+		token = ds->next_token++;
+		if (!ds->next_token) {
+			ds->next_token = 1;
+		}
+		job->token = token;
+		job->deadline = time(NULL) + VINE_DATA_CONNECT_BACK_SECONDS;
+	}
 	if (!job_submit(manager, job)) {
 		return VINE_CHECKPOINT_BUSY;
 	}
@@ -486,7 +605,15 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 	char *source = string_format("%s/%s", worker->transfer_url, file->cached_name);
 	job->transfer_id = vine_current_transfers_add(manager, NULL, worker, source);
 	free(source);
-	debug(D_VINE, "checkpoint started: %s from %s:%d size=%" PRId64 " required=%d vault_used=%" PRId64 " vault_reserved=%" PRId64 " vault_limit=%" PRId64, file->cached_name, worker->transfer_host, worker->transfer_port, size, required, ds->vault_used, ds->vault_reserved, ds->vault_limit);
+	debug(D_VINE, "checkpoint started: %s from %s:%d size=%" PRId64 " required=%d connect_back=%d vault_used=%" PRId64 " vault_reserved=%" PRId64 " vault_limit=%" PRId64, file->cached_name, worker->transfer_host, worker->transfer_port, size, required, worker->transfer_connect_back, ds->vault_used, ds->vault_reserved, ds->vault_limit);
+	/* The Worker connects to the data port and sends the token before it answers the native get. */
+	if (token && vine_manager_send(manager, worker, "connect-back %" PRIu64 "\n", token) < 0) {
+		pthread_mutex_lock(&ds->lock);
+		if (job->token) {
+			stop_waiting_locked(ds, job);
+		}
+		pthread_mutex_unlock(&ds->lock);
+	}
 	return VINE_CHECKPOINT_ADMITTED;
 }
 

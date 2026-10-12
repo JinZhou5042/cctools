@@ -386,6 +386,10 @@ static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_in
 		handle_library_update(q, w, value);
 	} else if (string_prefix_is(field, "transfer_port_bind_failed")) {
 		notice(D_VINE, "Worker %s (%s) could not bind transfer port; peer transfers disabled.", w->hostname, w->addrport);
+	} else if (string_prefix_is(field, "connect-back")) {
+		/* The Manager cannot reach this Worker's transfer port, so the Worker opens the connections that bring its
+		 * files to the data port. */
+		w->transfer_connect_back = atoi(value) != 0;
 	}
 
 	// Note we always mark info messages as processed, as they are optional.

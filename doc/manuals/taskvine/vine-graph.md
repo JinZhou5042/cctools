@@ -157,7 +157,10 @@ vine_worker -M vine-graph-example --cores 4
 Workers find the manager by its name through the TaskVine catalog, or connect
 to its port directly. Workers also fetch data from a second port of the
 manager. If a firewall admits only some ports, give the Executor a range of
-two, such as `port=(9123, 9124)`, so that both ports are known. Each worker
+two, such as `port=(9123, 9124)`, so that both ports are known. The manager
+also copies results from workers. If it cannot reach them, for example when
+the workers run behind a cluster firewall, start them with `--connect-back`,
+and each worker opens the connections that bring its results. Each worker
 runs one instance of the library that runs tasks, which takes the whole worker
 and runs one task per core, so workers of any size can join. Stop the worker
 with `Ctrl-C`.
