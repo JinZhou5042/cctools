@@ -143,6 +143,7 @@ static void update_max_worker(const char *hashkey, void *w, void *max);
 
 static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_task *t, vine_task_state_t new_state);
 static void push_task_to_ready_tasks(struct vine_manager *q, struct vine_task *t);
+static void ready_tasks_remove(struct vine_manager *q, struct vine_task *t);
 
 static int task_request_count(struct vine_manager *q, const char *category, category_allocation_t request);
 
@@ -3203,7 +3204,7 @@ static vine_result_code_t commit_task_group_to_worker(struct vine_manager *q, st
 	do {
 
 		if (counter && (result == VINE_SUCCESS)) {
-			skip_list_remove(q->ready_tasks, t);
+			ready_tasks_remove(q, t);
 			// decrement refcount
 			vine_task_delete(t);
 		}
@@ -3727,15 +3728,57 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 				push_task_to_ready_tasks(q, t);
 				break;
 			}
+
+			/* Once the last worker with room is taken, the rest of the pass cannot dispatch a task. */
+			if (result == VINE_SUCCESS && !vine_schedule_any_worker_accepts_tasks(q)) {
+				break;
+			}
 		}
 	}
 
 	return task_unready;
 }
 
+/*
+Find ready tasks that can no longer run, at most once a second. Dispatch passes find them otherwise, but no pass runs
+while no worker has room for a task.
+*/
+
+static int retrieve_ready_tasks(struct vine_manager *q, double now_secs)
+{
+	timestamp_t now = timestamp_get();
+	if (now - q->time_last_ready_tasks_check < ONE_SECOND) {
+		return 0;
+	}
+	q->time_last_ready_tasks_check = now;
+
+	int retrieved = 0;
+	struct vine_task *t;
+	struct skip_list_cursor *cur = skip_list_cursor_create(q->ready_tasks);
+	skip_list_seek(cur, 0);
+	SKIP_LIST_ITERATE(cur, t)
+	{
+		if (retrieve_ready_task(q, t, now_secs)) {
+			skip_list_remove_here(cur);
+			retrieved = 1;
+		}
+	}
+	skip_list_cursor_delete(cur);
+
+	return retrieved;
+}
+
 static int send_one_task(struct vine_manager *q)
 {
 	double now_secs = ((double)timestamp_get()) / ONE_SECOND;
+
+	/* Without a worker that has room, a pass would only try each ready task against each worker. The manager waits
+	 * instead, until a worker sends a message or for a second. */
+	q->dispatch_blocked = !vine_schedule_any_worker_accepts_tasks(q);
+	if (q->dispatch_blocked) {
+		return retrieve_ready_tasks(q, now_secs);
+	}
+
 	int iter_depth = MIN(skip_list_size(q->ready_tasks), q->attempt_schedule_depth);
 
 	// if ready_tasks_cr is not pointing at a task
@@ -4043,7 +4086,7 @@ static void reset_task_to_state(struct vine_manager *q, struct vine_task *t, vin
 		break;
 
 	case VINE_TASK_READY:
-		skip_list_remove(q->ready_tasks, t);
+		ready_tasks_remove(q, t);
 		change_task_state(q, t, new_state);
 		break;
 
@@ -4795,6 +4838,16 @@ char *vine_monitor_wrap(struct vine_manager *q, struct vine_worker_info *w, stru
 
 /* Put a given task on the ready list, taking into account the task priority and the manager schedule. */
 
+/* Remove a task from the ready list. Its priority, which ends with its unique task id, finds it without a scan, unless
+ * the priority changed after the task was inserted. */
+static void ready_tasks_remove(struct vine_manager *q, struct vine_task *t)
+{
+	double priority[] = {t->manager_priority, t->user_priority, -t->task_id};
+	if (!skip_list_remove_by_priority_arr(q->ready_tasks, priority)) {
+		skip_list_remove(q->ready_tasks, t);
+	}
+}
+
 static void push_task_to_ready_tasks(struct vine_manager *q, struct vine_task *t)
 {
 	vine_priority_t manager_priority = VINE_PRIORITY_NORMAL;
@@ -4868,6 +4921,9 @@ static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_t
 		vine_task_set_result(t, VINE_RESULT_UNKNOWN);
 		push_task_to_ready_tasks(q, t);
 		c->vine_stats->tasks_waiting++;
+		if (t->resources_requested->gpus > 0) {
+			q->gpus_requested = 1;
+		}
 		break;
 	case VINE_TASK_RUNNING:
 		itable_insert(q->running_table, t->task_id, t);
@@ -5738,9 +5794,10 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 
 		// if we got here, no events were triggered this time around.
 		// if we went through the entire ready list without finding a task to dispatch,
-		// we set the nothing_happened_last_wait_cycle flag so that link_poll waits for some time
-		// the next time around, or return retrieved tasks if there some available.
-		if (!skip_list_get(q->ready_tasks_cr, NULL) && list_size(q->retrieved_list) < 1) {
+		// or no worker has room for a task, we set the nothing_happened_last_wait_cycle flag
+		// so that link_poll waits for some time the next time around, or return retrieved
+		// tasks if there some available.
+		if ((!skip_list_get(q->ready_tasks_cr, NULL) || q->dispatch_blocked) && list_size(q->retrieved_list) < 1) {
 			q->nothing_happened_last_wait_cycle = 1;
 		}
 	}
@@ -6102,6 +6159,27 @@ void vine_set_manager_preferred_connection(struct vine_manager *q, const char *p
 	q->manager_preferred_connection = xxstrdup(preferred_connection);
 }
 
+/* Turn the debug log down to errors and notices, and close the performance, transactions, and taskgraph logs for the
+ * rest of the run. Their writers skip a log that is not open. */
+static void disable_logs(struct vine_manager *q)
+{
+	debug_flags_restore(D_NOTICE | D_ERROR | D_FATAL);
+	if (q->perf_logfile) {
+		fclose(q->perf_logfile);
+		q->perf_logfile = NULL;
+	}
+	if (q->txn_logfile) {
+		vine_txn_log_write_manager(q, "END");
+		fclose(q->txn_logfile);
+		q->txn_logfile = NULL;
+	}
+	if (q->graph_logfile) {
+		vine_taskgraph_log_write_footer(q);
+		fclose(q->graph_logfile);
+		q->graph_logfile = NULL;
+	}
+}
+
 int vine_tune(struct vine_manager *q, const char *name, double value)
 {
 	if (!strcmp(name, "attempt-schedule-depth")) {
@@ -6209,6 +6287,12 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "perf-log-interval")) {
 		q->perf_log_interval = MAX(1, (int)value);
+
+	} else if (!strcmp(name, "enable-logs")) {
+		/* Logs that were turned off stay off, because reopening them would lose what they recorded. */
+		if (!(int)value) {
+			disable_logs(q);
+		}
 
 	} else if (!strcmp(name, "update-interval")) {
 		q->update_interval = MAX(1, (int)value);
@@ -6595,18 +6679,27 @@ void vine_set_category_resources_max(struct vine_manager *q, const char *categor
 {
 	struct category *c = vine_category_lookup_or_create(q, category);
 	category_specify_max_allocation(c, rm);
+	if (rm && rm->gpus > 0) {
+		q->gpus_requested = 1;
+	}
 }
 
 void vine_set_category_resources_min(struct vine_manager *q, const char *category, const struct rmsummary *rm)
 {
 	struct category *c = vine_category_lookup_or_create(q, category);
 	category_specify_min_allocation(c, rm);
+	if (rm && rm->gpus > 0) {
+		q->gpus_requested = 1;
+	}
 }
 
 void vine_set_category_first_allocation_guess(struct vine_manager *q, const char *category, const struct rmsummary *rm)
 {
 	struct category *c = vine_category_lookup_or_create(q, category);
 	category_specify_first_allocation_guess(c, rm);
+	if (rm && rm->gpus > 0) {
+		q->gpus_requested = 1;
+	}
 }
 
 int vine_set_category_mode(struct vine_manager *q, const char *category, vine_category_mode_t mode)

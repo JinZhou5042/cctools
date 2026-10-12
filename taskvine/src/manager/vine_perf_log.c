@@ -57,14 +57,15 @@ void vine_perf_log_write_update(struct vine_manager *q, int force)
 		return;
 	}
 
-	vine_get_stats(q, &s);
-	debug(D_VINE, "workers connections -- known: %d, connecting: %d", s.workers_connected, s.workers_init);
-
 	q->time_last_log_stats = now;
 
+	/* The statistics take a pass over every worker, so they are computed only for a log that records them. */
 	if (!q->perf_logfile) {
 		return;
 	}
+
+	vine_get_stats(q, &s);
+	debug(D_VINE, "workers connections -- known: %d, connecting: %d", s.workers_connected, s.workers_init);
 
 	buffer_t B;
 	buffer_init(&B);

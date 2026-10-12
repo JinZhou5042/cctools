@@ -169,6 +169,9 @@ void vine_graph_delete(struct vine_graph *g)
 		vine_graph_mounts_delete(node->inputs);
 		vine_graph_mounts_delete(node->outputs);
 		list_delete(node->parents);
+		if (node->durable_children) {
+			list_cursor_destroy(node->durable_children);
+		}
 		list_delete(node->children);
 		free(node);
 	}

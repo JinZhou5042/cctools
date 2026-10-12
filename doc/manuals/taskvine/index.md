@@ -2825,6 +2825,7 @@ change.
 | clean-redundant-replicas | Remove redundant temporary file replicas to save worker's local disk space. | 0 |
 | default-transfer-rate | The assumed network bandwidth used until sufficient data has been collected.  (1MB/s)
 | disconnect-slow-workers-factor | Set the multiplier of the average task time at which point to disconnect a worker; disabled if less than 1. (default=0)
+| enable-logs | If set to 0, keep only errors and notices in the debug log and close the performance, transactions, and taskgraph logs for the rest of the run, which spares a busy manager their writes. Logs turned off stay off. | 1 |
 | hungry-minimum          | Smallest number of waiting tasks in the manager before declaring it hungry | 10 |
 | hungry-minimum-factor   | Queue is hungry if number of waiting tasks is less than hungry-minumum-factor x (number of workers) | 2 |
 | immediate-recovery    | If set to 1, create recovery tasks for temporary files as soon as their worker disconnects. Otherwise, create recovery tasks only if the temporary files are used as input when trying to dispatch another task. | 0 |

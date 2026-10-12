@@ -74,8 +74,10 @@ def graphed_plan_to_graph(plan):
     graph = Graph()
     tasks = sorted(tuple(plan.tasks), key=lambda task: task.key)
 
-    previous = graph.add(_graphed_empty, [plan.empty])
+    # One wrapper of each callable for every task, so it is serialized and staged once.
+    empty, process_ref, combine = [plan.empty], [plan.process], [plan.combine]
+    previous = graph.add(_graphed_empty, empty)
     for task in tasks:
-        process = graph.add(_graphed_process, [plan.process], task.partition)
-        previous = graph.add(_graphed_combine, [plan.combine], previous, process)
+        process = graph.add(_graphed_process, process_ref, task.partition)
+        previous = graph.add(_graphed_combine, combine, previous, process)
     return graph, previous

@@ -1515,6 +1515,8 @@ as dead. (default=30)
  - "category-steady-n-tasks" Set the number of tasks considered when computing category buckets.
  - "hungry-minimum" Mimimum number of tasks to consider manager not hungry. (default=10)
  - "wait-for-workers" Mimimum number of workers to connect before starting dispatching tasks. (default=0)
+ - "enable-logs" If 0, keep only errors and notices in the debug log and close the performance, transactions, and
+taskgraph logs for the rest of the run, which spares a busy manager their writes. Logs turned off stay off. (default=1)
  - "attempt-schedule-depth" The amount of tasks to attempt scheduling on each pass of send_one_task in the main loop.
 (default=100)
  - "wait_retrieve_many" Parameter to alter how vine_wait works. If set to 0, vine_wait breaks out of the while loop

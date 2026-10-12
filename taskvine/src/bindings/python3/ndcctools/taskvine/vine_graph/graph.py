@@ -208,38 +208,52 @@ class _FileRef(_Symbol):
 _LEAF_TYPES = (str, bytes, bytearray, memoryview, int, float, bool, complex, type(None))
 
 
-def _contains_symbol(value, seen):
-    """Return whether value holds a symbol anywhere inside, including inside custom objects."""
-    if isinstance(value, _Symbol):
-        return True
-    if value is None or isinstance(value, _LEAF_TYPES):
-        return False
-    if id(value) in seen:
-        return False
-    seen.add(id(value))
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return any(_contains_symbol(getattr(value, f.name), seen) for f in dataclasses.fields(value))
-    if isinstance(value, collections.abc.Mapping):
-        return any(_contains_symbol(k, seen) or _contains_symbol(v, seen) for k, v in value.items())
-    if isinstance(value, (list, tuple, set, frozenset, collections.deque)):
-        return any(_contains_symbol(v, seen) for v in value)
-    try:
-        state = vars(value)
-    except TypeError:
-        state = None
-    if state and any(_contains_symbol(v, seen) for v in state.values()):
-        return True
-    for slot in getattr(type(value), "__slots__", ()):
-        if isinstance(slot, str) and hasattr(value, slot) and _contains_symbol(getattr(value, slot), seen):
+def _scanner(known=()):
+    """Return a function that tells whether a value holds a symbol anywhere inside, including inside custom objects.
+    It scans each object once and remembers the answer, and it does not scan objects whose id is in known, which hold
+    none. An object reached again while it is being scanned, through a cycle, counts as holding a symbol, so the cycle
+    is copied and every symbol in it replaced."""
+    holds = {}  # id -> whether the object holds a symbol, or None while it is being scanned
+
+    def scan(value):
+        if isinstance(value, _Symbol):
             return True
-    return False
+        if value is None or isinstance(value, _LEAF_TYPES):
+            return False
+        oid = id(value)
+        if oid in known:
+            return False
+        if oid in holds:
+            return holds[oid] is not False
+        holds[oid] = None
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            result = any([scan(getattr(value, f.name)) for f in dataclasses.fields(value)])
+        elif isinstance(value, collections.abc.Mapping):
+            result = any([scan(k) or scan(v) for k, v in value.items()])
+        elif isinstance(value, (list, tuple, set, frozenset, collections.deque)):
+            result = any([scan(v) for v in value])
+        else:
+            try:
+                state = vars(value)
+            except TypeError:
+                state = None
+            result = bool(state) and any([scan(v) for v in state.values()])
+            for slot in getattr(type(value), "__slots__", ()):
+                if isinstance(slot, str) and hasattr(value, slot) and scan(getattr(value, slot)):
+                    result = True
+        holds[oid] = result
+        return result
+
+    return scan
 
 
-def replace_symbols(value, replace):
-    """Return value with every symbol inside replaced by replace(symbol). A value without symbols is returned as
-    is, so arguments keep their identity. Containers that hold symbols are copied with their type, aliases, and
-    cycles preserved. Symbols may not be dictionary keys or hide inside other custom objects."""
-    if not _contains_symbol(value, set()):
+def replace_symbols(value, replace, known=()):
+    """Return value with every symbol inside replaced by replace(symbol). Values without symbols are returned as they
+    are, at any depth, so arguments and the containers inside them keep their identity. Containers that hold symbols
+    are copied with their type, aliases, and cycles preserved. Objects whose id is in known hold no symbol and are not
+    scanned. Symbols may not be dictionary keys or hide inside other custom objects."""
+    scan = _scanner(known)
+    if not scan(value):
         return value
     memo = {}
     active_immutable = set()
@@ -247,14 +261,14 @@ def replace_symbols(value, replace):
     def visit(x):
         if isinstance(x, _Symbol):
             return replace(x)
-        if x is None or isinstance(x, _LEAF_TYPES):
+        if not scan(x):
             return x
         oid = id(x)
         if oid in memo:
             return memo[oid]
 
         if isinstance(x, collections.abc.Mapping):
-            if any(_contains_symbol(k, set()) for k in x.keys()):
+            if any(scan(k) for k in x.keys()):
                 raise ValueError("a task result or file cannot be a dictionary key")
             # copy+clear keeps dict subclasses and defaultdict factories, and publishing the empty copy first keeps
             # aliases and cycles.
@@ -310,10 +324,8 @@ def replace_symbols(value, replace):
                 object.__setattr__(out, field.name, visit(getattr(x, field.name)))
             return out
 
-        if _contains_symbol(x, set()):
-            raise TypeError("a task result or file inside a custom object is not supported; use a dataclass or a "
-                            "list, tuple, set, or dictionary")
-        return x
+        raise TypeError("a task result or file inside a custom object is not supported; use a dataclass or a list, "
+                        "tuple, set, or dictionary")
 
     return visit(value)
 
@@ -337,15 +349,20 @@ class Graph:
         self._reads = {}  # key -> File and _FileRef objects the task reads, in first-use order
         self._outputs = collections.defaultdict(dict)  # key -> sandbox path -> NodeFile it writes
         self._hoisted = {}  # key -> names of the hoisted objects the task reads, for tasks that read any
+        # id -> [object, tasks]: argument objects without symbols, scanned once while tasks hold them. An object passed
+        # again is assumed unchanged, as an Executor already assumes when it serializes it once.
+        self._plain = {}
 
     def __getstate__(self):
         state = dict(self.__dict__)
         del state["_id"]
+        del state["_plain"]
         return state
 
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._id = uuid.uuid4().hex
+        self._plain = {}
 
     def add(self, func, /, *args, **kwargs):
         """Add a call of func with these arguments and return its Node. Nodes, their selections and files, and
@@ -417,8 +434,13 @@ class Graph:
             return _Ref(graph_id, ref.key, ref.steps)
 
         # Replacing all arguments at once keeps an object passed as several arguments one object.
-        args, kwargs = replace_symbols((tuple(args), dict(kwargs)), replace)
+        originals = (*args, *kwargs.values())
+        args, kwargs = replace_symbols((tuple(args), dict(kwargs)), replace, self._plain)
         self._tasks[key] = (func, args, kwargs)
+        # An argument that replacement kept as it is holds no symbol, so later tasks that pass it skip the scan.
+        for original, stored in zip(originals, (*args, *kwargs.values())):
+            if stored is original and original is not None and not isinstance(original, _LEAF_TYPES):
+                self._plain.setdefault(id(original), [original, 0])[1] += 1
         self._parents[key] = tuple(parents)
         self._results[key] = tuple(results)
         self._reads[key] = tuple(reads.values())
@@ -428,6 +450,24 @@ class Graph:
             if graph_id is None:
                 self._children[parent].add(key)
         return Node(self, key)
+
+    def _remove(self, key):
+        """Forget a task that nothing can ask for again, with what it recorded. Only an Executor's own Graph does this,
+        for calls whose Futures are gone."""
+        _, args, kwargs = self._tasks.pop(key)
+        for value in (*args, *kwargs.values()):
+            entry = self._plain.get(id(value))
+            if entry is not None and entry[0] is value:
+                entry[1] -= 1
+                if not entry[1]:
+                    del self._plain[id(value)]
+        for graph_id, parent in self._parents.pop(key, ()):
+            if graph_id is None and parent in self._children:
+                self._children[parent].discard(key)
+                if not self._children[parent]:
+                    del self._children[parent]
+        for table in (self._results, self._reads, self._children, self._outputs, self._hoisted):
+            table.pop(key, None)
 
     def _add_output(self, key, path):
         if key not in self._tasks:

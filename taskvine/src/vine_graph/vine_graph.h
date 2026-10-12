@@ -46,6 +46,8 @@ struct vine_graph_node {
 	int failures;		    // failed attempts, bounded by the executor's retry limit
 	uint64_t execution_time_us; // latest successful execution time on a Worker
 
+	struct list_cursor *durable_children; // executor's release check: every child before it was durable when checked
+
 	int failed;				// the node cannot complete, or its outputs cannot be restored
 	struct vine_graph_node *failure_source; // borrowed node whose own failure made this one fail
 	char *error;				// why the node failed, set only on a failure source

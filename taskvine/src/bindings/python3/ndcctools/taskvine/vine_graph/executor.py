@@ -256,6 +256,14 @@ class _Serialized:
             os.unlink(self.path)
 
 
+class _Watcher:
+    """The tasks a caller of as_completed() waits for, and those of them that finished since it last looked."""
+
+    def __init__(self, tasks):
+        self.tasks = tasks
+        self.finished = []
+
+
 class _PathRequest:
     """A caller's wait for the readable local path of a pinned output."""
 
@@ -344,7 +352,11 @@ class Executor:
         self._finished = {}  # (graph id, key) -> (COMPLETED, None, None) or (FAILED, source task, message)
         self._counts = {COMPLETED: 0, FAILED: 0}
         self._path_requests = []
+        self._paths = {}  # data key -> readable local path of a pinned output, published by the background thread
         self._cancelled = set()  # (graph id, key) of tasks that cancel() stopped
+        # Callers in as_completed(): each watches some tasks and collects those that finish, so a wait wakes up for
+        # new results instead of checking every pending Future again.
+        self._watchers = set()
         # Staged objects, shared by identity across tasks: id(object) -> (object, sandbox name, local path). Holding the
         # object keeps its id from being reused. A staged file lives while a task that holds it may still run.
         self._edata = {}
@@ -821,6 +833,9 @@ class Executor:
                 self._held.append(command)
                 return
             self._commands.append(command)
+            if threading.current_thread() is self._driver:
+                # The background thread runs every queued call before it waits again.
+                return
             self._changed.notify_all()
             if self._driver is not None:
                 # End the background thread's wait in C so it runs the call now. Closing deletes the C executor only
@@ -927,6 +942,8 @@ class Executor:
     def _unhold(self, task, key):
         capi.vine_graph_executor_unpin_file(self._executor, self._file_of(key))
         with self._lock:
+            # An unpinned output may leave the vault, so its path is looked up again next time.
+            self._paths.pop(key, None)
             self._futures[task] -= 1
             if not self._futures[task]:
                 del self._futures[task]
@@ -950,9 +967,8 @@ class Executor:
         self._drop_staged(self._staged.pop(task))
         if graph_id == self._dynamic._id:
             # Only a Future could reach this call again, so its function and arguments go too.
-            for table in (self._dynamic._tasks, self._dynamic._parents, self._dynamic._results, self._dynamic._reads,
-                          self._dynamic._children, self._dynamic._outputs, self._dynamic._hoisted):
-                table.pop(key, None)
+            self._dynamic._remove(key)
+            self._graph_tasks[graph_id].discard(key)
 
     def _drop_staged(self, names):
         """Let go of staged files that a task held, and free each one that no task holds anymore."""
@@ -997,6 +1013,8 @@ class Executor:
             for request in self._path_requests:
                 if request.path is None:
                     request.path = capi.vine_graph_executor_get_local_path(self._executor, self._file_of(request.key))
+                    if request.path:
+                        self._paths[request.key] = request.path
             if error:
                 self._run_error = error
             self._changed.notify_all()
@@ -1016,7 +1034,9 @@ class Executor:
             task = self._tasks[node]
             if capi.vine_graph_executor_get_node_state(self._executor, node) == capi.VINE_GRAPH_NODE_FAILED:
                 source = self._tasks[capi.vine_graph_executor_get_failure_source(self._executor, node)]
-                finished.append((task, (FAILED, source, capi.vine_graph_executor_get_node_error(self._executor, node))))
+                # Only the source keeps the message, which its dependents read from it.
+                message = capi.vine_graph_executor_get_node_error(self._executor, node) if source == task else None
+                finished.append((task, (FAILED, source, message)))
             else:
                 finished.append((task, (COMPLETED, None, None)))
         released = []
@@ -1038,6 +1058,9 @@ class Executor:
             self._counts[previous[0]] -= 1
         self._finished[task] = entry
         self._counts[entry[0]] += 1
+        for watcher in self._watchers:
+            if task in watcher.tasks:
+                watcher.finished.append(task)
 
     def _finished_entry(self, task):
         with self._lock:
@@ -1068,14 +1091,30 @@ class Executor:
         """Yield the given futures as their tasks finish. More tasks may be submitted between iterations. A timeout
         in seconds that expires raises TimeoutError."""
         deadline = None if timeout is None else time.monotonic() + timeout
-        pending = list(futures)
-        while pending:
-            remaining = None if deadline is None else deadline - time.monotonic()
-            self._wait_until(lambda: any(future.done() for future in pending), remaining,
-                             f"{len(pending)} futures are not done")
-            done = [future.done() for future in pending]
-            yield from (future for future, finished in zip(pending, done) if finished)
-            pending = [future for future, finished in zip(pending, done) if not finished]
+        pending = collections.defaultdict(list)  # task -> its futures that were not yielded yet
+        for future in futures:
+            if future._executor is not self:
+                raise ValueError("as_completed() takes Futures of this Executor")
+            pending[future._task].append(future)
+        watcher = _Watcher(pending)
+        try:
+            with self._lock:
+                # Registered first, so a task that finishes during the scan below is not missed.
+                self._watchers.add(watcher)
+            ready = [task for task, waiting in pending.items() if waiting[0].done()]
+            while True:
+                for task in ready:
+                    yield from pending.pop(task, ())
+                if not pending:
+                    return
+                remaining = None if deadline is None else deadline - time.monotonic()
+                self._wait_until(lambda: watcher.finished, remaining,
+                                 lambda: f"{sum(map(len, pending.values()))} futures are not done")
+                with self._lock:
+                    ready, watcher.finished = watcher.finished, []
+        finally:
+            with self._lock:
+                self._watchers.discard(watcher)
 
     def run(self, graph, targets=None):
         """Run the targets of a Graph, and every task they read, and return {target: result}. Targets are Nodes,
@@ -1111,7 +1150,17 @@ class Executor:
         })
 
     def _wait_for(self, futures, timeout):
-        self._wait_until(lambda: all(future.done() for future in futures), timeout, "the task is not done")
+        # A finished task stays finished, so each future is checked until it is done and never again.
+        futures = list(futures)
+        position = 0
+
+        def ready():
+            nonlocal position
+            while position < len(futures) and futures[position].done():
+                position += 1
+            return position == len(futures)
+
+        self._wait_until(ready, timeout, "the task is not done")
 
     def _wait_until(self, ready, timeout, unfinished):
         """Wait until ready() holds, checking it whenever the background thread publishes changes. An interrupt or a
@@ -1124,7 +1173,7 @@ class Executor:
                     raise RuntimeError(f"vine_graph execution stopped: {self._run_error}")
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
-                    raise TimeoutError(unfinished)
+                    raise TimeoutError(unfinished() if callable(unfinished) else unfinished)
                 self._changed.wait(0.5 if remaining is None else min(remaining, 0.5))
 
     def _node(self, task):
@@ -1136,6 +1185,9 @@ class Executor:
         if self._finished_state(task) != FAILED:
             return None
         _, source, message = self._finished_entry(task)
+        if source != task:
+            message = self._finished_entry(source)[2]
+        message = message or ""
         task_node, source_node = self._node(task), self._node(source)
         task_label, source_label = self._labels[task], self._labels[source]
         # A function failure ends with its traceback. Lines the library writes before it are not about the function.
@@ -1192,16 +1244,23 @@ class Executor:
 
     def _fetched_path(self, task, key):
         """Wait until a pinned output of a completed task is readable at the Manager, and return its path."""
+        with self._lock:
+            path = self._paths.get(key)
+        if path:
+            return path
         request = _PathRequest(key)
-        with self._changed:
-            self._path_requests.append(request)
-            self._changed.notify_all()
         try:
+            with self._changed:
+                self._path_requests.append(request)
+                self._changed.notify_all()
+                # The background thread leaves its wait in C to look the path up at once.
+                capi.vine_graph_executor_wake(self._executor)
             self._wait_until(lambda: request.path or self._finished_state(task) == FAILED, None,
                              "the result is not available")
         finally:
             with self._lock:
-                self._path_requests.remove(request)
+                if request in self._path_requests:
+                    self._path_requests.remove(request)
         if request.path:
             return request.path
         raise self._error(task)
