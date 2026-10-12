@@ -154,8 +154,9 @@ int check_worker_have_enough_disk_with_inputs(struct vine_manager *q, struct vin
  * If it returns true, the worker has either free slots for function calls or sufficient resources for regular tasks.
  * @param q         Manager info structure
  * @param w The worker info structure.
+ * @param count_gpus Whether free gpus count as resources for a regular task.
  */
-static int check_worker_have_committable_resources(struct vine_manager *q, struct vine_worker_info *w)
+static int check_worker_have_committable_resources(struct vine_manager *q, struct vine_worker_info *w, int count_gpus)
 {
 	/* Check if there are free slots on any of the running libraries */
 	if (w->current_libraries && itable_size(w->current_libraries) > 0) {
@@ -172,7 +173,7 @@ static int check_worker_have_committable_resources(struct vine_manager *q, struc
 
 	/* Check if there are free resources for tasks except function calls */
 	int cores_committable = w->resources->cores.total > 0 && (w->resources->cores.inuse < overcommitted_resource_total(q, w->resources->cores.total));
-	int gpus_committable = w->resources->gpus.total > 0 && (w->resources->gpus.inuse < overcommitted_resource_total(q, w->resources->gpus.total));
+	int gpus_committable = count_gpus && w->resources->gpus.total > 0 && (w->resources->gpus.inuse < overcommitted_resource_total(q, w->resources->gpus.total));
 	int memory_committable = w->resources->memory.total > 0 && (w->resources->memory.inuse < overcommitted_resource_total(q, w->resources->memory.total));
 	int disk_committable = w->resources->disk.total > 0 && (w->resources->disk.inuse < overcommitted_resource_total(q, w->resources->disk.total));
 
@@ -188,20 +189,9 @@ static int check_worker_have_committable_resources(struct vine_manager *q, struc
 	return 0;
 }
 
-/* Check if this task is compatible with this given worker by considering
- * resources availability, features, blocklist, and all other relevant factors.
- * Used by all scheduling methods for basic compatibility.
- * @param q The manager structure.
- * @param w The worker info structure.
- * @param t The task structure.
- * @return 0 if the task is not compatible with the worker, 1 otherwise.
- */
-
-int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
+/* Check the conditions under which a worker accepts no task at all, apart from its free resources. */
+static int check_worker_is_available(struct vine_manager *q, struct vine_worker_info *w)
 {
-	/* THIS FUNCTION SHOULD NOT MODIFY t IN ANY WAY. */
-	/* Otherwise library templates are modified during the run. */
-
 	/* worker has not reported any resources yet */
 	if (w->resources->tag < 0 || w->resources->workers.total < 1 || w->end_time < 0) {
 		return 0;
@@ -235,8 +225,45 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 		return 0;
 	}
 
+	return 1;
+}
+
+/* Return true if some worker has room for a task now. Otherwise no ready task can be dispatched, and the manager does
+ * not need to try each of them against each worker. */
+int vine_schedule_any_worker_accepts_tasks(struct vine_manager *q)
+{
+	char *key;
+	struct vine_worker_info *w;
+	int iteration;
+	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+	{
+		if (w->type == VINE_WORKER_TYPE_WORKER && check_worker_is_available(q, w) && check_worker_have_committable_resources(q, w, q->gpus_requested)) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* Check if this task is compatible with this given worker by considering
+ * resources availability, features, blocklist, and all other relevant factors.
+ * Used by all scheduling methods for basic compatibility.
+ * @param q The manager structure.
+ * @param w The worker info structure.
+ * @param t The task structure.
+ * @return 0 if the task is not compatible with the worker, 1 otherwise.
+ */
+
+int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
+{
+	/* THIS FUNCTION SHOULD NOT MODIFY t IN ANY WAY. */
+	/* Otherwise library templates are modified during the run. */
+
+	if (!check_worker_is_available(q, w)) {
+		return 0;
+	}
+
 	/* if worker has free resources to use */
-	if (!check_worker_have_committable_resources(q, w)) {
+	if (!check_worker_have_committable_resources(q, w, 1)) {
 		return 0;
 	}
 
