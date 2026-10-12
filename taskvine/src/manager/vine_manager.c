@@ -5590,6 +5590,9 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 				sent_in_previous_cycle = 1;
 				continue;
 			}
+		} else {
+			/* No task is dispatched before enough workers connect, and each connection ends the wait. */
+			q->dispatch_blocked = 1;
 		}
 
 		// Check if any temp files need replication and start replicating
