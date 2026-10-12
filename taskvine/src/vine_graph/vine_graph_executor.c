@@ -1049,7 +1049,11 @@ vine_graph_status_t vine_graph_executor_wait(struct vine_graph_executor *e, int 
 		 * returns no task expired or was ended by vine_graph_executor_wake(). */
 		struct vine_task *task = vine_wait(e->manager, wait_timeout);
 		if (task) {
-			vine_graph_executor_handle_task(e, task);
+			/* Settle every task the Manager has already returned, so one call reports a batch of finished nodes.
+			 * A wait of zero seconds only collects returned tasks. */
+			do {
+				vine_graph_executor_handle_task(e, task);
+			} while ((task = vine_wait(e->manager, 0)));
 			wait_timeout = 0;
 		} else if (wait_timeout > 0 || time(NULL) >= stoptime) {
 			expired = 1;

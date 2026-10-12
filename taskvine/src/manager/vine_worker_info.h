@@ -49,6 +49,11 @@ struct vine_worker_info {
 	char *transfer_url;       /* worker(ip)?://transfer_addr:transfer_port */
 	int  transfer_connect_back; /* The Manager cannot reach the transfer port, so the Worker connects back to send files. */
 
+	/* Scratch space of vine_schedule_task_to_worker(): bytes of the task's inputs cached on this worker, valid only while
+	 * schedule_stamp equals the manager's schedule_stamp. */
+	int64_t schedule_cached_bytes;
+	uint64_t schedule_stamp;
+
 	/* Worker condition that may affect task start or cancellation. */
 	int  draining;                          // if 1, worker does not accept anymore tasks. It is shutdown if no task running.
 	int  alarm_slow_worker;                 // if 1, no task has finished since a slow running task triggered a disconnection.

@@ -410,6 +410,35 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 	char *key;
 	struct vine_worker_info *w;
 	int iteration;
+
+	/* Add up the cached bytes of the task's inputs per worker from the workers that hold each input, which costs one
+	 * lookup per input instead of one per input and worker. file_worker_table lists a worker for every replica that
+	 * the worker's current_files holds, in any state. */
+	uint64_t stamp = ++q->schedule_stamp;
+	int64_t input_size = 0;
+	struct vine_mount *m;
+	LIST_ITERATE(t->input_mounts, m)
+	{
+		if (!m || !m->file) {
+			continue;
+		}
+		input_size += m->file->size;
+		struct set *holders = hash_table_lookup(q->file_worker_table, m->file->cached_name);
+		if (!holders) {
+			continue;
+		}
+		struct vine_worker_info *holder;
+		int holder_iteration;
+		SET_ITERATE(holders, holder_iteration, holder)
+		{
+			if (holder->schedule_stamp != stamp) {
+				holder->schedule_stamp = stamp;
+				holder->schedule_cached_bytes = 0;
+			}
+			holder->schedule_cached_bytes += m->file->size;
+		}
+	}
+
 	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
 	{
 		/* briefly skip uninitialized workers, more detailed checks are performed in @check_worker_against_task */
@@ -437,23 +466,9 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 			}
 		}
 
-		/* compute the size of cached and uncached input files on the worker */
-		int64_t uncached_input_size = 0;
-		int64_t cached_input_size = 0;
-		struct vine_mount *m;
-		LIST_ITERATE(t->input_mounts, m)
-		{
-			if (!m || !m->file) {
-				continue;
-			}
-
-			struct vine_file_replica *replica = vine_file_replica_table_lookup(w, m->file->cached_name);
-			if (replica) {
-				cached_input_size += m->file->size;
-			} else {
-				uncached_input_size += m->file->size;
-			}
-		}
+		/* the size of cached and uncached input files on the worker */
+		int64_t cached_input_size = w->schedule_stamp == stamp ? w->schedule_cached_bytes : 0;
+		int64_t uncached_input_size = input_size - cached_input_size;
 
 		int64_t available_cache_space_after_task_dispatch = MEGABYTES_TO_BYTES(w->resources->disk.total) - (w->inuse_cache + uncached_input_size);
 

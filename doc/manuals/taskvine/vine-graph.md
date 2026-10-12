@@ -590,8 +590,9 @@ Vine Graph moves three kinds of data:
 | Results | The return value of a task, and any files it writes | Worker caches, as TaskVine temporary files | When every task that reads them has a durable result |
 | Checkpoints | Copies of results | The vault, a directory on the manager disk | With the result they copy |
 
-Workers fetch arguments and checkpoints from the manager's data port. They
-fetch results from each other, or from the vault when no worker has a copy.
+Workers fetch arguments and checkpoints from the manager's data port, except
+that files up to 64 KB, such as manifests, travel with their task. They fetch
+results from each other, or from the vault when no worker has a copy.
 
 ### The life of a task
 

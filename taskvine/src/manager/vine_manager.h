@@ -137,6 +137,7 @@ struct vine_manager {
 	/* Primary scheduling controls. */
 
 	vine_schedule_t worker_selection_algorithm;    /* Mode for selecting best worker for task in main scheduler. */
+	uint64_t schedule_stamp;                       /* Marks worker scratch space of the current vine_schedule_task_to_worker(). */
 	vine_category_mode_t allocation_default_mode;  /* Mode for computing resources allocations for each task. */
 
 	/* Internal state modified by the manager */

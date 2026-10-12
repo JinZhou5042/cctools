@@ -48,6 +48,10 @@ vine_manager_checkpoint_result_t vine_manager_data_service_fetch(struct vine_man
 /* Declare a regular local file as a workflow-cached VINE_FILE served through the vault. Return NULL on failure.
  * The caller keeps the local source unchanged until undeclaration. */
 struct vine_file *vine_manager_data_service_declare_file(struct vine_manager *manager, const char *source_path);
+/* A declared file up to this many bytes travels with its task over the control link, like any local input, instead of
+ * through the data port. A connection of its own costs more than such a file, and every connection occupies an entry
+ * of the host's connection tracking table for minutes after it closes. */
+#define VINE_DATA_INLINE_BYTES 65536
 /* Query a readable local disk copy without starting a transfer: a vault entry or a readable VINE_FILE source. */
 int vine_manager_data_service_has_local_file(struct vine_manager *manager, struct vine_file *file);
 /* Cancel checkpoint retrieval and remove the file's vault entry without waiting for queued work.

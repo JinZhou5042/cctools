@@ -236,6 +236,7 @@ static int attach_connect_back(struct transfer_job *job, uint64_t token)
 		debug(D_VINE, "data service: no receive waits for connect-back token %" PRIu64, token);
 		return 0;
 	}
+	debug(D_VINE, "checkpoint connected back: %s", receive->name);
 	if (!thread_pool_submit(ds->threads, transfer_run, receive)) {
 		pthread_mutex_lock(&ds->lock);
 		receive->success = 0;
@@ -401,9 +402,10 @@ struct vine_manager_data_service *vine_manager_data_service_create(const char *r
 		const char *high = getenv("TCP_HIGH_PORT");
 		debug(D_NOTICE, "no free port for the manager's data listener in the port range %s-%s; give the manager a range with a free port besides its own", low ? low : "default", high ? high : "default");
 	}
-	/* Let many Workers wait for a slot in the kernel instead of retrying dropped connections. */
+	/* Let many Workers wait for a slot in the kernel instead of retrying dropped connections. SOMAXCONN is only 128,
+	 * so ask for more, and the kernel lowers it to net.core.somaxconn. */
 	if (ds->listener) {
-		listen(link_fd(ds->listener), SOMAXCONN);
+		listen(link_fd(ds->listener), 4096);
 	}
 	/* Cancelled receives release their slots before their executors return, so allow one spare executor per slot. */
 	ds->threads = thread_pool_create(VINE_DATA_THREADS);

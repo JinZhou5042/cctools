@@ -77,6 +77,9 @@ EXECUTOR_TUNING = {
 COMPLETED = "completed"
 FAILED = "failed"
 
+# Seconds the background thread spends on queued calls before it advances the run one step.
+COMMAND_SECONDS = 0.05
+
 # Bytes up to which a serialized function or argument travels inside the manifest of its task. Larger objects become
 # staged files, which every task that passes the same object shares. A file of its own takes at least one 4 KiB page
 # on disk, so a smaller object is never cheaper as a file. References to other tasks and small values, which are usually
@@ -652,8 +655,11 @@ class Executor:
         self._add_graph(node.graph)
         task = (node.graph._id, node.key)
         with self._first_submission():
-            self._submit_with_ancestors(task)
-            future = self._new_future(task, target)
+            held = self._submit_with_ancestors([task])
+            try:
+                future = self._new_future(task, target)
+            finally:
+                self._unpin_results(held)
         return future
 
     def _new_future(self, task, target):
@@ -675,10 +681,14 @@ class Executor:
             # Collection may happen in any thread, so the background thread lets the Graph's tasks go.
             weakref.finalize(graph, _graph_collected, weakref.ref(self), graph._id).atexit = False
 
-    def _submit_with_ancestors(self, task):
-        """Submit a task after every ancestor that is not submitted yet, upstream first."""
+    def _submit_with_ancestors(self, tasks):
+        """Submit tasks after every ancestor that is not submitted yet, upstream first. The background thread advances
+        the run between queued calls, and C releases a completed task whose readers and Futures it has not seen yet. So
+        a task that a later task of this call reads pins its result in its own submission, and its last such reader
+        unpins it. The given tasks pin their results too, and the caller passes the returned list to _unpin_results()
+        once their Futures hold them."""
         order = []
-        visiting = [(task, False)]
+        visiting = [(task, False) for task in reversed(tasks)]
         seen = set()
         while visiting:
             current, expanded = visiting.pop()
@@ -694,12 +704,41 @@ class Executor:
                 raise KeyError(f"no submitted Graph has a task with key {key!r}")
             visiting.append((current, True))
             visiting.extend((_resolve(graph_id, parent), False) for parent in graph._parents[key])
+        batch = set(order)
+        last_reader = {}
         for current in order:
-            self._submit_task(current)
+            for parent in self._graphs[current[0]]._parents[current[1]]:
+                parent = _resolve(current[0], parent)
+                if parent in batch:
+                    last_reader[parent] = current
+        unpins = collections.defaultdict(list)
+        for parent, reader in last_reader.items():
+            unpins[reader].append(parent)
+        targets = set(tasks) & batch
+        try:
+            for current in order:
+                pins = (current in last_reader) + (current in targets)
+                self._submit_task(current, pins, unpins.get(current, ()))
+        except BaseException:
+            # A queued task keeps its number. One whose last reader was not queued, because staging failed or was
+            # interrupted, gives up its pin, and so does every queued target.
+            if not self._local:
+                for parent, reader in last_reader.items():
+                    if parent in self._numbers and reader not in self._numbers:
+                        self._enqueue(lambda parent=parent: self._unpin_result(parent))
+                self._unpin_results([task for task in targets if task in self._numbers])
+            raise
+        return [] if self._local else [task for task in order if task in targets]
 
-    def _submit_task(self, task):
+    def _unpin_results(self, tasks):
+        """Release the pins that submitted targets took until their Futures hold them."""
+        for task in tasks:
+            self._enqueue(lambda task=task: self._unpin_result(task))
+
+    def _submit_task(self, task, pins=0, unpins=()):
         """Check and stage one task, then run it locally or queue it for the background thread. A task interrupted
-        before it was queued can be submitted again."""
+        before it was queued can be submitted again. pins is the number of pins its result takes in its own submission,
+        which later calls release, and unpins names the tasks whose pins it releases once it is submitted."""
         graph_id, key = task
         graph = self._graphs[graph_id]
         for name in graph._hoisted.get(key, ()):
@@ -722,6 +761,8 @@ class Executor:
                 submitted = True
             else:
                 plan = self._plan(task, names)
+                plan["pins"] = pins
+                plan["unpins"] = list(unpins)
                 with _deferred_interrupts(), self._lock:
                     self._staged[task] = names
                     self._graph_tasks[graph_id].add(key)
@@ -899,6 +940,15 @@ class Executor:
                 self._add_input(node, self._edata_files[name], name)
         self._add_input(node, self._edata_files[plan["manifest"][0]], library.MANIFEST)
         self._check(capi.vine_graph_executor_submit_node(self._executor, node), f"failed to submit task {key!r}")
+        for _ in range(plan["pins"]):
+            self._check(capi.vine_graph_executor_pin_file(self._executor, self._result_files[task]),
+                        "failed to pin a result")
+        for parent in plan["unpins"]:
+            self._unpin_result(parent)
+
+    def _unpin_result(self, task):
+        """Release a pin that a task took in its own submission."""
+        capi.vine_graph_executor_unpin_file(self._executor, self._result_files[task])
 
     def _add_output(self, node, task_path):
         file = capi.vine_graph_executor_add_output(self._executor, node, task_path)
@@ -994,7 +1044,10 @@ class Executor:
 
     def _advance(self):
         """Run queued calls, advance the run for about a second, and publish what happened. Return False when the run
-        stopped. Only the background thread calls this."""
+        stopped. Only the background thread calls this. Queued calls run for at most COMMAND_SECONDS before the run
+        advances one step, so tasks already submitted start while a caller keeps submitting more."""
+        deadline = time.monotonic() + COMMAND_SECONDS
+        pending = False
         while True:
             with self._changed:
                 if self._closed or not self._commands:
@@ -1004,8 +1057,16 @@ class Executor:
             if isinstance(command, _Call):
                 with self._changed:
                     self._changed.notify_all()
+            if time.monotonic() >= deadline:
+                with self._changed:
+                    pending = bool(self._commands)
+                break
         if self._closed:
             return False
+        if pending:
+            # A wait returns after one step of the Manager, which dispatches ready tasks, when a wake is pending.
+            # A wait of zero seconds would only collect returned tasks.
+            capi.vine_graph_executor_wake(self._executor)
         status = capi.vine_graph_executor_wait(self._executor, 1)
         error = capi.vine_graph_executor_get_error(self._executor) if status == capi.VINE_GRAPH_FAILED else None
         self._publish_finished()
@@ -1121,8 +1182,19 @@ class Executor:
         NodeFiles, or Files, and default to the tasks no other task reads. A failure raises the TaskError of a task
         that failed on its own, in preference to the tasks that could not run because of it."""
         targets = graph.sinks() if targets is None else list(targets)
+        tasks = []
+        for target in targets:
+            node = target.node if isinstance(target, NodeFile) else target
+            if isinstance(node, Node) and node.key in node.graph._tasks:
+                self._add_graph(node.graph)
+                tasks.append((node.graph._id, node.key))
         with self._first_submission():
-            futures = [self.submit(target) for target in targets]
+            # One call submits every task that the targets need, so a task read by another target's task stays.
+            held = self._submit_with_ancestors(tasks)
+            try:
+                futures = [self.submit(target) for target in targets]
+            finally:
+                self._unpin_results(held)
         self.wait(futures)
         errors = [error for error in (future.exception() for future in futures) if error is not None]
         if errors:

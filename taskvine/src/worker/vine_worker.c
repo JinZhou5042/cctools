@@ -98,6 +98,9 @@ static struct list *procs_waiting = NULL;
 /* List of asynchronous messages pending to be sent to the manager */
 static struct list *pending_async_messages = NULL;
 
+/* Bytes of the message at the head of pending_async_messages that the socket already took. */
+static size_t pending_async_offset = 0;
+
 /* Table of all processes with results to be sent back, indexed by task_id. */
 /* These are additional pointers into procs_table and should not be deleted */
 static struct itable *procs_complete = NULL;
@@ -218,55 +221,29 @@ __attribute__((format(printf, 2, 3))) void send_message(struct link *l, const ch
 }
 
 /*
-Send messages from list of asychronous messages available.
-Asynchronus messages are measured and sent as to not overflow the
-TCP window (typically 64KB). This is done to avoid deadlock. Should
-the worker overflow the window, deadlock may occur in the scenario in
-which the manager requests data from the worker (files, etc.) during the
-the time in which the worker is sending data, causing the worker to block.
-This function attempts to deliver messages that have been buffered via
-the function send_async_message. We measure the size of the window and
-bytes present within the window. As we iterate though buffered messages,
-should a buffered message not overflow the the window, it is sent. Otherwise,
-we break once a message would overflow the window.
+Send the asynchronous messages that the socket takes without blocking. The worker never blocks writing a message of
+its own: the manager may be blocked writing a long task to this worker at the same time, and then neither side would
+read. A message that the socket takes only in part keeps its remainder at the head of the queue, so the stream stays
+intact, and the main loop waits for the link to become writable while messages remain.
 */
 
 void deliver_async_messages(struct link *l)
 {
-	/* If no pending messages, return right away. */
-	int messages = list_size(pending_async_messages);
-	if (messages < 1)
-		return;
-
-	/* Determine how much space is available for sending */
-	int recv_window;
-	int send_window;
-	link_window_get(l, &send_window, &recv_window);
-
-	int bytes_in_buffer = link_get_buffer_bytes(l);
-	int bytes_available = send_window - bytes_in_buffer;
-
-	int visited;
-
-	/* Consider each message in the pending queue: */
-	for (visited = 0; visited < messages; visited++) {
-		char *message = list_peek_head(pending_async_messages);
-		int message_size = strlen(message);
-		/*
-		If the message fits in the available space, send it.
-		OR: If it is larger than the whole window, send it anyway
-		because we will have to block one way or the other.
-		Otherwise, stop here and return later.
-		*/
-		if (message_size < bytes_available || message_size > send_window) {
-			message = list_pop_head(pending_async_messages);
-			bytes_available -= message_size;
-			debug(D_VINE, "tx: %s", message);
-			link_printf(l, time(0) + options->active_timeout, "%s", message);
-			free(message);
-		} else {
+	char *message;
+	while ((message = list_peek_head(pending_async_messages))) {
+		size_t length = strlen(message + pending_async_offset);
+		ssize_t written = link_write(l, message + pending_async_offset, length, LINK_NOWAIT);
+		if (written <= 0) {
 			break;
 		}
+		if ((size_t)written < length) {
+			pending_async_offset += written;
+			break;
+		}
+		debug(D_VINE, "tx: %s", message);
+		list_pop_head(pending_async_messages);
+		free(message);
+		pending_async_offset = 0;
 	}
 }
 
@@ -286,6 +263,14 @@ void send_async_message(struct link *l, const char *fmt, ...)
 
 	list_push_tail(pending_async_messages, message);
 	deliver_async_messages(l); // attempt to deliver message, will be delivered later if buffer is full.
+}
+
+/* Queue a message that is already allocated and may be longer than VINE_LINE_MAX, and attempt to deliver it. */
+
+static void send_async_string(struct link *l, char *message)
+{
+	list_push_tail(pending_async_messages, message);
+	deliver_async_messages(l);
 }
 
 /* Send asynchronous task completion messages for current complete processes */
@@ -490,7 +475,7 @@ Send a message to the manager with my current statistics information.
 
 static void send_stats_update(struct link *manager)
 {
-	send_message(manager, "info tasks_running %lld\n", (long long)itable_size(procs_running));
+	send_async_message(manager, "info tasks_running %lld\n", (long long)itable_size(procs_running));
 }
 
 /*
@@ -546,16 +531,16 @@ void vine_worker_send_cache_invalid(struct link *manager, const char *cachename,
 		return;
 	}
 
+	/* The error message follows its header in the same queued message, so it cannot overtake the header. */
 	int length = strlen(message);
 	char *transfer_id = hash_table_remove(current_transfers, cachename);
 	if (transfer_id) {
 		debug(D_VINE, "Sending Cache invalid transfer id: %s", transfer_id);
-		send_async_message(manager, "cache-invalid %s %d %s\n", cachename, length, transfer_id);
+		send_async_string(manager, string_format("cache-invalid %s %d %s\n%s", cachename, length, transfer_id, message));
 		free(transfer_id);
 	} else {
-		send_async_message(manager, "cache-invalid %s %d\n", cachename, length);
+		send_async_string(manager, string_format("cache-invalid %s %d\n%s", cachename, length, message));
 	}
-	link_write(manager, message, length, time(0) + options->active_timeout);
 }
 
 /*
@@ -667,7 +652,7 @@ static int start_process(struct vine_process *p, struct link *manager)
 		 * Also set the sigchld flag so the worker will immediately check for the library
 		 * startup instead of sleeping and waiting for the manager. */
 		if (p->task->provides_library) {
-			send_message(manager, "info library-update %d %d\n", p->task->task_id, VINE_LIBRARY_STARTED);
+			send_async_message(manager, "info library-update %d %d\n", p->task->task_id, VINE_LIBRARY_STARTED);
 			sigchld_received_flag = 1;
 		}
 
@@ -1266,6 +1251,13 @@ static void disconnect_manager(struct link *manager)
 	debug(D_VINE, "disconnecting from manager %s:%d", current_manager_address->addr, current_manager_address->port);
 	link_close(manager);
 
+	/* Messages that this manager did not take belong to its session, and a partly sent one would corrupt the next. */
+	char *message;
+	while ((message = list_pop_head(pending_async_messages))) {
+		free(message);
+	}
+	pending_async_offset = 0;
+
 	debug(D_VINE, "killing all outstanding tasks");
 	kill_all_tasks();
 
@@ -1763,7 +1755,9 @@ static void vine_worker_serve_manager(struct link *manager)
 			sigchld_received_flag = 0;
 		}
 
-		struct link_info waits[2] = {{manager, LINK_READ, 0}, {wake_link, LINK_READ, 0}};
+		/* Queued messages also wait for the manager to make room for them. */
+		int manager_events = LINK_READ | (list_size(pending_async_messages) ? LINK_WRITE : 0);
+		struct link_info waits[2] = {{manager, manager_events, 0}, {wake_link, LINK_READ, 0}};
 		int ready = link_poll(waits, wake_link ? 2 : 1, wait_msec);
 		char drain[64];
 		while (wake_link && read(wake_pipe[0], drain, sizeof(drain)) > 0) {

@@ -82,6 +82,7 @@ See the file COPYING for details.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -297,6 +298,13 @@ __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager 
 	stoptime = time(0) + q->short_timeout;
 
 	int result = link_putlstring(w->link, buffer_tostring(B), buffer_pos(B), stoptime);
+	if (result < 0) {
+		/* A worker that did not take a message within the short timeout may have received part of it, so its stream
+		 * is lost. Later messages fail at once instead of each waiting the short timeout, and the worker is removed
+		 * when it reads the end of the stream or stops answering keepalives. */
+		debug(D_VINE, "failed to send to %s (%s), so later messages to it fail at once", w->hostname, w->addrport);
+		shutdown(link_fd(w->link), SHUT_WR);
+	}
 
 	buffer_free(B);
 
@@ -1170,6 +1178,11 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 	}
 
 	vine_txn_log_write_worker(q, w, 1, reason);
+
+	/* Cleanup below only updates the manager's state. Messages that it would still send, such as unlink and kill,
+	 * fail at once instead of waiting on a worker that stopped reading, which would stall the manager for the
+	 * short timeout per file. A worker that loses its manager kills its tasks and prunes its cache itself. */
+	shutdown(link_fd(w->link), SHUT_WR);
 
 	hash_table_remove(q->worker_table, w->hashkey);
 	hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
@@ -3452,8 +3465,10 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 		A VINE_FILE in the vault is Manager-local data, such as graph edata. A VINE_TEMP in the vault is
 		a task output with a checkpoint copy, such as graph idata, so it stays recoverable after the copy
 		is removed. Like any URL source, the vault entry is limited by file-source-max-transfers.
+		A small VINE_FILE is the exception: the manager sends it at dispatch like any other local file.
 		*/
-		if (vine_manager_data_service_vault_contains(q, m->file)) {
+		int small_local_file = m->file->type == VINE_FILE && m->file->size <= VINE_DATA_INLINE_BYTES;
+		if (!small_local_file && vine_manager_data_service_vault_contains(q, m->file)) {
 			char *source = string_format("manager://%s", m->file->cached_name);
 			if (vine_current_transfers_url_in_use(q, source) >= q->file_source_max_transfers) {
 				free(source);
@@ -3856,6 +3871,9 @@ static void ask_for_workers_updates(struct vine_manager *q)
 	int iteration;
 	timestamp_t current_time = timestamp_get();
 
+	/* Removing a worker changes worker_table, so failed workers are removed after the iteration. */
+	struct list *failed = list_create();
+
 	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
 	{
 
@@ -3866,7 +3884,7 @@ static void ask_for_workers_updates(struct vine_manager *q)
 			if (!strcmp(w->hostname, "unknown")) {
 				if ((int)((current_time - w->start_time) / 1000000) >= q->keepalive_timeout) {
 					debug(D_VINE, "Removing worker %s (%s): hasn't sent its initialization in more than %d s", w->hostname, w->addrport, q->keepalive_timeout);
-					handle_worker_failure(q, w);
+					list_push_tail(failed, w);
 				}
 				continue;
 			}
@@ -3878,7 +3896,7 @@ static void ask_for_workers_updates(struct vine_manager *q)
 				if (last_update_elapsed_time >= q->keepalive_interval) {
 					if (vine_manager_send(q, w, "check\n") < 0) {
 						debug(D_VINE, "Failed to send keepalive check to worker %s (%s).", w->hostname, w->addrport);
-						handle_worker_failure(q, w);
+						list_push_tail(failed, w);
 					} else {
 						debug(D_VINE, "Sent keepalive check to worker %s (%s)", w->hostname, w->addrport);
 						w->last_update_msg_time = current_time;
@@ -3895,12 +3913,17 @@ static void ask_for_workers_updates(struct vine_manager *q)
 								w->hostname,
 								w->addrport,
 								q->keepalive_timeout);
-						handle_worker_failure(q, w);
+						list_push_tail(failed, w);
 					}
 				}
 			}
 		}
 	}
+
+	while ((w = list_pop_head(failed))) {
+		handle_worker_failure(q, w);
+	}
+	list_delete(failed);
 }
 
 /*
@@ -5718,6 +5741,9 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 				sent_in_previous_cycle = 1;
 				continue;
 			}
+		} else {
+			/* No task is dispatched before enough workers connect, and each connection ends the wait. */
+			q->dispatch_blocked = 1;
 		}
 
 		// Check if any temp files need replication and start replicating
@@ -5977,16 +6003,23 @@ int vine_workers_shutdown(struct vine_manager *q, int n)
 	if (n < 1)
 		n = hash_table_size(q->worker_table);
 
-	// send worker the "exit" msg
+	/* Removing a worker changes worker_table, so the workers are chosen first and shut down after the iteration. */
+	struct list *chosen = list_create();
 	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
 	{
 		if (i >= n)
 			break;
 		if (w->tasks_committed == 0) {
-			vine_manager_shut_down_worker(q, w);
+			list_push_tail(chosen, w);
 			i++;
 		}
 	}
+
+	// send worker the "exit" msg
+	while ((w = list_pop_head(chosen))) {
+		vine_manager_shut_down_worker(q, w);
+	}
+	list_delete(chosen);
 
 	return i;
 }

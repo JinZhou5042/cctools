@@ -154,6 +154,10 @@ int vine_transfer_server_start(struct vine_cache *cache, struct link *manager, i
 /* The Manager sends its get request once an executor takes the connection, which may wait in its listener backlog. */
 #define VINE_CONNECT_BACK_REQUEST_SECONDS 60
 
+/* Seconds to connect to the Manager, which allow for the kernel retrying a dropped connection, and stay below the
+ * Manager's own wait for the connection. */
+#define VINE_CONNECT_BACK_CONNECT_SECONDS 20
+
 int vine_transfer_server_connect_back(struct vine_cache *cache, struct link *manager, uint64_t token)
 {
 	char ip[LINK_ADDRESS_MAX];
@@ -173,7 +177,7 @@ int vine_transfer_server_connect_back(struct vine_cache *cache, struct link *man
 			/* Close only the inherited descriptor without flushing or shutting down the Worker TLS session. */
 			close(link_fd(manager));
 			change_process_title("vine_worker [connect back]");
-			struct link *lnk = link_connect(ip, port, time(0) + command_timeout);
+			struct link *lnk = link_connect(ip, port, time(0) + VINE_CONNECT_BACK_CONNECT_SECONDS);
 			if (lnk) {
 				if ((!options->password || link_auth_password(lnk, options->password, time(0) + command_timeout)) &&
 						link_printf(lnk, time(0) + command_timeout, "connect-back %" PRIu64 "\n", token) >= 0) {

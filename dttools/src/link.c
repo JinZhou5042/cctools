@@ -39,6 +39,10 @@ See the file COPYING for details.
 #include <string.h>
 #include <time.h>
 
+/* Connections a listening socket holds before they are accepted. The kernel lowers it to net.core.somaxconn. A short
+ * queue drops connections that arrive together, such as many workers connecting at once, and each must retry. */
+#define LINK_LISTEN_BACKLOG 4096
+
 #ifndef TCP_LOW_PORT_DEFAULT
 #define TCP_LOW_PORT_DEFAULT 1024
 #endif
@@ -491,7 +495,7 @@ struct link *link_serve_address(const char *addr, int port)
 	if (success < 0)
 		goto failure;
 
-	success = listen(link->fd, 5);
+	success = listen(link->fd, LINK_LISTEN_BACKLOG);
 	if (success < 0)
 		goto failure;
 
