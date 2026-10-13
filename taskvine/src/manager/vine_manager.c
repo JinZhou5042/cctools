@@ -4944,6 +4944,9 @@ int vine_submit(struct vine_manager *q, struct vine_task *t)
 
 	/* Add reference to task when adding it to primary table. */
 	itable_insert(q->tasks, t->task_id, vine_task_addref(t));
+	if (t->type == VINE_TASK_TYPE_STANDARD) {
+		q->standard_tasks_count++;
+	}
 
 	/* Ensure category structure is created. */
 	vine_category_lookup_or_create(q, t->category);
@@ -5331,6 +5334,9 @@ struct vine_task *find_task_to_return(struct vine_manager *q, const char *tag, i
 
 		/* The task was given a reference when added to the table, so delete a reference on removal. */
 		itable_remove(q->tasks, t->task_id);
+		if (type == VINE_TASK_TYPE_STANDARD) {
+			q->standard_tasks_count--;
+		}
 		vine_task_delete(t);
 
 		/* CAREFUL: a non-standard task *may* no longer exist following vine_delete! */
@@ -5950,22 +5956,11 @@ static void release_all_workers(struct vine_manager *q)
 If there are any standard tasks (those submitted by the user)
 known to the manager, then the system is not empty, and the caller
 should wait some more.
-XXX This is a linear-time operation, perhaps there is a more efficient way to do it.
 */
 
 int vine_empty(struct vine_manager *q)
 {
-	struct vine_task *t;
-	uint64_t task_id;
-	int iteration;
-
-	ITABLE_ITERATE(q->tasks, iteration, task_id, t)
-	{
-		if (t->type == VINE_TASK_TYPE_STANDARD)
-			return 0;
-	}
-
-	return 1;
+	return q->standard_tasks_count == 0;
 }
 
 void vine_set_keepalive_interval(struct vine_manager *q, int interval)
