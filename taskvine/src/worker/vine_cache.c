@@ -36,6 +36,13 @@ See the file COPYING for details.
 #include <sys/wait.h>
 #include <unistd.h>
 
+/*
+A transfer from another worker fails when it connects or receives nothing for this many seconds. A worker whose host
+hangs leaves its connections open without sending anything, and the fetching worker then reports the file as invalid,
+so that the manager can find another source or recreate the file, instead of waiting for a fixed deadline.
+*/
+#define VINE_PEER_TRANSFER_TIMEOUT 60
+
 struct vine_cache {
 	struct hash_table *table;
 	struct hash_table *pending_transfers;
@@ -561,7 +568,7 @@ static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, c
 	debug(D_VINE, "cache: setting up worker transfer file %s", f->source);
 
 	timestamp_t time_start_connect = timestamp_get();
-	worker_link = link_connect(addr, port_num, time(0) + 300);
+	worker_link = link_connect(addr, port_num, time(0) + VINE_PEER_TRANSFER_TIMEOUT);
 	timestamp_t time_end_connect = timestamp_get();
 	int time_duration_connect = (time_end_connect - time_start_connect) / 1e6;
 
@@ -578,13 +585,11 @@ static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, c
 		}
 	}
 
-	/* XXX A fixed timeout of 900 certainly can't be right! */
-
 	char *transfer_dir = vine_cache_transfer_path(c, ".");
 	int64_t totalsize;
 	int mode, mtime;
 
-	if (!vine_transfer_request_any(worker_link, source_path, transfer_dir, &totalsize, &mode, &mtime, time(0) + 900, error_message)) {
+	if (!vine_transfer_request_any(worker_link, source_path, transfer_dir, &totalsize, &mode, &mtime, VINE_PEER_TRANSFER_TIMEOUT, error_message)) {
 		if (error_message && *error_message == NULL) {
 			*error_message = string_format("Could not transfer file from %s", f->source);
 		}
