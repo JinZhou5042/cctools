@@ -33,8 +33,10 @@ struct vine_worker_info *vine_worker_create(struct link *lnk)
 	w->features = hash_table_create(4, 0);
 
 	w->current_files = hash_table_create(0, 0);
-	w->current_tasks = itable_create(0);
-	w->current_libraries = itable_create(0);
+	/* A pass over a table visits every bucket, and the scheduler passes over these tables of each worker for every
+	 * dispatch, so they start small and grow with the tasks and libraries that a worker holds. */
+	w->current_tasks = itable_create(7);
+	w->current_libraries = itable_create(7);
 
 	w->start_time = timestamp_get();
 	w->end_time = -1;

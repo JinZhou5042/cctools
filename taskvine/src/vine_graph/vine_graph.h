@@ -35,7 +35,8 @@ struct vine_graph_mount {
 /* One node of the graph, executed as one task. */
 struct vine_graph_node {
 	uint64_t node_id;	// dense id assigned by the graph, starting from one
-	struct vine_task *task; // current attempt, or NULL before the first submission
+	struct vine_task *task; // latest attempt until the Manager returns it, then NULL
+	int task_id;		// Manager id of the latest attempt, or zero before the first submission
 
 	struct list *inputs;   // mounts the task reads
 	struct list *outputs;  // mounts the task writes

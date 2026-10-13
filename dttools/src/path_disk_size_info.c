@@ -48,7 +48,17 @@ int path_disk_size_info_get(const char *path, int64_t *measured_size, int64_t *n
 
 int path_disk_size_info_get_r(const char *path, int64_t max_secs, struct path_disk_size_info **state, struct hash_table *exclude_paths)
 {
-	int64_t start_time = time(0);
+	if (max_secs < 0) {
+		return path_disk_size_info_get_budget(path, NULL, state, exclude_paths);
+	}
+
+	struct budget b;
+	budget_start(&b, max_secs * 1000000);
+	return path_disk_size_info_get_budget(path, &b, state, exclude_paths);
+}
+
+int path_disk_size_info_get_budget(const char *path, const struct budget *b, struct path_disk_size_info **state, struct hash_table *exclude_paths)
+{
 	int result = 0;
 
 	if (!*state) {
@@ -141,10 +151,8 @@ int path_disk_size_info_get_r(const char *path, int64_t max_secs, struct path_di
 				/* do nothing, avoiding infinite loops. */
 			}
 
-			if (max_secs > -1) {
-				if (time(0) - start_time >= max_secs) {
-					goto timeout;
-				}
+			if (b && budget_expired(b)) {
+				goto timeout;
 			}
 		}
 		/* we are done reading a complete directory, and we go to the next in the queue */

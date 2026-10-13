@@ -131,7 +131,7 @@ void vine_process_delete(struct vine_process *p)
 		link_close(p->library_write_link);
 
 	if (p->sandbox) {
-		trash_file(p->sandbox);
+		trash_move(p->sandbox);
 		free(p->sandbox);
 	}
 
@@ -260,7 +260,7 @@ int vine_process_execute_and_wait(struct vine_process *p)
 int vine_process_invoke_function(struct vine_process *p)
 {
 	char *buffer = string_format("%d %s %s %s", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name);
-	ssize_t result = link_printf(p->library_process->library_write_link, time(0) + options->active_timeout, "%ld\n%s", strlen(buffer), buffer);
+	ssize_t result = link_printf(p->library_process->library_write_link, LINK_FOREVER, "%ld\n%s", strlen(buffer), buffer);
 
 	// conservatively assume that the function starts executing as soon as we send it to the library.
 	// XXX Alternatively, the library could report when the function started.
@@ -333,7 +333,8 @@ int vine_process_execute(struct vine_process *p)
 	if (p->pid > 0) {
 		// Make child process the leader of its own process group. This allows
 		// signals to also be delivered to processes forked by the child process.
-		// This is currently used by kill_task().
+		// This is currently used by vine_process_kill(). The child does the same,
+		// so the group exists once either call has run, whichever comes first.
 		setpgid(p->pid, 0);
 
 		/* Start the performance clock just after forking the process. */
@@ -341,11 +342,16 @@ int vine_process_execute(struct vine_process *p)
 
 		debug(D_VINE, "started task %d pid %d: %s", p->task->task_id, p->pid, p->task->command_line);
 
-		/* If we just started a library, then retain links to communicate with it. */
+		/* If we just started a library, then retain links to communicate with it. They do not block, so a wait on the
+		 * library ends when it makes no progress for the idle timeout, as a wait on any other party does. */
 		if (p->type == VINE_PROCESS_TYPE_LIBRARY) {
 
 			p->library_read_link = link_attach_to_fd(pipe_out[0]);
 			p->library_write_link = link_attach_to_fd(pipe_in[1]);
+			link_nonblocking(p->library_read_link, 1);
+			link_nonblocking(p->library_write_link, 1);
+			link_set_idle_timeout(p->library_read_link, vine_worker_options_idle_timeout(options));
+			link_set_idle_timeout(p->library_write_link, vine_worker_options_idle_timeout(options));
 
 			/* Close the ends of the pipes that the parent process won't use. */
 			close(pipe_in[0]);
@@ -372,6 +378,10 @@ int vine_process_execute(struct vine_process *p)
 		return 0;
 
 	} else {
+		/* Enter its own process group before anything else, so that a kill of the group reaches it even when the
+		 * worker's own setpgid() comes too late. */
+		setpgid(0, 0);
+
 		if (chdir(p->sandbox)) {
 			printf("The sandbox dir is %s", p->sandbox);
 			fatal("could not change directory into %s: %s", p->sandbox, strerror(errno));
@@ -521,7 +531,7 @@ int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_
 	int ok = 1;
 
 	/* read number of bytes of data first. */
-	ok = link_readline(p->library_read_link, buffer, VINE_LINE_MAX, time(0) + options->active_timeout);
+	ok = link_readline(p->library_read_link, buffer, VINE_LINE_MAX, LINK_FOREVER);
 	if (!ok) {
 		return 0;
 	}
@@ -529,7 +539,7 @@ int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_
 
 	/* now read the buffer, which is the task id of the done function invocation. */
 	char buffer_data[len_buffer + 1];
-	ok = link_read(p->library_read_link, buffer_data, len_buffer, time(0) + options->active_timeout);
+	ok = link_read(p->library_read_link, buffer_data, len_buffer, LINK_FOREVER);
 	if (ok <= 0) {
 		return 0;
 	}
@@ -549,7 +559,7 @@ int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_
 }
 
 /*
-Send a kill signal to a running process.
+Send a kill signal to a running process without waiting for it.
 Note that the process must still be waited-for to collect its final disposition.
 */
 
@@ -567,28 +577,15 @@ void vine_process_kill(struct vine_process *p)
 		return;
 	}
 
-	// make sure a few seconds have passed since child process was created to avoid sending a signal
-	// before it has been fully initialized. Else, the signal sent to that process gets lost.
-	timestamp_t elapsed_time_execution_start = timestamp_get() - p->execution_start;
-
-	if (elapsed_time_execution_start / 1000000 < 3)
-		sleep(3 - (elapsed_time_execution_start / 1000000));
-
 	debug(D_VINE, "terminating task %d pid %d", p->task->task_id, p->pid);
 
 	// Send signal to process group of child which is denoted by -ve value of child pid.
 	// This is done to ensure delivery of signal to processes forked by the child.
-	kill((-1 * p->pid), SIGKILL);
-}
-
-/*
-Send a kill signal to a running process, and then wait for it to exit.
-*/
-
-int vine_process_kill_and_wait(struct vine_process *p)
-{
-	vine_process_kill(p);
-	return vine_process_wait(p);
+	// The child and the worker both create the group right after fork, so a freshly started
+	// task has it already. The signal to the pid alone covers a group that is already gone.
+	if (kill(-p->pid, SIGKILL) < 0) {
+		kill(p->pid, SIGKILL);
+	}
 }
 
 /* The disk needed by a task is shared between the cache and the process
@@ -630,15 +627,15 @@ void vine_process_compute_disk_needed(struct vine_process *p)
 	}
 }
 
-static int vine_process_sandbox_disk_measure(struct vine_process *p, int max_time_on_measurement, struct path_disk_size_info **state);
+static int vine_process_sandbox_disk_measure(struct vine_process *p, const struct budget *b, struct path_disk_size_info **state);
 
-int vine_process_measure_disk(struct vine_process *p, int max_time_on_measurement)
+int vine_process_measure_disk(struct vine_process *p, const struct budget *b)
 {
 	/* we can't have pointers to struct members, thus we create temp variables here */
 
 	struct path_disk_size_info *state = p->disk_measurement_state;
 
-	int result = vine_process_sandbox_disk_measure(p, max_time_on_measurement, &state);
+	int result = vine_process_sandbox_disk_measure(p, b, &state);
 
 	/* not a memory leak... Either disk_measurement_state was NULL or the same as state. */
 	p->disk_measurement_state = state;
@@ -651,10 +648,17 @@ int vine_process_measure_disk(struct vine_process *p, int max_time_on_measuremen
 
 	p->sandbox_file_count = state->last_file_count_complete;
 
-	return result;
+	/* After an error, the next measurement starts over instead of resuming at the entry that failed. */
+	if (result < 0) {
+		path_disk_size_info_delete_state(state);
+		p->disk_measurement_state = NULL;
+		return 1;
+	}
+
+	return state->complete_measurement;
 }
 
-static int vine_process_sandbox_disk_measure(struct vine_process *p, int max_secs, struct path_disk_size_info **state)
+static int vine_process_sandbox_disk_measure(struct vine_process *p, const struct budget *b, struct path_disk_size_info **state)
 {
 	int num_inputs = 0;
 	if (p->task->input_mounts) {
@@ -672,7 +676,7 @@ static int vine_process_sandbox_disk_measure(struct vine_process *p, int max_sec
 		}
 	}
 
-	int result = path_disk_size_info_get_r(p->sandbox, max_secs, state, exclude_paths);
+	int result = path_disk_size_info_get_budget(p->sandbox, b, state, exclude_paths);
 
 	if (exclude_paths) {
 		hash_table_delete(exclude_paths);

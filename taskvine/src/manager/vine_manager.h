@@ -106,6 +106,7 @@ struct vine_manager {
 	/* Primary data structures for tracking task state. */
 
 	struct itable *tasks;           /* Maps task_id -> vine_task of all tasks in any state. */
+	int standard_tasks_count;       /* Number of standard tasks in the tasks table, which vine_empty() reports. */
 	struct skip_list   *ready_tasks;       /* Skip list of vine_task that are waiting to execute. */
 	struct itable   *running_table;      /* Table of vine_task that are running at workers. */
 	struct list   *waiting_retrieval_list;      /* List of vine_task that are waiting to be retrieved. */
@@ -161,6 +162,7 @@ struct vine_manager {
 	timestamp_t time_last_log_stats;
 	timestamp_t time_last_large_tasks_check;
 	timestamp_t time_last_ready_tasks_check;
+	timestamp_t time_last_worker_checks; /* When keepalives, slow and drained workers, and blocks were last checked. */
 	timestamp_t link_poll_end;
 	time_t      catalog_last_update_time;
 	time_t      resources_last_update_time;
@@ -199,14 +201,12 @@ struct vine_manager {
 	int group_id_counter; 
 
 	/* Various performance knobs that can be tuned. */
-	int short_timeout;            /* Timeout in seconds to send/recv a brief message from worker */
-	int long_timeout;             /* Timeout if in the middle of an incomplete message. */
-	int minimum_transfer_timeout; /* Minimum number of seconds to allow for a manager<-> worker file transfer. */
-	int transfer_outlier_factor;  /* Factor to consider a given transfer time to be an outlier justifying cancellation. */
-	int default_transfer_rate;    /* Assumed data transfer rate for computing timeouts, prior to collecting observations. */
+	int response_timeout;         /* Seconds within which a healthy peer makes progress. One idle twice as long failed. */
+	int default_transfer_rate;    /* Assumed data transfer rate for reporting bandwidth, prior to collecting observations. */
 	int process_pending_check;    /* Enables check for waiting processes in main loop via @ref process_pending */
-	int keepalive_interval;	      /* Time between keepalive request transmissions. */
-	int keepalive_timeout;	      /* Keepalive response must be received within this time, otherwise worker disconnected. */
+	int keepalive_interval;	      /* Time between keepalive request transmissions. Negative follows response_timeout. */
+	int keepalive_timeout;	      /* Keepalive response must be received within this time, otherwise worker disconnected.
+	                                 Negative follows twice the response_timeout. */
 	int hungry_minimum;           /* Minimum number of waiting tasks to consider queue not hungry. */
 	int hungry_minimum_factor;    /* queue is hungry if number of waiting tasks is less than hungry_minimum_factor * number of connected workers. */
 	int wait_for_workers;         /* Wait for these many workers to connect before dispatching tasks at start of execution. */
@@ -277,9 +277,6 @@ int vine_manager_send( struct vine_manager *q, struct vine_worker_info *w, const
 
 /* Receive a line-oriented message from a remote worker. */
 vine_msg_code_t vine_manager_recv( struct vine_manager *q, struct vine_worker_info *w, char *line, int length );
-
-/* Compute the expected wait time for a transfer of length bytes. */
-int vine_manager_transfer_time( struct vine_manager *q, struct vine_worker_info *w, int64_t length );
 
 /* Various functions to compute expected properties of tasks. */
 const struct rmsummary *vine_manager_task_resources_min(struct vine_manager *q, struct vine_task *t);

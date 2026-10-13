@@ -12,6 +12,10 @@ returns the function's result, which the TaskVine library writes to RESULT as {"
 function that raises ends the task process with a non-zero status after printing its traceback, because the library
 otherwise reports exceptions with status zero. Local execution calls run_task() too, so both run a function alike.
 
+A task that reads a result at exactly one place, through a selection such as node[k], needs only the selected value.
+The manifest of the task that produces the result may list selections, which run_node() writes each to a file of its
+own with save_selection(), and a task that reads one of them mounts only that file instead of the whole result.
+
 The library prepares itself once when it starts, in its own process: it imports the modules it was given, then loads
 the hoisted objects from one file, HOISTED, which maps each name to the object serialized on its own, and the cached
 edata from another, EDATA_CACHE, which maps sandbox names of staged objects to their serialized bytes. Every task it
@@ -144,6 +148,56 @@ def load_result(path):
         return cloudpickle.load(stream)["Result"]
 
 
+def save_selection(path, result, steps):
+    """Write what steps select from a task result: the selected value, or the exception that the selection or its
+    serialization raises, which load_selection() raises in the task that reads it. The selection never fails the
+    task that produced the result, so the file always exists. A value that cannot be serialized on its own, such as
+    state that the result's own serialization replaces, is selected again from a serialized copy of the result, which
+    is what a task that loads the whole result selects from. The file holds a flag that tells a value from an
+    exception, followed by either."""
+    with open(path, "wb") as stream:
+        try:
+            value = _select(result, steps)
+        except Exception as error:
+            _save_outcome(stream, False, _portable_error(error))
+            return
+        try:
+            _save_outcome(stream, True, value)
+            return
+        except Exception:
+            del value
+        try:
+            _save_outcome(stream, True, _select(cloudpickle.loads(cloudpickle.dumps(result)), steps))
+        except Exception as error:
+            _save_outcome(stream, False, _portable_error(error))
+
+
+def _save_outcome(stream, selected, value):
+    stream.seek(0)
+    stream.truncate()
+    cloudpickle.dump(selected, stream)
+    cloudpickle.dump(value, stream)
+
+
+def load_selection(path):
+    """Return the value that a file written by save_selection() holds, or raise the exception it holds."""
+    with open(path, "rb") as stream:
+        selected = cloudpickle.load(stream)
+        value = cloudpickle.load(stream)
+    if not selected:
+        raise value
+    return value
+
+
+def _portable_error(error):
+    """Return error, or a RuntimeError with its message when it cannot be serialized and loaded again."""
+    try:
+        cloudpickle.loads(cloudpickle.dumps(error))
+        return error
+    except Exception:
+        return RuntimeError("".join(traceback.format_exception_only(error)).strip())
+
+
 def file_identity(ref):
     """Return the key under which a manifest lists the path of a File or of a task's output file."""
     if isinstance(ref, File):
@@ -162,12 +216,17 @@ def _select(value, steps):
     return value
 
 
-def run_task(func, args, kwargs, load_task_result, file_path, load_hoisted_object):
+def run_task(func, args, kwargs, load_task_result, file_path, load_hoisted_object, read_once=(), load_selected=None):
     """Call func after replacing each reference in its arguments: a task result with load_task_result((graph id,
     key)), a file with file_path(file_identity(file)), and a hoisted object with load_hoisted_object(name). Other
-    arguments reach func unchanged. A result or hoisted object read twice is one object."""
+    arguments reach func unchanged. A result or hoisted object read twice is one object. A task in read_once is read at
+    exactly one place, through a selection, and load_selected(task, steps) returns the selected value, by default
+    selected from load_task_result(task), so the whole result does not stay in memory while func runs."""
     results = {}
     hoisted = {}
+    if load_selected is None:
+        def load_selected(task, steps):
+            return _select(load_task_result(task), steps)
 
     def replace(ref):
         if isinstance(ref, Hoisted):
@@ -176,6 +235,8 @@ def run_task(func, args, kwargs, load_task_result, file_path, load_hoisted_objec
             return hoisted[ref.name]
         if isinstance(ref, _Ref):
             task = (ref.graph_id, ref.key)
+            if task in read_once:
+                return load_selected(task, ref.steps)
             if task not in results:
                 results[task] = load_task_result(task)
             return _select(results[task], ref.steps)
@@ -223,11 +284,20 @@ def _run_node():
                     objects[entry] = cloudpickle.load(stream)
         return objects[entry]
 
+    def load_selected(task, steps):
+        # A result read only through a selection is either a file of its own or selected from the whole result.
+        path = manifest["selected"][task]
+        if path is None:
+            return _select(load_result(manifest["inputs"][task]), steps)
+        return load_selection(path)
+
     function = load(manifest["callable"])
     args = tuple(load(task_path) for task_path in manifest["args"])
     kwargs = {name: load(task_path) for name, task_path in manifest["kwargs"].items()}
     output = run_task(function, args, kwargs, lambda task: load_result(manifest["inputs"][task]),
-                      manifest["files"].__getitem__, _hoisted.__getitem__)
+                      manifest["files"].__getitem__, _hoisted.__getitem__, manifest["selected"], load_selected)
     del function, args, kwargs
     objects.clear()
+    for steps, path in manifest["selections"]:
+        save_selection(path, output, steps)
     return output

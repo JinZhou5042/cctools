@@ -34,8 +34,10 @@ struct vine_worker_options {
 	/* Maximum time to attempt connecting to all available managers before giving up. */
 	int connect_timeout;
 
-	/* Maximum time to attempt sending/receiving any given file or message. */
-	int active_timeout;
+	/* Seconds within which this worker answers the manager: the manager's response-timeout X, received when the
+	 * worker connects, and VINE_DEFAULT_RESPONSE_TIMEOUT until then. Each round of the main loop is bounded by it, and
+	 * a wait on another party fails when that party makes no progress for twice as long. */
+	int response_timeout;
 
 	/* Initial value for backoff interval (in seconds) when worker fails to connect to a manager. */
 	int init_backoff_interval;
@@ -75,9 +77,6 @@ struct vine_worker_options {
 
 	/* How frequently to measure resources available. */
 	int check_resources_interval;
-
-	/* Maximum number of seconds to spend on each resource management. */
-	int max_time_on_measurement;
 
 	/* Name of worker architecture and operating system */
 	char *arch_name;
@@ -125,6 +124,9 @@ struct vine_worker_options * vine_worker_options_create();
 void vine_worker_options_show_help( const char *cmd, struct vine_worker_options *options );
 void vine_worker_options_get( struct vine_worker_options *options, int argc, char *argv[] );
 void vine_worker_options_delete( struct vine_worker_options *options );
+
+/* Return the seconds another party may go without progress before a wait on it fails: twice the response timeout. */
+int vine_worker_options_idle_timeout( struct vine_worker_options *options );
 
 #endif
 

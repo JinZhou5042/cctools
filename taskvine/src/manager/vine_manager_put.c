@@ -54,7 +54,7 @@ static int vine_manager_put_symlink(struct vine_manager *q, struct vine_worker_i
 
 	vine_manager_send(q, w, "symlink %s %d\n", remotename_encoded, length);
 
-	link_write(w->link, target, length, time(0) + q->long_timeout);
+	link_write(w->link, target, length, LINK_FOREVER);
 
 	*total_bytes += length;
 
@@ -63,8 +63,7 @@ static int vine_manager_put_symlink(struct vine_manager *q, struct vine_worker_i
 
 /*
 Send a single file to the remote worker.
-The transfer time is controlled by the size of the file.
-If the transfer takes too long, then cancel it.
+If the worker stops taking data for the idle timeout of its link, then cancel it.
 */
 
 static int vine_manager_put_file(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, const char *localname, const char *remotename, struct stat info, int override_mode, int64_t *total_bytes)
@@ -96,7 +95,8 @@ static int vine_manager_put_file(struct vine_manager *q, struct vine_worker_info
 	char remotename_encoded[VINE_LINE_MAX];
 	url_encode(remotename, remotename_encoded, sizeof(remotename_encoded));
 
-	stoptime = time(0) + vine_manager_transfer_time(q, w, length);
+	/* The worker link fails the transfer when it makes no progress for the idle timeout, however long it takes. */
+	stoptime = LINK_FOREVER;
 	vine_manager_send(q, w, "file %s %" PRId64 " 0%o %lld\n", remotename_encoded, length, mode, (long long)info.st_mtime);
 	actual = link_stream_from_fd(w->link, fd, length, stoptime);
 	close(fd);
@@ -301,7 +301,8 @@ vine_result_code_t vine_manager_put_buffer(struct vine_manager *q, struct vine_w
 	if (mode == 0)
 		mode = 0755;
 
-	time_t stoptime = time(0) + vine_manager_transfer_time(q, w, f->size);
+	/* The worker link fails the transfer when it makes no progress for the idle timeout. */
+	time_t stoptime = LINK_FOREVER;
 	vine_manager_send(q, w, "file %s %lld 0%o 0\n", f->cached_name, (long long)f->size, (int)mode);
 	int64_t actual = link_putlstring(w->link, f->data, f->size, stoptime);
 	if (actual >= 0 && (size_t)actual == f->size) {
@@ -585,7 +586,8 @@ vine_result_code_t vine_manager_put_task(
 	debug(D_VINE, "tx to %s (%s): %s", w->hostname, w->addrport, buffer_tostring(&description));
 
 	size_t length = buffer_pos(&description);
-	ssize_t sent = link_putlstring(w->link, buffer_tostring(&description), length, time(0) + q->short_timeout);
+	/* A long description to a busy worker may take a while, so only a worker that stops reading fails it. */
+	ssize_t sent = link_putlstring(w->link, buffer_tostring(&description), length, LINK_FOREVER);
 	buffer_free(&description);
 	if (sent >= 0 && (size_t)sent == length) {
 		if (target) {

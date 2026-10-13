@@ -19,6 +19,7 @@ See the file COPYING for details.
 #include "debug.h"
 #include "domain_name_cache.h"
 #include "hash_table.h"
+#include "itable.h"
 #include "link.h"
 #include "link_auth.h"
 #include "path_disk_size_info.h"
@@ -41,13 +42,14 @@ struct vine_cache {
 	struct hash_table *table;
 	struct hash_table *pending_transfers;
 	struct hash_table *processing_transfers;
+	struct itable *killed_transfers; /* Transfer processes killed with their files but not yet reaped, by pid. */
 	char *cache_dir;
 	int max_transfer_procs;
 	char manager_ip[LINK_ADDRESS_MAX]; /* This holds the control connection peer address inherited by download processes. */
 	int manager_transfer_port; /* This holds the Manager-supplied port and is zero until configured. */
 };
 
-static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager);
+static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager);
 
 /*
 Create the cache manager structure for a given cache directory.
@@ -59,6 +61,7 @@ struct vine_cache *vine_cache_create(const char *cache_dir, int max_procs)
 	c->table = hash_table_create(0, 0);
 	c->pending_transfers = hash_table_create(0, 0);
 	c->processing_transfers = hash_table_create(0, 0);
+	c->killed_transfers = itable_create(0);
 	c->cache_dir = strdup(cache_dir);
 	c->max_transfer_procs = max_procs;
 	c->manager_ip[0] = 0;
@@ -95,8 +98,8 @@ void vine_cache_load(struct vine_cache *c)
 			if (vine_cache_file_load_metadata(f, meta_path)) {
 				if (f->cache_level < VINE_CACHE_LEVEL_FOREVER) {
 					debug(D_VINE, "cache: %s has cache-level %d, deleting", d->d_name, f->cache_level);
-					trash_file(meta_path);
-					trash_file(data_path);
+					trash_move(meta_path);
+					trash_move(data_path);
 					vine_cache_file_delete(f);
 				} else {
 					debug(D_VINE, "cache: %s has cache-level %d, keeping", d->d_name, f->cache_level);
@@ -105,8 +108,8 @@ void vine_cache_load(struct vine_cache *c)
 				}
 			} else {
 				debug(D_VINE, "cache: %s has invalid metadata, deleting", d->d_name);
-				trash_file(meta_path);
-				trash_file(data_path);
+				trash_move(meta_path);
+				trash_move(data_path);
 				vine_cache_file_delete(f);
 			}
 
@@ -159,20 +162,57 @@ void vine_cache_prune(struct vine_cache *c, vine_cache_level_t level)
 }
 
 /*
-Kill off any process associated with this file object.
+Kill off any process associated with this file object, without waiting for it to exit.
+The file fails as if its transfer had failed: the manager is told, and the partial data goes to the trash.
+The process is reaped later by vine_cache_check_xfer_files or vine_cache_delete.
 The cache_file object is still valid afterwards.
 Used by both vine_cache_remove and vine_cache_delete.
 */
 
 static void vine_cache_kill(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager)
 {
-	while (f->status == VINE_CACHE_STATUS_PROCESSING) {
-		debug(D_VINE, "cache: killing pending transfer process %d...", f->pid);
-		kill(f->pid, SIGKILL);
-		vine_cache_check_file(c, f, cachename, manager);
-		if (f->status == VINE_CACHE_STATUS_PROCESSING) {
-			debug(D_VINE, "cache: still not killed, trying again!");
-			sleep(1);
+	if (f->status != VINE_CACHE_STATUS_PROCESSING) {
+		return;
+	}
+
+	debug(D_VINE, "cache: killing pending transfer process %d...", f->pid);
+	kill(f->pid, SIGKILL);
+	itable_insert(c->killed_transfers, f->pid, (void *)(uintptr_t)f->pid);
+	hash_table_remove(c->processing_transfers, cachename);
+	f->pid = 0;
+	f->stop_time = timestamp_get();
+	f->status = VINE_CACHE_STATUS_FAILED;
+
+	char *error_path = vine_cache_error_path(c, cachename);
+	FILE *file = fopen(error_path, "w");
+	if (file) {
+		fprintf(file, "transfer of %s was cancelled\n", cachename);
+		fclose(file);
+	}
+	free(error_path);
+
+	vine_cache_check_outputs(c, f, cachename, manager);
+}
+
+/*
+Collect the exit status of transfer processes killed with their files. Without waiting, collect only those that exited.
+With waiting, as when the cache is deleted, wait for each, which is short because each was sent SIGKILL.
+*/
+
+static void vine_cache_reap_killed_transfers(struct vine_cache *c, int wait)
+{
+	uint64_t pid;
+	void *dummy;
+	int iteration;
+	ITABLE_ITERATE(c->killed_transfers, iteration, pid, dummy)
+	{
+		pid_t result;
+		do {
+			result = waitpid((pid_t)pid, NULL, wait ? 0 : WNOHANG);
+		} while (wait && result < 0 && errno == EINTR);
+		/* An error other than an interruption means the process is no longer a child to wait for. */
+		if (result != 0) {
+			itable_remove(c->killed_transfers, pid);
 		}
 	}
 }
@@ -226,6 +266,8 @@ void vine_cache_delete(struct vine_cache *c)
 	{
 		vine_cache_kill(c, file, cachename, 0);
 	}
+	vine_cache_reap_killed_transfers(c, 1);
+	itable_delete(c->killed_transfers);
 
 	hash_table_clear(c->pending_transfers, NULL);
 	hash_table_clear(c->processing_transfers, NULL);
@@ -258,6 +300,13 @@ char *vine_cache_meta_path(struct vine_cache *c, const char *cachename)
 char *vine_cache_transfer_path(struct vine_cache *c, const char *cachename)
 {
 	return string_format("%s/%s", workspace->transfer_dir, cachename);
+}
+
+/* Get the full path to the measurement of what a transfer created. This result must be freed. */
+
+static char *vine_cache_measurement_path(struct vine_cache *c, const char *cachename)
+{
+	return string_format("%s/%s.measured", workspace->transfer_dir, cachename);
 }
 
 /* Get the full path to the error message from a transfer.  This result must be freed. */
@@ -442,8 +491,8 @@ int vine_cache_remove(struct vine_cache *c, const char *cachename, struct link *
 	/* Then remove the disk state associated with the file. */
 	char *data_path = vine_cache_data_path(c, cachename);
 	char *meta_path = vine_cache_meta_path(c, cachename);
-	trash_file(data_path);
-	trash_file(meta_path);
+	trash_move(data_path);
+	trash_move(meta_path);
 	free(data_path);
 	free(meta_path);
 
@@ -495,11 +544,13 @@ Transfer a single input file from a url to the local transfer path via curl.
 -S Show errors.
 -L Follow redirects as needed.
 --stderr Send errors to /dev/stdout so that they are observed by popen.
+--connect-timeout, -y, -Y Fail when connecting takes, or the transfer makes no progress for, the idle timeout.
 */
 
 static int do_curl_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *transfer_path, const char *cache_path, char **error_message)
 {
-	char *command = string_format("curl -sSL --stderr /dev/stdout -o \"%s\" \"%s\"", transfer_path, f->source);
+	int timeout = vine_worker_options_idle_timeout(options);
+	char *command = string_format("curl -sSL --stderr /dev/stdout --connect-timeout %d -y %d -Y 1 -o \"%s\" \"%s\"", timeout, timeout, transfer_path, f->source);
 	int result = do_internal_command(c, command, error_message);
 	free(command);
 
@@ -551,15 +602,20 @@ static int rewrite_source_to_ip(struct vine_cache_file *f, char **error_message)
 	return 1;
 }
 
-/* Share the original Worker transfer sequence without changing its timeout or result handling. */
+/* Fetch a file with the native get from another worker or from the manager's data port. */
 static int do_peer_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *addr, int port_num, const char *source_path, const char *password, char **error_message)
 {
 	struct link *worker_link;
 
 	debug(D_VINE, "cache: setting up worker transfer file %s", f->source);
 
+	/* The peer must connect and then make progress within the idle timeout. A peer whose host hangs leaves the
+	 * connection open without sending anything, and the transfer then fails and the file is reported invalid, so that
+	 * the manager can find another source or recreate the file. */
+	int timeout = vine_worker_options_idle_timeout(options);
+
 	timestamp_t time_start_connect = timestamp_get();
-	worker_link = link_connect(addr, port_num, time(0) + 300);
+	worker_link = link_connect(addr, port_num, time(0) + timeout);
 	timestamp_t time_end_connect = timestamp_get();
 	int time_duration_connect = (time_end_connect - time_start_connect) / 1e6;
 
@@ -567,6 +623,8 @@ static int do_peer_transfer(struct vine_cache *c, struct vine_cache_file *f, con
 		*error_message = string_format("Could not establish connection with worker at: %s:%d after %d seconds: %s", addr, port_num, time_duration_connect, strerror(errno));
 		return 0;
 	}
+
+	link_set_idle_timeout(worker_link, timeout);
 
 	if (password) {
 		if (!link_auth_password(worker_link, password, time(0) + 5)) {
@@ -576,13 +634,11 @@ static int do_peer_transfer(struct vine_cache *c, struct vine_cache_file *f, con
 		}
 	}
 
-	/* XXX A fixed timeout of 900 certainly can't be right! */
-
 	char *transfer_dir = vine_cache_transfer_path(c, ".");
 	int64_t totalsize = 0;
 	int mode, mtime;
 
-	if (!vine_transfer_request_any(worker_link, source_path, transfer_dir, &totalsize, &mode, &mtime, time(0) + 900, error_message)) {
+	if (!vine_transfer_request_any(worker_link, source_path, transfer_dir, &totalsize, &mode, &mtime, timeout, error_message)) {
 		if (error_message && *error_message == NULL) {
 			*error_message = string_format("Could not transfer file from %s", f->source);
 		}
@@ -681,6 +737,47 @@ static int do_transfer(struct vine_cache *c, struct vine_cache_file *f, const ch
 }
 
 /*
+Record the mode, size, and mtime of what a transfer process created, so that the main loop of the worker adds it to
+the cache without measuring a possibly large directory itself.
+*/
+
+static void save_measurement(struct vine_cache *c, const char *cachename, const char *path)
+{
+	int mode;
+	int64_t size;
+	time_t mtime;
+	if (!vine_cache_file_measure_metadata(path, &mode, &size, &mtime)) {
+		return;
+	}
+
+	char *measurement_path = vine_cache_measurement_path(c, cachename);
+	FILE *file = fopen(measurement_path, "w");
+	if (file) {
+		fprintf(file, "%o %" PRId64 " %lld\n", mode, size, (long long)mtime);
+		fclose(file);
+	}
+	free(measurement_path);
+}
+
+/* Read and remove the measurement left by a transfer process. Return 0 if there is none, which means the transfer
+ * created nothing. */
+
+static int load_measurement(struct vine_cache *c, const char *cachename, int *mode, int64_t *size, time_t *mtime)
+{
+	char *measurement_path = vine_cache_measurement_path(c, cachename);
+	FILE *file = fopen(measurement_path, "r");
+	long long value = 0;
+	int result = file && fscanf(file, "%o %" SCNd64 " %lld", mode, size, &value) == 3;
+	if (file) {
+		fclose(file);
+	}
+	*mtime = value;
+	unlink(measurement_path);
+	free(measurement_path);
+	return result;
+}
+
+/*
 Child process that materializes the proper file.
 */
 
@@ -702,7 +799,18 @@ static void vine_cache_worker_process(struct vine_cache_file *f, struct vine_cac
 		break;
 	}
 
-	/* At this point the file is now in the transfer path.  The parent will move it to the cache path. */
+	/* At this point the file is now in the transfer path, or in the mini task's sandbox. The parent will move it to
+	 * the cache path, using the measurement made here. */
+
+	if (result && f->cache_type == VINE_CACHE_MINI_TASK) {
+		char *source_path = vine_sandbox_full_path(f->process, f->source);
+		save_measurement(c, cachename, source_path);
+		free(source_path);
+	} else if (result) {
+		char *transfer_path = vine_cache_transfer_path(c, cachename);
+		save_measurement(c, cachename, transfer_path);
+		free(transfer_path);
+	}
 
 	/* If an error message was generated, save it to {transfer_path}.error for recovery by the parent process. */
 
@@ -881,8 +989,7 @@ static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_fil
 
 		chmod(cache_path, f->mode);
 
-		debug(D_VINE, "cache: measuring %s", transfer_path);
-		if (vine_cache_file_measure_metadata(transfer_path, &mode, &size, &mtime)) {
+		if (load_measurement(c, cachename, &mode, &size, &mtime)) {
 			debug(D_VINE, "cache: created %s with size %lld in %lld usec", cachename, (long long)size, (long long)transfer_time);
 			if (vine_cache_add_file(c, cachename, transfer_path, f->cache_level, mode, size, mtime, f->start_time, transfer_time, manager)) {
 				f->status = VINE_CACHE_STATUS_READY;
@@ -891,12 +998,15 @@ static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_fil
 				f->status = VINE_CACHE_STATUS_FAILED;
 			}
 		} else {
-			debug(D_VINE, "cache: command succeeded but didn't create %s: %s\n", cachename, strerror(errno));
+			debug(D_VINE, "cache: command succeeded but didn't create %s\n", cachename);
 			f->status = VINE_CACHE_STATUS_FAILED;
 		}
 	} else {
 		debug(D_VINE, "cache: command failed to complete for %s", cachename);
 		f->status = VINE_CACHE_STATUS_FAILED;
+		char *measurement_path = vine_cache_measurement_path(c, cachename);
+		unlink(measurement_path);
+		free(measurement_path);
 	}
 
 	/* Finally send a cache update message one way or the other. */
@@ -917,7 +1027,7 @@ static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_fil
 			}
 
 			vine_worker_send_cache_invalid(manager, cachename, error_message);
-			trash_file(error_path);
+			trash_move(error_path);
 
 			free(error_message);
 			free(error_path);
@@ -925,7 +1035,7 @@ static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_fil
 	}
 
 	/* The transfer path is either moved to the cache or failed, so we can delete it safely. */
-	trash_file(transfer_path);
+	trash_move(transfer_path);
 
 	free(cache_path);
 	free(transfer_path);
@@ -992,6 +1102,8 @@ If any have definitively failed, they are removed from the cache.
 
 int vine_cache_check_xfer_files(struct vine_cache *c, struct link *manager)
 {
+	vine_cache_reap_killed_transfers(c, 0);
+
 	char *cachename;
 	void *dummy; // processing_transfers is used as a key set; values are unused.
 	int iteration;

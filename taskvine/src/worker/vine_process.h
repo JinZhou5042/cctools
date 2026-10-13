@@ -82,7 +82,6 @@ int   vine_process_execute( struct vine_process *p );
 int   vine_process_is_complete( struct vine_process *p );
 int   vine_process_wait( struct vine_process *p );
 void  vine_process_kill( struct vine_process *p );
-int   vine_process_kill_and_wait( struct vine_process *p );
 void  vine_process_delete( struct vine_process *p );
 
 int   vine_process_execute_and_wait( struct vine_process *p );
@@ -90,6 +89,10 @@ int   vine_process_execute_and_wait( struct vine_process *p );
 int   vine_process_library_get_result( struct vine_process *p, uint64_t *done_task_id, int *exit_code );
 
 void  vine_process_compute_disk_needed( struct vine_process *p );
-int   vine_process_measure_disk(struct vine_process *p, int max_time_on_measurement);
+
+/* Measure the disk used by the sandbox of a process, resuming an earlier measurement, until the budget expires.
+ * Update sandbox_size and sandbox_file_count, and return 1 once the measurement completed, or 0 if it continues in a
+ * later call. */
+int   vine_process_measure_disk(struct vine_process *p, const struct budget *b);
 
 #endif

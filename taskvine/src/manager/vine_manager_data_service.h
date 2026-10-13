@@ -13,6 +13,7 @@
 
 struct vine_manager;
 struct vine_file;
+struct vine_worker_info;
 struct vine_manager_data_service;
 struct link_info;
 
@@ -34,6 +35,10 @@ int vine_manager_data_service_port(struct vine_manager_data_service *ds);
 void vine_manager_data_service_poll(struct vine_manager_data_service *ds, struct link_info *entries);
 /* Accept connections and process a bounded batch of executor results. */
 void vine_manager_data_service_handle(struct vine_manager *manager);
+/* Set the seconds a peer of the data port may go without progress before its transfer fails. It also bounds connecting
+ * to a source Worker, and a receive from a Worker that connects back waits twice as long for its connection. The
+ * Manager sets it from its response timeout. New transfers use the new value. */
+void vine_manager_data_service_set_idle_timeout(struct vine_manager_data_service *ds, int seconds);
 
 /* Request a checkpoint of a temporary file into the vault through a receive slot.
  * When admitted, the Manager thread later calls complete with one when the complete file is published, or with zero
@@ -57,6 +62,10 @@ int vine_manager_data_service_has_local_file(struct vine_manager *manager, struc
 /* Cancel checkpoint retrieval and remove the file's vault entry without waiting for queued work.
  * Only a connected receive is joined. Open sends retain their descriptors. */
 void vine_manager_data_service_vault_remove(struct vine_manager_data_service *ds, struct vine_file *file);
+
+/* Cancel every receive from a Worker that is being removed. Each reports failure at once, so its file is tried again
+ * from another source or recreated, instead of waiting on a connection that may never answer. */
+void vine_manager_data_service_remove_worker(struct vine_manager_data_service *ds, struct vine_worker_info *w);
 /* Return non-zero when the vault holds a complete entry for this file. Does not touch the filesystem. */
 int vine_manager_data_service_vault_contains(struct vine_manager *manager, struct vine_file *file);
 /* Return a newly allocated path of the file's vault entry, or NULL when the vault holds none. The entry stays until

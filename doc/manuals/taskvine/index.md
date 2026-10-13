@@ -2837,12 +2837,12 @@ change.
 | hungry-minimum          | Smallest number of waiting tasks in the manager before declaring it hungry | 10 |
 | hungry-minimum-factor   | Queue is hungry if number of waiting tasks is less than hungry-minumum-factor x (number of workers) | 2 |
 | immediate-recovery    | If set to 1, create recovery tasks for temporary files as soon as their worker disconnects. Otherwise, create recovery tasks only if the temporary files are used as input when trying to dispatch another task. | 0 |
-| keepalive-interval | Set the minimum number of seconds to wait before sending new keepalive checks to workers. | 300 |
-| keepalive-timeout | Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. | 30 |
+| keepalive-interval | Set the minimum number of seconds to wait before sending new keepalive checks to workers. | response-timeout |
+| keepalive-timeout | Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. | twice response-timeout |
 | load-from-shared-filesystem | If set to 1, workers can load in data to their caches from the shared filesystem | 0 |
-| long-timeout | Set the minimum timeout in seconds when sending a large message to a single worker. | 3600 |
+| long-timeout | No effect: waits on workers end when a worker makes no progress, see response-timeout. | |
 | max-retrievals | Sets the max number of tasks to retrieve per manager wait(). If less than 1, the manager prefers to retrieve all completed tasks before dispatching new tasks to workers. | 1 |
-| min-transfer-timeout | Set the minimum number of seconds to wait for files to be transferred to or from a worker. | 10 |
+| min-transfer-timeout | No effect: a transfer fails only when it makes no progress, see response-timeout. | |
 | monitor-interval        | Maximum number of seconds between resource monitor measurements. If less than 1, use default. | 5 |
 | prefer-dispatch | If 1, try to dispatch tasks even if there are retrieved tasks ready to be reportedas done. | 0 |
 | proportional-whole-tasks | Round up resource proportions such that only an integer number of tasks could be fit in the worker. The default is to use proportions. (See [task resources.](#task-resources) | 1 |
@@ -2850,9 +2850,10 @@ change.
 | resource-submit-multiplier | Assume that workers have `resource x resources-submit-multiplier` available.<br> This overcommits resources at the worker, causing tasks to be sent to workers that cannot be immediately executed.<br>The extra tasks wait at the worker until resources become available. | 1 |
 | sandbox-grow-factor    | When task disk sandboxes are exhausted, increase the allocation using their measured valued times this factor. Minimum is 1.1. | 2 |
 | shift-disk-load | Proactively shift temporary files away from the most disk-heavy worker to those with more available disk. | 0 |
-| short-timeout | Set the minimum timeout in seconds when sending a brief message to a single worker. | 5 |
+| response-timeout | Seconds within which a healthy worker makes visible progress. Any message, transfer, or handshake with a worker fails when the worker makes no progress for twice as long, however long it takes in total. | 15 |
+| short-timeout | No effect: waits on workers end when a worker makes no progress, see response-timeout. | |
 | temp-replica-count    | Number of temp file replicas created across workers | 0 |
-| transfer-outlier-factor | Transfer that are this many times slower than the average will be terminated. | 10 |
+| transfer-outlier-factor | No effect: a transfer fails only when it makes no progress, see response-timeout. | |
 | transfer-replica-per-cycle | Number of replicas to schedule per file per iteration. | 1 |
 | transfer-temps-recovery | If 1, try to replicate temp files to reach threshold on worker removal. | 0 |
 | transient-error-interval | Time to wait in seconds after a resource failure before attempting to use it again | 15 |

@@ -206,6 +206,28 @@ class _FileRef(_Symbol):
 
 
 _LEAF_TYPES = (str, bytes, bytearray, memoryview, int, float, bool, complex, type(None))
+# Types of selection steps that selection_key() tells apart by type and value.
+_KEY_TYPES = (str, bytes, int, bool, type(None))
+
+
+def selection_key(steps):
+    """Return a hashable key of a chain of selection steps, equal only for chains that select alike, or None for a
+    chain with a step of another type. Keys include each step's type, so x[1], x[True], and x["1"] differ."""
+    keys = []
+    for step in steps:
+        kind = type(step)
+        if kind is _Attribute:
+            keys.append(step)
+        elif kind in _KEY_TYPES:
+            keys.append((kind, step))
+        elif kind is tuple or kind is slice:
+            parts = selection_key((step.start, step.stop, step.step) if kind is slice else step)
+            if parts is None:
+                return None
+            keys.append((kind, parts))
+        else:
+            return None
+    return tuple(keys)
 
 
 def _scanner(known=()):
@@ -349,6 +371,10 @@ class Graph:
         self._reads = {}  # key -> File and _FileRef objects the task reads, in first-use order
         self._outputs = collections.defaultdict(dict)  # key -> sandbox path -> NodeFile it writes
         self._hoisted = {}  # key -> names of the hoisted objects the task reads, for tasks that read any
+        # key -> {(graph id, key): (selection_key(steps), steps)} for each task result that the task reads at exactly
+        # one place in its arguments, through a selection, for tasks that read any. Such a task needs only the selected
+        # value, and an Executor may have the producer write that value to a file of its own.
+        self._selections = {}
         # id -> [object, tasks]: argument objects without symbols, scanned once while tasks hold them. An object passed
         # again is assumed unchanged, as an Executor already assumes when it serializes it once.
         self._plain = {}
@@ -408,6 +434,7 @@ class Graph:
         results = {}  # (graph id, key) of tasks whose result it reads -> None, as an ordered set
         reads = {}  # identity of each file read -> its File or _FileRef
         hoisted = {}  # names of hoisted objects -> None, as an ordered set
+        places = {}  # (graph id, key) of each task result read -> [places it is read at, steps of the first place]
 
         def replace(symbol):
             if on_symbol is not None:
@@ -431,6 +458,11 @@ class Graph:
                 reads.setdefault((graph_id, ref.key, ref.path), ref)
                 return ref
             results.setdefault((graph_id, ref.key), None)
+            # Replacement visits a container once however often the arguments hold it, and a symbol at each place, as
+            # the library does when it runs the task, so places counts how often the task receives the result or a
+            # selection of it.
+            place = places.setdefault((graph_id, ref.key), [0, ref.steps])
+            place[0] += 1
             return _Ref(graph_id, ref.key, ref.steps)
 
         # Replacing all arguments at once keeps an object passed as several arguments one object.
@@ -446,6 +478,10 @@ class Graph:
         self._reads[key] = tuple(reads.values())
         if hoisted:
             self._hoisted[key] = tuple(hoisted)
+        selections = {parent: (selection_key(steps), steps) for parent, (count, steps) in places.items()
+                      if count == 1 and steps}
+        if selections:
+            self._selections[key] = selections
         for graph_id, parent in parents:
             if graph_id is None:
                 self._children[parent].add(key)
@@ -466,7 +502,7 @@ class Graph:
                 self._children[parent].discard(key)
                 if not self._children[parent]:
                     del self._children[parent]
-        for table in (self._results, self._reads, self._children, self._outputs, self._hoisted):
+        for table in (self._results, self._reads, self._children, self._outputs, self._hoisted, self._selections):
             table.pop(key, None)
 
     def _add_output(self, key, path):

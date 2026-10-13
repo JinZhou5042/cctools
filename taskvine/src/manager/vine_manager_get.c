@@ -58,9 +58,8 @@ static vine_result_code_t vine_manager_get_buffer(struct vine_manager *q, struct
 
 		f->data = malloc(size + 1);
 		if (f->data) {
-			time_t stoptime = time(0) + vine_manager_transfer_time(q, w, f->size);
-
-			ssize_t actual = link_read(w->link, f->data, f->size, stoptime);
+			/* The worker link fails the read when it makes no progress for the idle timeout. */
+			ssize_t actual = link_read(w->link, f->data, f->size, LINK_FOREVER);
 			if (actual >= 0 && (size_t)actual == f->size) {
 				/* While not strictly necessary, add a null terminator to facilitate printing text data.
 				 */
@@ -102,8 +101,8 @@ static vine_result_code_t vine_manager_get_file_contents(struct vine_manager *q,
 		effective_stoptime = (length / q->bandwidth_limit) * 1000000 + timestamp_get();
 	}
 
-	// Choose the actual stoptime.
-	time_t stoptime = time(0) + vine_manager_transfer_time(q, w, length);
+	// The worker link fails the transfer when it makes no progress for the idle timeout, however long it takes.
+	time_t stoptime = LINK_FOREVER;
 
 	// If necessary, create parent directories of the file.
 	char dirname[VINE_LINE_MAX];
@@ -171,7 +170,7 @@ static vine_result_code_t vine_manager_get_symlink_contents(struct vine_manager 
 {
 	char *target = malloc(length);
 
-	int actual = link_read(w->link, target, length, time(0) + q->short_timeout);
+	int actual = link_read(w->link, target, length, LINK_FOREVER);
 	if (actual != length) {
 		free(target);
 		return VINE_WORKER_FAILURE;

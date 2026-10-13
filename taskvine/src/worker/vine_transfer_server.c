@@ -22,12 +22,6 @@ See the file COPYING for details.
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* The initial timeout to wait for a command is short, to avoid unnecessary hangs */
-static int command_timeout = 5;
-
-/* The timeout to handle a valid transfer is much higher, to avoid false failures. */
-static int transfer_timeout = 3600;
-
 /* The server link from which connections are accepted */
 static struct link *transfer_link = 0;
 
@@ -37,7 +31,8 @@ pid_t transfer_server_pid = 0;
 /* Specific port for the transfer server to listen on.  Zero means choose any available. */
 int vine_transfer_server_port = 0;
 
-/* Answer one get request on an authenticated connection. */
+/* Answer one get request on an authenticated connection. The reply may take as long as the requester keeps taking
+ * data within the idle timeout. */
 
 static void vine_transfer_serve_request(struct link *lnk, struct vine_cache *cache, time_t command_stoptime)
 {
@@ -46,29 +41,34 @@ static void vine_transfer_serve_request(struct link *lnk, struct vine_cache *cac
 	char filename[VINE_LINE_MAX];
 
 	if (link_readline(lnk, line, sizeof(line), command_stoptime)) {
+		link_set_idle_timeout(lnk, vine_worker_options_idle_timeout(options));
 		if (sscanf(line, "get %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			vine_transfer_put_any(lnk, cache, filename, VINE_TRANSFER_MODE_ANY, time(0) + transfer_timeout);
+			vine_transfer_put_any(lnk, cache, filename, VINE_TRANSFER_MODE_ANY, LINK_FOREVER);
 		} else {
 			debug(D_VINE, "invalid peer transfer message: %s\n", line);
 		}
 	}
 }
 
-/* Handle a single request for a transfer request from a peer. */
+/* Handle a single request for a transfer request from a peer, which sends its request right after it connects and
+ * then makes progress within the idle timeout. */
 
 static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
 {
 	change_process_title("vine_worker [transfer]");
 
+	int timeout = vine_worker_options_idle_timeout(options);
+	link_set_idle_timeout(lnk, timeout);
+
 	if (options->password) {
-		if (!link_auth_password(lnk, options->password, time(0) + command_timeout)) {
+		if (!link_auth_password(lnk, options->password, time(0) + timeout)) {
 			debug(D_VINE, "transfer server: could not authenticate peer worker via password!");
 			return;
 		}
 	}
 
-	vine_transfer_serve_request(lnk, cache, time(0) + command_timeout);
+	vine_transfer_serve_request(lnk, cache, time(0) + timeout);
 }
 
 static void vine_transfer_process(struct vine_cache *cache, pid_t worker_pid)
@@ -158,13 +158,12 @@ int vine_transfer_server_start(struct vine_cache *cache, struct link *manager, i
 	return 1;
 }
 
-/* The Manager sends its get request once an executor takes the connection, which may wait in its listener backlog. */
-#define VINE_CONNECT_BACK_REQUEST_SECONDS 60
-
-/* Seconds to connect to the Manager, which allow for the kernel retrying a dropped connection, and stay below the
- * Manager's own wait for the connection. */
-#define VINE_CONNECT_BACK_CONNECT_SECONDS 20
-
+/*
+A connect-back sender connects to the manager's data port within the idle timeout T, which allows for the kernel
+retrying a dropped connection. The manager sends its get request once an executor takes the connection, which may wait
+in its listener backlog while every request slot is busy, so the request may take another T. This matches the
+manager, which gives a waiting receive 2T.
+*/
 int vine_transfer_server_connect_back(struct vine_cache *cache, struct link *manager, uint64_t token)
 {
 	char ip[LINK_ADDRESS_MAX];
@@ -184,11 +183,14 @@ int vine_transfer_server_connect_back(struct vine_cache *cache, struct link *man
 			/* Close only the inherited descriptor without flushing or shutting down the Worker TLS session. */
 			close(link_fd(manager));
 			change_process_title("vine_worker [connect back]");
-			struct link *lnk = link_connect(ip, port, time(0) + VINE_CONNECT_BACK_CONNECT_SECONDS);
+			int timeout = vine_worker_options_idle_timeout(options);
+			struct link *lnk = link_connect(ip, port, time(0) + timeout);
 			if (lnk) {
-				if ((!options->password || link_auth_password(lnk, options->password, time(0) + command_timeout)) &&
-						link_printf(lnk, time(0) + command_timeout, "connect-back %" PRIu64 "\n", token) >= 0) {
-					vine_transfer_serve_request(lnk, cache, time(0) + VINE_CONNECT_BACK_REQUEST_SECONDS);
+				/* Until the request arrives, the manager's backlog may add another T to its silence. */
+				link_set_idle_timeout(lnk, 2 * timeout);
+				if ((!options->password || link_auth_password(lnk, options->password, time(0) + timeout)) &&
+						link_printf(lnk, LINK_FOREVER, "connect-back %" PRIu64 "\n", token) >= 0) {
+					vine_transfer_serve_request(lnk, cache, time(0) + 2 * timeout);
 				}
 				link_close(lnk);
 			} else {

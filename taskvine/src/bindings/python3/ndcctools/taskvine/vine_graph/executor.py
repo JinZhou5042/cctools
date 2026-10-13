@@ -345,6 +345,9 @@ class Executor:
         self._cached_edata = frozenset()  # sandbox names of staged objects that the library loads
         self._last_number = 0
         self._declared_outputs = {}  # (graph id, key) -> output paths the task declared when it was submitted
+        # (graph id, key) -> {selection key: (steps, sandbox path)} of the selections of its result that the task writes
+        # to files of its own, for tasks that write any
+        self._selection_outputs = {}
         self._file_numbers = {}  # file identity -> number that names the file in sandboxes
         self._local_paths = {}  # file identity -> local path of a file a local task wrote
         self._local_seconds = 0.0
@@ -354,6 +357,7 @@ class Executor:
         self._nodes = {}  # (graph id, key) -> C node id
         self._tasks = {}  # C node id -> (graph id, key)
         self._result_files = {}  # (graph id, key) -> C file id of the task result
+        self._selection_files = {}  # (graph id, key) -> {selection key: C file id of the selection file}
         self._output_files = {}  # (graph id, key, path) -> C file id of a file the task writes
         self._input_files = {}  # absolute path of a File -> C file id
         self._edata_files = {}  # sandbox name of a staged object -> C file id
@@ -767,6 +771,10 @@ class Executor:
         self._submitted += 1
         self._labels[task] = repr(Node(graph, key))
         self._declared_outputs[task] = tuple(graph._outputs.get(key, {}))
+        if not self._local:
+            selections = _selections_read_from(graph, key)
+            if selections:
+                self._selection_outputs[task] = selections
         names = []
         submitted = False
         try:
@@ -788,6 +796,7 @@ class Executor:
                 self._submitted -= 1
                 del self._labels[task]
                 del self._declared_outputs[task]
+                self._selection_outputs.pop(task, None)
                 with self._lock:
                     self._staged.pop(task, None)
                     self._drop_staged(names)
@@ -811,12 +820,32 @@ class Executor:
                 entries[id(value)] = self._stage_argument(value, names, inline)
             return entries[id(value)]
 
+        # A result that the task reads at exactly one place, through a selection, is selected, and the task mounts
+        # the producer's file of that selection when the producer writes one, instead of the whole result.
+        inputs = {}
+        selected = {}
+        results = []  # (task, sandbox path, selection key of the producer's selection file or None for the result)
+        read_once = graph._selections.get(key, {})
+        for parent in graph._results[key]:
+            source = _resolve(graph_id, parent)
+            chain = read_once[parent][0] if parent in read_once else None
+            if chain is not None and chain in self._selection_outputs.get(source, ()):
+                selected[parent] = self._selection_task_path(source)
+                results.append((source, selected[parent], chain))
+                continue
+            if parent in read_once:
+                selected[parent] = None
+            inputs[parent] = self._result_task_path(source)
+            results.append((source, inputs[parent], None))
+        selections = self._selection_outputs.get(task, {})
         manifest = {
             "objects": inline,
             "callable": stage(func),
             "args": [stage(value) for value in args],
             "kwargs": {argument: stage(value) for argument, value in kwargs.items()},
-            "inputs": {parent: self._result_task_path(_resolve(graph_id, parent)) for parent in graph._results[key]},
+            "inputs": inputs,
+            "selected": selected,
+            "selections": list(selections.values()),
             "files": files,
         }
         with self._lock:
@@ -824,7 +853,8 @@ class Executor:
         return {
             "task": task,
             "outputs": self._declared_outputs[task],
-            "results": [(_resolve(graph_id, parent), name) for parent, name in manifest["inputs"].items()],
+            "selections": [(chain, path) for chain, (_, path) in selections.items()],
+            "results": results,
             "files": [(_resolve_file(graph_id, identity), name) for identity, name in files.items()],
             "edata": edata,
             "manifest": self._stage_manifest(manifest, names),
@@ -930,14 +960,17 @@ class Executor:
         self._nodes[task] = node
         self._tasks[node] = task
         self._result_files[task] = self._add_output(node, library.RESULT)
+        if plan["selections"]:
+            self._selection_files[task] = {chain: self._add_output(node, path) for chain, path in plan["selections"]}
         for path in plan["outputs"]:
             self._output_files[(graph_id, key, path)] = self._add_output(node, path)
         with self._lock:
             # A released task that a new task reads runs again.
-            self._released.difference_update(parent for parent, _ in plan["results"])
+            self._released.difference_update(parent for parent, _, _ in plan["results"])
             self._released.difference_update(identity[1:3] for identity, _ in plan["files"] if identity[0] == "output")
-        for parent, name in plan["results"]:
-            self._add_input(node, self._result_files[parent], name)
+        for parent, name, chain in plan["results"]:
+            self._add_input(node, self._result_files[parent] if chain is None else self._selection_files[parent][chain],
+                            name)
         for identity, name in plan["files"]:
             if identity[0] == "input":
                 if identity[1] not in self._input_files:
@@ -1049,12 +1082,15 @@ class Executor:
             return
         self._nodes.pop(task, None)
         self._result_files.pop(task, None)
+        self._selection_files.pop(task, None)
+        self._selection_outputs.pop(task, None)
         for path in self._declared_outputs.pop(task, ()):
             self._output_files.pop((task[0], task[1], path), None)
         self._numbers.pop(task, None)
         self._labels.pop(task, None)
         self._finished.pop(task, None)
         self._cancelled.discard(task)
+        self._released.discard(task)
 
     def _drop_staged(self, names):
         """Let go of staged files that a task held, and free each one that no task holds anymore."""
@@ -1116,9 +1152,6 @@ class Executor:
                 self._run_error = error
             self._changed.notify_all()
             progress = self._progress_locked()
-            if status == capi.VINE_GRAPH_DONE and not self._commands and not self._closed:
-                # Every task finished and every requested output is readable, so wait for the caller to queue more.
-                self._changed.wait(0.5)
         if self._display is not None:
             self._display.update(progress)
         return error is None
@@ -1324,6 +1357,8 @@ class Executor:
         return self._call(cancel)
 
     def _result(self, future, timeout):
+        # One deadline covers waiting for the task and for its result to reach the Manager.
+        deadline = None if timeout is None else time.monotonic() + timeout
         self._wait_for([future], timeout)
         target = future._target
         if isinstance(target, File):
@@ -1335,7 +1370,7 @@ class Executor:
         if isinstance(target, Node):
             if self._local:
                 return library.load_result(self._local_result_path(task))
-            return library.load_result(self._fetched_path(task, self._data_key(target)))
+            return library.load_result(self._fetched_path(task, self._data_key(target), deadline))
         identity = library.file_identity(target._as_ref())
         if self._local:
             path = self._local_paths[identity]
@@ -1343,7 +1378,7 @@ class Executor:
             # Link or copy the file out of the Manager's vault, which the Executor removes when it closes.
             path = os.path.join(self._run_dir, self._file_task_path(identity))
             if not os.path.exists(path):
-                fetched = self._fetched_path(task, self._data_key(target))
+                fetched = self._fetched_path(task, self._data_key(target), deadline)
                 try:
                     os.link(fetched, path)
                 except OSError:
@@ -1352,8 +1387,9 @@ class Executor:
         self._keep_paths.add(path)
         return path
 
-    def _fetched_path(self, task, key):
-        """Wait until a pinned output of a completed task is readable at the Manager, and return its path."""
+    def _fetched_path(self, task, key, deadline=None):
+        """Wait until a pinned output of a completed task is readable at the Manager, and return its path. A deadline
+        from time.monotonic() that passes first raises TimeoutError."""
         with self._lock:
             path = self._paths.get(key)
         if path:
@@ -1365,7 +1401,8 @@ class Executor:
                 self._changed.notify_all()
                 # The background thread leaves its wait in C to look the path up at once.
                 capi.vine_graph_executor_wake(self._executor)
-            self._wait_until(lambda: request.path or self._finished_state(task) == FAILED, None,
+            timeout = None if deadline is None else max(deadline - time.monotonic(), 0)
+            self._wait_until(lambda: request.path or self._finished_state(task) == FAILED, timeout,
                              "the result is not available")
         finally:
             with self._lock:
@@ -1401,7 +1438,7 @@ class Executor:
                 func, args, kwargs,
                 lambda parent: library.load_result(self._local_result_path(_resolve(graph_id, parent))),
                 lambda identity: self._local_file_path(_resolve_file(graph_id, identity)),
-                lambda name: cloudpickle.loads(self._hoisted[name]))
+                lambda name: cloudpickle.loads(self._hoisted[name]), graph._selections.get(key, ()))
             for task_path in outputs:
                 local_path = os.path.abspath(os.path.join(task_dir, task_path))
                 if not os.path.isfile(local_path):
@@ -1433,6 +1470,10 @@ class Executor:
 
     def _result_task_path(self, task):
         return f"vine-graph-result-{self._numbers[task]}"
+
+    def _selection_task_path(self, task):
+        # A task mounts at most one selection file of each producer.
+        return f"vine-graph-selection-{self._numbers[task]}"
 
     def _file_task_path(self, identity):
         if identity not in self._file_numbers:
@@ -1466,6 +1507,19 @@ def _serialize_hoisted(hoist):
             raise TypeError("a hoisted object is named by a non-empty string")
         hoisted[name] = cloudpickle.dumps(value)
     return hoisted
+
+
+def _selections_read_from(graph, key):
+    """Return {selection key: (steps, sandbox path)} of the distinct selections of a task's result that tasks of its
+    Graph read at exactly one place. The task writes each to a file of its own, which those tasks mount instead of the
+    whole result. A task added after the task was submitted, or one of another Graph, mounts such a file when it reads
+    the same selection, and the whole result otherwise."""
+    selections = {}
+    for child in graph._children.get(key, ()):
+        entry = graph._selections.get(child, {}).get((None, key))
+        if entry is not None and entry[0] is not None and entry[0] not in selections:
+            selections[entry[0]] = (entry[1], f"vine-graph-selection-output-{len(selections) + 1}")
+    return selections
 
 
 def _resolve(graph_id, reference):

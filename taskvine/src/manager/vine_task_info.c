@@ -42,8 +42,9 @@ void vine_task_info_add(struct vine_manager *q, struct vine_task *t)
 		return;
 	}
 
-	struct vine_stats s;
-	vine_get_stats(q, &s);
+	/* Each report advances the weighted capacity, which needs only the stored reports, not the worker totals that
+	 * vine_get_stats() also computes. */
+	vine_task_info_compute_capacity(q, q->stats);
 
 	struct vine_task_info *ti = vine_task_info_create(t);
 

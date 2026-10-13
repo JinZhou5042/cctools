@@ -19,7 +19,7 @@ def get_c_constant(constant):
 @contextlib.contextmanager
 def port_range(port):
     """ Set the range in which CCTools looks for free ports while the block runs, and restore the previous range
-    afterwards, so that processes started later choose their own ports. """
+    afterwards, so that processes started later, such as local workers, choose their own ports. """
     try:
         low_port, high_port = port
     except Exception:

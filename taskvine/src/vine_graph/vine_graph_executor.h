@@ -21,8 +21,11 @@
  * keeps it until the frontend unpins it. A pinned output can be fetched to the Manager and read there.
  *
  * Failures. A node fails when its function fails, when a file only the frontend provides is lost, or when its tasks
- * fail more often than max-retries for other reasons. Every unfinished node that depends on it then fails too, while
- * unrelated nodes continue. The run as a whole fails only when the executor itself cannot continue, such as when
+ * fail more often than max-retries for other reasons. Any other node fails exactly when it needs an output of a failed
+ * node that exists nowhere, neither at the Manager nor on a Worker: an unfinished node, or a completed node that must
+ * recreate its own outputs. A failed node that never completed has no outputs. A node that fails because of another
+ * names the node whose own failure explains it. Other nodes continue, including those that read only outputs of a
+ * failed node that still exist. The run as a whole fails only when the executor itself cannot continue, such as when
  * TaskVine removes the library after it keeps failing to start on workers.
  *
  * Runner contract. Every node runs as a call of one function in one TaskVine library that the frontend installs
@@ -97,8 +100,8 @@ uint64_t vine_graph_executor_add_output(struct vine_graph_executor *e, uint64_t 
 int vine_graph_executor_add_input(struct vine_graph_executor *e, uint64_t node_id, uint64_t file_id, const char *task_path);
 
 /* Submit a node whose files are mounted. It runs once every node whose output it reads has completed, and it fails at
- * once when one of them failed. Return zero, or -1 for an unknown or submitted node, a node that reads an output of a
- * node not submitted before it, or a failed run. */
+ * once when it reads an output of a failed node that exists nowhere. Return zero, or -1 for an unknown or submitted
+ * node, a node that reads an output of a node not submitted before it, or a failed run. */
 int vine_graph_executor_submit_node(struct vine_graph_executor *e, uint64_t node_id);
 
 /* Pin or unpin a node output. A pinned output is never released. Pins are counted, so each pin needs one unpin.
@@ -116,7 +119,9 @@ int vine_graph_executor_fetch_file(struct vine_graph_executor *e, uint64_t file_
 const char *vine_graph_executor_get_local_path(struct vine_graph_executor *e, uint64_t file_id);
 
 /* Advance the run and return its state. The wait ends once a node finished or a requested fetch became available, or
- * after about timeout seconds. More nodes may be submitted after DONE, and the run continues with the next wait. */
+ * after about timeout seconds, or at a wake. It runs the Manager for that time even when nothing remains, so Workers
+ * that connect and recovery tasks are handled while the run is idle. More nodes may be submitted after DONE, and the
+ * run continues with the next wait. */
 vine_graph_status_t vine_graph_executor_wait(struct vine_graph_executor *e, int timeout);
 
 /* End a wait that runs in another thread soon, so that thread can apply calls queued for it. This is the only function
