@@ -36,7 +36,7 @@ struct vine_graph_executor {
 	char *library_name;  // library that runs every node, installed by the frontend
 	char *function_name; // library function that runs one node
 
-	struct itable *task_id_to_node;		 // maps Manager task id to graph node after submission
+	struct itable *task_id_to_node;		 // maps Manager task id to the id of its graph node after submission
 	struct priority_queue *checkpoint_queue; // borrowed idata awaiting admission, longest producer first
 	struct list *checkpoint_completed;	 // borrowed files whose checkpoint the Manager published
 	struct list *checkpoint_failed;		 // borrowed files whose checkpoint failed, to requeue
@@ -49,8 +49,10 @@ struct vine_graph_executor {
 	struct set *fetch_pending;  // borrowed pinned outputs requested at the Manager and not in the vault yet
 	struct list *fetch_ready;   // borrowed pending fetches to try now, queued when one can make progress, maybe twice
 	struct itable *vault_paths; // vine_file address -> owned path of a fetched output in the vault
-	struct list *finished;	    // borrowed nodes that completed or failed and were not reported yet
-	struct list *released;	    // borrowed nodes whose outputs were released and were not reported yet
+	struct list *finished;	    // nodes that completed or failed and were not reported yet, counted in their refs
+	struct list *released;	    // nodes whose outputs were released and were not reported yet, counted in their refs
+	struct list *removable;	    // ids of nodes let go by the frontend that may have become removable
+	struct list *removed;	    // ids of removed nodes that were not reported yet
 	int vault_full_noticed;	    // the user was told once that the vault is full
 
 	vine_graph_priority_mode_t priority_mode; // order of ready nodes
@@ -104,6 +106,8 @@ struct vine_graph_executor *vine_graph_executor_create(struct vine_manager *mana
 	e->vault_paths = itable_create(0);
 	e->finished = list_create();
 	e->released = list_create();
+	e->removable = list_create();
+	e->removed = list_create();
 	e->priority_mode = VINE_GRAPH_PRIORITY_LARGEST_INPUT_FIRST;
 	e->max_retries = 5;
 	e->show_progress_bar = 1;
@@ -172,18 +176,36 @@ void vine_graph_executor_delete(struct vine_graph_executor *e)
 			vine_file_delete(file);
 		}
 	}
+	/* Report entries keep removed nodes until the graph frees the nodes that remain. */
+	struct vine_graph_node *node;
+	while ((node = list_pop_head(e->finished))) {
+		vine_graph_node_unref(node);
+	}
+	while ((node = list_pop_head(e->released))) {
+		vine_graph_node_unref(node);
+	}
 	vine_graph_delete(e->graph);
 	itable_delete(e->task_id_to_node);
+	/* Queued files hold references of their own. */
+	while ((file = priority_queue_pop(e->checkpoint_queue))) {
+		vine_file_delete(file);
+	}
 	priority_queue_delete(e->checkpoint_queue);
-	list_delete(e->checkpoint_completed);
-	list_delete(e->checkpoint_failed);
+	struct list *queued[] = {e->checkpoint_completed, e->checkpoint_failed, e->fetch_ready};
+	for (size_t i = 0; i < sizeof(queued) / sizeof(queued[0]); i++) {
+		while ((file = list_pop_head(queued[i]))) {
+			vine_file_delete(file);
+		}
+		list_delete(queued[i]);
+	}
 	set_delete(e->checkpoint_pending);
 	set_delete(e->checkpoint_parked);
 	set_delete(e->fetch_pending);
-	list_delete(e->fetch_ready);
 	itable_delete(e->vault_paths);
 	list_delete(e->finished);
 	list_delete(e->released);
+	list_delete(e->removable);
+	list_delete(e->removed);
 	free(e->library_name);
 	free(e->function_name);
 	free(e->error);
@@ -345,7 +367,28 @@ static double vine_graph_executor_priority(struct vine_graph_executor *e, struct
 	return priority;
 }
 
-static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct vine_graph_node *node, struct vine_graph_node *source, char *error);
+static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct vine_graph_node *node, uint64_t source_id, char *error);
+
+/* Queue a node for a report to the frontend. The entry keeps the node's structure until the report. */
+static void vine_graph_executor_report(struct list *reports, struct vine_graph_node *node)
+{
+	node->refs++;
+	list_push_tail(reports, node);
+}
+
+/* Return the id of the next reported node that was not removed meanwhile, or zero. */
+static uint64_t vine_graph_executor_next_report(struct list *reports)
+{
+	struct vine_graph_node *node;
+	while ((node = list_pop_head(reports))) {
+		uint64_t node_id = node->removed ? 0 : node->node_id;
+		vine_graph_node_unref(node);
+		if (node_id) {
+			return node_id;
+		}
+	}
+	return 0;
+}
 
 /* Submit a new task for a node. The task runs the node function with the shared arguments and every mount.
  * Return zero, or -1 after failing the node. */
@@ -353,7 +396,7 @@ static int vine_graph_executor_submit_task(struct vine_graph_executor *e, struct
 {
 	struct vine_task *task = vine_task_create(e->function_name);
 	if (!task) {
-		vine_graph_executor_fail_node(e, node, node, xxstrdup("could not create its task"));
+		vine_graph_executor_fail_node(e, node, node->node_id, xxstrdup("could not create its task"));
 		return -1;
 	}
 	vine_task_set_library_required(task, e->library_name);
@@ -371,26 +414,27 @@ static int vine_graph_executor_submit_task(struct vine_graph_executor *e, struct
 	int task_id = mounted ? vine_submit(e->manager, task) : 0;
 	if (task_id <= 0) {
 		vine_task_delete(task);
-		vine_graph_executor_fail_node(e, node, node, xxstrdup("could not submit its task"));
+		vine_graph_executor_fail_node(e, node, node->node_id, xxstrdup("could not submit its task"));
 		return -1;
 	}
 
 	/* The Manager keeps its own reference while the task is active. A finished attempt is no longer needed. */
 	vine_task_delete(node->task);
 	node->task = task;
-	itable_insert(e->task_id_to_node, (uint64_t)task_id, node);
+	itable_insert(e->task_id_to_node, (uint64_t)task_id, (void *)(uintptr_t)node->node_id);
 	debug(D_VINE, "submitted node %" PRIu64 " as task %d", node->node_id, task_id);
 	return 0;
 }
 
-/* Map a returned task to its node. A recovery task maps to the node whose task it copies. */
-static struct vine_graph_node *vine_graph_executor_node_from_task(struct vine_graph_executor *e, struct vine_task *task)
+/* Map a returned task to the id of its node, or zero for a task of no node. A recovery task maps to the node whose task
+ * it copies. */
+static uint64_t vine_graph_executor_node_id_from_task(struct vine_graph_executor *e, struct vine_task *task)
 {
 	int task_id = vine_task_get_recovery_source_task_id(task);
 	if (task_id <= 0) {
 		task_id = vine_task_get_id(task);
 	}
-	return task_id > 0 ? itable_lookup(e->task_id_to_node, (uint64_t)task_id) : NULL;
+	return task_id > 0 ? (uint64_t)(uintptr_t)itable_lookup(e->task_id_to_node, (uint64_t)task_id) : 0;
 }
 
 /* After a node completes, submit each child whose parents have now all completed. The ready children are collected
@@ -401,7 +445,7 @@ static void vine_graph_executor_submit_children(struct vine_graph_executor *e, s
 	struct vine_graph_node *child;
 	LIST_ITERATE(node->children, child)
 	{
-		if (--child->remaining_parents == 0 && !child->task && !child->failed) {
+		if (--child->remaining_parents == 0 && !child->task && !child->failed && !child->removed) {
 			list_push_tail(ready, child);
 		}
 	}
@@ -445,11 +489,12 @@ static int vine_graph_executor_node_is_anchored(struct vine_graph_executor *e, c
 }
 
 /* Push a pending file into the checkpoint queue, ordered by producer execution time with the longest first.
- * A fraction below one microsecond breaks ties in queue order without reordering distinct execution times. */
+ * A fraction below one microsecond breaks ties in queue order without reordering distinct execution times. Each entry
+ * holds a reference to its file, so a file withdrawn when its node is removed stays valid until it leaves the queue. */
 static void vine_graph_executor_push_checkpoint(struct vine_graph_executor *e, struct vine_graph_node *node, struct vine_file *file)
 {
 	double priority = (double)node->execution_time_us + 1.0 / (2.0 + (double)e->checkpoint_sequence++);
-	priority_queue_push(e->checkpoint_queue, file, priority);
+	priority_queue_push(e->checkpoint_queue, vine_file_addref(file), priority);
 	debug(D_VINE, "checkpoint queued: %s node %" PRIu64 " runtime_us=%" PRIu64 " priority=%.9f", vine_file_cached_name(file), node->node_id, node->execution_time_us, priority);
 }
 
@@ -478,7 +523,7 @@ static void vine_graph_executor_forget_checkpoint(struct vine_graph_executor *e,
  * read them, or it completed, is not being recovered, and its outputs are either released or anchored in the vault. */
 static int vine_graph_executor_node_is_durable(struct vine_graph_executor *e, struct vine_graph_node *node)
 {
-	if (node->failed) {
+	if (node->failed || node->removed) {
 		return 1;
 	}
 	return node->completed && !vine_graph_node_is_recovering(node) && (node->released || vine_graph_executor_node_is_anchored(e, node));
@@ -545,7 +590,10 @@ static int vine_graph_executor_try_release(struct vine_graph_executor *e, struct
 		vine_prune_file(e->manager, mount->file);
 	}
 	node->released = 1;
-	list_push_tail(e->released, node);
+	vine_graph_executor_report(e->released, node);
+	if (node->let_go) {
+		list_push_tail(e->removable, (void *)(uintptr_t)node->node_id);
+	}
 	debug(D_VINE, "released node %" PRIu64, node->node_id);
 	return 1;
 }
@@ -576,10 +624,12 @@ static void vine_graph_executor_release_from(struct vine_graph_executor *e, stru
 	list_delete(worklist);
 }
 
-/* Record a checkpoint or fetch result from the Manager thread. Queue and graph changes wait for the executor loop. */
+/* Record a checkpoint or fetch result from the Manager thread. Queue and graph changes wait for the executor loop, and
+ * the recorded file keeps a reference until then. */
 static void vine_graph_executor_checkpoint_complete(void *argument, struct vine_file *file, int success)
 {
 	struct vine_graph_executor *e = argument;
+	file = vine_file_addref(file);
 	if (success) {
 		list_push_tail(e->checkpoint_completed, file);
 		/* The Manager's wait returns, so the executor reports a fetched output and fills the freed slot at once. */
@@ -594,11 +644,12 @@ static void vine_graph_executor_checkpoint_complete(void *argument, struct vine_
 	list_push_tail(e->checkpoint_failed, file);
 }
 
-/* Queue a pending fetch to be tried in the next round, when its file may have become receivable. */
+/* Queue a pending fetch to be tried in the next round, when its file may have become receivable. The entry holds a
+ * reference to its file. */
 static void vine_graph_executor_fetch_ready(struct vine_graph_executor *e, struct vine_file *file)
 {
 	if (set_lookup(e->fetch_pending, file)) {
-		list_push_tail(e->fetch_ready, file);
+		list_push_tail(e->fetch_ready, vine_file_addref(file));
 	}
 }
 
@@ -625,12 +676,14 @@ static void vine_graph_executor_process_checkpoints(struct vine_graph_executor *
 			/* A published checkpoint anchors its node, which may let its ancestors be released. */
 			vine_graph_executor_release_from(e, vine_graph_get_producer(e->graph, file), 0);
 		}
+		vine_file_delete(file);
 	}
 	while (timestamp_get() >= e->checkpoint_retry_time && (file = list_pop_head(e->checkpoint_failed))) {
 		vine_graph_executor_fetch_ready(e, file);
 		if (set_lookup(e->checkpoint_pending, file)) {
 			vine_graph_executor_push_checkpoint(e, vine_graph_get_producer(e->graph, file), file);
 		}
+		vine_file_delete(file);
 	}
 
 	enum { SKIP_LIMIT = 16 };
@@ -641,7 +694,7 @@ static void vine_graph_executor_process_checkpoints(struct vine_graph_executor *
 		double priority = priority_queue_get_top_priority(e->checkpoint_queue);
 		if (!set_lookup(e->checkpoint_pending, file) || set_lookup(e->checkpoint_parked, file)) {
 			/* Withdrawn, or parked by an earlier entry for the same file. */
-			priority_queue_pop(e->checkpoint_queue);
+			vine_file_delete(priority_queue_pop(e->checkpoint_queue));
 			continue;
 		}
 		vine_manager_checkpoint_result_t result = vine_manager_data_service_checkpoint(e->manager, file, vine_graph_executor_checkpoint_complete, e);
@@ -653,14 +706,18 @@ static void vine_graph_executor_process_checkpoints(struct vine_graph_executor *
 			break;
 		}
 		priority_queue_pop(e->checkpoint_queue);
-		if (result == VINE_CHECKPOINT_NO_SOURCE && !vine_temp_exists_somewhere(e->manager, file)) {
-			/* No replica can serve it, so it waits outside the queue until a task recreates it. */
-			set_insert(e->checkpoint_parked, file);
-		} else if (result == VINE_CHECKPOINT_NO_SOURCE) {
+		if (result == VINE_CHECKPOINT_NO_SOURCE && vine_temp_exists_somewhere(e->manager, file)) {
+			/* The skipped entry keeps its reference and returns to the queue below. */
 			skipped[skips] = file;
 			skipped_priority[skips] = priority;
 			skips++;
+			continue;
 		}
+		if (result == VINE_CHECKPOINT_NO_SOURCE) {
+			/* No replica can serve it, so it waits outside the queue until a task recreates it. */
+			set_insert(e->checkpoint_parked, file);
+		}
+		vine_file_delete(file);
 	}
 	for (int i = 0; i < skips; i++) {
 		priority_queue_push(e->checkpoint_queue, skipped[i], skipped_priority[i]);
@@ -679,16 +736,16 @@ static void vine_graph_executor_cancel_node_task(struct vine_graph_executor *e, 
 	}
 }
 
-/* Fail a node because of source, the node whose own failure explains it, and fail every unfinished node that depends
+/* Fail a node because of the node source_id, whose own failure explains it, and fail every unfinished node that depends
  * on it. error is set only when node is the source. A completed node fails when its outputs cannot be restored. Its
  * completed children keep their own outputs. Failed nodes no longer hold back the release of their parents. */
-static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct vine_graph_node *node, struct vine_graph_node *source, char *error)
+static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct vine_graph_node *node, uint64_t source_id, char *error)
 {
 	if (node->failed) {
 		free(error);
 		return;
 	}
-	if (node == source) {
+	if (node->node_id == source_id) {
 		node->error = error;
 		debug(D_VINE, "node %" PRIu64 " failed: %s", node->node_id, error);
 	}
@@ -701,7 +758,7 @@ static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct 
 			continue;
 		}
 		current->failed = 1;
-		current->failure_source = source;
+		current->failure_source_id = source_id;
 		current->restoring = 0;
 		if (!current->completed) {
 			e->finished_nodes++;
@@ -709,7 +766,10 @@ static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct 
 		if (current != node) {
 			vine_graph_executor_cancel_node_task(e, current);
 		}
-		list_push_tail(e->finished, current);
+		vine_graph_executor_report(e->finished, current);
+		if (current->let_go) {
+			list_push_tail(e->removable, (void *)(uintptr_t)current->node_id);
+		}
 		list_push_tail(failed, current);
 		struct vine_graph_mount *mount;
 		LIST_ITERATE(current->outputs, mount)
@@ -719,7 +779,7 @@ static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct 
 		struct vine_graph_node *child;
 		LIST_ITERATE(current->children, child)
 		{
-			if (!child->completed) {
+			if (!child->completed && !child->removed) {
 				list_push_tail(worklist, child);
 			}
 		}
@@ -775,16 +835,16 @@ static void vine_graph_executor_handle_failure(struct vine_graph_executor *e, st
 {
 	if (vine_graph_task_function_failed(task)) {
 		const char *output = vine_task_get_stdout(task);
-		vine_graph_executor_fail_node(e, node, node, string_format("its function failed:\n%s", output ? output : ""));
+		vine_graph_executor_fail_node(e, node, node->node_id, string_format("its function failed:\n%s", output ? output : ""));
 		return;
 	}
 	struct vine_file *lost = result == VINE_RESULT_INPUT_MISSING ? vine_graph_executor_find_lost_input(node) : NULL;
 	if (lost) {
-		vine_graph_executor_fail_node(e, node, node, string_format("its input %s is missing at the Manager", vine_file_source(lost)));
+		vine_graph_executor_fail_node(e, node, node->node_id, string_format("its input %s is missing at the Manager", vine_file_source(lost)));
 		return;
 	}
 	if (++node->failures > e->max_retries) {
-		vine_graph_executor_fail_node(e, node, node, string_format("it failed %d times; last result: %s", node->failures, vine_result_string(result)));
+		vine_graph_executor_fail_node(e, node, node->node_id, string_format("it failed %d times; last result: %s", node->failures, vine_result_string(result)));
 		return;
 	}
 	debug(D_VINE, "node %" PRIu64 " %s %d failed (%s), failure %d of at most %d", node->node_id, is_recovery ? "recovery task" : "task", vine_task_get_id(task), vine_result_string(result), node->failures, e->max_retries);
@@ -823,7 +883,7 @@ static void vine_graph_executor_handle_success(struct vine_graph_executor *e, st
 	e->time_last_task_retrieved = MAX(e->time_last_task_retrieved, (timestamp_t)vine_task_get_metric(task, "time_when_retrieval"));
 	e->completed_nodes++;
 	e->finished_nodes++;
-	list_push_tail(e->finished, node);
+	vine_graph_executor_report(e->finished, node);
 	vine_graph_executor_release_from(e, node, 1);
 	vine_graph_executor_submit_children(e, node);
 }
@@ -831,10 +891,14 @@ static void vine_graph_executor_handle_success(struct vine_graph_executor *e, st
 /* Handle one task returned by the Manager. */
 static void vine_graph_executor_handle_task(struct vine_graph_executor *e, struct vine_task *task)
 {
-	struct vine_graph_node *node = vine_graph_executor_node_from_task(e, task);
-	if (!node) {
+	uint64_t node_id = vine_graph_executor_node_id_from_task(e, task);
+	if (!node_id) {
 		vine_graph_executor_fail_run(e, string_format("task %d does not belong to this graph", vine_task_get_id(task)));
 		return;
+	}
+	struct vine_graph_node *node = vine_graph_get_node(e->graph, node_id);
+	if (!node) {
+		return; // a recovery task or an earlier attempt of a removed node
 	}
 	if (node->failed) {
 		return; // a task cancelled when the node failed
@@ -883,7 +947,7 @@ int vine_graph_executor_submit_node(struct vine_graph_executor *e, uint64_t node
 		}
 	}
 	if (failed_parent) {
-		vine_graph_executor_fail_node(e, node, failed_parent->failure_source, NULL);
+		vine_graph_executor_fail_node(e, node, failed_parent->failure_source_id, NULL);
 	} else if (node->remaining_parents == 0) {
 		vine_graph_executor_submit_task(e, node);
 	}
@@ -937,6 +1001,44 @@ int vine_graph_executor_fetch_file(struct vine_graph_executor *e, uint64_t file_
 	return 0;
 }
 
+/* What became of one fetch that was tried. */
+typedef enum {
+	VINE_GRAPH_FETCH_DONE = 0, /* Received, being received, not pending, or waiting for a task. It leaves the list. */
+	VINE_GRAPH_FETCH_LATER,	   /* A replica exists but cannot serve it yet. It is tried again later. */
+	VINE_GRAPH_FETCH_BUSY	   /* The Manager has no free receive slot. It stays first in the list. */
+} vine_graph_fetch_result_t;
+
+/* Try one pending fetch: receive it from a Worker replica, or run its completed producer again when no replica
+ * exists, unless a recovery task is already recreating it. */
+static vine_graph_fetch_result_t vine_graph_executor_fetch_one(struct vine_graph_executor *e, struct vine_file *file)
+{
+	if (!set_lookup(e->fetch_pending, file)) {
+		return VINE_GRAPH_FETCH_DONE;
+	}
+	if (vine_manager_data_service_vault_contains(e->manager, file)) {
+		set_remove(e->fetch_pending, file);
+		return VINE_GRAPH_FETCH_DONE;
+	}
+	struct vine_graph_node *producer = vine_graph_get_producer(e->graph, file);
+	if (!producer->completed || producer->restoring) {
+		return VINE_GRAPH_FETCH_DONE;
+	}
+	vine_manager_checkpoint_result_t result = vine_manager_data_service_fetch(e->manager, file, vine_graph_executor_checkpoint_complete, e);
+	if (result == VINE_CHECKPOINT_BUSY) {
+		return VINE_GRAPH_FETCH_BUSY;
+	}
+	if (result != VINE_CHECKPOINT_NO_SOURCE || vine_file_is_recovering(file)) {
+		return VINE_GRAPH_FETCH_DONE;
+	}
+	if (vine_temp_exists_somewhere(e->manager, file)) {
+		return VINE_GRAPH_FETCH_LATER;
+	}
+	debug(D_VINE, "node %" PRIu64 " runs again to restore %s", producer->node_id, vine_file_cached_name(file));
+	producer->restoring = 1;
+	vine_graph_executor_submit_task(e, producer);
+	return VINE_GRAPH_FETCH_DONE;
+}
+
 /* Try the fetches that can make progress, in the order they became ready, until the Manager has no free receive slot.
  * A file in the vault is done. A file with a Worker replica is received into the vault with priority over checkpoints
  * and beyond the vault limit, and its receive reports back. A completed node whose output exists nowhere is run again
@@ -949,33 +1051,17 @@ static void vine_graph_executor_process_fetches(struct vine_graph_executor *e)
 	int skips = 0;
 	struct vine_file *file;
 	while (skips < SKIP_LIMIT && (file = list_pop_head(e->fetch_ready))) {
-		if (!set_lookup(e->fetch_pending, file)) {
-			continue;
-		}
-		if (vine_manager_data_service_vault_contains(e->manager, file)) {
-			set_remove(e->fetch_pending, file);
-			continue;
-		}
-		struct vine_graph_node *producer = vine_graph_get_producer(e->graph, file);
-		if (!producer->completed || producer->restoring) {
-			continue;
-		}
-		vine_manager_checkpoint_result_t result = vine_manager_data_service_fetch(e->manager, file, vine_graph_executor_checkpoint_complete, e);
-		if (result == VINE_CHECKPOINT_BUSY) {
+		vine_graph_fetch_result_t result = vine_graph_executor_fetch_one(e, file);
+		if (result == VINE_GRAPH_FETCH_BUSY) {
 			list_push_head(e->fetch_ready, file);
 			break;
 		}
-		if (result != VINE_CHECKPOINT_NO_SOURCE || vine_file_is_recovering(file)) {
-			continue;
-		}
-		if (vine_temp_exists_somewhere(e->manager, file)) {
+		if (result == VINE_GRAPH_FETCH_LATER) {
 			list_push_tail(e->fetch_ready, file);
 			skips++;
-		} else {
-			debug(D_VINE, "node %" PRIu64 " runs again to restore %s", producer->node_id, vine_file_cached_name(file));
-			producer->restoring = 1;
-			vine_graph_executor_submit_task(e, producer);
+			continue;
 		}
+		vine_file_delete(file);
 	}
 }
 
@@ -994,6 +1080,92 @@ const char *vine_graph_executor_get_local_path(struct vine_graph_executor *e, ui
 		itable_insert(e->vault_paths, key, path);
 	}
 	return path;
+}
+
+/*************************************************************/
+/* Removing nodes */
+/*************************************************************/
+
+/* Return non-zero when a node the frontend dropped can be removed: every child was removed, so no node that remains
+ * reads its outputs, and it failed, or it completed and its outputs were released and are not being restored. */
+static int vine_graph_executor_node_is_removable(struct vine_graph_node *node)
+{
+	if (!node->let_go || node->removed || node->live_children > 0) {
+		return 0;
+	}
+	struct vine_graph_mount *mount;
+	LIST_ITERATE(node->outputs, mount)
+	{
+		if (mount->pins > 0) {
+			return 0;
+		}
+	}
+	return node->failed || (node->completed && node->released && !node->restoring);
+}
+
+/* Remove a node: collect its active task, undeclare its outputs, and queue its dropped parents, which may be
+ * removable once their last child is gone. */
+static void vine_graph_executor_remove_node(struct vine_graph_executor *e, struct vine_graph_node *node)
+{
+	if (node->task) {
+		/* The cancelled task of a failed node may still be active, and the Manager returns it at once. */
+		int task_id = vine_task_get_id(node->task);
+		if (itable_lookup(e->manager->tasks, (uint64_t)task_id)) {
+			vine_cancel_by_task_id(e->manager, task_id);
+			vine_wait_for_task_id(e->manager, task_id, 0);
+		}
+		/* Earlier attempts keep their entries, so a late recovery task of the node is recognized and ignored. */
+		itable_remove(e->task_id_to_node, (uint64_t)task_id);
+	}
+	struct vine_graph_mount *mount;
+	LIST_ITERATE(node->outputs, mount)
+	{
+		vine_graph_executor_forget_checkpoint(e, mount->file);
+		set_remove(e->fetch_pending, mount->file);
+		vine_graph_executor_forget_vault_path(e, mount->file);
+		vine_graph_remove_file(e->graph, mount->file_id);
+		if (vine_manager_lookup_file(e->manager, vine_file_cached_name(mount->file)) == mount->file) {
+			vine_undeclare_file(e->manager, mount->file);
+		} else {
+			vine_file_delete(mount->file);
+		}
+	}
+	struct vine_graph_node *parent;
+	LIST_ITERATE(node->parents, parent)
+	{
+		if (--parent->live_children == 0 && parent->let_go) {
+			list_push_tail(e->removable, (void *)(uintptr_t)parent->node_id);
+		}
+	}
+	uint64_t node_id = node->node_id;
+	vine_graph_remove_node(e->graph, node);
+	list_push_tail(e->removed, (void *)(uintptr_t)node_id);
+	debug(D_VINE, "removed node %" PRIu64, node_id);
+}
+
+/* Remove the dropped nodes that became removable, and the parents that their removal makes removable in turn. Nodes
+ * are queued by id, so a node removed meanwhile is skipped. */
+static void vine_graph_executor_remove_dropped(struct vine_graph_executor *e)
+{
+	void *id;
+	while ((id = list_pop_head(e->removable))) {
+		struct vine_graph_node *node = vine_graph_get_node(e->graph, (uint64_t)(uintptr_t)id);
+		if (node && vine_graph_executor_node_is_removable(node)) {
+			vine_graph_executor_remove_node(e, node);
+		}
+	}
+}
+
+int vine_graph_executor_drop_node(struct vine_graph_executor *e, uint64_t node_id)
+{
+	struct vine_graph_node *node = e ? vine_graph_get_node(e->graph, node_id) : NULL;
+	if (!node || !node->submitted) {
+		return -1;
+	}
+	node->let_go = 1;
+	list_push_tail(e->removable, (void *)(uintptr_t)node_id);
+	vine_graph_executor_remove_dropped(e);
+	return 0;
 }
 
 /*************************************************************/
@@ -1039,6 +1211,7 @@ vine_graph_status_t vine_graph_executor_wait(struct vine_graph_executor *e, int 
 		/* Fetches come first, so a receive slot freed during the last wait goes to an output the caller waits for. */
 		vine_graph_executor_process_fetches(e);
 		vine_graph_executor_process_checkpoints(e);
+		vine_graph_executor_remove_dropped(e);
 		vine_graph_executor_update_progress_bar(e);
 		/* The caller learns at once that a node finished or that a fetched output became readable. Results that
 		 * arrived during the last Manager wait are settled above before any return. */
@@ -1062,6 +1235,7 @@ vine_graph_status_t vine_graph_executor_wait(struct vine_graph_executor *e, int 
 		}
 	}
 
+	vine_graph_executor_remove_dropped(e);
 	vine_graph_executor_finish_progress_bar(e);
 	return e->error ? VINE_GRAPH_FAILED : VINE_GRAPH_DONE;
 }
@@ -1077,14 +1251,17 @@ void vine_graph_executor_wake(struct vine_graph_executor *e)
 
 uint64_t vine_graph_executor_next_finished(struct vine_graph_executor *e)
 {
-	struct vine_graph_node *node = e ? list_pop_head(e->finished) : NULL;
-	return node ? node->node_id : 0;
+	return e ? vine_graph_executor_next_report(e->finished) : 0;
 }
 
 uint64_t vine_graph_executor_next_released(struct vine_graph_executor *e)
 {
-	struct vine_graph_node *node = e ? list_pop_head(e->released) : NULL;
-	return node ? node->node_id : 0;
+	return e ? vine_graph_executor_next_report(e->released) : 0;
+}
+
+uint64_t vine_graph_executor_next_removed(struct vine_graph_executor *e)
+{
+	return e ? (uint64_t)(uintptr_t)list_pop_head(e->removed) : 0;
 }
 
 vine_graph_node_state_t vine_graph_executor_get_node_state(const struct vine_graph_executor *e, uint64_t node_id)
@@ -1099,13 +1276,14 @@ vine_graph_node_state_t vine_graph_executor_get_node_state(const struct vine_gra
 uint64_t vine_graph_executor_get_failure_source(const struct vine_graph_executor *e, uint64_t node_id)
 {
 	struct vine_graph_node *node = e ? vine_graph_get_node(e->graph, node_id) : NULL;
-	return node && node->failed ? node->failure_source->node_id : 0;
+	return node && node->failed ? node->failure_source_id : 0;
 }
 
 const char *vine_graph_executor_get_node_error(const struct vine_graph_executor *e, uint64_t node_id)
 {
 	struct vine_graph_node *node = e ? vine_graph_get_node(e->graph, node_id) : NULL;
-	return node && node->failed ? node->failure_source->error : NULL;
+	struct vine_graph_node *source = node && node->failed ? vine_graph_get_node(e->graph, node->failure_source_id) : NULL;
+	return source ? source->error : NULL;
 }
 
 const char *vine_graph_executor_get_error(const struct vine_graph_executor *e)
@@ -1133,6 +1311,6 @@ int vine_graph_executor_cancel_node(struct vine_graph_executor *e, uint64_t node
 		return -1;
 	}
 	vine_graph_executor_cancel_node_task(e, node);
-	vine_graph_executor_fail_node(e, node, node, xxstrdup("it was cancelled"));
+	vine_graph_executor_fail_node(e, node, node->node_id, xxstrdup("it was cancelled"));
 	return 0;
 }

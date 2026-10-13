@@ -100,6 +100,8 @@ static struct list *pending_async_messages = NULL;
 
 /* Bytes of the message at the head of pending_async_messages that the socket already took. */
 static size_t pending_async_offset = 0;
+/* The manager link that the queued messages go to. Only a direct write to this link waits for them. */
+static struct link *pending_async_link = 0;
 
 /* Table of all processes with results to be sent back, indexed by task_id. */
 /* These are additional pointers into procs_table and should not be deleted */
@@ -200,13 +202,19 @@ struct vine_worker_options *options = 0;
 
 extern int vine_hack_do_not_compute_cached_name;
 
-/* Send a printf-formatted message to the current manager. */
+static int flush_async_messages(struct link *l, time_t stoptime);
+
+/* Send a printf-formatted message to the current manager, or to a peer. */
 
 __attribute__((format(printf, 2, 3))) void send_message(struct link *l, const char *fmt, ...)
 {
 	char debug_msg[2 * VINE_LINE_MAX];
 	va_list va;
 	va_list debug_va;
+
+	if (!flush_async_messages(l, time(0) + options->active_timeout)) {
+		return;
+	}
 
 	va_start(va, fmt);
 
@@ -247,11 +255,42 @@ void deliver_async_messages(struct link *l)
 	}
 }
 
+/*
+Write every queued message to the manager, waiting as needed, before the worker writes to that link directly. A direct
+write in the middle of a message that the socket took only in part would cut it. The worker writes directly only when
+the manager reads: in the reply to a request, or right before it disconnects. Return 0 if the link failed.
+*/
+
+static int flush_async_messages(struct link *l, time_t stoptime)
+{
+	if (l != pending_async_link) {
+		return 1;
+	}
+
+	char *message;
+	while ((message = list_peek_head(pending_async_messages))) {
+		size_t length = strlen(message + pending_async_offset);
+		ssize_t written = link_write(l, message + pending_async_offset, length, stoptime);
+		if (written > 0) {
+			pending_async_offset += written;
+		}
+		if (written < 0 || (size_t)written < length) {
+			return 0;
+		}
+		debug(D_VINE, "tx: %s", message);
+		list_pop_head(pending_async_messages);
+		free(message);
+		pending_async_offset = 0;
+	}
+	return 1;
+}
+
 /* Buffer an asynchronous message to be sent to the manager */
 
 void send_async_message(struct link *l, const char *fmt, ...)
 {
 	assert(l);
+	pending_async_link = l;
 
 	va_list va;
 	char *message = malloc(VINE_LINE_MAX);
@@ -269,6 +308,7 @@ void send_async_message(struct link *l, const char *fmt, ...)
 
 static void send_async_string(struct link *l, char *message)
 {
+	pending_async_link = l;
 	list_push_tail(pending_async_messages, message);
 	deliver_async_messages(l);
 }
@@ -319,6 +359,9 @@ void send_complete_tasks(struct link *l)
 
 static void report_changes(struct link *manager)
 {
+	if (!flush_async_messages(manager, time(0) + options->active_timeout)) {
+		return;
+	}
 	vine_watcher_send_changes(watcher, manager, time(0) + options->active_timeout);
 	send_message(manager, "end\n");
 
@@ -754,6 +797,29 @@ static void finish_running_tasks(vine_result_t result)
 }
 
 /*
+Reap the functions running in a library process that ends. They run in children of the library and end with it, so
+they are forsaken, and the manager runs them again. A function thus never runs without its library, and no process
+refers to a library process after it is gone.
+*/
+
+static void reap_library_functions(struct vine_process *library)
+{
+	struct vine_process *p;
+	uint64_t task_id;
+	int iteration;
+
+	ITABLE_ITERATE(procs_running, iteration, task_id, p)
+	{
+		if (p->library_process == library) {
+			debug(D_VINE, "killing function task %d running on library task %d", (int)task_id, library->task->task_id);
+			finish_running_task(p, VINE_RESULT_FORSAKEN);
+			reap_process(p, /* do not stage out */ NULL);
+			p->library_process = NULL;
+		}
+	}
+}
+
+/*
 Kill a failed library process.
 This library process may either not existent or no longer responses.
 */
@@ -772,19 +838,7 @@ static void handle_failed_library_process(struct vine_process *p, struct link *m
 
 	/* Forsake the tasks that are running on this library */
 	/* It no available libraries on this worker, tasks waiting for this library will be forsaken */
-
-	struct vine_process *p_running;
-	uint64_t task_id;
-	int iteration;
-
-	ITABLE_ITERATE(procs_running, iteration, task_id, p_running)
-	{
-		if (p_running->library_process == p) {
-			debug(D_VINE, "killing function task %d running on library task %d", (int)task_id, p->task->task_id);
-			finish_running_task(p_running, VINE_RESULT_FORSAKEN);
-			reap_process(p_running, /* do not stage out */ NULL);
-		}
-	}
+	reap_library_functions(p);
 
 	reap_process(p, manager);
 }
@@ -1104,6 +1158,10 @@ static int do_kill(int task_id)
 	}
 
 	if (itable_remove(procs_running, task_id)) {
+		/* The functions of a library end with it, so they are reaped while the library process still exists. */
+		if (p->type == VINE_PROCESS_TYPE_LIBRARY) {
+			reap_library_functions(p);
+		}
 		vine_process_kill_and_wait(p);
 		reap_process(p, /* do not stage out */ NULL);
 	}
@@ -1257,6 +1315,7 @@ static void disconnect_manager(struct link *manager)
 		free(message);
 	}
 	pending_async_offset = 0;
+	pending_async_link = 0;
 
 	debug(D_VINE, "killing all outstanding tasks");
 	kill_all_tasks();
@@ -1737,7 +1796,7 @@ static void vine_worker_serve_manager(struct link *manager)
 					current_manager_address->addr,
 					current_manager_address->port,
 					options->idle_timeout);
-			send_message(manager, "info idle-disconnect-request %lld\n", (long long)options->idle_timeout);
+			send_async_message(manager, "info idle-disconnect-request %lld\n", (long long)options->idle_timeout);
 			reset_idle_timer();
 		}
 

@@ -171,6 +171,8 @@ void vine_task_reset(struct vine_task *t)
 
 /* The copy helpers walk the source list with a cursor of their own. LIST_ITERATE would move the cursor stored in the
  * list, which ends any walk of the same list that a caller of vine_task_copy() is in the middle of. */
+/* The copy helpers walk the source list with a cursor of their own. LIST_ITERATE would move the cursor stored in the
+ * list, which ends any walk of the same list that a caller of vine_task_copy() is in the middle of. */
 static void vine_task_mount_list_copy(struct list *destination, struct list *list)
 {
 	struct list_cursor *cur = list_cursor_create(list);

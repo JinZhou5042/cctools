@@ -138,6 +138,12 @@ def vine_graph_executor_get_makespan_us(e):
 def vine_graph_executor_get_completed_recovery_tasks(e):
     return _vine_graph_capi.vine_graph_executor_get_completed_recovery_tasks(e)
 
+def vine_graph_executor_drop_node(e, node_id):
+    return _vine_graph_capi.vine_graph_executor_drop_node(e, node_id)
+
+def vine_graph_executor_next_removed(e):
+    return _vine_graph_capi.vine_graph_executor_next_removed(e)
+
 def vine_graph_executor_cancel_node(e, node_id):
     return _vine_graph_capi.vine_graph_executor_cancel_node(e, node_id)
 

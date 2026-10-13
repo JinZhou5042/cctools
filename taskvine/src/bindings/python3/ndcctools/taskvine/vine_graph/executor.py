@@ -139,11 +139,23 @@ class Future(_Selectable):
     keeps the data it stands for, so tasks submitted later read it without recomputing it. Pass a Future to
     Executor.submit() to give a task its result, or select from it like a Node."""
 
-    __slots__ = ("_executor", "_target", "__weakref__")
+    __slots__ = ("_executor", "_target", "_held", "__weakref__")
 
     def __init__(self, executor, target):
         self._executor = executor
         self._target = target
+        self._held = None  # the data key whose data the Executor keeps for this Future
+
+    def __del__(self):
+        # Collection may happen in any thread, so the background thread lets the data go. A closed Executor ignores
+        # the call, and one collected at interpreter exit may find its modules gone already.
+        key = self._held
+        if key is not None:
+            executor = self._executor
+            try:
+                executor._enqueue(lambda: executor._unhold(key[0], key))
+            except Exception:
+                pass
 
     @property
     def target(self):
@@ -317,6 +329,7 @@ class Executor:
         # graph id -> Graph of submitted tasks, held weakly: a Graph the user drops lets its tasks go.
         self._graphs = weakref.WeakValueDictionary({self._dynamic._id: self._dynamic})
         self._numbers = {}  # (graph id, key) of each submitted task -> number that names its files
+        self._submitted = 0  # tasks submitted over the Executor's life, including those it forgot
         self._labels = {}  # (graph id, key) -> how messages name the task, which outlives its Graph
         # Hoisted objects, each serialized on its own: name -> bytes. A local Executor loads one copy per task, as
         # forked tasks get on Workers, and a Worker library loads them from a file.
@@ -672,7 +685,7 @@ class Executor:
                 # The Future keeps its data, which is fetched to the Manager as soon as the task completes. Closing the
                 # Executor releases every pin, so unpinning at interpreter exit could only reach freed state.
                 self._enqueue(lambda: self._hold(task, key))
-                weakref.finalize(future, self._enqueue, lambda: self._unhold(task, key)).atexit = False
+                future._held = key
         return future
 
     def _add_graph(self, graph):
@@ -751,6 +764,7 @@ class Executor:
                 raise ValueError(f"the file {ref.path!r} was declared after its task was submitted")
         self._last_number += 1
         self._numbers[task] = self._last_number
+        self._submitted += 1
         self._labels[task] = repr(Node(graph, key))
         self._declared_outputs[task] = tuple(graph._outputs.get(key, {}))
         names = []
@@ -771,6 +785,7 @@ class Executor:
         finally:
             if not submitted:
                 del self._numbers[task]
+                self._submitted -= 1
                 del self._labels[task]
                 del self._declared_outputs[task]
                 with self._lock:
@@ -1019,6 +1034,27 @@ class Executor:
             # Only a Future could reach this call again, so its function and arguments go too.
             self._dynamic._remove(key)
             self._graph_tasks[graph_id].discard(key)
+        # C removes the node once every node that reads its outputs was removed, and then this Executor forgets it.
+        self._enqueue(lambda task=task: self._drop_node(task))
+
+    def _drop_node(self, task):
+        node = self._nodes.get(task)
+        if node is not None:
+            capi.vine_graph_executor_drop_node(self._executor, node)
+
+    def _forget(self, node):
+        """Forget a task whose C node was removed. Its descendants were removed before it, so no failure names it."""
+        task = self._tasks.pop(node, None)
+        if task is None:
+            return
+        self._nodes.pop(task, None)
+        self._result_files.pop(task, None)
+        for path in self._declared_outputs.pop(task, ()):
+            self._output_files.pop((task[0], task[1], path), None)
+        self._numbers.pop(task, None)
+        self._labels.pop(task, None)
+        self._finished.pop(task, None)
+        self._cancelled.discard(task)
 
     def _drop_staged(self, names):
         """Let go of staged files that a task held, and free each one that no task holds anymore."""
@@ -1109,6 +1145,8 @@ class Executor:
             self._released.update(released)
             for task in [*released, *(task for task, entry in finished if entry[0] == FAILED)]:
                 self._let_go(task)
+            while node := capi.vine_graph_executor_next_removed(self._executor):
+                self._forget(node)
             self._changed.notify_all()
 
     # Published state, shared by both threads.
@@ -1208,16 +1246,16 @@ class Executor:
             return self._progress_locked()
 
     def _progress_locked(self):
-        return Progress(len(self._numbers), self._counts[COMPLETED], self._counts[FAILED])
+        return Progress(self._submitted, self._counts[COMPLETED], self._counts[FAILED])
 
     def stats(self):
         """Return the makespan in seconds, the number of submitted tasks, and the number of recovery tasks."""
         self._check_open()
         if self._local:
-            return {"makespan": self._local_seconds, "tasks": len(self._numbers), "recovery_tasks": 0}
+            return {"makespan": self._local_seconds, "tasks": self._submitted, "recovery_tasks": 0}
         return self._call(lambda: {
             "makespan": capi.vine_graph_executor_get_makespan_us(self._executor) / 1e6,
-            "tasks": len(self._numbers),
+            "tasks": self._submitted,
             "recovery_tasks": capi.vine_graph_executor_get_completed_recovery_tasks(self._executor),
         })
 

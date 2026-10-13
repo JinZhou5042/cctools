@@ -2,12 +2,12 @@
 # Rules for building various sorts of files
 #
 
-# Internal compiler flags include -MMD -MP, which write the headers that each object includes to a .d file next to it.
-# Including those files rebuilds an object when one of its headers changes. This file comes before the first target
-# of each Makefile, so the default goal is kept.
-CCTOOLS_DEFAULT_GOAL := $(.DEFAULT_GOAL)
+# Rebuild an object when a header it includes changes. The compiler lists those headers in .d files (-MMD -MP).
 -include $(wildcard *.d)
-.DEFAULT_GOAL := $(CCTOOLS_DEFAULT_GOAL)
+
+# The .d files contain rules, and make takes the first rule it reads as the default target.
+# Reset it, so a plain "make" still builds "all".
+.DEFAULT_GOAL :=
 
 %.o: %.c
 	$(CCTOOLS_CC) -o $@ -c $(CCTOOLS_INTERNAL_CCFLAGS) $(LOCAL_CCFLAGS) $<

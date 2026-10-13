@@ -8,7 +8,8 @@
  * installs signal handlers.
  *
  * Handles. Nodes and files are identified by ids that the executor assigns, starting from one. Zero means failure.
- * Ids are valid only for the executor that returned them.
+ * Ids are valid only for the executor that returned them, and they are never reused. A node the frontend drops is
+ * removed once nothing in the run needs it, which frees its memory in a long run.
  *
  * Growth. The graph may grow while it runs, and a graph known in advance is the case where every node is submitted
  * before the first wait. A node is built by adding it and mounting its files, then submitted. It may read only outputs
@@ -143,6 +144,15 @@ const char *vine_graph_executor_get_error(const struct vine_graph_executor *e);
 uint64_t vine_graph_executor_get_makespan_us(const struct vine_graph_executor *e);
 /* Return how many tasks recomputed outputs of completed nodes in this run. */
 uint64_t vine_graph_executor_get_completed_recovery_tasks(const struct vine_graph_executor *e);
+
+/* Drop a submitted node the frontend no longer needs: it will not pin, fetch, or read the node's outputs, and no node it
+ * submits later reads them. The node is removed once it failed, or once it completed and its outputs were released,
+ * and once every node that reads its outputs was removed, so a node is never removed before its descendants. A removed
+ * node frees its task and undeclares its outputs, and its id is no longer valid. Return zero, or -1 for an unknown or
+ * unsubmitted node. */
+int vine_graph_executor_drop_node(struct vine_graph_executor *e, uint64_t node_id);
+/* Return the next node removed since the last call, or zero when none was. The frontend forgets it then. */
+uint64_t vine_graph_executor_next_removed(struct vine_graph_executor *e);
 
 /* Cancel a submitted node that has not completed or failed: its task stops, and it fails with every node that depends
  * on it, as if its function had failed. Return zero, or -1 for an unknown node or a node that already finished. */

@@ -73,6 +73,7 @@ def installed(manager, name, modules=(), files=None, hoisted=None, edata_cache=N
     cache_root = Path(manager.cache_directory) / "vine-library-cache"
     before = set(cache_root.iterdir()) if cache_root.exists() else set()
     inputs = []
+    installed_library = False
     try:
         try:
             context = [prepare, [module_names, HOISTED if hoisted else None, EDATA_CACHE if edata_cache else None], {}]
@@ -85,11 +86,13 @@ def installed(manager, name, modules=(), files=None, hoisted=None, edata_cache=N
             library.add_input(inputs[-1], remote)
         # Without a resource request, each instance takes its whole Worker with one function slot per core.
         manager.install_library(library)
+        installed_library = True
         yield run_node.__name__
     finally:
         try:
-            # Removing the library also undeclares the code that the Manager generated for it.
-            if manager.check_library_exists(name):
+            # Removing the library also undeclares the code that the Manager generated for it. A library that failed
+            # too often was already removed by the Manager, and removing it here still undeclares that code.
+            if installed_library:
                 manager.remove_library(name)
         finally:
             try:

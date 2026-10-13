@@ -177,7 +177,6 @@ static void delete_uncacheable_files(struct vine_manager *q, struct vine_worker_
 static int release_worker(struct vine_manager *q, struct vine_worker_info *w);
 
 struct vine_task *send_library_to_worker(struct vine_manager *q, struct vine_worker_info *w, const char *name);
-static struct vine_task *remove_library_instances(struct vine_manager *q, const char *name);
 
 /*
 Log timezone context at manager startup so timestamp-based logs can be
@@ -1048,17 +1047,20 @@ int vine_manager_release_random_worker(struct vine_manager *q)
 	struct vine_worker_info *w;
 	int iteration;
 
+	struct vine_worker_info *chosen = 0;
 	HASH_TABLE_ITERATE_RANDOM_START(q->worker_table, iteration, offset_bookkeep, key, w)
 	{
-		if (!w) {
-			continue;
+		if (w) {
+			chosen = w;
+			break;
 		}
+	}
 
-		/* evict this worker */
-		debug(D_VINE | D_NOTICE, "Intentionally evicting worker %s", w->hostname);
-		release_worker(q, w);
+	/* Releasing a worker can iterate the worker table, so the worker is released after the iteration. */
+	if (chosen) {
+		debug(D_VINE | D_NOTICE, "Intentionally evicting worker %s", chosen->hostname);
+		release_worker(q, chosen);
 		removed = 1;
-		break;
 	}
 
 	return removed;
@@ -3369,8 +3371,13 @@ static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_inf
 	/* if t is a function task, t->library_task should not be invalidated, and we decrement the reference count of the library task.
 	 * if t->library_task is NULL or it had been released before, then something is going wrong. */
 	if (t->needs_library && t->library_task) {
-		t->library_task->function_slots_inuse = MAX(0, t->library_task->function_slots_inuse - 1);
-		vine_task_delete(t->library_task);
+		struct vine_task *library = t->library_task;
+		library->function_slots_inuse = MAX(0, library->function_slots_inuse - 1);
+		/* The last function of an instance whose library was removed ends the instance. */
+		if (library->library_retired && library->function_slots_inuse == 0 && library->worker) {
+			vine_cancel_by_task_id(q, library->task_id);
+		}
+		vine_task_delete(library);
 		t->library_task = NULL;
 	}
 
@@ -3535,7 +3542,11 @@ static void vine_manager_create_recovery_tasks(struct vine_manager *q, struct vi
 				recovery_task->type = VINE_TASK_TYPE_RECOVERY;
 			}
 
+			/* A task submitted again for the same output, such as a retry, replaces the recovery task of the earlier
+			 * one. The earlier one mounts the file too, so keeping it would stop the file from ever being deleted. */
+			struct vine_task *previous = m->file->recovery_task;
 			m->file->recovery_task = vine_task_addref(recovery_task);
+			vine_task_delete(previous);
 			m->file->original_producer_task_id = t->task_id;
 		}
 	}
@@ -5141,8 +5152,7 @@ struct vine_task *send_library_to_worker(struct vine_manager *q, struct vine_wor
 	then remove it and notify the user that this template might be broken
 	*/
 	if (original->library_failed_count > q->max_library_retries) {
-		/* The application may still hold this template, so it is retired without being freed. */
-		remove_library_instances(q, name);
+		vine_manager_remove_library(q, name);
 		debug(D_VINE | D_NOTICE, "library %s has reached the maximum failure count %d, it has been removed\n", name, q->max_library_retries);
 		return 0;
 	}
@@ -5214,8 +5224,10 @@ void vine_manager_install_library(struct vine_manager *q, struct vine_task *t, c
 /* Cancel every instance of a library and remove its template from the table. Return the template, or NULL.
  * Instances are collected before any is cancelled, because a task state change can iterate the worker table, for
  * example to write the performance log, and that would break an iteration in progress. */
-static struct vine_task *remove_library_instances(struct vine_manager *q, const char *name)
+void vine_manager_remove_library(struct vine_manager *q, const char *name)
 {
+	/* Cancelling a task can iterate the worker table, for example to write the performance log, so the instances
+	 * are collected before any is cancelled. */
 	struct list *instances = list_create();
 	char *worker_key;
 	struct vine_worker_info *w;
@@ -5229,7 +5241,13 @@ static struct vine_task *remove_library_instances(struct vine_manager *q, const 
 		int library_iteration;
 		ITABLE_ITERATE(w->current_libraries, library_iteration, task_id, library)
 		{
-			if (!strcmp(library->provides_library, name) && library->function_slots_inuse < library->function_slots_total) {
+			if (strcmp(library->provides_library, name)) {
+				continue;
+			}
+			if (library->function_slots_inuse > 0) {
+				/* A busy instance finishes its running functions and ends with the last one. */
+				library->library_retired = 1;
+			} else {
 				list_push_tail(instances, library);
 			}
 		}
@@ -5246,17 +5264,10 @@ static struct vine_task *remove_library_instances(struct vine_manager *q, const 
 	}
 	list_delete(instances);
 
+	/* The manager owns a template once it is installed, so removing the library frees it. */
+	struct vine_task *library_template = hash_table_remove(q->library_templates, name);
+	vine_task_delete(library_template);
 	debug(D_VINE, "All instances and the template for library %s have been removed", name);
-	return hash_table_remove(q->library_templates, name);
-}
-
-void vine_manager_remove_library(struct vine_manager *q, const char *name)
-{
-	/* The Manager owns an installed template, and the caller releases its own handle. Instances are copies. */
-	struct vine_task *library_template = remove_library_instances(q, name);
-	if (library_template) {
-		vine_task_delete(library_template);
-	}
 }
 
 struct vine_task *vine_manager_find_library_template(struct vine_manager *q, const char *library_name)
@@ -5669,15 +5680,25 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 
 		// get updates for watched files.
 		if (hash_table_size(q->workers_with_watched_file_updates)) {
-
+			/* Receiving the updates also handles other messages of a worker, which can iterate the worker table or
+			 * remove a worker, so the workers that announced updates are collected by key before any is asked. */
+			struct list *keys = list_create();
 			struct vine_worker_info *w;
 			char *key;
 			int iteration;
-			HASH_TABLE_ITERATE(q->worker_table, iteration, key, w) // should this be workers_with_watched_file_updates?
+			HASH_TABLE_ITERATE(q->workers_with_watched_file_updates, iteration, key, w)
 			{
-				get_watched_file_updates(q, w);
-				hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
+				list_push_tail(keys, xxstrdup(key));
 			}
+			hash_table_clear(q->workers_with_watched_file_updates, 0);
+			while ((key = list_pop_head(keys))) {
+				w = hash_table_lookup(q->worker_table, key);
+				if (w) {
+					get_watched_file_updates(q, w);
+				}
+				free(key);
+			}
+			list_delete(keys);
 		}
 
 		// check if we need to kill any workers if the user has specified an eviction interval.
@@ -6359,7 +6380,7 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 		q->sandbox_grow_factor = MAX(1.1, value);
 
 	} else if (!strcmp(name, "max-library-retries")) {
-		q->max_library_retries = MIN(1, value);
+		q->max_library_retries = MAX(1, value);
 
 	} else if (!strcmp(name, "disk-proportion-available-to-task")) {
 		if (value < 1 && value > 0) {

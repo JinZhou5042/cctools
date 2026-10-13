@@ -10,7 +10,11 @@
  *
  * Nodes and files are the graph's stable handles over TaskVine objects. A node outlives the tasks of its attempts, as
  * a file handle refers to a vine_file whose single owner is the Manager's file_table. The graph holds no run
- * configuration. */
+ * configuration.
+ *
+ * A node the frontend no longer needs is removed once every child was removed, so no node that remains reads an
+ * output of a removed one. Its parents still list it until they are removed too, so the node's structure stays, marked
+ * as removed, until no list refers to it. Ids are never reused. */
 
 #include <stdint.h>
 
@@ -23,6 +27,7 @@
 /* A file mounted in a node's task sandbox. */
 struct vine_graph_mount {
 	struct vine_file *file; // a reference of its own, so undeclaring the file leaves the mount valid
+	uint64_t file_id;	// the graph's id of the file
 	char *task_path;	// path inside the task sandbox
 	int pins;		// on an output, frontend references that keep it from being released
 };
@@ -48,14 +53,20 @@ struct vine_graph_node {
 
 	struct list_cursor *durable_children; // executor's release check: every child before it was durable when checked
 
-	int failed;				// the node cannot complete, or its outputs cannot be restored
-	struct vine_graph_node *failure_source; // borrowed node whose own failure made this one fail
-	char *error;				// why the node failed, set only on a failure source
+	int failed;		    // the node cannot complete, or its outputs cannot be restored
+	uint64_t failure_source_id; // the node whose own failure made this one fail
+	char *error;		    // why the node failed, set only on a failure source
+
+	int let_go;	   // the frontend no longer needs the node, which is removed once every child was removed
+	int live_children; // children not removed yet
+	int removed;	   // removed from the graph, so only the lists counted in refs still hold the structure
+	int refs;	   // entries that point to the node in its parents' children lists and in the executor's lists
 };
 
 /* Nodes, files, and the producer of each output file. */
 struct vine_graph {
-	struct itable *nodes;	      // node id -> owned node
+	struct itable *nodes;	      // node id -> owned node that was not removed
+	uint64_t last_node_id;	      // id given to the latest node
 	struct itable *files;	      // file id -> declared vine_file, borrowed until the executor undeclares it
 	uint64_t last_file_id;	      // id given to the latest recorded file
 	struct hash_table *producers; // output cache name -> borrowed producer node
@@ -94,7 +105,15 @@ struct vine_graph_mount *vine_graph_get_output(const struct vine_graph *g, uint6
  * submitted before it. */
 int vine_graph_link_node(struct vine_graph *g, uint64_t node_id);
 
-/* Delete the graph, its nodes, and their tasks. Files are not undeclared. */
+/* Remove a node whose children were all removed: delete its task and mounts, forget it as a producer, and leave its
+ * parents' children lists pointing at a structure marked as removed. The caller undeclares the node's outputs and
+ * updates its parents first. */
+void vine_graph_remove_node(struct vine_graph *g, struct vine_graph_node *node);
+
+/* Drop one entry that points to a node, and free the structure of a removed node that no entry points to anymore. */
+void vine_graph_node_unref(struct vine_graph_node *node);
+
+/* Delete the graph, its nodes, and their tasks. Files are not undeclared. The executor drops its own entries first. */
 void vine_graph_delete(struct vine_graph *g);
 
 #endif // VINE_GRAPH_H

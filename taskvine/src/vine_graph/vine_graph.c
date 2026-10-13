@@ -17,6 +17,7 @@ struct vine_graph *vine_graph_create(void)
 	g->nodes = itable_create(0);
 	g->files = itable_create(0);
 	g->producers = hash_table_create(0, 0);
+	g->last_node_id = 0;
 	g->last_file_id = 0;
 	return g;
 }
@@ -27,8 +28,8 @@ uint64_t vine_graph_add_node(struct vine_graph *g)
 	if (!node) {
 		return 0;
 	}
-	/* Nodes are never removed, so ids are dense and start from one. */
-	node->node_id = itable_size(g->nodes) + 1;
+	/* Ids start from one and are never reused, because the frontend may remove nodes. */
+	node->node_id = ++g->last_node_id;
 	node->inputs = list_create();
 	node->outputs = list_create();
 	node->parents = list_create();
@@ -77,6 +78,7 @@ int vine_graph_add_mount(struct vine_graph *g, uint64_t node_id, uint64_t file_i
 	}
 	struct vine_graph_mount *mount = xxcalloc(1, sizeof(*mount));
 	mount->file = vine_file_addref(file);
+	mount->file_id = file_id;
 	mount->task_path = xxstrdup(task_path);
 	list_push_tail(is_output ? node->outputs : node->inputs, mount);
 	return 0;
@@ -131,6 +133,8 @@ int vine_graph_link_node(struct vine_graph *g, uint64_t node_id)
 		set_insert(linked, parent);
 		list_push_tail(node->parents, parent);
 		list_push_tail(parent->children, node);
+		parent->live_children++;
+		node->refs++;
 		if (node->depth < parent->depth + 1) {
 			node->depth = parent->depth + 1;
 		}
@@ -154,27 +158,81 @@ static void vine_graph_mounts_delete(struct list *mounts)
 	list_delete(mounts);
 }
 
+void vine_graph_node_unref(struct vine_graph_node *node)
+{
+	if (--node->refs == 0 && node->removed) {
+		free(node);
+	}
+}
+
+/* Drop the entries of a node's children list that point to removed children. Entries of children that remain point to
+ * structures that the graph still owns. */
+static void vine_graph_node_drop_removed_children(struct vine_graph_node *node)
+{
+	struct vine_graph_node *child;
+	while ((child = list_pop_head(node->children))) {
+		if (child->removed) {
+			vine_graph_node_unref(child);
+		}
+	}
+}
+
+/* Free what a node owns. Its children list must hold no entry for a removed child anymore. */
+static void vine_graph_node_clear(struct vine_graph_node *node)
+{
+	vine_task_delete(node->task);
+	node->task = NULL;
+	free(node->error);
+	node->error = NULL;
+	vine_graph_mounts_delete(node->inputs);
+	vine_graph_mounts_delete(node->outputs);
+	node->inputs = node->outputs = NULL;
+	if (node->durable_children) {
+		list_cursor_destroy(node->durable_children);
+		node->durable_children = NULL;
+	}
+	list_delete(node->children);
+	list_delete(node->parents);
+	node->children = node->parents = NULL;
+}
+
+void vine_graph_remove_node(struct vine_graph *g, struct vine_graph_node *node)
+{
+	struct vine_graph_mount *mount;
+	LIST_ITERATE(node->outputs, mount)
+	{
+		hash_table_remove(g->producers, vine_file_cached_name(mount->file));
+	}
+	itable_remove(g->nodes, node->node_id);
+	/* Every child was removed before the node, so every entry of its children list points to a removed child. */
+	vine_graph_node_drop_removed_children(node);
+	vine_graph_node_clear(node);
+	node->removed = 1;
+	if (node->refs == 0) {
+		free(node);
+	}
+}
+
 void vine_graph_delete(struct vine_graph *g)
 {
 	if (!g) {
 		return;
 	}
+	/* Removed nodes are freed while every node that remains still exists, and then the nodes that remain. */
+	struct list *nodes = list_create();
 	uint64_t node_id;
 	struct vine_graph_node *node;
 	int iteration;
 	ITABLE_ITERATE(g->nodes, iteration, node_id, node)
 	{
-		vine_task_delete(node->task);
-		free(node->error);
-		vine_graph_mounts_delete(node->inputs);
-		vine_graph_mounts_delete(node->outputs);
-		list_delete(node->parents);
-		if (node->durable_children) {
-			list_cursor_destroy(node->durable_children);
-		}
-		list_delete(node->children);
+		list_push_tail(nodes, node);
+		vine_graph_node_drop_removed_children(node);
+	}
+	while ((node = list_pop_head(nodes))) {
+		vine_graph_node_clear(node);
 		free(node);
 	}
+	list_delete(nodes);
 	itable_delete(g->nodes);
 	itable_delete(g->files);
 	hash_table_delete(g->producers);

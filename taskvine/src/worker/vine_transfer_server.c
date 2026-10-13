@@ -71,7 +71,7 @@ static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
 	vine_transfer_serve_request(lnk, cache, time(0) + command_timeout);
 }
 
-static void vine_transfer_process(struct vine_cache *cache)
+static void vine_transfer_process(struct vine_cache *cache, pid_t worker_pid)
 {
 	static int child_count = 0;
 
@@ -83,6 +83,12 @@ static void vine_transfer_process(struct vine_cache *cache)
 	5. lnk should be closed in the parent process to prevent file descriptor exhaustion.
 	*/
 	while (1) {
+		/* A worker that is killed cannot stop the server, so the server exits when its worker is gone. */
+		if (getppid() != worker_pid) {
+			debug(D_VINE, "Transfer Server: the worker is gone, exiting");
+			_exit(0);
+		}
+
 		/* Do a non-blocking wait for any exited children. */
 		while (waitpid(-1, NULL, WNOHANG) > 0) {
 			child_count--;
@@ -130,12 +136,13 @@ int vine_transfer_server_start(struct vine_cache *cache, struct link *manager, i
 		return 0;
 	}
 
+	pid_t worker_pid = getpid();
 	transfer_server_pid = fork();
 	if (transfer_server_pid == 0) {
 		/* Close only the inherited descriptor without flushing or shutting down the Worker TLS session. */
 		close(link_fd(manager));
 		change_process_title("vine_worker [transfer server]");
-		vine_transfer_process(cache);
+		vine_transfer_process(cache, worker_pid);
 		_exit(0);
 	} else if (transfer_server_pid > 0) {
 		char addr[LINK_ADDRESS_MAX];

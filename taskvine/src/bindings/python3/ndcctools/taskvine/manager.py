@@ -1106,6 +1106,7 @@ class Manager(object):
             raise TypeError(f"Given task is of type {type(task)}. Please provide a LibraryTask as the task argument.")
         self._library_table[task.get_libray_provided()] = task
         cvine.vine_manager_install_library(self._taskvine, task._task, task.get_libray_provided())
+        # The manager owns the task from now on, while a library task that is never installed is freed by Python.
         task._manager_will_free = True
 
     ##
@@ -1118,7 +1119,7 @@ class Manager(object):
     def remove_library(self, name):
         libtask = self._library_table.pop(name)
         cvine.vine_manager_remove_library(self._taskvine, name)
-        # The Manager freed the installed template, so the Python object must not reach it again.
+        # The manager freed the installed library task, so the Python object must not reach it again.
         libtask._task = None
         for f in libtask._library_files:
             self.undeclare_file(f)
