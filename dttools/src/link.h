@@ -56,7 +56,9 @@ link_close(link);
 /** Value to usewhen any listen port is acceptable */
 #define LINK_PORT_ANY 0
 
-/** Stoptime to give when you wish to wait forever */
+/** Stoptime to give when you wish to wait forever. On a link with an idle timeout (@ref link_set_idle_timeout), a read
+or write still fails when no data moves for that long, so LINK_FOREVER there means until the peer stops making
+progress. */
 #define LINK_FOREVER ((time_t)INT_MAX)
 #define LINK_NOWAIT ((time_t)INT_MIN)
 
@@ -260,8 +262,7 @@ The idle timeout of the link does not apply to this wait.
 @param stoptime The time at which to abort.
 @param reading Wait for the link to become readable.
 @param writing Wait for the link to become writable.
-@return One if the link becomes readable or writable before the timeout expires, zero otherwise, with errno set to
-ETIMEDOUT when the stoptime passed.
+@return One if the link becomes readable or writable before the timeout expires, zero otherwise.
 */
 int link_sleep(struct link *link, time_t stoptime, int reading, int writing);
 
@@ -271,7 +272,9 @@ moves for the given number of seconds, even if its stoptime is later or is @ref 
 moves renews the limit, so a large transfer that keeps making progress succeeds however long it takes. Once a wait has
 failed this way, later waits for the link to become readable or writable in reads and writes fail at once, because the
 stream may have stopped in the middle of a message. The limit also bounds each wait of an ssl handshake. Waits for a
-connection, such as @ref link_accept and @ref link_sleep, are not affected.
+connection, such as @ref link_accept and @ref link_sleep, are not affected. A stoptime of @ref LINK_FOREVER on such a
+link thus waits until the peer stops making progress. A stoptime that passes first ends the call as on a link without
+an idle timeout, with the same errno.
 @param link The link to limit.
 @param seconds Seconds without progress before a read or write fails. Zero, the default, removes the limit, so only
 the stoptime of each call applies.

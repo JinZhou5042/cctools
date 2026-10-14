@@ -2837,17 +2837,20 @@ have no effect.
 A healthy worker answers its manager within the response time X (`response-timeout`), because its main loop works in
 rounds of a bounded budget. Every wait of the manager on a worker, and of a worker on its manager, a peer, a library,
 or a URL, fails when the other party makes no progress for T = 2X, however large the data. A worker that sends nothing
-for T/2 gets a keepalive check, and a worker that sends nothing for T after its check is removed. These guarantees
-assume that X is at least twice the longest network delay, including draining the buffers on the path, plus the longest
-step of the manager, and they have these limits:
+for T/2 gets a keepalive check, and a worker that sends nothing for T after its check is removed, so a stopped worker
+is removed within 1.5 T plus one second. The checks run inside `wait()`, so this bound assumes that the application
+keeps calling `wait()`: time it spends between calls adds to the bound. These guarantees assume that X is at least
+twice the longest network delay, including draining the buffers on the path, plus the longest step of the manager, and
+they have these limits:
 
 - A worker that stops reading costs the manager up to T once, after which writes to it fail at once. N such workers at
   once cost up to N T.
 - A connection that sends nothing, or a worker that stops in the middle of a message, costs the manager up to T once.
-- The manager judges a worker by its messages only, so the network must drain a full receive buffer within the
-  longest network delay: with the default X of 15 s, within about 7 s.
-- Synchronous exchanges (task outputs, standard output, watched files) last as long as their data takes, each wait in
-  them bounded by T.
+- The manager judges a worker by its messages only, so the network must drain the send and receive buffers on the
+  path (S + R, about 10 MB with default Linux maximums) within the longest network delay: with the default X of 15 s,
+  within about 7 s, so links of at least about 1.5 MB/s.
+- Synchronous exchanges (task inputs, task outputs, standard output, watched files) last as long as their data takes,
+  each wait in them bounded by T.
 | watch-library-logfiles | If 1, watch the output files produced by each of the library processes running on the remote workers, take
 them back the current logging directory. | 0 |
 

@@ -354,7 +354,8 @@ int vine_process_execute(struct vine_process *p)
 			p->library_write_link = link_attach_to_fd(pipe_in[1]);
 
 			/* The pipes do not block, so a wait on the library ends when it makes no progress for T. Reading the rest
-			 * of a message that the library began is such a wait, a declared exception to the round budget. */
+			 * of a message that the library began is bounded by T in total, a declared exception to the round
+			 * budget. */
 			link_nonblocking(p->library_read_link, 1);
 			link_nonblocking(p->library_write_link, 1);
 			link_set_idle_timeout(p->library_read_link, vine_worker_options_idle_timeout(options));
@@ -537,8 +538,11 @@ int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_
 	char buffer[VINE_LINE_MAX]; // Buffer to store length of data from library.
 	int ok = 1;
 
+	/* The library began a result, a bounded-size exchange, so read all of it within T in total. */
+	time_t stoptime = time(0) + vine_worker_options_idle_timeout(options);
+
 	/* read number of bytes of data first. */
-	ok = link_readline(p->library_read_link, buffer, VINE_LINE_MAX, LINK_FOREVER);
+	ok = link_readline(p->library_read_link, buffer, VINE_LINE_MAX, stoptime);
 	if (!ok) {
 		return 0;
 	}
@@ -546,7 +550,7 @@ int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_
 
 	/* now read the buffer, which is the task id of the done function invocation. */
 	char buffer_data[len_buffer + 1];
-	ok = link_read(p->library_read_link, buffer_data, len_buffer, LINK_FOREVER);
+	ok = link_read(p->library_read_link, buffer_data, len_buffer, stoptime);
 	if (ok <= 0) {
 		return 0;
 	}

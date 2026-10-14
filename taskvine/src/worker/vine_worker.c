@@ -1696,16 +1696,19 @@ static int check_library_startup(struct vine_process *p)
 	char buffer_len[VINE_LINE_MAX];
 	int length = 0;
 
-	/* The library began its message, so read all of it: the pipe fails a wait without progress for T. */
+	/* The library began its message, a bounded-size exchange, so read all of it within T in total: a progress deadline
+	 * buys nothing here, and a library sending one byte at a time could renew it without end. */
+	time_t stoptime = time(0) + vine_worker_options_idle_timeout(options);
+
 	/* Read a line that gives the length of the response message. */
-	if (!link_readline(p->library_read_link, buffer_len, VINE_LINE_MAX, LINK_FOREVER)) {
+	if (!link_readline(p->library_read_link, buffer_len, VINE_LINE_MAX, stoptime)) {
 		return 0;
 	}
 	sscanf(buffer_len, "%d", &length);
 
 	/* Now read that length of message and null-terminate it. */
 	char buffer[length + 1];
-	if (link_read(p->library_read_link, buffer, length, LINK_FOREVER) <= 0) {
+	if (link_read(p->library_read_link, buffer, length, stoptime) <= 0) {
 		return 0;
 	}
 	buffer[length] = 0;
@@ -1795,8 +1798,9 @@ static void check_libraries_ready(struct link *manager)
 /*
 Each round of the main loop polls, then works under a budget of VINE_ROUND_BUDGET, so the worker answers its manager
 within the response time X. Bulk work (disk measurement, stage-out of outputs, emptying the trash) continues across
-rounds. A step that cannot be divided, such as one system call on a hung disk or reading the rest of a message that a
-library began, may still exceed the budget: the round timer names the slowest step of a round that takes longer than X.
+rounds. A step that cannot be divided, such as one system call on a hung disk, or reading the rest of a message that a
+library began (bounded by T in total), may still exceed the budget: the round timer names the slowest step of a round
+that takes longer than X.
 */
 
 /* Times the steps of one round of the main loop after its poll. */

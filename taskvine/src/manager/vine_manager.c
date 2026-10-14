@@ -98,19 +98,22 @@ See the file COPYING for details.
 Timeouts. A healthy worker makes visible progress within its response time X (response-timeout, default 15 s), because
 its main loop works in rounds of a bounded budget. Every wait on a worker fails when the worker makes no progress for
 T = kX, with the tolerance k = VINE_TIMEOUT_TOLERANCE = 2: the link of every worker carries T as its idle timeout, and
-waits on it pass LINK_FOREVER. T judges a worker correctly within the envelope X >= 2 d_max + D_W, where d_max is the longest
-delay of the network, including draining the buffers on the path, and D_W the longest step of the manager. A worker
-that sent no message for T/2 gets a keepalive check, and one that sends no message for T after the check is removed, so
-a stopped worker is removed within 1.5 T plus the period of the checks, one second.
+waits on it pass LINK_FOREVER. T judges a worker correctly within the envelope X >= 2 d_max + D_W, where d_max is the
+longest delay of the network, including draining the buffers on the path, and D_W the longest step of the manager. A
+worker that sent no message for T/2 gets a keepalive check, and one that sends no message for T after the check is
+removed, so a stopped worker is removed within 1.5 T plus the period of the checks, one second. The checks run inside
+vine_wait(), so this bound assumes that the application keeps calling it: time the application spends between calls
+adds to it.
 
 Declared limits, beyond which these guarantees do not hold:
 - A worker that stops reading costs the manager up to T once, after which writes to it fail at once. N such workers at
   once cost up to N T.
 - A connection that sends nothing, or a worker that stops in the middle of a message, costs the manager up to T once.
-- The manager judges a worker by its messages only, so the network must drain a full receive buffer R within d_max:
-  with the default X of 15 s, within about 7 s.
-- Synchronous exchanges (task outputs, standard output, watched files) last as long as their data takes, each wait in
-  them bounded by T.
+- The manager judges a worker by its messages only, so the network must drain the send and receive buffers on the path
+  (S + R, about 10 MB with default Linux maximums) within d_max: with the default X of 15 s, within about 7 s, so
+  links of at least about 1.5 MB/s.
+- Synchronous exchanges (task inputs, task outputs, standard output, watched files) last as long as their data takes,
+  each wait in them bounded by T.
 */
 
 /* Return the timeout T of every worker in seconds, see "Timeouts". */
@@ -1198,6 +1201,8 @@ static void add_worker(struct vine_manager *q)
 
 	link_keepalive(link, 1);
 	link_tune(link, LINK_TUNE_INTERACTIVE);
+	/* Every wait on a worker link passes LINK_FOREVER and is bounded by this idle timeout T, set here for each new
+	 * link and again by set_response_timeout(). */
 	link_set_idle_timeout(link, worker_timeout(q));
 
 	/* The ssl handshake and the password check exchange a few messages of bounded size, so a progress deadline buys
@@ -6012,6 +6017,23 @@ void vine_set_manager_preferred_connection(struct vine_manager *q, const char *p
 	q->manager_preferred_connection = xxstrdup(preferred_connection);
 }
 
+/* Return 1 for a tuning that is accepted without effect, and log once per name that it has none. */
+static int ignored_tuning(const char *name)
+{
+	static const char *names[] = {"long-timeout", "short-timeout", "min-transfer-timeout", "transfer-outlier-factor"};
+	static int noticed[4];
+	for (int i = 0; i < 4; i++) {
+		if (!strcmp(name, names[i])) {
+			if (!noticed[i]) {
+				notice(D_VINE, "tuning %s has no effect: response-timeout bounds every wait on a worker.", name);
+				noticed[i] = 1;
+			}
+			return 1;
+		}
+	}
+	return 0;
+}
+
 int vine_tune(struct vine_manager *q, const char *name, double value)
 {
 	if (!strcmp(name, "attempt-schedule-depth")) {
@@ -6041,7 +6063,7 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 	} else if (!strcmp(name, "keepalive-timeout")) {
 		q->keepalive_timeout = MAX(0, (int)value);
 
-	} else if (!strcmp(name, "long-timeout") || !strcmp(name, "short-timeout") || !strcmp(name, "min-transfer-timeout") || !strcmp(name, "transfer-outlier-factor")) {
+	} else if (ignored_tuning(name)) {
 		/* Accepted for compatibility: waits on workers end when a worker makes no progress, see response-timeout. */
 
 	} else if (!strcmp(name, "max-retrievals")) {

@@ -248,7 +248,6 @@ static int link_internal_sleep(struct link *link, timestamp_t deadline, sigset_t
 			}
 			continue;
 		} else if (result == 0) {
-			errno = ETIMEDOUT;
 			return 0;
 		} else if (mask && errno == EINTR) {
 			return 0;
@@ -261,7 +260,7 @@ static int link_internal_sleep(struct link *link, timestamp_t deadline, sigset_t
 }
 
 /* Convert a stoptime into a deadline in microseconds for link_internal_sleep, where zero means forever. Return zero
- * with errno set when the stoptime has already passed. */
+ * with errno ECONNRESET, as link_sleep always did, when the stoptime has already passed. */
 static int stoptime_to_deadline(time_t stoptime, timestamp_t now, timestamp_t *deadline)
 {
 	*deadline = 0;
@@ -270,7 +269,7 @@ static int stoptime_to_deadline(time_t stoptime, timestamp_t now, timestamp_t *d
 	}
 	time_t timeout = stoptime - time(0);
 	if (timeout <= 0) {
-		errno = ETIMEDOUT;
+		errno = ECONNRESET;
 		return 0;
 	}
 	*deadline = now + (timestamp_t)timeout * 1000000;
@@ -289,7 +288,7 @@ int link_sleep(struct link *link, time_t stoptime, int reading, int writing)
 
 /* Wait for a read or write to make progress. The wait ends at the stoptime, or earlier when the link's idle timeout
  * passes first. Every caller waits here only after its last read or write, so each piece of progress renews the idle
- * timeout. */
+ * timeout. Only an expired idle timeout sets errno ETIMEDOUT: a stoptime ends the wait with the errno it always had. */
 static int link_wait(struct link *link, time_t stoptime, int reading, int writing)
 {
 	timestamp_t now = timestamp_monotonic();
@@ -311,7 +310,8 @@ static int link_wait(struct link *link, time_t stoptime, int reading, int writin
 		deadline = idle_deadline;
 	}
 	int result = link_internal_sleep(link, deadline, NULL, reading, writing);
-	if (!result && idle && errno == ETIMEDOUT) {
+	if (!result && idle && timestamp_monotonic() >= idle_deadline) {
+		errno = ETIMEDOUT;
 		link->idle_expired = 1;
 		debug(D_TCP, "link to %s port %d made no progress for %d s", link->raddr, link->rport, link->idle_timeout);
 	}
