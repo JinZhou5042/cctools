@@ -52,6 +52,7 @@ See the file COPYING for details.
 #include "process.h"
 #include "random.h"
 #include "stringtools.h"
+#include "budget.h"
 #include "trash.h"
 #include "unlink_recursive.h"
 #include "url_encode.h"
@@ -101,6 +102,10 @@ static struct list *pending_async_messages = NULL;
 /* Table of all processes with results to be sent back, indexed by task_id. */
 /* These are additional pointers into procs_table and should not be deleted */
 static struct itable *procs_complete = NULL;
+
+/* List of processes that ended and whose outputs move into the cache (continue_stageout) before they are complete. */
+/* These are additional pointers into procs_table and should not be deleted */
+static struct list *procs_stageout = NULL;
 
 /* Table of current transfers and their id. */
 static struct hash_table *current_transfers = NULL;
@@ -211,7 +216,7 @@ __attribute__((format(printf, 2, 3))) void send_message(struct link *l, const ch
 	va_copy(debug_va, va);
 
 	vdebug(D_VINE, debug_msg, debug_va);
-	link_vprintf(l, time(0) + options->active_timeout, fmt, va);
+	link_vprintf(l, LINK_FOREVER, fmt, va);
 
 	va_end(va);
 	va_end(debug_va);
@@ -262,7 +267,7 @@ void deliver_async_messages(struct link *l)
 			message = list_pop_head(pending_async_messages);
 			bytes_available -= message_size;
 			debug(D_VINE, "tx: %s", message);
-			link_printf(l, time(0) + options->active_timeout, "%s", message);
+			link_printf(l, LINK_FOREVER, "%s", message);
 			free(message);
 		} else {
 			break;
@@ -334,7 +339,7 @@ void send_complete_tasks(struct link *l)
 
 static void report_changes(struct link *manager)
 {
-	vine_watcher_send_changes(watcher, manager, time(0) + options->active_timeout);
+	vine_watcher_send_changes(watcher, manager, LINK_FOREVER);
 	send_message(manager, "end\n");
 
 	results_to_be_sent_msg = 0;
@@ -361,45 +366,119 @@ static void reset_idle_timer()
 }
 
 /*
-Measure the disk used by the worker. We only manually measure the cache directory, as processes measure themselves.
+Disk measurement is a bulk step of the main loop (see run_bulk_steps). measure_worker_resources() starts one at most
+every check_resources_interval seconds. It measures the cache directory, then the sandbox of each running task that
+requested disk, and resumes in the next round where the budget stopped it, so a large tree or a slow disk never holds
+the loop.
 */
 
+static void finish_running_task(struct vine_process *p, vine_result_t result);
+
+/* A measurement is in progress, and has measured the cache directory. */
+static int disk_measurement_active = 0;
+static int cache_disk_done = 0;
+
+/* State of the cache measurement, and ids of the tasks whose sandboxes are left to measure. */
+static struct path_disk_size_info *cache_disk_state = NULL;
+static struct list *disk_measurement_tasks = NULL;
+
+/* Megabytes and files of the cache directory, from the last complete measurement. */
+static int64_t cache_disk_measured = 0;
+static int64_t cache_files_measured = 0;
+
+/* Start a measurement unless one is in progress, and return the disk used by the worker as last measured. */
 static int64_t measure_worker_disk()
 {
-	static struct path_disk_size_info *state = NULL;
-
-	if (!cache_manager)
+	if (!cache_manager) {
 		return 0;
-
-	char *cache_dir = vine_cache_data_path(cache_manager, ".");
-	path_disk_size_info_get_r(cache_dir, options->max_time_on_measurement, &state, NULL);
-	free(cache_dir);
-
-	int64_t disk_measured = 0;
-	if (state->last_byte_size_complete >= 0) {
-		disk_measured = (int64_t)ceil(state->last_byte_size_complete / (1.0 * MEGA));
 	}
 
-	files_counted = state->last_file_count_complete;
-
-	if (state->complete_measurement) {
-		/* if a complete measurement has been done, then update
-		 * for the found value, and add the known values of the processes. */
-
+	if (!disk_measurement_active) {
+		disk_measurement_active = 1;
+		cache_disk_done = 0;
 		struct vine_process *p;
 		uint64_t task_id;
 		int iteration;
-
-		ITABLE_ITERATE(procs_table, iteration, task_id, p)
+		ITABLE_ITERATE(procs_running, iteration, task_id, p)
 		{
-			if (p->sandbox_size > 0) {
-				disk_measured += p->sandbox_size;
-				files_counted += p->sandbox_file_count;
+			if (p->task->resources_requested->disk >= 1) {
+				list_push_tail(disk_measurement_tasks, (void *)(uintptr_t)task_id);
 			}
 		}
 	}
 
+	int64_t disk_measured = cache_disk_measured;
+	files_counted = cache_files_measured;
+
+	struct vine_process *p;
+	uint64_t task_id;
+	int iteration;
+	ITABLE_ITERATE(procs_table, iteration, task_id, p)
+	{
+		if (p->sandbox_size > 0) {
+			disk_measured += p->sandbox_size;
+			files_counted += p->sandbox_file_count;
+		}
+	}
+
 	return disk_measured;
+}
+
+/* Continue the measurement until the budget expires, and end each task that went over the disk it requested. */
+static void continue_disk_measurement(const struct budget *b)
+{
+	if (!disk_measurement_active) {
+		return;
+	}
+
+	if (!cache_disk_done) {
+		char *cache_dir = vine_cache_data_path(cache_manager, ".");
+		int result = path_disk_size_info_get_budget(cache_dir, b, &cache_disk_state, NULL);
+		free(cache_dir);
+		if (result == 0 && cache_disk_state && !cache_disk_state->complete_measurement) {
+			return;
+		}
+		if (result == 0 && cache_disk_state && cache_disk_state->last_byte_size_complete >= 0) {
+			cache_disk_measured = (int64_t)ceil(cache_disk_state->last_byte_size_complete / (1.0 * MEGA));
+			cache_files_measured = cache_disk_state->last_file_count_complete;
+		}
+		path_disk_size_info_delete_state(cache_disk_state);
+		cache_disk_state = NULL;
+		cache_disk_done = 1;
+	}
+
+	void *item;
+	while ((item = list_peek_head(disk_measurement_tasks))) {
+		if (budget_expired(b)) {
+			return;
+		}
+		/* The task may have ended since the measurement began. */
+		struct vine_process *p = itable_lookup(procs_running, (uint64_t)(uintptr_t)item);
+		if (p && !vine_process_measure_disk(p, b)) {
+			return;
+		}
+		list_pop_head(disk_measurement_tasks);
+		if (p && p->sandbox_size > p->task->resources_requested->disk) {
+			debug(D_VINE,
+					"Task %d went over its disk size limit: %s > %s\n",
+					p->task->task_id,
+					rmsummary_resource_to_str("disk", p->sandbox_size, /* with units */ 1),
+					rmsummary_resource_to_str("disk", p->task->resources_requested->disk, 1));
+			finish_running_task(p, VINE_RESULT_SANDBOX_EXHAUSTION);
+			trash_move(p->sandbox);
+		}
+	}
+
+	disk_measurement_active = 0;
+}
+
+/* Abandon a measurement in progress, as at a disconnect, when the tasks it would measure end. */
+static void stop_disk_measurement()
+{
+	path_disk_size_info_delete_state(cache_disk_state);
+	cache_disk_state = NULL;
+	list_clear(disk_measurement_tasks, NULL);
+	disk_measurement_active = 0;
 }
 
 /*
@@ -474,7 +553,7 @@ Send a message to the manager with my current resources.
 
 static void send_resource_update(struct link *manager)
 {
-	time_t stoptime = time(0) + options->active_timeout;
+	time_t stoptime = LINK_FOREVER;
 
 	// if workers are set to expire in some time, send the expiration time to manager
 	if (options->manual_wall_time_option > 0) {
@@ -555,7 +634,7 @@ void vine_worker_send_cache_invalid(struct link *manager, const char *cachename,
 	} else {
 		send_async_message(manager, "cache-invalid %s %d\n", cachename, length);
 	}
-	link_write(manager, message, length, time(0) + options->active_timeout);
+	link_write(manager, message, length, LINK_FOREVER);
 }
 
 /*
@@ -614,6 +693,8 @@ static void report_worker_ready(struct link *manager)
 
 	send_features(manager);
 	send_transfer_address(manager);
+	/* A manager that knows this message answers with its response time X, and an older one ignores it. */
+	send_async_message(manager, "info accepts-response-timeout 1\n");
 	send_async_message(manager, "info worker-end-time %" PRId64 "\n", (int64_t)DIV_INT_ROUND_UP(options->end_time, USECOND));
 
 	if (options->factory_name) {
@@ -682,6 +763,43 @@ static int start_process(struct vine_process *p, struct link *manager)
 }
 
 /*
+A process whose outputs are in the cache is complete: measure its standard output, which a library may have declared
+as an output and thus moved, and queue it to be reported.
+*/
+
+static void complete_process(struct vine_process *p)
+{
+	struct stat info;
+	if (!stat(p->output_file_name, &info)) {
+		p->output_length = info.st_size;
+	} else {
+		p->output_length = 0;
+	}
+
+	itable_insert(procs_complete, p->task->task_id, p);
+}
+
+/*
+Move the outputs of ended processes into the cache until the budget expires, and complete each process whose outputs
+were all handled. A later round continues with the process where this one stopped.
+*/
+
+static void continue_stageout(struct link *manager, const struct budget *b)
+{
+	struct vine_process *p;
+	while ((p = list_peek_head(procs_stageout))) {
+		if (!vine_sandbox_stageout(p, cache_manager, manager, b)) {
+			return;
+		}
+		list_pop_head(procs_stageout);
+		complete_process(p);
+		if (budget_expired(b)) {
+			break;
+		}
+	}
+}
+
+/*
 This process has ended so mark it complete and
 account for the resources as necessary.
 Should maintain parallel structure to start_process() above.
@@ -699,22 +817,17 @@ static void reap_process(struct vine_process *p, struct link *manager)
 	xpu_tracker_free(gpu_tracker, p->task->task_id);
 	xpu_tracker_free(core_tracker, p->task->task_id);
 
-	if (manager) {
-		vine_sandbox_stageout(p, cache_manager, manager);
-	}
-
 	if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
 		p->library_process->functions_running--;
 	}
 
 	itable_remove(procs_running, p->task->task_id);
-	itable_insert(procs_complete, p->task->task_id, p);
 
-	struct stat info;
-	if (!stat(p->output_file_name, &info)) {
-		p->output_length = info.st_size;
+	/* The outputs move into the cache in budgeted pieces (continue_stageout) before the process is complete. */
+	if (manager) {
+		list_push_tail(procs_stageout, p);
 	} else {
-		p->output_length = 0;
+		complete_process(p);
 	}
 
 	total_task_execution_time += (p->execution_end - p->execution_start);
@@ -1032,7 +1145,7 @@ static int do_put(struct link *manager, const char *cachename, vine_cache_level_
 
 	timestamp_t start = timestamp_get();
 	char *error_message = NULL;
-	int r = vine_transfer_get_any(manager, transfer_dir, &actual_size, &mode, &mtime, time(0) + options->active_timeout, &error_message);
+	int r = vine_transfer_get_any(manager, transfer_dir, &actual_size, &mode, &mtime, LINK_FOREVER, &error_message);
 	timestamp_t stop = timestamp_get();
 
 	/* XXX actual_size should equal expected size, but only for a simple file, not a dir. */
@@ -1131,12 +1244,16 @@ static int do_kill(int task_id)
 		if (p->type == VINE_PROCESS_TYPE_LIBRARY) {
 			reap_library_functions(p);
 		}
-		vine_process_kill_and_wait(p);
+		vine_process_kill(p);
+		if (p->type != VINE_PROCESS_TYPE_FUNCTION && p->pid > 0) {
+			vine_process_reap_later(p->pid);
+		}
 		reap_process(p, /* do not stage out */ NULL);
 	}
 
 	itable_remove(procs_complete, p->task->task_id);
 	list_remove(procs_waiting, p);
+	list_remove(procs_stageout, p);
 
 	vine_watcher_remove_process(watcher, p);
 
@@ -1168,64 +1285,13 @@ static void kill_all_tasks()
 	assert(itable_size(procs_running) == 0);
 	assert(itable_size(procs_complete) == 0);
 	assert(list_size(procs_waiting) == 0);
+	assert(list_size(procs_stageout) == 0);
 	assert(cores_allocated == 0);
 	assert(memory_allocated == 0);
 	assert(disk_allocated == 0);
 	assert(gpus_allocated == 0);
 
 	debug(D_VINE, "all data structures are clean");
-}
-
-/* Check whether a given process is still within the various limits imposed on it. */
-
-static int enforce_process_sanbox_limits(struct vine_process *p)
-{
-	/* If the task did not set disk usage, return right away. */
-	if (p->task->resources_requested->disk < 1)
-		return 1;
-
-	vine_process_measure_disk(p, options->max_time_on_measurement);
-	if (p->sandbox_size > p->task->resources_requested->disk) {
-		debug(D_VINE,
-				"Task %d went over its disk size limit: %s > %s\n",
-				p->task->task_id,
-				rmsummary_resource_to_str("disk", p->sandbox_size, /* with units */ 1),
-				rmsummary_resource_to_str("disk", p->task->resources_requested->disk, 1));
-		return 0;
-	}
-
-	return 1;
-}
-
-/* Check all processes to see whether they have exceeded various limits, and kill if necessary. */
-
-static int enforce_processes_sandbox_limits()
-{
-	static time_t last_check_time = 0;
-
-	struct vine_process *p;
-	uint64_t task_id;
-	int iteration;
-
-	int ok = 1;
-
-	/* Do not check too often, as it is expensive (particularly disk) */
-	if ((time(0) - last_check_time) < options->check_resources_interval)
-		return 1;
-
-	ITABLE_ITERATE(procs_running, iteration, task_id, p)
-	{
-		if (!enforce_process_sanbox_limits(p)) {
-			finish_running_task(p, VINE_RESULT_SANDBOX_EXHAUSTION);
-			trash_file(p->sandbox);
-
-			ok = 0;
-		}
-	}
-
-	last_check_time = time(0);
-
-	return ok;
 }
 
 /*
@@ -1280,6 +1346,8 @@ static void disconnect_manager(struct link *manager)
 
 	debug(D_VINE, "killing all outstanding tasks");
 	kill_all_tasks();
+	vine_process_reap_killed(1);
+	stop_disk_measurement();
 
 	if (released_by_manager) {
 		released_by_manager = 0;
@@ -1310,7 +1378,7 @@ void send_stdout(struct link *l, int64_t task_id)
 	send_message(l, "stdout %" SCNd64 " %lld\n", task_id, (long long)p->output_length);
 
 	if (output_file >= 0) {
-		link_stream_from_fd(l, output_file, p->output_length, time(0) + options->active_timeout);
+		link_stream_from_fd(l, output_file, p->output_length, LINK_FOREVER);
 		close(output_file);
 	}
 	return;
@@ -1331,10 +1399,12 @@ static int handle_manager(struct link *manager)
 	int mode, n;
 	int r = 0;
 	int cache_level;
+	int response_timeout;
 
-	if (recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
+	/* The main loop calls this only when the link has data, and the manager link fails a wait without progress for T. */
+	if (recv_message(manager, line, sizeof(line), LINK_FOREVER)) {
 		if (sscanf(line, "task %" SCNd64, &task_id) == 1) {
-			r = do_task(manager, task_id, time(0) + options->active_timeout);
+			r = do_task(manager, task_id, LINK_FOREVER);
 		} else if (sscanf(line, "put %s %d %" SCNd64, filename_encoded, &cache_level, &length) == 3) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = do_put(manager, filename, cache_level, length);
@@ -1354,17 +1424,17 @@ static int handle_manager(struct link *manager)
 		} else if (sscanf(line, "mini_task %s %s %d %" SCNd64 " %o", source_encoded, filename_encoded, &cache_level, &length, &mode) == 5) {
 			url_decode(source_encoded, source, sizeof(source));
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = do_put_mini_task(manager, time(0) + options->active_timeout, filename, cache_level, length, mode, source);
+			r = do_put_mini_task(manager, LINK_FOREVER, filename, cache_level, length, mode, source);
 			reset_idle_timer();
 		} else if (sscanf(line, "unlink %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = do_unlink(manager, filename);
 		} else if (sscanf(line, "getfile %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = vine_transfer_put_any(manager, cache_manager, filename, VINE_TRANSFER_MODE_FILE_ONLY, time(0) + options->active_timeout);
+			r = vine_transfer_put_any(manager, cache_manager, filename, VINE_TRANSFER_MODE_FILE_ONLY, LINK_FOREVER);
 		} else if (sscanf(line, "get %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = vine_transfer_put_any(manager, cache_manager, filename, VINE_TRANSFER_MODE_ANY, time(0) + options->active_timeout);
+			r = vine_transfer_put_any(manager, cache_manager, filename, VINE_TRANSFER_MODE_ANY, LINK_FOREVER);
 		} else if (sscanf(line, "kill %" SCNd64, &task_id) == 1) {
 			if (task_id >= 0) {
 				r = do_kill(task_id);
@@ -1379,6 +1449,11 @@ static int handle_manager(struct link *manager)
 			r = 1;
 		} else if (!strncmp(line, "check", 6)) {
 			r = send_keepalive(manager, 0);
+		} else if (sscanf(line, "response-timeout %d", &response_timeout) == 1) {
+			/* The manager's response time X, sent after this worker said it accepts it, and again when X changes. */
+			options->response_timeout = MAX(1, response_timeout);
+			link_set_idle_timeout(manager, vine_worker_options_idle_timeout(options));
+			r = 1;
 		} else if (!strncmp(line, "auth", 4)) {
 			fprintf(stderr, "vine_worker: this manager requires a password. (use the -P option)\n");
 			r = 0;
@@ -1621,15 +1696,16 @@ static int check_library_startup(struct vine_process *p)
 	char buffer_len[VINE_LINE_MAX];
 	int length = 0;
 
+	/* The library began its message, so read all of it: the pipe fails a wait without progress for T. */
 	/* Read a line that gives the length of the response message. */
-	if (!link_readline(p->library_read_link, buffer_len, VINE_LINE_MAX, LINK_NOWAIT)) {
+	if (!link_readline(p->library_read_link, buffer_len, VINE_LINE_MAX, LINK_FOREVER)) {
 		return 0;
 	}
 	sscanf(buffer_len, "%d", &length);
 
 	/* Now read that length of message and null-terminate it. */
 	char buffer[length + 1];
-	if (link_read(p->library_read_link, buffer, length, LINK_NOWAIT) <= 0) {
+	if (link_read(p->library_read_link, buffer, length, LINK_FOREVER) <= 0) {
 		return 0;
 	}
 	buffer[length] = 0;
@@ -1716,6 +1792,76 @@ static void check_libraries_ready(struct link *manager)
 	list_delete(failed_libraries);
 }
 
+/*
+Each round of the main loop polls, then works under a budget of VINE_ROUND_BUDGET, so the worker answers its manager
+within the response time X. Bulk work (disk measurement, stage-out of outputs, emptying the trash) continues across
+rounds. A step that cannot be divided, such as one system call on a hung disk or reading the rest of a message that a
+library began, may still exceed the budget: the round timer names the slowest step of a round that takes longer than X.
+*/
+
+/* Times the steps of one round of the main loop after its poll. */
+struct round_timer {
+	timestamp_t start;       /* When the poll of the round ended. */
+	timestamp_t last;        /* When the last step ended. */
+	const char *slowest;     /* Name of the slowest step so far. */
+	timestamp_t slowest_us;  /* Duration of the slowest step so far. */
+};
+
+static void round_timer_start(struct round_timer *t)
+{
+	t->start = t->last = timestamp_monotonic();
+	t->slowest = "none";
+	t->slowest_us = 0;
+}
+
+static void round_timer_step(struct round_timer *t, const char *name)
+{
+	timestamp_t now = timestamp_monotonic();
+	if (now - t->last > t->slowest_us) {
+		t->slowest_us = now - t->last;
+		t->slowest = name;
+	}
+	t->last = now;
+}
+
+/* The poll of a round may wait, so a slow round is one whose work after the poll takes longer than X. */
+static void round_timer_finish(struct round_timer *t)
+{
+	timestamp_t work_us = timestamp_monotonic() - t->start;
+	if (work_us > (timestamp_t)options->response_timeout * USECOND) {
+		debug(D_NOTICE, "slow round: %.3f s of work, the slowest step %s took %.3f s", work_us / 1e6, t->slowest, t->slowest_us / 1e6);
+	}
+}
+
+/* Run the bulk steps of a round, starting with the step after the one that started the last round. Return 1 if any
+ * bulk work remains for a later round. */
+static int run_bulk_steps(struct link *manager, const struct budget *round, struct round_timer *timer)
+{
+	static int first_step = 0;
+	static int trash_left = 0;
+	for (int k = 0; k < 3; k++) {
+		if (k > 0 && budget_expired(round)) {
+			break;
+		}
+		switch ((first_step + k) % 3) {
+		case 0:
+			continue_disk_measurement(round);
+			round_timer_step(timer, "disk-measurement");
+			break;
+		case 1:
+			continue_stageout(manager, round);
+			round_timer_step(timer, "stageout");
+			break;
+		case 2:
+			trash_left = !trash_empty_budget(round);
+			round_timer_step(timer, "trash");
+			break;
+		}
+	}
+	first_step = (first_step + 1) % 3;
+	return disk_measurement_active || list_size(procs_stageout) > 0 || trash_left;
+}
+
 /* Start working for the (newly connected) manager on this given link. */
 
 static void vine_worker_serve_manager(struct link *manager)
@@ -1733,6 +1879,9 @@ static void vine_worker_serve_manager(struct link *manager)
 	sigaddset(&mask, SIGUSR2);
 
 	reset_idle_timer();
+
+	/* Some bulk work or buffered messages remain, so the next poll does not wait. */
+	int bulk_work_left = 0;
 
 	// Start serving managers
 	while (!abort_flag) {
@@ -1767,7 +1916,7 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		int wait_msec = 5000;
 
-		if (sigchld_received_flag) {
+		if (sigchld_received_flag || bulk_work_left) {
 			wait_msec = 0;
 			sigchld_received_flag = 0;
 		}
@@ -1776,17 +1925,30 @@ static void vine_worker_serve_manager(struct link *manager)
 		if (manager_activity < 0)
 			break;
 
+		struct round_timer timer;
+		round_timer_start(&timer);
+
+		/* The round's budget starts after the poll. Messages from the manager come first, at least one when there are
+		 * any, more while the budget lasts. Messages left in the buffer keep the next poll from waiting. */
+		struct budget round;
+		budget_start(&round, VINE_ROUND_BUDGET);
+
 		int ok = 1;
 		if (manager_activity) {
-			ok &= handle_manager(manager);
+			do {
+				ok &= handle_manager(manager);
+			} while (ok && !link_buffer_empty(manager) && !budget_expired(&round));
 		}
+		round_timer_step(&timer, "manager-messages");
 
+		vine_process_reap_killed(0);
 		expire_procs_running();
 
 		ok &= handle_completed_tasks(manager);
 		ok &= vine_cache_check_xfer_files(cache_manager, manager);
 
 		measure_worker_resources();
+		round_timer_step(&timer, "processes");
 
 		if (!enforce_worker_promises(manager)) {
 			finish_running_tasks(VINE_RESULT_FORSAKEN);
@@ -1795,10 +1957,6 @@ static void vine_worker_serve_manager(struct link *manager)
 		}
 
 		enforce_processes_max_running_time();
-
-		/* end a running processes if goes above its declared limits.
-		 * Mark offending process as RESOURCE_EXHASTION. */
-		enforce_processes_sandbox_limits();
 
 		/* end running processes if worker resources are exhasusted, and marked
 		 * them as FORSAKEN, so they can be resubmitted somewhere else. */
@@ -1816,6 +1974,7 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		/* deliver queued asynchronous messages if available */
 		deliver_async_messages(manager);
+		round_timer_step(&timer, "tasks");
 
 		int task_event = 0;
 		if (ok) {
@@ -1839,6 +1998,13 @@ static void vine_worker_serve_manager(struct link *manager)
 			}
 		}
 
+		/* Bulk work runs in pieces after the other steps, starting with a different step in each round, so that none
+		 * waits for another. The first step makes progress in every round, and no further step starts after the
+		 * budget expired. Stage-out runs before completed tasks are reported, so their cache updates come first. */
+		if (ok) {
+			bulk_work_left = run_bulk_steps(manager, &round, &timer);
+		}
+
 		if (ok) {
 			if (vine_watcher_check(watcher)) {
 				send_async_message(manager, "available_results\n");
@@ -1859,6 +2025,9 @@ static void vine_worker_serve_manager(struct link *manager)
 		if (list_size(procs_waiting) > 0 || itable_size(procs_table) > 0 || itable_size(procs_complete) > 0) {
 			reset_idle_timer();
 		}
+
+		bulk_work_left |= !link_buffer_empty(manager);
+		round_timer_finish(&timer);
 	}
 }
 
@@ -1889,6 +2058,10 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 		fprintf(stderr, "couldn't connect to %s:%d: %s\n", current_manager_address->addr, port, strerror(errno));
 		return 0;
 	}
+
+	/* Until the manager sends its response time, the default bounds every wait on it, including the SSL handshake. */
+	options->response_timeout = VINE_DEFAULT_RESPONSE_TIMEOUT;
+	link_set_idle_timeout(manager, vine_worker_options_idle_timeout(options));
 
 	if (options->ssl_requested && !use_ssl) {
 		fprintf(stderr, "vine_worker: --ssl was given, but manager %s:%d is not using ssl.\n", host, port);
@@ -2271,6 +2444,8 @@ void vine_worker_create_structures()
 	procs_table = itable_create(0);
 	procs_running = itable_create(0);
 	procs_waiting = list_create();
+	procs_stageout = list_create();
+	disk_measurement_tasks = list_create();
 	pending_async_messages = list_create();
 	procs_complete = itable_create(0);
 
@@ -2305,6 +2480,10 @@ static void vine_worker_delete_structures()
 		itable_delete(procs_complete);
 	if (procs_waiting)
 		list_delete(procs_waiting);
+	if (procs_stageout)
+		list_delete(procs_stageout);
+	if (disk_measurement_tasks)
+		list_delete(disk_measurement_tasks);
 }
 
 int main(int argc, char *argv[])

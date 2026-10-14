@@ -81,8 +81,13 @@ struct vine_worker_info {
 	timestamp_t total_transfer_time;
 	timestamp_t last_transfer_failure;
 	timestamp_t start_time;
+	/* When the last message arrived, and when the last keepalive check was sent (connection time before the first),
+	 * on the monotonic clock, so that a step of the wall clock judges no worker. */
 	timestamp_t last_msg_recv_time;
 	timestamp_t last_update_msg_time;
+
+	/* The worker said it accepts the manager's response timeout X, which the manager then sends it, also when tuned. */
+	int accepts_response_timeout;
 	timestamp_t last_failure_time;
 
 	/* consecutive failed peer transfers with worker serving as source or destination */

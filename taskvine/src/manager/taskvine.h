@@ -1434,17 +1434,17 @@ void vine_set_manager_preferred_connection(struct vine_manager *m, const char *p
 @param name The name of the parameter to tune
  - "resource-submit-multiplier" Treat each worker as having ({cores,memory,gpus} * multiplier) when submitting tasks.
 This allows for tasks to wait at a worker rather than the manager. (default = 1.0)
- - "min-transfer-timeout" Set the minimum number of seconds to wait for files to be transferred to or from a worker.
-(default=10)
- - "transfer-outlier-factor" Transfer that are this many times slower than the average will be terminated. (default=10x)
+ - "response-timeout" The response time X in seconds of a healthy worker. Every wait on a worker fails when the worker
+makes no progress for T = 2X. (default=15)
+ - "min-transfer-timeout", "transfer-outlier-factor", "short-timeout", "long-timeout" Accepted and without effect: every
+wait on a worker is bounded by response-timeout.
  - "default-transfer-rate" The assumed network bandwidth used until sufficient data has been collected.  (1MB/s)
  - "disconnect-slow-workers-factor" Set the multiplier of the average task time at which point to disconnect;
 deactivated if less than 1. (default=0)
- - "keepalive-interval" Set the minimum number of seconds to wait before sending new keepalive checks to workers.
-(default=300)
- - "keepalive-timeout" Set the minimum number of seconds to wait for a keepalive response from worker before marking it
-as dead. (default=30)
- - "short-timeout" Set the minimum timeout when sending a brief message to a single worker. (default=5s)
+ - "keepalive-interval" Seconds without any message from a worker before it gets a keepalive check; 0 disables
+keepalive checks. (default=T/2)
+ - "keepalive-timeout" Seconds without any message from a worker after its keepalive check before it is removed.
+(default=T)
  - "monitor-interval" Maximum number of seconds between resource monitor measurements. If less than 1, use default (5s).
 (default=5)
  - "category-steady-n-tasks" Set the number of tasks considered when computing category buckets.

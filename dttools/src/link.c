@@ -13,6 +13,7 @@ See the file COPYING for details.
 #include "full_io.h"
 #include "macros.h"
 #include "stringtools.h"
+#include "timestamp.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -43,6 +44,9 @@ See the file COPYING for details.
 #define TCP_LOW_PORT_DEFAULT 1024
 #endif
 
+/* The number of completed connections that wait for the program to accept them, see link_serve_address(). */
+#define LINK_LISTEN_BACKLOG 4096
+
 #ifndef TCP_HIGH_PORT_DEFAULT
 #define TCP_HIGH_PORT_DEFAULT 32767
 #endif
@@ -72,6 +76,12 @@ struct link {
 
 	char raddr[LINK_ADDRESS_MAX];
 	int rport;
+
+	/* Seconds a read or write may wait without progress before it fails. Zero waits as long as the stoptime allows. */
+	int idle_timeout;
+	/* Set once a wait ended at the idle timeout. Later waits fail at once, so a read or write that made partial
+	 * progress and is called again does not wait another idle timeout. */
+	int idle_expired;
 
 #ifdef HAS_OPENSSL
 	SSL_CTX *ctx;
@@ -192,18 +202,14 @@ int errno_is_temporary(int e)
 	}
 }
 
-static int link_internal_sleep(struct link *link, struct timeval *timeout, sigset_t *mask, int reading, int writing)
+/* Wait until the link is ready or the deadline, a time of timestamp_monotonic(), passes. A deadline of zero waits
+ * forever. A signal does not extend the wait, because each poll waits only for the time left. */
+static int link_internal_sleep(struct link *link, timestamp_t deadline, sigset_t *mask, int reading, int writing)
 {
 	int result;
 	struct pollfd pfd;
 	int msec;
 	sigset_t cmask;
-
-	if (timeout) {
-		msec = (timeout->tv_sec * 1000.0) + (timeout->tv_usec / 1000.0);
-	} else {
-		msec = -1;
-	}
 
 	if (reading && link->buffer_length) {
 		return 1;
@@ -218,6 +224,13 @@ static int link_internal_sleep(struct link *link, struct timeval *timeout, sigse
 		if (writing)
 			pfd.events = POLLOUT;
 
+		if (deadline) {
+			timestamp_t now = timestamp_monotonic();
+			msec = deadline > now ? (deadline - now + 999) / 1000 : 0;
+		} else {
+			msec = -1;
+		}
+
 		sigprocmask(SIG_UNBLOCK, mask, &cmask);
 		result = poll(&pfd, 1, msec);
 		sigprocmask(SIG_SETMASK, &cmask, NULL);
@@ -229,11 +242,13 @@ static int link_internal_sleep(struct link *link, struct timeval *timeout, sigse
 			if (writing && (pfd.revents & POLLOUT)) {
 				return 1;
 			}
-			if (pfd.revents & POLLHUP) {
-				return 0;
+			/* An error or hangup without the requested event is reported by the next read or write. */
+			if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+				return 1;
 			}
 			continue;
 		} else if (result == 0) {
+			errno = ETIMEDOUT;
 			return 0;
 		} else if (mask && errno == EINTR) {
 			return 0;
@@ -245,50 +260,84 @@ static int link_internal_sleep(struct link *link, struct timeval *timeout, sigse
 	}
 }
 
+/* Convert a stoptime into a deadline in microseconds for link_internal_sleep, where zero means forever. Return zero
+ * with errno set when the stoptime has already passed. */
+static int stoptime_to_deadline(time_t stoptime, timestamp_t now, timestamp_t *deadline)
+{
+	*deadline = 0;
+	if (stoptime == LINK_FOREVER) {
+		return 1;
+	}
+	time_t timeout = stoptime - time(0);
+	if (timeout <= 0) {
+		errno = ETIMEDOUT;
+		return 0;
+	}
+	*deadline = now + (timestamp_t)timeout * 1000000;
+	return 1;
+}
+
 int link_sleep(struct link *link, time_t stoptime, int reading, int writing)
 {
-	struct timeval tm, *tptr;
-
-	if (stoptime == LINK_FOREVER) {
-		tptr = 0;
-	} else {
-		time_t timeout = stoptime - time(0);
-		if (timeout <= 0) {
-			errno = ECONNRESET;
-			return 0;
-		}
-		tm.tv_sec = timeout;
-		tm.tv_usec = 0;
-		tptr = &tm;
+	timestamp_t deadline;
+	if (!stoptime_to_deadline(stoptime, timestamp_monotonic(), &deadline)) {
+		return 0;
 	}
 
-	return link_internal_sleep(link, tptr, NULL, reading, writing);
+	return link_internal_sleep(link, deadline, NULL, reading, writing);
+}
+
+/* Wait for a read or write to make progress. The wait ends at the stoptime, or earlier when the link's idle timeout
+ * passes first. Every caller waits here only after its last read or write, so each piece of progress renews the idle
+ * timeout. */
+static int link_wait(struct link *link, time_t stoptime, int reading, int writing)
+{
+	timestamp_t now = timestamp_monotonic();
+	timestamp_t deadline;
+	if (!stoptime_to_deadline(stoptime, now, &deadline)) {
+		return 0;
+	}
+	if (link->idle_expired) {
+		errno = ETIMEDOUT;
+		return 0;
+	}
+	if (link->idle_timeout <= 0) {
+		return link_internal_sleep(link, deadline, NULL, reading, writing);
+	}
+
+	timestamp_t idle_deadline = now + (timestamp_t)link->idle_timeout * 1000000;
+	int idle = !deadline || idle_deadline < deadline;
+	if (idle) {
+		deadline = idle_deadline;
+	}
+	int result = link_internal_sleep(link, deadline, NULL, reading, writing);
+	if (!result && idle && errno == ETIMEDOUT) {
+		link->idle_expired = 1;
+		debug(D_TCP, "link to %s port %d made no progress for %d s", link->raddr, link->rport, link->idle_timeout);
+	}
+	return result;
+}
+
+void link_set_idle_timeout(struct link *link, int seconds)
+{
+	link->idle_timeout = MAX(0, seconds);
 }
 
 int link_usleep(struct link *link, int usec, int reading, int writing)
 {
-	struct timeval tm;
-
-	tm.tv_sec = 0;
-	tm.tv_usec = usec;
-
-	return link_internal_sleep(link, &tm, NULL, reading, writing);
+	return link_internal_sleep(link, timestamp_monotonic() + usec, NULL, reading, writing);
 }
 
 int link_usleep_mask(struct link *link, int usec, sigset_t *mask, int reading, int writing)
 {
-	struct timeval tm;
 	sigset_t emptymask;
-
-	tm.tv_sec = 0;
-	tm.tv_usec = usec;
 
 	if (!mask) {
 		sigemptyset(&emptymask);
 		mask = &emptymask;
 	}
 
-	return link_internal_sleep(link, &tm, mask, reading, writing);
+	return link_internal_sleep(link, timestamp_monotonic() + usec, mask, reading, writing);
 }
 
 static struct link *link_create()
@@ -311,6 +360,8 @@ static struct link *link_create()
 	link->raddr[0] = 0;
 	link->rport = 0;
 	link->type = LINK_TYPE_STANDARD;
+	link->idle_timeout = 0;
+	link->idle_expired = 0;
 
 #ifdef HAS_OPENSSL
 	link->ctx = 0;
@@ -492,7 +543,11 @@ struct link *link_serve_address(const char *addr, int port)
 	if (success < 0)
 		goto failure;
 
-	success = listen(link->fd, 5);
+	/* Connections that completed their handshake wait in this queue until the program accepts them. It is a declared,
+	 * bounded queue: the kernel caps it at net.core.somaxconn, and a program that accepts a bounded number of
+	 * connections at once leaves the others here. A small queue makes the kernel drop the handshakes of further clients,
+	 * which then retry after a second or more, or stay half open. */
+	success = listen(link->fd, LINK_LISTEN_BACKLOG);
 	if (success < 0)
 		goto failure;
 
@@ -586,16 +641,44 @@ struct link *link_serve(int port)
 	}
 }
 
+#ifdef HAS_OPENSSL
+/* Complete a TLS handshake on a non-blocking link. Each wait for the peer ends at the stoptime, or earlier when the
+ * link's idle timeout passes, so a peer that stops in the middle of the handshake cannot hold the caller forever.
+ * Return the result of the last SSL_accept or SSL_connect, which is positive on success. */
+static int ssl_handshake(struct link *link, int accepting, time_t stoptime)
+{
+	int result;
+	while ((result = accepting ? SSL_accept(link->ssl) : SSL_connect(link->ssl)) <= 0) {
+		int ready;
+		switch (SSL_get_error(link->ssl, result)) {
+		case SSL_ERROR_WANT_READ:
+			ready = link_wait(link, stoptime, 1, 0);
+			break;
+		case SSL_ERROR_WANT_WRITE:
+			ready = link_wait(link, stoptime, 0, 1);
+			break;
+		default:
+			ready = 0;
+			break;
+		}
+		if (!ready) {
+			return result;
+		}
+	}
+	return result;
+}
+#endif
+
 int link_ssl_wrap_accept(struct link *link, const char *key, const char *cert)
+{
+	return link_ssl_wrap_accept_stoptime(link, key, cert, LINK_FOREVER);
+}
+
+int link_ssl_wrap_accept_stoptime(struct link *link, const char *key, const char *cert, time_t stoptime)
 {
 #ifdef HAS_OPENSSL
 	if (key && cert) {
 		debug(D_TCP, "accepting ssl state for %s port %d", link->raddr, link->rport);
-
-		/* go to blocking mode during handshake */
-		if (!link_nonblocking(link, 0)) {
-			return 0;
-		}
 
 		link->ctx = _create_ssl_context();
 		_set_ssl_keys(link->ctx, key, cert);
@@ -603,16 +686,11 @@ int link_ssl_wrap_accept(struct link *link, const char *key, const char *cert)
 		link->ssl = SSL_new(link->ctx);
 		SSL_set_fd(link->ssl, link->fd);
 
-		int ret = SSL_accept(link->ssl);
+		int ret = ssl_handshake(link, 1, stoptime);
 		if (ret <= 0) {
 			debug(D_SSL, "ssl accept failed from %s port %d", link->raddr, link->rport);
 			ERR_print_errors_cb(_ssl_errors_cb, /* use warn */ (void *)1);
 			ret = 0;
-		}
-
-		if (!link_nonblocking(link, 1)) {
-			debug(D_SSL, "Could not switch link back to non-blocking after SSL handshake: %s", strerror(errno));
-			return 0;
 		}
 
 		return ret;
@@ -625,11 +703,6 @@ int link_ssl_wrap_accept(struct link *link, const char *key, const char *cert)
 int link_ssl_wrap_connect(struct link *link, const char *sni_hostname)
 {
 #ifdef HAS_OPENSSL
-
-	/* go to blocking mode during the ssl handshake */
-	if (!link_nonblocking(link, 0)) {
-		return 0;
-	}
 
 	link->ctx = _create_ssl_context();
 	link->ssl = SSL_new(link->ctx);
@@ -644,25 +717,9 @@ int link_ssl_wrap_connect(struct link *link, const char *sni_hostname)
 	debug(D_SSL, "Setting SNI to: %s", name);
 	SSL_set_tlsext_host_name(link->ssl, name);
 
-	int result;
-	while ((result = SSL_connect(link->ssl)) <= 0) {
-		switch (SSL_get_error(link->ssl, result)) {
-		case SSL_ERROR_WANT_READ:
-			link_sleep(link, LINK_FOREVER, 1, 0);
-			break;
-		case SSL_ERROR_WANT_WRITE:
-			link_sleep(link, LINK_FOREVER, 0, 1);
-			break;
-		default:
-			ERR_print_errors_cb(_ssl_errors_cb, 0);
-			return result;
-			break;
-		}
-	}
-
-	if (!link_nonblocking(link, 1)) {
-		debug(D_SSL, "Could not switch link back to non-blocking after SSL handshake: %s", strerror(errno));
-		return 0;
+	int result = ssl_handshake(link, 0, LINK_FOREVER);
+	if (result <= 0) {
+		ERR_print_errors_cb(_ssl_errors_cb, 0);
 	}
 
 	return result;
@@ -804,7 +861,8 @@ failure:
 	return 0;
 }
 
-ssize_t read_aux(struct link *link, char *data, size_t count)
+/* Read from the link once. With SSL, wait until a record arrives, the stoptime passes, or the idle timeout passes. */
+static ssize_t read_aux(struct link *link, char *data, size_t count, time_t stoptime)
 {
 #ifdef HAS_OPENSSL
 	if (link->ssl) {
@@ -812,10 +870,14 @@ ssize_t read_aux(struct link *link, char *data, size_t count)
 		while ((result = SSL_read(link->ssl, data, count)) <= 0) {
 			switch (SSL_get_error(link->ssl, result)) {
 			case SSL_ERROR_WANT_READ:
-				link_sleep(link, LINK_FOREVER, 1, 0);
+				if (!link_wait(link, stoptime, 1, 0)) {
+					return -1;
+				}
 				break;
 			case SSL_ERROR_WANT_WRITE:
-				link_sleep(link, LINK_FOREVER, 0, 1);
+				if (!link_wait(link, stoptime, 0, 1)) {
+					return -1;
+				}
 				break;
 			default:
 				return result;
@@ -831,7 +893,9 @@ ssize_t read_aux(struct link *link, char *data, size_t count)
 	return read(link->fd, data, count);
 }
 
-ssize_t write_aux(struct link *link, const char *data, size_t count)
+/* Write to the link once. With SSL, wait until the record is written, the stoptime passes, or the idle timeout
+ * passes. */
+static ssize_t write_aux(struct link *link, const char *data, size_t count, time_t stoptime)
 {
 #ifdef HAS_OPENSSL
 	if (link->ssl) {
@@ -839,10 +903,14 @@ ssize_t write_aux(struct link *link, const char *data, size_t count)
 		while ((result = SSL_write(link->ssl, data, count)) <= 0) {
 			switch (SSL_get_error(link->ssl, result)) {
 			case SSL_ERROR_WANT_READ:
-				link_sleep(link, LINK_FOREVER, 1, 0);
+				if (!link_wait(link, stoptime, 1, 0)) {
+					return -1;
+				}
 				break;
 			case SSL_ERROR_WANT_WRITE:
-				link_sleep(link, LINK_FOREVER, 0, 1);
+				if (!link_wait(link, stoptime, 0, 1)) {
+					return -1;
+				}
 				break;
 			default:
 				return result;
@@ -864,7 +932,7 @@ static ssize_t fill_buffer(struct link *link, time_t stoptime)
 		return link->buffer_length;
 
 	while (1) {
-		ssize_t chunk = read_aux(link, link->buffer, sizeof(link->buffer));
+		ssize_t chunk = read_aux(link, link->buffer, sizeof(link->buffer), stoptime);
 		if (chunk > 0) {
 			link->read += chunk;
 			link->buffer_start = link->buffer;
@@ -876,7 +944,7 @@ static ssize_t fill_buffer(struct link *link, time_t stoptime)
 			return 0;
 		} else {
 			if (errno_is_temporary(errno)) {
-				if (link_sleep(link, stoptime, 1, 0)) {
+				if (link_wait(link, stoptime, 1, 0)) {
 					continue;
 				} else {
 					return -1;
@@ -919,10 +987,10 @@ ssize_t link_read(struct link *link, char *data, size_t count, time_t stoptime)
 	/* Otherwise, pull it all off the wire. */
 
 	while (count > 0) {
-		chunk = read_aux(link, data, count);
+		chunk = read_aux(link, data, count, stoptime);
 		if (chunk < 0) {
 			if (errno_is_temporary(errno)) {
-				if (link_sleep(link, stoptime, 1, 0)) {
+				if (link_wait(link, stoptime, 1, 0)) {
 					continue;
 				} else {
 					break;
@@ -973,11 +1041,11 @@ ssize_t link_read_avail(struct link *link, char *data, size_t count, time_t stop
 	/* Next, read what is available off the wire */
 
 	while (count > 0) {
-		chunk = read_aux(link, data, count);
+		chunk = read_aux(link, data, count, stoptime);
 		if (chunk < 0) {
 			/* ONLY BLOCK IF NOTHING HAS BEEN READ */
 			if (errno_is_temporary(errno) && total == 0) {
-				if (link_sleep(link, stoptime, 1, 0)) {
+				if (link_wait(link, stoptime, 1, 0)) {
 					continue;
 				} else {
 					break;
@@ -1041,10 +1109,10 @@ ssize_t link_write(struct link *link, const char *data, size_t count, time_t sto
 		return errno = EINVAL, -1;
 
 	while (count > 0) {
-		chunk = write_aux(link, data, count);
+		chunk = write_aux(link, data, count, stoptime);
 		if (chunk < 0) {
 			if (errno_is_temporary(errno)) {
-				if (link_sleep(link, stoptime, 0, 1)) {
+				if (link_wait(link, stoptime, 0, 1)) {
 					continue;
 				} else {
 					break;

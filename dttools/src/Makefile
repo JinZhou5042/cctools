@@ -21,6 +21,7 @@ SOURCES = \
 	bucketing_exhaust_common.c \
 	bucketing_greedy_common.c \
 	bucketing_manager.c \
+	budget.c \
 	buffer.c \
 	catalog_query.c \
 	category.c \
@@ -148,6 +149,7 @@ HEADERS_PUBLIC = \
 	bucketing_exhaust_common.h \
 	bucketing_greedy_common.h \
 	bucketing_manager.h \
+	budget.h \
 	buffer.h \
 	category.h \
 	cctools.h \

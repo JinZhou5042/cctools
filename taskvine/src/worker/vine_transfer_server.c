@@ -21,12 +21,6 @@ See the file COPYING for details.
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* The initial timeout to wait for a command is short, to avoid unnecessary hangs */
-static int command_timeout = 5;
-
-/* The timeout to handle a valid transfer is much higher, to avoid false failures. */
-static int transfer_timeout = 3600;
-
 /* The server link from which connections are accepted */
 static struct link *transfer_link = 0;
 
@@ -36,7 +30,8 @@ pid_t transfer_server_pid = 0;
 /* Specific port for the transfer server to listen on.  Zero means choose any available. */
 int vine_transfer_server_port = 0;
 
-/* Handle a single request for a transfer request from a peer. */
+/* Handle a single request for a transfer request from a peer, which authenticates and sends its request within the
+ * idle timeout, and then takes the reply as long as it makes progress within the idle timeout. */
 
 static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
 {
@@ -46,17 +41,20 @@ static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
 
 	change_process_title("vine_worker [transfer]");
 
+	int timeout = vine_worker_options_idle_timeout(options);
+	link_set_idle_timeout(lnk, timeout);
+
 	if (options->password) {
-		if (!link_auth_password(lnk, options->password, time(0) + command_timeout)) {
+		if (!link_auth_password(lnk, options->password, time(0) + timeout)) {
 			debug(D_VINE, "transfer server: could not authenticate peer worker via password!");
 			return;
 		}
 	}
 
-	if (link_readline(lnk, line, sizeof(line), time(0) + command_timeout)) {
+	if (link_readline(lnk, line, sizeof(line), time(0) + timeout)) {
 		if (sscanf(line, "get %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			vine_transfer_put_any(lnk, cache, filename, VINE_TRANSFER_MODE_ANY, time(0) + transfer_timeout);
+			vine_transfer_put_any(lnk, cache, filename, VINE_TRANSFER_MODE_ANY, LINK_FOREVER);
 		} else {
 			debug(D_VINE, "invalid peer transfer message: %s\n", line);
 		}

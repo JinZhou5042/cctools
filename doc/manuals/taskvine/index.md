@@ -2812,27 +2812,42 @@ change.
 | hungry-minimum          | Smallest number of waiting tasks in the manager before declaring it hungry | 10 |
 | hungry-minimum-factor   | Queue is hungry if number of waiting tasks is less than hungry-minumum-factor x (number of workers) | 2 |
 | immediate-recovery    | If set to 1, create recovery tasks for temporary files as soon as their worker disconnects. Otherwise, create recovery tasks only if the temporary files are used as input when trying to dispatch another task. | 0 |
-| keepalive-interval | Set the minimum number of seconds to wait before sending new keepalive checks to workers. | 300 |
-| keepalive-timeout | Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. | 30 |
+| keepalive-interval | Seconds without any message from a worker before it gets a keepalive check. 0 disables keepalive checks. | T/2 |
+| keepalive-timeout | Seconds without any message from a worker after its keepalive check before it is removed. | T |
 | load-from-shared-filesystem | If set to 1, workers can load in data to their caches from the shared filesystem | 0 |
-| long-timeout | Set the minimum timeout in seconds when sending a large message to a single worker. | 3600 |
 | max-retrievals | Sets the max number of tasks to retrieve per manager wait(). If less than 1, the manager prefers to retrieve all completed tasks before dispatching new tasks to workers. | 1 |
-| min-transfer-timeout | Set the minimum number of seconds to wait for files to be transferred to or from a worker. | 10 |
 | monitor-interval        | Maximum number of seconds between resource monitor measurements. If less than 1, use default. | 5 |
 | prefer-dispatch | If 1, try to dispatch tasks even if there are retrieved tasks ready to be reportedas done. | 0 |
 | proportional-whole-tasks | Round up resource proportions such that only an integer number of tasks could be fit in the worker. The default is to use proportions. (See [task resources.](#task-resources) | 1 |
 | ramp-down-heuristic     | If set to 1 and there are more workers than tasks waiting, then tasks are allocated all the free resources of a worker large enough to run them. If monitoring watchdog is not enabled, then this heuristic has no effect. | 0 |
 | resource-submit-multiplier | Assume that workers have `resource x resources-submit-multiplier` available.<br> This overcommits resources at the worker, causing tasks to be sent to workers that cannot be immediately executed.<br>The extra tasks wait at the worker until resources become available. | 1 |
 | sandbox-grow-factor    | When task disk sandboxes are exhausted, increase the allocation using their measured valued times this factor. Minimum is 1.1. | 2 |
+| response-timeout | The response time X in seconds of a healthy worker. Every wait on a worker fails when the worker makes no progress for T = 2X (see below). | 15 |
 | shift-disk-load | Proactively shift temporary files away from the most disk-heavy worker to those with more available disk. | 0 |
-| short-timeout | Set the minimum timeout in seconds when sending a brief message to a single worker. | 5 |
 | temp-replica-count    | Number of temp file replicas created across workers | 0 |
-| transfer-outlier-factor | Transfer that are this many times slower than the average will be terminated. | 10 |
 | transfer-replica-per-cycle | Number of replicas to schedule per file per iteration. | 1 |
 | transfer-temps-recovery | If 1, try to replicate temp files to reach threshold on worker removal. | 0 |
 | transient-error-interval | Time to wait in seconds after a resource failure before attempting to use it again | 15 |
 | wait-for-workers        | Do not schedule any tasks until `wait-for-workers` are connected. | 0 |
 | worker-retrievals | If 1, retrieve all completed tasks from a worker when retrieving results, even if going above the parameter max-retrievals . Otherwise, if 0, retrieve just one task before deciding to dispatch new tasks or connect new workers. | 1 |
+
+The parameters `long-timeout`, `short-timeout`, `min-transfer-timeout`, and `transfer-outlier-factor` are accepted and
+have no effect.
+
+A healthy worker answers its manager within the response time X (`response-timeout`), because its main loop works in
+rounds of a bounded budget. Every wait of the manager on a worker, and of a worker on its manager, a peer, a library,
+or a URL, fails when the other party makes no progress for T = 2X, however large the data. A worker that sends nothing
+for T/2 gets a keepalive check, and a worker that sends nothing for T after its check is removed. These guarantees
+assume that X is at least twice the longest network delay, including draining the buffers on the path, plus the longest
+step of the manager, and they have these limits:
+
+- A worker that stops reading costs the manager up to T once, after which writes to it fail at once. N such workers at
+  once cost up to N T.
+- A connection that sends nothing, or a worker that stops in the middle of a message, costs the manager up to T once.
+- The manager judges a worker by its messages only, so the network must drain a full receive buffer within the
+  longest network delay: with the default X of 15 s, within about 7 s.
+- Synchronous exchanges (task outputs, standard output, watched files) last as long as their data takes, each wait in
+  them bounded by T.
 | watch-library-logfiles | If 1, watch the output files produced by each of the library processes running on the remote workers, take
 them back the current logging directory. | 0 |
 

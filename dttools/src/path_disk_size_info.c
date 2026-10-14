@@ -48,7 +48,17 @@ int path_disk_size_info_get(const char *path, int64_t *measured_size, int64_t *n
 
 int path_disk_size_info_get_r(const char *path, int64_t max_secs, struct path_disk_size_info **state, struct hash_table *exclude_paths)
 {
-	int64_t start_time = time(0);
+	if (max_secs < 0) {
+		return path_disk_size_info_get_budget(path, NULL, state, exclude_paths);
+	}
+
+	struct budget b;
+	budget_start(&b, max_secs * 1000000);
+	return path_disk_size_info_get_budget(path, &b, state, exclude_paths);
+}
+
+int path_disk_size_info_get_budget(const char *path, const struct budget *b, struct path_disk_size_info **state, struct hash_table *exclude_paths)
+{
 	int result = 0;
 
 	if (!*state) {
@@ -95,6 +105,9 @@ int path_disk_size_info_get_r(const char *path, int64_t max_secs, struct path_di
 					tail = list_pop_tail(s->current_dirs);
 					free(tail->name);
 					free(tail);
+					if (b && budget_expired(b) && list_size(s->current_dirs) > 0) {
+						goto timeout;
+					}
 					continue;
 				} else {
 					debug(D_DEBUG, "error opening directory '%s', errno: %s.\n", tail->name, strerror(errno));
@@ -103,48 +116,43 @@ int path_disk_size_info_get_r(const char *path, int64_t max_secs, struct path_di
 				}
 			}
 		}
-		/* Read out entries from the dir stream. */
+		/* Read out entries from the dir stream. The budget is checked after every entry, also one that is skipped,
+		 * because each costs part of a system call. */
 		while ((entry = readdir(tail->dir))) {
-			if (strcmp(".", entry->d_name) == 0 || strcmp("..", entry->d_name) == 0)
-				continue;
-
 			char composed_path[PATH_MAX];
 			if (entry->d_name[0] == '/') {
-				strncpy(composed_path, entry->d_name, PATH_MAX);
+				snprintf(composed_path, PATH_MAX, "%s", entry->d_name);
 			} else {
 				snprintf(composed_path, PATH_MAX, "%s/%s", tail->name, entry->d_name);
 			}
 
-			if (exclude_paths && hash_table_lookup(exclude_paths, composed_path)) {
-				continue;
-			}
-
-			if (lstat(composed_path, &file_info) < 0) {
+			if (strcmp(".", entry->d_name) == 0 || strcmp("..", entry->d_name) == 0) {
+				/* Not an entry of its own. */
+			} else if (exclude_paths && hash_table_lookup(exclude_paths, composed_path)) {
+				/* Excluded from the measurement. */
+			} else if (lstat(composed_path, &file_info) < 0) {
 				if (errno == ENOENT) {
 					/* our DIR structure is stale, and a file went away. We simply do nothing. */
 				} else {
 					debug(D_DEBUG, "error reading disk usage on '%s'.\n", path);
 					result = -1;
 				}
-				continue;
-			}
-
-			s->count_so_far++;
-			if (S_ISREG(file_info.st_mode)) {
-				s->size_so_far += file_info.st_size;
-			} else if (S_ISDIR(file_info.st_mode)) {
-				/* Only add name of directory, will only open it to read when it's its turn. */
-				struct DIR_with_name *branch = calloc(1, sizeof(struct DIR_with_name));
-				branch->name = xxstrdup(composed_path);
-				list_push_head(s->current_dirs, branch);
-			} else if (S_ISLNK(file_info.st_mode)) {
-				/* do nothing, avoiding infinite loops. */
-			}
-
-			if (max_secs > -1) {
-				if (time(0) - start_time >= max_secs) {
-					goto timeout;
+			} else {
+				s->count_so_far++;
+				if (S_ISREG(file_info.st_mode)) {
+					s->size_so_far += file_info.st_size;
+				} else if (S_ISDIR(file_info.st_mode)) {
+					/* Only add name of directory, will only open it to read when it's its turn. */
+					struct DIR_with_name *branch = calloc(1, sizeof(struct DIR_with_name));
+					branch->name = xxstrdup(composed_path);
+					list_push_head(s->current_dirs, branch);
+				} else if (S_ISLNK(file_info.st_mode)) {
+					/* do nothing, avoiding infinite loops. */
 				}
+			}
+
+			if (b && budget_expired(b)) {
+				goto timeout;
 			}
 		}
 		/* we are done reading a complete directory, and we go to the next in the queue */
@@ -154,6 +162,11 @@ int path_disk_size_info_get_r(const char *path, int64_t max_secs, struct path_di
 		}
 		free(tail->name);
 		free(tail);
+
+		/* Opening, reading to the end, and closing a directory is an item, even if it holds no entries. */
+		if (b && budget_expired(b) && list_size(s->current_dirs) > 0) {
+			goto timeout;
+		}
 	}
 
 	list_delete(s->current_dirs);

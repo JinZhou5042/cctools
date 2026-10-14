@@ -32,6 +32,15 @@ timestamp_t timestamp_get()
 	return stamp;
 }
 
+timestamp_t timestamp_monotonic()
+{
+	struct timespec current;
+	if (clock_gettime(CLOCK_MONOTONIC, &current) < 0) {
+		return timestamp_get();
+	}
+	return ((timestamp_t)current.tv_sec) * 1000000 + current.tv_nsec / 1000;
+}
+
 int timestamp_fmt(char *buf, size_t size, const char *fmt, timestamp_t ts)
 {
 	time_t tv_sec;

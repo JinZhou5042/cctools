@@ -69,6 +69,7 @@ link_close(link);
 struct link *link_connect(const char *addr, int port, time_t stoptime);
 
 /** Wrap a connect link with an ssl context and state
+The handshake waits for the server as long as the idle timeout of the link allows, see @ref link_set_idle_timeout.
 @param link A link returned from @ref link_connect
 @param sni_hostname Optional domainame for tls routing.
 @return 0 on failure, 1 on success
@@ -141,12 +142,24 @@ struct link *link_accept(struct link *parent, time_t stoptime);
 
 /** Wrap an accepted link with an ssl context.
 If successful, the connection is now encrypted.
+The handshake waits for the client as long as the idle timeout of the link allows, see @ref link_set_idle_timeout.
 @param lnk A link returned from @ref link_accept
 @param key   The ssl key of the server.
 @param cert  The ssl cert of the server.
 @return 0 on failure, 1 on success
 */
 int link_ssl_wrap_accept(struct link *lnk, const char *key, const char *cert);
+
+/** Wrap an accepted link with an ssl context, giving up at a stoptime.
+This is @ref link_ssl_wrap_accept with a limit on the whole handshake: it fails at the stoptime even while the client
+makes progress.
+@param lnk A link returned from @ref link_accept
+@param key   The ssl key of the server.
+@param cert  The ssl cert of the server.
+@param stoptime The absolute time at which to give up, or @ref LINK_FOREVER to rely on the link's idle timeout.
+@return 0 on failure, 1 on success
+*/
+int link_ssl_wrap_accept_stoptime(struct link *lnk, const char *key, const char *cert, time_t stoptime);
 
 
 /** Read data from a connection.
@@ -241,13 +254,29 @@ int link_usleep(struct link *link, int usec, int reading, int writing);
 int link_usleep_mask(struct link *link, int usec, sigset_t *mask, int reading, int writing);
 
 /** Block until a link is readable or writable.
+An error or hangup on the link also ends the wait, so that the next read or write reports it.
+The idle timeout of the link does not apply to this wait.
 @param link The link to wait on.
 @param stoptime The time at which to abort.
 @param reading Wait for the link to become readable.
 @param writing Wait for the link to become writable.
-@return One if the link becomes readable or writable before the timeout expires, zero otherwise.
+@return One if the link becomes readable or writable before the timeout expires, zero otherwise, with errno set to
+ETIMEDOUT when the stoptime passed.
 */
 int link_sleep(struct link *link, time_t stoptime, int reading, int writing);
+
+/** Limit how long a read or write on a link may go without progress.
+Every function that reads or writes the link with a stoptime then fails, with errno set to ETIMEDOUT, when no data
+moves for the given number of seconds, even if its stoptime is later or is @ref LINK_FOREVER. Each piece of data that
+moves renews the limit, so a large transfer that keeps making progress succeeds however long it takes. Once a wait has
+failed this way, later waits for the link to become readable or writable in reads and writes fail at once, because the
+stream may have stopped in the middle of a message. The limit also bounds each wait of an ssl handshake. Waits for a
+connection, such as @ref link_accept and @ref link_sleep, are not affected.
+@param link The link to limit.
+@param seconds Seconds without progress before a read or write fails. Zero, the default, removes the limit, so only
+the stoptime of each call applies.
+*/
+void link_set_idle_timeout(struct link *link, int seconds);
 
 /** Close a connection.
 @param link The connection to close.

@@ -7,6 +7,7 @@ See the file COPYING for details.
 #ifndef UNLINK_RECURSIVE_H
 #define UNLINK_RECURSIVE_H
 
+#include "budget.h"
 #include "compat-at.h"
 
 #include <fcntl.h>
@@ -19,6 +20,15 @@ See the file COPYING for details.
 @return 0 on success, -1 on failure.
 */
 int unlinkat_recursive (int fd, const char *path);
+
+/** Delete a path recursively until a budget expires, checking the budget after each entry. A later call resumes by
+walking what is left, so a partly deleted tree needs no saved state.
+@param fd Open directory.
+@param path The path relative to the open directory fd to unlink recursively.
+@param b The budget that limits this call, or NULL to delete everything.
+@return 1 when the path is gone, 0 when the budget expired first, -1 when something could not be deleted.
+*/
+int unlinkat_recursive_budget (int fd, const char *path, const struct budget *b);
 
 /** Delete a path recursively.
 @param path The path to unlink recursively.
