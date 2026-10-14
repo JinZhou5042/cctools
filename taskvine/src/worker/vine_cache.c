@@ -28,7 +28,6 @@ See the file COPYING for details.
 
 #include <dirent.h>
 #include <errno.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/fcntl.h>
@@ -45,7 +44,7 @@ struct vine_cache {
 	int max_transfer_procs;
 };
 
-static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager);
+static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager);
 
 /*
 Create the cache manager structure for a given cache directory.
@@ -91,8 +90,8 @@ void vine_cache_load(struct vine_cache *c)
 			if (vine_cache_file_load_metadata(f, meta_path)) {
 				if (f->cache_level < VINE_CACHE_LEVEL_FOREVER) {
 					debug(D_VINE, "cache: %s has cache-level %d, deleting", d->d_name, f->cache_level);
-					trash_move(meta_path);
-					trash_move(data_path);
+					trash_file(meta_path);
+					trash_file(data_path);
 					vine_cache_file_delete(f);
 				} else {
 					debug(D_VINE, "cache: %s has cache-level %d, keeping", d->d_name, f->cache_level);
@@ -101,8 +100,8 @@ void vine_cache_load(struct vine_cache *c)
 				}
 			} else {
 				debug(D_VINE, "cache: %s has invalid metadata, deleting", d->d_name);
-				trash_move(meta_path);
-				trash_move(data_path);
+				trash_file(meta_path);
+				trash_file(data_path);
 				vine_cache_file_delete(f);
 			}
 
@@ -155,51 +154,23 @@ void vine_cache_prune(struct vine_cache *c, vine_cache_level_t level)
 }
 
 /*
-Save the error message of a failed transfer to {transfer_path}.error, where vine_cache_check_outputs finds it.
-*/
-
-__attribute__((format(printf, 3, 4))) static void write_error_message(struct vine_cache *c, const char *cachename, const char *fmt, ...)
-{
-	char *error_path = vine_cache_error_path(c, cachename);
-	FILE *file = fopen(error_path, "w");
-	if (file) {
-		va_list va;
-		va_start(va, fmt);
-		vfprintf(file, fmt, va);
-		va_end(va);
-		fprintf(file, "\n");
-		fclose(file);
-	}
-	free(error_path);
-}
-
-/*
-Kill off any process associated with this file object, without waiting for it to exit.
-The file fails as if its transfer had failed: the manager is told, and the partial data goes to the trash.
-The process is reaped later, see vine_process_reap_later.
+Kill off any process associated with this file object.
 The cache_file object is still valid afterwards.
 Used by both vine_cache_remove and vine_cache_delete.
 */
 
 static void vine_cache_kill(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager)
 {
-	if (f->status != VINE_CACHE_STATUS_PROCESSING) {
-		return;
+	while (f->status == VINE_CACHE_STATUS_PROCESSING) {
+		debug(D_VINE, "cache: killing pending transfer process %d...", f->pid);
+		kill(f->pid, SIGKILL);
+		vine_cache_check_file(c, f, cachename, manager);
+		if (f->status == VINE_CACHE_STATUS_PROCESSING) {
+			debug(D_VINE, "cache: still not killed, trying again!");
+			sleep(1);
+		}
 	}
-
-	debug(D_VINE, "cache: killing pending transfer process %d...", f->pid);
-	kill(f->pid, SIGKILL);
-	vine_process_reap_later(f->pid);
-	hash_table_remove(c->processing_transfers, cachename);
-	f->pid = 0;
-	f->stop_time = timestamp_get();
-	f->status = VINE_CACHE_STATUS_FAILED;
-
-	write_error_message(c, cachename, "transfer of %s was cancelled", cachename);
-
-	vine_cache_check_outputs(c, f, cachename, manager);
 }
-
 
 /*
 Process pending transfers until we reach the maximum number of processing transfers or there are no more pending transfers.
@@ -250,7 +221,6 @@ void vine_cache_delete(struct vine_cache *c)
 	{
 		vine_cache_kill(c, file, cachename, 0);
 	}
-	vine_process_reap_killed(1);
 
 	hash_table_clear(c->pending_transfers, NULL);
 	hash_table_clear(c->processing_transfers, NULL);
@@ -593,9 +563,7 @@ static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, c
 	debug(D_VINE, "cache: setting up worker transfer file %s", f->source);
 
 	timestamp_t time_start_connect = timestamp_get();
-	/* The peer must connect within T and then make progress within T, whatever the size of the file. */
-	int timeout = vine_worker_options_idle_timeout(options);
-	worker_link = link_connect(addr, port_num, time(0) + timeout);
+	worker_link = link_connect(addr, port_num, time(0) + 300);
 	timestamp_t time_end_connect = timestamp_get();
 	int time_duration_connect = (time_end_connect - time_start_connect) / 1e6;
 
@@ -603,16 +571,17 @@ static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, c
 		*error_message = string_format("Could not establish connection with worker at: %s:%d after %d seconds: %s", addr, port_num, time_duration_connect, strerror(errno));
 		return 0;
 	}
-	link_set_idle_timeout(worker_link, timeout);
+
+	/* The transfer fails when the peer makes no progress for T, however long the file takes. */
+	link_set_idle_timeout(worker_link, vine_worker_options_idle_timeout(options));
 
 	if (options->password) {
-		if (!link_auth_password(worker_link, options->password, time(0) + timeout)) {
+		if (!link_auth_password(worker_link, options->password, time(0) + 5)) {
 			*error_message = string_format("Could not authenticate to peer worker at %s:%d", addr, port_num);
 			link_close(worker_link);
 			return 0;
 		}
 	}
-
 
 	char *transfer_dir = vine_cache_transfer_path(c, ".");
 	int64_t totalsize;
@@ -698,11 +667,17 @@ static void vine_cache_worker_process(struct vine_cache_file *f, struct vine_cac
 	if (error_message) {
 		debug(D_VINE, "cache: error when creating %s via mini task: %s", cachename, error_message);
 
-		if (f->cache_type == VINE_CACHE_MINI_TASK) {
-			write_error_message(c, cachename, "error creating file via mini task: %s", error_message);
-		} else {
-			write_error_message(c, cachename, "error transferring file: %s", error_message);
+		char *error_path = vine_cache_error_path(c, cachename);
+		FILE *file = fopen(error_path, "w");
+		if (file) {
+			if (f->cache_type == VINE_CACHE_MINI_TASK) {
+				fprintf(file, "error creating file via mini task: %s\n", error_message);
+			} else {
+				fprintf(file, "error transferring file: %s\n", error_message);
+			}
+			fclose(file);
 		}
+		free(error_path);
 		free(error_message);
 	}
 

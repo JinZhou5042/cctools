@@ -75,14 +75,6 @@ struct vine_process {
 
 	/* state between complete disk measurements. */
 	struct path_disk_size_info *disk_measurement_state;
-
-	/* While the outputs of a completed process move into the cache (vine_sandbox_stageout), the next output to move,
-	 * its mode and modification time once observed (mode zero before), and, if it is a directory, the state of its
-	 * measurement. */
-	struct list_cursor *output_cursor;
-	struct path_disk_size_info *output_measurement_state;
-	int output_mode;
-	time_t output_mtime;
 };
 
 struct vine_process * vine_process_create( struct vine_task *task, vine_process_type_t type );
@@ -90,22 +82,14 @@ int   vine_process_execute( struct vine_process *p );
 int   vine_process_is_complete( struct vine_process *p );
 int   vine_process_wait( struct vine_process *p );
 void  vine_process_kill( struct vine_process *p );
+int   vine_process_kill_and_wait( struct vine_process *p );
 void  vine_process_delete( struct vine_process *p );
 
 int   vine_process_execute_and_wait( struct vine_process *p );
 
 int   vine_process_library_get_result( struct vine_process *p, uint64_t *done_task_id, int *exit_code );
 
-/* Remember a child that was sent SIGKILL, so that vine_process_reap_killed collects it: kills never wait for it. */
-void  vine_process_reap_later( pid_t pid );
-
-/* Collect the children given to vine_process_reap_later. Without waiting, only those that exited are collected,
- * because a process sent SIGKILL may still take long to exit, as in an uninterruptible read of a hung disk. */
-void  vine_process_reap_killed( int wait );
-
 void  vine_process_compute_disk_needed( struct vine_process *p );
-/* Measure the disk used by the sandbox of a process, resuming an earlier measurement, until the budget expires.
- * Return 1 once the measurement completed, or 0 if it continues in a later call. */
 int   vine_process_measure_disk(struct vine_process *p, const struct budget *b);
 
 #endif

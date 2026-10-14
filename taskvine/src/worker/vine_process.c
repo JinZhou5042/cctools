@@ -21,7 +21,6 @@ See the file COPYING for details.
 #include "errno.h"
 #include "full_io.h"
 #include "hash_table.h"
-#include "itable.h"
 #include "link.h"
 #include "list.h"
 #include "macros.h"
@@ -115,11 +114,6 @@ struct vine_process *vine_process_create(struct vine_task *task, vine_process_ty
 
 void vine_process_delete(struct vine_process *p)
 {
-	/* The cursor of a stage-out in progress walks the outputs of the task, so it goes first. */
-	if (p->output_cursor) {
-		list_cursor_destroy(p->output_cursor);
-	}
-
 	if (p->task)
 		vine_task_delete(p->task);
 
@@ -142,10 +136,6 @@ void vine_process_delete(struct vine_process *p)
 
 	if (p->disk_measurement_state) {
 		path_disk_size_info_delete_state(p->disk_measurement_state);
-	}
-
-	if (p->output_measurement_state) {
-		path_disk_size_info_delete_state(p->output_measurement_state);
 	}
 
 	free(p);
@@ -266,7 +256,7 @@ int vine_process_execute_and_wait(struct vine_process *p)
 int vine_process_invoke_function(struct vine_process *p)
 {
 	char *buffer = string_format("%d %s %s %s", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name);
-	ssize_t result = link_printf(p->library_process->library_write_link, LINK_FOREVER, "%ld\n%s", strlen(buffer), buffer);
+	ssize_t result = link_printf(p->library_process->library_write_link, time(0) + options->active_timeout, "%ld\n%s", strlen(buffer), buffer);
 
 	// conservatively assume that the function starts executing as soon as we send it to the library.
 	// XXX Alternatively, the library could report when the function started.
@@ -353,9 +343,7 @@ int vine_process_execute(struct vine_process *p)
 			p->library_read_link = link_attach_to_fd(pipe_out[0]);
 			p->library_write_link = link_attach_to_fd(pipe_in[1]);
 
-			/* The pipes do not block, so a wait on the library ends when it makes no progress for T. Reading the rest
-			 * of a message that the library began is bounded by T in total, a declared exception to the round
-			 * budget. */
+			/* The pipes do not block, so a wait on the library fails when it makes no progress for T. */
 			link_nonblocking(p->library_read_link, 1);
 			link_nonblocking(p->library_write_link, 1);
 			link_set_idle_timeout(p->library_read_link, vine_worker_options_idle_timeout(options));
@@ -386,8 +374,7 @@ int vine_process_execute(struct vine_process *p)
 		return 0;
 
 	} else {
-		/* Enter its own process group before anything else, so that a kill of the group reaches it even when the
-		 * worker's own setpgid() comes too late. */
+		/* Enter its own process group at once, so that a kill of the group right after the fork reaches it. */
 		setpgid(0, 0);
 
 		if (chdir(p->sandbox)) {
@@ -538,11 +525,8 @@ int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_
 	char buffer[VINE_LINE_MAX]; // Buffer to store length of data from library.
 	int ok = 1;
 
-	/* The library began a result, a bounded-size exchange, so read all of it within T in total. */
-	time_t stoptime = time(0) + vine_worker_options_idle_timeout(options);
-
 	/* read number of bytes of data first. */
-	ok = link_readline(p->library_read_link, buffer, VINE_LINE_MAX, stoptime);
+	ok = link_readline(p->library_read_link, buffer, VINE_LINE_MAX, time(0) + options->active_timeout);
 	if (!ok) {
 		return 0;
 	}
@@ -550,7 +534,7 @@ int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_
 
 	/* now read the buffer, which is the task id of the done function invocation. */
 	char buffer_data[len_buffer + 1];
-	ok = link_read(p->library_read_link, buffer_data, len_buffer, stoptime);
+	ok = link_read(p->library_read_link, buffer_data, len_buffer, time(0) + options->active_timeout);
 	if (ok <= 0) {
 		return 0;
 	}
@@ -567,34 +551,6 @@ int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_
 
 	debug(D_VINE, "Received result for function %" PRIu64 ", exit code %d", *done_task_id, *done_exit_code);
 	return 1;
-}
-
-/* Pids of killed children (task, library, and transfer processes) that were not yet reaped. */
-static struct itable *killed_pids = NULL;
-
-void vine_process_reap_later(pid_t pid)
-{
-	if (!killed_pids) {
-		killed_pids = itable_create(0);
-	}
-	itable_insert(killed_pids, pid, (void *)(uintptr_t)pid);
-}
-
-void vine_process_reap_killed(int wait)
-{
-	if (!killed_pids) {
-		return;
-	}
-	uint64_t pid;
-	void *dummy;
-	int iteration;
-	ITABLE_ITERATE(killed_pids, iteration, pid, dummy)
-	{
-		/* A process that exited, or is no longer a child to wait for, leaves the table. */
-		if (waitpid((pid_t)pid, NULL, wait ? 0 : WNOHANG) != 0) {
-			itable_remove(killed_pids, pid);
-		}
-	}
 }
 
 /*
@@ -619,12 +575,21 @@ void vine_process_kill(struct vine_process *p)
 	debug(D_VINE, "terminating task %d pid %d", p->task->task_id, p->pid);
 
 	// Send signal to process group of child which is denoted by -ve value of child pid.
-	// This is done to ensure delivery of signal to processes forked by the child. The child and the worker both
-	// create the group right after the fork, so the kill does not wait for the child to start; a group that is
-	// already gone gets the signal to the pid alone.
+	// This is done to ensure delivery of signal to processes forked by the child. Both the child and the worker
+	// create the group right after the fork, so the signal needs no delay; a group already gone gets it to the pid.
 	if (kill(-p->pid, SIGKILL) < 0) {
 		kill(p->pid, SIGKILL);
 	}
+}
+
+/*
+Send a kill signal to a running process, and then wait for it to exit.
+*/
+
+int vine_process_kill_and_wait(struct vine_process *p)
+{
+	vine_process_kill(p);
+	return vine_process_wait(p);
 }
 
 /* The disk needed by a task is shared between the cache and the process
@@ -687,14 +652,7 @@ int vine_process_measure_disk(struct vine_process *p, const struct budget *b)
 
 	p->sandbox_file_count = state->last_file_count_complete;
 
-	/* After an error, the next measurement starts over instead of resuming at the entry that failed. */
-	if (result < 0) {
-		path_disk_size_info_delete_state(state);
-		p->disk_measurement_state = NULL;
-		return 1;
-	}
-
-	return state->complete_measurement;
+	return result;
 }
 
 static int vine_process_sandbox_disk_measure(struct vine_process *p, const struct budget *b, struct path_disk_size_info **state)

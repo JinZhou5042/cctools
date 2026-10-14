@@ -53,7 +53,7 @@ static int vine_manager_put_symlink(struct vine_manager *q, struct vine_worker_i
 
 	vine_manager_send(q, w, "symlink %s %d\n", remotename_encoded, length);
 
-	link_write(w->link, target, length, LINK_FOREVER);
+	link_write(w->link, target, length, time(0) + q->long_timeout);
 
 	*total_bytes += length;
 
@@ -68,6 +68,7 @@ If the transfer takes too long, then cancel it.
 
 static int vine_manager_put_file(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, const char *localname, const char *remotename, struct stat info, int override_mode, int64_t *total_bytes)
 {
+	time_t stoptime;
 	timestamp_t effective_stoptime = 0;
 	int64_t actual = 0;
 
@@ -94,8 +95,9 @@ static int vine_manager_put_file(struct vine_manager *q, struct vine_worker_info
 	char remotename_encoded[VINE_LINE_MAX];
 	url_encode(remotename, remotename_encoded, sizeof(remotename_encoded));
 
+	stoptime = time(0) + vine_manager_transfer_time(q, w, length);
 	vine_manager_send(q, w, "file %s %" PRId64 " 0%o %lld\n", remotename_encoded, length, mode, (long long)info.st_mtime);
-	actual = link_stream_from_fd(w->link, fd, length, LINK_FOREVER);
+	actual = link_stream_from_fd(w->link, fd, length, stoptime);
 	close(fd);
 
 	*total_bytes += actual;
@@ -298,8 +300,9 @@ vine_result_code_t vine_manager_put_buffer(struct vine_manager *q, struct vine_w
 	if (mode == 0)
 		mode = 0755;
 
+	time_t stoptime = time(0) + vine_manager_transfer_time(q, w, f->size);
 	vine_manager_send(q, w, "file %s %lld 0%o 0\n", f->cached_name, (long long)f->size, (int)mode);
-	int64_t actual = link_putlstring(w->link, f->data, f->size, LINK_FOREVER);
+	int64_t actual = link_putlstring(w->link, f->data, f->size, stoptime);
 	if (actual >= 0 && (size_t)actual == f->size) {
 		*total_bytes = actual;
 		return VINE_SUCCESS;
@@ -505,7 +508,7 @@ vine_result_code_t vine_manager_put_task(
 
 	long long cmd_len = strlen(command_line);
 	vine_manager_send(q, w, "cmd %lld\n", (long long)cmd_len);
-	link_putlstring(w->link, command_line, cmd_len, LINK_FOREVER);
+	link_putlstring(w->link, command_line, cmd_len, time(0) + q->short_timeout);
 	debug(D_VINE, "%s\n", command_line);
 
 	if (t->needs_library) {

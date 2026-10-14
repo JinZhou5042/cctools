@@ -16,8 +16,6 @@ See the file COPYING for details.
 #include "create_dir.h"
 #include "debug.h"
 #include "file_link_recursive.h"
-#include "list.h"
-#include "path_disk_size_info.h"
 #include "stringtools.h"
 
 #include <errno.h>
@@ -185,104 +183,59 @@ int vine_sandbox_stagein(struct vine_process *p, struct vine_cache *cache)
 }
 
 /*
-Move a given output file back to the target cache location and inform the manager of the added file. A regular file
-takes one stat. A directory is measured in pieces, resuming the measurement kept in the process, until the budget
-expires. Return 0 if the output continues in a later call, and 1 once the output was handled, whether it was added to
-the cache or not.
+Move a given output file back to the target cache location
+and inform the manager of the added file.
 */
 
-static int stage_output_file(struct vine_process *p, struct vine_mount *m, struct vine_file *f, struct vine_cache *cache, struct link *manager, const struct budget *b)
+static int stage_output_file(struct vine_process *p, struct vine_mount *m, struct vine_file *f, struct vine_cache *cache, struct link *manager)
 {
-	char *sandbox_path = vine_sandbox_full_path(p, m->remote_name);
-	int64_t size = 0;
-
-	/* A mode of zero means that the output was not observed yet, because every file type has a nonzero mode. */
-	if (!p->output_mode) {
-		struct stat info;
-		debug(D_VINE, "output: measuring %s", sandbox_path);
-		if (stat(sandbox_path, &info) < 0) {
-			debug(D_VINE, "output: unable to measure size of %s: %s\n", sandbox_path, strerror(errno));
-			free(sandbox_path);
-			return 1;
-		}
-		p->output_mode = info.st_mode;
-		p->output_mtime = info.st_mtime;
-		size = info.st_size;
-		if (S_ISDIR(p->output_mode) && budget_expired(b)) {
-			free(sandbox_path);
-			return 0;
-		}
-	}
-
-	if (S_ISDIR(p->output_mode)) {
-		int result = path_disk_size_info_get_budget(sandbox_path, b, &p->output_measurement_state, NULL);
-		if (result == 0 && !p->output_measurement_state->complete_measurement) {
-			free(sandbox_path);
-			return 0;
-		}
-		if (result < 0) {
-			debug(D_VINE, "output: unable to measure size of %s: %s\n", sandbox_path, strerror(errno));
-		}
-		size = p->output_measurement_state->last_byte_size_complete;
-		path_disk_size_info_delete_state(p->output_measurement_state);
-		p->output_measurement_state = NULL;
-		if (result < 0) {
-			p->output_mode = 0;
-			free(sandbox_path);
-			return 1;
-		}
-	}
-
 	char *cache_path = vine_cache_data_path(cache, f->cached_name);
+	char *sandbox_path = vine_sandbox_full_path(p, m->remote_name);
+
+	int result = 0;
+	int mode;
+	time_t mtime;
+	int64_t size;
+
 	timestamp_t transfer_time = p->execution_end - p->execution_start;
 
-	debug(D_VINE, "output: moving %s to %s", sandbox_path, cache_path);
-	if (vine_cache_add_file(cache, f->cached_name, sandbox_path, f->cache_level, p->output_mode, size, p->output_mtime, p->execution_start, transfer_time, manager)) {
-		f->size = size;
+	debug(D_VINE, "output: measuring %s", sandbox_path);
+	if (vine_cache_file_measure_metadata(sandbox_path, &mode, &size, &mtime)) {
+		debug(D_VINE, "output: moving %s to %s", sandbox_path, cache_path);
+		if (vine_cache_add_file(cache, f->cached_name, sandbox_path, f->cache_level, mode, size, mtime, p->execution_start, transfer_time, manager)) {
+			f->size = size;
+			result = 1;
+		} else {
+			debug(D_VINE, "output: unable to move %s to %s: %s\n", sandbox_path, cache_path, strerror(errno));
+			result = 0;
+		}
 	} else {
-		debug(D_VINE, "output: unable to move %s to %s: %s\n", sandbox_path, cache_path, strerror(errno));
+		debug(D_VINE, "output: unable to measure size of %s: %s\n", sandbox_path, strerror(errno));
+		result = 0;
 	}
-	p->output_mode = 0;
 
 	free(cache_path);
 	free(sandbox_path);
 
-	return 1;
+	return result;
 }
 
 /*
-Move all output files of a completed process back into the proper cache location, until the budget expires. Return 1
-once every output was handled, or 0 if a later call continues where this one stopped. Each call makes progress even
-with an expired budget: it handles one regular file, or it observes a directory output or measures one of its entries.
-A process whose outputs are regular files thus completes in one call unless the budget expires between its outputs.
+Move all output files of a completed process back into the proper cache location.
+This function deliberately does not fail.  If any of the desired outputs was not
+created, we still want the task to be marked as completed and sent back to the
+manager.
 
-Stage-out deliberately does not fail. If any of the desired outputs was not created, we still want the task to be
-marked as completed and sent back to the manager. The manager will handle the consequences of missing output files
-when processing the result of the task. Therefore, the task should be reported as done only after this function
-returned 1.
+The manager will handle the consequences of missing output files when processing
+the result of the task. Therefore, this function should be call BEFORE the task is
+reported as done to the manager.
 */
 
-int vine_sandbox_stageout(struct vine_process *p, struct vine_cache *cache, struct link *manager, const struct budget *b)
+void vine_sandbox_stageout(struct vine_process *p, struct vine_cache *cache, struct link *manager)
 {
-	if (!p->output_cursor) {
-		p->output_cursor = list_cursor_create(p->task->output_mounts);
-		list_seek(p->output_cursor, 0);
-	}
-
-	int handled = 0;
 	struct vine_mount *m;
-	while (list_get(p->output_cursor, (void **)&m)) {
-		if (handled && budget_expired(b)) {
-			return 0;
-		}
-		if (!stage_output_file(p, m, m->file, cache, manager, b)) {
-			return 0;
-		}
-		handled++;
-		list_next(p->output_cursor);
+	LIST_ITERATE(p->task->output_mounts, m)
+	{
+		stage_output_file(p, m, m->file, cache, manager);
 	}
-
-	list_cursor_destroy(p->output_cursor);
-	p->output_cursor = NULL;
-	return 1;
 }

@@ -58,7 +58,9 @@ static vine_result_code_t vine_manager_get_buffer(struct vine_manager *q, struct
 
 		f->data = malloc(size + 1);
 		if (f->data) {
-			ssize_t actual = link_read(w->link, f->data, f->size, LINK_FOREVER);
+			time_t stoptime = time(0) + vine_manager_transfer_time(q, w, f->size);
+
+			ssize_t actual = link_read(w->link, f->data, f->size, stoptime);
 			if (actual >= 0 && (size_t)actual == f->size) {
 				/* While not strictly necessary, add a null terminator to facilitate printing text data.
 				 */
@@ -100,13 +102,16 @@ static vine_result_code_t vine_manager_get_file_contents(struct vine_manager *q,
 		effective_stoptime = (length / q->bandwidth_limit) * 1000000 + timestamp_get();
 	}
 
+	// Choose the actual stoptime.
+	time_t stoptime = time(0) + vine_manager_transfer_time(q, w, length);
+
 	// If necessary, create parent directories of the file.
 	char dirname[VINE_LINE_MAX];
 	path_dirname(local_name, dirname);
 	if (strchr(local_name, '/')) {
 		if (!create_dir(dirname, 0777)) {
 			debug(D_VINE, "Could not create directory - %s (%s)", dirname, strerror(errno));
-			link_soak(w->link, length, LINK_FOREVER);
+			link_soak(w->link, length, stoptime);
 			return VINE_MGR_FAILURE;
 		}
 	}
@@ -123,12 +128,12 @@ static vine_result_code_t vine_manager_get_file_contents(struct vine_manager *q,
 	int fd = open(local_name, O_WRONLY | O_TRUNC | O_CREAT, 0777);
 	if (fd < 0) {
 		debug(D_NOTICE, "Cannot open file %s for writing: %s", local_name, strerror(errno));
-		link_soak(w->link, length, LINK_FOREVER);
+		link_soak(w->link, length, stoptime);
 		return VINE_MGR_FAILURE;
 	}
 
 	// Write the data on the link to file.
-	int64_t actual = link_stream_to_fd(w->link, fd, length, LINK_FOREVER);
+	int64_t actual = link_stream_to_fd(w->link, fd, length, stoptime);
 
 	fchmod(fd, mode);
 
@@ -162,7 +167,7 @@ static vine_result_code_t vine_manager_get_symlink_contents(struct vine_manager 
 {
 	char *target = malloc(length);
 
-	int actual = link_read(w->link, target, length, LINK_FOREVER);
+	int actual = link_read(w->link, target, length, time(0) + q->short_timeout);
 	if (actual != length) {
 		free(target);
 		return VINE_WORKER_FAILURE;
