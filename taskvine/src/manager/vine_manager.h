@@ -138,7 +138,7 @@ struct vine_manager {
 	/* Primary data structures for tracking task state. */
 
 	struct itable *tasks;           /* Maps task_id -> vine_task of all tasks in any state. */
-	int standard_tasks_count;       /* Number of standard tasks in the tasks table, which vine_empty() reports. */
+	int standard_tasks_count;       /* Number of standard tasks in the tasks table, so that vine_empty() takes constant time. */
 	struct skip_list   *ready_tasks;       /* Skip list of vine_task that are waiting to execute. */
 	struct itable   *running_table;      /* Table of vine_task that are running at workers. */
 	struct list   *waiting_retrieval_list;      /* List of vine_task that are waiting to be retrieved. */
@@ -264,7 +264,7 @@ struct vine_manager {
 	int temp_replica_count;       /* Number of replicas per temp file */
 	int clean_redundant_replicas; /* If true, remove redundant replicas of temp files to save disk space. */
 	int shift_disk_load;          /* If true, shift storage burden to more available workers to minimize disk usage peaks. */
-	int external_recovery_handling; /* If true, recovery tasks are returned by vine_wait to the user. By default they are handled internally. */
+	int external_recovery_handling; /* If true, recovery tasks are returned by vine_wait to the user. */
 
 	double resource_submit_multiplier; /* Factor to permit overcommitment of resources at each worker.  */
 	double bandwidth_limit;            /* Artificial limit on bandwidth of manager<->worker transfers. */

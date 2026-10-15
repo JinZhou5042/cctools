@@ -3805,8 +3805,7 @@ static void vine_manager_create_recovery_tasks(struct vine_manager *q, struct vi
 				recovery_task->type = VINE_TASK_TYPE_RECOVERY;
 			}
 
-			/* A task submitted again for the same output, such as a retry, replaces the recovery task of the earlier
-			 * one. The earlier one mounts the file too, so keeping it would stop the file from ever being deleted. */
+			/* A new task that writes the same file (such as a rerun) replaces the earlier recovery task. */
 			struct vine_task *previous = m->file->recovery_task;
 			m->file->recovery_task = vine_task_addref(recovery_task);
 			vine_task_delete(previous);
@@ -5280,8 +5279,6 @@ static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_t
 		break;
 	}
 
-	vine_perf_log_write_update(q, 0);
-
 	return old_state;
 }
 
@@ -5560,7 +5557,6 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 	}
 	list_delete(instances);
 
-	/* The manager owns a template once it is installed, so removing the library frees it. */
 	struct vine_task *library_template = hash_table_remove(q->library_templates, name);
 	vine_task_delete(library_template);
 	debug(D_VINE, "All instances and the template for library %s have been removed", name);
@@ -6009,6 +6005,8 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		if (q->monitor_mode) {
 			update_resource_report(q);
 		}
+
+		vine_perf_log_write_update(q, 0);
 		END_ACCUM_TIME(q, time_internal);
 
 		// break loop if there is a task to be returned to the user; or if prefering dispatching, if there
@@ -6222,10 +6220,10 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 
 		// if we got here, no events were triggered this time around.
 		// if we went through the entire ready list without finding a task to dispatch,
-		// or no worker has room for a task, we set the nothing_happened_last_wait_cycle flag
-		// so that link_poll waits for some time the next time around, or return retrieved
-		// tasks if there some available.
-		if ((!skip_list_get(q->ready_tasks_cr, NULL) || q->dispatch_blocked) && list_size(q->retrieved_list) < 1) {
+		// or we are still waiting for workers, or no worker has room for a task,
+		// we set the nothing_happened_last_wait_cycle flag so that link_poll waits for some time
+		// the next time around, or return retrieved tasks if there some available.
+		if ((!skip_list_get(q->ready_tasks_cr, NULL) || waiting_for_workers || q->dispatch_blocked) && list_size(q->retrieved_list) < 1) {
 			q->nothing_happened_last_wait_cycle = 1;
 		}
 	}

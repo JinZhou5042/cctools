@@ -148,6 +148,15 @@ static int link_squelch()
 	return 1;
 }
 
+static int link_close_on_exec(struct link *link)
+{
+	int flags = fcntl(link->fd, F_GETFD);
+	if (flags == -1) {
+		return 0;
+	}
+	return fcntl(link->fd, F_SETFD, flags | FD_CLOEXEC) != -1;
+}
+
 int link_keepalive(struct link *link, int onoff)
 {
 	int result, value;
@@ -526,12 +535,9 @@ struct link *link_serve_address(const char *addr, int port)
 	if (link->fd < 0)
 		goto failure;
 
-	value = fcntl(link->fd, F_GETFD);
-	if (value == -1)
+	if (!link_close_on_exec(link)) {
 		goto failure;
-	value |= FD_CLOEXEC;
-	if (fcntl(link->fd, F_SETFD, value) == -1)
-		goto failure;
+	}
 
 	value = 1;
 	setsockopt(link->fd, SOL_SOCKET, SO_REUSEADDR, (void *)&value, sizeof(value));
@@ -747,6 +753,9 @@ struct link *link_accept(struct link *parent, time_t stoptime)
 		}
 	} while (1);
 
+	if (!link_close_on_exec(link)) {
+		goto failure;
+	}
 	if (!link_nonblocking(link, 1))
 		goto failure;
 	if (!link_address_remote(link, link->raddr, &link->rport))
@@ -790,6 +799,10 @@ struct link *link_connect(const char *addr, int port, time_t stoptime)
 	link->fd = socket(address.ss_family, SOCK_STREAM, 0);
 	if (link->fd < 0)
 		goto failure;
+
+	if (!link_close_on_exec(link)) {
+		goto failure;
+	}
 
 	link_window_configure(link);
 

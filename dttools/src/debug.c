@@ -38,7 +38,6 @@ static pid_t (*debug_child_getpid)(void) = 0;
 static char debug_program_name[PATH_MAX];
 static int64_t debug_flags = D_NOTICE | D_ERROR | D_FATAL;
 static pid_t debug_cached_pid = 0;
-static int debug_time_zone_cached = 0;
 
 struct flag_info {
 	const char *name;
@@ -191,21 +190,7 @@ static void do_debug(int64_t flags, const char *fmt, va_list args)
 		struct tm tm_storage;
 		struct tm *tm;
 		gettimeofday(&tv, 0);
-		/* Background threads also log, so use the reentrant form instead of the shared static result. */
 		tm = localtime_r(&tv.tv_sec, &tm_storage);
-
-		/*
-		If the TZ environment variable is not set, then every single call
-		to localtime() results in a stat("/etc/localtime") which impacts
-		the minimum latency of a debug event.
-		*/
-
-		if (!debug_time_zone_cached) {
-			if (!getenv("TZ")) {
-				setenv("TZ", tm->tm_zone, 0);
-			}
-			debug_time_zone_cached = 1;
-		}
 
 		/* Fetch the pid just once and use it multiple times. */
 		pid_t pid = getpid();

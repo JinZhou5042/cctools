@@ -1111,20 +1111,14 @@ class Manager(object):
         task._manager_will_free = True
 
     ##
-    # Remove a library from all connected workers, and undeclare the code
-    # that @ref ndcctools.taskvine.manager.Manager.create_library_from_functions generated for it.
-    # Its environment stays declared, because it may be shared with other tasks or reused.
+    # Remove a library from all connected workers
     #
     # @param self   Reference to the current manager object.
     # @param name   Name of the library to be removed.
     def remove_library(self, name):
         libtask = self._library_table.pop(name)
         cvine.vine_manager_remove_library(self._taskvine, name)
-        # The manager freed the installed library task, so the Python object must not reach it again.
         libtask._task = None
-        for f in libtask._library_files:
-            self.undeclare_file(f)
-        libtask._library_files = []
 
     ##
     # Check whether a libray exists on the manager or not
@@ -1232,6 +1226,7 @@ class Manager(object):
             t = LibraryTask(f"{init_command} python {library_code_name}", library_name)
         else:
             t = LibraryTask(f"python {library_code_name}", library_name)
+        t.manager = self
 
         # Declare the environment if needed.
         if add_env:

@@ -169,32 +169,6 @@ void vine_task_reset(struct vine_task *t)
 	retract_mounts_on_reset(t->output_mounts);
 }
 
-/* The copy helpers walk the source list with a cursor of their own. LIST_ITERATE would move the cursor stored in the
- * list, which ends any walk of the same list that a caller of vine_task_copy() is in the middle of. */
-/* The copy helpers walk the source list with a cursor of their own. LIST_ITERATE would move the cursor stored in the
- * list, which ends any walk of the same list that a caller of vine_task_copy() is in the middle of. */
-static void vine_task_mount_list_copy(struct list *destination, struct list *list)
-{
-	struct list_cursor *cur = list_cursor_create(list);
-	struct vine_mount *mount;
-
-	for (list_seek(cur, 0); list_get(cur, (void **)&mount); list_next(cur)) {
-		list_push_tail(destination, vine_mount_copy(mount));
-	}
-	list_cursor_destroy(cur);
-}
-
-static void vine_task_string_list_copy(struct list *destination, struct list *string_list)
-{
-	struct list_cursor *cur = list_cursor_create(string_list);
-	char *var;
-
-	for (list_seek(cur, 0); list_get(cur, (void **)&var); list_next(cur)) {
-		list_push_tail(destination, xxstrdup(var));
-	}
-	list_cursor_destroy(cur);
-}
-
 struct vine_task *vine_task_addref(struct vine_task *t)
 {
 	if (!t)
@@ -210,6 +184,15 @@ struct vine_task *vine_task_copy(const struct vine_task *task)
 		return 0;
 
 	struct vine_task *new = vine_task_create(task->command_line);
+
+	list_delete(new->input_mounts);
+	new->input_mounts = list_copy(task->input_mounts, (void *)vine_mount_copy);
+	list_delete(new->output_mounts);
+	new->output_mounts = list_copy(task->output_mounts, (void *)vine_mount_copy);
+	list_delete(new->env_list);
+	new->env_list = list_copy(task->env_list, (void *)xxstrdup);
+	list_delete(new->feature_list);
+	new->feature_list = list_copy(task->feature_list, (void *)xxstrdup);
 
 	/* Reset the task ID so that this will get a new one at submit time. */
 	new->task_id = 0;
@@ -236,10 +219,6 @@ struct vine_task *vine_task_copy(const struct vine_task *task)
 		vine_task_set_snapshot_file(new, task->monitor_snapshot_file);
 	}
 
-	vine_task_mount_list_copy(new->input_mounts, task->input_mounts);
-	vine_task_mount_list_copy(new->output_mounts, task->output_mounts);
-	vine_task_string_list_copy(new->env_list, task->env_list);
-	vine_task_string_list_copy(new->feature_list, task->feature_list);
 	new->function_slots_requested = task->function_slots_requested;
 
 	/* Scheduling features of task are copied. */

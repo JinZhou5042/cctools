@@ -94,11 +94,12 @@ def installed(manager, name, modules=(), files=None, hoisted=None, edata_cache=N
         yield run_node.__name__
     finally:
         try:
-            # Removing the library also undeclares the code that the Manager generated for it. A library that failed
-            # too often was already removed by the Manager, and removing it here still undeclares that code.
+            # A library that failed too often was already removed by the Manager, and is removed here all the same.
             if installed_library:
                 manager.remove_library(name)
         finally:
+            # Dropping the library task undeclares the code that the Manager generated for it.
+            library = None
             try:
                 for file in inputs:
                     manager.undeclare_file(file)

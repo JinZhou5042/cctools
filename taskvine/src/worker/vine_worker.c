@@ -309,24 +309,22 @@ void send_async_message(struct link *l, const char *fmt, ...)
 	pending_async_link = l;
 
 	va_list va;
-	char *message = malloc(VINE_LINE_MAX);
 	va_start(va, fmt);
-	/* Use vsnprintf (not vsprintf) so an over-length message is truncated
-	 * rather than overflowing this fixed-size heap buffer. */
-	vsnprintf(message, VINE_LINE_MAX, fmt, va);
+	int length = vsnprintf(NULL, 0, fmt, va);
+	va_end(va);
+
+	/* Abort if the message is longer than VINE_LINE_MAX. */
+	if (length >= VINE_LINE_MAX) {
+		fatal("message to the manager is %d bytes, more than VINE_LINE_MAX", length);
+	}
+
+	char *message = xxmalloc(length + 1);
+	va_start(va, fmt);
+	vsnprintf(message, length + 1, fmt, va);
 	va_end(va);
 
 	list_push_tail(pending_async_messages, message);
 	deliver_async_messages(l); // attempt to deliver message, will be delivered later if buffer is full.
-}
-
-/* Queue a message that is already allocated and may be longer than VINE_LINE_MAX, and attempt to deliver it. */
-
-static void send_async_string(struct link *l, char *message)
-{
-	pending_async_link = l;
-	list_push_tail(pending_async_messages, message);
-	deliver_async_messages(l);
 }
 
 /* Send asynchronous task completion messages for current complete processes */
@@ -636,16 +634,22 @@ Send a message to the manager with my current resources.
 
 static void send_resource_update(struct link *manager)
 {
+	struct vine_resources *r = total_resources;
+
 	// if workers are set to expire in some time, send the expiration time to manager
 	if (options->manual_wall_time_option > 0) {
 		options->end_time = worker_start_time + (options->manual_wall_time_option * 1e6);
 	}
 
-	/* The resource lines are written directly, so queued messages go first and none is cut. */
-	if (!flush_async_messages(manager, LINK_FOREVER)) {
-		return;
-	}
-	vine_resources_send(manager, total_resources, LINK_FOREVER);
+	/* The same lines as vine_resources_send(), queued as one message. */
+	send_async_message(manager,
+			"resources\ncores %lf\nmemory %lf\ndisk %lf\ngpus %lf\nworkers %lf\ntag %" PRId64 "\nend\n",
+			r->cores.total,
+			r->memory.total,
+			r->disk.total,
+			r->gpus.total,
+			r->workers.total,
+			r->tag);
 }
 
 /*
@@ -710,15 +714,14 @@ void vine_worker_send_cache_invalid(struct link *manager, const char *cachename,
 		return;
 	}
 
-	/* The error message follows its header in the same queued message, so it cannot overtake the header. */
 	int length = strlen(message);
 	char *transfer_id = hash_table_remove(current_transfers, cachename);
 	if (transfer_id) {
 		debug(D_VINE, "Sending Cache invalid transfer id: %s", transfer_id);
-		send_async_string(manager, string_format("cache-invalid %s %d %s\n%s", cachename, length, transfer_id, message));
+		send_async_message(manager, "cache-invalid %s %d %s\n%s", cachename, length, transfer_id, message);
 		free(transfer_id);
 	} else {
-		send_async_string(manager, string_format("cache-invalid %s %d\n%s", cachename, length, message));
+		send_async_message(manager, "cache-invalid %s %d\n%s", cachename, length, message);
 	}
 }
 
@@ -729,7 +732,7 @@ Send an asynchronous message to the manager indicating where the worker is liste
 static void send_transfer_address(struct link *manager)
 {
 	if (!vine_transfer_server_running()) {
-		send_async_message(manager, "info transfer_port_bind_failed\n");
+		send_async_message(manager, "info transfer_port_bind_failed %d-%d\n", options->transfer_port_min, options->transfer_port_max);
 		return;
 	}
 	char addr[LINK_ADDRESS_MAX];
