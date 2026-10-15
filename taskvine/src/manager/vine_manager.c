@@ -6115,7 +6115,9 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		}
 
 		sent_in_previous_cycle = 0;
-		if (q->wait_for_workers <= hash_table_size(q->worker_table)) {
+		// no task is dispatched until wait_for_workers workers are connected.
+		int waiting_for_workers = q->wait_for_workers > hash_table_size(q->worker_table);
+		if (!waiting_for_workers) {
 			if (q->wait_for_workers > 0) {
 				debug(D_VINE, "Target number of workers reached (%d).", q->wait_for_workers);
 				q->wait_for_workers = 0;
@@ -6374,13 +6376,13 @@ int vine_hungry(struct vine_manager *q)
 
 	timestamp_t current_time = timestamp_get();
 
-	if (current_time - q->time_last_hungry + q->hungry_check_interval > 0) {
+	if (current_time - q->time_last_hungry > q->hungry_check_interval) {
 		q->time_last_hungry = current_time;
 		q->tasks_waiting_last_hungry = skip_list_size(q->ready_tasks);
 		q->tasks_to_sate_hungry = vine_hungry_computation(q);
 	}
 
-	int change = q->tasks_waiting_last_hungry - skip_list_size(q->ready_tasks);
+	int change = skip_list_size(q->ready_tasks) - q->tasks_waiting_last_hungry;
 
 	return MAX(0, q->tasks_to_sate_hungry - change);
 }
@@ -6639,9 +6641,11 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "hungry-minimum")) {
 		q->hungry_minimum = MAX(1, (int)value);
+		q->time_last_hungry = 0;
 
 	} else if (!strcmp(name, "hungry-minimum-factor")) {
 		q->hungry_minimum_factor = MAX(1, (int)value);
+		q->time_last_hungry = 0;
 
 	} else if (!strcmp(name, "immediate-recovery")) {
 		q->immediate_recovery = !!((int)value);
@@ -6763,7 +6767,6 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "max-library-retries")) {
 		q->max_library_retries = MAX(1, value);
-
 	} else if (!strcmp(name, "disk-proportion-available-to-task")) {
 		if (value < 1 && value > 0) {
 			q->disk_proportion_available_to_task = value;
