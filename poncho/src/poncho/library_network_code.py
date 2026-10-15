@@ -93,8 +93,8 @@ def load_function_infile(in_file_path):
         return cloudpickle.load(f)
 
 
-# Read data from worker, start function, and dump result to `outfile`.
-def start_function(in_pipe_fd, thread_limit=1):
+# Read a message from worker: a function invocation, or the cancellation of one.
+def read_message(in_pipe_fd):
     # read length of buffer to read
     buffer_len = b""
     while True:
@@ -108,8 +108,11 @@ def start_function(in_pipe_fd, thread_limit=1):
             buffer_len += c
     buffer_len = int(buffer_len)
     # now read the buffer to get invocation details
-    line = str(os.read(in_pipe_fd, buffer_len), encoding="utf-8")
+    return str(os.read(in_pipe_fd, buffer_len), encoding="utf-8")
 
+
+# Start the function of an invocation, and dump result to `outfile`.
+def start_function(line, thread_limit=1):
     try:
         (
             function_id,
@@ -379,6 +382,7 @@ def main():
         "name": library_info['library_name'],
         "taskid": args.task_id,
         "exec_mode": exec_method,
+        "cancel": exec_method == "fork",
     }
     send_configuration(config, out_pipe_fd, args.worker_pid)
 
@@ -413,8 +417,13 @@ def main():
         for re in rlist:
             # worker has a function, run it
             if re == in_pipe_fd:
-                if exec_method == 'direct':
-                    _, func_id = start_function(in_pipe_fd, thread_limit)
+                line = read_message(in_pipe_fd)
+                if line.startswith("cancel "):
+                    func_id = int(line.split(" ")[1])
+                    for pid in [p for p, f in pid_to_func_id.items() if f == func_id]:
+                        os.kill(pid, signal.SIGKILL)
+                elif exec_method == 'direct':
+                    _, func_id = start_function(line, thread_limit)
                     send_result(
                         out_pipe_fd,
                         args.worker_pid,
@@ -422,7 +431,7 @@ def main():
                         0,
                     )
                 else:
-                    pid, func_id = start_function(in_pipe_fd, thread_limit)
+                    pid, func_id = start_function(line, thread_limit)
                     # pid == -1 indicates a failure during fork/setup of the function execution
                     if pid == -1:
                         send_result(

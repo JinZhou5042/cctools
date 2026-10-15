@@ -109,9 +109,17 @@ static struct link *pending_async_link = 0;
  * their exit status remains to be collected, which the main loop does without waiting and a disconnect does waiting. */
 static struct itable *procs_killed = NULL;
 
+/* Table of killed function calls still running in their library, indexed by task_id, with the library as value. */
+static struct itable *procs_killed_functions = NULL;
+
 /* Table of all processes with results to be sent back, indexed by task_id. */
 /* These are additional pointers into procs_table and should not be deleted */
 static struct itable *procs_complete = NULL;
+
+/* Processes that ended and whose outputs are moving into the cache, in the order they ended. A process is in no other
+ * table but procs_table until continue_stageout() moves it to procs_complete, so it is neither running nor reported.
+ * These are additional pointers into procs_table and should not be deleted. */
+static struct list *procs_stageout = NULL;
 
 /* Table of current transfers and their id. */
 static struct hash_table *current_transfers = NULL;
@@ -210,6 +218,7 @@ extern int vine_hack_do_not_compute_cached_name;
 
 static int flush_async_messages(struct link *l, time_t stoptime);
 static void finish_running_task(struct vine_process *p, vine_result_t result);
+static void send_round_stats(struct link *manager);
 
 /* Send a printf-formatted message to the current manager, or to a peer. */
 
@@ -843,6 +852,7 @@ static int start_process(struct vine_process *p, struct link *manager)
 This process has ended so mark it complete and
 account for the resources as necessary.
 Should maintain parallel structure to start_process() above.
+With a manager, its outputs are moved into the cache by continue_stageout(), which then reports it complete.
 */
 
 static void reap_process(struct vine_process *p, struct link *manager)
@@ -857,16 +867,16 @@ static void reap_process(struct vine_process *p, struct link *manager)
 	xpu_tracker_free(gpu_tracker, p->task->task_id);
 	xpu_tracker_free(core_tracker, p->task->task_id);
 
-	if (manager) {
-		vine_sandbox_stageout(p, cache_manager, manager);
-	}
-
 	if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
 		p->library_process->functions_running--;
 	}
 
 	itable_remove(procs_running, p->task->task_id);
-	itable_insert(procs_complete, p->task->task_id, p);
+	if (manager) {
+		list_push_tail(procs_stageout, p);
+	} else {
+		itable_insert(procs_complete, p->task->task_id, p);
+	}
 
 	struct stat info;
 	if (!stat(p->output_file_name, &info)) {
@@ -877,6 +887,28 @@ static void reap_process(struct vine_process *p, struct link *manager)
 
 	total_task_execution_time += (p->execution_end - p->execution_start);
 	total_tasks_executed++;
+}
+
+/*
+Move the outputs of ended processes into the cache, in the order the processes ended, until the budget expires, and
+then report each process complete. Measuring a directory output resumes in the next round where the budget stopped
+it. Each call makes progress even with an expired budget, so a process whose outputs are regular files is reported in
+the round it ended.
+*/
+
+static void continue_stageout(struct link *manager, const struct budget *b)
+{
+	struct vine_process *p;
+	while ((p = list_peek_head(procs_stageout))) {
+		if (!vine_sandbox_stageout(p, cache_manager, manager, b)) {
+			return;
+		}
+		list_pop_head(procs_stageout);
+		itable_insert(procs_complete, p->task->task_id, p);
+		if (budget_expired(b)) {
+			return;
+		}
+	}
 }
 
 /*
@@ -944,6 +976,13 @@ static void reap_library_functions(struct vine_process *library)
 			p->library_process = NULL;
 		}
 	}
+
+	ITABLE_ITERATE(procs_killed_functions, iteration, task_id, p)
+	{
+		if (p == library) {
+			itable_remove(procs_killed_functions, task_id);
+		}
+	}
 }
 
 /*
@@ -1005,6 +1044,11 @@ static int handle_completed_tasks(struct link *manager)
 
 		/* If p is a library, check to see if any results waiting. */
 		while (vine_process_library_get_result(p, &done_task_id, &done_exit_code)) {
+			if (itable_lookup(procs_killed_functions, done_task_id) == p) {
+				itable_remove(procs_killed_functions, done_task_id);
+				p->functions_running--;
+				continue;
+			}
 			fp = itable_lookup(procs_table, done_task_id);
 			if (fp) {
 				fp->exit_code = done_exit_code;
@@ -1296,10 +1340,18 @@ static int do_kill(int task_id)
 			itable_insert(procs_killed, p->pid, (void *)(uintptr_t)p->pid);
 		}
 		reap_process(p, /* do not stage out */ NULL);
+		if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
+			p->library_process->functions_running++;
+			itable_insert(procs_killed_functions, task_id, p->library_process);
+			if (p->library_process->library_can_cancel) {
+				vine_process_cancel_function(p);
+			}
+		}
 	}
 
 	itable_remove(procs_complete, p->task->task_id);
 	list_remove(procs_waiting, p);
+	list_remove(procs_stageout, p);
 
 	vine_watcher_remove_process(watcher, p);
 
@@ -1354,6 +1406,7 @@ static void kill_all_tasks()
 	assert(itable_size(procs_running) == 0);
 	assert(itable_size(procs_complete) == 0);
 	assert(list_size(procs_waiting) == 0);
+	assert(list_size(procs_stageout) == 0);
 	assert(cores_allocated == 0);
 	assert(memory_allocated == 0);
 	assert(disk_allocated == 0);
@@ -1410,6 +1463,10 @@ static int do_release()
 static void disconnect_manager(struct link *manager)
 {
 	debug(D_VINE, "disconnecting from manager %s:%d", current_manager_address->addr, current_manager_address->port);
+
+	/* Queued messages, such as info vacating, go out before the link closes, unless the link fails or takes no data
+	 * for its idle timeout. */
+	flush_async_messages(manager, LINK_FOREVER);
 	link_close(manager);
 
 	/* Messages that this manager did not take belong to its session, and a partly sent one would corrupt the next. */
@@ -1552,6 +1609,7 @@ static int handle_manager(struct link *manager)
 			abort_flag = 1;
 			r = 1;
 		} else if (!strncmp(line, "check", 6)) {
+			send_round_stats(manager);
 			r = send_keepalive(manager, 0);
 		} else if (!strncmp(line, "auth", 4)) {
 			fprintf(stderr, "vine_worker: this manager requires a password. (use the -P option)\n");
@@ -1641,6 +1699,10 @@ static int process_ready_to_run_now(struct vine_process *p, struct vine_cache *c
 		return 0;
 
 	if (p->task->needs_library) {
+		if (itable_lookup(procs_killed_functions, p->task->task_id)) {
+			return 0;
+		}
+
 		/* Here is where we attach a function to a specific library. */
 		p->library_process = find_running_library_for_function(p->task->needs_library);
 		if (!p->library_process)
@@ -1832,6 +1894,7 @@ static int check_library_startup(struct vine_process *p)
 		if (p->task->func_exec_mode && converted_exec_mode != p->task->func_exec_mode) {
 			ok = 0;
 		}
+		p->library_can_cancel = jx_lookup_boolean(response, "cancel");
 	}
 	if (response) {
 		jx_delete(response);
@@ -1906,16 +1969,16 @@ static void wake_main_loop(void)
 
 /*
 Each round of the main loop waits for the manager, and then works for at most a budget before it waits again. A step
-that may take long, such as measuring the disk, emptying the trash, or reading many buffered messages, checks the
-budget between items and continues in the next round, so the worker answers the manager within the response timeout X
-whatever it is doing. The budget is a tenth of X, so that a round stays well below X even when unbudgeted steps
+that may take long, such as measuring the disk, measuring outputs as they move into the cache, emptying the trash, or
+reading many buffered messages, checks the budget between items and continues in the next round, so the worker answers
+the manager within the response timeout X whatever it is doing. The budget is a tenth of X, so that a round stays well below X even when unbudgeted steps
 (starting and reaping tasks, sending messages) and the one item each budgeted step completes after its budget expires
 add to it. It is at most one second, so a request of the manager never waits long behind background work when X is
 large. When a round leaves work, the next round does not wait for the manager.
 
-Some steps remain unbounded by design: hard-linking a directory input into a sandbox (file_link_recursive), measuring
-a directory output at stage-out, and single system calls. A system call that blocks for longer than X, as on a hung
-disk, is what makes a worker stuck, and the manager then removes it after twice X without progress.
+Some steps remain unbounded by design: hard-linking a directory input into a sandbox (file_link_recursive) and single
+system calls. A system call that blocks for longer than X, as on a hung disk, is what makes a worker stuck, and the
+manager then removes it after twice X without progress.
 */
 
 static timestamp_t round_budget_length()
@@ -1925,17 +1988,123 @@ static timestamp_t round_budget_length()
 
 /* The steps of one round of the main loop, timed to name the longest one when a round takes longer than X. */
 struct round_timer {
-	timestamp_t start;	  /* When the round's work began, after its wait for the manager. */
-	timestamp_t step_start;	  /* When the current step began. */
-	const char *longest_step; /* The step that took longest so far in this round. */
-	timestamp_t longest_time; /* How long that step took, in microseconds. */
+	timestamp_t start;	    /* When the round's work began, after its wait for the manager. */
+	timestamp_t step_start;	    /* When the current step began. */
+	const char *longest_step;   /* The step that took longest so far in this round. Step names contain no spaces. */
+	timestamp_t longest_time;   /* How long that step took, in microseconds. */
+	struct budget_items items;  /* The indivisible items of the round's budgeted steps, the longest of which is U. */
 };
+
+/* Number of buckets of a round histogram. Bucket k counts durations of [2^k, 2^(k+1)) microseconds, bucket 0 also
+ * those under one microsecond, and the last bucket also every longer one. */
+#define ROUND_HISTOGRAM_BUCKETS 32
+
+/* Seconds between the summaries of rounds that the worker writes to its debug log. */
+#define ROUND_SUMMARY_INTERVAL 60
+
+/*
+Statistics of the rounds of the main loop in a window of time, which tell how long the worker is silent because of its
+own work. The worker keeps one window that it reports to the manager with each answer to a check (info round-stats),
+and one that it writes to its debug log every ROUND_SUMMARY_INTERVAL seconds (round summary).
+*/
+struct round_stats {
+	timestamp_t start;			    /* When the window began. */
+	int64_t rounds;				    /* Rounds that ended in the window. */
+	timestamp_t longest_round;		    /* Longest round, in microseconds. */
+	const char *longest_round_step;		    /* Longest step of that round. */
+	timestamp_t longest_round_step_time;	    /* How long that step took, in microseconds. */
+	timestamp_t longest_item;		    /* Longest indivisible item of budgeted work, in microseconds. */
+	int64_t histogram[ROUND_HISTOGRAM_BUCKETS]; /* Rounds by duration. */
+};
+
+static struct round_stats round_report;
+static struct round_stats round_summary;
+
+static void round_stats_reset(struct round_stats *s, timestamp_t now)
+{
+	memset(s, 0, sizeof(*s));
+	s->start = now;
+	s->longest_round_step = "none";
+}
+
+/* Return the histogram bucket of a duration in microseconds. */
+static int round_histogram_bucket(timestamp_t duration)
+{
+	int k = 0;
+	while (duration > 1 && k < ROUND_HISTOGRAM_BUCKETS - 1) {
+		duration >>= 1;
+		k++;
+	}
+	return k;
+}
+
+static void round_stats_add(struct round_stats *s, timestamp_t elapsed, const struct round_timer *t)
+{
+	s->rounds++;
+	s->histogram[round_histogram_bucket(elapsed)]++;
+	if (elapsed >= s->longest_round) {
+		s->longest_round = elapsed;
+		s->longest_round_step = t->longest_step;
+		s->longest_round_step_time = t->longest_time;
+	}
+	if (t->items.longest > s->longest_item) {
+		s->longest_item = t->items.longest;
+	}
+}
+
+/*
+Send the statistics of the rounds since the last report, and begin a new window. The line goes with the answer to a
+check, so the manager can compare the worker's longest round with the longest silence it saw from the worker:
+info round-stats <rounds> <longest round> <its longest step> <that step> <longest item> <window>, durations in
+microseconds. A manager that does not know the line ignores it.
+*/
+
+static void send_round_stats(struct link *manager)
+{
+	timestamp_t now = timestamp_get();
+	struct round_stats *s = &round_report;
+	send_async_message(manager,
+			"info round-stats %" PRId64 " %" PRIu64 " %s %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
+			s->rounds,
+			(uint64_t)s->longest_round,
+			s->longest_round_step,
+			(uint64_t)s->longest_round_step_time,
+			(uint64_t)s->longest_item,
+			(uint64_t)(now > s->start ? now - s->start : 0));
+	round_stats_reset(s, now);
+}
+
+/* Write the statistics of the rounds since the last summary to the debug log, with the histogram of their durations as
+ * bucket:count pairs (see ROUND_HISTOGRAM_BUCKETS), and begin a new window. */
+
+static void log_round_summary(timestamp_t now)
+{
+	struct round_stats *s = &round_summary;
+	char histogram[ROUND_HISTOGRAM_BUCKETS * 24] = "";
+	size_t length = 0;
+	for (int k = 0; k < ROUND_HISTOGRAM_BUCKETS; k++) {
+		if (s->histogram[k] > 0 && length < sizeof(histogram)) {
+			length += snprintf(histogram + length, sizeof(histogram) - length, "%s%d:%" PRId64, length ? "," : "", k, s->histogram[k]);
+		}
+	}
+	debug(D_VINE,
+			"round summary: seconds=%.1f rounds=%" PRId64 " round_max_us=%" PRIu64 " step=%s step_us=%" PRIu64 " item_max_us=%" PRIu64 " log2_us_histogram=%s",
+			(now - s->start) / (double)USECOND,
+			s->rounds,
+			(uint64_t)s->longest_round,
+			s->longest_round_step,
+			(uint64_t)s->longest_round_step_time,
+			(uint64_t)s->longest_item,
+			histogram);
+	round_stats_reset(s, now);
+}
 
 static void round_timer_start(struct round_timer *t)
 {
 	t->start = t->step_start = timestamp_get();
 	t->longest_step = "none";
 	t->longest_time = 0;
+	t->items.longest = 0;
 }
 
 /* End the current step of a round, which was the given one. */
@@ -1950,11 +2119,19 @@ static void round_timer_step(struct round_timer *t, const char *step)
 	t->step_start = now;
 }
 
-/* Report a round that took longer than X, which breaks the worker's promise to answer the manager within X. */
+/* Add a round to the statistics, and report a round that took longer than X, which breaks the worker's promise to
+ * answer the manager within X. */
 
 static void round_timer_finish(struct round_timer *t)
 {
-	timestamp_t elapsed = timestamp_get() - t->start;
+	timestamp_t now = timestamp_get();
+	timestamp_t elapsed = now > t->start ? now - t->start : 0;
+	round_stats_add(&round_report, elapsed, t);
+	round_stats_add(&round_summary, elapsed, t);
+	if (now >= round_summary.start + ROUND_SUMMARY_INTERVAL * USECOND || now < round_summary.start) {
+		log_round_summary(now);
+	}
+
 	if (elapsed > (timestamp_t)options->response_timeout * USECOND) {
 		debug(D_NOTICE,
 				"a round of the main loop took %.3f s, more than the response timeout of %d s; its longest step was %s (%.3f s)",
@@ -1972,6 +2149,10 @@ static void vine_worker_serve_manager(struct link *manager)
 	debug(D_VINE, "working for manager at %s:%d.\n", current_manager_address->addr, current_manager_address->port);
 
 	reset_idle_timer();
+
+	timestamp_t now = timestamp_get();
+	round_stats_reset(&round_report, now);
+	round_stats_reset(&round_summary, now);
 
 	/* Non-zero when the last round left work that continues in the next round, which then does not wait. */
 	int work_remains = 0;
@@ -2025,24 +2206,31 @@ static void vine_worker_serve_manager(struct link *manager)
 		/* Handle the messages already in the link's buffer until the budget expires, as the manager does, so that a
 		 * long task, such as one with thousands of inputs, is read at once rather than one line per round. */
 		int ok = 1;
+		budget_items_begin(&round, &timer.items);
 		if (manager_activity) {
 			do {
 				ok &= handle_manager(manager);
 			} while (ok && !abort_flag && !link_buffer_empty(manager) && !budget_expired(&round));
 		}
-		round_timer_step(&timer, "manager messages");
+		budget_items_end(&round);
+		round_timer_step(&timer, "manager-messages");
 
 		expire_procs_running();
 
 		ok &= handle_completed_tasks(manager);
 		reap_killed_processes(0);
-		round_timer_step(&timer, "completed tasks");
+		round_timer_step(&timer, "completed-tasks");
+
+		budget_items_begin(&round, &timer.items);
+		continue_stageout(manager, &round);
+		budget_items_end(&round);
+		round_timer_step(&timer, "stage-out");
 
 		ok &= vine_cache_check_xfer_files(cache_manager, manager);
-		round_timer_step(&timer, "finished transfers");
+		round_timer_step(&timer, "finished-transfers");
 
 		measure_worker_resources();
-		round_timer_step(&timer, "resource measurement");
+		round_timer_step(&timer, "resource-measurement");
 
 		if (!enforce_worker_promises(manager)) {
 			finish_running_tasks(VINE_RESULT_FORSAKEN);
@@ -2054,8 +2242,10 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		/* end a running processes if goes above its declared limits.
 		 * Mark offending process as RESOURCE_EXHASTION. */
+		budget_items_begin(&round, &timer.items);
 		continue_disk_measurement(&round);
-		round_timer_step(&timer, "disk measurement");
+		budget_items_end(&round);
+		round_timer_step(&timer, "disk-measurement");
 
 		/* end running processes if worker resources are exhasusted, and marked
 		 * them as FORSAKEN, so they can be resubmitted somewhere else. */
@@ -2073,7 +2263,7 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		/* deliver queued asynchronous messages if available */
 		deliver_async_messages(manager);
-		round_timer_step(&timer, "transfers, libraries, and messages");
+		round_timer_step(&timer, "transfers-libraries-messages");
 
 		int task_event = 0;
 		if (ok) {
@@ -2096,7 +2286,7 @@ static void vine_worker_serve_manager(struct link *manager)
 				}
 			}
 		}
-		round_timer_step(&timer, "task start");
+		round_timer_step(&timer, "task-start");
 
 		if (ok) {
 			if (vine_watcher_check(watcher)) {
@@ -2109,10 +2299,12 @@ static void vine_worker_serve_manager(struct link *manager)
 				send_stats_update(manager);
 			}
 		}
-		round_timer_step(&timer, "task reports");
+		round_timer_step(&timer, "task-reports");
 
 		/* Delete what was moved to the trash, after everything else this round. */
+		budget_items_begin(&round, &timer.items);
 		int trash_done = trash_empty_budget(&round);
+		budget_items_end(&round);
 		round_timer_step(&timer, "trash");
 
 		round_timer_finish(&timer);
@@ -2121,7 +2313,7 @@ static void vine_worker_serve_manager(struct link *manager)
 			break;
 		}
 
-		work_remains = !link_buffer_empty(manager) || disk_measurement_active || !trash_done;
+		work_remains = !link_buffer_empty(manager) || list_size(procs_stageout) > 0 || disk_measurement_active || !trash_done;
 
 		// Reset options->idle_stoptime if something interesting is happening at this worker.
 		if (list_size(procs_waiting) > 0 || itable_size(procs_table) > 0 || itable_size(procs_complete) > 0) {
@@ -2550,7 +2742,9 @@ void vine_worker_create_structures()
 	procs_waiting = list_create();
 	pending_async_messages = list_create();
 	procs_complete = itable_create(0);
+	procs_stageout = list_create();
 	procs_killed = itable_create(0);
+	procs_killed_functions = itable_create(0);
 	disk_measurement_tasks = list_create();
 
 	current_transfers = hash_table_create(0, 0);
@@ -2582,8 +2776,12 @@ static void vine_worker_delete_structures()
 		itable_delete(procs_running);
 	if (procs_complete)
 		itable_delete(procs_complete);
+	if (procs_stageout)
+		list_delete(procs_stageout);
 	if (procs_killed)
 		itable_delete(procs_killed);
+	if (procs_killed_functions)
+		itable_delete(procs_killed_functions);
 	if (disk_measurement_tasks)
 		list_delete(disk_measurement_tasks);
 	if (procs_waiting)

@@ -63,6 +63,9 @@ struct vine_process {
 	/* If this is a library process, whether the library is ready to execute functions. */
 	int library_ready;
 
+	/* If this is a library process, whether the library stops a function call on request. */
+	int library_can_cancel;
+
 	/* expected disk usage by the process. If no cache is used, it is the same as in task. */
 	int64_t disk;
 
@@ -75,10 +78,19 @@ struct vine_process {
 
 	/* state between complete disk measurements. */
 	struct path_disk_size_info *disk_measurement_state;
+
+	/* While the outputs of a completed process move into the cache (vine_sandbox_stageout), the next output to move,
+	 * its mode and modification time once observed (mode zero before), and, if it is a directory, the state of its
+	 * measurement. */
+	struct list_cursor *output_cursor;
+	struct path_disk_size_info *output_measurement_state;
+	int output_mode;
+	time_t output_mtime;
 };
 
 struct vine_process * vine_process_create( struct vine_task *task, vine_process_type_t type );
 int   vine_process_execute( struct vine_process *p );
+int   vine_process_cancel_function( struct vine_process *p );
 int   vine_process_is_complete( struct vine_process *p );
 int   vine_process_wait( struct vine_process *p );
 void  vine_process_kill( struct vine_process *p );

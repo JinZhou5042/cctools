@@ -52,6 +52,7 @@ See the file COPYING for details.
 #include "jx_print.h"
 #include "link.h"
 #include "link_auth.h"
+#include "link_queue.h"
 #include "list.h"
 #include "load_average.h"
 #include "macros.h"
@@ -287,9 +288,55 @@ static int keepalive_timeout(struct vine_manager *q)
 }
 
 /*
-This function sends a message to the worker and records the time the message is
-successfully sent. This timestamp is used to determine when to send keepalive checks.
+Return the microseconds of work in one step of vine_wait(): a tenth of the response timeout, at most one second, as a
+worker's round. Message handling, retrievals, accepting workers, and writing to workers stop when the step's budget
+expires and continue in the next step, so one step ends within about the budget plus one indivisible action.
 */
+/* The link of a removed worker whose sealed queue still holds a final message, such as exit or release. */
+struct departing_link {
+	struct link *link;
+	struct link_queue *queue;
+};
+
+static void departing_link_delete(struct departing_link *d)
+{
+	link_queue_delete(d->queue);
+	link_close(d->link);
+	free(d);
+}
+
+static timestamp_t round_budget_length(struct vine_manager *q)
+{
+	timestamp_t length = (timestamp_t)q->response_timeout * ONE_SECOND / 10;
+	return MIN(length, ONE_SECOND);
+}
+
+/*
+Add data to a worker's queue. A queue that held nothing writes at once what the link takes, as a direct write would,
+for at most the rest of the current step. Later data waits until the poll finds the link writable.
+*/
+static int queue_to_worker(struct vine_manager *q, struct vine_worker_info *w, int was_empty, int queued)
+{
+	if (!queued) {
+		return -1;
+	}
+	if (was_empty && !link_queue_send(w->queue, q->round.end)) {
+		return -1;
+	}
+	return 0;
+}
+
+int vine_manager_send_data(struct vine_manager *q, struct vine_worker_info *w, const char *data, size_t length)
+{
+	int was_empty = link_queue_empty(w->queue);
+	return queue_to_worker(q, w, was_empty, link_queue_push(w->queue, data, length));
+}
+
+int vine_manager_send_file(struct vine_manager *q, struct vine_worker_info *w, const char *path, int64_t offset, int64_t length)
+{
+	int was_empty = link_queue_empty(w->queue);
+	return queue_to_worker(q, w, was_empty, link_queue_push_file(w->queue, path, offset, length));
+}
 
 __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager *q, struct vine_worker_info *w, const char *fmt, ...)
 {
@@ -305,19 +352,21 @@ __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager 
 
 	debug(D_VINE, "tx to %s (%s): %s", w->hostname, w->addrport, buffer_tostring(B));
 
-	/* The worker link fails a write that makes no progress for the idle timeout, however long the message. */
-	int result = link_putlstring(w->link, buffer_tostring(B), buffer_pos(B), LINK_FOREVER);
-	if (result < 0 && errno != EPIPE) {
-		/* A worker that stopped taking a message may have received part of it, so its stream is lost. Later messages
-		 * fail at once with EPIPE instead of each waiting the idle timeout, and the worker is removed when it reads
-		 * the end of the stream or stops answering keepalives. */
-		debug(D_VINE, "failed to send to %s (%s), so later messages to it fail at once", w->hostname, w->addrport);
-		shutdown(link_fd(w->link), SHUT_WR);
-	}
+	int length = buffer_pos(B);
+	int result = vine_manager_send_data(q, w, buffer_tostring(B), length);
 
 	buffer_free(B);
 
-	return result;
+	return result < 0 ? -1 : length;
+}
+
+/*
+Write everything queued for a worker before the manager reads its reply to a request, or writes to its link directly.
+The write waits for room and fails when the worker makes no progress for the idle timeout of its link.
+*/
+static int flush_worker_queue(struct vine_worker_info *w)
+{
+	return link_queue_flush(w->queue, LINK_FOREVER);
 }
 
 /*
@@ -386,6 +435,173 @@ static void handle_idle_disconnect_request(struct vine_manager *q, struct vine_w
 	return;
 }
 
+/*
+Silence attribution. The manager notes when it reads new data of a worker from its link, which is when the link's
+buffer was empty before the read, so that messages read together count as one arrival rather than as gaps of zero. The
+gap between two such reads is the silence of the worker as the manager saw it, made of the worker's own work, the
+network, and the steps of the manager, during which it reads nothing. A worker reports its rounds with each answer to a
+check, and the manager logs them next to its own observations, so that a long gap can be attributed.
+*/
+
+/* Return the histogram bucket of a duration in microseconds. */
+static int silence_bucket(timestamp_t duration)
+{
+	int k = 0;
+	while (duration > 1 && k < VINE_SILENCE_BUCKETS - 1) {
+		duration >>= 1;
+		k++;
+	}
+	return k;
+}
+
+/* Return the microseconds from earlier to later, or zero if the clock stepped back. */
+static timestamp_t silence_elapsed(timestamp_t earlier, timestamp_t later)
+{
+	return later > earlier ? later - earlier : 0;
+}
+
+/* Record that the manager read new data of a worker at the given time. */
+static void silence_record_read(struct vine_manager *q, struct vine_worker_info *w, timestamp_t now)
+{
+	struct vine_silence_stats *s = &q->silence;
+	if (!w->silence_last_read) {
+		w->silence_window_start = now;
+	} else {
+		timestamp_t gap = silence_elapsed(w->silence_last_read, now);
+		s->gaps++;
+		s->gap_histogram[silence_bucket(gap)]++;
+		s->gap_max = MAX(s->gap_max, gap);
+		w->silence_gap_max = MAX(w->silence_gap_max, gap);
+
+		/* The first read after a keepalive check ends the wait for an answer to it. */
+		if (w->last_update_msg_time > w->silence_last_read) {
+			timestamp_t wait = silence_elapsed(w->last_update_msg_time, now);
+			s->check_max = MAX(s->check_max, wait);
+			w->silence_check_max = MAX(w->silence_check_max, wait);
+		}
+	}
+	w->silence_last_read = now;
+}
+
+/* Record the step of the manager that ends now, which began when the last poll returned. */
+static void silence_record_step(struct vine_manager *q, timestamp_t now)
+{
+	if (!q->link_poll_end) {
+		return;
+	}
+	struct vine_silence_stats *s = &q->silence;
+	timestamp_t step = silence_elapsed(q->link_poll_end, now);
+	s->steps++;
+	s->step_histogram[silence_bucket(step)]++;
+	s->step_max = MAX(s->step_max, step);
+
+	timestamp_t second = now / ONE_SECOND;
+	int slot = second % VINE_SILENCE_STEP_SLOTS;
+	if (s->step_slot_second[slot] != second) {
+		s->step_slot_second[slot] = second;
+		s->step_slot_max[slot] = 0;
+	}
+	s->step_slot_max[slot] = MAX(s->step_slot_max[slot], step);
+}
+
+/* Return the longest step of the manager that ended since the given time, including the current step so far, looking
+ * back at most VINE_SILENCE_STEP_SLOTS seconds. */
+static timestamp_t silence_step_max_since(struct vine_manager *q, timestamp_t since, timestamp_t now)
+{
+	struct vine_silence_stats *s = &q->silence;
+	timestamp_t last = now / ONE_SECOND;
+	timestamp_t first = since / ONE_SECOND;
+	if (last >= VINE_SILENCE_STEP_SLOTS && first < last - VINE_SILENCE_STEP_SLOTS + 1) {
+		first = last - VINE_SILENCE_STEP_SLOTS + 1;
+	}
+
+	timestamp_t longest = q->link_poll_end ? silence_elapsed(q->link_poll_end, now) : 0;
+	for (timestamp_t second = first; second <= last; second++) {
+		int slot = second % VINE_SILENCE_STEP_SLOTS;
+		if (s->step_slot_second[slot] == second) {
+			longest = MAX(longest, s->step_slot_max[slot]);
+		}
+	}
+	return longest;
+}
+
+/*
+Log the round statistics of a worker next to the longest gap between reads of its data, the longest wait for an answer
+to a check, and the longest step of the manager since its last report, and begin a new window. The worker sends
+info round-stats <rounds> <longest round> <its longest step> <that step> <longest item> <window>, in microseconds.
+*/
+static void handle_round_stats(struct vine_manager *q, struct vine_worker_info *w, const char *value)
+{
+	long long rounds;
+	unsigned long long round_max;
+	unsigned long long step_time;
+	unsigned long long item_max;
+	unsigned long long window = 0;
+	char step[64];
+	if (sscanf(value, "%lld %llu %63s %llu %llu %llu", &rounds, &round_max, step, &step_time, &item_max, &window) < 5) {
+		return;
+	}
+
+	struct vine_silence_stats *s = &q->silence;
+	s->reports++;
+	s->round_max = MAX(s->round_max, (timestamp_t)round_max);
+
+	timestamp_t now = timestamp_get();
+	debug(D_VINE,
+			"silence: worker=%s host=%s gap_max_us=%" PRIu64 " check_max_us=%" PRIu64 " manager_step_max_us=%" PRIu64
+			" rounds=%lld round_max_us=%llu step=%s step_us=%llu item_max_us=%llu window_us=%llu",
+			w->addrport,
+			w->hostname,
+			(uint64_t)w->silence_gap_max,
+			(uint64_t)w->silence_check_max,
+			(uint64_t)silence_step_max_since(q, w->silence_window_start, now),
+			rounds,
+			round_max,
+			step,
+			step_time,
+			item_max,
+			window);
+
+	/* The gaps of the next window begin at the last read. */
+	w->silence_window_start = w->silence_last_read ? w->silence_last_read : now;
+	w->silence_gap_max = 0;
+	w->silence_check_max = 0;
+}
+
+/* Write a histogram as bucket:count pairs of its non-empty buckets. */
+static void silence_format_histogram(const int64_t *histogram, char *text, size_t size)
+{
+	size_t length = 0;
+	text[0] = 0;
+	for (int k = 0; k < VINE_SILENCE_BUCKETS && length < size; k++) {
+		if (histogram[k] > 0) {
+			length += snprintf(text + length, size - length, "%s%d:%" PRId64, length ? "," : "", k, histogram[k]);
+		}
+	}
+}
+
+/* Log what the manager observed about silences over its lifetime. */
+static void silence_log_summary(struct vine_manager *q)
+{
+	struct vine_silence_stats *s = &q->silence;
+	char gaps[VINE_SILENCE_BUCKETS * 24];
+	char steps[VINE_SILENCE_BUCKETS * 24];
+	silence_format_histogram(s->gap_histogram, gaps, sizeof(gaps));
+	silence_format_histogram(s->step_histogram, steps, sizeof(steps));
+	debug(D_VINE,
+			"silence summary: gaps=%" PRId64 " gap_max_us=%" PRIu64 " check_max_us=%" PRIu64 " reports=%" PRId64 " round_max_us=%" PRIu64
+			" steps=%" PRId64 " manager_step_max_us=%" PRIu64 " gap_log2_us_histogram=%s manager_step_log2_us_histogram=%s",
+			s->gaps,
+			(uint64_t)s->gap_max,
+			(uint64_t)s->check_max,
+			s->reports,
+			(uint64_t)s->round_max,
+			s->steps,
+			(uint64_t)s->step_max,
+			gaps,
+			steps);
+}
+
 /* Handle an info message coming from the worker that provides a variety of metrics. */
 
 static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_info *w, char *line)
@@ -418,6 +634,8 @@ static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_in
 		/* The Manager cannot reach this Worker's transfer port, so the Worker opens the connections that bring its
 		 * files to the data port. */
 		w->transfer_connect_back = atoi(value) != 0;
+	} else if (string_prefix_is(field, "round-stats")) {
+		handle_round_stats(q, w, value);
 	}
 
 	// Note we always mark info messages as processed, as they are optional.
@@ -801,6 +1019,9 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 	 * continues over several lines, is bounded by progress instead of by its length. */
 	time_t stoptime = LINK_FOREVER;
 
+	/* A read into an empty buffer brings new data of the worker, which ends a silence. */
+	int new_data = link_buffer_empty(w->link);
+
 	int result = link_readline(w->link, line, length, stoptime);
 
 	if (result <= 0) {
@@ -808,6 +1029,9 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 	}
 
 	w->last_msg_recv_time = timestamp_get();
+	if (new_data) {
+		silence_record_read(q, w, w->last_msg_recv_time);
+	}
 
 	debug(D_VINE, "rx from %s (%s): %s", w->hostname, w->addrport, line);
 
@@ -858,11 +1082,21 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 /*
 Call vine_manager_recv_no_retry and silently retry if the result indicates
 an asynchronous update message like 'keepalive' or 'resource'.
+
+Every caller reads the reply to a request it just queued, so the queue is written first. These exchanges remain
+synchronous on the manager's thread, each wait bounded by the idle timeout of the worker's link: the standard output of
+a task (send_stdout), the outputs of a task (get, getfile), the results of watched files (send_results), and a file
+fetched with vine_fetch_file (getfile).
 */
 
 vine_msg_code_t vine_manager_recv(struct vine_manager *q, struct vine_worker_info *w, char *line, int length)
 {
 	vine_msg_code_t result = VINE_MSG_PROCESSED;
+
+	if (!flush_worker_queue(w)) {
+		debug(D_VINE, "failed to send a request to %s (%s)", w->hostname, w->addrport);
+		return VINE_MSG_FAILURE;
+	}
 
 	do {
 		result = vine_manager_recv_no_retry(q, w, line, length);
@@ -1155,10 +1389,21 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	vine_txn_log_write_worker(q, w, 1, reason);
 
-	/* Cleanup below only updates the manager's state. Messages that it would still send, such as unlink and kill,
-	 * fail at once instead of waiting on a worker that stopped reading, which would stall the manager for the
-	 * short timeout per file. A worker that loses its manager kills its tasks and prunes its cache itself. */
-	shutdown(link_fd(w->link), SHUT_WR);
+	/* A final message, such as exit or release, is written if the link takes it now. */
+	link_queue_send(w->queue, 0);
+
+	/* An exit or release that waits behind other data keeps the link: the sealed queue refuses what cleanup would
+	 * still send and is written in later steps, until it is empty, fails, or takes no data for the idle timeout.
+	 * Otherwise the manager never waits on a worker it removes: messages that cleanup sends, such as unlink and
+	 * kill, fail at once, and the next write fails the queue, which then refuses them. A worker that loses its
+	 * manager kills its tasks and prunes its cache itself. */
+	int departing = reason == VINE_WORKER_DISCONNECT_EXPLICIT && !link_queue_empty(w->queue);
+	if (departing) {
+		link_queue_seal(w->queue);
+	} else {
+		shutdown(link_fd(w->link), SHUT_WR);
+		link_queue_send(w->queue, 0);
+	}
 
 	vine_manager_data_service_remove_worker(q->ds, w);
 
@@ -1173,6 +1418,15 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 	cleanup_worker(q, w);
 
 	vine_manager_factory_worker_leave(q, w);
+
+	if (departing) {
+		struct departing_link *d = xxmalloc(sizeof(*d));
+		d->link = w->link;
+		d->queue = w->queue;
+		list_push_tail(q->departing_links, d);
+		w->link = NULL;
+		w->queue = NULL;
+	}
 
 	vine_worker_delete(w);
 
@@ -2547,6 +2801,11 @@ static vine_msg_code_t handle_manager_status(struct vine_manager *q, struct vine
 		return VINE_MSG_FAILURE;
 	}
 
+	/* The answer is written directly, after the header lines that an http request queued. */
+	if (!flush_worker_queue(target)) {
+		jx_delete(a);
+		return VINE_MSG_FAILURE;
+	}
 	jx_print_link(a, l, stoptime);
 	jx_delete(a);
 
@@ -2660,6 +2919,8 @@ static vine_result_code_t handle_worker(struct vine_manager *q, struct link *l)
 
 	case VINE_MSG_PROCESSED_DISCONNECT:
 		// A status query was received and processed, so disconnect.
+		/* The client reads its whole answer before the link closes, bounded by the idle timeout of the link. */
+		flush_worker_queue(w);
 		vine_manager_remove_worker(q, w, VINE_WORKER_DISCONNECT_STATUS_WORKER);
 		// It was not really a failure, but signals to the calling code that the worker
 		// is not available anymore.
@@ -2700,7 +2961,8 @@ static int build_poll_table(struct vine_manager *q)
 	// Allocate a small table, if it hasn't been done yet.
 	if (!q->poll_table) {
 		q->poll_table = malloc(sizeof(*q->poll_table) * q->poll_table_size);
-		if (!q->poll_table) {
+		q->poll_workers = malloc(sizeof(*q->poll_workers) * q->poll_table_size);
+		if (!q->poll_table || !q->poll_workers) {
 			// if we can't allocate a poll table, we can't do anything else.
 			fatal("allocating memory for poll table failed.");
 		}
@@ -2714,7 +2976,9 @@ static int build_poll_table(struct vine_manager *q)
 	/* Reserve two entries for data requests and transfer completions, and one for wakes from other threads. */
 	vine_manager_data_service_poll(q->ds, &q->poll_table[1]);
 	q->poll_table[3] = (struct link_info){q->wake_link, LINK_READ, 0};
-	n = 4;
+	for (n = 0; n < 4; n++) {
+		q->poll_workers[n] = NULL;
+	}
 
 	// For every worker in the hash table, add an item to the poll table
 	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
@@ -2723,15 +2987,35 @@ static int build_poll_table(struct vine_manager *q)
 		if (n >= q->poll_table_size) {
 			q->poll_table_size *= 2;
 			q->poll_table = realloc(q->poll_table, sizeof(*q->poll_table) * q->poll_table_size);
-			if (q->poll_table == NULL) {
+			q->poll_workers = realloc(q->poll_workers, sizeof(*q->poll_workers) * q->poll_table_size);
+			if (q->poll_table == NULL || q->poll_workers == NULL) {
 				// if we can't allocate a poll table, we can't do anything else.
 				fatal("reallocating memory for poll table failed.");
 			}
 		}
 
+		/* A worker with queued data is also polled for room in its link. */
 		q->poll_table[n].link = w->link;
-		q->poll_table[n].events = LINK_READ;
+		q->poll_table[n].events = LINK_READ | (link_queue_empty(w->queue) ? 0 : LINK_WRITE);
 		q->poll_table[n].revents = 0;
+		q->poll_workers[n] = w;
+		n++;
+	}
+
+	/* Links of removed workers that still write a final message come last, polled only for room. */
+	struct departing_link *d;
+	LIST_ITERATE(q->departing_links, d)
+	{
+		if (n >= q->poll_table_size) {
+			q->poll_table_size *= 2;
+			q->poll_table = realloc(q->poll_table, sizeof(*q->poll_table) * q->poll_table_size);
+			q->poll_workers = realloc(q->poll_workers, sizeof(*q->poll_workers) * q->poll_table_size);
+			if (q->poll_table == NULL || q->poll_workers == NULL) {
+				fatal("reallocating memory for poll table failed.");
+			}
+		}
+		q->poll_table[n] = (struct link_info){d->link, LINK_WRITE, 0};
+		q->poll_workers[n] = NULL;
 		n++;
 	}
 
@@ -3831,10 +4115,10 @@ static int receive_tasks_from_worker(struct vine_manager *q, struct vine_worker_
 		if (t->state == VINE_TASK_WAITING_RETRIEVAL) {
 			/* Attempt to fetch it. */
 			if (fetch_outputs_from_worker(q, w, task_id)) {
-				/* If it was fetched, update stats and keep going. */
+				/* If it was fetched, update stats and keep going, until the step's budget expires. */
 				tasks_received++;
 
-				if (tasks_received >= max_to_receive) {
+				if (tasks_received >= max_to_receive || budget_expired(&q->round)) {
 					break;
 				}
 			} else {
@@ -3877,6 +4161,12 @@ static void ask_for_workers_updates(struct vine_manager *q)
 					debug(D_VINE, "Removing worker %s (%s): hasn't sent its initialization in more than %d s", w->hostname, w->addrport, keepalive_timeout(q));
 					list_push_tail(failed, w);
 				}
+				continue;
+			}
+
+			/* A worker with queued data is judged by the progress of its queue instead, because a check would wait
+			 * behind that data, and a worker that takes data is alive. */
+			if (!link_queue_empty(w->queue)) {
 				continue;
 			}
 
@@ -4318,6 +4608,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	// The poll table is initially null, and will be created
 	// (and resized) as needed by build_poll_table.
 	q->poll_table_size = 8;
+	q->departing_links = list_create();
 
 	q->worker_selection_algorithm = VINE_SCHEDULE_FILES;
 	q->process_pending_check = 0;
@@ -4651,6 +4942,8 @@ void vine_delete(struct vine_manager *q)
 		return;
 	}
 
+	silence_log_summary(q);
+
 	/* now that the manager is shutting down, worker removals are not an invalid event, so we
 	 * disable the immediate recovery to avoid submitting recovery tasks for lost files */
 	q->immediate_recovery = 0;
@@ -4660,6 +4953,14 @@ void vine_delete(struct vine_manager *q)
 	vine_fair_write_workflow_info(q);
 
 	release_all_workers(q);
+
+	/* A final message of a removed worker goes out if its link takes it within a second. */
+	struct departing_link *d;
+	while ((d = list_pop_head(q->departing_links))) {
+		link_queue_flush(d->queue, time(0) + 1);
+		departing_link_delete(d);
+	}
+	list_delete(q->departing_links);
 
 	vine_perf_log_write_update(q, 1);
 
@@ -4740,6 +5041,7 @@ void vine_delete(struct vine_manager *q)
 	hash_table_delete(q->properties);
 
 	free(q->poll_table);
+	free(q->poll_workers);
 	link_close(q->wake_link);
 	close(q->wake_fd);
 	free(q->ssl_cert);
@@ -5362,9 +5664,58 @@ struct vine_task *vine_wait_for_task_id(struct vine_manager *q, int task_id, int
 }
 
 /*
-Consider all of the connected workers, and act open each connection
-that has pending input data, until the input buffer is empty.
-Return the number of workers that *failed* and disconnected.
+Write queued data to the workers whose links have room, for at most the rest of the current step, and remove the
+workers whose queue failed or made no progress for the idle timeout. A worker that stops reading thus costs the manager
+nothing until it is removed. Return the number of workers removed.
+*/
+
+static int send_to_workers(struct vine_manager *q, int n)
+{
+	int removed = 0;
+	for (int i = 4; i < n; i++) {
+		struct vine_worker_info *w = q->poll_workers[i];
+		if (q->poll_table[i].revents & LINK_WRITE) {
+			link_queue_send(w->queue, q->round.end);
+		}
+
+		if (link_queue_failed(w->queue)) {
+			debug(D_VINE, "Failed to send to worker %s (%s).", w->hostname, w->addrport);
+		} else if (link_queue_stalled(w->queue, peer_idle_timeout(q))) {
+			debug(D_VINE, "Removing worker %s (%s): took no data for %d s", w->hostname, w->addrport, peer_idle_timeout(q));
+		} else {
+			continue;
+		}
+		q->stats->workers_lost++;
+		vine_manager_remove_worker(q, w, VINE_WORKER_DISCONNECT_FAILURE);
+		q->poll_table[i].revents = 0;
+		q->poll_workers[i] = NULL;
+		removed++;
+	}
+	return removed;
+}
+
+/*
+Write the final messages of removed workers within the step budget. A link is closed once its queue is empty, fails,
+or takes no data for the idle timeout.
+*/
+static void send_to_departing_links(struct vine_manager *q)
+{
+	int count = list_size(q->departing_links);
+	struct departing_link *d;
+	while (count-- > 0 && (d = list_pop_head(q->departing_links))) {
+		link_queue_send(d->queue, q->round.end);
+		if (link_queue_empty(d->queue) || link_queue_stalled(d->queue, peer_idle_timeout(q))) {
+			departing_link_delete(d);
+		} else {
+			list_push_tail(q->departing_links, d);
+		}
+	}
+}
+
+/*
+Consider all of the connected workers, and act upon each connection that has pending input data, until its input buffer
+is empty or the step's budget expires. Messages left in a buffer keep the next poll from waiting, and the next pass
+starts with the worker where this one stopped. Return the number of workers that *failed* and disconnected.
 */
 
 static int poll_active_workers(struct vine_manager *q, int stoptime)
@@ -5372,6 +5723,7 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 	BEGIN_ACCUM_TIME(q, time_polling);
 
 	int n = build_poll_table(q);
+	int worker_entries = n - list_size(q->departing_links);
 
 	// We poll in at most small time segments (of a half a second). This lets
 	// promptly dispatch tasks, while avoiding wasting cpu cycles when the
@@ -5389,16 +5741,22 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 
 	BEGIN_ACCUM_TIME(q, time_polling);
 
+	/* The manager reads nothing from the end of the last poll until this one. */
+	silence_record_step(q, timestamp_get());
+
 	// Poll all links for activity.
 	link_poll(q->poll_table, n, msec);
 	q->link_poll_end = timestamp_get();
 
 	END_ACCUM_TIME(q, time_polling);
 
+	/* The work of this step starts after the poll. */
+	budget_start(&q->round, round_budget_length(q));
+
 	BEGIN_ACCUM_TIME(q, time_status_msgs);
 
-	int i;
-	int workers_failed = 0;
+	int workers_failed = send_to_workers(q, worker_entries);
+	send_to_departing_links(q);
 
 	vine_manager_data_service_handle(q);
 
@@ -5410,11 +5768,17 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 		q->woken = 1;
 	}
 
-	/* Consider the Worker control connections. */
-	for (i = 4; i < n; i++) {
+	/* Consider the Worker control connections, starting where the last pass stopped. */
+	int workers = worker_entries - 4;
+	for (int k = 0; k < workers; k++) {
+		int i = 4 + (q->poll_cursor + k) % workers;
+		if (k > 0 && budget_expired(&q->round)) {
+			q->poll_cursor = i - 4;
+			break;
+		}
 
 		/* If there is pending input data on that connection. */
-		if (q->poll_table[i].revents) {
+		if (q->poll_table[i].revents & LINK_READ) {
 
 			/* Act on the next input message, until there is no more buffered data. */
 			do {
@@ -5422,7 +5786,7 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 					workers_failed++;
 					break;
 				}
-			} while (!link_buffer_empty(q->poll_table[i].link));
+			} while (!link_buffer_empty(q->poll_table[i].link) && !budget_expired(&q->round));
 		}
 	}
 
@@ -5442,7 +5806,7 @@ static int connect_new_workers(struct vine_manager *q, int stoptime, int max_new
 		do {
 			add_worker(q);
 			new_workers++;
-		} while (link_usleep(q->manager_link, 0, 1, 0) && (stoptime >= time(0) && (max_new_workers > new_workers)));
+		} while (link_usleep(q->manager_link, 0, 1, 0) && (stoptime >= time(0) && (max_new_workers > new_workers)) && !budget_expired(&q->round));
 	}
 
 	return new_workers;
@@ -5525,6 +5889,10 @@ struct vine_task *find_task_to_return(struct vine_manager *q, const char *tag, i
 		if (type == VINE_TASK_TYPE_STANDARD) {
 			q->standard_tasks_count--;
 		}
+		if (type == VINE_TASK_TYPE_RECOVERY && q->external_recovery_handling) {
+			/* The application receives the table's reference and deletes the task when it is done. */
+			return t;
+		}
 		vine_task_delete(t);
 
 		/* CAREFUL: a non-standard task *may* no longer exist following vine_delete! */
@@ -5537,10 +5905,6 @@ struct vine_task *find_task_to_return(struct vine_manager *q, const char *tag, i
 			break;
 
 		case VINE_TASK_TYPE_RECOVERY:
-			/* If configured for external recovery handling, return it to the user. */
-			if (q->external_recovery_handling) {
-				return t;
-			}
 
 			/*
 			If this is a recovery task, it is owned by the manager,
@@ -5688,10 +6052,17 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 				list_push_tail(keys, xxstrdup(key));
 			}
 			hash_table_clear(q->workers_with_watched_file_updates, 0);
+			int asked = 0;
 			while ((key = list_pop_head(keys))) {
 				w = hash_table_lookup(q->worker_table, key);
 				if (w) {
-					get_watched_file_updates(q, w);
+					/* Workers left when the step's budget expires are asked in the next step. */
+					if (asked && budget_expired(&q->round)) {
+						hash_table_insert(q->workers_with_watched_file_updates, key, w);
+					} else {
+						get_watched_file_updates(q, w);
+						asked++;
+					}
 				}
 				free(key);
 			}
@@ -5730,7 +6101,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			int retrieved_from_worker = receive_tasks_from_worker(q, w, retrieved_this_cycle);
 			retrieved_this_cycle += retrieved_from_worker;
 			events += retrieved_from_worker;
-		} while (q->max_retrievals < 0 || retrieved_this_cycle < q->max_retrievals || !skip_list_size(q->ready_tasks));
+		} while ((q->max_retrievals < 0 || retrieved_this_cycle < q->max_retrievals || !skip_list_size(q->ready_tasks)) && !budget_expired(&q->round));
 		END_ACCUM_TIME(q, time_receive);
 
 		if (retrieved_this_cycle) {

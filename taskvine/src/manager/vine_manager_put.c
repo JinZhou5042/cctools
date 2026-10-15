@@ -54,7 +54,9 @@ static int vine_manager_put_symlink(struct vine_manager *q, struct vine_worker_i
 
 	vine_manager_send(q, w, "symlink %s %d\n", remotename_encoded, length);
 
-	link_write(w->link, target, length, LINK_FOREVER);
+	if (vine_manager_send_data(q, w, target, length) < 0) {
+		return VINE_WORKER_FAILURE;
+	}
 
 	*total_bytes += length;
 
@@ -63,14 +65,13 @@ static int vine_manager_put_symlink(struct vine_manager *q, struct vine_worker_i
 
 /*
 Send a single file to the remote worker.
-If the worker stops taking data for the idle timeout of its link, then cancel it.
+The file is queued for the worker and read in chunks as its link takes them. If the worker stops taking data for the
+idle timeout of its link, or the file shrinks before it is sent, the manager removes the worker.
 */
 
 static int vine_manager_put_file(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, const char *localname, const char *remotename, struct stat info, int override_mode, int64_t *total_bytes)
 {
-	time_t stoptime;
 	timestamp_t effective_stoptime = 0;
-	int64_t actual = 0;
 
 	/* normalize the mode so as not to set up invalid permissions */
 	int mode = (info.st_mode | 0x600) & 0777;
@@ -81,11 +82,13 @@ static int vine_manager_put_file(struct vine_manager *q, struct vine_worker_info
 
 	int64_t length = info.st_size;
 
+	/* A file that cannot be read fails the task before anything is sent. */
 	int fd = open(localname, O_RDONLY, 0);
 	if (fd < 0) {
 		debug(D_NOTICE, "Cannot open file %s: %s", localname, strerror(errno));
 		return VINE_APP_FAILURE;
 	}
+	close(fd);
 
 	if (q->bandwidth_limit) {
 		effective_stoptime = (length / q->bandwidth_limit) * 1000000 + timestamp_get();
@@ -95,16 +98,12 @@ static int vine_manager_put_file(struct vine_manager *q, struct vine_worker_info
 	char remotename_encoded[VINE_LINE_MAX];
 	url_encode(remotename, remotename_encoded, sizeof(remotename_encoded));
 
-	/* The worker link fails the transfer when it makes no progress for the idle timeout, however long it takes. */
-	stoptime = LINK_FOREVER;
 	vine_manager_send(q, w, "file %s %" PRId64 " 0%o %lld\n", remotename_encoded, length, mode, (long long)info.st_mtime);
-	actual = link_stream_from_fd(w->link, fd, length, stoptime);
-	close(fd);
-
-	*total_bytes += actual;
-
-	if (actual != length)
+	if (vine_manager_send_file(q, w, localname, 0, length) < 0) {
 		return VINE_WORKER_FAILURE;
+	}
+
+	*total_bytes += length;
 
 	timestamp_t current_time = timestamp_get();
 	if (effective_stoptime && effective_stoptime > current_time) {
@@ -301,17 +300,13 @@ vine_result_code_t vine_manager_put_buffer(struct vine_manager *q, struct vine_w
 	if (mode == 0)
 		mode = 0755;
 
-	/* The worker link fails the transfer when it makes no progress for the idle timeout. */
-	time_t stoptime = LINK_FOREVER;
 	vine_manager_send(q, w, "file %s %lld 0%o 0\n", f->cached_name, (long long)f->size, (int)mode);
-	int64_t actual = link_putlstring(w->link, f->data, f->size, stoptime);
-	if (actual >= 0 && (size_t)actual == f->size) {
-		*total_bytes = actual;
-		return VINE_SUCCESS;
-	} else {
+	if (vine_manager_send_data(q, w, f->data, f->size) < 0) {
 		*total_bytes = 0;
 		return VINE_WORKER_FAILURE;
 	}
+	*total_bytes = f->size;
+	return VINE_SUCCESS;
 }
 
 /*
@@ -585,11 +580,10 @@ vine_result_code_t vine_manager_put_task(
 	buffer_putliteral(&description, "end\n");
 	debug(D_VINE, "tx to %s (%s): %s", w->hostname, w->addrport, buffer_tostring(&description));
 
-	size_t length = buffer_pos(&description);
-	/* A long description to a busy worker may take a while, so only a worker that stops reading fails it. */
-	ssize_t sent = link_putlstring(w->link, buffer_tostring(&description), length, LINK_FOREVER);
+	/* A long description to a busy worker may take a while, so it waits in the worker's queue. */
+	int sent = vine_manager_send_data(q, w, buffer_tostring(&description), buffer_pos(&description));
 	buffer_free(&description);
-	if (sent >= 0 && (size_t)sent == length) {
+	if (sent == 0) {
 		if (target) {
 			vine_file_replica_table_get_or_create(q, w, target->cached_name, target->type, target->cache_level, target->size, target->mtime);
 		}

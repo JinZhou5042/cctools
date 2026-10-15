@@ -13,6 +13,7 @@ This module is private to the manager and should not be invoked by the end user.
 */
 
 #include "taskvine.h"
+#include "budget.h"
 #include <limits.h>
 
 /*
@@ -75,6 +76,33 @@ struct vine_worker_info;
 struct vine_task;
 struct vine_file;
 
+/* Number of buckets of a silence histogram. Bucket k counts durations of [2^k, 2^(k+1)) microseconds, bucket 0 also
+ * those under one microsecond, and the last bucket also every longer one. */
+#define VINE_SILENCE_BUCKETS 32
+
+/* Number of one-second slots in which the manager keeps the length of its longest step. */
+#define VINE_SILENCE_STEP_SLOTS 64
+
+/*
+Observations that attribute the silence of a worker to the worker, the network, or the manager. The manager measures
+the gaps between the times it reads data of a worker from its link, and the length of its own steps, from the end of
+one poll to the start of the next, during which it reads nothing. Workers report the length of their own rounds
+(info round-stats), and the manager logs both together for each worker (silence:), and a summary at the end.
+*/
+struct vine_silence_stats {
+	int64_t gaps;					   /* Gaps between reads from a worker. */
+	timestamp_t gap_max;				   /* Longest gap, in microseconds. */
+	int64_t gap_histogram[VINE_SILENCE_BUCKETS];	   /* Gaps by length. */
+	timestamp_t check_max;				   /* Longest wait for any message after a keepalive check. */
+	int64_t reports;				   /* Round statistics reported by workers. */
+	timestamp_t round_max;				   /* Longest round that a worker reported. */
+	int64_t steps;					   /* Steps of the manager. */
+	timestamp_t step_max;				   /* Longest step, in microseconds. */
+	int64_t step_histogram[VINE_SILENCE_BUCKETS];	   /* Steps by length. */
+	timestamp_t step_slot_second[VINE_SILENCE_STEP_SLOTS]; /* Second since the epoch to which each slot belongs. */
+	timestamp_t step_slot_max[VINE_SILENCE_STEP_SLOTS];    /* Longest step that ended in that second. */
+};
+
 struct vine_manager {
 
 	/* Connection and communication settings */
@@ -91,7 +119,11 @@ struct vine_manager {
 	struct vine_manager_data_service *ds; /* Own the data listener and bidirectional transfer executors. */
 	struct link *manager_link;       /* Listening TCP connection for accepting new workers. */
 	struct link_info *poll_table;    /* Table for polling on all connected workers. */
-	int poll_table_size;             /* Number of entries in poll_table. */
+	struct vine_worker_info **poll_workers; /* Worker of each entry of poll_table, or NULL for the other links. */
+	int poll_table_size;             /* Number of entries in poll_table and poll_workers. */
+	struct list *departing_links;    /* Links of removed workers whose sealed queues still hold a final message. */
+	int poll_cursor;                 /* Worker entry at which the next pass over worker messages starts. */
+	struct budget round;             /* Time for the work of one step of vine_wait(), started after its poll. */
 	struct link *wake_link;          /* Read end of the pipe that vine_wake() writes to from other threads. */
 	int wake_fd;                     /* Write end of that pipe. */
 	int woken;                       /* A wake arrived during the current vine_wait(), which then returns. */
@@ -164,6 +196,7 @@ struct vine_manager {
 	timestamp_t time_last_ready_tasks_check;
 	timestamp_t time_last_worker_checks; /* When keepalives, slow and drained workers, and blocks were last checked. */
 	timestamp_t link_poll_end;
+	struct vine_silence_stats silence; /* Gaps between messages of workers and lengths of steps, see above. */
 	time_t      catalog_last_update_time;
 	time_t      resources_last_update_time;
 
@@ -269,13 +302,29 @@ be called on the manager object by other elements of the manager process.
 struct vine_file *vine_manager_declare_file(struct vine_manager *m, struct vine_file *f);
 struct vine_file *vine_manager_lookup_file(struct vine_manager *q, const char *cached_name);
 
-/* Send a printf-style message to a remote worker. */
+/*
+Send a printf-style message to a remote worker. Everything sent to a worker goes through its queue in order, and the
+manager writes only what the worker's link takes, so a worker that stops reading never blocks the manager. Return the
+length of the message, or -1 if the worker's link has failed.
+*/
 #ifndef SWIG
 __attribute__ (( format(printf,3,4) ))
 #endif
 int vine_manager_send( struct vine_manager *q, struct vine_worker_info *w, const char *fmt, ... );
 
-/* Receive a line-oriented message from a remote worker. */
+/* Send bytes to a remote worker through its queue, such as the body of a message. Return 0, or -1 if the worker's link
+ * has failed. */
+int vine_manager_send_data(struct vine_manager *q, struct vine_worker_info *w, const char *data, size_t length);
+
+/* Send a byte range of a local file to a remote worker through its queue. The file is read in chunks when the range
+ * reaches the head of the queue, so it must not shrink before then. Return 0, or -1 if the worker's link has failed. */
+int vine_manager_send_file(struct vine_manager *q, struct vine_worker_info *w, const char *path, int64_t offset, int64_t length);
+
+/*
+Receive a line-oriented message from a remote worker, as the reply to a request. Everything queued for the worker,
+including the request, is written first, so the exchange stays synchronous and is bounded by the idle timeout of the
+worker's link: it fails when the worker makes no progress for twice the response timeout.
+*/
 vine_msg_code_t vine_manager_recv( struct vine_manager *q, struct vine_worker_info *w, char *line, int length );
 
 /* Various functions to compute expected properties of tasks. */

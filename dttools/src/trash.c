@@ -49,26 +49,22 @@ get it later on the next attempt to empty the trash.
 
 void trash_move(const char *filename)
 {
-	struct stat info;
-
-	/* If the original file doesn't exist, then return success. */
-	int result = stat(filename, &info);
-	if (result < 0 && errno == ENOENT)
-		return;
-
 	/* Generate a unique random name */
 	char cookie[TRASH_COOKIE_LENGTH];
 	string_cookie(cookie, TRASH_COOKIE_LENGTH);
 
 	char *trashname = string_format("%s/%s.%" PRIu64, trashdir, cookie, timestamp_get());
-	debug(D_DEBUG, "trashing file %s", filename);
 
-	/* Move the file to the trash directory. */
-	result = rename(filename, trashname);
-	if (result != 0) {
+	/* Move the file to the trash directory. If the original file doesn't exist, then return success. The rename
+	 * itself tells, so a file costs one system call, which matters on a slow disk. */
+	int result = rename(filename, trashname);
+	if (result != 0 && errno != ENOENT) {
 		fatal("failed to move file (%s) to trash location (%s): %s", filename, trashname, strerror(errno));
 	}
-	trash_pending = 1;
+	if (result == 0) {
+		debug(D_DEBUG, "trashing file %s", filename);
+		trash_pending = 1;
+	}
 
 	free(trashname);
 }

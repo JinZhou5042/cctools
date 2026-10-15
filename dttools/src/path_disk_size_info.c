@@ -136,21 +136,21 @@ int path_disk_size_info_get_budget(const char *path, const struct budget *b, str
 					debug(D_DEBUG, "error reading disk usage on '%s'.\n", path);
 					result = -1;
 				}
-				continue;
+			} else {
+				s->count_so_far++;
+				if (S_ISREG(file_info.st_mode)) {
+					s->size_so_far += file_info.st_size;
+				} else if (S_ISDIR(file_info.st_mode)) {
+					/* Only add name of directory, will only open it to read when it's its turn. */
+					struct DIR_with_name *branch = calloc(1, sizeof(struct DIR_with_name));
+					branch->name = xxstrdup(composed_path);
+					list_push_head(s->current_dirs, branch);
+				} else if (S_ISLNK(file_info.st_mode)) {
+					/* do nothing, avoiding infinite loops. */
+				}
 			}
 
-			s->count_so_far++;
-			if (S_ISREG(file_info.st_mode)) {
-				s->size_so_far += file_info.st_size;
-			} else if (S_ISDIR(file_info.st_mode)) {
-				/* Only add name of directory, will only open it to read when it's its turn. */
-				struct DIR_with_name *branch = calloc(1, sizeof(struct DIR_with_name));
-				branch->name = xxstrdup(composed_path);
-				list_push_head(s->current_dirs, branch);
-			} else if (S_ISLNK(file_info.st_mode)) {
-				/* do nothing, avoiding infinite loops. */
-			}
-
+			/* Check the budget after every entry that took a system call, including one that went away. */
 			if (b && budget_expired(b)) {
 				goto timeout;
 			}

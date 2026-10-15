@@ -116,6 +116,14 @@ struct vine_graph_executor *vine_graph_executor_create(struct vine_manager *mana
 	return e;
 }
 
+/* Delete a recovery task that the Manager returned, whose reference the executor receives. */
+static void vine_graph_executor_release_returned(struct vine_task *task)
+{
+	if (task && vine_task_get_recovery_source_task_id(task) > 0) {
+		vine_task_delete(task);
+	}
+}
+
 /* Stop only this run's tasks, including Manager-created recovery tasks, before undeclaring their files. */
 static void vine_graph_executor_cancel_tasks(struct vine_graph_executor *e)
 {
@@ -133,7 +141,7 @@ static void vine_graph_executor_cancel_tasks(struct vine_graph_executor *e)
 	}
 	/* The Manager puts each cancelled task at the head of its retrieved list, so the newest is collected first. */
 	while ((task = list_pop_tail(tasks))) {
-		vine_wait_for_task_id(e->manager, vine_task_get_id(task), 0);
+		vine_graph_executor_release_returned(vine_wait_for_task_id(e->manager, vine_task_get_id(task), 0));
 		vine_task_delete(task);
 	}
 	list_delete(tasks);
@@ -1027,8 +1035,8 @@ static void vine_graph_executor_handle_task(struct vine_graph_executor *e, struc
 	struct vine_task *attempt = node->task;
 	vine_graph_executor_handle_node_task(e, node, task);
 	/* A returned attempt is not needed anymore, and the node keeps only its id. The Manager keeps a copy as the
-	 * recovery task of each temporary output, and a recovery task belongs to its files. A failed attempt that was
-	 * submitted again was already replaced. */
+	 * recovery task of each temporary output, and the caller deletes the reference of a returned recovery task. A
+	 * failed attempt that was submitted again was already replaced. */
 	if (task == attempt && node->task == attempt) {
 		node->task = NULL;
 		vine_task_delete(attempt);
@@ -1215,7 +1223,7 @@ static void vine_graph_executor_collect_task(struct vine_graph_executor *e, int 
 {
 	if (task_id > 0 && itable_lookup(e->manager->tasks, (uint64_t)task_id)) {
 		vine_cancel_by_task_id(e->manager, task_id);
-		vine_wait_for_task_id(e->manager, task_id, 0);
+		vine_graph_executor_release_returned(vine_wait_for_task_id(e->manager, task_id, 0));
 	}
 }
 
@@ -1357,7 +1365,12 @@ vine_graph_status_t vine_graph_executor_wait(struct vine_graph_executor *e, int 
 			/* Settle every task the Manager has already returned, so one call reports a batch of finished nodes.
 			 * A wait of zero seconds only collects returned tasks. */
 			do {
+				/* Handling may delete a returned attempt, so whether this is a recovery task is decided first. */
+				int recovery = vine_task_get_recovery_source_task_id(task) > 0;
 				vine_graph_executor_handle_task(e, task);
+				if (recovery) {
+					vine_task_delete(task);
+				}
 			} while ((task = vine_wait(e->manager, 0)));
 			wait_timeout = 0;
 		} else if (wait_timeout > 0 || time(NULL) >= stoptime) {

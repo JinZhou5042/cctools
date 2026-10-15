@@ -118,6 +118,10 @@ void vine_process_delete(struct vine_process *p)
 		list_cursor_destroy(p->input_cursor);
 	}
 
+	if (p->output_cursor) {
+		list_cursor_destroy(p->output_cursor);
+	}
+
 	if (p->task)
 		vine_task_delete(p->task);
 
@@ -140,6 +144,10 @@ void vine_process_delete(struct vine_process *p)
 
 	if (p->disk_measurement_state) {
 		path_disk_size_info_delete_state(p->disk_measurement_state);
+	}
+
+	if (p->output_measurement_state) {
+		path_disk_size_info_delete_state(p->output_measurement_state);
 	}
 
 	free(p);
@@ -280,6 +288,14 @@ int vine_process_invoke_function(struct vine_process *p)
 				p->library_process->pid);
 		return 1;
 	}
+}
+
+int vine_process_cancel_function(struct vine_process *p)
+{
+	char *buffer = string_format("cancel %d", p->task->task_id);
+	ssize_t result = link_printf(p->library_process->library_write_link, LINK_FOREVER, "%ld\n%s", strlen(buffer), buffer);
+	free(buffer);
+	return result >= 0;
 }
 
 /*
