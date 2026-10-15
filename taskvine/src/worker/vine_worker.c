@@ -299,18 +299,21 @@ void send_complete_tasks(struct link *l)
 		p = itable_pop(procs_complete);
 		if (p->output_length <= 1024 && p->output_length > 0) {
 
-			char *output;
+			char *output = xxmalloc(p->output_length + 1);
 			int output_file = open(p->output_file_name, O_RDONLY);
-			output = malloc(p->output_length + 1);
-			full_read(output_file, output, p->output_length);
-			output[p->output_length] = '\0';
-			close(output_file);
+			ssize_t length = output_file >= 0 ? full_read(output_file, output, p->output_length) : -1;
+			if (output_file >= 0) {
+				close(output_file);
+			}
+			/* The manager reads exactly the length sent, so a short read or a NUL byte shortens the output. */
+			output[MAX(length, 0)] = '\0';
+			length = strlen(output);
 			send_async_message(l,
 					"complete %d %d %lld %lld %llu %llu %d %d\n%s",
 					p->result,
 					p->exit_code,
-					(long long)p->output_length,
-					(long long)p->output_length,
+					(long long)length,
+					(long long)length,
 					(unsigned long long)p->execution_start,
 					(unsigned long long)p->execution_end,
 					p->sandbox_size,
