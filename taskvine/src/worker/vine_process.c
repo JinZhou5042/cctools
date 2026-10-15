@@ -268,7 +268,7 @@ int vine_process_execute_and_wait(struct vine_process *p)
 int vine_process_invoke_function(struct vine_process *p)
 {
 	char *buffer = string_format("%d %s %s %s", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name);
-	ssize_t result = link_printf(p->library_process->library_write_link, LINK_FOREVER, "%ld\n%s", strlen(buffer), buffer);
+	ssize_t result = link_printf(p->library_process->library_write_link, time(0) + options->active_timeout, "%ld\n%s", strlen(buffer), buffer);
 
 	// conservatively assume that the function starts executing as soon as we send it to the library.
 	// XXX Alternatively, the library could report when the function started.
@@ -293,7 +293,7 @@ int vine_process_invoke_function(struct vine_process *p)
 int vine_process_cancel_function(struct vine_process *p)
 {
 	char *buffer = string_format("cancel %d", p->task->task_id);
-	ssize_t result = link_printf(p->library_process->library_write_link, LINK_FOREVER, "%ld\n%s", strlen(buffer), buffer);
+	ssize_t result = link_printf(p->library_process->library_write_link, time(0) + options->active_timeout, "%ld\n%s", strlen(buffer), buffer);
 	free(buffer);
 	return result >= 0;
 }
@@ -358,16 +358,11 @@ int vine_process_execute(struct vine_process *p)
 
 		debug(D_VINE, "started task %d pid %d: %s", p->task->task_id, p->pid, p->task->command_line);
 
-		/* If we just started a library, then retain links to communicate with it. They do not block, so a wait on the
-		 * library ends when it makes no progress for the idle timeout, as a wait on any other party does. */
+		/* If we just started a library, then retain links to communicate with it. */
 		if (p->type == VINE_PROCESS_TYPE_LIBRARY) {
 
 			p->library_read_link = link_attach_to_fd(pipe_out[0]);
 			p->library_write_link = link_attach_to_fd(pipe_in[1]);
-			link_nonblocking(p->library_read_link, 1);
-			link_nonblocking(p->library_write_link, 1);
-			link_set_idle_timeout(p->library_read_link, vine_worker_options_idle_timeout(options));
-			link_set_idle_timeout(p->library_write_link, vine_worker_options_idle_timeout(options));
 
 			/* Close the ends of the pipes that the parent process won't use. */
 			close(pipe_in[0]);
@@ -547,7 +542,7 @@ int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_
 	int ok = 1;
 
 	/* read number of bytes of data first. */
-	ok = link_readline(p->library_read_link, buffer, VINE_LINE_MAX, LINK_FOREVER);
+	ok = link_readline(p->library_read_link, buffer, VINE_LINE_MAX, time(0) + options->active_timeout);
 	if (!ok) {
 		return 0;
 	}
@@ -555,7 +550,7 @@ int vine_process_library_get_result(struct vine_process *p, uint64_t *done_task_
 
 	/* now read the buffer, which is the task id of the done function invocation. */
 	char buffer_data[len_buffer + 1];
-	ok = link_read(p->library_read_link, buffer_data, len_buffer, LINK_FOREVER);
+	ok = link_read(p->library_read_link, buffer_data, len_buffer, time(0) + options->active_timeout);
 	if (ok <= 0) {
 		return 0;
 	}

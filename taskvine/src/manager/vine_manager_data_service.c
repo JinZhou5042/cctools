@@ -60,7 +60,6 @@ struct vine_manager_data_service {
 	struct itable *waiting;		/* Maps token -> receive waiting for its Worker to connect back. */
 	uint64_t next_token;		/* Token of the next receive from a Worker that connects back. Never zero. */
 	time_t next_expiry;		/* Earliest time to look for receives whose Worker did not connect back. */
-	int idle_timeout;		/* Seconds a peer may go without progress, set by the Manager. See the setter. */
 };
 
 /* Hold one transfer until its completion is consumed by the Manager. A job with a file is a checkpoint receive
@@ -86,7 +85,7 @@ struct transfer_job {
 	char *transfer_id;				   /* Own the record that counts a receive against its source. */
 	uint64_t token;					   /* Nonzero while the receive waits for its Worker to connect back. */
 	time_t deadline;				   /* Fail a waiting receive after this time. */
-	int idle_timeout;				   /* Copy the service's idle timeout at admission for the executor. */
+	int timeout;					   /* Seconds the transfer may go without progress, from the Manager at admission. */
 };
 
 static void job_delete(struct transfer_job *job)
@@ -124,6 +123,21 @@ static unsigned slots_in_use(struct vine_manager_data_service *ds, int receives)
 	return count;
 }
 
+/* Move file data between a link and a file in pieces, each with a new deadline, so a transfer fails when no data moves
+ * for timeout seconds, and a large file that keeps moving is never cut off. */
+static int64_t stream_in_pieces(int64_t (*stream)(struct link *, int, int64_t, time_t), struct link *link, int fd, int64_t length, int timeout)
+{
+	int64_t actual = 0;
+	while (actual < length) {
+		int64_t piece = stream(link, fd, MIN(length - actual, 1 << 16), time(NULL) + timeout);
+		if (piece <= 0) {
+			break;
+		}
+		actual += piece;
+	}
+	return actual;
+}
+
 /* Stage incoming bytes beside the destination so failed transfers never replace it. */
 static int receive_file(struct transfer_job *job)
 {
@@ -131,7 +145,7 @@ static int receive_file(struct transfer_job *job)
 	int64_t size;
 	int mode, mtime;
 	url_encode(job->name, encoded, sizeof(encoded));
-	if (link_printf(job->link, LINK_FOREVER, "get %s\n", encoded) < 0 || !link_readline(job->link, line, sizeof(line), LINK_FOREVER) ||
+	if (link_printf(job->link, time(NULL) + job->timeout, "get %s\n", encoded) < 0 || !link_readline(job->link, line, sizeof(line), time(NULL) + job->timeout) ||
 			sscanf(line, "file %4095s %" SCNd64 " %o %d", encoded, &size, &mode, &mtime) != 4 || size < 0) {
 		return 0;
 	}
@@ -141,7 +155,7 @@ static int receive_file(struct transfer_job *job)
 	}
 	char *temporary = string_format("%s.XXXXXX", job->path);
 	int fd = mkstemp(temporary);
-	int valid = fd >= 0 && link_stream_to_fd(job->link, fd, size, LINK_FOREVER) == size;
+	int valid = fd >= 0 && stream_in_pieces(link_stream_to_fd, job->link, fd, size, job->timeout) == size;
 	if (fd >= 0) {
 		valid = valid && fchmod(fd, mode & 0777) == 0;
 		if (close(fd) != 0) {
@@ -167,10 +181,10 @@ static int send_file(struct transfer_job *job, int fd)
 	url_encode(job->name, encoded, sizeof(encoded));
 	int valid = fd >= 0 && fstat(fd, &info) == 0 && S_ISREG(info.st_mode);
 	if (valid) {
-		valid = link_printf(job->link, LINK_FOREVER, "file %s %" PRId64 " %o %ld\n", encoded, (int64_t)info.st_size, info.st_mode & 0777, (long)info.st_mtime) >= 0 &&
-			link_stream_from_fd(job->link, fd, info.st_size, LINK_FOREVER) == info.st_size;
+		valid = link_printf(job->link, time(NULL) + job->timeout, "file %s %" PRId64 " %o %ld\n", encoded, (int64_t)info.st_size, info.st_mode & 0777, (long)info.st_mtime) >= 0 &&
+			stream_in_pieces(link_stream_from_fd, job->link, fd, info.st_size, job->timeout) == info.st_size;
 	} else {
-		link_printf(job->link, LINK_FOREVER, "error %s %d\n", encoded, ENOENT);
+		link_printf(job->link, time(NULL) + job->timeout, "error %s %d\n", encoded, ENOENT);
 	}
 	if (fd >= 0) {
 		close(fd);
@@ -244,7 +258,7 @@ static int serve_request(struct transfer_job *job)
 	char line[VINE_DATA_LINE_MAX], encoded[VINE_DATA_LINE_MAX];
 	int used = 0;
 	uint64_t token = 0;
-	int valid = (!job->password || link_auth_password(job->link, job->password, LINK_FOREVER)) && link_readline(job->link, line, sizeof(line), LINK_FOREVER);
+	int valid = (!job->password || link_auth_password(job->link, job->password, time(NULL) + job->timeout)) && link_readline(job->link, line, sizeof(line), time(NULL) + job->timeout);
 	if (valid && sscanf(line, "connect-back %" SCNu64 "%n", &token, &used) == 1 && !line[used]) {
 		return attach_connect_back(job, token);
 	}
@@ -276,15 +290,12 @@ static void transfer_run(void *argument)
 	} else if (job->file && link) {
 		job->success = receive_file(job);
 	} else if (job->file) {
-		link = link_connect(job->ip, job->port, time(NULL) + job->idle_timeout);
-		if (link) {
-			link_set_idle_timeout(link, job->idle_timeout);
-		}
+		link = link_connect(job->ip, job->port, time(NULL) + job->timeout);
 		pthread_mutex_lock(&ds->lock);
 		job->link = link;
 		stopping = ds->stopping || job->cancelled;
 		pthread_mutex_unlock(&ds->lock);
-		job->success = link && !stopping && (!job->password || link_auth_password(link, job->password, LINK_FOREVER)) && receive_file(job);
+		job->success = link && !stopping && (!job->password || link_auth_password(link, job->password, time(NULL) + job->timeout)) && receive_file(job);
 	} else {
 		job->success = serve_request(job);
 	}
@@ -298,7 +309,7 @@ static int job_submit(struct vine_manager *manager, struct transfer_job *job)
 {
 	struct vine_manager_data_service *ds = manager->ds;
 	job->owner = ds;
-	job->idle_timeout = ds->idle_timeout;
+	job->timeout = manager->minimum_transfer_timeout;
 	job->password = manager->password ? strdup(manager->password) : NULL;
 	list_push_tail(ds->jobs, job);
 	if (job->token) {
@@ -534,7 +545,6 @@ void vine_manager_data_service_handle(struct vine_manager *manager)
 			link_close(link);
 			break;
 		}
-		link_set_idle_timeout(link, ds->idle_timeout);
 		job->link = link;
 		job_submit(manager, job);
 	}
@@ -592,9 +602,9 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 			ds->next_token = 1;
 		}
 		job->token = token;
-		/* The Worker answers the request and connects within the idle timeout. Its connection may then wait in the
-		 * listener backlog while every request slot is busy, so it is allowed another idle timeout. */
-		job->deadline = time(NULL) + 2 * ds->idle_timeout;
+		/* The Worker answers the request and connects within the minimum transfer timeout. Its connection may then
+		 * wait in the listener backlog while every request slot is busy, so it is allowed another one. */
+		job->deadline = time(NULL) + 2 * manager->minimum_transfer_timeout;
 	}
 	if (!job_submit(manager, job)) {
 		return VINE_CHECKPOINT_BUSY;
@@ -738,13 +748,6 @@ char *vine_manager_data_service_vault_path(struct vine_manager *manager, struct 
 		return NULL;
 	}
 	return string_format("%s/%s", manager->ds->vault_directory, file->cached_name);
-}
-
-void vine_manager_data_service_set_idle_timeout(struct vine_manager_data_service *ds, int seconds)
-{
-	if (ds) {
-		ds->idle_timeout = MAX(1, seconds);
-	}
 }
 
 void vine_manager_data_service_vault_set_limit(struct vine_manager_data_service *ds, int64_t bytes)

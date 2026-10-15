@@ -76,33 +76,6 @@ struct vine_worker_info;
 struct vine_task;
 struct vine_file;
 
-/* Number of buckets of a silence histogram. Bucket k counts durations of [2^k, 2^(k+1)) microseconds, bucket 0 also
- * those under one microsecond, and the last bucket also every longer one. */
-#define VINE_SILENCE_BUCKETS 32
-
-/* Number of one-second slots in which the manager keeps the length of its longest step. */
-#define VINE_SILENCE_STEP_SLOTS 64
-
-/*
-Observations that attribute the silence of a worker to the worker, the network, or the manager. The manager measures
-the gaps between the times it reads data of a worker from its link, and the length of its own steps, from the end of
-one poll to the start of the next, during which it reads nothing. Workers report the length of their own rounds
-(info round-stats), and the manager logs both together for each worker (silence:), and a summary at the end.
-*/
-struct vine_silence_stats {
-	int64_t gaps;					   /* Gaps between reads from a worker. */
-	timestamp_t gap_max;				   /* Longest gap, in microseconds. */
-	int64_t gap_histogram[VINE_SILENCE_BUCKETS];	   /* Gaps by length. */
-	timestamp_t check_max;				   /* Longest wait for any message after a keepalive check. */
-	int64_t reports;				   /* Round statistics reported by workers. */
-	timestamp_t round_max;				   /* Longest round that a worker reported. */
-	int64_t steps;					   /* Steps of the manager. */
-	timestamp_t step_max;				   /* Longest step, in microseconds. */
-	int64_t step_histogram[VINE_SILENCE_BUCKETS];	   /* Steps by length. */
-	timestamp_t step_slot_second[VINE_SILENCE_STEP_SLOTS]; /* Second since the epoch to which each slot belongs. */
-	timestamp_t step_slot_max[VINE_SILENCE_STEP_SLOTS];    /* Longest step that ended in that second. */
-};
-
 struct vine_manager {
 
 	/* Connection and communication settings */
@@ -196,7 +169,6 @@ struct vine_manager {
 	timestamp_t time_last_ready_tasks_check;
 	timestamp_t time_last_worker_checks; /* When keepalives, slow and drained workers, and blocks were last checked. */
 	timestamp_t link_poll_end;
-	struct vine_silence_stats silence; /* Gaps between messages of workers and lengths of steps, see above. */
 	time_t      catalog_last_update_time;
 	time_t      resources_last_update_time;
 
@@ -234,12 +206,14 @@ struct vine_manager {
 	int group_id_counter; 
 
 	/* Various performance knobs that can be tuned. */
-	int response_timeout;         /* Seconds within which a healthy peer makes progress. One idle twice as long failed. */
-	int default_transfer_rate;    /* Assumed data transfer rate for reporting bandwidth, prior to collecting observations. */
+	int short_timeout;            /* Timeout in seconds to send/recv a brief message from worker */
+	int long_timeout;             /* Timeout if in the middle of an incomplete message. */
+	int minimum_transfer_timeout; /* Minimum number of seconds to allow for a manager<-> worker file transfer. */
+	int transfer_outlier_factor;  /* Factor to consider a given transfer time to be an outlier justifying cancellation. */
+	int default_transfer_rate;    /* Assumed data transfer rate for computing timeouts, prior to collecting observations. */
 	int process_pending_check;    /* Enables check for waiting processes in main loop via @ref process_pending */
-	int keepalive_interval;	      /* Time between keepalive request transmissions. Negative follows response_timeout. */
-	int keepalive_timeout;	      /* Keepalive response must be received within this time, otherwise worker disconnected.
-	                                 Negative follows twice the response_timeout. */
+	int keepalive_interval;	      /* Time between keepalive request transmissions. */
+	int keepalive_timeout;	      /* Keepalive response must be received within this time, otherwise worker disconnected. */
 	int hungry_minimum;           /* Minimum number of waiting tasks to consider queue not hungry. */
 	int hungry_minimum_factor;    /* queue is hungry if number of waiting tasks is less than hungry_minimum_factor * number of connected workers. */
 	int wait_for_workers;         /* Wait for these many workers to connect before dispatching tasks at start of execution. */
@@ -320,12 +294,12 @@ int vine_manager_send_data(struct vine_manager *q, struct vine_worker_info *w, c
  * reaches the head of the queue, so it must not shrink before then. Return 0, or -1 if the worker's link has failed. */
 int vine_manager_send_file(struct vine_manager *q, struct vine_worker_info *w, const char *path, int64_t offset, int64_t length);
 
-/*
-Receive a line-oriented message from a remote worker, as the reply to a request. Everything queued for the worker,
-including the request, is written first, so the exchange stays synchronous and is bounded by the idle timeout of the
-worker's link: it fails when the worker makes no progress for twice the response timeout.
-*/
+/* Receive a line-oriented message from a remote worker, as the reply to a request. Everything queued for the worker,
+ * including the request, is written first, so the exchange stays synchronous. */
 vine_msg_code_t vine_manager_recv( struct vine_manager *q, struct vine_worker_info *w, char *line, int length );
+
+/* Compute the expected wait time for a transfer of length bytes. */
+int vine_manager_transfer_time( struct vine_manager *q, struct vine_worker_info *w, int64_t length );
 
 /* Various functions to compute expected properties of tasks. */
 const struct rmsummary *vine_manager_task_resources_min(struct vine_manager *q, struct vine_task *t);

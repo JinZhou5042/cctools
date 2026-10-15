@@ -17,9 +17,4 @@ worker, and catalog, but should not be visible to the public user API.
 
 #define VINE_LINE_MAX 4096       /**< Maximum length of a vine message line. */
 
-/* Default response timeout X in seconds: a healthy worker or data peer makes visible progress within this time, and
- * every wait on a peer fails when the peer makes no progress for twice as long. The manager tunes it with
- * response-timeout and sends it to each worker, which bounds every round of its main loop by it. */
-#define VINE_DEFAULT_RESPONSE_TIMEOUT 15
-
 #endif

@@ -94,14 +94,6 @@ struct vine_worker_info {
 	timestamp_t start_time;
 	timestamp_t last_msg_recv_time;
 	timestamp_t last_update_msg_time;
-
-	/* When the manager last read new data of this worker from its link, and, since the worker last reported its round
-	 * statistics, the longest gap between such reads, the longest wait for any message after a keepalive check, and
-	 * when this window began, at the last read before that report (see struct vine_silence_stats). */
-	timestamp_t silence_last_read;
-	timestamp_t silence_gap_max;
-	timestamp_t silence_check_max;
-	timestamp_t silence_window_start;
 	timestamp_t last_failure_time;
 
 	/* consecutive failed peer transfers with worker serving as source or destination */

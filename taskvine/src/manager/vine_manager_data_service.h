@@ -35,10 +35,6 @@ int vine_manager_data_service_port(struct vine_manager_data_service *ds);
 void vine_manager_data_service_poll(struct vine_manager_data_service *ds, struct link_info *entries);
 /* Accept connections and process a bounded batch of executor results. */
 void vine_manager_data_service_handle(struct vine_manager *manager);
-/* Set the seconds a peer of the data port may go without progress before its transfer fails. It also bounds connecting
- * to a source Worker, and a receive from a Worker that connects back waits twice as long for its connection. The
- * Manager sets it from its response timeout. New transfers use the new value. */
-void vine_manager_data_service_set_idle_timeout(struct vine_manager_data_service *ds, int seconds);
 
 /* Request a checkpoint of a temporary file into the vault through a receive slot.
  * When admitted, the Manager thread later calls complete with one when the complete file is published, or with zero

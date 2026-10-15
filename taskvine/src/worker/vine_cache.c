@@ -38,6 +38,13 @@ See the file COPYING for details.
 #include <sys/wait.h>
 #include <unistd.h>
 
+/*
+A transfer from another worker fails when it connects or receives nothing for this many seconds. A worker whose host
+hangs leaves its connections open without sending anything, and the fetching worker then reports the file as invalid,
+so that the manager can find another source or recreate the file, instead of waiting for a fixed deadline.
+*/
+#define VINE_PEER_TRANSFER_TIMEOUT 60
+
 struct vine_cache {
 	struct hash_table *table;
 	struct hash_table *pending_transfers;
@@ -544,13 +551,11 @@ Transfer a single input file from a url to the local transfer path via curl.
 -S Show errors.
 -L Follow redirects as needed.
 --stderr Send errors to /dev/stdout so that they are observed by popen.
---connect-timeout, -y, -Y Fail when connecting takes, or the transfer makes no progress for, the idle timeout.
 */
 
 static int do_curl_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *transfer_path, const char *cache_path, char **error_message)
 {
-	int timeout = vine_worker_options_idle_timeout(options);
-	char *command = string_format("curl -sSL --stderr /dev/stdout --connect-timeout %d -y %d -Y 1 -o \"%s\" \"%s\"", timeout, timeout, transfer_path, f->source);
+	char *command = string_format("curl -sSL --stderr /dev/stdout -o \"%s\" \"%s\"", transfer_path, f->source);
 	int result = do_internal_command(c, command, error_message);
 	free(command);
 
@@ -609,13 +614,8 @@ static int do_peer_transfer(struct vine_cache *c, struct vine_cache_file *f, con
 
 	debug(D_VINE, "cache: setting up worker transfer file %s", f->source);
 
-	/* The peer must connect and then make progress within the idle timeout. A peer whose host hangs leaves the
-	 * connection open without sending anything, and the transfer then fails and the file is reported invalid, so that
-	 * the manager can find another source or recreate the file. */
-	int timeout = vine_worker_options_idle_timeout(options);
-
 	timestamp_t time_start_connect = timestamp_get();
-	worker_link = link_connect(addr, port_num, time(0) + timeout);
+	worker_link = link_connect(addr, port_num, time(0) + VINE_PEER_TRANSFER_TIMEOUT);
 	timestamp_t time_end_connect = timestamp_get();
 	int time_duration_connect = (time_end_connect - time_start_connect) / 1e6;
 
@@ -623,8 +623,6 @@ static int do_peer_transfer(struct vine_cache *c, struct vine_cache_file *f, con
 		*error_message = string_format("Could not establish connection with worker at: %s:%d after %d seconds: %s", addr, port_num, time_duration_connect, strerror(errno));
 		return 0;
 	}
-
-	link_set_idle_timeout(worker_link, timeout);
 
 	if (password) {
 		if (!link_auth_password(worker_link, password, time(0) + 5)) {
@@ -638,7 +636,7 @@ static int do_peer_transfer(struct vine_cache *c, struct vine_cache_file *f, con
 	int64_t totalsize = 0;
 	int mode, mtime;
 
-	if (!vine_transfer_request_any(worker_link, source_path, transfer_dir, &totalsize, &mode, &mtime, timeout, error_message)) {
+	if (!vine_transfer_request_any(worker_link, source_path, transfer_dir, &totalsize, &mode, &mtime, VINE_PEER_TRANSFER_TIMEOUT, error_message)) {
 		if (error_message && *error_message == NULL) {
 			*error_message = string_format("Could not transfer file from %s", f->source);
 		}
