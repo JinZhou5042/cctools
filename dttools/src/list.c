@@ -8,6 +8,7 @@ See the file COPYING for details.
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <assert.h>
 
 #include "list.h"
 #include "debug.h"
@@ -705,6 +706,8 @@ struct list *list_duplicate(struct list *src)
 
 struct list *list_copy(struct list *src, void *(*copy)(void *item))
 {
+	assert(copy);
+
 	void *item;
 	struct list *dst = list_create();
 	struct list_cursor *cur = list_cursor_create(src);

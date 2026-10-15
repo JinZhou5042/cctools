@@ -197,8 +197,10 @@ static int check_worker_is_available(struct vine_manager *q, struct vine_worker_
 		return 0;
 	}
 
-	/* Don't send tasks to this worker if it is in draining mode (no more tasks). */
-	if (w->draining) {
+	/* Don't send tasks to this worker if it is in draining mode (no more tasks), or it is going to be removed. */
+	/* Probably we don't need to check pending_removal here as the worker shouldn't be in worker's table
+	 * anyway, but just in case that changes in the future. */
+	if (w->draining || w->pending_removal) {
 		return 0;
 	}
 
