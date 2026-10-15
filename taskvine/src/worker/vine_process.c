@@ -664,7 +664,9 @@ static int vine_process_sandbox_disk_measure(struct vine_process *p, int max_sec
 		struct vine_mount *m;
 		LIST_ITERATE(p->task->input_mounts, m)
 		{
-			hash_table_insert(exclude_paths, m->remote_name, (void *)1);
+			char *path = vine_sandbox_full_path(p, m->remote_name);
+			hash_table_insert(exclude_paths, path, (void *)1);
+			free(path);
 		}
 	}
 
