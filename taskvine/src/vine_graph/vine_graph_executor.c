@@ -1336,7 +1336,7 @@ vine_graph_status_t vine_graph_executor_wait(struct vine_graph_executor *e, int 
 		done = e->finished_nodes >= e->submitted_nodes && set_size(e->fetch_pending) == 0;
 		/* TaskVine removes a library that keeps failing to start, and then no node can run. */
 		if (!done && !vine_manager_find_library_template(e->manager, e->library_name)) {
-			vine_graph_executor_fail_run(e, string_format("library %s failed to start on workers too many times and was removed; check that workers can run it, and set the manager tuning watch-library-logfiles to 1 to keep its logs", e->library_name));
+			vine_graph_executor_fail_run(e, string_format("library %s failed to start on workers too many times and was removed; check that workers can run it and use the manager's environment (Python, cloudpickle, ndcctools), and set the manager tuning watch-library-logfiles to 1 to keep its logs", e->library_name));
 			break;
 		}
 		/* Fetches come first, so a receive slot freed during the last wait goes to an output the caller waits for. */
