@@ -13,7 +13,6 @@ See the file COPYING for details.
 #include "load_average.h"
 #include "macros.h"
 #include "nvpair.h"
-#include "stringtools.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -73,20 +72,6 @@ void vine_resources_measure_locally(struct vine_resources *r, const char *disk_p
 static void vine_resource_debug(struct vine_resource *r, const char *name)
 {
 	debug(D_VINE, "%8s %lf inuse %lf total", name, r->inuse, r->total);
-}
-
-char *vine_resources_message(struct vine_resources *r)
-{
-	debug(D_VINE, "Sending resource description to manager:");
-	vine_resources_debug(r);
-
-	return string_format("resources\ncores %lf\nmemory %lf\ndisk %lf\ngpus %lf\nworkers %lf\ntag %" PRId64 "\nend\n",
-			r->cores.total,
-			r->memory.total,
-			r->disk.total,
-			r->gpus.total,
-			r->workers.total,
-			r->tag);
 }
 
 void vine_resources_debug(struct vine_resources *r)
