@@ -62,6 +62,9 @@ struct vine_process {
 	/* If this is a library process, whether the library is ready to execute functions. */
 	int library_ready;
 
+	/* If this is a library process, whether the library stops a function call on request. */
+	int library_can_cancel;
+
 	/* expected disk usage by the process. If no cache is used, it is the same as in task. */
 	int64_t disk;
 
@@ -78,6 +81,7 @@ struct vine_process {
 
 struct vine_process * vine_process_create( struct vine_task *task, vine_process_type_t type );
 int   vine_process_execute( struct vine_process *p );
+int   vine_process_cancel_function( struct vine_process *p );
 int   vine_process_is_complete( struct vine_process *p );
 int   vine_process_wait( struct vine_process *p );
 void  vine_process_kill( struct vine_process *p );
