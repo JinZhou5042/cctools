@@ -28,7 +28,7 @@ from .task import (
     Task,
 )
 from .utils import (
-    set_port_range,
+    port_range,
     get_c_constant,
 )
 from . import vine_cache as vc
@@ -119,8 +119,6 @@ class Manager(object):
         else:
             self._staging_explicit = None
 
-        set_port_range(port)
-
         if status_display_interval and status_display_interval >= 1:
             self._info_widget = JupyterDisplay(interval=status_display_interval)
 
@@ -138,8 +136,13 @@ class Manager(object):
 
             ssl_key, ssl_cert = self._setup_ssl(ssl, run_info_path)
 
-            # use port = 0, as a port range has been set with set_port_range
-            self._taskvine = cvine.vine_ssl_create(0, ssl_key, ssl_cert)
+            # A single port goes to the C manager directly. A range reaches it through the environment only while the
+            # manager is created, so processes started later, such as local workers, choose their own ports.
+            if isinstance(port, int):
+                self._taskvine = cvine.vine_ssl_create(port, ssl_key, ssl_cert)
+            else:
+                with port_range(port):
+                    self._taskvine = cvine.vine_ssl_create(0, ssl_key, ssl_cert)
 
             if ssl_key:
                 self._using_ssl = True
