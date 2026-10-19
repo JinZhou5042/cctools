@@ -169,13 +169,18 @@ after the "symlink" header has already been received.
 
 static vine_result_code_t vine_manager_get_symlink_contents(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, const char *filename, int length)
 {
-	char *target = malloc(length);
+	/* The body holds the target without a terminating null. */
+	char *target = malloc(length + 1);
+	if (!target) {
+		return VINE_MGR_FAILURE;
+	}
 
 	int actual = link_read(w->link, target, length, time(0) + q->short_timeout);
 	if (actual != length) {
 		free(target);
 		return VINE_WORKER_FAILURE;
 	}
+	target[length] = 0;
 
 	int result = symlink(target, filename);
 	if (result < 0) {

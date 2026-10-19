@@ -46,13 +46,18 @@ need to be url_decoded because it is sent in the body.
 
 static int vine_transfer_get_symlink_internal(struct link *lnk, char *filename, int length, int timeout)
 {
-	char *target = malloc(length);
+	/* The body holds the target without a terminating null. */
+	char *target = malloc(length + 1);
+	if (!target) {
+		return 0;
+	}
 
 	int actual = link_read(lnk, target, length, time(0) + timeout);
 	if (actual != length) {
 		free(target);
 		return 0;
 	}
+	target[length] = 0;
 
 	int result = symlink(target, filename);
 	if (result < 0) {
