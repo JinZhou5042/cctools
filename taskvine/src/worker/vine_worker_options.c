@@ -37,7 +37,6 @@ struct vine_worker_options *vine_worker_options_create()
 	self->max_backoff_interval = 8;
 
 	self->check_resources_interval = 5;
-	self->max_time_on_measurement = 3;
 
 	self->features = hash_table_create(0, 0);
 

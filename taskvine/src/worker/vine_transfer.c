@@ -240,12 +240,12 @@ static int vine_transfer_get_file_internal(struct link *lnk, const char *filenam
 		return 0;
 	}
 
+	fchmod(fd, mode);
+
 	if (close(fd) < 0) {
 		debug(D_VINE, "Failed to close file - %s (%s)\n", filename, strerror(errno));
 		return 0;
 	}
-
-	chmod(filename, mode);
 
 	return 1;
 }

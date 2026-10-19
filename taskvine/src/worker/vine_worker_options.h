@@ -76,9 +76,6 @@ struct vine_worker_options {
 	/* How frequently to measure resources available. */
 	int check_resources_interval;
 
-	/* Maximum number of seconds to spend on each resource management. */
-	int max_time_on_measurement;
-
 	/* Name of worker architecture and operating system */
 	char *arch_name;
 	char *os_name;
