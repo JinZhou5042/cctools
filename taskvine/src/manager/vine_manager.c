@@ -4127,14 +4127,32 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 		link_address_local(q->manager_link, address, &q->port);
 	}
 
-	q->poll_set = link_poll_set_create();
-	if (!q->poll_set || !link_poll_set_add(q->poll_set, q->manager_link, LINK_READ, NULL)) {
+	int wake[2] = {-1, -1};
+	if (pipe(wake) == 0) {
+		q->wake_link = link_attach_to_fd(wake[0]);
+	}
+	if (q->wake_link) {
+		q->poll_set = link_poll_set_create();
+	}
+	if (!q->poll_set || !link_poll_set_add(q->poll_set, q->manager_link, LINK_READ, NULL) || !link_poll_set_add(q->poll_set, q->wake_link, LINK_READ, NULL)) {
 		debug(D_NOTICE, "Could not create the poll set of the manager.");
+		if (q->wake_link) {
+			link_close(q->wake_link);
+			close(wake[1]);
+		} else if (wake[0] >= 0) {
+			close(wake[0]);
+			close(wake[1]);
+		}
 		link_poll_set_delete(q->poll_set);
 		link_close(q->manager_link);
 		free(runtime_dir);
 		free(q);
-		return 0;
+		return NULL;
+	}
+	q->wake_fd = wake[1];
+	for (int i = 0; i < 2; i++) {
+		fcntl(wake[i], F_SETFD, FD_CLOEXEC);
+		fcntl(wake[i], F_SETFL, O_NONBLOCK);
 	}
 
 	debug(D_VINE, "manager start");
@@ -4605,6 +4623,8 @@ void vine_delete(struct vine_manager *q)
 	hash_table_delete(q->properties);
 
 	link_poll_set_delete(q->poll_set);
+	link_close(q->wake_link);
+	close(q->wake_fd);
 	free(q->ssl_cert);
 	free(q->ssl_key);
 
@@ -4955,6 +4975,8 @@ int vine_submit(struct vine_manager *q, struct vine_task *t)
 	vine_category_lookup_or_create(q, t->category);
 
 	change_task_state(q, t, VINE_TASK_READY);
+	/* The new task may be dispatched at once, so the next wait polls workers without sleeping first. */
+	q->nothing_happened_last_wait_cycle = 0;
 
 	t->time_when_submitted = timestamp_get();
 	q->stats->tasks_submitted++;
@@ -5176,6 +5198,13 @@ struct vine_task *vine_wait(struct vine_manager *q, int timeout)
 	return vine_wait_for_tag(q, NULL, timeout);
 }
 
+void vine_wake(struct vine_manager *q)
+{
+	/* Only the write touches the manager, so any thread may call this. A full pipe already holds a wake. */
+	ssize_t result = write(q->wake_fd, "x", 1);
+	(void)result;
+}
+
 struct vine_task *vine_wait_for_tag(struct vine_manager *q, const char *tag, int timeout)
 {
 	return vine_wait_internal(q, timeout, tag, -1);
@@ -5223,6 +5252,14 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 	int workers_failed = 0;
 
 	q->connections_waiting = link_poll_set_take(q->poll_set, q->manager_link, LINK_READ);
+
+	if (link_poll_set_take(q->poll_set, q->wake_link, LINK_READ)) {
+		/* Several wakes before this poll end the same wait. */
+		char buffer[64];
+		while (read(link_fd(q->wake_link), buffer, sizeof(buffer)) > 0) {
+		}
+		q->woken = 1;
+	}
 
 	/* Consider the ready worker connections in turn. A worker marked for removal while handling another one leaves
 	 * the poll set, and so is not reached. */
@@ -5431,6 +5468,9 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 	int events = 0;
 	print_password_warning(q);
 
+	/* A wake that arrived during an earlier wait was answered when that wait returned. */
+	q->woken = 0;
+
 	// compute stoptime
 	time_t stoptime = (timeout == VINE_WAIT_FOREVER) ? 0 : time(0) + timeout;
 
@@ -5472,6 +5512,11 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			if (t && (!q->prefer_dispatch || skip_list_size(q->ready_tasks) == 0 || !sent_in_previous_cycle)) {
 				break;
 			}
+		}
+
+		// return to the application, which another thread asked for with vine_wake.
+		if (q->woken) {
+			break;
 		}
 
 		// retrieve worker status messages
