@@ -1605,6 +1605,12 @@ static void disconnect_manager(struct link *manager)
 	kill_all_tasks();
 	reap_killed_processes(1);
 
+	/* Messages queued for this manager must not reach the next one. */
+	char *message;
+	while ((message = list_pop_head(pending_async_messages))) {
+		free(message);
+	}
+
 	if (released_by_manager) {
 		released_by_manager = 0;
 	} else if (abort_flag) {
