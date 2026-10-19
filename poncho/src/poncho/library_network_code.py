@@ -47,6 +47,10 @@ spare = None
 spare_wanted = False
 discarded_spares = set()
 
+# Modules that calls imported and the library failed to import, and whether the library still imports them.
+failed_imports = set()
+learning_imports = True
+
 
 # This class captures how results from FunctionCalls are conveyed from
 # the library to the manager.
@@ -400,6 +404,45 @@ def start_in_spare(line):
         discarded_spares.add(pid)
         return -1
     return pid
+
+
+# Return " name,name,..." for the modules imported since sys.modules held count modules, at most limit characters,
+# or "" when there are none or when the call left threads running, which may have imported them for themselves and
+# would make an import in the library start threads that every later fork inherits half-copied.
+def imported_modules(count, limit):
+    threading_module = sys.modules.get("threading")
+    if threading_module and threading_module.active_count() > 1:
+        return ""
+    names = []
+    length = 0
+    for name in list(sys.modules)[count:]:
+        if name.startswith("__") or "," in name or " " in name:
+            continue
+        length += len(name) + 1
+        if length + 1 > limit:
+            break
+        names.append(name)
+    return " " + ",".join(names) if names else ""
+
+
+# Import, in the library process, modules that a call imported, so the calls forked afterwards inherit them instead of
+# importing them each. An import that fails is not tried again. Importing stops for good once an import leaves a
+# thread running, which forked calls would inherit without its state being safe to use.
+def learn_imports(names):
+    global learning_imports
+    if not learning_imports:
+        return
+    for name in names:
+        if name in sys.modules or name in failed_imports:
+            continue
+        try:
+            importlib.import_module(name)
+        except BaseException:
+            failed_imports.add(name)
+    threading_module = sys.modules.get("threading")
+    if threading_module and threading_module.active_count() > 1:
+        learning_imports = False
+        stdout_timed_message("an imported module started a thread, so the library imports no more modules of calls")
 
 
 # Send result of a function execution to worker. Wake worker up to do work with SIGCHLD.
