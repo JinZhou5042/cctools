@@ -16,6 +16,7 @@ See the file COPYING for details.
 #include "trash.h"
 #include "unlink_recursive.h"
 #include "url_encode.h"
+#include "xxmalloc.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -71,7 +72,23 @@ end
 
 */
 
-static int vine_transfer_put_internal(struct link *lnk, const char *full_name, const char *relative_name, vine_transfer_mode_t xfer_mode, time_t stoptime)
+/* A directory being sent, or one that contains the requested item, identified by device and inode, with the directory
+ * that contains it. A link that leads to one of them is sent as a link instead of being followed, which would send the
+ * tree again without end. */
+struct sent_directory {
+	dev_t device;
+	ino_t inode;
+	const struct sent_directory *parent;
+};
+
+/*
+Send one item. Links are followed and sent as what they lead to, except a link to a directory being sent or to one
+that contains the requested item, which is sent as a link. Inside a directory, a FIFO, a socket, or a device has no
+data to send and is skipped. Any other item that cannot be read is sent as "error", which fails the transfer.
+ancestors holds the directories around the item, the innermost first, and nested is zero for the requested item.
+*/
+
+static int vine_transfer_put_internal(struct link *lnk, const char *full_name, const char *relative_name, vine_transfer_mode_t xfer_mode, time_t stoptime, const struct sent_directory *ancestors, int nested)
 {
 	struct stat info;
 	int64_t actual, length;
@@ -83,6 +100,23 @@ static int vine_transfer_put_internal(struct link *lnk, const char *full_name, c
 
 	if (stat(full_name, &info) != 0) {
 		goto access_failure;
+	}
+
+	if (S_ISDIR(info.st_mode)) {
+		for (const struct sent_directory *a = ancestors; a; a = a->parent) {
+			if (a->device == info.st_dev && a->inode == info.st_ino) {
+				/* A link to a directory being sent or containing the item. A loop without a link, such as a bind
+				 * mount, cannot be sent. */
+				if (lstat(full_name, &info) != 0) {
+					goto access_failure;
+				}
+				if (!S_ISLNK(info.st_mode)) {
+					errno = ELOOP;
+					goto access_failure;
+				}
+				break;
+			}
+		}
 	}
 
 	/* Send only the normal mode bits. */
@@ -118,12 +152,13 @@ static int vine_transfer_put_internal(struct link *lnk, const char *full_name, c
 
 		send_message(lnk, "dir %s %o %lld\n", relative_name_encoded, mode, (long long)info.st_mtime);
 
+		struct sent_directory sent = {info.st_dev, info.st_ino, ancestors};
 		struct dirent *dent;
 		while ((dent = readdir(dir))) {
 			if (!strcmp(dent->d_name, ".") || !strcmp(dent->d_name, ".."))
 				continue;
 			char *sub_full_name = string_format("%s/%s", full_name, dent->d_name);
-			int sub_result = vine_transfer_put_internal(lnk, sub_full_name, dent->d_name, xfer_mode, stoptime);
+			int sub_result = vine_transfer_put_internal(lnk, sub_full_name, dent->d_name, xfer_mode, stoptime, &sent, 1);
 			free(sub_full_name);
 
 			// Bail out of transfer if we cannot send any more
@@ -142,7 +177,10 @@ static int vine_transfer_put_internal(struct link *lnk, const char *full_name, c
 		} else {
 			goto access_failure;
 		}
+	} else if (nested) {
+		debug(D_VINE, "not sending %s: a FIFO, socket, or device holds no data", full_name);
 	} else {
+		errno = EINVAL;
 		goto access_failure;
 	}
 
@@ -168,7 +206,27 @@ int vine_transfer_put_any(struct link *lnk, struct vine_cache *cache, const char
 	int r;
 
 	if (path_within_dir(cached_path, workspace->cache_dir)) {
-		r = vine_transfer_put_internal(lnk, cached_path, path_basename(filename), xfer_mode, stoptime);
+		/* The directories that contain the item, from the root down. */
+		struct sent_directory *above = NULL;
+		char *prefix = xxstrdup(cached_path);
+		for (char *slash = strchr(prefix, '/'); slash; slash = strchr(slash + 1, '/')) {
+			char kept = slash[1];
+			slash[1] = 0;
+			struct stat info;
+			if (stat(prefix, &info) == 0) {
+				struct sent_directory *directory = xxmalloc(sizeof(*directory));
+				*directory = (struct sent_directory){info.st_dev, info.st_ino, above};
+				above = directory;
+			}
+			slash[1] = kept;
+		}
+		free(prefix);
+		r = vine_transfer_put_internal(lnk, cached_path, path_basename(filename), xfer_mode, stoptime, above, 0);
+		while (above) {
+			struct sent_directory *parent = (struct sent_directory *)above->parent;
+			free(above);
+			above = parent;
+		}
 	} else {
 		/* Same reply as an unreadable file in vine_transfer_put_internal. */
 		debug(D_VINE, "refusing to send %s: not within %s", cached_path, workspace->cache_dir);
