@@ -102,6 +102,12 @@ struct vine_worker_info {
 
 	int incoming_xfer_counter;
 	int outgoing_xfer_counter;
+
+	/* Quarantine of tasks charged a lost worker (see vine_schedule.h): the id of the quarantined task that runs here,
+	 * so the worker takes no other task, and the id of the quarantined task for which the worker takes no new task
+	 * until it runs nothing, or zero. */
+	int quarantine_task_id;
+	int quarantine_reserved_id;
 };
 
 struct vine_worker_info * vine_worker_create( struct link * lnk );
