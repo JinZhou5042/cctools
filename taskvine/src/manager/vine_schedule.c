@@ -135,6 +135,22 @@ int check_worker_have_enough_disk_with_inputs(struct vine_manager *q, struct vin
 {
 	double available = w->resources->disk.total - MAX(0, t->resources_requested->disk) - w->resources->disk.inuse;
 
+	/* A function call runs inside its library, and its inputs go to the worker's cache like those of any task. The
+	 * disk a library reserves at dispatch (a share of what the cache left free then) is not used by the library itself,
+	 * so it stays available to the inputs of function calls. Counting it as well as the cache that grew into it left no
+	 * room for any function call once the cache passed the unreserved share, and the worker never ran one again. */
+	if (t->needs_library && w->current_libraries) {
+		uint64_t library_id;
+		struct vine_task *library;
+		int iteration;
+		ITABLE_ITERATE(w->current_libraries, iteration, library_id, library)
+		{
+			if (library->state == VINE_TASK_RUNNING && library->current_resource_box) {
+				available += library->current_resource_box->disk;
+			}
+		}
+	}
+
 	int64_t missing = 0;
 	struct vine_mount *m;
 	LIST_ITERATE(t->input_mounts, m)
