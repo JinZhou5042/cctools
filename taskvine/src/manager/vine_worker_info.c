@@ -46,6 +46,7 @@ struct vine_worker_info *vine_worker_create(struct link *lnk)
 
 	w->last_update_msg_time = w->start_time;
 	w->last_transfer_failure = 0;
+	w->last_source_failure = 0;
 	w->last_failure_time = 0;
 
 	vine_counters.worker.created++;
@@ -141,4 +142,15 @@ struct jx *vine_worker_to_jx(struct vine_worker_info *w)
 	current_tasks_to_jx(j, w);
 
 	return j;
+}
+
+/*
+A transfer from this worker failed at its destination, and the worker sent nothing since. Its host may hang with its
+connections open, so another transfer from it would wait for the same peer transfer timeout. It is not chosen as a
+source until any message from it shows that it is alive.
+*/
+
+int vine_worker_source_is_suspect(struct vine_worker_info *w)
+{
+	return w->last_source_failure > w->last_msg_recv_time;
 }

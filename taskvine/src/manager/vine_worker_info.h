@@ -96,6 +96,9 @@ struct vine_worker_info {
 	timestamp_t total_task_time;
 	timestamp_t total_transfer_time;
 	timestamp_t last_transfer_failure;
+	/* Time of the last failed transfer from this worker as a source. It is not chosen as a source again until a
+	 * message from it arrives after this time. */
+	timestamp_t last_source_failure;
 	timestamp_t start_time;
 	timestamp_t last_msg_recv_time;
 	timestamp_t last_update_msg_time;
@@ -115,10 +118,17 @@ struct vine_worker_info {
 
 	int incoming_xfer_counter;
 	int outgoing_xfer_counter;
+
+	/* The records of current_transfer_table with this worker as destination or source, linked through the records,
+	 * so the records of a removed worker are found without a pass over the table. */
+	struct vine_transfer_pair *incoming_transfers;
+	struct vine_transfer_pair *outgoing_transfers;
 };
 
 struct vine_worker_info * vine_worker_create( struct link * lnk );
 void vine_worker_delete( struct vine_worker_info *w );
 
 struct jx * vine_worker_to_jx( struct vine_worker_info *w );
+
+int vine_worker_source_is_suspect( struct vine_worker_info *w );
 #endif
