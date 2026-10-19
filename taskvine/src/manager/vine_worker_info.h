@@ -102,6 +102,11 @@ struct vine_worker_info {
 
 	int incoming_xfer_counter;
 	int outgoing_xfer_counter;
+
+	/* The records of current_transfer_table with this worker as destination or source, linked through the records,
+	 * so the records of a removed worker are found without a pass over the table. */
+	struct vine_transfer_pair *incoming_transfers;
+	struct vine_transfer_pair *outgoing_transfers;
 };
 
 struct vine_worker_info * vine_worker_create( struct link * lnk );
