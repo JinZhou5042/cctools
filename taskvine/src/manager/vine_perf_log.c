@@ -54,17 +54,20 @@ void vine_perf_log_write_update(struct vine_manager *q, int force)
 
 	timestamp_t now = timestamp_get();
 	if (!force && ((now - q->time_last_log_stats) < (long unsigned int)(ONE_SECOND * q->perf_log_interval))) {
+		q->perf_log_pending = 1;
+		return;
+	}
+
+	q->time_last_log_stats = now;
+	q->perf_log_pending = 0;
+
+	/* The statistics take a pass over every worker, so they are computed only for a log that records them. */
+	if (!q->perf_logfile) {
 		return;
 	}
 
 	vine_get_stats(q, &s);
 	debug(D_VINE, "workers connections -- known: %d, connecting: %d", s.workers_connected, s.workers_init);
-
-	q->time_last_log_stats = now;
-
-	if (!q->perf_logfile) {
-		return;
-	}
 
 	buffer_t B;
 	buffer_init(&B);

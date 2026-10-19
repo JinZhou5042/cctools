@@ -5693,8 +5693,10 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		}
 	}
 
-	if (events > 0) {
-		vine_perf_log_write_update(q, 1);
+	/* Events write a performance log entry at most once per interval, because computing the statistics takes a pass
+	 * over every worker. An event held back is written by a later wait once the interval passed. */
+	if (events > 0 || q->perf_log_pending) {
+		vine_perf_log_write_update(q, 0);
 	}
 
 	q->time_last_wait = timestamp_get();
@@ -5707,7 +5709,7 @@ struct vine_task *vine_manager_no_wait(struct vine_manager *q, const char *tag, 
 	BEGIN_ACCUM_TIME(q, time_internal);
 	struct vine_task *t = find_task_to_return(q, tag, task_id);
 	if (t) {
-		vine_perf_log_write_update(q, 1);
+		vine_perf_log_write_update(q, 0);
 	}
 	END_ACCUM_TIME(q, time_internal);
 
