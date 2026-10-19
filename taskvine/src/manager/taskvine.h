@@ -1484,6 +1484,13 @@ a times series, if this feature is enabled. See @ref vine_enable_monitoring.
 */
 int vine_tune(struct vine_manager *m, const char *name, double value);
 
+/** Tell whether @ref vine_tune takes a parameter name, without a manager.
+A program that checks settings before it creates a manager, or without one, uses it.
+@param name The name of the parameter.
+@return 1 when vine_tune takes the name, 0 otherwise.
+*/
+int vine_tune_known(const char *name);
+
 /** Sets the maximum resources a task without an explicit category ("default" category).
 rm specifies the maximum resources a task in the default category may use.
 @param m  Reference to the current manager object.
