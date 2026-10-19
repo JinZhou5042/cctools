@@ -5232,20 +5232,6 @@ int vine_disable_external_recovery_handling(struct vine_manager *q)
 	return 1;
 }
 
-int vine_enable_external_recovery_handling(struct vine_manager *q)
-{
-	debug(D_VINE, "External recovery handling enabled");
-	q->external_recovery_handling = 1;
-	return 1;
-}
-
-int vine_disable_external_recovery_handling(struct vine_manager *q)
-{
-	debug(D_VINE, "External recovery handling disabled");
-	q->external_recovery_handling = 0;
-	return 1;
-}
-
 int vine_enable_proportional_resources(struct vine_manager *q)
 {
 	debug(D_VINE, "Proportional resources enabled");
