@@ -39,6 +39,10 @@ See the file COPYING for details.
 #include <string.h>
 #include <time.h>
 
+#if defined(CCTOOLS_OPSYS_LINUX)
+#include <sys/epoll.h>
+#endif
+
 #ifndef TCP_LOW_PORT_DEFAULT
 #define TCP_LOW_PORT_DEFAULT 1024
 #endif
@@ -82,7 +86,57 @@ struct link {
 	SSL_CTX *ctx;
 	SSL *ssl;
 #endif
+
+	/* Membership in a poll set, or null. */
+	struct link_poll_entry *poll;
 };
+
+/* The lists of a poll set that a link can be in: links with events that were not taken yet, in the order in which
+ * they became ready, and links whose input buffer may hold data that the next wait must report. */
+enum poll_list_kind {
+	POLL_READY,
+	POLL_CHECK,
+	POLL_LISTS
+};
+
+/* The place of a link in one list of its poll set. */
+struct poll_node {
+	struct link *prev;
+	struct link *next;
+	int member; /* Whether the link is in the list. */
+};
+
+/* A list of links of a poll set, linked through their entries so that any link leaves it at once. */
+struct poll_list {
+	struct link *head;
+	struct link *tail;
+};
+
+/* The membership of a link in a poll set. */
+struct link_poll_entry {
+	struct link_poll_set *set;
+	void *data;  /* The caller's value, returned with the link's events. */
+	int events;  /* The events of interest. */
+	int revents; /* The events found by a wait and not taken yet. */
+	int index;   /* The position of the link in set->links. */
+	struct poll_node node[POLL_LISTS];
+};
+
+struct link_poll_set {
+	struct link **links; /* Every link of the set, for its deletion and the poll() fallback. */
+	int count;	     /* Number of links in the set. */
+	int size;	     /* Allocated entries of links and of the wait array below. */
+	struct poll_list list[POLL_LISTS];
+#if defined(CCTOOLS_OPSYS_LINUX)
+	int epoll_fd;		   /* The epoll instance that watches every link of the set. */
+	struct epoll_event *ready; /* Events returned by one epoll_wait(). */
+#else
+	struct pollfd *fds; /* The poll() array, rebuilt for every wait. */
+#endif
+};
+
+static void poll_set_note_buffer(struct link *link);
+static int poll_set_grow(struct link_poll_set *set);
 
 static int link_send_window = 65536;
 static int link_recv_window = 65536;
@@ -332,6 +386,7 @@ static struct link *link_create()
 	link->raddr[0] = 0;
 	link->rport = 0;
 	link->type = LINK_TYPE_STANDARD;
+	link->poll = 0;
 
 #ifdef HAS_OPENSSL
 	link->ctx = 0;
@@ -844,6 +899,11 @@ ssize_t read_aux(struct link *link, char *data, size_t count)
 			}
 		}
 
+		/* A wait of the link's poll set reports what the read left inside the SSL object. */
+		if (SSL_pending(link->ssl) > 0) {
+			poll_set_note_buffer(link);
+		}
+
 		return result;
 	}
 #endif
@@ -890,6 +950,7 @@ static ssize_t fill_buffer(struct link *link, time_t stoptime)
 			link->read += chunk;
 			link->buffer_start = link->buffer;
 			link->buffer_length = chunk;
+			poll_set_note_buffer(link);
 			return chunk;
 		} else if (chunk == 0) {
 			link->buffer_start = link->buffer;
@@ -1164,6 +1225,9 @@ ssize_t link_printf(struct link *link, time_t stoptime, const char *fmt, ...)
 void link_close(struct link *link)
 {
 	if (link) {
+		if (link->poll) {
+			link_poll_set_remove(link->poll->set, link);
+		}
 		link_flush_output(link);
 		buffer_free(&link->output_buffer);
 
@@ -1194,6 +1258,9 @@ void link_close(struct link *link)
 void link_detach(struct link *link)
 {
 	if (link) {
+		if (link->poll) {
+			link_poll_set_remove(link->poll->set, link);
+		}
 		free(link);
 	}
 }
@@ -1499,6 +1566,355 @@ int link_get_buffer_bytes(struct link *link)
 	int bytes;
 	ioctl(link->fd, TIOCOUTQ, &bytes);
 	return bytes;
+}
+
+static void poll_list_push(struct link_poll_set *set, enum poll_list_kind kind, struct link *link)
+{
+	struct poll_node *node = &link->poll->node[kind];
+	if (node->member) {
+		return;
+	}
+	struct poll_list *list = &set->list[kind];
+	node->prev = list->tail;
+	node->next = NULL;
+	node->member = 1;
+	if (list->tail) {
+		list->tail->poll->node[kind].next = link;
+	} else {
+		list->head = link;
+	}
+	list->tail = link;
+}
+
+static void poll_list_remove(struct link_poll_set *set, enum poll_list_kind kind, struct link *link)
+{
+	struct poll_node *node = &link->poll->node[kind];
+	if (!node->member) {
+		return;
+	}
+	struct poll_list *list = &set->list[kind];
+	if (node->prev) {
+		node->prev->poll->node[kind].next = node->next;
+	} else {
+		list->head = node->next;
+	}
+	if (node->next) {
+		node->next->poll->node[kind].prev = node->prev;
+	} else {
+		list->tail = node->prev;
+	}
+	node->prev = node->next = NULL;
+	node->member = 0;
+}
+
+static struct link *poll_list_pop(struct link_poll_set *set, enum poll_list_kind kind)
+{
+	struct link *link = set->list[kind].head;
+	if (link) {
+		poll_list_remove(set, kind, link);
+	}
+	return link;
+}
+
+/* Data that a read left in the buffer of a link is reported by the next wait of its set. */
+static void poll_set_note_buffer(struct link *link)
+{
+	if (link->poll) {
+		poll_list_push(link->poll->set, POLL_CHECK, link);
+	}
+}
+
+/* Record events found for a link, which keeps its place among the ready links or takes the last one. */
+static void poll_set_mark(struct link_poll_set *set, struct link *link, int revents)
+{
+	if (revents) {
+		link->poll->revents |= revents;
+		poll_list_push(set, POLL_READY, link);
+	}
+}
+
+#if defined(CCTOOLS_OPSYS_LINUX)
+static uint32_t link_to_epoll(int events)
+{
+	uint32_t r = 0;
+	if (events & LINK_READ) {
+		r |= EPOLLIN;
+	}
+	if (events & LINK_WRITE) {
+		r |= EPOLLOUT;
+	}
+	return r;
+}
+
+/* An error is reported as the events of interest, because the operations that waited for them no longer block. */
+static int epoll_to_link(uint32_t revents, int events)
+{
+	int r = 0;
+	if (revents & (EPOLLIN | EPOLLHUP)) {
+		r |= LINK_READ;
+	}
+	if (revents & EPOLLOUT) {
+		r |= LINK_WRITE;
+	}
+	if (revents & EPOLLERR) {
+		r |= events;
+	}
+	return r;
+}
+#endif
+
+struct link_poll_set *link_poll_set_create(void)
+{
+	struct link_poll_set *set = calloc(1, sizeof(*set));
+	if (!set) {
+		return NULL;
+	}
+#if defined(CCTOOLS_OPSYS_LINUX)
+	set->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+	if (set->epoll_fd < 0) {
+		free(set);
+		return NULL;
+	}
+#endif
+	/* The arrays always have room, so a wait on an empty set passes a valid array. */
+	if (!poll_set_grow(set)) {
+		link_poll_set_delete(set);
+		return NULL;
+	}
+	return set;
+}
+
+void link_poll_set_delete(struct link_poll_set *set)
+{
+	if (!set) {
+		return;
+	}
+	while (set->count > 0) {
+		link_poll_set_remove(set, set->links[set->count - 1]);
+	}
+#if defined(CCTOOLS_OPSYS_LINUX)
+	close(set->epoll_fd);
+	free(set->ready);
+#else
+	free(set->fds);
+#endif
+	free(set->links);
+	free(set);
+}
+
+/* Make room for one more link in the arrays of a set. */
+static int poll_set_grow(struct link_poll_set *set)
+{
+	if (set->count < set->size) {
+		return 1;
+	}
+	int size = set->size ? set->size * 2 : 8;
+	struct link **links = realloc(set->links, size * sizeof(*links));
+	if (!links) {
+		return 0;
+	}
+	set->links = links;
+#if defined(CCTOOLS_OPSYS_LINUX)
+	struct epoll_event *ready = realloc(set->ready, size * sizeof(*ready));
+	if (!ready) {
+		return 0;
+	}
+	set->ready = ready;
+#else
+	struct pollfd *fds = realloc(set->fds, size * sizeof(*fds));
+	if (!fds) {
+		return 0;
+	}
+	set->fds = fds;
+#endif
+	set->size = size;
+	return 1;
+}
+
+int link_poll_set_add(struct link_poll_set *set, struct link *link, int events, void *data)
+{
+	if (link->poll) {
+		if (link->poll->set != set) {
+			return 0;
+		}
+		link->poll->data = data;
+		return link_poll_set_modify(set, link, events);
+	}
+
+	if (!poll_set_grow(set)) {
+		return 0;
+	}
+
+	struct link_poll_entry *entry = calloc(1, sizeof(*entry));
+	if (!entry) {
+		return 0;
+	}
+
+#if defined(CCTOOLS_OPSYS_LINUX)
+	struct epoll_event event = {.events = link_to_epoll(events), .data.ptr = link};
+	if (epoll_ctl(set->epoll_fd, EPOLL_CTL_ADD, link->fd, &event) < 0) {
+		debug(D_TCP, "could not watch link %d: %s", link->fd, strerror(errno));
+		free(entry);
+		return 0;
+	}
+#endif
+
+	entry->set = set;
+	entry->data = data;
+	entry->events = events;
+	entry->index = set->count;
+	set->links[set->count++] = link;
+	link->poll = entry;
+
+	/* Data read before the link joined the set is reported by the next wait. */
+	poll_set_note_buffer(link);
+
+	return 1;
+}
+
+int link_poll_set_modify(struct link_poll_set *set, struct link *link, int events)
+{
+	struct link_poll_entry *entry = link->poll;
+	if (!entry || entry->set != set) {
+		return 0;
+	}
+	if (entry->events == events) {
+		return 1;
+	}
+
+#if defined(CCTOOLS_OPSYS_LINUX)
+	struct epoll_event event = {.events = link_to_epoll(events), .data.ptr = link};
+	if (epoll_ctl(set->epoll_fd, EPOLL_CTL_MOD, link->fd, &event) < 0) {
+		debug(D_TCP, "could not change the events of link %d: %s", link->fd, strerror(errno));
+		return 0;
+	}
+#endif
+
+	entry->events = events;
+	if (!(events & LINK_WRITE)) {
+		entry->revents &= ~LINK_WRITE;
+	}
+	if (!entry->revents) {
+		poll_list_remove(set, POLL_READY, link);
+	}
+	return 1;
+}
+
+void link_poll_set_remove(struct link_poll_set *set, struct link *link)
+{
+	struct link_poll_entry *entry = link->poll;
+	if (!entry || entry->set != set) {
+		return;
+	}
+
+#if defined(CCTOOLS_OPSYS_LINUX)
+	/* The descriptor may be shared with a child process, so closing it would not remove it from the epoll set. */
+	epoll_ctl(set->epoll_fd, EPOLL_CTL_DEL, link->fd, NULL);
+#endif
+
+	for (int kind = 0; kind < POLL_LISTS; kind++) {
+		poll_list_remove(set, kind, link);
+	}
+
+	struct link *last = set->links[--set->count];
+	set->links[entry->index] = last;
+	last->poll->index = entry->index;
+
+	free(entry);
+	link->poll = NULL;
+}
+
+int link_poll_set_wait(struct link_poll_set *set, int msec)
+{
+	/* Links that were not taken keep their place, and their events are confirmed below: by their sockets, or by data
+	 * in their buffers, which may be what made them ready and which their sockets no longer show. */
+	struct link *link;
+	for (link = set->list[POLL_READY].head; link; link = link->poll->node[POLL_READY].next) {
+		link->poll->revents = 0;
+		poll_list_push(set, POLL_CHECK, link);
+	}
+
+	/* Links that a read left with data in their buffer are readable without a look at their sockets. */
+	while ((link = poll_list_pop(set, POLL_CHECK))) {
+		if (link_has_buffered_data(link)) {
+			poll_set_mark(set, link, LINK_READ);
+			msec = 0;
+		}
+	}
+
+	int result;
+#if defined(CCTOOLS_OPSYS_LINUX)
+	result = epoll_wait(set->epoll_fd, set->ready, MAX(set->size, 1), msec);
+	for (int i = 0; i < result; i++) {
+		link = set->ready[i].data.ptr;
+		poll_set_mark(set, link, epoll_to_link(set->ready[i].events, link->poll->events));
+	}
+#else
+	for (int i = 0; i < set->count; i++) {
+		set->fds[i].fd = set->links[i]->fd;
+		set->fds[i].events = link_to_poll(set->links[i]->poll->events);
+		set->fds[i].revents = 0;
+	}
+	result = poll(set->fds, set->count, msec);
+	int polled = result > 0 ? set->count : 0;
+	for (int i = 0; i < polled; i++) {
+		int revents = poll_to_link(set->fds[i].revents);
+		if (set->fds[i].revents & POLLERR) {
+			revents |= set->links[i]->poll->events;
+		}
+		poll_set_mark(set, set->links[i], revents);
+	}
+#endif
+
+	/* Drop links whose events were not confirmed, and count the rest. */
+	int ready = 0;
+	struct link *next;
+	for (link = set->list[POLL_READY].head; link; link = next) {
+		next = link->poll->node[POLL_READY].next;
+		if (link->poll->revents) {
+			ready++;
+		} else {
+			poll_list_remove(set, POLL_READY, link);
+		}
+	}
+
+	if (result < 0 && errno != EINTR) {
+		return -1;
+	}
+	return ready;
+}
+
+struct link *link_poll_set_next(struct link_poll_set *set, int *revents, void **data)
+{
+	struct link *link = poll_list_pop(set, POLL_READY);
+	if (!link) {
+		return NULL;
+	}
+	*revents = link->poll->revents;
+	link->poll->revents = 0;
+	if (data) {
+		*data = link->poll->data;
+	}
+	/* The caller reads the link now and may leave data in its buffer. */
+	poll_set_note_buffer(link);
+	return link;
+}
+
+int link_poll_set_take(struct link_poll_set *set, struct link *link, int events)
+{
+	struct link_poll_entry *entry = link->poll;
+	if (!entry || entry->set != set) {
+		return 0;
+	}
+	int taken = entry->revents & events;
+	entry->revents &= ~events;
+	if (!entry->revents) {
+		poll_list_remove(set, POLL_READY, link);
+	}
+	if (taken & LINK_READ) {
+		poll_set_note_buffer(link);
+	}
+	return taken;
 }
 
 /* vim: set noexpandtab tabstop=8: */

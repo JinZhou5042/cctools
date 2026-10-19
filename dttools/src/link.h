@@ -392,6 +392,77 @@ Wait for a activity on a an array of links.
 
 int link_poll(struct link_info *array, int nlinks, int msec);
 
+/** @struct link_poll_set
+A persistent set of links that a program waits on together. Unlike @ref link_poll, which takes every link in every
+call, a link is added once and stays until it is removed or closed, so a wait costs time in proportion to the links
+that are ready, not to all links in the set. Linux uses epoll, and other systems poll every link in the set.
+<p>
+A wait reports the events of a link until the caller takes them with @ref link_poll_set_next or
+@ref link_poll_set_take. Links whose events were not taken keep their place ahead of newly ready links, so a caller
+that stops early serves every ready link in turn. A wait confirms the events of such links again and drops those that
+are no longer ready. A link whose input buffer holds data is reported readable even when its socket has nothing, as
+@ref link_poll does: this covers data that any read of the link left in its buffer.
+<p>
+Closing a link removes it from its set. A set and its links belong to one thread. A link is in at most one set.
+*/
+struct link_poll_set;
+
+/** Create an empty poll set.
+@return A new poll set, or null on failure.
+*/
+struct link_poll_set *link_poll_set_create(void);
+
+/** Delete a poll set. Its links are removed from it and stay open.
+@param set The set to delete.
+*/
+void link_poll_set_delete(struct link_poll_set *set);
+
+/** Add a link to a poll set, or change the events and data of a link that it holds.
+@param set The poll set.
+@param link The link to watch. A link in another set is refused.
+@param events The events to wait for (@ref LINK_READ, @ref LINK_WRITE, both, or zero). A closed connection is reported as @ref LINK_READ whatever the events.
+@param data A value returned with the link's events, such as the object that owns the link.
+@return One on success, zero on failure.
+*/
+int link_poll_set_add(struct link_poll_set *set, struct link *link, int events, void *data);
+
+/** Change the events that a poll set waits for on one of its links. Events that are no longer wanted are dropped.
+@param set The poll set.
+@param link A link in the set.
+@param events The events to wait for.
+@return One on success, zero if the link is not in the set or the change failed.
+*/
+int link_poll_set_modify(struct link_poll_set *set, struct link *link, int events);
+
+/** Remove a link from a poll set. Nothing happens when the link is not in the set.
+@param set The poll set.
+@param link The link to remove.
+*/
+void link_poll_set_remove(struct link_poll_set *set, struct link *link);
+
+/** Wait for activity on the links of a poll set.
+@param set The poll set.
+@param msec The number of milliseconds to wait. Zero does not wait, and -1 waits forever. A wait does not sleep while a link is ready already, by events not yet taken or by data in its buffer.
+@return The number of ready links, or -1 on error.
+*/
+int link_poll_set_wait(struct link_poll_set *set, int msec);
+
+/** Take the events of the next ready link, in the order in which links became ready.
+@param set The poll set.
+@param revents Filled with the events of the link.
+@param data Filled with the data given to @ref link_poll_set_add, if not null.
+@return The next ready link, or null when no link is ready.
+*/
+struct link *link_poll_set_next(struct link_poll_set *set, int *revents, void **data);
+
+/** Take some events of one link, leaving its other events for @ref link_poll_set_next.
+@param set The poll set.
+@param link A link in the set.
+@param events The events to take.
+@return The events taken, zero if none of them was ready.
+*/
+int link_poll_set_take(struct link_poll_set *set, struct link *link, int events);
+
 /** Get the number of bytes in the output buffer of a link.
 @param link The link to examine.
 @return The number of bytes in the output buffer of a link.
