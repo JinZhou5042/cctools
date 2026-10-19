@@ -22,6 +22,7 @@ struct vine_transfer_pair {
 	struct vine_worker_info *dest_worker;
 	struct vine_worker_info *source_worker;
 	char *source_url;
+	char *cachename;		      /* The file that the destination receives. */
 	char *id;			      /* A copy of the record's key in current_transfer_table. */
 	struct vine_transfer_pair *dest_prev; /* Neighbors in dest_worker->incoming_transfers. */
 	struct vine_transfer_pair *dest_next;
@@ -29,12 +30,13 @@ struct vine_transfer_pair {
 	struct vine_transfer_pair *source_next;
 };
 
-static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *id)
+static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename, const char *id)
 {
 	struct vine_transfer_pair *t = xxcalloc(1, sizeof(struct vine_transfer_pair));
 	t->dest_worker = dest_worker;
 	t->source_worker = source_worker;
 	t->source_url = source_url ? xxstrdup(source_url) : 0;
+	t->cachename = cachename ? xxstrdup(cachename) : 0;
 	t->id = xxstrdup(id);
 
 	if (t->dest_worker) {
@@ -83,19 +85,20 @@ static void vine_transfer_pair_delete(struct vine_transfer_pair *p)
 			}
 		}
 		free(p->source_url);
+		free(p->cachename);
 		free(p->id);
 		free(p);
 	}
 }
 
 // add a current transaction to the transfer table
-char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url)
+char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename)
 {
 	cctools_uuid_t uuid;
 	cctools_uuid_create(&uuid);
 
 	char *transfer_id = strdup(uuid.str);
-	struct vine_transfer_pair *t = vine_transfer_pair_create(dest_worker, source_worker, source_url, transfer_id);
+	struct vine_transfer_pair *t = vine_transfer_pair_create(dest_worker, source_worker, source_url, cachename, transfer_id);
 
 	hash_table_insert(q->current_transfer_table, transfer_id, t);
 	return transfer_id;
@@ -267,6 +270,32 @@ int vine_current_transfers_wipe_worker(struct vine_manager *q, struct vine_worke
 	}
 
 	return removed;
+}
+
+/*
+A destination keeps waiting for data from a removed source until its peer transfer timeout, because a source whose host
+hangs keeps its connections open. Unlinking the pending file kills the transfer process at the destination, which
+reports cache-invalid, so the task that needs the file is set up again from another source at once. The records stay
+until vine_current_transfers_wipe_worker(), so the failures that follow are not counted against either worker.
+*/
+
+int vine_current_transfers_abandon_source(struct vine_manager *q, struct vine_worker_info *w)
+{
+	int abandoned = 0;
+	if (!w) {
+		return abandoned;
+	}
+
+	struct vine_transfer_pair *p;
+	for (p = w->outgoing_transfers; p; p = p->source_next) {
+		if (p->dest_worker && p->dest_worker != w && p->cachename) {
+			debug(D_VINE, "abandoning the transfer of %s from removed worker %s to %s", p->cachename, w->addrport, p->dest_worker->addrport);
+			delete_worker_file(q, p->dest_worker, p->cachename, VINE_CACHE_LEVEL_TASK, VINE_CACHE_LEVEL_FOREVER);
+			abandoned++;
+		}
+	}
+
+	return abandoned;
 }
 
 void vine_current_transfers_print_table(struct vine_manager *q)
