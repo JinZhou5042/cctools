@@ -43,10 +43,6 @@ See the file COPYING for details.
 #include <sys/epoll.h>
 #endif
 
-/* Connections a listening socket holds before they are accepted. The kernel lowers it to net.core.somaxconn. A short
- * queue drops connections that arrive together, such as many workers connecting at once, and each must retry. */
-#define LINK_LISTEN_BACKLOG 4096
-
 #ifndef TCP_LOW_PORT_DEFAULT
 #define TCP_LOW_PORT_DEFAULT 1024
 #endif
