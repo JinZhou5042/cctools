@@ -2051,15 +2051,8 @@ static int fetch_outputs_from_worker(struct vine_manager *q, struct vine_worker_
 	return 1;
 }
 
-/*
-Retrieve task that cannot run for unfixable policy reasons,
-such as exceeded the absolute end time, no library task available, etc.
-This is done in a separate iteration outside of scheduling
-to avoid the cost of these checks in the critical path.
-*/
-/* Return whether a library template named name exists. Every check of a ready function call asks this, about seven
- * times per task before it is dispatched, and the calls of a run need one library, so the last answer is kept until
- * a template is added or removed. */
+/* Return whether a library template named name exists. Every check of a ready function call asks this, and the calls
+ * of a run usually need one library, so the last answer is kept until a template is added or removed. */
 static int library_template_exists(struct vine_manager *q, const char *name)
 {
 	if (q->library_checked_name && q->library_checked_serial == q->library_templates_serial && !strcmp(q->library_checked_name, name)) {
@@ -2076,6 +2069,12 @@ static int library_template_exists(struct vine_manager *q, const char *name)
 	return q->library_checked_found;
 }
 
+/*
+Retrieve task that cannot run for unfixable policy reasons,
+such as exceeded the absolute end time, no library task available, etc.
+This is done in a separate iteration outside of scheduling
+to avoid the cost of these checks in the critical path.
+*/
 static int retrieve_ready_task(struct vine_manager *q, struct vine_task *t, double now_secs)
 {
 	int retrieved = 0;
@@ -7833,8 +7832,8 @@ const struct rmsummary *vine_manager_task_resources_min(struct vine_manager *q, 
 
 struct category *vine_category_lookup_or_create(struct vine_manager *q, const char *name)
 {
-	/* The manager looks up a task's category about nine times per task, and most tasks share one, so the last one is
-	 * compared first. Categories live until the manager is deleted, so the pointer stays valid. */
+	/* The manager looks up the category of a task many times, and most tasks share one, so the last one is compared
+	 * first. Categories live until the manager is deleted, so the pointer stays valid. */
 	if (q->last_category && name && !strcmp(q->last_category->name, name)) {
 		return q->last_category;
 	}
