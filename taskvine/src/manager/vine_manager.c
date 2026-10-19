@@ -3302,15 +3302,26 @@ static void find_max_worker(struct vine_manager *q)
  * are not counted towards the resources in use and will be killed if needed. */
 static void kill_empty_libraries_on_worker(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
 {
+	/* Cancelling removes a library from current_libraries, so the libraries are collected first and cancelled after
+	 * the walk, which removal would otherwise break. */
+	struct list *unused = list_create();
+	if (!unused) {
+		return;
+	}
 	int iteration;
 	uint64_t libtask_id;
 	struct vine_task *libtask;
 	ITABLE_ITERATE(w->current_libraries, iteration, libtask_id, libtask)
 	{
 		if (libtask->function_slots_inuse == 0 && (!t->needs_library || strcmp(t->needs_library, libtask->provides_library))) {
-			vine_cancel_by_task_id(q, libtask_id);
+			list_push_tail(unused, (void *)(uintptr_t)libtask_id);
 		}
 	}
+	void *id;
+	while ((id = list_pop_head(unused))) {
+		vine_cancel_by_task_id(q, (uint64_t)(uintptr_t)id);
+	}
+	list_delete(unused);
 }
 
 /*
