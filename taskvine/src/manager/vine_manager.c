@@ -364,17 +364,59 @@ static void handle_idle_disconnect_request(struct vine_manager *q, struct vine_w
 	return;
 }
 
+/* Copy the next space-separated word of a message into word, which holds size bytes, and return the position after it,
+ * or NULL when there is no word or it does not fit. */
+static const char *message_word(const char *s, char *word, size_t size)
+{
+	if (!s) {
+		return NULL;
+	}
+	while (*s == ' ') {
+		s++;
+	}
+	size_t length = strcspn(s, " \n");
+	if (length == 0 || length >= size) {
+		return NULL;
+	}
+	memcpy(word, s, length);
+	word[length] = 0;
+	return s + length;
+}
+
+/* Parse the next space-separated word of a message as a decimal integer, and return the position after it, or NULL. */
+static const char *message_integer(const char *s, long long *value)
+{
+	if (!s) {
+		return NULL;
+	}
+	char *end;
+	errno = 0;
+	*value = strtoll(s, &end, 10);
+	if (end == s || errno || (*end && *end != ' ' && *end != '\n')) {
+		return NULL;
+	}
+	return end;
+}
+
 /* Handle an info message coming from the worker that provides a variety of metrics. */
 
 static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_info *w, char *line)
 {
 	char field[VINE_LINE_MAX];
-	char value[VINE_LINE_MAX];
 
-	int n = sscanf(line, "info %s %[^\n]", field, value);
-
-	if (n != 2)
+	/* The field is a word and the value the rest of the line, which must not be empty. It is parsed without sscanf,
+	 * because a worker sends info tasks_running for every task. */
+	const char *rest = message_word(string_prefix_is(line, "info ") ? line + strlen("info") : NULL, field, sizeof(field));
+	if (!rest) {
 		return VINE_MSG_FAILURE;
+	}
+	while (*rest == ' ') {
+		rest++;
+	}
+	const char *value = rest;
+	if (!*value || *value == '\n') {
+		return VINE_MSG_FAILURE;
+	}
 
 	if (string_prefix_is(field, "tasks_running")) {
 		w->dynamic_tasks_running = atoi(value);
@@ -435,15 +477,25 @@ of the file for the purposes of cache storage management.
 static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_worker_info *w, const char *line)
 {
 	char cachename[VINE_LINE_MAX];
-	int type;
-	int cache_level;
+	long long type;
+	long long cache_level;
 	long long size;
 	long long mtime;
 	long long transfer_time;
 	long long start_time;
 	char id[VINE_LINE_MAX];
 
-	if (sscanf(line, "cache-update %s %d %d %lld %lld %lld %lld %s", cachename, &type, &cache_level, &size, &mtime, &transfer_time, &start_time, id) == 8) {
+	/* cache-update <cachename> <type> <cache_level> <size> <mtime> <transfer_time> <start_time> <transfer_id>, parsed
+	 * without sscanf because a worker sends one for every file it receives or creates. */
+	const char *s = message_word(line + strlen("cache-update"), cachename, sizeof(cachename));
+	s = message_integer(s, &type);
+	s = message_integer(s, &cache_level);
+	s = message_integer(s, &size);
+	s = message_integer(s, &mtime);
+	s = message_integer(s, &transfer_time);
+	s = message_integer(s, &start_time);
+	s = message_word(s, id, sizeof(id));
+	if (s) {
 		/*
 		If an unsolicited cache-update arrives, there are several possibilities:
 		- The worker is telling us about an item from a previous run.
@@ -626,23 +678,25 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 	timestamp_t execution_time, start_time, end_time;
 	timestamp_t observed_execution_time;
 
-	// Format: task completion status, exit status (exit code or signal), output length, bytes_sent, execution time,
-	// task_id
-	int n = sscanf(line,
-			"complete %d %d %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64 "",
-			&task_status,
-			&exit_status,
-			&output_length,
-			&bytes_sent,
-			&start_time,
-			&end_time,
-			&sandbox_used,
-			&task_id);
-
-	if (n < 7) {
+	// Format: task completion status, exit status (exit code or signal), output length, bytes_sent, start time, end
+	// time, sandbox used, task_id. It is parsed without sscanf, because a worker sends one for every task.
+	long long fields[8];
+	const char *s = string_prefix_is(line, "complete ") ? line + strlen("complete") : NULL;
+	for (int i = 0; i < 8; i++) {
+		s = message_integer(s, &fields[i]);
+	}
+	if (!s) {
 		debug(D_VINE, "Invalid message from worker %s (%s): %s", w->hostname, w->addrport, line);
 		return VINE_WORKER_FAILURE;
 	}
+	task_status = fields[0];
+	exit_status = fields[1];
+	output_length = fields[2];
+	bytes_sent = fields[3];
+	start_time = fields[4];
+	end_time = fields[5];
+	sandbox_used = fields[6];
+	task_id = fields[7];
 
 	execution_time = end_time - start_time;
 
@@ -797,8 +851,13 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 
 	char path[length];
 
-	// Check for status updates that can be consumed here.
-	if (string_prefix_is(line, "alive")) {
+	// Check for status updates that can be consumed here. The most frequent messages, a cache-update for every file
+	// and a complete for every task, are matched first.
+	if (string_prefix_is(line, "cache-update")) {
+		result = handle_cache_update(q, w, line);
+	} else if (string_prefix_is(line, "complete")) {
+		result = handle_complete(q, w, line);
+	} else if (string_prefix_is(line, "alive")) {
 		result = VINE_MSG_PROCESSED;
 	} else if (string_prefix_is(line, "taskvine")) {
 		result = handle_taskvine(q, w, line);
@@ -819,8 +878,6 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		result = handle_name(q, w, line);
 	} else if (string_prefix_is(line, "info")) {
 		result = handle_info(q, w, line);
-	} else if (string_prefix_is(line, "cache-update")) {
-		result = handle_cache_update(q, w, line);
 	} else if (string_prefix_is(line, "cache-invalid")) {
 		result = handle_cache_invalid(q, w, line);
 	} else if (string_prefix_is(line, "transfer-hostport")) {
@@ -829,8 +886,6 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		result = handle_transfer_port(q, w, line);
 	} else if (sscanf(line, "GET %s HTTP/%*d.%*d", path) == 1) {
 		result = handle_http_request(q, w, path, stoptime);
-	} else if (string_prefix_is(line, "complete")) {
-		result = handle_complete(q, w, line);
 	} else {
 		// Message is not a status update: return it to the user.
 		result = VINE_MSG_NOT_PROCESSED;
