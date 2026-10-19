@@ -1179,6 +1179,9 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	vine_txn_log_write_worker(q, w, 1, reason);
 
+	/* Workers that receive files from this one would wait for the peer transfer timeout, so they abandon them now. */
+	vine_current_transfers_abandon_source(q, w);
+
 	hash_table_remove(q->worker_table, w->hashkey);
 	hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
 	hash_table_remove(q->workers_idle_disconnecting, w->hashkey);
