@@ -4319,8 +4319,19 @@ static int disconnect_slow_workers(struct vine_manager *q)
 
 	timestamp_t current = timestamp_get();
 
-	ITABLE_ITERATE(q->tasks, iteration, task_id, t)
+	/* Only a task at a worker can be slow, and the tasks at workers are the running ones and those waiting for
+	 * retrieval. They are collected first, because removing a task or a worker below changes both collections. */
+	struct list *candidates = list_create();
+	ITABLE_ITERATE(q->running_table, iteration, task_id, t)
 	{
+		list_push_tail(candidates, t);
+	}
+	LIST_ITERATE(q->waiting_retrieval_list, t)
+	{
+		list_push_tail(candidates, t);
+	}
+
+	while ((t = list_pop_head(candidates))) {
 
 		c = vine_category_lookup_or_create(q, t->category);
 		/* disconnect slow workers is not enabled for this category */
@@ -4379,6 +4390,8 @@ static int disconnect_slow_workers(struct vine_manager *q)
 			}
 		}
 	}
+
+	list_delete(candidates);
 
 	return removed;
 }
