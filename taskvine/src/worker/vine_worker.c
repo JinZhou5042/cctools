@@ -95,8 +95,21 @@ static struct itable *procs_running = NULL;
 /* These are additional pointers into procs_table and should not be deleted */
 static struct list *procs_waiting = NULL;
 
-/* List of asynchronous messages pending to be sent to the manager */
+/* A message of the worker's own, waiting to be sent to the manager. Most are text, but a message may also carry binary
+ * data, which may hold NUL bytes, so a message has an explicit length. */
+struct async_message {
+	size_t length;	      /* Bytes of data. */
+	size_t header_length; /* Bytes at the start of data that the debug log shows. */
+	char data[];	      /* The message itself. */
+};
+
+/* List of asynchronous messages (struct async_message) pending to be sent to the manager */
 static struct list *pending_async_messages = NULL;
+
+/* Bytes of the message at the head of pending_async_messages that the socket already took. */
+static size_t pending_async_offset = 0;
+/* The manager link that the queued messages go to. Only a direct write to this link waits for them. */
+static struct link *pending_async_link = 0;
 
 /* Table of all processes with results to be sent back, indexed by task_id. */
 /* These are additional pointers into procs_table and should not be deleted */
@@ -197,13 +210,19 @@ struct vine_worker_options *options = 0;
 
 extern int vine_hack_do_not_compute_cached_name;
 
-/* Send a printf-formatted message to the current manager. */
+static int flush_async_messages(struct link *l, time_t stoptime);
+
+/* Send a printf-formatted message to the current manager, or to a peer. */
 
 __attribute__((format(printf, 2, 3))) void send_message(struct link *l, const char *fmt, ...)
 {
 	char debug_msg[2 * VINE_LINE_MAX];
 	va_list va;
 	va_list debug_va;
+
+	if (!flush_async_messages(l, time(0) + options->active_timeout)) {
+		return;
+	}
 
 	va_start(va, fmt);
 
@@ -218,64 +237,86 @@ __attribute__((format(printf, 2, 3))) void send_message(struct link *l, const ch
 }
 
 /*
-Send messages from list of asychronous messages available.
-Asynchronus messages are measured and sent as to not overflow the
-TCP window (typically 64KB). This is done to avoid deadlock. Should
-the worker overflow the window, deadlock may occur in the scenario in
-which the manager requests data from the worker (files, etc.) during the
-the time in which the worker is sending data, causing the worker to block.
-This function attempts to deliver messages that have been buffered via
-the function send_async_message. We measure the size of the window and
-bytes present within the window. As we iterate though buffered messages,
-should a buffered message not overflow the the window, it is sent. Otherwise,
-we break once a message would overflow the window.
+Send the asynchronous messages that the socket takes without blocking. The worker never blocks writing a message of
+its own: the manager may be blocked writing a long task to this worker at the same time, and then neither side would
+read. A message that the socket takes only in part keeps its remainder at the head of the queue, so the stream stays
+intact, and the main loop waits for the link to become writable while messages remain.
 */
 
 void deliver_async_messages(struct link *l)
 {
-	/* If no pending messages, return right away. */
-	int messages = list_size(pending_async_messages);
-	if (messages < 1)
-		return;
-
-	/* Determine how much space is available for sending */
-	int recv_window;
-	int send_window;
-	link_window_get(l, &send_window, &recv_window);
-
-	int bytes_in_buffer = link_get_buffer_bytes(l);
-	int bytes_available = send_window - bytes_in_buffer;
-
-	int visited;
-
-	/* Consider each message in the pending queue: */
-	for (visited = 0; visited < messages; visited++) {
-		char *message = list_peek_head(pending_async_messages);
-		int message_size = strlen(message);
-		/*
-		If the message fits in the available space, send it.
-		OR: If it is larger than the whole window, send it anyway
-		because we will have to block one way or the other.
-		Otherwise, stop here and return later.
-		*/
-		if (message_size < bytes_available || message_size > send_window) {
-			message = list_pop_head(pending_async_messages);
-			bytes_available -= message_size;
-			debug(D_VINE, "tx: %s", message);
-			link_printf(l, time(0) + options->active_timeout, "%s", message);
-			free(message);
-		} else {
+	struct async_message *message;
+	while ((message = list_peek_head(pending_async_messages))) {
+		size_t length = message->length - pending_async_offset;
+		ssize_t written = link_write(l, message->data + pending_async_offset, length, LINK_NOWAIT);
+		if (written <= 0) {
 			break;
 		}
+		if ((size_t)written < length) {
+			pending_async_offset += written;
+			break;
+		}
+		debug(D_VINE, "tx: %.*s", (int)message->header_length, message->data);
+		list_pop_head(pending_async_messages);
+		free(message);
+		pending_async_offset = 0;
 	}
+}
+
+/*
+Write every queued message to the manager, waiting as needed, before the worker writes to that link directly. A direct
+write in the middle of a message that the socket took only in part would cut it. The worker writes directly only when
+the manager reads: in the reply to a request, or right before it disconnects. Return 0 if the link failed.
+*/
+
+static int flush_async_messages(struct link *l, time_t stoptime)
+{
+	if (l != pending_async_link) {
+		return 1;
+	}
+
+	struct async_message *message;
+	while ((message = list_peek_head(pending_async_messages))) {
+		size_t length = message->length - pending_async_offset;
+		ssize_t written = link_write(l, message->data + pending_async_offset, length, stoptime);
+		if (written > 0) {
+			pending_async_offset += written;
+		}
+		if (written < 0 || (size_t)written < length) {
+			return 0;
+		}
+		debug(D_VINE, "tx: %.*s", (int)message->header_length, message->data);
+		list_pop_head(pending_async_messages);
+		free(message);
+		pending_async_offset = 0;
+	}
+	return 1;
+}
+
+/* Queue a message of a text line and length bytes of data that follow it, and send what the socket takes now. */
+
+static void queue_async_message(struct link *l, const char *line, size_t line_length, const char *data, size_t length)
+{
+	assert(l);
+	pending_async_link = l;
+
+	struct async_message *message = xxmalloc(sizeof(*message) + line_length + length + 1);
+	memcpy(message->data, line, line_length);
+	if (length > 0) {
+		memcpy(message->data + line_length, data, length);
+	}
+	message->data[line_length + length] = 0;
+	message->length = line_length + length;
+	message->header_length = data ? line_length : message->length;
+
+	list_push_tail(pending_async_messages, message);
+	deliver_async_messages(l); // attempt to deliver message, will be delivered later if buffer is full.
 }
 
 /* Buffer an asynchronous message to be sent to the manager */
 
 void send_async_message(struct link *l, const char *fmt, ...)
 {
-	assert(l);
-
 	va_list va;
 	va_start(va, fmt);
 	int length = vsnprintf(NULL, 0, fmt, va);
@@ -286,13 +327,12 @@ void send_async_message(struct link *l, const char *fmt, ...)
 		fatal("message to the manager is %d bytes, more than VINE_LINE_MAX", length);
 	}
 
-	char *message = xxmalloc(length + 1);
+	char message[VINE_LINE_MAX];
 	va_start(va, fmt);
 	vsnprintf(message, length + 1, fmt, va);
 	va_end(va);
 
-	list_push_tail(pending_async_messages, message);
-	deliver_async_messages(l); // attempt to deliver message, will be delivered later if buffer is full.
+	queue_async_message(l, message, length, NULL, 0);
 }
 
 /* Send asynchronous task completion messages for current complete processes */
@@ -348,6 +388,11 @@ would be read as part of it. Return false then, so the worker disconnects instea
 static int report_changes(struct link *manager)
 {
 	results_to_be_sent_msg = 0;
+
+	/* Messages already queued go first, so the changes do not cut a message that is partly written. */
+	if (!flush_async_messages(manager, time(0) + options->active_timeout)) {
+		return 0;
+	}
 
 	if (!vine_watcher_send_changes(watcher, manager, time(0) + options->active_timeout)) {
 		debug(D_VINE, "failed to send the changes of watched files");
@@ -1306,16 +1351,21 @@ static int do_release()
 static void disconnect_manager(struct link *manager)
 {
 	debug(D_VINE, "disconnecting from manager %s:%d", current_manager_address->addr, current_manager_address->port);
+
+	/* Queued messages, such as info vacating, go out before the link closes, unless the link fails. */
+	flush_async_messages(manager, time(0) + options->active_timeout);
 	link_close(manager);
 
-	debug(D_VINE, "killing all outstanding tasks");
-	kill_all_tasks();
-
-	/* Messages queued for this manager must not reach the next one. */
-	char *message;
+	/* Messages that this manager did not take belong to its session, and a partly sent one would corrupt the next. */
+	struct async_message *message;
 	while ((message = list_pop_head(pending_async_messages))) {
 		free(message);
 	}
+	pending_async_offset = 0;
+	pending_async_link = 0;
+
+	debug(D_VINE, "killing all outstanding tasks");
+	kill_all_tasks();
 
 	if (released_by_manager) {
 		released_by_manager = 0;
@@ -1800,7 +1850,9 @@ static void vine_worker_serve_manager(struct link *manager)
 			sigchld_received_flag = 0;
 		}
 
-		struct link_info waits[2] = {{manager, LINK_READ, 0}, {wake_link, LINK_READ, 0}};
+		/* Queued messages also wait for the manager to make room for them. */
+		int manager_events = LINK_READ | (list_size(pending_async_messages) ? LINK_WRITE : 0);
+		struct link_info waits[2] = {{manager, manager_events, 0}, {wake_link, LINK_READ, 0}};
 		int ready = link_poll(waits, wake_link ? 2 : 1, wait_msec);
 		char drain[64];
 		while (wake_link && read(wake_pipe[0], drain, sizeof(drain)) > 0) {
