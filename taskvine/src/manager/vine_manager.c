@@ -668,7 +668,14 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 		debug(D_VINE, "Task %d library %s failed", t->task_id, t->provides_library);
 		struct vine_task *original = hash_table_lookup(q->library_templates, t->provides_library);
 		if (original) {
-			original->library_failed_count++;
+			/* The template retires after max_library_retries instances in a row fail to start. An instance that
+			 * completed a function call had started, so its death, such as a kill during a long run, starts the count
+			 * again instead of adding to it. */
+			if (t->library_ran_function) {
+				original->library_failed_count = 0;
+			} else {
+				original->library_failed_count++;
+			}
 			original->time_when_last_failure = timestamp_get();
 		}
 		debug(D_VINE | D_NOTICE, "Library %s failed on worker %s (%s)", t->provides_library, w->hostname, w->addrport);
@@ -678,6 +685,11 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 			debug(D_VINE | D_NOTICE, ", enable watch-library-logfiles for debug\n");
 		}
 	} else {
+		/* A function call that completed, whatever its result, shows that its library instance started. */
+		if (t->needs_library && t->library_task) {
+			t->library_task->library_ran_function = 1;
+		}
+
 		/* Update task stats for this completion. */
 		observed_execution_time = timestamp_get() - t->time_when_commit_end;
 

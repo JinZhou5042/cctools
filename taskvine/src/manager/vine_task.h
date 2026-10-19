@@ -92,12 +92,14 @@ struct vine_task {
 	char *library_log_path; /**< The path of the library log file, used only for library task if set q->watch_library_logfiles */
 	int try_count;               /**< The number of times the task has been dispatched to a worker without being forsaken. If larger than max_retries, return with result of last attempt. */
 	int forsaken_count;         /**< The number of times the task has been dispatched to a worker. If larger than max_forsaken, return with VINE_RESULT_FORSAKEN. */
-	int library_failed_count;   /**< The number of times the duplicated library instances failed on the workers. Only count for the template. */
+	int library_failed_count;   /**< The number of library instances in a row that failed on the workers before any of their function calls completed. Only count for the template. */
 	int exhausted_attempts;     /**< Number of times the task failed given exhausted resources. */
 	int forsaken_attempts;      /**< Number of times the task was submitted to a worker but failed to start execution. */
 	int workers_slow;           /**< Number of times this task has been terminated for running too long. */
 	int function_slots_total;   /**< If a library, the total number of function slots usable. */
 	int function_slots_inuse;   /**< If a library, the number of functions currently running. */
+	int library_ran_function;   /**< If a library instance, set when a function call it ran completed, which shows
+				       that the instance started. Its later death does not count as a failure to start. */
 		
 	/***** Results of task once it has reached completion. *****/
 
