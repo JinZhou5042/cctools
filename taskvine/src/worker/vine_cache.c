@@ -14,6 +14,7 @@ See the file COPYING for details.
 #include "vine_protocol.h"
 #include "vine_transfer.h"
 
+#include "address.h"
 #include "copy_stream.h"
 #include "debug.h"
 #include "domain_name_cache.h"
@@ -50,6 +51,8 @@ struct vine_cache {
 	struct hash_table *processing_transfers;
 	char *cache_dir;
 	int max_transfer_procs;
+	char manager_ip[LINK_ADDRESS_MAX]; /* This holds the control connection peer address inherited by download processes. */
+	int manager_transfer_port; /* This holds the Manager-supplied port and is zero until configured. */
 };
 
 static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager);
@@ -66,6 +69,8 @@ struct vine_cache *vine_cache_create(const char *cache_dir, int max_procs)
 	c->processing_transfers = hash_table_create(0, 0);
 	c->cache_dir = strdup(cache_dir);
 	c->max_transfer_procs = max_procs;
+	c->manager_ip[0] = 0;
+	c->manager_transfer_port = 0;
 	return c;
 }
 
@@ -558,17 +563,10 @@ static int rewrite_source_to_ip(struct vine_cache_file *f, char **error_message)
 	return 1;
 }
 
-/*
-Transfer a single input file from a worker url to a local file name.
-*/
-static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, char **error_message)
+/* Fetch a file with the native get from another worker or from the manager's data port. */
+static int do_peer_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *addr, int port_num, const char *source_path, const char *password, char **error_message)
 {
-	int port_num;
-	char addr[VINE_LINE_MAX], source_path[VINE_LINE_MAX];
 	struct link *worker_link;
-
-	// expect the form: workerip://host:port/path/to/file
-	sscanf(f->source, "workerip://%256[^:]:%d/%s", addr, &port_num, source_path);
 
 	debug(D_VINE, "cache: setting up worker transfer file %s", f->source);
 
@@ -582,8 +580,8 @@ static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, c
 		return 0;
 	}
 
-	if (options->password) {
-		if (!link_auth_password(worker_link, options->password, time(0) + 5)) {
+	if (password) {
+		if (!link_auth_password(worker_link, password, time(0) + 5)) {
 			*error_message = string_format("Could not authenticate to peer worker at %s:%d", addr, port_num);
 			link_close(worker_link);
 			return 0;
@@ -591,13 +589,14 @@ static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, c
 	}
 
 	char *transfer_dir = vine_cache_transfer_path(c, ".");
-	int64_t totalsize;
+	int64_t totalsize = 0;
 	int mode, mtime;
 
 	if (vine_transfer_request_any(worker_link, source_path, transfer_dir, &totalsize, &mode, &mtime, VINE_PEER_TRANSFER_TIMEOUT, error_message) != 1) {
 		if (error_message && *error_message == NULL) {
 			*error_message = string_format("Could not transfer file from %s", f->source);
 		}
+		free(transfer_dir);
 		link_close(worker_link);
 		return 0;
 	}
@@ -611,9 +610,52 @@ static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, c
 	return 1;
 }
 
+/* Parse the Worker source and use the original peer transfer sequence. */
+static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, char **error_message)
+{
+	int port_num;
+	char addr[VINE_LINE_MAX], source_path[VINE_LINE_MAX];
+
+	// expect the form: workerip://host:port/path/to/file
+	sscanf(f->source, "workerip://%256[^:]:%d/%s", addr, &port_num, source_path);
+
+	return do_peer_transfer(c, f, addr, port_num, source_path, options->password, error_message);
+}
+
+/* Save the control connection peer address and the advertised Manager data port. */
+int vine_cache_set_manager_transfer(struct vine_cache *c, const char *ip, int port)
+{
+	if (!ip || strlen(ip) >= sizeof(c->manager_ip) || !address_is_valid_ip(ip) || port < 1 || port > 65535 ||
+			(c->manager_transfer_port && (c->manager_transfer_port != port || strcmp(c->manager_ip, ip)))) {
+		return 0;
+	}
+	strcpy(c->manager_ip, ip);
+	c->manager_transfer_port = port;
+	return 1;
+}
+
+int vine_cache_get_manager_transfer(struct vine_cache *c, char *ip, int *port)
+{
+	if (!c->manager_transfer_port) {
+		return 0;
+	}
+	strcpy(ip, c->manager_ip);
+	*port = c->manager_transfer_port;
+	return 1;
+}
+
+/* Download through the Manager data port using the original peer transfer sequence. */
+static int do_manager_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, char **error_message)
+{
+	if (!c->manager_transfer_port) {
+		*error_message = string_format("Manager has not advertised its data port");
+		return 0;
+	}
+	return do_peer_transfer(c, f, c->manager_ip, c->manager_transfer_port, cachename, options->password, error_message);
+}
+
 /*
-Transfer a single object into the cache,
-whether by worker or via curl.
+Transfer a single object into the cache from a Worker, Manager, or URL.
 Use a temporary transfer path while downloading,
 and then rename it into the proper place.
 */
@@ -625,9 +667,11 @@ static int do_transfer(struct vine_cache *c, struct vine_cache_file *f, const ch
 
 	int result = 0;
 
-	if (strncmp(f->source, "workerip://", 11) == 0) {
+	if (string_prefix_is(f->source, VINE_TRANSFER_MANAGER_PREFIX)) {
+		result = do_manager_transfer(c, f, cachename, error_message);
+	} else if (string_prefix_is(f->source, VINE_TRANSFER_WORKER_IP_PREFIX)) {
 		result = do_worker_transfer(c, f, cachename, error_message);
-	} else if (strncmp(f->source, "worker://", 9) == 0) {
+	} else if (string_prefix_is(f->source, VINE_TRANSFER_WORKER_PREFIX)) {
 		result = rewrite_source_to_ip(f, error_message);
 		if (result) {
 			result = do_worker_transfer(c, f, cachename, error_message);
@@ -636,8 +680,9 @@ static int do_transfer(struct vine_cache *c, struct vine_cache_file *f, const ch
 		result = do_curl_transfer(c, f, transfer_path, cache_path, error_message);
 	}
 
-	if (!result)
+	if (!result) {
 		trash_file(transfer_path);
+	}
 
 	free(transfer_path);
 	free(cache_path);

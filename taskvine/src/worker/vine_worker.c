@@ -95,8 +95,8 @@ static struct itable *procs_running = NULL;
 /* These are additional pointers into procs_table and should not be deleted */
 static struct list *procs_waiting = NULL;
 
-/* A message of the worker's own, waiting to be sent to the manager. Most are text, but a message may also carry binary
- * data, which may hold NUL bytes, so a message has an explicit length. */
+/* A message of the worker's own, waiting to be sent to the manager. Most are text, and an inline-data reply also carries
+ * the bytes of a cached file, which may hold NUL bytes, so a message has an explicit length. */
 struct async_message {
 	size_t length;	      /* Bytes of data. */
 	size_t header_length; /* Bytes at the start of data that the debug log shows. */
@@ -359,6 +359,61 @@ void send_async_message(struct link *l, const char *fmt, ...)
 	va_end(va);
 
 	queue_async_message(l, message, length, NULL, 0);
+}
+
+/*
+Answer a manager request for the data of a cached file over the control link: "inline-data <name> <length> <mode>"
+followed by the bytes, or "inline-error <name> <errno>". The manager asks only for small files, so a connection of
+their own, which costs more than the file and occupies an entry of the host's connection tracking table for minutes,
+is not needed. A file larger than limit or not a regular file, such as a directory, is refused with EFBIG or EISDIR,
+and the manager then fetches it over a connection, as it does larger files. The reply goes through the asynchronous queue, ordered
+with the other messages of the worker, and the manager reads it without waiting for the rest of a partial reply.
+*/
+
+static int do_inline_get(struct link *manager, const char *cachename, int64_t limit)
+{
+	char cachename_encoded[VINE_LINE_MAX];
+	url_encode(cachename, cachename_encoded, sizeof(cachename_encoded));
+
+	int error = 0;
+	int fd = -1;
+	struct stat info;
+	char *data = NULL;
+
+	if (!cachename[0] || strchr(cachename, '/') || !strcmp(cachename, ".") || !strcmp(cachename, "..")) {
+		error = EACCES;
+	} else {
+		char *path = vine_cache_data_path(cache_manager, cachename);
+		/* A FIFO would block the open until a writer comes, which never does. */
+		fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+		free(path);
+		if (fd < 0 || fstat(fd, &info) < 0) {
+			error = errno;
+		} else if (!S_ISREG(info.st_mode)) {
+			error = EISDIR;
+		} else if (info.st_size > limit) {
+			error = EFBIG;
+		} else {
+			data = xxmalloc(info.st_size + 1);
+			if (full_read(fd, data, info.st_size) != info.st_size) {
+				error = EIO;
+			}
+		}
+	}
+	if (fd >= 0) {
+		close(fd);
+	}
+
+	if (error) {
+		debug(D_VINE, "cannot send %s inline: %s", cachename, strerror(error));
+		send_async_message(manager, "inline-error %s %d\n", cachename_encoded, error);
+	} else {
+		char line[VINE_LINE_MAX];
+		int length = snprintf(line, sizeof(line), "inline-data %s %lld %o\n", cachename_encoded, (long long)info.st_size, (unsigned)(info.st_mode & 0777));
+		queue_async_message(manager, line, length, data, info.st_size);
+	}
+	free(data);
+	return 1;
 }
 
 /* Send asynchronous task completion messages for current complete processes */
@@ -715,6 +770,9 @@ static void report_worker_ready(struct link *manager)
 
 	send_features(manager);
 	send_transfer_address(manager);
+	if (options->connect_back) {
+		send_async_message(manager, "info connect-back 1\n");
+	}
 	send_async_message(manager, "info worker-end-time %" PRId64 "\n", (int64_t)DIV_INT_ROUND_UP(options->end_time, USECOND));
 
 	if (options->factory_name) {
@@ -1444,6 +1502,7 @@ static int handle_manager(struct link *manager)
 	char transfer_id[VINE_LINE_MAX];
 	int64_t length;
 	int64_t task_id = 0;
+	uint64_t token;
 	int mode, n;
 	int r = 0;
 	int cache_level;
@@ -1455,6 +1514,15 @@ static int handle_manager(struct link *manager)
 		}
 		if (sscanf(line, "task %" SCNd64, &task_id) == 1) {
 			r = do_task(manager, task_id, time(0) + options->active_timeout);
+		} else if (sscanf(line, "connect-back %" SCNu64, &token) == 1) {
+			/* A failure only fails this receive, which the manager retries. */
+			vine_transfer_server_connect_back(cache_manager, manager, token);
+			r = 1;
+		} else if (sscanf(line, "manager_transfer_port %" SCNd64, &length) == 1) {
+			char manager_ip[LINK_ADDRESS_MAX];
+			int manager_port;
+			r = length > 0 && length <= 65535 && link_address_remote(manager, manager_ip, &manager_port) &&
+				vine_cache_set_manager_transfer(cache_manager, manager_ip, (int)length);
 		} else if (sscanf(line, "put %s %d %" SCNd64, filename_encoded, &cache_level, &length) == 3) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = do_put(manager, filename, cache_level, length);
@@ -1479,6 +1547,9 @@ static int handle_manager(struct link *manager)
 		} else if (sscanf(line, "unlink %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = do_unlink(manager, filename);
+		} else if (sscanf(line, "inline-get %s %" SCNd64, filename_encoded, &length) == 2) {
+			url_decode(filename_encoded, filename, sizeof(filename));
+			r = do_inline_get(manager, filename, length);
 		} else if (sscanf(line, "getfile %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = vine_transfer_put_any(manager, cache_manager, filename, VINE_TRANSFER_MODE_FILE_ONLY, time(0) + options->active_timeout);
@@ -2067,7 +2138,7 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	vine_cache_load(cache_manager);
 
 	/* Start the transfer server, which serves up the cache directory. */
-	if (!vine_transfer_server_start(cache_manager, options->transfer_port_min, options->transfer_port_max)) {
+	if (!vine_transfer_server_start(cache_manager, manager, options->transfer_port_min, options->transfer_port_max)) {
 		fprintf(stderr, "vine_worker: unable to bind transfer port (check --transfer-port or cluster permissions)\n");
 	}
 

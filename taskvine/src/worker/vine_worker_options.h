@@ -112,6 +112,10 @@ struct vine_worker_options {
 	char *reported_transfer_host;
 	int reported_transfer_port;
 
+	/* If set, the manager cannot reach the transfer port, so the worker connects to the manager's data port to send
+	 * the files the manager requests. Transfers between workers still use the transfer port. */
+	int connect_back;
+
 	/* Wrapper command to be applied to beginning of each task command. */
 	const char *task_wrapper;
 

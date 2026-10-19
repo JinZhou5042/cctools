@@ -144,6 +144,7 @@ void vine_worker_options_show_help(const char *cmd, struct vine_worker_options *
 	printf(" %-30s Listening port for worker-worker transfers. Either port or port_min:port_max (default: any)\n", "--transfer-port");
 	printf(" %-30s Explicit contact host:port for worker-worker transfers, e.g., when routing is used. (default: :<transfer_port>)\n", "--contact-hostport");
 	printf(" %-30s Maximum number of concurrent worker transfer requests (default=%d)\n", "--max-transfer-procs", options->max_transfer_procs);
+	printf(" %-30s Connect to the manager to send the files it requests, for a manager that cannot reach the transfer port.\n", "--connect-back");
 
 	printf(" %-30s Enable tls connection to manager (manager should support it).\n", "--ssl");
 	printf(" %-30s SNI domain name if different from manager hostname. Implies --ssl.\n", "--tls-sni=<domain name>");
@@ -176,6 +177,7 @@ enum {
 	LONG_OPT_KEEP_WORKSPACE,
 	LONG_OPT_MAX_TRANSFER_PROCS,
 	LONG_OPT_TASK_WRAPPER,
+	LONG_OPT_CONNECT_BACK,
 };
 
 static const struct option long_options[] = {{"advertise", no_argument, 0, 'a'},
@@ -219,6 +221,7 @@ static const struct option long_options[] = {{"advertise", no_argument, 0, 'a'},
 		{"max-transfer-procs", required_argument, 0, LONG_OPT_MAX_TRANSFER_PROCS},
 		{"contact-hostport", required_argument, 0, LONG_OPT_CONTACT_HOSTPORT},
 		{"task-wrapper", required_argument, 0, LONG_OPT_TASK_WRAPPER},
+		{"connect-back", no_argument, 0, LONG_OPT_CONNECT_BACK},
 		{0, 0, 0, 0}};
 
 static void vine_worker_options_get_env(const char *name, int64_t *manual_option)
@@ -468,6 +471,9 @@ void vine_worker_options_get(struct vine_worker_options *options, int argc, char
 			break;
 		case LONG_OPT_MAX_TRANSFER_PROCS:
 			options->max_transfer_procs = atoi(optarg);
+			break;
+		case LONG_OPT_CONNECT_BACK:
+			options->connect_back = 1;
 			break;
 		case LONG_OPT_TASK_WRAPPER:
 			options->task_wrapper = optarg;

@@ -13,6 +13,11 @@ See the file COPYING for details.
 #include "vine_transfer_receive.h"
 #include "link.h"
 
+/* These prefixes identify sources handled by the native transfer protocols. */
+#define VINE_TRANSFER_MANAGER_PREFIX "manager://"
+#define VINE_TRANSFER_WORKER_PREFIX "worker://"
+#define VINE_TRANSFER_WORKER_IP_PREFIX "workerip://"
+
 typedef enum {
 	VINE_TRANSFER_MODE_ANY,
 	VINE_TRANSFER_MODE_FILE_ONLY
