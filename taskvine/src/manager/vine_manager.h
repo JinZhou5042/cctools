@@ -108,7 +108,18 @@ struct vine_manager {
 	struct list   *waiting_retrieval_list;      /* List of vine_task that are waiting to be retrieved. */
 	struct list   *retrieved_list;      /* List of vine_task that have been retrieved. */
 	struct list   *task_info_list;  /* List of last N vine_task_infos for computing capacity. */
-	int task_info_limit;		/* The bound of task_info_list, which never shrinks. */
+	/* Sums of the reports in task_info_list, kept as reports are added and removed, so that the capacity costs O(1) per
+	 * returned task instead of a pass over the list. limit is the list's bound, which never shrinks. */
+	struct {
+		timestamp_t transfer_time;
+		timestamp_t exec_time;
+		timestamp_t manager_time;
+		double cores;
+		double memory;
+		double disk;
+		double gpus;
+		int limit;
+	} task_info_sums;
 	struct hash_table *categories;  /* Maps category_name -> struct category */
 	struct category *last_category; /* The category that vine_category_lookup_or_create() returned last, which most calls ask for again. */
 	struct hash_table *library_templates; /* Maps library name -> vine_task of library with that name. */
