@@ -478,7 +478,18 @@ Emit warnings if inconsistencies are detected, but keep going otherwise.
 
 void vine_task_check_consistency(struct vine_task *t)
 {
-	struct hash_table *table = hash_table_create(0, 0);
+	/* Names conflict only within a list of two or more mounts. The check runs at every submission, and a table of the
+	 * default 127 buckets was an allocation of 1 KB for a task with one input and one output. */
+	int inputs = list_size(t->input_mounts);
+	int outputs = list_size(t->output_mounts);
+	if (inputs < 2 && outputs < 2) {
+		return;
+	}
+
+	struct hash_table *table = hash_table_create(MAX(inputs, outputs), 0);
+	if (!table) {
+		return;
+	}
 	struct vine_mount *m;
 
 	/* Cannot have multiple input files mapped to the same remote name. */
