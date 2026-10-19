@@ -8,6 +8,7 @@
 # Function Calls will be executed by this pilot task.
 
 # import relevant libraries.
+import importlib
 import json
 import os
 import fcntl
@@ -36,6 +37,10 @@ reported = set()
 
 # The standard output file of each forked function process, by pid, for a call that ends without reporting.
 pid_to_stdout = {}
+
+# Modules that calls imported and the library failed to import, and whether the library still imports them.
+failed_imports = set()
+learning_imports = True
 
 
 # This class captures how results from FunctionCalls are conveyed from
@@ -176,6 +181,8 @@ def start_function(in_pipe_fd, thread_limit=1):
             p = os.fork()
             if p == 0:
                 exit_status = 1
+                # sys.modules keeps the order of imports, so the modules this call imports follow the ones it inherited.
+                inherited_modules = len(sys.modules)
 
                 try:
                     # change the working directory to the function's sandbox
@@ -224,10 +231,14 @@ def start_function(in_pipe_fd, thread_limit=1):
                     stdout_timed_message(f"TASK {function_id} error: execution failed due to {e}")
                 finally:
                     # Report the status that waitpid() would return before exiting, because tearing down a copy
-                    # of the library takes longer than most functions. The report is one write shorter than
-                    # PIPE_BUF, so reports of different processes never interleave.
+                    # of the library takes longer than most functions, and the modules the call imported, which the
+                    # library then imports once for later calls. The report is one write shorter than PIPE_BUF, so
+                    # reports of different processes never interleave.
                     try:
-                        os.write(report_w, f"{os.getpid()} {exit_status << 8}\n".encode())
+                        report = f"{os.getpid()} {exit_status << 8}"
+                        if exit_status == 0:
+                            report += imported_modules(inherited_modules, select.PIPE_BUF - len(report) - 2)
+                        os.write(report_w, f"{report}\n".encode())
                     except Exception:
                         pass
                     os._exit(exit_status)
@@ -242,6 +253,45 @@ def start_function(in_pipe_fd, thread_limit=1):
         else:
             stdout_timed_message(f"error: invalid execution method {exec_method}")
             return -1, function_id
+
+
+# Return " name,name,..." for the modules imported since sys.modules held count modules, at most limit characters,
+# or "" when there are none or when the call left threads running, which may have imported them for themselves and
+# would make an import in the library start threads that every later fork inherits half-copied.
+def imported_modules(count, limit):
+    threading_module = sys.modules.get("threading")
+    if threading_module and threading_module.active_count() > 1:
+        return ""
+    names = []
+    length = 0
+    for name in list(sys.modules)[count:]:
+        if name.startswith("__") or "," in name or " " in name:
+            continue
+        length += len(name) + 1
+        if length + 1 > limit:
+            break
+        names.append(name)
+    return " " + ",".join(names) if names else ""
+
+
+# Import, in the library process, modules that a call imported, so the calls forked afterwards inherit them instead of
+# importing them each. An import that fails is not tried again. Importing stops for good once an import leaves a
+# thread running, which forked calls would inherit without its state being safe to use.
+def learn_imports(names):
+    global learning_imports
+    if not learning_imports:
+        return
+    for name in names:
+        if name in sys.modules or name in failed_imports:
+            continue
+        try:
+            importlib.import_module(name)
+        except BaseException:
+            failed_imports.add(name)
+    threading_module = sys.modules.get("threading")
+    if threading_module and threading_module.active_count() > 1:
+        learning_imports = False
+        stdout_timed_message("an imported module started a thread, so the library imports no more modules of calls")
 
 
 # Send result of a function execution to worker. Wake worker up to do work with SIGCHLD.
@@ -366,8 +416,10 @@ def main():
         nonlocal report_buffer
         report_buffer += os.read(report_r, 65536)
         *reports, report_buffer = report_buffer.split(b"\n")
+        imported = []
         for report in reports:
-            c_pid, c_exit_status = (int(field) for field in report.split())
+            fields = report.decode().split()
+            c_pid, c_exit_status = int(fields[0]), int(fields[1])
             if c_pid in pid_to_func_id and c_pid not in reported:
                 send_result(
                     out_pipe_fd,
@@ -376,6 +428,11 @@ def main():
                     c_exit_status,
                 )
                 reported.add(c_pid)
+            if len(fields) > 2:
+                imported.extend(fields[2].split(","))
+        # results go out first.
+        if imported:
+            learn_imports(imported)
 
     # read in information about this library
     with open('library_info.clpk', 'rb') as f:
