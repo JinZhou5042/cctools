@@ -480,6 +480,7 @@ typedef enum {
 	MEMORY_BIT = (1 << 1),
 	DISK_BIT = (1 << 2),
 	GPUS_BIT = (1 << 3),
+	INPUTS_BIT = (1 << 4), /* the inputs of the task are larger than the disk of the worker */
 } vine_resource_bitmask_t;
 
 /*
@@ -488,7 +489,7 @@ Returns a bitmask that indicates which resource of the task, if any, cannot
 be met by the worker. If the task fits in the worker, it returns 0.
 */
 
-static vine_resource_bitmask_t is_task_larger_than_worker(struct vine_manager *q, struct vine_task *t, struct vine_worker_info *w)
+static vine_resource_bitmask_t is_task_larger_than_worker(struct vine_manager *q, struct vine_task *t, struct vine_worker_info *w, int64_t input_mb)
 {
 	if (w->resources->tag < 0) {
 		/* quickly return if worker has not sent its resources yet */
@@ -510,6 +511,9 @@ static vine_resource_bitmask_t is_task_larger_than_worker(struct vine_manager *q
 
 	if ((double)w->resources->disk.total < l->disk) {
 		set = set | DISK_BIT;
+	} else if ((double)w->resources->disk.total < input_mb) {
+		/* the task's inputs alone do not fit the worker's disk */
+		set = set | INPUTS_BIT;
 	} else if ((double)w->resources->disk.total - w->resources->disk.inuse < l->disk && itable_size(w->current_tasks) < 1) {
 		/* also trigger disk if worker's cache does not allow to run any task anymore */
 		set = set | DISK_BIT;
@@ -529,7 +533,7 @@ Returns 0 if there is worker than can fit the task. Otherwise it returns a bitma
 that indicates that there was at least one worker that could not fit that task resource.
 */
 
-static vine_resource_bitmask_t is_task_larger_than_any_worker(struct vine_manager *q, struct vine_task *t)
+static vine_resource_bitmask_t is_task_larger_than_any_worker(struct vine_manager *q, struct vine_task *t, int64_t input_mb)
 {
 	char *key;
 	struct vine_worker_info *w;
@@ -538,7 +542,7 @@ static vine_resource_bitmask_t is_task_larger_than_any_worker(struct vine_manage
 	int bit_set = 0;
 	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
 	{
-		vine_resource_bitmask_t new_set = is_task_larger_than_worker(q, t, w);
+		vine_resource_bitmask_t new_set = is_task_larger_than_worker(q, t, w, input_mb);
 		if (new_set == 0) {
 			// Task could run on a currently connected worker, immediately
 			// return
@@ -566,6 +570,8 @@ void vine_schedule_check_for_large_tasks(struct vine_manager *q)
 	int unfit_mem = 0;
 	int unfit_disk = 0;
 	int unfit_gpu = 0;
+	int unfit_inputs = 0;
+	int64_t largest_unfit_inputs = 0;
 
 	struct rmsummary *largest_unfit_task = rmsummary_create(-1);
 
@@ -576,8 +582,17 @@ void vine_schedule_check_for_large_tasks(struct vine_manager *q)
 		// in case there are continues, etc. below.
 		skip_list_next(cur);
 
+		/* The total size of the task's inputs, all of which its worker must hold. */
+		int64_t input_bytes = 0;
+		struct vine_mount *m;
+		LIST_ITERATE(t->input_mounts, m)
+		{
+			input_bytes += m->file->size;
+		}
+		int64_t input_mb = BYTES_TO_MEGABYTES(input_bytes);
+
 		// check each task against the queue of connected workers
-		vine_resource_bitmask_t bit_set = is_task_larger_than_any_worker(q, t);
+		vine_resource_bitmask_t bit_set = is_task_larger_than_any_worker(q, t, input_mb);
 		if (bit_set) {
 			rmsummary_merge_max(largest_unfit_task, vine_manager_task_resources_max(q, t));
 			rmsummary_merge_max(largest_unfit_task, vine_manager_task_resources_min(q, t));
@@ -594,10 +609,14 @@ void vine_schedule_check_for_large_tasks(struct vine_manager *q)
 		if (bit_set & GPUS_BIT) {
 			unfit_gpu++;
 		}
+		if (bit_set & INPUTS_BIT) {
+			unfit_inputs++;
+			largest_unfit_inputs = MAX(largest_unfit_inputs, input_mb);
+		}
 	}
 	skip_list_cursor_delete(cur);
 
-	if (unfit_core || unfit_mem || unfit_disk || unfit_gpu) {
+	if (unfit_core || unfit_mem || unfit_disk || unfit_gpu || unfit_inputs) {
 		notice(D_VINE, "There are tasks that cannot fit any currently connected worker:\n");
 	}
 
@@ -615,6 +634,10 @@ void vine_schedule_check_for_large_tasks(struct vine_manager *q)
 
 	if (unfit_gpu) {
 		notice(D_VINE, "    %d waiting task(s) need more than %s", unfit_gpu, rmsummary_resource_to_str("gpus", largest_unfit_task->gpus, 1));
+	}
+
+	if (unfit_inputs) {
+		notice(D_VINE, "    %d waiting task(s) read up to %" PRId64 " MB of inputs, more than the disk of any connected worker", unfit_inputs, largest_unfit_inputs);
 	}
 
 	rmsummary_delete(largest_unfit_task);
