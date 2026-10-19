@@ -149,6 +149,8 @@ struct vine_task {
 	int group_id;					       /**< When enabled, group ID will be assigned based on temp file dependencies of this task */	
 
 	int refcount;                                          /**< Number of remaining references to this object. */
+	int recovery_refs;				       /**< Number of temporary files whose recovery source is this task, each with a reference to it
+								  (see vine_task_recipe.h). Once only they hold the task, they keep its recipe instead. */
 };
 
 void vine_task_delete(struct vine_task *t);

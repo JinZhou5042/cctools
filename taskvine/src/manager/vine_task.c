@@ -9,6 +9,7 @@ See the file COPYING for details.
 #include "vine_file.h"
 #include "vine_manager.h"
 #include "vine_mount.h"
+#include "vine_task_recipe.h"
 #include "vine_worker_info.h"
 
 #include "debug.h"
@@ -27,6 +28,15 @@ See the file COPYING for details.
 #include <unistd.h>
 
 void vine_task_set_function_exec_mode(struct vine_task *t, vine_task_func_exec_mode_t exec_mode);
+
+/* The application may change a task after the manager returns it, and temporary files that the task wrote must still
+ * be recreated as it was submitted. Before such a change, the files get a recipe of the task as it is. */
+static void vine_task_before_change(struct vine_task *t)
+{
+	if (t->recovery_refs > 0) {
+		vine_task_recipe_detach(t, 0);
+	}
+}
 
 struct vine_task *vine_task_create(const char *command_line)
 {
@@ -253,6 +263,7 @@ struct vine_task *vine_task_copy(const struct vine_task *task)
 
 void vine_task_set_command(struct vine_task *t, const char *cmd)
 {
+	vine_task_before_change(t);
 	if (t->command_line)
 		free(t->command_line);
 	t->command_line = xxstrdup(cmd);
@@ -260,6 +271,7 @@ void vine_task_set_command(struct vine_task *t, const char *cmd)
 
 void vine_task_set_library_required(struct vine_task *t, const char *library_name)
 {
+	vine_task_before_change(t);
 	if (t->needs_library) {
 		free(t->needs_library);
 		t->needs_library = NULL;
@@ -288,6 +300,7 @@ const char *vine_task_get_library_required(struct vine_task *t)
 
 void vine_task_set_library_provided(struct vine_task *t, const char *library_name)
 {
+	vine_task_before_change(t);
 	if (t->provides_library) {
 		free(t->provides_library);
 		t->provides_library = NULL;
@@ -308,11 +321,13 @@ const char *vine_task_get_library_provided(struct vine_task *t)
 
 void vine_task_set_function_slots(struct vine_task *t, int nslots)
 {
+	vine_task_before_change(t);
 	t->function_slots_requested = nslots;
 }
 
 void vine_task_set_function_exec_mode(struct vine_task *t, vine_task_func_exec_mode_t exec_mode)
 {
+	vine_task_before_change(t);
 	if (t->provides_library) {
 		t->func_exec_mode = exec_mode;
 	}
@@ -320,6 +335,7 @@ void vine_task_set_function_exec_mode(struct vine_task *t, vine_task_func_exec_m
 
 void vine_task_set_function_exec_mode_from_string(struct vine_task *t, const char *exec_mode)
 {
+	vine_task_before_change(t);
 	if (exec_mode && t->provides_library) {
 		t->func_exec_mode = vine_task_func_exec_mode_from_string(exec_mode);
 	}
@@ -327,6 +343,7 @@ void vine_task_set_function_exec_mode_from_string(struct vine_task *t, const cha
 
 void vine_task_set_env_var(struct vine_task *t, const char *name, const char *value)
 {
+	vine_task_before_change(t);
 	if (value) {
 		list_push_tail(t->env_list, string_format("%s=%s", name, value));
 	} else {
@@ -337,6 +354,7 @@ void vine_task_set_env_var(struct vine_task *t, const char *name, const char *va
 
 void vine_task_set_retries(struct vine_task *t, int64_t max_retries)
 {
+	vine_task_before_change(t);
 	if (max_retries < 1) {
 		t->max_retries = 0;
 	} else {
@@ -346,6 +364,7 @@ void vine_task_set_retries(struct vine_task *t, int64_t max_retries)
 
 void vine_task_set_max_forsaken(struct vine_task *t, int64_t max_forsaken)
 {
+	vine_task_before_change(t);
 	if (max_forsaken < 0) {
 		t->max_forsaken = -1;
 	} else {
@@ -355,6 +374,7 @@ void vine_task_set_max_forsaken(struct vine_task *t, int64_t max_forsaken)
 
 void vine_task_set_memory(struct vine_task *t, int64_t memory)
 {
+	vine_task_before_change(t);
 	if (memory < 0) {
 		t->resources_requested->memory = -1;
 	} else {
@@ -364,6 +384,7 @@ void vine_task_set_memory(struct vine_task *t, int64_t memory)
 
 void vine_task_set_disk(struct vine_task *t, int64_t disk)
 {
+	vine_task_before_change(t);
 	if (disk < 0) {
 		t->resources_requested->disk = -1;
 	} else {
@@ -373,6 +394,7 @@ void vine_task_set_disk(struct vine_task *t, int64_t disk)
 
 void vine_task_set_cores(struct vine_task *t, int cores)
 {
+	vine_task_before_change(t);
 	if (cores < 0) {
 		t->resources_requested->cores = -1;
 	} else {
@@ -382,6 +404,7 @@ void vine_task_set_cores(struct vine_task *t, int cores)
 
 void vine_task_set_gpus(struct vine_task *t, int gpus)
 {
+	vine_task_before_change(t);
 	if (gpus < 0) {
 		t->resources_requested->gpus = -1;
 	} else {
@@ -391,6 +414,7 @@ void vine_task_set_gpus(struct vine_task *t, int gpus)
 
 void vine_task_set_time_end(struct vine_task *t, int64_t useconds)
 {
+	vine_task_before_change(t);
 	if (useconds < 1) {
 		t->resources_requested->end = -1;
 	} else {
@@ -400,6 +424,7 @@ void vine_task_set_time_end(struct vine_task *t, int64_t useconds)
 
 void vine_task_set_time_start(struct vine_task *t, int64_t useconds)
 {
+	vine_task_before_change(t);
 	if (useconds < 1) {
 		t->resources_requested->start = -1;
 	} else {
@@ -409,6 +434,7 @@ void vine_task_set_time_start(struct vine_task *t, int64_t useconds)
 
 void vine_task_set_time_max(struct vine_task *t, int64_t seconds)
 {
+	vine_task_before_change(t);
 	if (seconds < 1) {
 		t->resources_requested->wall_time = -1;
 	} else {
@@ -418,6 +444,7 @@ void vine_task_set_time_max(struct vine_task *t, int64_t seconds)
 
 void vine_task_set_time_min(struct vine_task *t, int64_t seconds)
 {
+	vine_task_before_change(t);
 	if (seconds < 1) {
 		t->min_running_time = -1;
 	} else {
@@ -441,6 +468,7 @@ void vine_task_set_resources(struct vine_task *t, const struct rmsummary *rm)
 
 void vine_task_set_tag(struct vine_task *t, const char *tag)
 {
+	vine_task_before_change(t);
 	if (t->tag)
 		free(t->tag);
 	t->tag = xxstrdup(tag);
@@ -448,6 +476,7 @@ void vine_task_set_tag(struct vine_task *t, const char *tag)
 
 void vine_task_set_category(struct vine_task *t, const char *category)
 {
+	vine_task_before_change(t);
 	if (t->category)
 		free(t->category);
 
@@ -456,6 +485,7 @@ void vine_task_set_category(struct vine_task *t, const char *category)
 
 void vine_task_add_feature(struct vine_task *t, const char *name)
 {
+	vine_task_before_change(t);
 	if (!name) {
 		return;
 	}
@@ -529,6 +559,11 @@ int vine_task_add_input(struct vine_task *t, struct vine_file *f, const char *re
 		return 0;
 	}
 
+	/* The manager adds mounts for one attempt, such as the resource monitor's, which are not part of the task. */
+	if (!(flags & VINE_RETRACT_ON_RESET)) {
+		vine_task_before_change(t);
+	}
+
 	t->has_fixed_locations |= flags & VINE_FIXED_LOCATION;
 
 	struct vine_mount *m = vine_mount_create(f, remote_name, flags, 0);
@@ -548,6 +583,11 @@ int vine_task_add_output(struct vine_task *t, struct vine_file *f, const char *r
 	if (remote_name[0] == '/') {
 		debug(D_NOTICE | D_VINE, "%s: invalid remote name %s: cannot start with a slash.", __func__, remote_name);
 		return 0;
+	}
+
+	/* The manager adds mounts for one attempt, such as the resource monitor's, which are not part of the task. */
+	if (!(flags & VINE_RETRACT_ON_RESET)) {
+		vine_task_before_change(t);
 	}
 
 	switch (f->type) {
@@ -648,6 +688,7 @@ int vine_task_add_execution_context(struct vine_task *t, struct vine_file *conte
 
 int vine_task_set_snapshot_file(struct vine_task *t, struct vine_file *monitor_snapshot_file)
 {
+	vine_task_before_change(t);
 	if (!monitor_snapshot_file) {
 		debug(D_NOTICE | D_VINE, "%s: monitor_snapshot_file cannot be null", __func__);
 		return 0;
@@ -661,16 +702,19 @@ int vine_task_set_snapshot_file(struct vine_task *t, struct vine_file *monitor_s
 
 void vine_task_set_scheduler(struct vine_task *t, vine_schedule_t algorithm)
 {
+	vine_task_before_change(t);
 	t->worker_selection_algorithm = algorithm;
 }
 
 void vine_task_set_priority(struct vine_task *t, double priority)
 {
+	vine_task_before_change(t);
 	t->user_priority = priority;
 }
 
 int vine_task_set_monitor_output(struct vine_task *t, const char *monitor_output_directory)
 {
+	vine_task_before_change(t);
 
 	if (!monitor_output_directory) {
 		debug(D_NOTICE | D_VINE, "Error: no monitor_output_file was specified.");
@@ -721,6 +765,12 @@ void vine_task_delete(struct vine_task *t)
 
 	t->refcount--;
 	vine_counters.task.deleted++;
+
+	if (t->refcount > 0 && t->refcount == t->recovery_refs) {
+		/* Only the temporary files that the task can recreate hold it now. They keep its recipe instead, which takes
+		 * the task's strings and mounts, and the task is freed. */
+		vine_task_recipe_detach(t, 1);
+	}
 
 	if (t->refcount > 0)
 		return;
