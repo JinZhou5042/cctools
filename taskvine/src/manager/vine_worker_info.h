@@ -48,6 +48,18 @@ struct vine_worker_info {
 	int  transfer_port_active;
 	char *transfer_url;       /* worker(ip)?://transfer_addr:transfer_port */
 
+	/* Scratch space of vine_schedule_task_to_worker(): bytes of the task's inputs cached on this worker, and whether it
+	 * holds the task's first input without a transfer source, valid only while schedule_stamp equals the manager's
+	 * schedule_stamp. */
+	int64_t schedule_cached_bytes;
+	int schedule_holds_unsourced;
+	uint64_t schedule_stamp;
+
+	/* Entry of the manager's capacity index (workers_by_capacity): the worker's free capacity priority when it was last
+	 * placed there, and its serial, which is unique among workers and zero while the worker is not in the index. */
+	double schedule_capacity;
+	uint64_t schedule_serial;
+
 	/* Blocking inputs of ready tasks that this worker holds, each with a reference. When the worker frees a transfer
 	 * slot, gains room for a task, or leaves, each of them is woken (see vine_schedule.h). */
 	struct set *blocked_files;

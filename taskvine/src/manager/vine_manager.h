@@ -142,6 +142,9 @@ struct vine_manager {
 	/* Primary scheduling controls. */
 
 	vine_schedule_t worker_selection_algorithm;    /* Mode for selecting best worker for task in main scheduler. */
+	uint64_t schedule_stamp;                       /* Marks worker scratch space of the current vine_schedule_task_to_worker(). */
+	struct skip_list *workers_by_capacity;         /* Capacity index: the workers of worker_table by free cores and function slots, see vine_schedule.h. */
+	uint64_t worker_serial;                        /* Last serial given to a worker that entered the capacity index. */
 	struct hash_table *blocked_sources;            /* Blocking inputs by the URL of their source, each a set of file references, see vine_schedule.h. */
 	uint64_t blocked_epoch;                        /* Advanced by vine_schedule_wake_all(), which ends the wait of every blocked ready task. */
 	uint64_t blocked_pass;                         /* Counts dispatch passes, so a blocking input is checked once per pass. */

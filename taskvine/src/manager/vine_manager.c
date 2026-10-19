@@ -1347,8 +1347,7 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 	vine_schedule_quarantine_remove_worker(q, w);
 
 	hash_table_remove(q->worker_table, w->hashkey);
-	/* A holder that leaves may leave a file without a replica, whose readers must then start its recovery. */
-	vine_schedule_wake_worker(q, w);
+	vine_schedule_capacity_index_remove(q, w);
 	hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
 	hash_table_remove(q->workers_idle_disconnecting, w->hashkey);
 
@@ -1381,7 +1380,7 @@ void vine_manager_mark_worker_for_removal(struct vine_manager *q, struct vine_wo
 
 	w->pending_removal = reason;
 	hash_table_remove(q->worker_table, w->hashkey);
-	vine_schedule_wake_worker(q, w);
+	vine_schedule_capacity_index_remove(q, w);
 	list_push_tail(q->zombie_workers, w);
 }
 
@@ -1471,6 +1470,7 @@ static void add_worker(struct vine_manager *q)
 	w->addrport = string_format("%s:%d", addr, port);
 
 	hash_table_insert(q->worker_table, w->hashkey, w);
+	vine_schedule_capacity_index_add(q, w);
 }
 
 /* Delete a single file on a remote worker except those with greater delete_upto_level cache level */
@@ -3269,8 +3269,8 @@ static void count_worker_resources(struct vine_manager *q, struct vine_worker_in
 	/* The disk usage includes the sandboxes of each task + the shared cache in use. */
 	w->resources->disk.inuse += BYTES_TO_MEGABYTES(w->inuse_cache);
 
-	/* A worker with room may let a ready task that waits for one of its files run. */
-	vine_schedule_wake_worker_with_room(q, w);
+	/* Committed cores, library slots, and reported cores change only before a count, so the count places the worker. */
+	vine_schedule_capacity_index_update(q, w);
 }
 
 static void update_max_worker(const char *hashkey, void *w_ptr, void *max_ptr)
@@ -3994,6 +3994,7 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 		if (iter_count >= iter_depth) {
 			break;
 		}
+
 		int waits = vine_schedule_task_waits(q, t);
 		iter_count++;
 
@@ -4597,6 +4598,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	/* priority has 3 components: vine_priority_t, user given priority, and -task_id */
 	q->ready_tasks = skip_list_create(3, 0.5);
+	/* priority has 2 components: the free capacity priority of a worker and -serial */
+	q->workers_by_capacity = skip_list_create(2, 0.5);
 	q->blocked_sources = hash_table_create(0, 0);
 	q->blocked_epoch = 1;
 	q->running_table = itable_create(0);
@@ -4986,6 +4989,8 @@ void vine_delete(struct vine_manager *q)
 		free(q->catalog_hosts);
 	}
 
+	skip_list_clear(q->workers_by_capacity, NULL);
+	skip_list_delete(q->workers_by_capacity);
 	vine_schedule_delete_blocked_sources(q);
 	hash_table_clear(q->worker_table, (void *)vine_worker_delete);
 	hash_table_delete(q->worker_table);
@@ -5562,6 +5567,7 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 		vine_cancel_by_task_id(q, task_id);
 		if (w) {
 			itable_remove(w->current_libraries, task_id);
+			vine_schedule_capacity_index_update(q, w);
 		}
 	}
 	list_delete(instances);
@@ -6597,6 +6603,7 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "resource-submit-multiplier") || !strcmp(name, "asynchrony-multiplier")) {
 		q->resource_submit_multiplier = MAX(value, 1.0);
+		vine_schedule_capacity_index_update_all(q);
 
 	} else if (!strcmp(name, "short-timeout")) {
 		q->short_timeout = MAX(1, (int)value);

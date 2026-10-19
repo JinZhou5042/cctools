@@ -36,9 +36,8 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
  *   with a source URL when a transfer from it ends at the limit of file-source-max-transfers (the manager's own send
  *   of a local file ends when its replica becomes ready or is removed, see vine_manager_limits_sends());
  * - vine_schedule_wake_worker() with a holder of it, through the holder's set of blocking files, when the holder frees
- *   a transfer slot at worker-source-max-transfers, ends its suspicion as a source with a message, reports its
- *   transfer port, or leaves, and vine_schedule_wake_worker_with_room() when its resources were counted again and it
- *   has room for a task;
+ *   a transfer slot at worker-source-max-transfers, may have gained room for a task, ends its suspicion as a source
+ *   with a message, reports its transfer port, or leaves;
  * - vine_schedule_wake_all(), which advances blocked_epoch in O(1), when a setting changes, and once a second for the
  *   conditions that change with time alone: recent transfer and task failures, blocklist expiry, draining, and factory
  *   limits.
@@ -52,7 +51,6 @@ int vine_schedule_task_is_blocked(struct vine_manager *q, struct vine_task *t);
 int vine_schedule_task_waits(struct vine_manager *q, struct vine_task *t);
 void vine_schedule_wake_file(struct vine_manager *q, const char *key);
 void vine_schedule_wake_worker(struct vine_manager *q, struct vine_worker_info *w);
-void vine_schedule_wake_worker_with_room(struct vine_manager *q, struct vine_worker_info *w);
 void vine_schedule_wake_all(struct vine_manager *q);
 /* Drop the registrations by source URL when the manager is deleted. */
 void vine_schedule_delete_blocked_sources(struct vine_manager *q);
@@ -62,9 +60,19 @@ void vine_schedule_delete_blocked_sources(struct vine_manager *q);
  * task that kills its workers are then its own, and a task that only shared a worker with it runs alone and
  * completes. When no worker is free, the task reserves one, which takes no new task until its tasks end, so a
  * quarantined task never waits for a worker to become free by chance. The reservation ends when the task is
- * committed to a worker, when it leaves the ready state, or when its worker is removed. */
+ * committed to a worker, when it leaves the ready state, or when its worker is removed. The checks cost O(1) per
+ * worker tried, and finding a worker to reserve walks the capacity index once per task. */
 void vine_schedule_quarantine_commit(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
 void vine_schedule_quarantine_reap(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
 void vine_schedule_quarantine_release(struct vine_task *t);
 void vine_schedule_quarantine_remove_worker(struct vine_manager *q, struct vine_worker_info *w);
+/* Keep the capacity index, which orders the workers of worker_table by their free cores and function slots so that
+ * VINE_SCHEDULE_FILES finds the best worker without a pass over all workers. A worker is added when it enters
+ * worker_table and removed when it leaves it. An update moves the worker to its place after its committed resources,
+ * its libraries, their slots, or its reported resources changed, and does nothing for a worker outside the index.
+ * Updating all workers follows a change of the resource submit multiplier. */
+void vine_schedule_capacity_index_add(struct vine_manager *q, struct vine_worker_info *w);
+void vine_schedule_capacity_index_remove(struct vine_manager *q, struct vine_worker_info *w);
+void vine_schedule_capacity_index_update(struct vine_manager *q, struct vine_worker_info *w);
+void vine_schedule_capacity_index_update_all(struct vine_manager *q);
 #endif
