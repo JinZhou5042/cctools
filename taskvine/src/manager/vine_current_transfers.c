@@ -23,6 +23,7 @@ struct vine_transfer_pair {
 	struct vine_worker_info *source_worker;
 	char *source_url;
 	char *cachename;		      /* The file that the destination receives. */
+	int64_t bytes; /* The size of the source worker's replica, counted in its outgoing_xfer_bytes. */
 	timestamp_t start_time;		      /* When the transfer was requested, to tell whether its source spoke since. */
 	char *id;			      /* A copy of the record's key in current_transfer_table. */
 	struct vine_transfer_pair *dest_prev; /* Neighbors in dest_worker->incoming_transfers. */
@@ -50,6 +51,9 @@ static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_i
 		dest_worker->incoming_transfers = t;
 	}
 	if (t->source_worker) {
+		struct vine_file_replica *replica = cachename ? vine_file_replica_table_lookup(source_worker, cachename) : 0;
+		t->bytes = replica ? MAX(replica->size, 0) : 0;
+		t->source_worker->outgoing_xfer_bytes += t->bytes;
 		t->source_worker->outgoing_xfer_counter++;
 		t->source_next = source_worker->outgoing_transfers;
 		if (t->source_next) {
@@ -76,6 +80,7 @@ static void vine_transfer_pair_delete(struct vine_transfer_pair *p)
 			}
 		}
 		if (p->source_worker) {
+			p->source_worker->outgoing_xfer_bytes -= p->bytes;
 			p->source_worker->outgoing_xfer_counter--;
 			if (p->source_prev) {
 				p->source_prev->source_next = p->source_next;
@@ -117,6 +122,16 @@ int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 	} else {
 		return 0;
 	}
+}
+
+int vine_current_transfers_source_has_room(struct vine_manager *q, struct vine_worker_info *w, int64_t size)
+{
+	if (w->outgoing_xfer_counter >= q->worker_source_max_transfers) {
+		return 0;
+	}
+	/* A size that is not known counts as none, so the count alone limits such a file. */
+	size = MAX(size, 0);
+	return w->outgoing_xfer_bytes == 0 || w->outgoing_xfer_bytes + size <= VINE_WORKER_SOURCE_MAX_BYTES;
 }
 
 /*
@@ -198,15 +213,15 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 	struct vine_worker_info *source_worker = p->source_worker;
 	struct vine_worker_info *dest_worker = p->dest_worker;
 
-	/* If p is valid, the elements of p should always be valid, because a failed worker causes the transfer record to be removed,
+	/* A transfer from a URL has no source worker, so no worker is at fault. */
+	if (!source_worker) {
+		return 0;
+	}
+
+	/* If p is valid, the destination should always be valid, because a failed worker causes the transfer record to be removed,
 	 * not nulled out. This shouldn't happen, but we check and emit an error just in case. */
-	if (!source_worker || !dest_worker) {
-		if (!source_worker) {
-			debug(D_ERROR, "%s: transfer record for file %s with id %s is found, but source worker is null", __func__, cachename, id);
-		}
-		if (!dest_worker) {
-			debug(D_ERROR, "%s: transfer record for file %s with id %s is found, but destination worker is null", __func__, cachename, id);
-		}
+	if (!dest_worker) {
+		debug(D_ERROR, "%s: transfer record for file %s with id %s is found, but destination worker is null", __func__, cachename, id);
 		return 0;
 	}
 

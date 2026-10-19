@@ -105,6 +105,8 @@ struct vine_worker_info {
 
 	int incoming_xfer_counter;
 	int outgoing_xfer_counter;
+	/* The bytes of the files this worker sends to other workers now, see vine_current_transfers_source_has_room(). */
+	int64_t outgoing_xfer_bytes;
 
 	/* The records of current_transfer_table with this worker as destination or source, linked through the records,
 	 * so the records of a removed worker are found without a pass over the table. */
