@@ -152,6 +152,10 @@ struct vine_manager {
 	timestamp_t time_last_wait;
 	timestamp_t time_last_log_stats;
 	timestamp_t time_last_large_tasks_check;
+	timestamp_t time_last_compaction; /* When the tables were last compacted, see compact_tables(). */
+	int64_t compacted_since_trim;     /* Removed table entries freed since the heap was last trimmed. */
+	int64_t tables_peak_since_trim;   /* Most tasks and files held at a compaction since the last trim. */
+	int64_t tables_held_last;         /* Tasks and files held at the last compaction. */
 	timestamp_t link_poll_end;
 	time_t      catalog_last_update_time;
 	time_t      resources_last_update_time;

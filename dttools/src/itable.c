@@ -160,18 +160,25 @@ static int itable_resize(struct itable *h, int new_count)
 	return 1;
 }
 
-/* Halve the buckets of a table whose load fell below DEFAULT_MIN_LOAD, as (n+1)/2-1 undoes the doubling to 2n+1.
- * Return whether the buckets were resized, which also frees the removed entries. */
+/* Shrink the buckets of a table whose load fell below DEFAULT_MIN_LOAD in one resize. The count is halved, as
+ * (n+1)/2-1 undoes the doubling to 2n+1, while the load stays at most half of DEFAULT_MAX_LOAD, so the next inserts do
+ * not double it again at once. Return whether the buckets were resized, which also frees the removed entries. */
 static int itable_reduce_buckets(struct itable *h)
 {
 	if (((float)h->size / h->bucket_count) >= DEFAULT_MIN_LOAD) {
 		return 0;
 	}
 
-	int new_count = ((h->bucket_count + 1) / 2) - 1;
+	int new_count = h->bucket_count;
+	while (1) {
+		int half = ((new_count + 1) / 2) - 1;
+		if (half < DEFAULT_SIZE || ((float)h->size / half) > DEFAULT_MAX_LOAD / 2) {
+			break;
+		}
+		new_count = half;
+	}
 
-	/* DEFAULT_SIZE is the minimum size, and the table cannot be reduced above DEFAULT_MAX_LOAD */
-	if (new_count < DEFAULT_SIZE || ((float)h->size / new_count) > DEFAULT_MAX_LOAD) {
+	if (new_count == h->bucket_count) {
 		return 0;
 	}
 
@@ -179,19 +186,22 @@ static int itable_reduce_buckets(struct itable *h)
 }
 
 /* Free the entries removed since the last compaction and shrink the buckets when the load is low. The cost is O(removed
- * entries), plus O(buckets) for a resize, which only follows removals of most entries. A compaction that frees entries
- * ends any iteration in progress, as an insert does, so an iteration continued afterwards aborts instead of reading a
- * freed entry. */
-void itable_compact(struct itable *h)
+ * entries), plus O(buckets) for a resize, which only follows removals of most entries, so it is amortized O(1) per
+ * removal however often it is called. A compaction that frees entries ends any iteration in progress, as an insert
+ * does: an iteration continued afterwards aborts instead of reading a freed entry. */
+int itable_compact(struct itable *h)
 {
-	if (!h->need_compact) {
-		return;
+	int freed = h->need_compact;
+	if (!freed) {
+		return 0;
 	}
 
 	if (!itable_reduce_buckets(h)) {
 		free_removed(h);
 	}
 	h->iteration_index = (h->iteration_index + 1) % ITERATION_MAX;
+
+	return freed;
 }
 
 void itable_delete(struct itable *h)
