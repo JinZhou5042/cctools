@@ -537,8 +537,39 @@ static void handle_idle_disconnect_request(struct vine_manager *q, struct vine_w
 	return;
 }
 
-static const char *message_word(const char *s, char *word, size_t size);
-static const char *message_integer(const char *s, long long *value);
+/* Copy the next space-separated word of a message into word, which holds size bytes, and return the position after it,
+ * or NULL when there is no word or it does not fit. */
+static const char *message_word(const char *s, char *word, size_t size)
+{
+	if (!s) {
+		return NULL;
+	}
+	while (*s == ' ') {
+		s++;
+	}
+	size_t length = strcspn(s, " \n");
+	if (length == 0 || length >= size) {
+		return NULL;
+	}
+	memcpy(word, s, length);
+	word[length] = 0;
+	return s + length;
+}
+
+/* Parse the next space-separated word of a message as a decimal integer, and return the position after it, or NULL. */
+static const char *message_integer(const char *s, long long *value)
+{
+	if (!s) {
+		return NULL;
+	}
+	char *end;
+	errno = 0;
+	*value = strtoll(s, &end, 10);
+	if (end == s || errno || (*end && *end != ' ' && *end != '\n')) {
+		return NULL;
+	}
+	return end;
+}
 
 /* Handle an info message coming from the worker that provides a variety of metrics. */
 
@@ -627,40 +658,6 @@ static int process_replica_event(struct vine_manager *q, struct vine_worker_info
 	}
 
 	return 1;
-}
-
-/* Copy the next space-separated word of a message into word, which holds size bytes, and return the position after it,
- * or NULL when there is no word or it does not fit. */
-static const char *message_word(const char *s, char *word, size_t size)
-{
-	if (!s) {
-		return NULL;
-	}
-	while (*s == ' ') {
-		s++;
-	}
-	size_t length = strcspn(s, " \n");
-	if (length == 0 || length >= size) {
-		return NULL;
-	}
-	memcpy(word, s, length);
-	word[length] = 0;
-	return s + length;
-}
-
-/* Parse the next space-separated word of a message as a decimal integer, and return the position after it, or NULL. */
-static const char *message_integer(const char *s, long long *value)
-{
-	if (!s) {
-		return NULL;
-	}
-	char *end;
-	errno = 0;
-	*value = strtoll(s, &end, 10);
-	if (end == s || errno || (*end && *end != ' ' && *end != '\n')) {
-		return NULL;
-	}
-	return end;
 }
 
 /*
