@@ -5,6 +5,7 @@ See the file COPYING for details.
 */
 
 #include "debug.h"
+#include "xxmalloc.h"
 #include "set.h"
 
 #include <stdlib.h>
@@ -14,12 +15,17 @@ See the file COPYING for details.
 #define DEFAULT_SIZE 127
 #define DEFAULT_LOAD 0.75
 #define DEFAULT_MIN_LOAD 0.125
+#define REMOVED_KEEP_MIN 1024 /* removed array capacity that is always kept across compactions */
 
 #define ITERATION_MAX 1000000 /* very conservative overflow protection */
 
+/* One element. A removed entry leaves its bucket at once, so lookups walk only live entries, but it stays allocated in
+ * the set's removed array, still marked deleted and with its next pointer intact, until the set frees removed entries
+ * at a compaction, a resize, or a clear. An iterator that stands on it therefore stays valid exactly as long as when
+ * removed entries stayed in their buckets. */
 struct entry {
 	uintptr_t element;
-	struct entry *next;
+	struct entry *next; /* Next entry of the bucket, or of the bucket it left when it was removed. */
 	int deleted;
 };
 
@@ -30,8 +36,19 @@ struct set {
 	int ibucket;
 	struct entry *ientry;
 	int iteration_index;
-	int need_compact;
+	int need_compact;	/* entries removed since the last compaction, which the removed array holds */
+	struct entry **removed; /* removed entries, freed at the next compaction, resize, or clear */
+	int removed_capacity;	/* length of the removed array */
 };
+
+/* Elements are mostly pointers, which are multiples of 16, so the bucket of an element comes from a mix of all of its
+ * bits rather than from the element itself, which would fill only every 16th bucket of an even bucket count. */
+static uint64_t set_bucket(uintptr_t element, int bucket_count)
+{
+	uint64_t x = (uint64_t)element * 0x9E3779B97F4A7C15ull;
+	x ^= x >> 32;
+	return x % bucket_count;
+}
 
 struct set *set_create(int bucket_count)
 {
@@ -53,6 +70,8 @@ struct set *set_create(int bucket_count)
 
 	s->size = 0;
 	s->need_compact = 0;
+	s->removed = 0;
+	s->removed_capacity = 0;
 	s->ientry = 0;
 	s->iteration_index = 0;
 	return s;
@@ -92,41 +111,43 @@ struct set *set_union(struct set *s1, struct set *s2)
 	return s;
 }
 
-static int set_insert_to_buckets_aux(struct entry **buckets, int bucket_count, struct entry *new_entry)
+/* Keep a removed entry until the next compaction, resize, or clear. */
+static void hold_removed(struct set *s, struct entry *e)
 {
-	uint64_t index;
-	struct entry *e;
-
-	index = new_entry->element % bucket_count;
-	e = buckets[index];
-
-	while (e) {
-		if (new_entry->element == e->element) {
-			e->deleted = 0;
-			free(new_entry);
-			return 1;
-		}
-		e = e->next;
+	if (s->need_compact == s->removed_capacity) {
+		s->removed_capacity = s->removed_capacity ? 2 * s->removed_capacity : 8;
+		s->removed = xxrealloc(s->removed, sizeof(*s->removed) * s->removed_capacity);
 	}
-
-	new_entry->next = buckets[index];
-	buckets[index] = new_entry;
-
-	return 1;
+	s->removed[s->need_compact++] = e;
 }
 
-static int set_reduce_buckets(struct set *s)
+/* Free the entries removed since the last compaction. The removed array keeps its capacity for the next removals,
+ * unless it holds more than REMOVED_KEEP_MIN entries and eight times the live entries plus buckets, so it never holds
+ * more than a constant times the most removals between two compactions, and a set that is filled and emptied again
+ * and again does not reallocate it each time. The removed entries stay in an array rather than in a list linked
+ * through them: freeing walks the array in removal order without a cache miss per entry, and a list link would move
+ * the inline key of a hash_table entry and slow its lookups. */
+static void free_removed(struct set *s)
 {
-	int new_count = ((s->bucket_count + 1) / 2) - 1;
-
-	if (new_count < DEFAULT_SIZE) {
-		return 0;
+	if (s->need_compact) {
+		/* The iterator may stand on a removed entry. A pop resumes from it, so it starts again instead. */
+		s->ientry = 0;
 	}
-
-	if (((float)s->size / new_count) > DEFAULT_LOAD) {
-		return 1;
+	for (int i = 0; i < s->need_compact; i++) {
+		free(s->removed[i]);
 	}
+	s->need_compact = 0;
+	if (s->removed_capacity > REMOVED_KEEP_MIN && s->removed_capacity > 8 * (s->size + s->bucket_count)) {
+		free(s->removed);
+		s->removed = 0;
+		s->removed_capacity = 0;
+	}
+}
 
+/* Move every entry to a new array of buckets, keeping the order in which the old buckets list them, and free the
+ * removed entries. */
+static int set_resize(struct set *s, int new_count)
+{
 	struct entry **new_buckets = (struct entry **)calloc(new_count, sizeof(struct entry *));
 	if (!new_buckets) {
 		return 0;
@@ -137,10 +158,9 @@ static int set_reduce_buckets(struct set *s)
 		e = s->buckets[i];
 		while (e) {
 			f = e->next;
-			if (!e->deleted) {
-				e->next = NULL;
-				set_insert_to_buckets_aux(new_buckets, new_count, e);
-			}
+			uint64_t index = set_bucket(e->element, new_count);
+			e->next = new_buckets[index];
+			new_buckets[index] = e;
 			e = f;
 		}
 	}
@@ -148,47 +168,55 @@ static int set_reduce_buckets(struct set *s)
 	free(s->buckets);
 	s->buckets = new_buckets;
 	s->bucket_count = new_count;
-	s->need_compact = 0;
+	free_removed(s);
 
 	s->iteration_index = (s->iteration_index + 1) % ITERATION_MAX;
 
 	return 1;
 }
 
-void set_compact(struct set *s)
+/* Shrink the buckets of a set whose load fell below DEFAULT_MIN_LOAD in one resize. The count is halved, as
+ * (n+1)/2-1 undoes the doubling to 2n+1, while the load stays at most half of DEFAULT_LOAD, so the next inserts do
+ * not double it again at once. Return whether the buckets were resized, which also frees the removed entries. */
+static int set_reduce_buckets(struct set *s)
 {
-	struct entry *e, *f;
-	int i;
-
-	if (!s->need_compact) {
-		return;
+	if (((float)s->size / s->bucket_count) >= DEFAULT_MIN_LOAD) {
+		return 0;
 	}
 
-	for (i = 0; i < s->bucket_count; i++) {
-		e = s->buckets[i];
-
-		while (e && e->deleted) {
-			f = e->next;
-			free(e);
-			e = f;
+	int new_count = s->bucket_count;
+	while (1) {
+		int half = ((new_count + 1) / 2) - 1;
+		if (half < DEFAULT_SIZE || ((float)s->size / half) > DEFAULT_LOAD / 2) {
+			break;
 		}
-		s->buckets[i] = e;
-
-		while (e) {
-			f = e->next;
-			while (f && f->deleted) {
-				e->next = f->next;
-				free(f);
-				f = e->next;
-			}
-			e = f;
-		}
+		new_count = half;
 	}
 
-	s->need_compact = 0;
-	if (((float)s->size / s->bucket_count) < DEFAULT_MIN_LOAD) {
-		set_reduce_buckets(s);
+	if (new_count == s->bucket_count) {
+		return 0;
 	}
+
+	return set_resize(s, new_count);
+}
+
+/* Free the entries removed since the last compaction and shrink the buckets when the load is low. The cost is O(removed
+ * entries), plus O(buckets) for a resize, which only follows removals of most entries, so it is amortized O(1) per
+ * removal however often it is called. A compaction that frees entries ends any iteration in progress, as an insert
+ * does: an iteration continued afterwards aborts instead of reading a freed entry. */
+int set_compact(struct set *s)
+{
+	int freed = s->need_compact;
+	if (!freed) {
+		return 0;
+	}
+
+	if (!set_reduce_buckets(s)) {
+		free_removed(s);
+	}
+	s->iteration_index = (s->iteration_index + 1) % ITERATION_MAX;
+
+	return freed;
 }
 
 void set_clear(struct set *s)
@@ -209,14 +237,15 @@ void set_clear(struct set *s)
 		s->buckets[i] = 0;
 	}
 
+	free_removed(s);
 	s->size = 0;
-	s->need_compact = 0;
 	s->iteration_index = (s->iteration_index + 1) % ITERATION_MAX;
 }
 
 void set_delete(struct set *s)
 {
 	set_clear(s);
+	free(s->removed);
 	free(s->buckets);
 	free(s);
 }
@@ -229,19 +258,14 @@ int set_size(struct set *s)
 int set_lookup(struct set *s, void *element)
 {
 	struct entry *e;
-	uint64_t index;
 
 	uintptr_t key = (uintptr_t)element;
 
-	index = key % s->bucket_count;
-	e = s->buckets[index];
+	e = s->buckets[set_bucket(key, s->bucket_count)];
 
 	while (e) {
 		if (key == e->element) {
-			if (!e->deleted) {
-				return 1;
-			}
-			return 0;
+			return 1;
 		}
 		e = e->next;
 	}
@@ -251,33 +275,7 @@ int set_lookup(struct set *s, void *element)
 
 static int set_double_buckets(struct set *s)
 {
-	int new_count = 2 * s->bucket_count;
-	struct entry **new_buckets = (struct entry **)calloc(new_count, sizeof(struct entry *));
-	if (!new_buckets) {
-		return 0;
-	}
-
-	struct entry *e, *f;
-	for (int i = 0; i < s->bucket_count; i++) {
-		e = s->buckets[i];
-		while (e) {
-			f = e->next;
-			if (!e->deleted) {
-				e->next = NULL;
-				set_insert_to_buckets_aux(new_buckets, new_count, e);
-			}
-			e = f;
-		}
-	}
-
-	free(s->buckets);
-	s->buckets = new_buckets;
-	s->bucket_count = new_count;
-	s->need_compact = 0;
-
-	s->iteration_index = (s->iteration_index + 1) % ITERATION_MAX;
-
-	return 1;
+	return set_resize(s, (2 * (s->bucket_count + 1)) - 1);
 }
 
 int set_insert(struct set *s, const void *element)
@@ -290,19 +288,21 @@ int set_insert(struct set *s, const void *element)
 	if (((float)s->size / s->bucket_count) > DEFAULT_LOAD)
 		set_double_buckets(s);
 
-	index = key % s->bucket_count;
+	index = set_bucket(key, s->bucket_count);
 	e = s->buckets[index];
 
 	while (e) {
 		if (key == e->element) {
-			if (e->deleted) {
-				e->deleted = 0;
-				s->size++;
-				s->iteration_index = (s->iteration_index + 1) % ITERATION_MAX;
-			}
 			return 1;
 		}
 		e = e->next;
+	}
+
+	/* A set that is never iterated is never compacted, so compact once removed entries outnumber the rest. A new
+	 * entry ends any iteration in progress, so no iterator is left on a freed entry. */
+	if (s->need_compact > s->size + s->bucket_count) {
+		set_compact(s);
+		index = set_bucket(key, s->bucket_count);
 	}
 
 	e = (struct entry *)malloc(sizeof(struct entry));
@@ -352,25 +352,21 @@ int set_push(struct set *s, const void *element)
 
 int set_remove(struct set *s, const void *element)
 {
-	struct entry *e;
-	uint64_t index;
+	struct entry *e, **link;
 
 	uintptr_t key = (uintptr_t)element;
 
-	index = key % s->bucket_count;
-	e = s->buckets[index];
+	link = &s->buckets[set_bucket(key, s->bucket_count)];
 
-	while (e) {
+	while ((e = *link)) {
 		if (key == e->element) {
-			if (e->deleted) {
-				return 0;
-			}
+			*link = e->next;
 			e->deleted = 1;
-			s->need_compact = 1;
+			hold_removed(s, e);
 			s->size--;
 			return 1;
 		}
-		e = e->next;
+		link = &e->next;
 	}
 
 	return 0;

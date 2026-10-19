@@ -106,6 +106,19 @@ void *hash_table_lookup(struct hash_table *h, const char *key);
 
 void *hash_table_remove(struct hash_table *h, const char *key);
 
+/** Free the entries removed since the last compaction.
+A removed entry stays allocated, so that an iteration standing on it and a key pointer obtained from it stay valid,
+until a later insert, a new iteration, a resize, a clear, or this call frees it. A table that only shrinks, such as
+one emptied when an application drops its work, otherwise keeps every removed entry and pins the memory around it.
+Call it only while no iteration of the table is in progress, from a point that holds no key pointer of a removed
+entry; an iteration continued after a compaction that freed entries aborts. Its cost is amortized O(1) per removal, so
+it may be called as often as convenient, and it also shrinks the buckets when most entries were removed.
+@param h A pointer to a hash table.
+@return The number of removed entries freed.
+*/
+
+int hash_table_compact(struct hash_table *h);
+
 /** Remove any one value.
 @param h A pointer to a hash table.
 @return One object removed from the table.
