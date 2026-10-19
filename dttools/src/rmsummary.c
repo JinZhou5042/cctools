@@ -622,8 +622,7 @@ void rmsummary_print_buffer(struct buffer *B, const struct rmsummary *s, int onl
 	if (!s)
 		return;
 
-	/* Resources alone are printed without building a JX object, which dominated the cost of the TaskVine
-	 * transactions log. The output is the same as that of rmsummary_to_json(). */
+	/* Resources alone are printed without building a JX object, with the same output as rmsummary_to_json(). */
 	if (only_resources) {
 		buffer_putliteral(B, "{");
 		rmsummary_print_buffer_members(B, s, 0);

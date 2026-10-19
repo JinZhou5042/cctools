@@ -69,8 +69,9 @@ static void print_io_member(struct buffer *B, int *count, const char *name, doub
 }
 
 /* Print the resources of a task with its transfer and timing report as one JSON object. It is printed directly
- * instead of through a JX object, whose construction and printing dominated the cost of this log, and the output is
- * the same: the report members come first, the last of them inserted first, then the resources of s, if any. */
+ * instead of through a JX object, whose construction and printing dominated the cost of this log, with the same
+ * output: the report members come first, in the reverse order of their insertion into the object, then the resources
+ * of s, if any. */
 static void print_resources_with_io_report(struct buffer *B, const struct vine_task *t, const struct rmsummary *s)
 {
 	int count = 0;
