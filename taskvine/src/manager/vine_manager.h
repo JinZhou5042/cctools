@@ -142,6 +142,14 @@ struct vine_manager {
 	/* Primary scheduling controls. */
 
 	vine_schedule_t worker_selection_algorithm;    /* Mode for selecting best worker for task in main scheduler. */
+	struct hash_table *blocked_sources;            /* Blocking inputs by the URL of their source, each a set of file references, see vine_schedule.h. */
+	uint64_t blocked_epoch;                        /* Advanced by vine_schedule_wake_all(), which ends the wait of every blocked ready task. */
+	uint64_t blocked_pass;                         /* Counts dispatch passes, so a blocking input is checked once per pass. */
+	uint64_t schedule_wakes;                       /* Counts the events that may end the wait of a blocked ready task, and changes of the ready tasks. */
+	uint64_t blocked_files_registered;             /* Files registered as blocking at their current serial, so a wake by name of a file looks it up only while some file is. */
+	uint64_t schedule_waiting_wakes;               /* The value of schedule_wakes while schedule_waiting_run counts. */
+	uint64_t schedule_waiting_run;                 /* Ready tasks found waiting in a row by dispatch passes since schedule_wakes last changed. */
+	timestamp_t time_last_blocked_wake;            /* When every blocked ready task was last woken by time. */
 	vine_category_mode_t allocation_default_mode;  /* Mode for computing resources allocations for each task. */
 
 	/* Internal state modified by the manager */
@@ -151,7 +159,7 @@ struct vine_manager {
 	int num_tasks_left;    /* Optional: Number of tasks remaining, if given by user.  @ref vine_set_num_tasks */
 	int nothing_happened_last_wait_cycle; /* Set internally in main loop if no messages or tasks were processed during the last wait loop.
 																					 If set, poll longer to avoid wasting cpu cycles, and growing log files unnecessarily.*/
-	int dispatch_blocked;  /* Set when the last dispatch attempt found no worker with room for a task. */
+	int dispatch_blocked;  /* Set when the last dispatch attempt found no worker with room for a task, or every ready task waiting for an event. */
 	int gpus_requested;    /* Set once a ready task or a category requests gpus. Until then, idle gpus are not room for a task. */
 
 	/* Accumulation of statistics for reporting to the caller. */

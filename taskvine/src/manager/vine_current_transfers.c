@@ -10,6 +10,7 @@ See the file COPYING for details.
 #include "vine_file_replica_table.h"
 #include "vine_blocklist.h"
 #include "vine_manager.h"
+#include "vine_schedule.h"
 #include "xxmalloc.h"
 
 #include <string.h>
@@ -139,18 +140,52 @@ char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info
 	return transfer_id;
 }
 
+static void remove_pair(struct vine_manager *q, struct vine_transfer_pair *p);
+static void count_success(struct vine_manager *q, struct vine_transfer_pair *p);
+
 // remove a completed transaction from the transfer table - i.e. open the source to an additional transfer
 int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 {
-	struct vine_transfer_pair *p;
-	p = hash_table_remove(q->current_transfer_table, id);
-	if (p) {
-		update_url_count(q, p->source_url, -1);
-		vine_transfer_pair_delete(p);
-		return 1;
-	} else {
+	struct vine_transfer_pair *p = hash_table_remove(q->current_transfer_table, id);
+	if (!p) {
 		return 0;
 	}
+	remove_pair(q, p);
+	return 1;
+}
+
+/* Remove the record of a transfer that succeeded, and clear the failure streaks of its source and destination. The
+ * record is looked up once. */
+int vine_current_transfers_remove_success(struct vine_manager *q, const char *id)
+{
+	struct vine_transfer_pair *p = hash_table_remove(q->current_transfer_table, id);
+	if (!p) {
+		return 0;
+	}
+	count_success(q, p);
+	remove_pair(q, p);
+	return 1;
+}
+
+/* Release a record taken out of the transfer table. */
+static void remove_pair(struct vine_manager *q, struct vine_transfer_pair *p)
+{
+	update_url_count(q, p->source_url, -1);
+	/* A source that leaves its limit of transfers, or now has room for the smallest file it refused for its bytes in
+	 * flight, can serve another one, so ready tasks that wait for one of its files may run. Other ends of transfers
+	 * change nothing for them. */
+	if (p->source_worker) {
+		struct vine_worker_info *w = p->source_worker;
+		int64_t remaining = w->outgoing_xfer_bytes - p->bytes;
+		int64_t refused = w->outgoing_refused_bytes;
+		if (w->outgoing_xfer_counter == q->worker_source_max_transfers || (refused >= 0 && (remaining == 0 || remaining + refused <= VINE_WORKER_SOURCE_MAX_BYTES))) {
+			w->outgoing_refused_bytes = -1;
+			vine_schedule_wake_worker(q, w);
+		}
+	} else if (p->source_url && vine_current_transfers_url_in_use(q, p->source_url) == q->file_source_max_transfers - 1) {
+		vine_schedule_wake_file(q, p->source_url);
+	}
+	vine_transfer_pair_delete(p);
 }
 
 int vine_current_transfers_source_has_room(struct vine_manager *q, struct vine_worker_info *w, int64_t size)
@@ -160,7 +195,13 @@ int vine_current_transfers_source_has_room(struct vine_manager *q, struct vine_w
 	}
 	/* A size that is not known counts as none, so the count alone limits such a file. */
 	size = MAX(size, 0);
-	return w->outgoing_xfer_bytes == 0 || w->outgoing_xfer_bytes + size <= VINE_WORKER_SOURCE_MAX_BYTES;
+	if (w->outgoing_xfer_bytes == 0 || w->outgoing_xfer_bytes + size <= VINE_WORKER_SOURCE_MAX_BYTES) {
+		return 1;
+	}
+	if (w->outgoing_refused_bytes < 0 || size < w->outgoing_refused_bytes) {
+		w->outgoing_refused_bytes = size;
+	}
+	return 0;
 }
 
 /*
@@ -286,16 +327,9 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 	return 0;
 }
 
-/* Remove the record of a transfer that succeeded, and clear the failure streaks of its source and destination. The
- * record is looked up once. */
-int vine_current_transfers_remove_success(struct vine_manager *q, const char *id)
+/* Clear the failure streaks of the source and destination of a successful transfer. */
+static void count_success(struct vine_manager *q, struct vine_transfer_pair *p)
 {
-	struct vine_transfer_pair *p = hash_table_remove(q->current_transfer_table, id);
-
-	if (!p) {
-		return 0;
-	}
-
 	struct vine_worker_info *source = p->source_worker;
 	if (source) {
 		vine_blocklist_unblock(q, source->addrport);
@@ -311,10 +345,6 @@ int vine_current_transfers_remove_success(struct vine_manager *q, const char *id
 		dest_worker->xfer_streak_bad_destination_counter = 0;
 		dest_worker->xfer_total_good_destination_counter++;
 	}
-
-	update_url_count(q, p->source_url, -1);
-	vine_transfer_pair_delete(p);
-	return 1;
 }
 
 // count the number transfers coming from a specific remote url (not a worker)

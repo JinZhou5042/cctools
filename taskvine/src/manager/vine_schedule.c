@@ -284,6 +284,21 @@ static int input_holders_cannot_run(struct vine_manager *q, struct vine_file *f,
 	return 1;
 }
 
+/* Return true if input f, recorded as blocking, keeps a task from every worker on its own: it is held without a transfer
+ * source and no holder has room. The answer is computed once per dispatch pass and blocking serial of the file, so the
+ * tasks that wait for the same input share one check. */
+static int input_blocks_alone(struct vine_manager *q, struct vine_file *f, int *held)
+{
+	if (f->blocked_memo_pass != q->blocked_pass || f->blocked_memo_serial != f->blocked_serial) {
+		f->blocked_memo_pass = q->blocked_pass;
+		f->blocked_memo_serial = f->blocked_serial;
+		f->blocked_memo_held = input_held_without_source(q, f);
+		f->blocked_memo_alone = f->blocked_memo_held && input_holders_cannot_run(q, f, NULL);
+	}
+	*held = f->blocked_memo_held;
+	return f->blocked_memo_alone;
+}
+
 /* Return true if the inputs that kept this ready task from every worker at its last scheduling attempt still keep it
  * from every worker. An input without a transfer source can reach no worker that lacks it, so the task cannot run
  * when no holder of such an input has room, or when no worker holds both recorded inputs. The check costs one lookup
@@ -293,15 +308,65 @@ static int blocking_inputs_still_block(struct vine_manager *q, struct vine_task 
 	struct vine_file *first = t->blocking_inputs[0];
 	struct vine_file *second = t->blocking_inputs[1];
 
-	int first_held = input_held_without_source(q, first);
-	if (first_held && input_holders_cannot_run(q, first, NULL)) {
+	int first_held = 0;
+	int second_held = 0;
+	if (input_blocks_alone(q, first, &first_held)) {
 		return 1;
 	}
-	int second_held = second && input_held_without_source(q, second);
-	if (second_held && input_holders_cannot_run(q, second, NULL)) {
+	if (second && input_blocks_alone(q, second, &second_held)) {
 		return 1;
 	}
 	return first_held && second_held && input_holders_cannot_run(q, first, second);
+}
+
+/* Register blocking input f with the events that can change whether it blocks, once per blocking serial: the file's
+ * own events find it by name, a transfer from its URL source by that URL (blocked_sources), and the events of each of
+ * its holders through the holder's set of blocking files. Each entry holds a reference to the file. */
+static int register_blocking_input(struct vine_manager *q, struct vine_file *f)
+{
+	if (f->blocked_registered == f->blocked_serial + 1) {
+		return 1;
+	}
+	if (f->type == VINE_URL && f->source) {
+		struct set *files = hash_table_lookup(q->blocked_sources, f->source);
+		if (!files) {
+			files = set_create(0);
+			if (!files) {
+				return 0;
+			}
+			hash_table_insert(q->blocked_sources, f->source, files);
+		}
+		if (!set_lookup(files, f) && set_insert(files, f)) {
+			vine_file_addref(f);
+		}
+	}
+	struct set *holders = hash_table_lookup(q->file_worker_table, f->cached_name);
+	if (holders) {
+		struct vine_worker_info *w;
+		int iteration;
+		SET_ITERATE(holders, iteration, w)
+		{
+			if (!w->blocked_files) {
+				w->blocked_files = set_create(0);
+				if (!w->blocked_files) {
+					return 0;
+				}
+			}
+			if (!set_lookup(w->blocked_files, f) && set_insert(w->blocked_files, f)) {
+				vine_file_addref(f);
+			}
+		}
+	}
+	f->blocked_registered = f->blocked_serial + 1;
+	q->blocked_files_registered++;
+	return 1;
+}
+
+int vine_schedule_task_waits(struct vine_manager *q, struct vine_task *t)
+{
+	struct vine_file *first = t->blocking_inputs[0];
+	struct vine_file *second = t->blocking_inputs[1];
+	return q->peer_transfers_enabled && first && t->blocked_epoch == q->blocked_epoch && first->blocked_serial == t->blocked_serials[0] && (!second || second->blocked_serial == t->blocked_serials[1]);
 }
 
 int vine_schedule_task_is_blocked(struct vine_manager *q, struct vine_task *t)
@@ -309,7 +374,107 @@ int vine_schedule_task_is_blocked(struct vine_manager *q, struct vine_task *t)
 	if (!t->blocking_inputs[0] || !q->peer_transfers_enabled) {
 		return 0;
 	}
-	return blocking_inputs_still_block(q, t);
+	if (vine_schedule_task_waits(q, t)) {
+		return 1;
+	}
+	t->blocked_epoch = 0;
+	if (!blocking_inputs_still_block(q, t)) {
+		return 0;
+	}
+
+	/* The answer can change only on an event of the recorded inputs or of their holders, so the task waits for one.
+	 * A task whose inputs cannot be registered for every such event is checked again in the next pass. */
+	for (int i = 0; i < 2; i++) {
+		struct vine_file *f = t->blocking_inputs[i];
+		if (f && !register_blocking_input(q, f)) {
+			return 1;
+		}
+		t->blocked_serials[i] = f ? f->blocked_serial : 0;
+	}
+	t->blocked_epoch = q->blocked_epoch;
+	return 1;
+}
+
+/* Advance the blocking serial of file f, which ends the wait of the tasks blocked by it. Only a file registered at its
+ * current serial can have tasks that wait for it, so only its wake counts as an event for the dispatch pass. */
+static void wake_one_file(struct vine_manager *q, struct vine_file *f)
+{
+	if (f->blocked_registered == f->blocked_serial + 1) {
+		q->schedule_wakes++;
+		if (q->blocked_files_registered > 0) {
+			q->blocked_files_registered--;
+		}
+	}
+	f->blocked_serial++;
+}
+
+/* Advance the blocking serial of each file in files and empty the set, dropping its references. */
+static void wake_files(struct vine_manager *q, struct set *files)
+{
+	struct vine_file *f;
+	while ((f = set_pop(files))) {
+		wake_one_file(q, f);
+		vine_file_delete(f);
+	}
+}
+
+void vine_schedule_wake_file(struct vine_manager *q, const char *key)
+{
+	if (!key) {
+		return;
+	}
+	/* Only a file registered at its current serial has tasks that wait for its next event: a task records the serial
+	 * of each input it finds blocking, and registers the input at that serial. While no file is registered, which is
+	 * the common case, the event needs no lookup of the file. A registered file that is freed before its next event
+	 * stays counted, which costs only lookups. */
+	if (q->blocked_files_registered > 0) {
+		struct vine_file *f = hash_table_lookup(q->file_table, key);
+		if (f) {
+			wake_one_file(q, f);
+		}
+	}
+	if (q->blocked_sources && hash_table_size(q->blocked_sources) > 0) {
+		struct set *files = hash_table_remove(q->blocked_sources, key);
+		if (files) {
+			wake_files(q, files);
+			set_delete(files);
+		}
+	}
+}
+
+void vine_schedule_wake_worker(struct vine_manager *q, struct vine_worker_info *w)
+{
+	if (w->blocked_files) {
+		wake_files(q, w->blocked_files);
+	}
+}
+
+/* Wake the tasks blocked by files that worker w holds, when the worker has room for a task. */
+void vine_schedule_wake_worker_with_room(struct vine_manager *q, struct vine_worker_info *w)
+{
+	if (w->blocked_files && set_size(w->blocked_files) > 0 && check_worker_accepts_tasks(q, w)) {
+		vine_schedule_wake_worker(q, w);
+	}
+}
+
+void vine_schedule_wake_all(struct vine_manager *q)
+{
+	q->blocked_epoch++;
+	q->schedule_wakes++;
+}
+
+void vine_schedule_delete_blocked_sources(struct vine_manager *q)
+{
+	char *source;
+	struct set *files;
+	int iteration;
+	HASH_TABLE_ITERATE(q->blocked_sources, iteration, source, files)
+	{
+		wake_files(q, files);
+	}
+	hash_table_clear(q->blocked_sources, (void *)set_delete);
+	hash_table_delete(q->blocked_sources);
+	q->blocked_sources = NULL;
 }
 
 /* Return true if a worker runs a task other than its libraries. */
@@ -666,6 +831,7 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 
 	t->blocking_inputs[0] = NULL;
 	t->blocking_inputs[1] = NULL;
+	t->blocked_epoch = 0;
 
 	/* A quarantined task with a reservation takes its worker once that worker runs nothing, or any other worker that
 	 * runs nothing first, so a long task on the reserved worker does not hold it back while other workers are free. A

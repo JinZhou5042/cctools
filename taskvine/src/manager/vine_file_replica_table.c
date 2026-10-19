@@ -14,6 +14,7 @@ See the file COPYING for details.
 #include "vine_file_replica.h"
 #include "vine_manager.h"
 #include "vine_manager_put.h"
+#include "vine_schedule.h"
 #include "vine_worker_info.h"
 
 #include "stringtools.h"
@@ -54,6 +55,9 @@ static void replica_table_add(struct vine_manager *m, struct vine_worker_info *w
 	}
 
 	set_insert(workers, w);
+
+	/* A new holder may let a ready task that waits for this file run. */
+	vine_schedule_wake_file(m, cachename);
 }
 
 // remove a file from the remote file table.
@@ -85,6 +89,9 @@ struct vine_file_replica *vine_file_replica_table_remove(struct vine_manager *m,
 			set_delete(workers);
 		}
 	}
+
+	/* A lost holder may leave the file without a replica, and a task that reads it must then start its recovery. */
+	vine_schedule_wake_file(m, cachename);
 
 	return replica;
 }

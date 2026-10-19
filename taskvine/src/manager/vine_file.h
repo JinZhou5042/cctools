@@ -47,6 +47,18 @@ struct vine_file {
 	int change_message_shown; // True if error message already shown.
 	int manager_sends;	  // Copies of this file that the manager is sending itself, counted only for a file whose sends it limits (see vine_manager_limits_sends()).
 	int refcount;       // Number of references from a task object, delete when zero.
+
+	/* Scheduler state of a file that keeps ready tasks from every worker (see vine_schedule.h). blocked_serial advances
+	 * on every event that may change whether the file blocks them. blocked_registered is one more than the serial at
+	 * which the file was registered with those events, or zero. The memo holds the file's own check, valid for one
+	 * dispatch pass and serial: whether it is held without a transfer source, and whether no holder has room. */
+	uint64_t blocked_serial;
+	uint64_t blocked_registered;
+	uint64_t blocked_memo_pass;
+	uint64_t blocked_memo_serial;
+	int blocked_memo_held;
+	int blocked_memo_alone;
+
 };
 
 struct vine_file * vine_file_create( const char *source, const char *cached_name, const char *data, size_t size, vine_file_type_t type, struct vine_task *mini_task, vine_cache_level_t cache_level, vine_file_flags_t flags);

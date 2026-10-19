@@ -161,6 +161,9 @@ struct vine_task {
 								  for it. The second, if set, is held by no worker that holds the first. The dispatch pass skips the task while
 								  vine_schedule_task_is_blocked() finds them still blocking. Both are among the task's input mounts, which hold
 								  their references. */
+	uint64_t blocked_epoch;                                /**< The manager's blocked_epoch when this ready task was found blocked, or zero. While it and the
+								  blocking serials of its blocking inputs are unchanged, the task waits for an event (see vine_schedule.h). */
+	uint64_t blocked_serials[2];                           /**< Blocking serials of blocking_inputs when the task was found blocked. */
 
 	int refcount;                                          /**< Number of remaining references to this object. */
 };

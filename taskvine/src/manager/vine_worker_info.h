@@ -48,6 +48,10 @@ struct vine_worker_info {
 	int  transfer_port_active;
 	char *transfer_url;       /* worker(ip)?://transfer_addr:transfer_port */
 
+	/* Blocking inputs of ready tasks that this worker holds, each with a reference. When the worker frees a transfer
+	 * slot, gains room for a task, or leaves, each of them is woken (see vine_schedule.h). */
+	struct set *blocked_files;
+
 	/* Worker condition that may affect task start or cancellation. */
 	int  draining;                          // if 1, worker does not accept anymore tasks. It is shutdown if no task running.
 	int  pending_removal;                   // if not 0, the vine_worker_disconnect_reason_t with which the worker will be removed
@@ -105,8 +109,12 @@ struct vine_worker_info {
 
 	int incoming_xfer_counter;
 	int outgoing_xfer_counter;
-	/* The bytes of the files this worker sends to other workers now, see vine_current_transfers_source_has_room(). */
+
+	/* Bytes of the files that this worker sends as a source in the manager's transfer records, and the smallest file
+	 * refused since the last wake because it would not fit beside them (-1 if none). See
+	 * vine_current_transfers_source_has_room(). */
 	int64_t outgoing_xfer_bytes;
+	int64_t outgoing_refused_bytes;
 
 	/* The records of current_transfer_table with this worker as destination or source, linked through the records,
 	 * so the records of a removed worker are found without a pass over the table. */

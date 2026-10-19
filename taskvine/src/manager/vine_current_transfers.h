@@ -28,7 +28,8 @@ int vine_current_transfers_remove(struct vine_manager *q, const char *id);
 
 /* Return true if source worker w can start sending another file of size bytes now: it sends fewer than
  * worker-source-max-transfers files, and it sends nothing else or the bytes it sends, with this file, stay within
- * VINE_WORKER_SOURCE_MAX_BYTES. A size that is not known counts as zero. */
+ * VINE_WORKER_SOURCE_MAX_BYTES. A refusal for bytes is remembered, so the end of a transfer that makes room wakes the
+ * tasks that wait for the worker's files (vine_schedule_wake_worker()). */
 int vine_current_transfers_source_has_room(struct vine_manager *q, struct vine_worker_info *w, int64_t size);
 
 int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const char *cachename);

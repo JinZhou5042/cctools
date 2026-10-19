@@ -149,6 +149,7 @@ static void update_max_worker(const char *hashkey, void *w, void *max);
 
 static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_task *t, vine_task_state_t new_state);
 static void push_task_to_ready_tasks(struct vine_manager *q, struct vine_task *t);
+static void ready_tasks_remove(struct vine_manager *q, struct vine_task *t);
 
 static int task_request_count(struct vine_manager *q, const char *category, category_allocation_t request);
 
@@ -458,8 +459,14 @@ static int process_replica_event(struct vine_manager *q, struct vine_worker_info
 	}
 
 	/* change the state of the replica on the event */
+	vine_file_replica_state_t old_state = replica->state;
 	if (!vine_file_replica_change_state_on_event(replica, event)) {
 		return 0;
+	}
+
+	/* A replica that became ready is a transfer source for ready tasks that wait for this file. */
+	if (old_state != VINE_FILE_REPLICA_STATE_READY && replica->state == VINE_FILE_REPLICA_STATE_READY) {
+		vine_schedule_wake_file(q, cachename);
 	}
 
 	/* remove the replica if the final state is DELETED */
@@ -645,6 +652,7 @@ static int handle_transfer_port(struct vine_manager *q, struct vine_worker_info 
 	}
 
 	w->transfer_port_active = 1;
+	vine_schedule_wake_worker(q, w);
 	link_address_remote(w->link, w->transfer_host, &dummy_port);
 
 	free(w->transfer_url);
@@ -667,6 +675,7 @@ static int handle_transfer_hostport(struct vine_manager *q, struct vine_worker_i
 	}
 
 	w->transfer_port_active = 1;
+	vine_schedule_wake_worker(q, w);
 
 	int is_ip = address_is_valid_ip(w->transfer_host);
 	free(w->transfer_url);
@@ -859,7 +868,12 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		return VINE_MSG_FAILURE;
 	}
 
+	/* Any message ends the suspicion of a source whose transfer failed, so tasks that wait for its files may run. */
+	int suspect = vine_worker_source_is_suspect(w);
 	w->last_msg_recv_time = timestamp_get();
+	if (suspect) {
+		vine_schedule_wake_worker(q, w);
+	}
 
 	debug(D_VINE, "rx from %s (%s): %s", w->hostname, w->addrport, line);
 
@@ -1333,6 +1347,8 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 	vine_schedule_quarantine_remove_worker(q, w);
 
 	hash_table_remove(q->worker_table, w->hashkey);
+	/* A holder that leaves may leave a file without a replica, whose readers must then start its recovery. */
+	vine_schedule_wake_worker(q, w);
 	hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
 	hash_table_remove(q->workers_idle_disconnecting, w->hashkey);
 
@@ -1365,6 +1381,7 @@ void vine_manager_mark_worker_for_removal(struct vine_manager *q, struct vine_wo
 
 	w->pending_removal = reason;
 	hash_table_remove(q->worker_table, w->hashkey);
+	vine_schedule_wake_worker(q, w);
 	list_push_tail(q->zombie_workers, w);
 }
 
@@ -3251,6 +3268,9 @@ static void count_worker_resources(struct vine_manager *q, struct vine_worker_in
 
 	/* The disk usage includes the sandboxes of each task + the shared cache in use. */
 	w->resources->disk.inuse += BYTES_TO_MEGABYTES(w->inuse_cache);
+
+	/* A worker with room may let a ready task that waits for one of its files run. */
+	vine_schedule_wake_worker_with_room(q, w);
 }
 
 static void update_max_worker(const char *hashkey, void *w_ptr, void *max_ptr)
@@ -3422,7 +3442,7 @@ static vine_result_code_t commit_task_group_to_worker(struct vine_manager *q, st
 	do {
 
 		if (counter && (result == VINE_SUCCESS)) {
-			skip_list_remove(q->ready_tasks, t);
+			ready_tasks_remove(q, t);
 			// decrement refcount
 			vine_task_delete(t);
 		}
@@ -3974,7 +3994,14 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 		if (iter_count >= iter_depth) {
 			break;
 		}
+		int waits = vine_schedule_task_waits(q, t);
 		iter_count++;
+
+		if (waits) {
+			q->schedule_waiting_run++;
+			continue;
+		}
+		q->schedule_waiting_run = 0;
 
 		if (retrieve_ready_task(q, t, now_secs)) {
 			skip_list_remove_here(cur);
@@ -3986,9 +4013,10 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 			continue;
 		}
 
-		/* A task whose recorded inputs without a transfer source still keep it from every worker is skipped, instead of
-		 * a pass over all its inputs and the workers. Its other inputs are checked again, and recovery of a lost one
-		 * started, once the recorded inputs no longer block it. */
+		/* A task whose recorded inputs without a transfer source still keep it from every worker is skipped, in O(1)
+		 * while it waits for an event that can unblock it (see vine_schedule.h), instead of a pass over all its inputs
+		 * and the workers. Its other inputs are checked again, and recovery of a lost one started, once the recorded
+		 * inputs no longer block it. */
 		if (vine_schedule_task_is_blocked(q, t)) {
 			continue;
 		}
@@ -4080,6 +4108,7 @@ static int retrieve_ready_tasks(struct vine_manager *q, double now_secs)
 	{
 		if (retrieve_ready_task(q, t, now_secs)) {
 			skip_list_remove_here(cur);
+			q->schedule_wakes++;
 			retrieved = 1;
 		}
 	}
@@ -4090,7 +4119,8 @@ static int retrieve_ready_tasks(struct vine_manager *q, double now_secs)
 
 static int send_one_task(struct vine_manager *q)
 {
-	double now_secs = ((double)timestamp_get()) / ONE_SECOND;
+	timestamp_t now_usecs = timestamp_get();
+	double now_secs = ((double)now_usecs) / ONE_SECOND;
 
 	/* Without a worker that has room, a pass would only try each ready task against each worker. The manager waits
 	 * instead, until a worker sends a message or for a second. */
@@ -4098,6 +4128,27 @@ static int send_one_task(struct vine_manager *q)
 	if (q->dispatch_blocked) {
 		return retrieve_ready_tasks(q, now_secs);
 	}
+
+	/* Blocked ready tasks wait for events that can unblock them, and are checked again once a second for the
+	 * conditions that change with time alone, such as the end of a holder's transient error interval. */
+	if (now_usecs - q->time_last_blocked_wake >= ONE_SECOND) {
+		q->time_last_blocked_wake = now_usecs;
+		vine_schedule_wake_all(q);
+	}
+
+	/* Once passes have found every ready task waiting, in a row and with no event since that may end a wait or change
+	 * the ready tasks, another pass would only find them waiting again, so it is skipped. A step then costs O(1)
+	 * instead of a visit to each waiting task. Like a pass without a worker with room, it lets the next poll wait:
+	 * the events that end a wait come with a worker message, a finished transfer, a submission, or the wake above once
+	 * a second. */
+	if (q->schedule_waiting_wakes != q->schedule_wakes) {
+		q->schedule_waiting_wakes = q->schedule_wakes;
+		q->schedule_waiting_run = 0;
+	} else if (q->schedule_waiting_run >= (uint64_t)skip_list_size(q->ready_tasks)) {
+		q->dispatch_blocked = 1;
+		return 0;
+	}
+	q->blocked_pass++;
 
 	int iter_depth = MIN(skip_list_size(q->ready_tasks), q->attempt_schedule_depth);
 
@@ -4406,7 +4457,7 @@ static void reset_task_to_state(struct vine_manager *q, struct vine_task *t, vin
 		break;
 
 	case VINE_TASK_READY:
-		skip_list_remove(q->ready_tasks, t);
+		ready_tasks_remove(q, t);
 		change_task_state(q, t, new_state);
 		break;
 
@@ -4546,6 +4597,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	/* priority has 3 components: vine_priority_t, user given priority, and -task_id */
 	q->ready_tasks = skip_list_create(3, 0.5);
+	q->blocked_sources = hash_table_create(0, 0);
+	q->blocked_epoch = 1;
 	q->running_table = itable_create(0);
 	q->waiting_retrieval_list = list_create();
 	q->retrieved_list = list_create();
@@ -4743,6 +4796,7 @@ int vine_enable_peer_transfers(struct vine_manager *q)
 {
 	debug(D_VINE, "Peer Transfers enabled");
 	q->peer_transfers_enabled = 1;
+	vine_schedule_wake_all(q);
 	return 1;
 }
 
@@ -4751,6 +4805,7 @@ int vine_disable_peer_transfers(struct vine_manager *q)
 	debug(D_VINE, "Peer Transfers disabled");
 	fprintf(stderr, "warning: Peer Transfers disabled. Temporary files will be returned to the manager upon creation.");
 	q->peer_transfers_enabled = 0;
+	vine_schedule_wake_all(q);
 	return 1;
 }
 
@@ -4931,6 +4986,7 @@ void vine_delete(struct vine_manager *q)
 		free(q->catalog_hosts);
 	}
 
+	vine_schedule_delete_blocked_sources(q);
 	hash_table_clear(q->worker_table, (void *)vine_worker_delete);
 	hash_table_delete(q->worker_table);
 	list_delete(q->zombie_workers);
@@ -5125,6 +5181,17 @@ char *vine_monitor_wrap(struct vine_manager *q, struct vine_worker_info *w, stru
 
 /* Put a given task on the ready list, taking into account the task priority and the manager schedule. */
 
+/* Remove a task from the ready list. Its priority, which ends with its unique task id, finds it without a scan, unless
+ * the priority changed after the task was inserted. */
+static void ready_tasks_remove(struct vine_manager *q, struct vine_task *t)
+{
+	double priority[] = {t->manager_priority, t->user_priority, -t->task_id};
+	if (!skip_list_remove_by_priority_arr(q->ready_tasks, priority)) {
+		skip_list_remove(q->ready_tasks, t);
+	}
+	q->schedule_wakes++;
+}
+
 static void push_task_to_ready_tasks(struct vine_manager *q, struct vine_task *t)
 {
 	vine_priority_t manager_priority = VINE_PRIORITY_NORMAL;
@@ -5140,6 +5207,7 @@ static void push_task_to_ready_tasks(struct vine_manager *q, struct vine_task *t
 	}
 
 	skip_list_insert(q->ready_tasks, t, t->manager_priority, t->user_priority, -t->task_id);
+	q->schedule_wakes++;
 
 	/* If the task has been used before, clear out accumulated state. */
 	vine_task_clean(t);
@@ -5818,6 +5886,7 @@ static void compact_tables(struct vine_manager *q)
 	freed += hash_table_compact(q->file_table);
 	freed += hash_table_compact(q->file_worker_table);
 	freed += hash_table_compact(q->current_transfer_table);
+	freed += hash_table_compact(q->blocked_sources);
 
 	char *key;
 	struct vine_worker_info *w;
@@ -5826,6 +5895,9 @@ static void compact_tables(struct vine_manager *q)
 	{
 		freed += hash_table_compact(w->current_files);
 		freed += itable_compact(w->current_tasks);
+		if (w->blocked_files) {
+			freed += set_compact(w->blocked_files);
+		}
 	}
 
 	q->compacted_since_trim += freed;
@@ -6615,6 +6687,9 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 		debug(D_NOTICE | D_VINE, "Warning: tuning parameter \"%s\" not recognized\n", name);
 		return -1;
 	}
+
+	/* A setting may change the limits that keep ready tasks blocked, so each is checked again. */
+	vine_schedule_wake_all(q);
 
 	return 0;
 }

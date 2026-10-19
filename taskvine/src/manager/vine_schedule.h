@@ -27,9 +27,35 @@ int vine_schedule_any_worker_accepts_tasks(struct vine_manager *q);
 int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
 /* Blocked ready tasks. vine_schedule_task_to_worker() records in a ready task that it found no worker the inputs that
  * kept it from every worker (blocking_inputs). vine_schedule_task_is_blocked() returns non-zero when those inputs still
- * keep it from every worker, so a dispatch pass skips it without looking at its other inputs. */
+ * keep it from every worker, so a dispatch pass skips it without looking at its other inputs. Its answer depends only
+ * on the recorded inputs and on the workers that hold them, so the task remembers the blocking serial of each recorded
+ * input (blocked_serials) and the manager's blocked_epoch, and vine_schedule_task_waits() skips it in O(1) while none
+ * of them changed. A recorded input found blocking is registered once per serial with the events that can change the
+ * answer, which advance its serial:
+ * - vine_schedule_wake_file() with its cached name, when a replica of it is added, becomes ready, or is removed, and
+ *   with a source URL when a transfer from it ends at the limit of file-source-max-transfers (the manager's own send
+ *   of a local file ends when its replica becomes ready or is removed, see vine_manager_limits_sends());
+ * - vine_schedule_wake_worker() with a holder of it, through the holder's set of blocking files, when the holder frees
+ *   a transfer slot at worker-source-max-transfers, ends its suspicion as a source with a message, reports its
+ *   transfer port, or leaves, and vine_schedule_wake_worker_with_room() when its resources were counted again and it
+ *   has room for a task;
+ * - vine_schedule_wake_all(), which advances blocked_epoch in O(1), when a setting changes, and once a second for the
+ *   conditions that change with time alone: recent transfer and task failures, blocklist expiry, draining, and factory
+ *   limits.
+ * An event thus costs O(1), or O(blocking files) that a worker holds, never a pass over the tasks that wait. A task
+ * whose wait ended checks its inputs again when the dispatch pass reaches it, and the check of each input is shared by
+ * every task that it blocks within one pass (the file's memo). Entries hold file references, so no entry dangles. */
 int vine_schedule_task_is_blocked(struct vine_manager *q, struct vine_task *t);
-
+/* Return non-zero, in O(1), while a task found blocked waits for an event that can unblock it. A dispatch pass skips
+ * such a task before anything else, so the checks of retrieve_ready_task() reach it once its wait ends, at least
+ * once a second. */
+int vine_schedule_task_waits(struct vine_manager *q, struct vine_task *t);
+void vine_schedule_wake_file(struct vine_manager *q, const char *key);
+void vine_schedule_wake_worker(struct vine_manager *q, struct vine_worker_info *w);
+void vine_schedule_wake_worker_with_room(struct vine_manager *q, struct vine_worker_info *w);
+void vine_schedule_wake_all(struct vine_manager *q);
+/* Drop the registrations by source URL when the manager is deleted. */
+void vine_schedule_delete_blocked_sources(struct vine_manager *q);
 /* Quarantine of tasks charged an unexpected loss of a worker (t->worker_loss_charged). The charging rule cannot tell a
  * task that makes its worker exit from a task that shared the worker with it, so after its first charged loss a task
  * runs only on a worker that runs no other task, and that worker takes no other task while it runs. The losses of a
