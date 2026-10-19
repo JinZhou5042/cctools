@@ -120,6 +120,14 @@ def limit_thread_pools(thread_limit):
         limited_module_count = len(sys.modules)
 
 
+# Load the arguments of a function call from its infile. A function call without an infile takes no arguments.
+def load_function_infile(in_file_path):
+    if not os.path.exists(in_file_path):
+        return {}
+    with open(in_file_path, "rb") as f:
+        return cloudpickle.load(f)
+
+
 # Read data from worker, start function, and dump result to `outfile`.
 def start_function(in_pipe_fd, thread_limit=1):
     global spare_wanted
@@ -175,8 +183,7 @@ def start_function(in_pipe_fd, thread_limit=1):
             os.chdir(function_sandbox)
 
             # parameters are represented as infile.
-            with open("infile", "rb") as f:
-                event = cloudpickle.load(f)
+            event = load_function_infile("infile")
 
             # output of execution should be dumped to outfile.
             result = globals()[function_name](event)
@@ -203,8 +210,7 @@ def start_function(in_pipe_fd, thread_limit=1):
     elif exec_method == "fork":
         try:
             arg_infile = os.path.join(function_sandbox, "infile")
-            with open(arg_infile, "rb") as f:
-                event = cloudpickle.load(f)
+            event = load_function_infile(arg_infile)
         except Exception:
             stdout_timed_message(f"TASK {function_id} error: can't load the arguments from {arg_infile}")
             return -1, function_id
@@ -240,8 +246,7 @@ def run_function(function_id, function_name, function_sandbox, function_stdout_f
         if event is None:
             arg_infile = os.path.join(function_sandbox, "infile")
             try:
-                with open(arg_infile, "rb") as f:
-                    event = cloudpickle.load(f)
+                event = load_function_infile(arg_infile)
             except Exception:
                 stdout_timed_message(f"TASK {function_id} error: can't load the arguments from {arg_infile}")
                 raise
