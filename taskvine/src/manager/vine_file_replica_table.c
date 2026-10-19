@@ -135,8 +135,9 @@ struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager
 		}
 
 		if ((replica = hash_table_lookup(peer->current_files, cachename)) && replica->state == VINE_FILE_REPLICA_STATE_READY) {
-			int current_transfers = peer->outgoing_xfer_counter;
-			if (current_transfers < q->worker_source_max_transfers) {
+			/* The source's transfers in flight limit it by count and by bytes, so a large file goes one copy at
+			 * a time while small files overlap. */
+			if (vine_current_transfers_source_has_room(q, peer, replica->size)) {
 				peer_selected = peer;
 				if (random_index < 0) {
 					return peer_selected;
