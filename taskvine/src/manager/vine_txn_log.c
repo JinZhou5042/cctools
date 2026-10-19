@@ -121,11 +121,9 @@ void vine_txn_log_write_task(struct vine_manager *q, struct vine_task *t)
 		buffer_printf(&B, " %s %s %d ", t->category, allocation, t->try_count + 1);
 		rmsummary_print_buffer(&B, vine_manager_task_resources_min(q, t), 1);
 	} else if (state == VINE_TASK_DONE) {
-		buffer_printf(&B, " %s ", vine_result_string(t->result));
-		buffer_printf(&B, " %d ", t->exit_code);
+		buffer_printf(&B, " %s  %d ", vine_result_string(t->result), t->exit_code);
 	} else if (state == VINE_TASK_RETRIEVED) {
-		buffer_printf(&B, " %s ", vine_result_string(t->result));
-		buffer_printf(&B, " %d ", t->exit_code);
+		buffer_printf(&B, " %s  %d ", vine_result_string(t->result), t->exit_code);
 
 		assert(t->resources_measured);
 		if (t->result == VINE_RESULT_RESOURCE_EXHAUSTION) {
@@ -219,6 +217,10 @@ void vine_txn_log_write_category(struct vine_manager *q, struct category *c)
 
 void vine_txn_log_write_worker(struct vine_manager *q, struct vine_worker_info *w, int leaving, vine_worker_disconnect_reason_t reason_leaving)
 {
+	if (!q->txn_logfile) {
+		return;
+	}
+
 	if (reason_leaving == VINE_WORKER_DISCONNECT_STATUS_WORKER) {
 		/* status worker should not generate a transaction */
 		return;
@@ -266,6 +268,9 @@ void vine_txn_log_write_worker(struct vine_manager *q, struct vine_worker_info *
 
 void vine_txn_log_write_worker_resources(struct vine_manager *q, struct vine_worker_info *w)
 {
+	if (!q->txn_logfile) {
+		return;
+	}
 
 	struct rmsummary *s = rmsummary_create(-1);
 
@@ -290,14 +295,20 @@ void vine_txn_log_write_worker_resources(struct vine_manager *q, struct vine_wor
 void vine_txn_log_write_transfer(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, struct vine_mount *m, struct vine_file *f, size_t size_in_bytes,
 		timestamp_t time_in_usecs, timestamp_t start_in_usecs, int is_input)
 {
+	if (!q->txn_logfile) {
+		return;
+	}
+
 	struct buffer B;
 	buffer_init(&B);
-	buffer_printf(&B, "WORKER %s TRANSFER ", w->workerid);
-	buffer_printf(&B, is_input ? "INPUT" : "OUTPUT");
-	buffer_printf(&B, " %s", m->file->cached_name);
-	buffer_printf(&B, " %lld", (long long)size_in_bytes);
-	buffer_printf(&B, " %llu", (unsigned long long)time_in_usecs);
-	buffer_printf(&B, " %llu", (unsigned long long)start_in_usecs);
+	buffer_printf(&B,
+			"WORKER %s TRANSFER %s %s %lld %llu %llu",
+			w->workerid,
+			is_input ? "INPUT" : "OUTPUT",
+			m->file->cached_name,
+			(long long)size_in_bytes,
+			(unsigned long long)time_in_usecs,
+			(unsigned long long)start_in_usecs);
 
 	vine_txn_log_write(q, buffer_tostring(&B));
 	buffer_free(&B);
@@ -306,14 +317,14 @@ void vine_txn_log_write_transfer(struct vine_manager *q, struct vine_worker_info
 void vine_txn_log_write_cache_update(
 		struct vine_manager *q, struct vine_worker_info *w, size_t size_in_bytes, timestamp_t time_in_usecs, timestamp_t start_in_usecs, const char *name)
 {
+	if (!q->txn_logfile) {
+		return;
+	}
+
 	struct buffer B;
 
 	buffer_init(&B);
-	buffer_printf(&B, "WORKER %s CACHE_UPDATE", w->workerid);
-	buffer_printf(&B, " %s", name);
-	buffer_printf(&B, " %lld", (long long)size_in_bytes);
-	buffer_printf(&B, " %llu", (unsigned long long)time_in_usecs);
-	buffer_printf(&B, " %llu", (unsigned long long)start_in_usecs);
+	buffer_printf(&B, "WORKER %s CACHE_UPDATE %s %lld %llu %llu", w->workerid, name, (long long)size_in_bytes, (unsigned long long)time_in_usecs, (unsigned long long)start_in_usecs);
 
 	vine_txn_log_write(q, buffer_tostring(&B));
 	buffer_free(&B);
@@ -321,6 +332,10 @@ void vine_txn_log_write_cache_update(
 
 void vine_txn_log_write_manager(struct vine_manager *q, const char *event)
 {
+	if (!q->txn_logfile) {
+		return;
+	}
+
 	struct buffer B;
 	int64_t time_from_origin = 0;
 
@@ -336,6 +351,10 @@ void vine_txn_log_write_manager(struct vine_manager *q, const char *event)
 
 void vine_txn_log_write_library_update(struct vine_manager *q, struct vine_worker_info *w, int library_id, vine_library_state_t state)
 {
+	if (!q->txn_logfile) {
+		return;
+	}
+
 	struct buffer B;
 	buffer_init(&B);
 	buffer_printf(&B, "LIBRARY %d", library_id);
@@ -365,6 +384,10 @@ void vine_txn_log_write_library_update(struct vine_manager *q, struct vine_worke
 
 void vine_txn_log_write_app_entry(struct vine_manager *q, const char *entry)
 {
+	if (!q->txn_logfile) {
+		return;
+	}
+
 	struct buffer B;
 	buffer_init(&B);
 	buffer_printf(&B, "APPLICATION %s", entry);

@@ -1872,7 +1872,8 @@ static vine_result_code_t get_stdout(struct vine_manager *q, struct vine_worker_
 	}
 
 	if (retrieved_output_length > 0) {
-		debug(D_VINE, "Receiving stdout of task %d (size: %" PRId64 " bytes) from %s (%s) ...", t->task_id, retrieved_output_length, w->addrport, w->hostname);
+		/* The message that announced the output (complete or stdout) was logged with its task and length, and the
+		 * end of the read is logged below, so its start is not logged. */
 
 		// First read the bytes we keep.
 		stoptime = time(0) + vine_manager_transfer_time(q, w, retrieved_output_length);
@@ -1883,7 +1884,7 @@ static vine_result_code_t get_stdout(struct vine_manager *q, struct vine_worker_
 			t->output[actual] = '\0';
 			return VINE_WORKER_FAILURE;
 		}
-		debug(D_VINE, "Retrieved %" PRId64 " bytes from %s (%s)", actual, w->hostname, w->addrport);
+		debug(D_VINE, "Retrieved %" PRId64 " bytes of stdout of task %d from %s (%s)", actual, t->task_id, w->hostname, w->addrport);
 
 		// Then read the bytes we need to throw away.
 		if (output_length > retrieved_output_length) {
@@ -3013,7 +3014,6 @@ static vine_result_code_t start_one_task(struct vine_manager *q, struct vine_wor
 	if (result == VINE_SUCCESS) {
 		t->current_resource_box = limits;
 		rmsummary_merge_override_basic(t->resources_allocated, limits);
-		debug(D_VINE, "%s (%s) busy on '%s'", w->hostname, w->addrport, t->command_line);
 	} else {
 		rmsummary_delete(limits);
 	}
