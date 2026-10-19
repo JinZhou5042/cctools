@@ -131,9 +131,12 @@ static batch_queue_id_t batch_queue_condor_submit(struct batch_queue *q, struct 
 	fprintf(file, "log = %s\n", q->logfile);
 	fprintf(file, "+JobMaxSuspendTime = 0\n");
 
-	// A held job, such as one that went over its memory limit, never runs again on its own and was counted as
-	// submitted forever, so a factory never replaced it. Removing it reports it as ended (event 009).
-	// batch-options, written below, may override this expression.
+	/*
+	A held job, such as one that went over its memory limit, stays in the queue
+	until someone releases or removes it, and would be waited for forever.
+	Removing it reports it as ended through the remove event (009).
+	Options given by the user are written below and may override this.
+	*/
 	fprintf(file, "periodic_remove = (JobStatus == 5)\n");
 
 	const char *c_req = batch_queue_get_option(q, "condor-requirements");
