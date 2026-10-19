@@ -20,6 +20,7 @@ See the file COPYING for details.
 #include "hash_table.h"
 #include "link.h"
 #include "link_auth.h"
+#include "list.h"
 #include "path_disk_size_info.h"
 #include "stringtools.h"
 #include "timestamp.h"
@@ -950,8 +951,62 @@ Search the processing transfer table to determine if any transfer processes have
 If any have definitively failed, they are removed from the cache.
 */
 
+/*
+Return the peer part of a worker transfer source ("workerip://host:port/"), or null for any other source.
+*/
+
+static char *worker_source_peer(const char *source)
+{
+	if (!string_prefix_is(source, "workerip://") && !string_prefix_is(source, "worker://")) {
+		return NULL;
+	}
+	const char *slash = strchr(strstr(source, "://") + 3, '/');
+	if (!slash) {
+		return NULL;
+	}
+	return strndup(source, slash - source + 1);
+}
+
+/*
+A transfer from another worker failed after the peer transfer timeout, so that worker did not answer for that long:
+its host may hang with its connections open. The transfers from it that wait for a transfer slot would wait as long
+each, and hold the tasks that need them, so they fail now, and the manager chooses another source for each file.
+Transfers in progress fail on their own.
+*/
+
+static void fail_pending_transfers_from(struct vine_cache *c, const char *peer, struct link *manager)
+{
+	struct list *names = list_create();
+	char *cachename;
+	void *dummy;
+	int iteration;
+	HASH_TABLE_ITERATE(c->pending_transfers, iteration, cachename, dummy)
+	{
+		struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
+		if (f && f->status == VINE_CACHE_STATUS_PENDING && f->cache_type == VINE_CACHE_TRANSFER && string_prefix_is(f->source, peer)) {
+			list_push_tail(names, xxstrdup(cachename));
+		}
+	}
+
+	while ((cachename = list_pop_head(names))) {
+		struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
+		char *message = string_format("error transferring file: %s did not answer another transfer for %d seconds", peer, VINE_PEER_TRANSFER_TIMEOUT);
+		debug(D_VINE, "cache: %s %s", cachename, message);
+		vine_worker_send_cache_invalid(manager, cachename, message);
+		free(message);
+		/* The failure was reported, so the removal does not report the pending transfer again. */
+		f->status = VINE_CACHE_STATUS_FAILED;
+		vine_cache_remove(c, cachename, manager);
+		free(cachename);
+	}
+	list_delete(names);
+}
+
 int vine_cache_check_xfer_files(struct vine_cache *c, struct link *manager)
 {
+	/* Peers that did not answer a transfer for the peer transfer timeout, created when one is found. */
+	struct list *silent_peers = NULL;
+
 	char *cachename;
 	void *dummy; // processing_transfers is used as a key set; values are unused.
 	int iteration;
@@ -965,6 +1020,16 @@ int vine_cache_check_xfer_files(struct vine_cache *c, struct link *manager)
 		/* The check above may change or remove cache state, so look up the entry again. */
 		f = hash_table_lookup(c->table, cachename);
 		if (f && f->status == VINE_CACHE_STATUS_FAILED) {
+			/* The connect deadline counts whole seconds, so a connect that timed out may take a second less. */
+			if (f->cache_type == VINE_CACHE_TRANSFER && f->stop_time - f->start_time >= (timestamp_t)(VINE_PEER_TRANSFER_TIMEOUT - 1) * 1000000) {
+				char *peer = worker_source_peer(f->source);
+				if (peer) {
+					if (!silent_peers) {
+						silent_peers = list_create();
+					}
+					list_push_tail(silent_peers, peer);
+				}
+			}
 			/* if transfer failed, then we delete all of our records of the file. The manager
 			 * assumes that the file is not at the worker after the manager receives
 			 * the cache invalid message sent from vine_cache_check_outputs. */
@@ -972,6 +1037,17 @@ int vine_cache_check_xfer_files(struct vine_cache *c, struct link *manager)
 		}
 
 		/* Note that f may no longer be valid at this point */
+	}
+
+	if (silent_peers) {
+		char *peer;
+		while ((peer = list_pop_head(silent_peers))) {
+			if (manager) {
+				fail_pending_transfers_from(c, peer, manager);
+			}
+			free(peer);
+		}
+		list_delete(silent_peers);
 	}
 
 	return 1;
