@@ -106,6 +106,20 @@ def sigchld_handler(signum, frame):
     os.write(w, b"a")
 
 
+# Number of modules loaded when the native thread pools were last limited.
+limited_module_count = -1
+
+
+# Limit the native thread pools (BLAS, OpenMP) of the libraries loaded so far, which forked functions inherit.
+# Limiting them costs about 0.7 ms, which every function call paid in the library's only thread, so it runs again only
+# after modules were imported, which may have loaded another such library.
+def limit_thread_pools(thread_limit):
+    global limited_module_count
+    if len(sys.modules) != limited_module_count:
+        threadpool_limits(limits=thread_limit)
+        limited_module_count = len(sys.modules)
+
+
 # Read data from worker, start function, and dump result to `outfile`.
 def start_function(in_pipe_fd, thread_limit=1):
     global spare_wanted
@@ -154,60 +168,60 @@ def start_function(in_pipe_fd, thread_limit=1):
             pid_to_stdout[p] = os.path.join(function_sandbox, function_stdout_filename)
             return p, function_id
 
-    with threadpool_limits(limits=thread_limit):
-        if exec_method == "direct":
-            library_sandbox = os.getcwd()
+    limit_thread_pools(thread_limit)
+    if exec_method == "direct":
+        library_sandbox = os.getcwd()
+        try:
+            os.chdir(function_sandbox)
+
+            # parameters are represented as infile.
+            with open("infile", "rb") as f:
+                event = cloudpickle.load(f)
+
+            # output of execution should be dumped to outfile.
+            result = globals()[function_name](event)
             try:
-                os.chdir(function_sandbox)
-
-                # parameters are represented as infile.
-                with open("infile", "rb") as f:
-                    event = cloudpickle.load(f)
-
-                # output of execution should be dumped to outfile.
-                result = globals()[function_name](event)
-                try:
-                    with open("outfile", "wb") as f:
-                        cloudpickle.dump(result, f)
-                except Exception:
-                    if os.path.exists("outfile"):
-                        os.remove("outfile")
-                    raise
-
-                try:
-                    if not result["Success"]:
-                        raise Exception(result["Reason"])
-                except Exception:
-                    raise
-
-            except Exception as e:
-                stdout_timed_message(f"Library code: Function call failed due to {e}")
-                sys.exit(1)
-            finally:
-                os.chdir(library_sandbox)
-            return -1, function_id
-        elif exec_method == "fork":
-            try:
-                arg_infile = os.path.join(function_sandbox, "infile")
-                with open(arg_infile, "rb") as f:
-                    event = cloudpickle.load(f)
+                with open("outfile", "wb") as f:
+                    cloudpickle.dump(result, f)
             except Exception:
-                stdout_timed_message(f"TASK {function_id} error: can't load the arguments from {arg_infile}")
-                return -1, function_id
-            p = os.fork()
-            if p == 0:
-                run_function(function_id, function_name, function_sandbox, function_stdout_filename, event)
-            elif p < 0:
-                stdout_timed_message(f"TASK {function_id} error: unable to fork to execute {function_name}")
-                return -1, function_id
+                if os.path.exists("outfile"):
+                    os.remove("outfile")
+                raise
 
-            # return pid and function id of child process to parent.
-            else:
-                pid_to_stdout[p] = os.path.join(function_sandbox, function_stdout_filename)
-                return p, function_id
-        else:
-            stdout_timed_message(f"error: invalid execution method {exec_method}")
+            try:
+                if not result["Success"]:
+                    raise Exception(result["Reason"])
+            except Exception:
+                raise
+
+        except Exception as e:
+            stdout_timed_message(f"Library code: Function call failed due to {e}")
+            sys.exit(1)
+        finally:
+            os.chdir(library_sandbox)
+        return -1, function_id
+    elif exec_method == "fork":
+        try:
+            arg_infile = os.path.join(function_sandbox, "infile")
+            with open(arg_infile, "rb") as f:
+                event = cloudpickle.load(f)
+        except Exception:
+            stdout_timed_message(f"TASK {function_id} error: can't load the arguments from {arg_infile}")
             return -1, function_id
+        p = os.fork()
+        if p == 0:
+            run_function(function_id, function_name, function_sandbox, function_stdout_filename, event)
+        elif p < 0:
+            stdout_timed_message(f"TASK {function_id} error: unable to fork to execute {function_name}")
+            return -1, function_id
+
+        # return pid and function id of child process to parent.
+        else:
+            pid_to_stdout[p] = os.path.join(function_sandbox, function_stdout_filename)
+            return p, function_id
+    else:
+        stdout_timed_message(f"error: invalid execution method {exec_method}")
+        return -1, function_id
 
 
 # Run a function call in a forked process, which reports its exit status on the report pipe and exits. The arguments
@@ -308,13 +322,13 @@ def rehearse_call():
 # the pipe ends empty because the library discarded it or exited.
 def fork_spare(thread_limit):
     global spare
+    limit_thread_pools(thread_limit)
     read_fd, write_fd = os.pipe()
     p = os.fork()
     if p == 0:
         os.close(write_fd)
         exit_status = 1
         try:
-            threadpool_limits(limits=thread_limit)
             # a call that is already waiting runs at once.
             if not select.select([read_fd], [], [], 0)[0]:
                 rehearse_call()
@@ -615,13 +629,11 @@ def main():
                     pid, func_id = start_function(in_pipe_fd, thread_limit)
                     # pid == -1 indicates a failure during fork/setup of the function execution
                     if pid == -1:
-                        # The status that waitpid() returns for a process that exited with status 1, as the worker
-                        # receives for every other call. A plain 1 would read as a process killed by signal 1.
                         send_result(
                             out_pipe_fd,
                             args.worker_pid,
                             func_id,
-                            1 << 8,
+                            1,
                         )
                     else:
                         pid_to_func_id[pid] = func_id
