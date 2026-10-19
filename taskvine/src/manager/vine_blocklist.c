@@ -106,6 +106,10 @@ void vine_blocklist_block(struct vine_manager *q, const char *hostname, time_t t
 
 int vine_blocklist_is_blocked(struct vine_manager *q, const char *hostname)
 {
+	/* The scheduler asks for every worker it considers, and the blocklist is usually empty. */
+	if (hash_table_size(q->worker_blocklist) == 0) {
+		return 0;
+	}
 	struct vine_blocklist_info *info = hash_table_lookup(q->worker_blocklist, hostname);
 	return info && info->blocked;
 }
