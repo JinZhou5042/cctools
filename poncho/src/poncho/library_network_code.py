@@ -42,6 +42,13 @@ pid_to_stdout = {}
 failed_imports = set()
 learning_imports = True
 
+# The spare process for the next function call in fork mode, as (pid, write end of its invocation pipe, number of
+# modules loaded when it was forked), or None. A spare is kept once a call arrived in fork mode (`spare_wanted`).
+# Spares that were discarded without running a call are in `discarded_spares` until they are reaped.
+spare = None
+spare_wanted = False
+discarded_spares = set()
+
 
 # This class captures how results from FunctionCalls are conveyed from
 # the library to the manager.
@@ -101,6 +108,7 @@ def sigchld_handler(signum, frame):
 
 # Read data from worker, start function, and dump result to `outfile`.
 def start_function(in_pipe_fd, thread_limit=1):
+    global spare_wanted
     # read length of buffer to read
     buffer_len = b""
     while True:
@@ -137,6 +145,14 @@ def start_function(in_pipe_fd, thread_limit=1):
         # malformed message from worker so we exit
         stdout_timed_message(f"error: invalid function name, malformed message {line} from worker")
         exit(1)
+
+    if exec_method == "fork":
+        # A call runs in the spare process, forked before it arrived, when there is one that can run it.
+        spare_wanted = True
+        p = start_in_spare(line)
+        if p > 0:
+            pid_to_stdout[p] = os.path.join(function_sandbox, function_stdout_filename)
+            return p, function_id
 
     with threadpool_limits(limits=thread_limit):
         if exec_method == "direct":
@@ -180,68 +196,7 @@ def start_function(in_pipe_fd, thread_limit=1):
                 return -1, function_id
             p = os.fork()
             if p == 0:
-                exit_status = 1
-                # sys.modules keeps the order of imports, so the modules this call imports follow the ones it inherited.
-                inherited_modules = len(sys.modules)
-
-                try:
-                    # change the working directory to the function's sandbox
-                    os.chdir(function_sandbox)
-
-                    stdout_timed_message(f"TASK {function_id} {function_name} arrives, starting to run in process {os.getpid()}")
-
-                    try:
-                        # each child process independently redirects its own stdout/stderr.
-                        with open(function_stdout_filename, "wb") as f:
-                            os.dup2(f.fileno(), sys.stdout.fileno())  # redirect stdout
-                            os.dup2(f.fileno(), sys.stderr.fileno())  # redirect stderr
-
-                        # once the file descriptors are redirected, we can start the function execution
-                        stdout_timed_message(f"TASK {function_id} {function_name} starts in PID {os.getpid()}")
-                        result = globals()[function_name](event)
-                        stdout_timed_message(f"TASK {function_id} {function_name} finished")
-
-                    except Exception:
-                        stdout_timed_message(f"TASK {function_id} error: can't execute {function_name} due to {traceback.format_exc()}")
-                        exit_status = 2
-                        raise
-
-                    try:
-                        with open("outfile", "wb") as f:
-                            cloudpickle.dump(result, f)
-                    except Exception:
-                        stdout_timed_message(f"TASK {function_id} error: can't load the result from outfile")
-                        exit_status = 3
-                        if os.path.exists("outfile"):
-                            os.remove("outfile")
-                        raise
-
-                    try:
-                        if not result["Success"]:
-                            exit_status = 4
-                    except Exception:
-                        stdout_timed_message(f"TASK {function_id} error: the result is invalid")
-                        exit_status = 5
-                        raise
-
-                    # nothing failed
-                    stdout_timed_message(f"TASK {function_id} finished successfully")
-                    exit_status = 0
-                except Exception as e:
-                    stdout_timed_message(f"TASK {function_id} error: execution failed due to {e}")
-                finally:
-                    # Report the status that waitpid() would return before exiting, because tearing down a copy
-                    # of the library takes longer than most functions, and the modules the call imported, which the
-                    # library then imports once for later calls. The report is one write shorter than PIPE_BUF, so
-                    # reports of different processes never interleave.
-                    try:
-                        report = f"{os.getpid()} {exit_status << 8}"
-                        if exit_status == 0:
-                            report += imported_modules(inherited_modules, select.PIPE_BUF - len(report) - 2)
-                        os.write(report_w, f"{report}\n".encode())
-                    except Exception:
-                        pass
-                    os._exit(exit_status)
+                run_function(function_id, function_name, function_sandbox, function_stdout_filename, event)
             elif p < 0:
                 stdout_timed_message(f"TASK {function_id} error: unable to fork to execute {function_name}")
                 return -1, function_id
@@ -253,6 +208,155 @@ def start_function(in_pipe_fd, thread_limit=1):
         else:
             stdout_timed_message(f"error: invalid execution method {exec_method}")
             return -1, function_id
+
+
+# Run a function call in a forked process, which reports its exit status on the report pipe and exits. The arguments
+# are loaded from the call's infile when event is None.
+def run_function(function_id, function_name, function_sandbox, function_stdout_filename, event):
+    exit_status = 1
+    # sys.modules keeps the order of imports, so the modules this call imports follow the ones it inherited.
+    inherited_modules = len(sys.modules)
+
+    try:
+        # only the library holds the invocation pipe of the spare, which then sees its end when the library exits.
+        if spare:
+            os.close(spare[1])
+
+        # a call that runs in the spare loads its arguments here.
+        if event is None:
+            arg_infile = os.path.join(function_sandbox, "infile")
+            try:
+                with open(arg_infile, "rb") as f:
+                    event = cloudpickle.load(f)
+            except Exception:
+                stdout_timed_message(f"TASK {function_id} error: can't load the arguments from {arg_infile}")
+                raise
+
+        # change the working directory to the function's sandbox
+        os.chdir(function_sandbox)
+
+        stdout_timed_message(f"TASK {function_id} {function_name} arrives, starting to run in process {os.getpid()}")
+
+        try:
+            # each child process independently redirects its own stdout/stderr.
+            with open(function_stdout_filename, "wb") as f:
+                os.dup2(f.fileno(), sys.stdout.fileno())  # redirect stdout
+                os.dup2(f.fileno(), sys.stderr.fileno())  # redirect stderr
+
+            # once the file descriptors are redirected, we can start the function execution
+            stdout_timed_message(f"TASK {function_id} {function_name} starts in PID {os.getpid()}")
+            result = globals()[function_name](event)
+            stdout_timed_message(f"TASK {function_id} {function_name} finished")
+
+        except Exception:
+            stdout_timed_message(f"TASK {function_id} error: can't execute {function_name} due to {traceback.format_exc()}")
+            exit_status = 2
+            raise
+
+        try:
+            with open("outfile", "wb") as f:
+                cloudpickle.dump(result, f)
+        except Exception:
+            stdout_timed_message(f"TASK {function_id} error: can't load the result from outfile")
+            exit_status = 3
+            if os.path.exists("outfile"):
+                os.remove("outfile")
+            raise
+
+        try:
+            if not result["Success"]:
+                exit_status = 4
+        except Exception:
+            stdout_timed_message(f"TASK {function_id} error: the result is invalid")
+            exit_status = 5
+            raise
+
+        # nothing failed
+        stdout_timed_message(f"TASK {function_id} finished successfully")
+        exit_status = 0
+    except Exception as e:
+        stdout_timed_message(f"TASK {function_id} error: execution failed due to {e}")
+    finally:
+        # Report the status that waitpid() would return before exiting, because tearing down a copy of the library
+        # takes longer than most functions, and the modules the call imported, which the library then imports once
+        # for later calls. The report is one write shorter than PIPE_BUF, so reports of different processes never
+        # interleave.
+        try:
+            report = f"{os.getpid()} {exit_status << 8}"
+            if exit_status == 0:
+                report += imported_modules(inherited_modules, select.PIPE_BUF - len(report) - 2)
+            os.write(report_w, f"{report}\n".encode())
+        except Exception:
+            pass
+        os._exit(exit_status)
+
+
+# Write, in a process that waits for a call, to the memory that running any call writes: the first write to a page
+# that a forked process shares with the library makes the kernel copy that page, which costs a call more time than
+# its work when it happens while the call runs.
+def rehearse_call():
+    try:
+        datetime.now().strftime("%m/%d/%y %H:%M:%S.%f")
+        with open(os.devnull, "wb") as f:
+            cloudpickle.dump(LibraryResponse(None, True, None).generate(), f)
+    except Exception:
+        pass
+
+
+# Fork the spare process, which waits for the invocation of the next call and runs it, so that call does not wait for
+# the fork. The spare reads the invocation until the library closes the pipe, and exits without running anything when
+# the pipe ends empty because the library discarded it or exited.
+def fork_spare(thread_limit):
+    global spare
+    read_fd, write_fd = os.pipe()
+    p = os.fork()
+    if p == 0:
+        os.close(write_fd)
+        exit_status = 1
+        try:
+            threadpool_limits(limits=thread_limit)
+            # a call that is already waiting runs at once.
+            if not select.select([read_fd], [], [], 0)[0]:
+                rehearse_call()
+            chunks = []
+            while True:
+                chunk = os.read(read_fd, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            if not chunks:
+                exit_status = 0
+            else:
+                function_id, function_name, function_sandbox, function_stdout_filename = b"".join(chunks).decode().split(" ", maxsplit=3)
+                run_function(int(function_id), function_name, function_sandbox, function_stdout_filename, None)
+        finally:
+            os._exit(exit_status)
+    os.close(read_fd)
+    spare = (p, write_fd, len(sys.modules))
+
+
+# Hand an invocation to the spare process and return its pid, or -1 without a spare that can run it. A spare forked
+# before the library imported more modules lacks them, so it is discarded.
+def start_in_spare(line):
+    global spare
+    if not spare:
+        return -1
+    pid, write_fd, module_count = spare
+    spare = None
+    started = False
+    try:
+        if module_count == len(sys.modules):
+            data = line.encode()
+            while data:
+                data = data[os.write(write_fd, data):]
+            started = True
+    except OSError:
+        pass
+    os.close(write_fd)
+    if not started:
+        discarded_spares.add(pid)
+        return -1
+    return pid
 
 
 # Return " name,name,..." for the modules imported since sys.modules held count modules, at most limit characters,
@@ -457,7 +561,7 @@ def main():
         (load_variable_from_library.__globals__).update(context_vars)
 
     # set execution mode of functions in this library
-    global exec_method
+    global exec_method, spare, spare_wanted
     exec_method = library_info['exec_mode']
 
     # send configuration of library, just its name for now
@@ -531,9 +635,12 @@ def main():
                 # note that there might still be bytes in `r` but it's ok as they will
                 # be discarded in the next iterations.
                 os.read(r, 1)
-                while len(pid_to_func_id) > 0:
-                    c_pid, c_exit_status = os.waitpid(-1, os.WNOHANG)
-                    if c_pid > 0:
+                while len(pid_to_func_id) > 0 or len(discarded_spares) > 0 or spare:
+                    try:
+                        c_pid, c_exit_status = os.waitpid(-1, os.WNOHANG)
+                    except ChildProcessError:
+                        break
+                    if c_pid in pid_to_func_id:
                         # A process writes its report before it exits, so a report not read yet is in the pipe now.
                         if c_pid not in reported and c_exit_status == 0:
                             while c_pid not in reported and select.select([report_r], [], [], 0)[0]:
@@ -560,9 +667,24 @@ def main():
                             )
                         del pid_to_func_id[c_pid]
                         pid_to_stdout.pop(c_pid, None)
+                    elif c_pid > 0 and spare and c_pid == spare[0]:
+                        # the spare ended before it received a call, so the next call forks as usual, and only a
+                        # call in fork mode asks for a spare again.
+                        os.close(spare[1])
+                        spare = None
+                        spare_wanted = False
+                    elif c_pid > 0:
+                        discarded_spares.discard(c_pid)
                     # no exited child to reap, break
                     else:
                         break
+
+        # Keep a spare for the next call, forked after the calls that just arrived were started. While every function
+        # slot runs a call, no call can arrive, so the spare is forked when a call reports and its fork does not take
+        # a core from running calls.
+        calls_running = len(pid_to_func_id) - len(reported)
+        if spare_wanted and not spare and calls_running < args.function_slots:
+            fork_spare(thread_limit)
     return 0
 
 
