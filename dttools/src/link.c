@@ -183,9 +183,25 @@ int link_nonblocking(struct link *link, int onoff)
 	return 1;
 }
 
+/* Data is waiting to be read without a look at the socket: in the link's buffer, or decrypted inside the SSL object.
+ * SSL reads a whole record from the socket, and a read that asks for less than the record leaves the rest there, where
+ * neither the buffer nor a poll of the socket shows it. */
+static int link_has_buffered_data(struct link *link)
+{
+	if (link->buffer_length > 0) {
+		return 1;
+	}
+#ifdef HAS_OPENSSL
+	if (link->ssl && SSL_pending(link->ssl) > 0) {
+		return 1;
+	}
+#endif
+	return 0;
+}
+
 int link_buffer_empty(struct link *link)
 {
-	return link->buffer_length > 0 ? 0 : 1;
+	return link_has_buffered_data(link) ? 0 : 1;
 }
 
 int errno_is_temporary(int e)
@@ -210,7 +226,7 @@ static int link_internal_sleep(struct link *link, struct timeval *timeout, sigse
 		msec = -1;
 	}
 
-	if (reading && link->buffer_length) {
+	if (reading && link_has_buffered_data(link)) {
 		return 1;
 	}
 
@@ -1456,7 +1472,7 @@ int link_poll(struct link_info *links, int nlinks, int msec)
 	for (i = 0; i < nlinks; i++) {
 		fds[i].fd = links[i].link->fd;
 		fds[i].events = link_to_poll(links[i].events);
-		if (links[i].link->buffer_length) { // If there's data already waiting, don't sit in the poll
+		if (link_has_buffered_data(links[i].link)) { // If there's data already waiting, don't sit in the poll
 			msec = 0;
 		}
 	}
@@ -1466,7 +1482,7 @@ int link_poll(struct link_info *links, int nlinks, int msec)
 	if (result >= 0) {
 		for (i = 0; i < nlinks; i++) {
 			links[i].revents = poll_to_link(fds[i].revents);
-			if (links[i].link->buffer_length) {
+			if (link_has_buffered_data(links[i].link)) {
 				links[i].revents |= LINK_READ;
 				result++;
 			}
