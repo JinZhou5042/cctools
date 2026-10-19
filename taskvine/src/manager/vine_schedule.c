@@ -11,6 +11,7 @@ See the file COPYING for details.
 #include "vine_file_replica.h"
 #include "vine_file_replica_table.h"
 #include "vine_mount.h"
+#include "vine_temp.h"
 
 #include "debug.h"
 #include "hash_table.h"
@@ -21,7 +22,7 @@ See the file COPYING for details.
 #include "random.h"
 #include "rmonitor_types.h"
 #include "rmsummary.h"
-#include "hash_table.h"
+#include "set.h"
 
 #include <limits.h>
 #include <math.h>
@@ -251,6 +252,64 @@ int vine_schedule_any_worker_accepts_tasks(struct vine_manager *q)
 		}
 	}
 	return 0;
+}
+
+/* Return true if the input exists but cannot be transferred to a worker that lacks it now, so only the workers that
+ * hold it can run a task that reads it. A temporary file that exists nowhere is not such an input, because a full
+ * check of the task must start its recovery. */
+static int input_held_without_source(struct vine_manager *q, struct vine_file *f)
+{
+	if (vine_manager_transfer_source_available(q, f)) {
+		return 0;
+	}
+	return f->type != VINE_TEMP || vine_temp_exists_somewhere(q, f);
+}
+
+/* Return true if no worker that holds file f can take a task now: none has room, or, when other is given, none also
+ * holds other. */
+static int input_holders_cannot_run(struct vine_manager *q, struct vine_file *f, struct vine_file *other)
+{
+	struct set *holders = hash_table_lookup(q->file_worker_table, f->cached_name);
+	if (!holders) {
+		return 1;
+	}
+	struct vine_worker_info *w;
+	int iteration;
+	SET_ITERATE(holders, iteration, w)
+	{
+		if (other ? hash_table_lookup(w->current_files, other->cached_name) != NULL : check_worker_accepts_tasks(q, w)) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/* Return true if the inputs that kept this ready task from every worker at its last scheduling attempt still keep it
+ * from every worker. An input without a transfer source can reach no worker that lacks it, so the task cannot run
+ * when no holder of such an input has room, or when no worker holds both recorded inputs. The check costs one lookup
+ * per holder of the recorded inputs instead of a pass over all inputs and workers. */
+static int blocking_inputs_still_block(struct vine_manager *q, struct vine_task *t)
+{
+	struct vine_file *first = t->blocking_inputs[0];
+	struct vine_file *second = t->blocking_inputs[1];
+
+	int first_held = input_held_without_source(q, first);
+	if (first_held && input_holders_cannot_run(q, first, NULL)) {
+		return 1;
+	}
+	int second_held = second && input_held_without_source(q, second);
+	if (second_held && input_holders_cannot_run(q, second, NULL)) {
+		return 1;
+	}
+	return first_held && second_held && input_holders_cannot_run(q, first, second);
+}
+
+int vine_schedule_task_is_blocked(struct vine_manager *q, struct vine_task *t)
+{
+	if (!t->blocking_inputs[0] || !q->peer_transfers_enabled) {
+		return 0;
+	}
+	return blocking_inputs_still_block(q, t);
 }
 
 /* Return true if a worker runs a task other than its libraries. */
@@ -497,6 +556,106 @@ void vine_schedule_quarantine_remove_worker(struct vine_manager *q, struct vine_
 	}
 }
 
+/* Rank worker w for task t under the selection algorithm a, unless it cannot take the task. */
+static void rank_worker_for_task(struct vine_manager *q, struct vine_task *t, struct vine_worker_info *w, int a, struct priority_queue *workers)
+{
+	/* briefly skip uninitialized workers, more detailed checks are performed in @check_worker_against_task */
+	if (!w || !w->resources || w->type != VINE_WORKER_TYPE_WORKER || w->draining) {
+		return;
+	}
+
+	/* if task groups are enabled, skip workers that are running a group task */
+	if (q->task_groups_enabled) {
+		if (w->tasks_committed > 0) {
+			int iteration_group;
+			uint64_t tidg;
+			struct vine_task *tg;
+			int running_group_task = 0;
+			ITABLE_ITERATE(w->current_tasks, iteration_group, tidg, tg)
+			{
+				if (tg->group_id) {
+					running_group_task = 1;
+					break;
+				}
+			}
+			if (running_group_task) {
+				return;
+			}
+		}
+	}
+
+	/* compute the size of cached and uncached input files on the worker */
+	int64_t uncached_input_size = 0;
+	int64_t cached_input_size = 0;
+	struct vine_mount *m;
+	LIST_ITERATE(t->input_mounts, m)
+	{
+		if (!m || !m->file) {
+			continue;
+		}
+
+		struct vine_file_replica *replica = vine_file_replica_table_lookup(w, m->file->cached_name);
+		if (replica) {
+			cached_input_size += m->file->size;
+		} else {
+			uncached_input_size += m->file->size;
+		}
+	}
+
+	int64_t available_cache_space_after_task_dispatch = MEGABYTES_TO_BYTES(w->resources->disk.total) - (w->inuse_cache + uncached_input_size);
+
+	/* skip this worker if the available cache space drops below 0 after the task is dispatched */
+	if (available_cache_space_after_task_dispatch <= 0) {
+		return;
+	}
+
+	double priority = 0;
+
+	switch (a) {
+	case VINE_SCHEDULE_FILES:
+		/* Find the worker that has the largest quantity of cached data needed by this task,
+		 * so as to minimize transfer work that must be done by the manager. */
+		priority = cached_input_size;
+		break;
+	case VINE_SCHEDULE_DISK:
+		/* Find the worker that will be left with the most disk space if the task is finished there */
+		priority = available_cache_space_after_task_dispatch;
+		break;
+	case VINE_SCHEDULE_WORST:
+		/* Find the worker that is the "worst fit" for this task, meaning the worker with the most free cores.
+		 * We don't check on memory or disk because if there are no free cores, then the task will not fit anyway. */
+		priority = count_worker_free_cores(q, w);
+		break;
+	case VINE_SCHEDULE_TIME:
+		/* Find the worker that produced the fastest runtime of prior tasks. */
+		priority = w->total_tasks_complete == 0 ? HUGE_VAL : -(double)(w->total_task_time + w->total_transfer_time) / w->total_tasks_complete;
+		break;
+	case VINE_SCHEDULE_FCFS:
+		/* Deprecated, same as random */
+	case VINE_SCHEDULE_RAND:
+	default:
+		/* Default to random selection. */
+		priority = random_double();
+		break;
+	}
+
+	priority_queue_push(workers, w, priority);
+}
+
+/* Return true if some worker in holders also holds file f. */
+static int holders_hold_file(struct set *holders, struct vine_file *f)
+{
+	struct vine_worker_info *w;
+	int iteration;
+	SET_ITERATE(holders, iteration, w)
+	{
+		if (hash_table_lookup(w->current_files, f->cached_name)) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 /* Select the best worker for this task, based on the current scheduling mode. */
 
 struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, struct vine_task *t)
@@ -504,6 +663,9 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 	if (!q || !t) {
 		return NULL;
 	}
+
+	t->blocking_inputs[0] = NULL;
+	t->blocking_inputs[1] = NULL;
 
 	/* A quarantined task with a reservation takes its worker once that worker runs nothing, or any other worker that
 	 * runs nothing first, so a long task on the reserved worker does not hold it back while other workers are free. A
@@ -515,6 +677,36 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 		}
 		if (!worker_runs_tasks(reserved)) {
 			vine_schedule_quarantine_release(t);
+		}
+	}
+
+	/* An input without a transfer source now, such as a temporary file whose holders all reached
+	 * worker-source-max-transfers, cannot reach a worker that lacks it, whatever the worker. Only the workers that hold
+	 * the first such input are considered, and check_worker_against_task() finds any other such input for them. When the
+	 * first such input has no holder, or a later one is held by no holder of the first, no worker can take the task.
+	 * The task records these inputs, and the dispatch pass skips it while vine_schedule_task_is_blocked() finds that
+	 * they still block it. */
+	struct vine_file *unsourced = NULL;
+	struct set *unsourced_holders = NULL;
+	if (q->peer_transfers_enabled) {
+		struct vine_mount *m;
+		LIST_ITERATE(t->input_mounts, m)
+		{
+			if (!m || !m->file || vine_manager_transfer_source_available(q, m->file)) {
+				continue;
+			}
+			if (!unsourced) {
+				unsourced = m->file;
+				unsourced_holders = hash_table_lookup(q->file_worker_table, unsourced->cached_name);
+				if (!unsourced_holders || set_size(unsourced_holders) < 1) {
+					t->blocking_inputs[0] = unsourced;
+					return NULL;
+				}
+			} else if (!holders_hold_file(unsourced_holders, m->file)) {
+				t->blocking_inputs[0] = unsourced;
+				t->blocking_inputs[1] = m->file;
+				return NULL;
+			}
 		}
 	}
 
@@ -530,92 +722,19 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 		a = q->worker_selection_algorithm;
 	}
 
-	char *key;
 	struct vine_worker_info *w;
 	int iteration;
-	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
-	{
-		/* briefly skip uninitialized workers, more detailed checks are performed in @check_worker_against_task */
-		if (!w || !w->resources || w->type != VINE_WORKER_TYPE_WORKER || w->draining) {
-			continue;
-		}
-
-		/* if task groups are enabled, skip workers that are running a group task */
-		if (q->task_groups_enabled) {
-			if (w->tasks_committed > 0) {
-				int iteration_group;
-				uint64_t tidg;
-				struct vine_task *tg;
-				int running_group_task = 0;
-				ITABLE_ITERATE(w->current_tasks, iteration_group, tidg, tg)
-				{
-					if (tg->group_id) {
-						running_group_task = 1;
-						break;
-					}
-				}
-				if (running_group_task) {
-					continue;
-				}
-			}
-		}
-
-		/* compute the size of cached and uncached input files on the worker */
-		int64_t uncached_input_size = 0;
-		int64_t cached_input_size = 0;
-		struct vine_mount *m;
-		LIST_ITERATE(t->input_mounts, m)
+	if (unsourced) {
+		SET_ITERATE(unsourced_holders, iteration, w)
 		{
-			if (!m || !m->file) {
-				continue;
-			}
-
-			struct vine_file_replica *replica = vine_file_replica_table_lookup(w, m->file->cached_name);
-			if (replica) {
-				cached_input_size += m->file->size;
-			} else {
-				uncached_input_size += m->file->size;
-			}
+			rank_worker_for_task(q, t, w, a, workers);
 		}
-
-		int64_t available_cache_space_after_task_dispatch = MEGABYTES_TO_BYTES(w->resources->disk.total) - (w->inuse_cache + uncached_input_size);
-
-		/* skip this worker if the available cache space drops below 0 after the task is dispatched */
-		if (available_cache_space_after_task_dispatch <= 0) {
-			continue;
+	} else {
+		char *key;
+		HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+		{
+			rank_worker_for_task(q, t, w, a, workers);
 		}
-
-		double priority = 0;
-
-		switch (a) {
-		case VINE_SCHEDULE_FILES:
-			/* Find the worker that has the largest quantity of cached data needed by this task,
-			 * so as to minimize transfer work that must be done by the manager. */
-			priority = cached_input_size;
-			break;
-		case VINE_SCHEDULE_DISK:
-			/* Find the worker that will be left with the most disk space if the task is finished there */
-			priority = available_cache_space_after_task_dispatch;
-			break;
-		case VINE_SCHEDULE_WORST:
-			/* Find the worker that is the "worst fit" for this task, meaning the worker with the most free cores.
-			 * We don't check on memory or disk because if there are no free cores, then the task will not fit anyway. */
-			priority = count_worker_free_cores(q, w);
-			break;
-		case VINE_SCHEDULE_TIME:
-			/* Find the worker that produced the fastest runtime of prior tasks. */
-			priority = w->total_tasks_complete == 0 ? HUGE_VAL : -(double)(w->total_task_time + w->total_transfer_time) / w->total_tasks_complete;
-			break;
-		case VINE_SCHEDULE_FCFS:
-			/* Deprecated, same as random */
-		case VINE_SCHEDULE_RAND:
-		default:
-			/* Default to random selection. */
-			priority = random_double();
-			break;
-		}
-
-		priority_queue_push(workers, w, priority);
 	}
 
 	struct vine_worker_info *best_worker = NULL;
@@ -627,6 +746,11 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 	}
 
 	priority_queue_delete(workers);
+
+	/* Only holders of the input without a source were considered, and none could take the task. */
+	if (!best_worker && unsourced) {
+		t->blocking_inputs[0] = unsourced;
+	}
 
 	if (!best_worker && t->worker_loss_charged && !t->quarantine_worker) {
 		quarantine_reserve(q, t);

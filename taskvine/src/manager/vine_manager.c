@@ -3654,6 +3654,8 @@ Determine whether there is transfer capacity to assign this task to this worker.
 Returns true on success, false if there are insufficient transfer sources.
 If a file can be fetched from a substitute source,
 this function modifies the file->substitute field to reflect that source.
+vine_manager_transfer_source_available() applies the same rules to one file without a destination, and the two must
+agree.
 */
 
 int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
@@ -3723,6 +3725,36 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 		} else {
 			/* keep going */
 		}
+	}
+
+	return 1;
+}
+
+/*
+Determine whether an input that the destination worker does not hold can be fetched now: from a peer with transfer
+capacity, from its URL within file-source-max-transfers, or from the manager at dispatch, which sends a local file that
+peers may share within file-source-max-transfers copies at a time (vine_manager_limits_sends()).
+It applies the rules of vine_manager_transfer_capacity_available() without choosing a source or allocating a
+substitute, and the answer does not depend on the destination. A mini task depends on the destination and counts as
+available, so the full check decides for it.
+*/
+
+int vine_manager_transfer_source_available(struct vine_manager *q, struct vine_file *f)
+{
+	if (!(f->flags & VINE_PEER_NOSHARE) && (f->cache_level > VINE_CACHE_LEVEL_TASK) && vine_file_replica_table_find_worker(q, f->cached_name)) {
+		return 1;
+	}
+
+	if (f->type == VINE_URL) {
+		return vine_current_transfers_url_in_use(q, f->source) < q->file_source_max_transfers;
+	}
+
+	if (f->type == VINE_TEMP) {
+		return 0;
+	}
+
+	if (vine_manager_limits_sends(q, f)) {
+		return f->manager_sends < q->file_source_max_transfers;
 	}
 
 	return 1;
@@ -3875,7 +3907,23 @@ static int vine_manager_check_library_for_function_call(struct vine_manager *q, 
 }
 
 /*
-Consider if a task is eligible to run.
+Return true if an input that kept the task from every worker at its last scheduling attempt exists nowhere, such as a
+lost temporary file, so the inputs of the task must be checked, which starts their recovery.
+*/
+
+static int vine_manager_blocking_input_lost(struct vine_manager *q, struct vine_task *t)
+{
+	for (int i = 0; i < 2; i++) {
+		struct vine_file *f = t->blocking_inputs[i];
+		if (f && f->type == VINE_TEMP && !vine_temp_exists_somewhere(q, f)) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/*
+Consider if a task is eligible to run, apart from its inputs, which are checked once a worker is found.
 */
 int consider_task(struct vine_manager *q, struct vine_task *t)
 {
@@ -3895,11 +3943,6 @@ int consider_task(struct vine_manager *q, struct vine_task *t)
 	// Skip if category already running maximum allowed tasks
 	struct category *c = vine_category_lookup_or_create(q, t->category);
 	if (c->max_concurrent > -1 && c->max_concurrent <= c->vine_stats->tasks_running) {
-		return 0;
-	}
-
-	// Skip task if temp input files have not been materialized.
-	if (!vine_manager_check_inputs_available(q, t)) {
 		return 0;
 	}
 
@@ -3943,6 +3986,13 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 			continue;
 		}
 
+		/* A task whose recorded inputs without a transfer source still keep it from every worker is skipped, instead of
+		 * a pass over all its inputs and the workers. Its other inputs are checked again, and recovery of a lost one
+		 * started, once the recorded inputs no longer block it. */
+		if (vine_schedule_task_is_blocked(q, t)) {
+			continue;
+		}
+
 		if (!consider_task(q, t)) {
 			continue;
 		}
@@ -3951,6 +4001,20 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 		q->stats_measure->time_scheduling = timestamp_get();
 		struct vine_worker_info *w = vine_schedule_task_to_worker(q, t);
 		q->stats->time_scheduling += timestamp_get() - q->stats_measure->time_scheduling;
+
+		/* Inputs are checked once the task has a worker, and when scheduling stopped at an input that exists nowhere.
+		 * With peer transfers, the scheduler stops at the first inputs without a transfer source, and an input that
+		 * exists nowhere is one of them. The check starts the recovery of lost temporary files. Checking every input of
+		 * every waiting task first cost a pass over all its inputs in each dispatch pass. */
+		if (!w) {
+			if (!q->peer_transfers_enabled || vine_manager_blocking_input_lost(q, t)) {
+				vine_manager_check_inputs_available(q, t);
+			}
+			continue;
+		}
+		if (!vine_manager_check_inputs_available(q, t)) {
+			continue;
+		}
 
 		if (w) {
 			task_unready = 1;

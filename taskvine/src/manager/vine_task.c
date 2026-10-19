@@ -94,6 +94,9 @@ void vine_task_clean(struct vine_task *t)
 	t->time_when_retrieval = 0;
 	t->time_when_done = 0;
 
+	t->blocking_inputs[0] = NULL;
+	t->blocking_inputs[1] = NULL;
+
 	t->time_workers_execute_last = 0;
 	t->time_workers_execute_last_start = 0;
 	t->time_workers_execute_last_end = 0;

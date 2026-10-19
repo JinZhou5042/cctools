@@ -157,6 +157,11 @@ struct vine_task {
 
 	int group_id;					       /**< When enabled, group ID will be assigned based on temp file dependencies of this task */	
 
+	struct vine_file *blocking_inputs[2];                  /**< Inputs of this ready task that exist but have no transfer source, recorded when the scheduler found no worker
+								  for it. The second, if set, is held by no worker that holds the first. The dispatch pass skips the task while
+								  vine_schedule_task_is_blocked() finds them still blocking. Both are among the task's input mounts, which hold
+								  their references. */
+
 	int refcount;                                          /**< Number of remaining references to this object. */
 };
 

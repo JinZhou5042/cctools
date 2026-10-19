@@ -25,6 +25,10 @@ int vine_schedule_in_ramp_down(struct vine_manager *q);
 struct vine_task *vine_schedule_find_library(struct vine_manager *q, struct vine_worker_info *w, const char *library_name);
 int vine_schedule_any_worker_accepts_tasks(struct vine_manager *q);
 int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
+/* Blocked ready tasks. vine_schedule_task_to_worker() records in a ready task that it found no worker the inputs that
+ * kept it from every worker (blocking_inputs). vine_schedule_task_is_blocked() returns non-zero when those inputs still
+ * keep it from every worker, so a dispatch pass skips it without looking at its other inputs. */
+int vine_schedule_task_is_blocked(struct vine_manager *q, struct vine_task *t);
 
 /* Quarantine of tasks charged an unexpected loss of a worker (t->worker_loss_charged). The charging rule cannot tell a
  * task that makes its worker exit from a task that shared the worker with it, so after its first charged loss a task
