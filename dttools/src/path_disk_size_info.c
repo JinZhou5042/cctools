@@ -48,7 +48,17 @@ int path_disk_size_info_get(const char *path, int64_t *measured_size, int64_t *n
 
 int path_disk_size_info_get_r(const char *path, int64_t max_secs, struct path_disk_size_info **state, struct hash_table *exclude_paths)
 {
-	int64_t start_time = time(0);
+	if (max_secs < 0) {
+		return path_disk_size_info_get_budget(path, NULL, state, exclude_paths);
+	}
+
+	struct budget b;
+	budget_start(&b, max_secs * 1000000);
+	return path_disk_size_info_get_budget(path, &b, state, exclude_paths);
+}
+
+int path_disk_size_info_get_budget(const char *path, const struct budget *b, struct path_disk_size_info **state, struct hash_table *exclude_paths)
+{
 	int result = 0;
 
 	if (!*state) {
@@ -126,25 +136,23 @@ int path_disk_size_info_get_r(const char *path, int64_t max_secs, struct path_di
 					debug(D_DEBUG, "error reading disk usage on '%s'.\n", path);
 					result = -1;
 				}
-				continue;
-			}
-
-			s->count_so_far++;
-			if (S_ISREG(file_info.st_mode)) {
-				s->size_so_far += file_info.st_size;
-			} else if (S_ISDIR(file_info.st_mode)) {
-				/* Only add name of directory, will only open it to read when it's its turn. */
-				struct DIR_with_name *branch = calloc(1, sizeof(struct DIR_with_name));
-				branch->name = xxstrdup(composed_path);
-				list_push_head(s->current_dirs, branch);
-			} else if (S_ISLNK(file_info.st_mode)) {
-				/* do nothing, avoiding infinite loops. */
-			}
-
-			if (max_secs > -1) {
-				if (time(0) - start_time >= max_secs) {
-					goto timeout;
+			} else {
+				s->count_so_far++;
+				if (S_ISREG(file_info.st_mode)) {
+					s->size_so_far += file_info.st_size;
+				} else if (S_ISDIR(file_info.st_mode)) {
+					/* Only add name of directory, will only open it to read when it's its turn. */
+					struct DIR_with_name *branch = calloc(1, sizeof(struct DIR_with_name));
+					branch->name = xxstrdup(composed_path);
+					list_push_head(s->current_dirs, branch);
+				} else if (S_ISLNK(file_info.st_mode)) {
+					/* do nothing, avoiding infinite loops. */
 				}
+			}
+
+			/* Check the budget after every entry that took a system call, including one that went away. */
+			if (b && budget_expired(b)) {
+				goto timeout;
 			}
 		}
 		/* we are done reading a complete directory, and we go to the next in the queue */
