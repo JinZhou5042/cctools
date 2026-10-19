@@ -102,9 +102,10 @@ struct vine_process *vine_process_create(struct vine_task *task, vine_process_ty
 	p->functions_running = 0;
 	p->library_ready = 0;
 
-	/* Note that create_dir recursively creates parents, so a single one is sufficient. */
+	/* The workspace exists, so the sandbox and its tmp directory normally take one mkdir each. Otherwise create_dir
+	 * recursively creates parents, so a single one is sufficient. */
 
-	if (!create_dir(p->tmpdir, 0777)) {
+	if ((mkdir(p->sandbox, 0777) || mkdir(p->tmpdir, 0777)) && !create_dir(p->tmpdir, 0777)) {
 		vine_process_delete(p);
 		return 0;
 	}
