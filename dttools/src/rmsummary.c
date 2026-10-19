@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <math.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -604,11 +605,39 @@ char *rmsummary_print_string(const struct rmsummary *s, int only_resources)
 	return NULL;
 }
 
+static void rmsummary_fill(struct rmsummary *s, double default_value);
+
+/* Summaries of the usual default values, made once for the process and copied by rmsummary_create(), which fills a
+ * summary field by field otherwise. Applications such as the TaskVine manager create several summaries per task. */
+static struct rmsummary rmsummary_minus_one;
+static struct rmsummary rmsummary_zero;
+static pthread_once_t rmsummary_defaults_once = PTHREAD_ONCE_INIT;
+
+static void rmsummary_defaults_create(void)
+{
+	rmsummary_fill(&rmsummary_minus_one, -1);
+	rmsummary_fill(&rmsummary_zero, 0);
+}
+
 /* Create summary filling all numeric fields with default_value, and
 all string fields with NULL. Usual values are 0, or -1. */
 struct rmsummary *rmsummary_create(double default_value)
 {
 	struct rmsummary *s = malloc(sizeof(struct rmsummary));
+	if (!s) {
+		return NULL;
+	}
+	if (default_value == -1 || default_value == 0) {
+		pthread_once(&rmsummary_defaults_once, rmsummary_defaults_create);
+		memcpy(s, default_value == 0 ? &rmsummary_zero : &rmsummary_minus_one, sizeof(*s));
+	} else {
+		rmsummary_fill(s, default_value);
+	}
+	return s;
+}
+
+static void rmsummary_fill(struct rmsummary *s, double default_value)
+{
 	memset(s, default_value, sizeof(struct rmsummary));
 
 	s->command = NULL;
@@ -631,7 +660,6 @@ struct rmsummary *rmsummary_create(double default_value)
 		size_t offset = resources_info[i].offset;
 		rmsummary_set_by_offset(s, offset, default_value);
 	}
-	return s;
 }
 
 void rmsummary_delete(struct rmsummary *s)
@@ -1035,15 +1063,48 @@ const char *rmsummary_resource_to_str(const char *resource, double value, int in
 {
 	static char output[256];
 
-	int decimals = rmsummary_resource_decimals(resource);
-	const char *units = rmsummary_resource_units(resource);
-
-	if (!units) {
+	const struct resource_info *info = info_of_resource(resource);
+	if (!info) {
 		notice(D_RMON, "There is not such a resource: %s", resource);
 		return NULL;
 	}
+	const char *separator = include_units ? " " : "";
+	const char *units = include_units ? info->units : "";
+	size_t separator_length = strlen(separator);
+	size_t units_length = strlen(units);
 
-	string_nformat(output, sizeof(output), "%.*f%s%s", decimals, value, include_units ? " " : "", include_units ? units : "");
+	/* A whole number, as resources usually are, is written as its digits followed by zeros for the decimals, which is
+	 * what %.*f prints for it, without the floating point conversion of printf. -0 keeps printf for its sign. */
+	if (value == floor(value) && fabs(value) < 1e15 && !(value == 0 && signbit(value)) && info->decimals <= 15 && separator_length + units_length < sizeof(output) - 40) {
+		/* At most 15 digits, a sign, a point, 15 zeros, and the units, so it fits. */
+		char digits[20];
+		int count = 0;
+		long long whole = (long long)value;
+		unsigned long long magnitude = whole < 0 ? -(unsigned long long)whole : (unsigned long long)whole;
+		do {
+			digits[count++] = '0' + magnitude % 10;
+			magnitude /= 10;
+		} while (magnitude);
+
+		char *p = output;
+		if (whole < 0) {
+			*p++ = '-';
+		}
+		while (count) {
+			*p++ = digits[--count];
+		}
+		if (info->decimals > 0) {
+			*p++ = '.';
+			memset(p, '0', info->decimals);
+			p += info->decimals;
+		}
+		memcpy(p, separator, separator_length);
+		p += separator_length;
+		memcpy(p, units, units_length);
+		p[units_length] = 0;
+	} else {
+		string_nformat(output, sizeof(output), "%.*f%s%s", info->decimals, value, separator, units);
+	}
 
 	return output;
 }
