@@ -282,6 +282,12 @@ This may be called on tasks after they are returned from @ref vine_wait.
 */
 void vine_task_delete(struct vine_task *t);
 
+/** Add a reference to an existing task object, return the same object.
+@param t A task object.
+@return The same task object, or null.
+*/
+struct vine_task *vine_task_addref(struct vine_task *t);
+
 /** Indicate the command to be executed.
 @param t A task object.
 @param cmd The command to be executed.  This string will be duplicated by this call, so the argument may be freed or
@@ -717,6 +723,14 @@ has previously been called on this object.
 */
 const char *vine_file_contents(struct vine_file *f);
 
+/** Release a reference to a file object.
+Most declared files should be released with @ref vine_undeclare_file; this function is for file references owned outside
+the manager declaration table.
+@param f A file object.
+@return The remaining reference count, or zero.
+*/
+int vine_file_delete(struct vine_file *f);
+
 /** Get the length of a vine file.
 @param f A file object.
 @return The length of the file, or zero if unknown.
@@ -735,6 +749,18 @@ const char *vine_file_source(struct vine_file *f);
 @return A file type.
 */
 vine_file_type_t vine_file_type(struct vine_file *f);
+
+/** Get the manager-side cached name of a file.
+@param f A file object.
+@return The cached name, or null.
+*/
+const char *vine_file_cached_name(struct vine_file *f);
+
+/** Return non-zero if a file is currently being recovered.
+@param f A file object.
+@return Non-zero if the file is currently being recovered.
+*/
+int vine_file_is_recovering(struct vine_file *f);
 
 /** Get the number of replicas of a file.
 @param m A manager object
@@ -937,6 +963,13 @@ but is still available on the manager's site, and can be recovered by submitting
 @return The number of replicas pruned.
 */
 int vine_prune_file(struct vine_manager *m, struct vine_file *f);
+
+/** Return a declared file by its cached name, or NULL if it is unknown to the manager.
+@param m A manager object.
+@param cached_name The file cache name.
+@return The declared file object, or null.
+*/
+struct vine_file *vine_manager_lookup_file(struct vine_manager *m, const char *cached_name);
 
 //@}
 

@@ -374,6 +374,21 @@ const char *vine_file_source(struct vine_file *f)
 	return f->source;
 }
 
+const char *vine_file_cached_name(struct vine_file *f)
+{
+	return f ? f->cached_name : NULL;
+}
+
+int vine_file_is_recovering(struct vine_file *f)
+{
+	/* Until a recovery task is made, the source is the task that wrote the file, or its recipe. */
+	if (!f || f->type != VINE_TEMP || !f->recovery_task || f->recovery_task->type != VINE_TASK_TYPE_RECOVERY) {
+		return 0;
+	}
+
+	return f->recovery_task->state != VINE_TASK_INITIAL && f->recovery_task->state != VINE_TASK_DONE;
+}
+
 void vine_file_set_mode(struct vine_file *f, int mode)
 {
 	/* The mode must contain, at a minimum, owner-rw (0600) (so that we can delete it) */
