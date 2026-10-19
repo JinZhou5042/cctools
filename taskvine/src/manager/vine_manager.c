@@ -3984,15 +3984,57 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 				push_task_to_ready_tasks(q, t);
 				break;
 			}
+
+			/* Once the last worker with room is taken, the rest of the pass cannot dispatch a task. */
+			if (result == VINE_SUCCESS && !vine_schedule_any_worker_accepts_tasks(q)) {
+				break;
+			}
 		}
 	}
 
 	return task_unready;
 }
 
+/*
+Find ready tasks that can no longer run, at most once a second. Dispatch passes find them otherwise, but no pass runs
+while no worker has room for a task.
+*/
+
+static int retrieve_ready_tasks(struct vine_manager *q, double now_secs)
+{
+	timestamp_t now = timestamp_get();
+	if (now - q->time_last_ready_tasks_check < ONE_SECOND) {
+		return 0;
+	}
+	q->time_last_ready_tasks_check = now;
+
+	int retrieved = 0;
+	struct vine_task *t;
+	struct skip_list_cursor *cur = skip_list_cursor_create(q->ready_tasks);
+	skip_list_seek(cur, 0);
+	SKIP_LIST_ITERATE_CURSOR(cur, t)
+	{
+		if (retrieve_ready_task(q, t, now_secs)) {
+			skip_list_remove_here(cur);
+			retrieved = 1;
+		}
+	}
+	skip_list_cursor_delete(cur);
+
+	return retrieved;
+}
+
 static int send_one_task(struct vine_manager *q)
 {
 	double now_secs = ((double)timestamp_get()) / ONE_SECOND;
+
+	/* Without a worker that has room, a pass would only try each ready task against each worker. The manager waits
+	 * instead, until a worker sends a message or for a second. */
+	q->dispatch_blocked = !vine_schedule_any_worker_accepts_tasks(q);
+	if (q->dispatch_blocked) {
+		return retrieve_ready_tasks(q, now_secs);
+	}
+
 	int iter_depth = MIN(skip_list_size(q->ready_tasks), q->attempt_schedule_depth);
 
 	// if ready_tasks_cr is not pointing at a task
@@ -5096,6 +5138,9 @@ static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_t
 		vine_task_set_result(t, VINE_RESULT_UNKNOWN);
 		push_task_to_ready_tasks(q, t);
 		c->vine_stats->tasks_waiting++;
+		if (t->resources_requested->gpus > 0) {
+			q->gpus_requested = 1;
+		}
 		break;
 	case VINE_TASK_RUNNING:
 		itable_insert(q->running_table, t->task_id, t);
@@ -5917,6 +5962,9 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 				sent_in_previous_cycle = 1;
 				continue;
 			}
+		} else {
+			/* No task is dispatched before enough workers connect, and each connection ends the wait. */
+			q->dispatch_blocked = 1;
 		}
 
 		// Check if any temp files need replication and start replicating
@@ -5997,10 +6045,10 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 
 		// if we got here, no events were triggered this time around.
 		// if we went through the entire ready list without finding a task to dispatch,
-		// or we are still waiting for workers,
+		// or we are still waiting for workers, or no worker has room for a task,
 		// we set the nothing_happened_last_wait_cycle flag so that link_poll waits for some time
 		// the next time around, or return retrieved tasks if there some available.
-		if ((!skip_list_get(q->ready_tasks_cr, NULL) || waiting_for_workers) && list_size(q->retrieved_list) < 1) {
+		if ((!skip_list_get(q->ready_tasks_cr, NULL) || waiting_for_workers || q->dispatch_blocked) && list_size(q->retrieved_list) < 1) {
 			q->nothing_happened_last_wait_cycle = 1;
 		}
 	}
@@ -6840,18 +6888,27 @@ void vine_set_category_resources_max(struct vine_manager *q, const char *categor
 {
 	struct category *c = vine_category_lookup_or_create(q, category);
 	category_specify_max_allocation(c, rm);
+	if (rm && rm->gpus > 0) {
+		q->gpus_requested = 1;
+	}
 }
 
 void vine_set_category_resources_min(struct vine_manager *q, const char *category, const struct rmsummary *rm)
 {
 	struct category *c = vine_category_lookup_or_create(q, category);
 	category_specify_min_allocation(c, rm);
+	if (rm && rm->gpus > 0) {
+		q->gpus_requested = 1;
+	}
 }
 
 void vine_set_category_first_allocation_guess(struct vine_manager *q, const char *category, const struct rmsummary *rm)
 {
 	struct category *c = vine_category_lookup_or_create(q, category);
 	category_specify_first_allocation_guess(c, rm);
+	if (rm && rm->gpus > 0) {
+		q->gpus_requested = 1;
+	}
 }
 
 int vine_set_category_mode(struct vine_manager *q, const char *category, vine_category_mode_t mode)

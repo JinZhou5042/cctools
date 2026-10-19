@@ -151,6 +151,8 @@ struct vine_manager {
 	int num_tasks_left;    /* Optional: Number of tasks remaining, if given by user.  @ref vine_set_num_tasks */
 	int nothing_happened_last_wait_cycle; /* Set internally in main loop if no messages or tasks were processed during the last wait loop.
 																					 If set, poll longer to avoid wasting cpu cycles, and growing log files unnecessarily.*/
+	int dispatch_blocked;  /* Set when the last dispatch attempt found no worker with room for a task. */
+	int gpus_requested;    /* Set once a ready task or a category requests gpus. Until then, idle gpus are not room for a task. */
 
 	/* Accumulation of statistics for reporting to the caller. */
 
@@ -162,6 +164,7 @@ struct vine_manager {
 	timestamp_t time_last_wait;
 	timestamp_t time_last_log_stats;
 	timestamp_t time_last_large_tasks_check;
+	timestamp_t time_last_ready_tasks_check;
 	timestamp_t time_last_compaction; /* When the tables were last compacted, see compact_tables(). */
 	int64_t compacted_since_trim;     /* Removed table entries freed since the heap was last trimmed. */
 	int64_t tables_peak_since_trim;   /* Most tasks and files held at a compaction since the last trim. */

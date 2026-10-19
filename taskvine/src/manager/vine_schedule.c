@@ -154,8 +154,9 @@ int check_worker_have_enough_disk_with_inputs(struct vine_manager *q, struct vin
  * If it returns true, the worker has either free slots for function calls or sufficient resources for regular tasks.
  * @param q         Manager info structure
  * @param w The worker info structure.
+ * @param count_gpus Whether free gpus count as resources for a regular task.
  */
-static int check_worker_have_committable_resources(struct vine_manager *q, struct vine_worker_info *w)
+static int check_worker_have_committable_resources(struct vine_manager *q, struct vine_worker_info *w, int count_gpus)
 {
 	/* Check if there are free slots on any of the running libraries */
 	if (w->current_libraries && itable_size(w->current_libraries) > 0) {
@@ -172,7 +173,7 @@ static int check_worker_have_committable_resources(struct vine_manager *q, struc
 
 	/* Check if there are free resources for tasks except function calls */
 	int cores_committable = w->resources->cores.total > 0 && (w->resources->cores.inuse < overcommitted_resource_total(q, w->resources->cores.total));
-	int gpus_committable = w->resources->gpus.total > 0 && (w->resources->gpus.inuse < overcommitted_resource_total(q, w->resources->gpus.total));
+	int gpus_committable = count_gpus && w->resources->gpus.total > 0 && (w->resources->gpus.inuse < overcommitted_resource_total(q, w->resources->gpus.total));
 	int memory_committable = w->resources->memory.total > 0 && (w->resources->memory.inuse < overcommitted_resource_total(q, w->resources->memory.total));
 	int disk_committable = w->resources->disk.total > 0 && (w->resources->disk.inuse < overcommitted_resource_total(q, w->resources->disk.total));
 
@@ -227,6 +228,29 @@ static int check_worker_is_available(struct vine_manager *q, struct vine_worker_
 	}
 
 	return 1;
+}
+
+/* Return true if this worker has room for a task now. */
+static int check_worker_accepts_tasks(struct vine_manager *q, struct vine_worker_info *w)
+{
+	return w->type == VINE_WORKER_TYPE_WORKER && check_worker_is_available(q, w) && check_worker_have_committable_resources(q, w, q->gpus_requested);
+}
+
+/* Return true if some worker has room for a task now. Otherwise no ready task can be dispatched, and the manager does
+ * not need to try each of them against each worker. Room needs a free function slot or a free core, unless idle GPUs
+ * count. */
+int vine_schedule_any_worker_accepts_tasks(struct vine_manager *q)
+{
+	char *key;
+	struct vine_worker_info *w;
+	int iteration;
+	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+	{
+		if (check_worker_accepts_tasks(q, w)) {
+			return 1;
+		}
+	}
+	return 0;
 }
 
 /* Return true if a worker runs a task other than its libraries. */
@@ -288,7 +312,7 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 	}
 
 	/* if worker has free resources to use */
-	if (!check_worker_have_committable_resources(q, w)) {
+	if (!check_worker_have_committable_resources(q, w, 1)) {
 		return 0;
 	}
 
