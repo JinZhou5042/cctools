@@ -53,36 +53,53 @@ void vine_txn_log_write_header(struct vine_manager *q)
 	fprintf(q->txn_logfile, "# time manager_pid APPLICATION message*\n");
 }
 
-static struct jx *resources_with_io_report(const struct vine_task *t, const struct rmsummary *s)
+/* Append one member "name":[value,"units"] of a JSON object, with a comma unless it is the first. */
+static void print_io_member(struct buffer *B, int *count, const char *name, double value, const char *units)
 {
+	if ((*count)++ > 0) {
+		buffer_putliteral(B, ",");
+	}
+	buffer_putliteral(B, "\"");
+	buffer_putstring(B, name);
+	buffer_putliteral(B, "\":[");
+	jx_print_double(value, B);
+	buffer_putliteral(B, ",\"");
+	buffer_putstring(B, units);
+	buffer_putliteral(B, "\"]");
+}
 
-	struct jx *m = NULL;
+/* Print the resources of a task with its transfer and timing report as one JSON object. It is printed directly
+ * instead of through a JX object, whose construction and printing dominated the cost of this log, with the same
+ * output: the report members come first, in the reverse order of their insertion into the object, then the resources
+ * of s, if any. */
+static void print_resources_with_io_report(struct buffer *B, const struct vine_task *t, const struct rmsummary *s)
+{
+	int count = 0;
 
-	if (s) {
-		m = rmsummary_to_json(s, /* only resources */ 1);
-	} else {
-		m = jx_object(0);
+	buffer_putliteral(B, "{");
+
+	if (t->time_when_retrieval > 0) {
+		/* if time_when_retrieval, then information about execution is available */
+		print_io_member(B, &count, "time_worker_start", t->time_workers_execute_last_start / ((double)ONE_SECOND), "s");
+		print_io_member(B, &count, "time_worker_end", t->time_workers_execute_last_end / ((double)ONE_SECOND), "s");
+		print_io_member(B, &count, "time_output_mgr", (t->time_when_done - t->time_when_retrieval) / ((double)ONE_SECOND), "s");
+		print_io_member(B, &count, "size_output_mgr", t->bytes_received / ((double)MEGABYTE), "MB");
 	}
 
 	if (t->time_when_commit_start > 0) {
 		/* if time_when_commit_start, then we now for sure the task was
 		 * submitted to some worker, and that bytes sent makes sense. */
-
-		jx_insert(m, jx_string("size_input_mgr"), jx_arrayv(jx_double(t->bytes_sent / ((double)MEGABYTE)), jx_string("MB"), NULL));
-		jx_insert(m, jx_string("time_input_mgr"), jx_arrayv(jx_double((t->time_when_commit_end - t->time_when_commit_start) / ((double)ONE_SECOND)), jx_string("s"), NULL));
-		jx_insert(m, jx_string("time_commit_end"), jx_arrayv(jx_double(t->time_when_commit_end / ((double)ONE_SECOND)), jx_string("s"), NULL));
-		jx_insert(m, jx_string("time_commit_start"), jx_arrayv(jx_double(t->time_when_commit_start / ((double)ONE_SECOND)), jx_string("s"), NULL));
+		print_io_member(B, &count, "time_commit_start", t->time_when_commit_start / ((double)ONE_SECOND), "s");
+		print_io_member(B, &count, "time_commit_end", t->time_when_commit_end / ((double)ONE_SECOND), "s");
+		print_io_member(B, &count, "time_input_mgr", (t->time_when_commit_end - t->time_when_commit_start) / ((double)ONE_SECOND), "s");
+		print_io_member(B, &count, "size_input_mgr", t->bytes_sent / ((double)MEGABYTE), "MB");
 	}
 
-	if (t->time_when_retrieval > 0) {
-		/* if time_when_retrieval, then information about execution is available */
-		jx_insert(m, jx_string("size_output_mgr"), jx_arrayv(jx_double(t->bytes_received / ((double)MEGABYTE)), jx_string("MB"), NULL));
-		jx_insert(m, jx_string("time_output_mgr"), jx_arrayv(jx_double((t->time_when_done - t->time_when_retrieval) / ((double)ONE_SECOND)), jx_string("s"), NULL));
-		jx_insert(m, jx_string("time_worker_end"), jx_arrayv(jx_double(t->time_workers_execute_last_end / ((double)ONE_SECOND)), jx_string("s"), NULL));
-		jx_insert(m, jx_string("time_worker_start"), jx_arrayv(jx_double(t->time_workers_execute_last_start / ((double)ONE_SECOND)), jx_string("s"), NULL));
+	if (s) {
+		rmsummary_print_buffer_members(B, s, count);
 	}
 
-	return m;
+	buffer_putliteral(B, "}");
 }
 
 void vine_txn_log_write_task(struct vine_manager *q, struct vine_task *t)
@@ -119,9 +136,7 @@ void vine_txn_log_write_task(struct vine_manager *q, struct vine_task *t)
 			buffer_printf(&B, " {} ");
 		}
 
-		struct jx *m = resources_with_io_report(t, t->resources_measured);
-		jx_print_buffer(m, &B);
-		jx_delete(m);
+		print_resources_with_io_report(&B, t, t->resources_measured);
 	} else {
 		struct vine_worker_info *w = t->worker;
 		if (w) {
@@ -130,9 +145,7 @@ void vine_txn_log_write_task(struct vine_manager *q, struct vine_task *t)
 			if (state == VINE_TASK_RUNNING) {
 				const char *allocation = (t->resource_request == CATEGORY_ALLOCATION_FIRST ? "FIRST_RESOURCES" : "MAX_RESOURCES");
 				buffer_printf(&B, " %s ", allocation);
-				struct jx *m = resources_with_io_report(t, t->current_resource_box);
-				jx_print_buffer(m, &B);
-				jx_delete(m);
+				print_resources_with_io_report(&B, t, t->current_resource_box);
 			} else if (state == VINE_TASK_WAITING_RETRIEVAL) {
 				/* do not add any info */
 			}

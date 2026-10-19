@@ -280,6 +280,15 @@ int rmsummary_assign_summary_field(struct rmsummary *s, char *key, struct jx *va
 	return 0;
 }
 
+/* round to the specified number of decimals, for a resource that has decimals */
+static double round_to_decimals(double value, int decimals)
+{
+	double factor = pow(10, decimals);
+	int64_t scaled = (jx_int_t)((value * factor) + 0.5);
+
+	return scaled / factor;
+}
+
 /* truncate to specified number of decimals */
 struct jx *value_to_jx_number(double value, int decimals)
 {
@@ -287,10 +296,7 @@ struct jx *value_to_jx_number(double value, int decimals)
 		return jx_integer((jx_int_t)value);
 	}
 
-	double factor = pow(10, decimals);
-	int64_t scaled = (jx_int_t)((value * factor) + 0.5);
-
-	return jx_double(scaled / factor);
+	return jx_double(round_to_decimals(value, decimals));
 }
 
 struct jx *peak_times_to_json(struct rmsummary *s)
@@ -574,16 +580,56 @@ void rmsummary_print(FILE *stream, struct rmsummary *s, int pprint, struct jx *v
 	jx_delete(jsum);
 }
 
+int rmsummary_print_buffer_members(struct buffer *B, const struct rmsummary *s, int count)
+{
+	size_t i;
+	for (i = 0; i < rmsummary_num_resources(); i++) {
+		const struct resource_info *info = &resources_info[i];
+		double value = rmsummary_get_by_offset(s, info->offset);
+
+		/* do not output undefined values */
+		if (value < 0) {
+			continue;
+		}
+
+		if (count++ > 0) {
+			buffer_putliteral(B, ",");
+		}
+		buffer_putliteral(B, "\"");
+		buffer_putstring(B, info->name);
+		buffer_putliteral(B, "\":[");
+		if (info->decimals == 0) {
+			jx_print_integer((jx_int_t)value, B);
+		} else {
+			jx_print_double(round_to_decimals(value, info->decimals), B);
+		}
+		buffer_putliteral(B, ",\"");
+		buffer_putstring(B, info->units);
+		buffer_putliteral(B, "\"]");
+	}
+
+	return count;
+}
+
 void rmsummary_print_buffer(struct buffer *B, const struct rmsummary *s, int only_resources)
 {
 	if (!s)
 		return;
 
-	char *str = rmsummary_print_string(s, only_resources);
+	/* Resources alone are printed without building a JX object, with the same output as rmsummary_to_json(). */
+	if (only_resources) {
+		buffer_putliteral(B, "{");
+		rmsummary_print_buffer_members(B, s, 0);
+		buffer_putliteral(B, "}");
+		return;
+	}
 
-	if (str) {
-		buffer_printf(B, "%s", str);
-		free(str);
+	/* Print into the caller's buffer directly instead of formatting a copy of the whole string. */
+	struct jx *jsum = rmsummary_to_json(s, only_resources);
+
+	if (jsum) {
+		jx_print_buffer(jsum, B);
+		jx_delete(jsum);
 	}
 }
 
