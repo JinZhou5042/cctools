@@ -338,19 +338,39 @@ static int check_worker_accepts_tasks(struct vine_manager *q, struct vine_worker
 
 /* Return true if some worker has room for a task now. Otherwise no ready task can be dispatched, and the manager does
  * not need to try each of them against each worker. Room needs a free function slot or a free core, unless idle GPUs
- * count. */
+ * count, so only workers whose capacity index priority is positive can have it, and the walk of the index stops at the
+ * first worker without free cores or slots. A busy run, where no worker has room, then costs O(1) per step instead of
+ * a pass over all workers. */
 int vine_schedule_any_worker_accepts_tasks(struct vine_manager *q)
 {
-	char *key;
 	struct vine_worker_info *w;
-	int iteration;
-	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
-	{
-		if (check_worker_accepts_tasks(q, w)) {
-			return 1;
+	if (q->gpus_requested) {
+		char *key;
+		int iteration;
+		HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+		{
+			if (check_worker_accepts_tasks(q, w)) {
+				return 1;
+			}
 		}
+		return 0;
 	}
-	return 0;
+
+	int accepts = 0;
+	struct skip_list_cursor *cur = skip_list_cursor_create(q->workers_by_capacity);
+	if (!cur) {
+		return 1;
+	}
+	skip_list_seek(cur, 0);
+	while (skip_list_get(cur, (void **)&w) && w->schedule_capacity > 0) {
+		if (check_worker_accepts_tasks(q, w)) {
+			accepts = 1;
+			break;
+		}
+		skip_list_next(cur);
+	}
+	skip_list_cursor_delete(cur);
+	return accepts;
 }
 
 /* Return true if the input exists but cannot be transferred to a worker that lacks it now, so only the workers that
