@@ -81,7 +81,9 @@ static int vine_transfer_put_internal(struct link *lnk, const char *full_name, c
 	char relative_name_encoded[VINE_LINE_MAX];
 	url_encode(relative_name, relative_name_encoded, sizeof(relative_name_encoded));
 
-	if (stat(full_name, &info) != 0) {
+	/* Links are followed and sent as what they point to. A link that cannot be followed, such as one whose target
+	 * does not exist, is sent as a link. */
+	if (stat(full_name, &info) != 0 && lstat(full_name, &info) != 0) {
 		goto access_failure;
 	}
 
