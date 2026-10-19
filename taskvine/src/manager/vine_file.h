@@ -69,8 +69,8 @@ struct vine_file {
 
 	/* The number of data service jobs of this file: checkpoint receives, including cancelled ones whose executors have
 	 * not returned, and writes of its vault entry to disk. The data service counts them as it indexes them by cache
-	 * name, so a vault removal of a file with no entry and no job, such as the second pruning of a released output
-	 * when its node is removed, costs no lookup by name. */
+	 * name, so a vault removal of a file with no entry and no job, such as the second pruning of an output when it is
+	 * undeclared, costs no lookup by name. */
 	int vault_jobs;
 
 };

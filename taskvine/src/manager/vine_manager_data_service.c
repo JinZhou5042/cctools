@@ -1388,9 +1388,9 @@ uint64_t vine_manager_data_service_receiving_inline(struct vine_manager *manager
 	return 0;
 }
 
-/* Declare Manager-local data served through the vault, such as graph edata (serialized callables and arguments).
- * It is a VINE_FILE because its bytes already exist at the Manager and never need to be recomputed. Task outputs,
- * such as graph idata, remain VINE_TEMP even after a checkpoint places a copy in the vault.
+/* Declare Manager-local data served through the vault, such as application inputs.
+ * It is a VINE_FILE because its bytes already exist at the Manager and never need to be recomputed. Task outputs
+ * remain VINE_TEMP even after a checkpoint places a copy in the vault.
  * The cache name is random so declaration never reads the file to compute a checksum. */
 struct vine_file *vine_manager_data_service_declare_file(struct vine_manager *manager, const char *source_path)
 {
@@ -1481,7 +1481,7 @@ void vine_manager_data_service_vault_remove(struct vine_manager_data_service *ds
 	}
 	/* Every entry of the vault table is the vault_entry of its file, and the file counts its jobs, so a file with
 	 * neither has nothing to remove and needs no lookup by name. Most removals are such: an output pruned again when
-	 * its node is removed, and a task's buffer when it is undeclared. */
+	 * it is undeclared after its release, and a task's buffer when it is undeclared. */
 	if (!file->vault_entry && !file->vault_jobs) {
 		return;
 	}

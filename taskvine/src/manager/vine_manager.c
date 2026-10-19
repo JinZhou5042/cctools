@@ -4017,9 +4017,9 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 
 		/*
 		Files in the data service vault are delivered through the data port, whatever their type.
-		A VINE_FILE in the vault is Manager-local data, such as graph edata. A VINE_TEMP in the vault is
-		a task output with a checkpoint copy, such as graph idata, so it stays recoverable after the copy
-		is removed. Like any URL source, the vault entry is limited by file-source-max-transfers.
+		A VINE_FILE in the vault is Manager-local data, such as application inputs. A VINE_TEMP in the vault is
+		a task output with a checkpoint copy, so it stays recoverable after the copy is removed. Like any URL
+		source, the vault entry is limited by file-source-max-transfers.
 		A small VINE_FILE is the exception: the manager sends it at dispatch like any other local file.
 		*/
 		int small_local_file = m->file->type == VINE_FILE && m->file->size <= VINE_DATA_INLINE_BYTES;
