@@ -445,9 +445,10 @@ Change the state of a file replica on an event.
 If the final state is DELETED, remove the replica from the table.
 */
 
-static int process_replica_on_event(struct vine_manager *q, struct vine_worker_info *w, const char *cachename, vine_file_replica_state_transition_event_t event)
+/* Apply an event to the replica of cachename that worker w holds, already looked up by the caller. Return 0 when the
+ * state did not change, 1 when it changed, and 2 when the replica reached DELETED and was deleted. */
+static int process_replica_event(struct vine_manager *q, struct vine_worker_info *w, const char *cachename, struct vine_file_replica *replica, vine_file_replica_state_transition_event_t event)
 {
-	struct vine_file_replica *replica = vine_file_replica_table_lookup(w, cachename);
 	if (!replica) {
 		return 0;
 	}
@@ -463,9 +464,15 @@ static int process_replica_on_event(struct vine_manager *q, struct vine_worker_i
 		if (removed_replica) {
 			vine_file_replica_delete(removed_replica);
 		}
+		return 2;
 	}
 
 	return 1;
+}
+
+static int process_replica_on_event(struct vine_manager *q, struct vine_worker_info *w, const char *cachename, vine_file_replica_state_transition_event_t event)
+{
+	return process_replica_event(q, w, cachename, vine_file_replica_table_lookup(w, cachename), event) != 0;
 }
 
 /*
@@ -509,18 +516,17 @@ static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_w
 		replica->mtime = mtime;
 		replica->transfer_time = transfer_time;
 
-		process_replica_on_event(q, w, cachename, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_CACHE_UPDATE);
+		int deleted = process_replica_event(q, w, cachename, replica, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_CACHE_UPDATE) == 2;
 
-		vine_current_transfers_set_success(q, id);
-		vine_current_transfers_remove(q, id);
+		/* A worker sends X for a file that no transfer record describes, such as the output of a task. */
+		if (strcmp(id, "X")) {
+			vine_current_transfers_remove_success(q, id);
+		}
 
 		vine_txn_log_write_cache_update(q, w, size, transfer_time, start_time, cachename);
 
-		/* process_replica_on_eventt may have deleted the replica,
-		 * so we check here again and return if there's nothing
-		 * more to update */
-		replica = vine_file_replica_table_lookup(w, cachename);
-		if (!replica) {
+		/* The event deletes a replica that was being deleted, and then there is nothing more to update. */
+		if (deleted) {
 			return VINE_MSG_PROCESSED;
 		}
 
