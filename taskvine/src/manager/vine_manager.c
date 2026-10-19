@@ -77,9 +77,6 @@ See the file COPYING for details.
 #include <errno.h>
 #include <fcntl.h>
 #include <float.h>
-#ifdef __GLIBC__
-#include <malloc.h>
-#endif
 #include <math.h>
 #ifdef __GLIBC__
 #include <malloc.h>
@@ -4950,6 +4947,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 		q->poll_set = link_poll_set_create();
 	}
 	if (!q->poll_set || !link_poll_set_add(q->poll_set, q->manager_link, LINK_READ, NULL) || !link_poll_set_add(q->poll_set, q->wake_link, LINK_READ, NULL)) {
+		debug(D_NOTICE, "Could not create the poll set of the manager.");
 		if (q->wake_link) {
 			link_close(q->wake_link);
 			close(wake[1]);
