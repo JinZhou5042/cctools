@@ -15,14 +15,20 @@ See the file COPYING for details.
 #define DEFAULT_SIZE 127
 #define DEFAULT_MAX_LOAD 0.75
 #define DEFAULT_MIN_LOAD 0.125
+#define REMOVED_KEEP_MIN 1024 /* removed array capacity that is always kept across compactions */
 #define DEFAULT_FUNC hash_string
 
+/* One key and its value. The key is stored inline, so an entry is one allocation and a lookup that matches reads one
+ * object. A removed entry leaves its bucket at once, so lookups walk only live entries, but it stays allocated in the
+ * table's removed array, still marked deleted and with its next pointer intact, until the table frees removed entries
+ * at a compaction, a resize, or a clear. An iterator that stands on it, or a key pointer that the caller obtained from
+ * it, therefore stays valid exactly as long as when removed entries stayed in their buckets. */
 struct entry {
-	char *key;
+	struct entry *next; /* Next entry of the bucket, or of the bucket it left when it was removed. */
 	void *value;
 	unsigned hash;
-	struct entry *next;
 	int deleted;
+	char key[];
 };
 
 struct hash_table {
@@ -33,7 +39,9 @@ struct hash_table {
 	int ibucket;
 	struct entry *ientry;
 	int iteration_index;
-	int need_compact; /* entries marked deleted since the last compaction */
+	int need_compact;	/* entries removed since the last compaction, which the removed array holds */
+	struct entry **removed; /* removed entries, freed at the next compaction, resize, or clear */
+	int removed_capacity;	/* length of the removed array */
 };
 
 struct hash_table *hash_table_create(int bucket_count, hash_func_t func)
@@ -53,6 +61,8 @@ struct hash_table *hash_table_create(int bucket_count, hash_func_t func)
 	h->ientry = 0;
 	h->iteration_index = 0;
 	h->need_compact = 0;
+	h->removed = 0;
+	h->removed_capacity = 0;
 	h->hash_func = func;
 	h->bucket_count = bucket_count;
 	h->buckets = (struct entry **)calloc(bucket_count, sizeof(struct entry *));
@@ -64,6 +74,39 @@ struct hash_table *hash_table_create(int bucket_count, hash_func_t func)
 	return h;
 }
 
+/* Keep a removed entry until the next compaction, resize, or clear. */
+static void hold_removed(struct hash_table *h, struct entry *e)
+{
+	if (h->need_compact == h->removed_capacity) {
+		h->removed_capacity = h->removed_capacity ? 2 * h->removed_capacity : 8;
+		h->removed = xxrealloc(h->removed, sizeof(*h->removed) * h->removed_capacity);
+	}
+	h->removed[h->need_compact++] = e;
+}
+
+/* Free the entries removed since the last compaction. The removed array keeps its capacity for the next removals,
+ * unless it holds more than REMOVED_KEEP_MIN entries and eight times the live entries plus buckets, so it never holds
+ * more than a constant times the most removals between two compactions, and a table that is filled and emptied again
+ * and again does not reallocate it each time. The removed entries stay in an array rather than in a list linked
+ * through them: freeing walks the array in removal order without a cache miss per entry, and a list link would move
+ * the inline key of a hash_table entry and slow its lookups. */
+static void free_removed(struct hash_table *h)
+{
+	if (h->need_compact) {
+		/* The iterator may stand on a removed entry. A pop resumes from it, so it starts again instead. */
+		h->ientry = 0;
+	}
+	for (int i = 0; i < h->need_compact; i++) {
+		free(h->removed[i]);
+	}
+	h->need_compact = 0;
+	if (h->removed_capacity > REMOVED_KEEP_MIN && h->removed_capacity > 8 * (h->size + h->bucket_count)) {
+		free(h->removed);
+		h->removed = 0;
+		h->removed_capacity = 0;
+	}
+}
+
 void hash_table_clear(struct hash_table *h, void (*delete_func)(void *))
 {
 	struct entry *e, *f;
@@ -72,10 +115,10 @@ void hash_table_clear(struct hash_table *h, void (*delete_func)(void *))
 	for (i = 0; i < h->bucket_count; i++) {
 		e = h->buckets[i];
 		while (e) {
-			if (delete_func && !e->deleted)
+			if (delete_func) {
 				delete_func(e->value);
+			}
 			f = e->next;
-			free(e->key);
 			free(e);
 			e = f;
 		}
@@ -85,14 +128,15 @@ void hash_table_clear(struct hash_table *h, void (*delete_func)(void *))
 		h->buckets[i] = 0;
 	}
 
+	free_removed(h);
 	h->size = 0;
-	h->need_compact = 0;
 	h->iteration_index++;
 }
 
 void hash_table_delete(struct hash_table *h)
 {
 	hash_table_clear(h, 0);
+	free(h->removed);
 	free(h->buckets);
 	free(h);
 }
@@ -108,10 +152,8 @@ char **hash_table_keys_array(struct hash_table *h)
 	for (i = 0; i < h->bucket_count; i++) {
 		e = h->buckets[i];
 		while (e) {
-			if (!e->deleted) {
-				keys[ikey] = strdup(e->key);
-				ikey++;
-			}
+			keys[ikey] = strdup(e->key);
+			ikey++;
 			f = e->next;
 			e = f;
 		}
@@ -144,10 +186,7 @@ void *hash_table_lookup(struct hash_table *h, const char *key)
 
 	while (e) {
 		if (hash == e->hash && !strcmp(key, e->key)) {
-			if (!e->deleted) {
-				return e->value;
-			}
-			return 0;
+			return e->value;
 		}
 		e = e->next;
 	}
@@ -165,148 +204,75 @@ double hash_table_load(struct hash_table *h)
 	return ((double)h->size) / h->bucket_count;
 }
 
-static int insert_to_buckets_aux(struct entry **buckets, int bucket_count, struct entry *new_entry)
+/* Move every entry to a new array of buckets, keeping the order in which the old buckets list them, and free the
+ * removed entries. */
+static int hash_table_resize(struct hash_table *h, int new_count)
 {
-	unsigned index;
-	struct entry *e;
-
-	index = new_entry->hash % bucket_count;
-	e = buckets[index];
-
-	while (e) {
-		/* check that this key does not already exist in the table */
-		if (new_entry->hash == e->hash && !strcmp(new_entry->key, e->key)) {
-			return 0;
-		}
-		e = e->next;
+	struct entry **new_buckets = (struct entry **)calloc(new_count, sizeof(struct entry *));
+	if (!new_buckets) {
+		return 0;
 	}
 
-	new_entry->next = buckets[index];
-	buckets[index] = new_entry;
+	struct entry *e, *f;
+	for (int i = 0; i < h->bucket_count; i++) {
+		e = h->buckets[i];
+		while (e) {
+			f = e->next;
+			unsigned index = e->hash % new_count;
+			e->next = new_buckets[index];
+			new_buckets[index] = e;
+			e = f;
+		}
+	}
+
+	/* Make the old point to the new */
+	free(h->buckets);
+	h->buckets = new_buckets;
+	h->bucket_count = new_count;
+	free_removed(h);
+
+	h->iteration_index++;
 
 	return 1;
 }
 
 static int hash_table_double_buckets(struct hash_table *h)
 {
-	int new_count = (2 * (h->bucket_count + 1)) - 1;
-	struct entry **new_buckets = (struct entry **)calloc(new_count, sizeof(struct entry *));
-	if (!new_buckets) {
-		return 0;
-	}
-
-	struct entry *e, *f;
-	for (int i = 0; i < h->bucket_count; i++) {
-		e = h->buckets[i];
-		while (e) {
-			f = e->next;
-			if (!e->deleted) {
-				e->next = NULL;
-				insert_to_buckets_aux(new_buckets, new_count, e);
-			} else {
-				free(e->key);
-				free(e);
-			}
-			e = f;
-		}
-	}
-
-	/* Make the old point to the new */
-	free(h->buckets);
-	h->buckets = new_buckets;
-	h->bucket_count = new_count;
-	h->need_compact = 0;
-
-	h->iteration_index++;
-
-	return 1;
+	return hash_table_resize(h, (2 * (h->bucket_count + 1)) - 1);
 }
 
+/* Halve the buckets of a table whose load fell below DEFAULT_MIN_LOAD, as (n+1)/2-1 undoes the doubling to 2n+1.
+ * Return whether the buckets were resized, which also frees the removed entries. */
 static int hash_table_reduce_buckets(struct hash_table *h)
 {
-	int new_count = ((h->bucket_count + 1) / 2) - 1;
-
-	/* DEFAULT_SIZE is the minimum size */
-	if (new_count < DEFAULT_SIZE) {
-		return 1;
-	}
-
-	/* Table cannot be reduced above DEFAULT_MAX_LOAD */
-	if (((float)h->size / new_count) > DEFAULT_MAX_LOAD) {
-		return 1;
-	}
-
-	struct entry **new_buckets = (struct entry **)calloc(new_count, sizeof(struct entry *));
-	if (!new_buckets) {
+	if (((float)h->size / h->bucket_count) >= DEFAULT_MIN_LOAD) {
 		return 0;
 	}
 
-	struct entry *e, *f;
-	for (int i = 0; i < h->bucket_count; i++) {
-		e = h->buckets[i];
-		while (e) {
-			f = e->next;
-			if (!e->deleted) {
-				e->next = NULL;
-				insert_to_buckets_aux(new_buckets, new_count, e);
-			} else {
-				free(e->key);
-				free(e);
-			}
-			e = f;
-		}
+	int new_count = ((h->bucket_count + 1) / 2) - 1;
+
+	/* DEFAULT_SIZE is the minimum size, and the table cannot be reduced above DEFAULT_MAX_LOAD */
+	if (new_count < DEFAULT_SIZE || ((float)h->size / new_count) > DEFAULT_MAX_LOAD) {
+		return 0;
 	}
 
-	/* Make the old point to the new */
-	free(h->buckets);
-	h->buckets = new_buckets;
-	h->bucket_count = new_count;
-	h->need_compact = 0;
-
-	h->iteration_index++;
-
-	return 1;
+	return hash_table_resize(h, new_count);
 }
 
-/* Compact the table by removing deleted entries. This does not change the size of the table, or the number of buckets. */
+/* Free the entries removed since the last compaction and shrink the buckets when the load is low. The cost is O(removed
+ * entries), plus O(buckets) for a resize, which only follows removals of most entries. A compaction that frees entries
+ * ends any iteration in progress, as an insert does, so an iteration continued afterwards aborts instead of reading a
+ * freed entry. */
 void hash_table_compact(struct hash_table *h)
 {
-	struct entry *e, *f;
-	int i;
-
 	if (!h->need_compact) {
 		return;
 	}
 
-	for (i = 0; i < h->bucket_count; i++) {
-		e = h->buckets[i];
-
-		/* find the head of the bucket and remove deleted entries */
-		while (e && e->deleted) {
-			f = e->next;
-			free(e->key);
-			free(e);
-			e = f;
-		}
-		h->buckets[i] = e;
-
-		/* remove deleted entries from the rest of the bucket */
-		while (e) {
-			f = e->next;
-			while (f && f->deleted) {
-				e->next = f->next;
-				free(f->key);
-				free(f);
-				f = e->next;
-			}
-			e = f;
-		}
+	if (!hash_table_reduce_buckets(h)) {
+		free_removed(h);
 	}
-
-	h->need_compact = 0;
-	if (((float)h->size / h->bucket_count) < DEFAULT_MIN_LOAD) {
-		hash_table_reduce_buckets(h);
-	}
+	h->iteration_index++;
 }
 
 int hash_table_insert(struct hash_table *h, const char *key, const void *value)
@@ -323,75 +289,58 @@ int hash_table_insert(struct hash_table *h, const char *key, const void *value)
 
 	while (e) {
 		if (hash == e->hash && !strcmp(key, e->key)) {
-			if (!e->deleted) {
-				if (e->value != value) {
-					notice(D_DEBUG, "key %s already exists in hash table with different value, ignoring new value.", key);
-				}
-				return 0;
+			if (e->value != value) {
+				notice(D_DEBUG, "key %s already exists in hash table with different value, ignoring new value.", key);
 			}
-			e->value = (void *)value;
-			e->deleted = 0;
-			h->size++;
-			h->iteration_index++;
-			return 1;
+			return 0;
 		}
 		e = e->next;
 	}
 
-	/* A table that is never iterated is never compacted, so compact once deleted entries outnumber the rest. A new
+	/* A table that is never iterated is never compacted, so compact once removed entries outnumber the rest. A new
 	 * entry ends any iteration in progress, so no iterator is left on a freed entry. */
 	if (h->need_compact > h->size + h->bucket_count) {
 		hash_table_compact(h);
+		index = hash % h->bucket_count;
 	}
 
-	e = (struct entry *)xxmalloc(sizeof(struct entry));
+	size_t length = strlen(key) + 1;
+	e = (struct entry *)xxmalloc(sizeof(struct entry) + length);
 
-	e->key = xxstrdup(key);
+	memcpy(e->key, key, length);
 	e->value = (void *)value;
 	e->hash = hash;
 	e->deleted = 0;
+	e->next = h->buckets[index];
+	h->buckets[index] = e;
 
-	int inserted = insert_to_buckets_aux(h->buckets, h->bucket_count, e);
-	if (inserted) {
-		h->size++;
-		h->iteration_index++;
-	} else {
-		if (value != NULL) {
-			/* signal possible memory leak. Only if hash table is being used as set we do not print the message. */
-			notice(D_ERROR, "Failed to insert key %s into hash table.", key);
-		}
-		free(e->key);
-		free(e);
-	}
+	h->size++;
+	h->iteration_index++;
 
-	return inserted;
+	return 1;
 }
 
-/* keys are not really removed, just marked as deleted. A call to hash_table_compact will remove them. */
+/* A removed entry leaves its bucket at once and is freed later, see struct entry. */
 void *hash_table_remove(struct hash_table *h, const char *key)
 {
-	struct entry *e;
-	void *value;
+	struct entry *e, **link;
 	unsigned hash, index;
 
 	hash = h->hash_func(key);
 	index = hash % h->bucket_count;
-	e = h->buckets[index];
+	link = &h->buckets[index];
 
-	while (e) {
+	while ((e = *link)) {
 		if (hash == e->hash && !strcmp(key, e->key)) {
-			if (e->deleted) {
-				return 0;
-			}
+			*link = e->next;
 			e->deleted = 1;
-			h->need_compact++;
-			value = e->value;
+			hold_removed(h, e);
 
 			h->size--;
-			return value;
+			return e->value;
 		}
 
-		e = e->next;
+		link = &e->next;
 	}
 
 	return 0;
