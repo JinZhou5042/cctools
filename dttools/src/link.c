@@ -644,9 +644,21 @@ int link_ssl_wrap_connect(struct link *link, const char *sni_hostname)
 	debug(D_SSL, "Setting SNI to: %s", name);
 	SSL_set_tlsext_host_name(link->ssl, name);
 
+	/*
+	The link blocks during the handshake, so OpenSSL asks to retry only when a
+	signal interrupted a read or write. The handshake has no deadline, and a
+	peer that never answers would hold the process even after a termination
+	signal, so an interrupted handshake fails. A handler installed with
+	SA_RESTART, as signal() does, never interrupts it.
+	*/
 	int result;
 	while ((result = SSL_connect(link->ssl)) <= 0) {
-		switch (SSL_get_error(link->ssl, result)) {
+		int error = SSL_get_error(link->ssl, result);
+		if ((error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE) && errno == EINTR) {
+			debug(D_SSL, "ssl handshake with %s:%d was interrupted by a signal", link->raddr, link->rport);
+			return 0;
+		}
+		switch (error) {
 		case SSL_ERROR_WANT_READ:
 			link_sleep(link, LINK_FOREVER, 1, 0);
 			break;

@@ -239,6 +239,24 @@ static void ignore_signal( int sig )
 {
 }
 
+/*
+Install handle_abort without SA_RESTART, so that a termination signal
+interrupts a blocking system call instead of resuming it. The ssl handshake
+of a direct query blocks in read() without a deadline, and a manager that
+does not serve its connections would otherwise keep the factory from ever
+seeing the signal.
+*/
+
+static void install_abort_handler( int sig )
+{
+	struct sigaction action;
+	memset(&action, 0, sizeof(action));
+	action.sa_handler = handle_abort;
+	sigemptyset(&action.sa_mask);
+	action.sa_flags = 0;
+	sigaction(sig, &action, 0);
+}
+
 int manager_workers_capacity(struct jx *j) {
 	int capacity_tasks   = jx_lookup_integer(j, "capacity_tasks");
 	int capacity_cores   = jx_lookup_integer(j, "capacity_cores");
@@ -1150,6 +1168,12 @@ static void mainloop( struct batch_queue *queue )
 			managers_list = do_direct_query(manager_host,manager_port);
 		}
 
+		/* A signal that interrupted the query ends the factory before it submits more workers. */
+		if(abort_flag) {
+			delete_projects_list(managers_list);
+			break;
+		}
+
 		if(managers_list && list_size(managers_list) > 0)
 		{
 			factory_timeout_start = time(0);
@@ -1864,9 +1888,9 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	signal(SIGINT, handle_abort);
-	signal(SIGQUIT, handle_abort);
-	signal(SIGTERM, handle_abort);
+	install_abort_handler(SIGINT);
+	install_abort_handler(SIGQUIT);
+	install_abort_handler(SIGTERM);
 	signal(SIGHUP, ignore_signal);
 
 	queue = batch_queue_create(batch_queue_type,0,0);
