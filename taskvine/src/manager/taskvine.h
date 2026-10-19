@@ -1101,6 +1101,15 @@ Rather than assuming a specific port, the user should simply call this function 
 */
 int vine_port(struct vine_manager *m);
 
+/** Get the port on which the manager serves data to workers.
+Workers connect to this port, in addition to @ref vine_port, to fetch files the manager keeps for them.
+It is a free port of the range set by TCP_LOW_PORT and TCP_HIGH_PORT when the manager is created,
+so a range of two ports places both listening ports of the manager behind a firewall.
+@param m A manager object
+@return The data port of the manager.
+*/
+int vine_data_port(struct vine_manager *m);
+
 /** Change the project name for a given manager.
 @param m A manager object
 @param name The new project name.

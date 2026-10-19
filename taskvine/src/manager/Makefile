@@ -3,6 +3,7 @@ include ../../../rules.mk
 
 SOURCES = \
 	vine_manager.c \
+	vine_manager_data_service.c \
 	vine_manager_get.c \
 	vine_manager_put.c \
 	vine_manager_factory.c \
@@ -42,6 +43,9 @@ TARGETS = $(LIBRARIES)
 all: $(TARGETS)
 
 libtaskvine.a: $(OBJECTS)
+
+# Rebuild Manager objects when their shared internal structure changes.
+vine_manager.o vine_manager_data_service.o: vine_manager_data_service.h
 
 install: all
 	mkdir -p $(CCTOOLS_INSTALL_DIR)/lib

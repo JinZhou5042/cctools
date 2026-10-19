@@ -5,6 +5,7 @@ See the file COPYING for details.
 */
 
 #include "vine_manager.h"
+#include "vine_manager_data_service.h"
 #include "vine_blocklist.h"
 #include "vine_counters.h"
 #include "vine_current_transfers.h"
@@ -465,6 +466,13 @@ static int flush_worker_queue(struct vine_manager *q, struct vine_worker_info *w
 	return result;
 }
 
+/* Tell a worker the manager's data port. */
+
+static int send_manager_transfer_port(struct vine_manager *q, struct vine_worker_info *w)
+{
+	return vine_manager_send(q, w, "manager_transfer_port %d\n", vine_manager_data_service_port(q->ds));
+}
+
 /* Handle a name message coming back from the worker, requesting the manager's project name. */
 
 static vine_msg_code_t handle_name(struct vine_manager *q, struct vine_worker_info *w, char *line)
@@ -548,6 +556,10 @@ static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_in
 		handle_library_update(q, w, value);
 	} else if (string_prefix_is(field, "transfer_port_bind_failed")) {
 		notice(D_VINE, "Worker %s (%s) could not bind transfer port; peer transfers disabled.", w->hostname, w->addrport);
+	} else if (string_prefix_is(field, "connect-back")) {
+		/* The Manager cannot reach this Worker's transfer port, so the Worker opens the connections that bring its
+		 * files to the data port. */
+		w->transfer_connect_back = atoi(value) != 0;
 	}
 
 	// Note we always mark info messages as processed, as they are optional.
@@ -943,6 +955,11 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 
 	debug(D_VINE, "rx from %s (%s): %s", w->hostname, w->addrport, line);
 
+	/* The data of an inline reply follows its header, also from a worker that is being removed. */
+	if (string_prefix_is(line, "inline-")) {
+		return vine_manager_data_service_inline_reply(q, w, line) ? VINE_MSG_PROCESSED : VINE_MSG_FAILURE;
+	}
+
 	if (!w || w->pending_removal) {
 		// message from zombie beyond the grave muahaha, marked it as processed and do nothing else.
 		// effectively we are soaking the link for the already in-flight messages.
@@ -1022,7 +1039,12 @@ static int flush_worker_queue_reading(struct vine_manager *q, struct vine_worker
 		if (!(info.revents & LINK_READ)) {
 			continue;
 		}
-		result = vine_manager_recv_no_retry(q, w, line, length) == VINE_MSG_PROCESSED;
+		/* The data of an inline reply is read as it arrives, as handle_worker() reads it. */
+		if (vine_manager_data_service_inline_pending(q, w)) {
+			result = vine_manager_data_service_inline_read(q, w, LINK_NOWAIT) >= 0;
+		} else {
+			result = vine_manager_recv_no_retry(q, w, line, length) == VINE_MSG_PROCESSED;
+		}
 		if (!result || w->pending_removal) {
 			result = 0;
 			break;
@@ -1053,6 +1075,10 @@ vine_msg_code_t vine_manager_recv(struct vine_manager *q, struct vine_worker_inf
 	}
 
 	do {
+		/* The reply follows the data of an inline reply that is still arriving. */
+		if (vine_manager_data_service_inline_read(q, w, time(0) + q->long_timeout) < 0) {
+			return VINE_MSG_FAILURE;
+		}
 		result = vine_manager_recv_no_retry(q, w, line, length);
 	} while (result == VINE_MSG_PROCESSED);
 
@@ -1402,6 +1428,8 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 		shutdown(link_fd(w->link), SHUT_WR);
 		link_queue_send(w->queue, 0);
 	}
+
+	vine_manager_data_service_remove_worker(q->ds, w);
 
 	/* Workers that receive files from this one would wait for the peer transfer timeout, so they abandon them now. */
 	vine_current_transfers_abandon_source(q, w);
@@ -1969,6 +1997,9 @@ static vine_msg_code_t handle_taskvine(struct vine_manager *q, struct vine_worke
 		 * also, don't return VINE_MSG_PROCESSED, as it would trigger do-while loop in vine_manager_recv().
 		 * Must keep w pointer valid until message processing completes, then cleanup safely. */
 		w->draining = 1;
+		return VINE_MSG_FAILURE;
+	}
+	if (!send_manager_transfer_port(q, w)) {
 		return VINE_MSG_FAILURE;
 	}
 
@@ -2935,6 +2966,17 @@ static vine_result_code_t handle_worker(struct vine_manager *q, struct vine_work
 {
 	char line[VINE_LINE_MAX];
 
+	/* Read what arrived of an inline reply's data without waiting for the rest, so a partial reply never stalls the
+	 * manager. The next message is read only after the data. */
+	if (vine_manager_data_service_inline_pending(q, w)) {
+		if (vine_manager_data_service_inline_read(q, w, LINK_NOWAIT) < 0) {
+			q->stats->workers_lost++;
+			handle_worker_failure(q, w);
+			return VINE_WORKER_FAILURE;
+		}
+		return VINE_SUCCESS;
+	}
+
 	vine_msg_code_t mcode;
 	mcode = vine_manager_recv_no_retry(q, w, line, sizeof(line));
 
@@ -3698,6 +3740,18 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 			m->substitute = NULL;
 		}
 
+		/* A small checkpoint in the vault goes with the task over the control connection, which costs less than a
+		 * transfer of its own from a peer or the data port and needs no transfer capacity. */
+		if (vine_manager_data_service_vault_small_file(q, m->file)) {
+			continue;
+		}
+
+		/* A small file that comes inline into the vault goes with the task once it is published, which costs less
+		 * than a transfer from a peer, and the publication wakes the task. */
+		if (vine_manager_data_service_receiving_inline(q, m->file)) {
+			return 0;
+		}
+
 		/* Provide a substitute file object to describe the peer. */
 		if (!(m->file->flags & VINE_PEER_NOSHARE) && (m->file->cache_level > VINE_CACHE_LEVEL_TASK)) {
 			if ((peer = vine_file_replica_table_find_worker(q, m->file->cached_name))) {
@@ -3710,6 +3764,26 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 
 		/* If that resulted in a match, move on to the next file. */
 		if (found_match) {
+			continue;
+		}
+
+		/*
+		Files in the data service vault are delivered through the data port, whatever their type.
+		A VINE_FILE in the vault is Manager-local data, such as application inputs. A VINE_TEMP in the vault is
+		a task output with a checkpoint copy, so it stays recoverable after the copy is removed. Like any URL
+		source, the vault entry is limited by file-source-max-transfers.
+		A small VINE_FILE is the exception: the manager sends it at dispatch like any other local file.
+		*/
+		int small_local_file = m->file->type == VINE_FILE && m->file->size <= VINE_DATA_INLINE_BYTES;
+		if (!small_local_file && vine_manager_data_service_vault_contains(q, m->file)) {
+			char *source = string_format("manager://%s", m->file->cached_name);
+			if (vine_current_transfers_url_in_use(q, source) >= q->file_source_max_transfers) {
+				free(source);
+				return 0;
+			}
+			m->substitute = vine_file_substitute_url(m->file, source, NULL);
+			free(source);
+			debug(D_VINE, "vault hit: task %d file %s", t->task_id, m->file->cached_name);
 			continue;
 		}
 
@@ -4419,17 +4493,21 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 		link_address_local(q->manager_link, address, &q->port);
 	}
 
-	q->poll_set = link_poll_set_create();
+	q->ds = vine_manager_data_service_create(runtime_dir);
+	if (q->ds) {
+		q->poll_set = link_poll_set_create();
+	}
 	if (!q->poll_set || !link_poll_set_add(q->poll_set, q->manager_link, LINK_READ, NULL)) {
 		debug(D_NOTICE, "Could not create the poll set of the manager.");
 		link_poll_set_delete(q->poll_set);
+		vine_manager_data_service_delete(q->ds);
 		link_close(q->manager_link);
 		free(runtime_dir);
 		free(q);
 		return 0;
 	}
 
-	debug(D_VINE, "manager start");
+	debug(D_VINE, "manager start on port %d with data port %d", q->port, vine_manager_data_service_port(q->ds));
 
 	q->runtime_directory = runtime_dir;
 
@@ -4718,6 +4796,11 @@ int vine_port(struct vine_manager *q)
 	}
 }
 
+int vine_data_port(struct vine_manager *q)
+{
+	return q ? vine_manager_data_service_port(q->ds) : 0;
+}
+
 void vine_set_scheduler(struct vine_manager *q, vine_schedule_t algorithm)
 {
 	q->worker_selection_algorithm = algorithm;
@@ -4820,6 +4903,8 @@ void vine_delete(struct vine_manager *q)
 	/* now that the manager is shutting down, worker removals are not an invalid event, so we
 	 * disable the immediate recovery to avoid submitting recovery tasks for lost files */
 	q->immediate_recovery = 0;
+	vine_manager_data_service_delete(q->ds);
+	q->ds = NULL;
 
 	vine_fair_write_workflow_info(q);
 
@@ -5592,6 +5677,8 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 {
 	BEGIN_ACCUM_TIME(q, time_polling);
 
+	vine_manager_data_service_poll(q->ds, q->poll_set);
+
 	// We poll in at most small time segments (of a half a second). This lets
 	// promptly dispatch tasks, while avoiding wasting cpu cycles when the
 	// state of the system cannot be advanced.
@@ -5625,8 +5712,12 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 	int workers_failed = send_to_workers(q);
 	send_to_departing_links(q);
 
+	vine_manager_data_service_handle(q);
+
 	/* Consider the ready worker connections in turn. A worker marked for removal while handling another one leaves
-	 * the poll set, and so is not reached. A worker that is not reached keeps its place for the next step. */
+	 * the poll set, and so is not reached. The other links left are those of the data service, which handles them in
+	 * every step, so their events only end the wait. A worker that is not reached keeps its place for the next
+	 * step. */
 	int handled = 0;
 	struct link *link;
 	struct vine_worker_info *w;
@@ -5822,6 +5913,8 @@ static void compact_tables(struct vine_manager *q)
 		freed += hash_table_compact(w->current_files);
 		freed += itable_compact(w->current_tasks);
 	}
+
+	freed += vine_manager_data_service_compact(q->ds);
 
 	q->compacted_since_trim += freed;
 	int64_t held = itable_size(q->tasks) + hash_table_size(q->file_table);
@@ -6480,7 +6573,7 @@ static const char *const vine_tune_names[] = {
 	"resource-submit-multiplier", "asynchrony-multiplier", "short-timeout", "temp-replica-count",
 	"transfer-outlier-factor", "transfer-replica-per-cycle", "transfer-temps-recovery",
 	"transient-error-interval", "wait-for-workers", "max-workers", "worker-retrievals",
-	"file-source-max-transfers", "worker-source-max-transfers",
+	"file-source-max-transfers", "worker-source-max-transfers", "vault-disk-limit", "vault-memory-limit",
 	"load-from-shared-filesystem", "perf-log-interval", "update-interval", "task-groups",
 	"resource-management-interval", "max-task-stdout-storage", "max-new-workers", "large-task-check-interval",
 	"option-blocklist-slow-workers-timeout", "watch-library-logfiles", "sandbox-grow-factor",
@@ -6602,6 +6695,14 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "worker-source-max-transfers")) {
 		q->worker_source_max_transfers = MAX(1, (int)value);
+
+	} else if (!strcmp(name, "vault-disk-limit")) {
+		/* Gigabytes of checkpoint data the data service vault may hold. Zero means unlimited. */
+		vine_manager_data_service_vault_set_limit(q->ds, (int64_t)(MAX(0, value) * 1e9));
+
+	} else if (!strcmp(name, "vault-memory-limit")) {
+		/* Gigabytes of small checkpoints the vault holds in memory before it writes them to disk. Zero writes all. */
+		vine_manager_data_service_vault_set_memory_limit(q->ds, (int64_t)(MAX(0, value) * 1e9));
 
 	} else if (!strcmp(name, "load-from-shared-filesystem")) {
 		q->load_from_shared_fs_enabled = !!((int)value);
@@ -7129,6 +7230,11 @@ int vine_prune_file(struct vine_manager *m, struct vine_file *f)
 
 	int pruned_replica_count = 0;
 
+	/* A vault entry of a temporary file is one of its replicas. A VINE_FILE vault entry is Manager-local data. */
+	if (f->type == VINE_TEMP) {
+		vine_manager_data_service_vault_remove(m->ds, f);
+	}
+
 	/* delete all of the replicas present at remote workers. */
 	struct set *source_workers = hash_table_lookup(m->file_worker_table, f->cached_name);
 	if (source_workers && set_size(source_workers) > 0) {
@@ -7182,6 +7288,11 @@ void vine_undeclare_file(struct vine_manager *m, struct vine_file *f)
 	*/
 	if (!m) {
 		return;
+	}
+
+	/* vine_prune_file() removes the vault entry of a temporary file itself. */
+	if (f->type != VINE_TEMP) {
+		vine_manager_data_service_vault_remove(m->ds, f);
 	}
 
 	/* First prune the file on all workers */
