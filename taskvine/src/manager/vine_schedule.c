@@ -924,6 +924,46 @@ static struct vine_worker_info *find_worker_by_files(struct vine_manager *q, str
 	return best_worker;
 }
 
+/* The number of holders from which an input with a transfer source is not ranked holder by holder when it is the only
+ * input with holders (find_worker_by_wide_input()). Below it, ranking the holders costs little. */
+#define VINE_SCHEDULE_WIDE_HOLDERS 32
+
+/* Return the first worker that passes check_worker_against_task() in the order of VINE_SCHEDULE_FILES for a task whose
+ * only input with holders is wide, which holders hold. Every holder caches the same bytes of the task, wide->size > 0,
+ * so they rank above every other worker and among themselves by free capacity, the order of the capacity index: the
+ * index is walked for holders first and then for the others, the order find_worker_by_files() would produce, at
+ * O(log W) per worker tried instead of O(holders). An input held by every worker, as a broadcast or fanout one is,
+ * made each dispatch O(workers) (74% of the manager thread in a fanout of 100,000 tasks over 400 workers). */
+static struct vine_worker_info *find_worker_by_wide_input(struct vine_manager *q, struct vine_task *t, struct vine_file *wide, struct set *holders, uint64_t stamp, int64_t input_size)
+{
+	struct skip_list_cursor *cur = skip_list_cursor_create(q->workers_by_capacity);
+	if (!cur) {
+		return NULL;
+	}
+	struct vine_worker_info *best_worker = NULL;
+	for (int holding = 1; holding >= 0 && !best_worker; holding--) {
+		struct vine_worker_info *w;
+		skip_list_seek(cur, 0);
+		while (skip_list_get(cur, (void **)&w)) {
+			skip_list_next(cur);
+			if (!set_lookup(holders, w) != !holding) {
+				continue;
+			}
+			if (holding) {
+				w->schedule_stamp = stamp;
+				w->schedule_cached_bytes = wide->size;
+				w->schedule_holds_unsourced = 0;
+			}
+			if (worker_is_candidate(q, w, stamp, NULL, input_size) && check_worker_against_task(q, w, t)) {
+				best_worker = w;
+				break;
+			}
+		}
+	}
+	skip_list_cursor_delete(cur);
+	return best_worker;
+}
+
 /* Select the best worker for this task, based on the current scheduling mode. */
 
 struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, struct vine_task *t)
@@ -987,6 +1027,10 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 	uint64_t stamp = ++q->schedule_stamp;
 	int64_t input_size = 0;
 	struct vine_file *unsourced = NULL;
+	/* The first input with a transfer source and at least VINE_SCHEDULE_WIDE_HOLDERS holders, whose holders are
+	 * visited only if another input has holders or no source (find_worker_by_wide_input()). */
+	struct vine_file *wide = NULL;
+	struct set *wide_holders = NULL;
 	struct vine_mount *m;
 	LIST_ITERATE(t->input_mounts, m)
 	{
@@ -1006,6 +1050,11 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 		}
 		int held_with_unsourced = 0;
 		struct set *input_holders = hash_table_lookup(q->file_worker_table, m->file->cached_name);
+		if (a == VINE_SCHEDULE_FILES && !wide && !first_unsourced && !other_unsourced && m->file->size > 0 && input_holders && set_size(input_holders) >= VINE_SCHEDULE_WIDE_HOLDERS) {
+			wide = m->file;
+			wide_holders = input_holders;
+			continue;
+		}
 		if (input_holders) {
 			struct vine_worker_info *holder;
 			int holder_iteration;
@@ -1034,7 +1083,24 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 
 	struct vine_worker_info *best_worker = NULL;
 
-	if (a == VINE_SCHEDULE_FILES) {
+	if (wide && list_size(holders) == 0 && !unsourced) {
+		best_worker = find_worker_by_wide_input(q, t, wide, wide_holders, stamp, input_size);
+	} else if (a == VINE_SCHEDULE_FILES) {
+		if (wide) {
+			/* Another input has holders or no source, so the wide input's holders are ranked with theirs. */
+			struct vine_worker_info *holder;
+			int holder_iteration;
+			SET_ITERATE(wide_holders, holder_iteration, holder)
+			{
+				if (holder->schedule_stamp != stamp) {
+					holder->schedule_stamp = stamp;
+					holder->schedule_cached_bytes = 0;
+					holder->schedule_holds_unsourced = 0;
+					list_push_tail(holders, holder);
+				}
+				holder->schedule_cached_bytes += wide->size;
+			}
+		}
 		best_worker = find_worker_by_files(q, t, holders, stamp, unsourced, input_size);
 	} else {
 		/* Other algorithms rank every worker by the strategy-specific criterion, then run @check_worker_against_task

@@ -3761,7 +3761,7 @@ available, so the full check decides for it.
 
 int vine_manager_transfer_source_available(struct vine_manager *q, struct vine_file *f)
 {
-	if (!(f->flags & VINE_PEER_NOSHARE) && (f->cache_level > VINE_CACHE_LEVEL_TASK) && vine_file_replica_table_find_worker(q, f->cached_name)) {
+	if (!(f->flags & VINE_PEER_NOSHARE) && (f->cache_level > VINE_CACHE_LEVEL_TASK) && vine_file_replica_table_has_source(q, f->cached_name)) {
 		return 1;
 	}
 
