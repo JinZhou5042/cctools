@@ -45,6 +45,7 @@ struct vine_file {
 	int original_producer_task_id;   // For temp files, the task ID of the original task that produces this file.
 	struct vine_worker_info *source_worker; // if this is a substitute file, attach the worker serving it. 
 	int change_message_shown; // True if error message already shown.
+	int manager_sends;	  // Copies of this file that the manager is sending itself, counted only for a file whose sends it limits (see vine_manager_limits_sends()).
 	int refcount;       // Number of references from a task object, delete when zero.
 };
 
