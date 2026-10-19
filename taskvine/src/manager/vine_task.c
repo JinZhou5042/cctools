@@ -5,7 +5,6 @@ See the file COPYING for details.
 */
 
 #include "vine_task.h"
-#include "vine_task_recipe.h"
 #include "vine_counters.h"
 #include "vine_file.h"
 #include "vine_manager.h"
@@ -504,8 +503,6 @@ void vine_task_add_feature(struct vine_task *t, const char *name)
 	if (!name) {
 		return;
 	}
-
-	vine_task_before_change(t);
 
 	if (!t->feature_list) {
 		t->feature_list = list_create();
