@@ -6,6 +6,7 @@ See the file COPYING for details.
 
 #include "vine_manager_put.h"
 #include "vine_current_transfers.h"
+#include "vine_manager_data_service.h"
 #include "vine_file.h"
 #include "vine_file_replica.h"
 #include "vine_file_replica_table.h"
@@ -309,6 +310,34 @@ vine_result_code_t vine_manager_put_buffer(struct vine_manager *q, struct vine_w
 }
 
 /*
+Send a small checkpoint of a temporary file from the vault, as vine_manager_put_buffer() sends literal data. The
+worker's queue holds the vault's data by reference, in memory or as its vault path read when it reaches the head of
+the queue, instead of a copy per reader: a file that many tasks read, or many files that one task reads, then cost the
+manager no memory while their sends wait. The reference keeps the data valid when pruning removes the vault entry before
+the queue reaches it.
+*/
+
+static vine_result_code_t vine_manager_put_vault_file(struct vine_manager *q, struct vine_worker_info *w, struct vine_file *f, int64_t *total_bytes)
+{
+	int64_t length = 0;
+	int mode = 0;
+	struct link_queue_shared *data = vine_manager_data_service_vault_shared(q, f, &length, &mode);
+	if (!data) {
+		debug(D_NOTICE, "Cannot send vault entry %s", f->cached_name);
+		return VINE_APP_FAILURE;
+	}
+
+	vine_manager_send(q, w, "put %s %d %lld\n", f->cached_name, f->cache_level, (long long)length);
+	vine_manager_send(q, w, "file %s %lld 0%o 0\n", f->cached_name, (long long)length, mode);
+	if (vine_manager_send_shared(q, w, data) < 0) {
+		*total_bytes = 0;
+		return VINE_WORKER_FAILURE;
+	}
+	*total_bytes = length;
+	return VINE_SUCCESS;
+}
+
+/*
 Send a single input file of any type to the given worker, and record the performance.
 If the file has a chained dependency, send that first.
 */
@@ -344,8 +373,14 @@ static vine_result_code_t vine_manager_put_input_file(struct vine_manager *q, st
 		break;
 
 	case VINE_TEMP:
-		debug(D_VINE, "%s (%s) will use temp file %s", w->hostname, w->addrport, f->source);
-		// Do nothing.  Temporary files are created and used in place.
+		/* A temporary file is created and used in place, or comes from a peer as a URL substitute, except for a
+		 * small checkpoint in the vault, which goes with the task. */
+		if (vine_manager_data_service_vault_small_file(q, f)) {
+			debug(D_VINE, "%s (%s) needs vault file %s as %s", w->hostname, w->addrport, f->cached_name, m->remote_name);
+			result = vine_manager_put_vault_file(q, w, f, &total_bytes);
+		} else {
+			debug(D_VINE, "%s (%s) will use temp file %s", w->hostname, w->addrport, f->source);
+		}
 		break;
 	}
 
@@ -362,7 +397,7 @@ static vine_result_code_t vine_manager_put_input_file(struct vine_manager *q, st
 		q->stats->bytes_sent += total_bytes;
 
 		// Write to the transaction log.
-		if (f->type == VINE_FILE || f->type == VINE_BUFFER) {
+		if (f->type == VINE_FILE || f->type == VINE_BUFFER || (f->type == VINE_TEMP && total_bytes > 0)) {
 			vine_txn_log_write_transfer(q, w, t, m, f, total_bytes, elapsed_time, open_time, 1);
 		}
 

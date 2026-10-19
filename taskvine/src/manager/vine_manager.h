@@ -89,8 +89,9 @@ struct vine_manager {
 	char *uuid;          /* Unique identifier of manager when reported to catalog. */
 	struct hash_table *properties;   /* Set of additional properties to report to catalog server. */
 
+	struct vine_manager_data_service *ds; /* Own the data listener and bidirectional transfer executors. */
 	struct link *manager_link;       /* Listening TCP connection for accepting new workers. */
-	struct link_poll_set *poll_set;  /* Links that a step waits on: the manager link, every worker in worker_table (with its worker as data), and departing links. */
+	struct link_poll_set *poll_set;  /* Links that a step waits on: the manager link, the data service, the wake pipe, every worker in worker_table (with its worker as data), and departing links. */
 	struct list *sending_workers;    /* Workers whose output queue held data, visited by send_to_workers() in every step. */
 	int send_holds;                  /* Nesting depth of vine_manager_send_hold(). While positive, sends only queue. */
 	struct list *send_held_workers;  /* Workers given data while sends were held, written once at the outermost release. */
