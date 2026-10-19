@@ -164,6 +164,7 @@ struct vine_manager {
 	FILE *txn_logfile;         /* Transaction logfile for recording every event of interest. */
 	FILE *graph_logfile;       /* Graph logfile for visualizing application structure. */
 	int perf_log_interval;	   /* Minimum interval for performance log entries in seconds. */
+	int perf_log_pending;      /* An event since the last performance log entry waits for the interval to pass. */
 	
 	/* Resource monitoring configuration. */
 
