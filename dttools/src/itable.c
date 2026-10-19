@@ -6,6 +6,7 @@ See the file COPYING for details.
 */
 
 #include "debug.h"
+#include "xxmalloc.h"
 #include "itable.h"
 
 #include <stdlib.h>
@@ -14,13 +15,18 @@ See the file COPYING for details.
 #define DEFAULT_SIZE 127
 #define DEFAULT_MAX_LOAD 0.75
 #define DEFAULT_MIN_LOAD 0.125
+#define REMOVED_KEEP_MIN 1024 /* removed array capacity that is always kept across compactions */
 
 #define ITERATION_MAX 1000000 /* very conservative overflow protection */
 
+/* One key and its value. A removed entry leaves its bucket at once, so lookups walk only live entries, but it stays
+ * allocated in the table's removed array, still marked deleted and with its next pointer intact, until the table frees
+ * removed entries at a compaction, a resize, or a clear. An iterator that stands on it therefore stays valid exactly
+ * as long as when removed entries stayed in their buckets. */
 struct entry {
 	UINT64_T key;
 	void *value;
-	struct entry *next;
+	struct entry *next; /* Next entry of the bucket, or of the bucket it left when it was removed. */
 	int deleted;
 };
 
@@ -31,7 +37,9 @@ struct itable {
 	int ibucket;
 	struct entry *ientry;
 	int iteration_index;
-	int need_compact; /* entries marked deleted since the last compaction */
+	int need_compact;	/* entries removed since the last compaction, which the removed array holds */
+	struct entry **removed; /* removed entries, freed at the next compaction, resize, or clear */
+	int removed_capacity;	/* length of the removed array */
 };
 
 struct itable *itable_create(int bucket_count)
@@ -56,7 +64,42 @@ struct itable *itable_create(int bucket_count)
 	h->ientry = 0;
 	h->iteration_index = 0;
 	h->need_compact = 0;
+	h->removed = 0;
+	h->removed_capacity = 0;
 	return h;
+}
+
+/* Keep a removed entry until the next compaction, resize, or clear. */
+static void hold_removed(struct itable *h, struct entry *e)
+{
+	if (h->need_compact == h->removed_capacity) {
+		h->removed_capacity = h->removed_capacity ? 2 * h->removed_capacity : 8;
+		h->removed = xxrealloc(h->removed, sizeof(*h->removed) * h->removed_capacity);
+	}
+	h->removed[h->need_compact++] = e;
+}
+
+/* Free the entries removed since the last compaction. The removed array keeps its capacity for the next removals,
+ * unless it holds more than REMOVED_KEEP_MIN entries and eight times the live entries plus buckets, so it never holds
+ * more than a constant times the most removals between two compactions, and a table that is filled and emptied again
+ * and again does not reallocate it each time. The removed entries stay in an array rather than in a list linked
+ * through them: freeing walks the array in removal order without a cache miss per entry, and a list link would move
+ * the inline key of a hash_table entry and slow its lookups. */
+static void free_removed(struct itable *h)
+{
+	if (h->need_compact) {
+		/* The iterator may stand on a removed entry. A pop resumes from it, so it starts again instead. */
+		h->ientry = 0;
+	}
+	for (int i = 0; i < h->need_compact; i++) {
+		free(h->removed[i]);
+	}
+	h->need_compact = 0;
+	if (h->removed_capacity > REMOVED_KEEP_MIN && h->removed_capacity > 8 * (h->size + h->bucket_count)) {
+		free(h->removed);
+		h->removed = 0;
+		h->removed_capacity = 0;
+	}
 }
 
 void itable_clear(struct itable *h, void (*delete_func)(void *))
@@ -67,8 +110,9 @@ void itable_clear(struct itable *h, void (*delete_func)(void *))
 	for (i = 0; i < h->bucket_count; i++) {
 		e = h->buckets[i];
 		while (e) {
-			if (delete_func && !e->deleted)
+			if (delete_func) {
 				delete_func(e->value);
+			}
 			f = e->next;
 			free(e);
 			e = f;
@@ -79,50 +123,15 @@ void itable_clear(struct itable *h, void (*delete_func)(void *))
 		h->buckets[i] = 0;
 	}
 
+	free_removed(h);
 	h->size = 0;
-	h->need_compact = 0;
 	h->iteration_index = (h->iteration_index + 1) % ITERATION_MAX;
 }
 
-static int itable_insert_to_buckets_aux(struct entry **buckets, int bucket_count, struct entry *new_entry)
+/* Move every entry to a new array of buckets, keeping the order in which the old buckets list them, and free the
+ * removed entries. */
+static int itable_resize(struct itable *h, int new_count)
 {
-	UINT64_T index;
-	struct entry *e;
-
-	index = new_entry->key % bucket_count;
-	e = buckets[index];
-
-	while (e) {
-		/* check that if this key already exist in the table */
-		if (new_entry->key == e->key) {
-			e->value = new_entry->value;
-			e->deleted = 0;
-			free(new_entry);
-			return 1;
-		}
-		e = e->next;
-	}
-
-	new_entry->next = buckets[index];
-	buckets[index] = new_entry;
-
-	return 1;
-}
-
-static int itable_reduce_buckets(struct itable *h)
-{
-	int new_count = ((h->bucket_count + 1) / 2) - 1;
-
-	/* DEFAULT_SIZE is the minimum size */
-	if (new_count < DEFAULT_SIZE) {
-		return 0;
-	}
-
-	/* Table cannot be reduced above DEFAULT_MAX_LOAD */
-	if (((float)h->size / new_count) > DEFAULT_MAX_LOAD) {
-		return 1;
-	}
-
 	struct entry **new_buckets = (struct entry **)calloc(new_count, sizeof(struct entry *));
 	if (!new_buckets) {
 		return 0;
@@ -133,12 +142,9 @@ static int itable_reduce_buckets(struct itable *h)
 		e = h->buckets[i];
 		while (e) {
 			f = e->next;
-			if (!e->deleted) {
-				e->next = NULL;
-				itable_insert_to_buckets_aux(new_buckets, new_count, e);
-			} else {
-				free(e);
-			}
+			UINT64_T index = e->key % new_count;
+			e->next = new_buckets[index];
+			new_buckets[index] = e;
 			e = f;
 		}
 	}
@@ -147,55 +153,51 @@ static int itable_reduce_buckets(struct itable *h)
 	free(h->buckets);
 	h->buckets = new_buckets;
 	h->bucket_count = new_count;
-	h->need_compact = 0;
+	free_removed(h);
 
 	h->iteration_index = (h->iteration_index + 1) % ITERATION_MAX;
 
 	return 1;
 }
 
-/* Compact the table by removing deleted entries. This does not change the size of the table, or the number of buckets. */
+/* Halve the buckets of a table whose load fell below DEFAULT_MIN_LOAD, as (n+1)/2-1 undoes the doubling to 2n+1.
+ * Return whether the buckets were resized, which also frees the removed entries. */
+static int itable_reduce_buckets(struct itable *h)
+{
+	if (((float)h->size / h->bucket_count) >= DEFAULT_MIN_LOAD) {
+		return 0;
+	}
+
+	int new_count = ((h->bucket_count + 1) / 2) - 1;
+
+	/* DEFAULT_SIZE is the minimum size, and the table cannot be reduced above DEFAULT_MAX_LOAD */
+	if (new_count < DEFAULT_SIZE || ((float)h->size / new_count) > DEFAULT_MAX_LOAD) {
+		return 0;
+	}
+
+	return itable_resize(h, new_count);
+}
+
+/* Free the entries removed since the last compaction and shrink the buckets when the load is low. The cost is O(removed
+ * entries), plus O(buckets) for a resize, which only follows removals of most entries. A compaction that frees entries
+ * ends any iteration in progress, as an insert does, so an iteration continued afterwards aborts instead of reading a
+ * freed entry. */
 void itable_compact(struct itable *h)
 {
-	struct entry *e, *f;
-	int i;
-
 	if (!h->need_compact) {
 		return;
 	}
 
-	for (i = 0; i < h->bucket_count; i++) {
-		e = h->buckets[i];
-
-		/* find the head of the bucket and remove deleted entries*/
-		while (e && e->deleted) {
-			f = e->next;
-			free(e);
-			e = f;
-		}
-		h->buckets[i] = e;
-
-		/* remove deleted entries from the rest of the bucket */
-		while (e) {
-			f = e->next;
-			while (f && f->deleted) {
-				e->next = f->next;
-				free(f);
-				f = e->next;
-			}
-			e = f;
-		}
+	if (!itable_reduce_buckets(h)) {
+		free_removed(h);
 	}
-
-	h->need_compact = 0;
-	if (((float)h->size / h->bucket_count) < DEFAULT_MIN_LOAD) {
-		itable_reduce_buckets(h);
-	}
+	h->iteration_index = (h->iteration_index + 1) % ITERATION_MAX;
 }
 
 void itable_delete(struct itable *h)
 {
 	itable_clear(h, 0);
+	free(h->removed);
 	free(h->buckets);
 	free(h);
 }
@@ -215,10 +217,7 @@ void *itable_lookup(struct itable *h, UINT64_T key)
 
 	while (e) {
 		if (key == e->key) {
-			if (!e->deleted) {
-				return e->value;
-			}
-			return 0;
+			return e->value;
 		}
 		e = e->next;
 	}
@@ -228,36 +227,7 @@ void *itable_lookup(struct itable *h, UINT64_T key)
 
 static int itable_double_buckets(struct itable *h)
 {
-	int new_count = (2 * (h->bucket_count + 1)) - 1;
-	struct entry **new_buckets = (struct entry **)calloc(new_count, sizeof(struct entry *));
-	if (!new_buckets) {
-		return 0;
-	}
-
-	struct entry *e, *f;
-	for (int i = 0; i < h->bucket_count; i++) {
-		e = h->buckets[i];
-		while (e) {
-			f = e->next;
-			if (!e->deleted) {
-				e->next = NULL;
-				itable_insert_to_buckets_aux(new_buckets, new_count, e);
-			} else {
-				free(e);
-			}
-			e = f;
-		}
-	}
-
-	/* Make the old point to the new */
-	free(h->buckets);
-	h->buckets = new_buckets;
-	h->bucket_count = new_count;
-	h->need_compact = 0;
-
-	h->iteration_index = (h->iteration_index + 1) % ITERATION_MAX;
-
-	return 1;
+	return itable_resize(h, (2 * (h->bucket_count + 1)) - 1);
 }
 
 int itable_insert(struct itable *h, UINT64_T key, const void *value)
@@ -273,22 +243,18 @@ int itable_insert(struct itable *h, UINT64_T key, const void *value)
 
 	while (e) {
 		if (key == e->key) {
-			int was_deleted = e->deleted;
 			e->value = (void *)value;
-			e->deleted = 0;
-			if (was_deleted) {
-				h->size++;
-			}
 			h->iteration_index = (h->iteration_index + 1) % ITERATION_MAX;
 			return 1;
 		}
 		e = e->next;
 	}
 
-	/* A table that is never iterated is never compacted, so compact once deleted entries outnumber the rest. A new
+	/* A table that is never iterated is never compacted, so compact once removed entries outnumber the rest. A new
 	 * entry ends any iteration in progress, so no iterator is left on a freed entry. */
 	if (h->need_compact > h->size + h->bucket_count) {
 		itable_compact(h);
+		index = key % h->bucket_count;
 	}
 
 	e = (struct entry *)malloc(sizeof(struct entry));
@@ -298,43 +264,35 @@ int itable_insert(struct itable *h, UINT64_T key, const void *value)
 	e->key = key;
 	e->value = (void *)value;
 	e->deleted = 0;
+	e->next = h->buckets[index];
+	h->buckets[index] = e;
 
-	int inserted = itable_insert_to_buckets_aux(h->buckets, h->bucket_count, e);
-	if (inserted) {
-		h->size++;
-		h->iteration_index = (h->iteration_index + 1) % ITERATION_MAX;
-	} else {
-		free(e);
-		return 0;
-	}
+	h->size++;
+	h->iteration_index = (h->iteration_index + 1) % ITERATION_MAX;
 
 	return 1;
 }
 
-/* keys are not really removed, just marked as deleted. A call to itable_compact will remove them. */
+/* A removed entry leaves its bucket at once and is freed later, see struct entry. */
 void *itable_remove(struct itable *h, UINT64_T key)
 {
-	struct entry *e;
-	void *value;
+	struct entry *e, **link;
 	UINT64_T index;
 
 	index = key % h->bucket_count;
-	e = h->buckets[index];
+	link = &h->buckets[index];
 
-	while (e) {
+	while ((e = *link)) {
 		if (key == e->key) {
-			if (e->deleted) {
-				return 0;
-			}
+			*link = e->next;
 			e->deleted = 1;
-			h->need_compact++;
-			value = e->value;
+			hold_removed(h, e);
 
 			h->size--;
-			return value;
+			return e->value;
 		}
 
-		e = e->next;
+		link = &e->next;
 	}
 
 	return 0;
