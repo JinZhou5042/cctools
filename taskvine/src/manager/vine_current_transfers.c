@@ -204,13 +204,13 @@ int vine_current_transfers_source_has_room(struct vine_manager *q, struct vine_w
 }
 
 /*
-Count a failed transfer against a worker, and release the worker after repeated failures. A source is released after
-a streak of failures when it failed more often than not, or when it sent nothing since the failed transfer was
-requested (silent), because its host then hangs with its connections open: it does not answer keepalives either, and
-the tasks that it runs never return until it is removed.
+Count a failed transfer against a worker, and release the worker after repeated failures. A worker is released after
+a streak of failures when it failed more often than not. A source is also released after a streak when it sent
+nothing since the failed transfer was requested (silent), because its host then hangs with its connections open: it
+does not answer keepalives either, and the tasks that it runs never return until it is removed.
 */
 
-static void set_throttle(struct vine_manager *m, struct vine_worker_info *w, int is_destination, int silent)
+void set_throttle(struct vine_manager *m, struct vine_worker_info *w, int is_destination, int silent)
 {
 	if (!w) {
 		return;
