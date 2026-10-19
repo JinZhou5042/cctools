@@ -41,7 +41,6 @@ void vine_file_replica_delete(struct vine_file_replica *r);
 
 /* Count the replica as a copy of f that the manager sends itself, until it becomes ready or is deleted. */
 void vine_file_replica_set_manager_send(struct vine_file_replica *r, struct vine_file *f);
-
 int vine_file_replica_change_state_on_event(struct vine_file_replica *replica, vine_file_replica_state_transition_event_t event);
 
 #endif

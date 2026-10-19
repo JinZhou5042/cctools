@@ -48,6 +48,7 @@ struct vine_file {
 	struct vine_task_recipe *recovery_recipe;
 	struct vine_worker_info *source_worker; // if this is a substitute file, attach the worker serving it. 
 	int change_message_shown; // True if error message already shown.
+	int manager_sends;	  // Copies of this file that the manager is sending itself, counted only for a file whose sends it limits (see vine_manager_limits_sends()).
 	int refcount;       // Number of references from a task object, delete when zero.
 
 	/* Scheduler state of a file that keeps ready tasks from every worker (see vine_schedule.h). blocked_serial advances
@@ -72,10 +73,6 @@ struct vine_file {
 	 * when its node is removed, costs no lookup by name. */
 	int vault_jobs;
 
-	/* The number of copies of this local file that the manager is sending itself and that are not ready yet, counted
-	 * only for a file that peers may share (see vine_manager_limits_sends()). Each such replica holds a reference to
-	 * the file (vine_file_replica.manager_send) and returns it when it becomes ready or is deleted. */
-	int manager_sends;
 };
 
 struct vine_file * vine_file_create( const char *source, const char *cached_name, const char *data, size_t size, vine_file_type_t type, struct vine_task *mini_task, vine_cache_level_t cache_level, vine_file_flags_t flags);
