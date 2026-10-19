@@ -26,6 +26,7 @@ cached object instead of the file that its manifest names.
 import collections
 import contextlib
 import gc
+import hashlib
 import importlib
 import os
 import types
@@ -82,7 +83,8 @@ def installed(manager, name, modules=(), files=None, hoisted=None, edata_cache=N
     installed_library = False
     try:
         try:
-            context = [prepare, [module_names, HOISTED if hoisted else None, EDATA_CACHE if edata_cache else None], {}]
+            context = [prepare, [module_names, HOISTED if hoisted else None, EDATA_CACHE if edata_cache else None,
+                                 runtime_identity()], {}]
             library = manager.create_library_from_functions(name, run_node, add_env=False, library_context_info=context)
         finally:
             # Library construction is synchronous, so new cache directories belong to this library.
@@ -125,10 +127,26 @@ def module_name(module):
     raise TypeError(f"library_modules takes modules or module names, not {module!r}")
 
 
-def prepare(module_names, hoisted_path, edata_path=None):
-    """Prepare this library process when it starts: import the modules, then load the hoisted objects and the cached
-    edata, which may need them. Freezing what was loaded keeps the garbage collector from touching that memory, so
-    forked tasks share it instead of copying it."""
+def runtime_identity():
+    """Return what a Worker must share with its Manager to run the Manager's tasks: the Python version, which tasks'
+    code is compiled for, cloudpickle, which serializes them, and the vine_graph code that reads their manifests."""
+    digest = hashlib.sha256()
+    for path in (Path(__file__), Path(__file__).with_name("graph.py")):
+        digest.update(path.read_bytes())
+    code = digest.hexdigest()[:12]
+    return {"python": "%d.%d" % sys.version_info[:2], "cloudpickle": cloudpickle.__version__, "vine_graph library": code}
+
+
+def prepare(module_names, hoisted_path, edata_path=None, manager_identity=None):
+    """Prepare this library process when it starts: check that this Worker can run the Manager's tasks, import the
+    modules, then load the hoisted objects and the cached edata, which may need them. Freezing what was loaded keeps
+    the garbage collector from touching that memory, so forked tasks share it instead of copying it."""
+    if manager_identity is not None:
+        identity = runtime_identity()
+        mismatched = [f"{key} {identity.get(key)} on this Worker but {value} on the Manager"
+                      for key, value in manager_identity.items() if identity.get(key) != value]
+        if mismatched:
+            raise RuntimeError("this Worker's environment does not match the Manager's: " + "; ".join(mismatched))
     for name in module_names:
         importlib.import_module(name)
     for path, objects in ((hoisted_path, _hoisted), (edata_path, _edata)):
