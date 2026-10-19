@@ -288,7 +288,9 @@ char *vine_meta_name(const struct vine_file *f, ssize_t *totalsize)
 
 	if (stat(f->source, &info))
 		return 0;
-	char *mtime = ctime(&info.st_mtime);
+	/* ctime() returns a static string, which other threads of the process may overwrite. */
+	char mtime[32];
+	ctime_r(&info.st_mtime, mtime);
 	char *meta = string_format("%s-%" PRIu64 "-%s", f->source, info.st_size, mtime);
 	char *metahash = md5_of_string(meta);
 	char *name = string_format("file-meta-%s", metahash);

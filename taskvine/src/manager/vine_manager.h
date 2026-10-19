@@ -107,6 +107,7 @@ struct vine_manager {
 	struct list   *waiting_retrieval_list;      /* List of vine_task that are waiting to be retrieved. */
 	struct list   *retrieved_list;      /* List of vine_task that have been retrieved. */
 	struct list   *task_info_list;  /* List of last N vine_task_infos for computing capacity. */
+	int task_info_limit;		/* The bound of task_info_list, which never shrinks. */
 	struct hash_table *categories;  /* Maps category_name -> struct category */
 	struct hash_table *library_templates; /* Maps library name -> vine_task of library with that name. */
 

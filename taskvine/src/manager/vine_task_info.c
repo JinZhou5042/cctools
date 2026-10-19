@@ -49,11 +49,10 @@ void vine_task_info_add(struct vine_manager *q, struct vine_task *t)
 
 	list_push_tail(q->task_info_list, ti);
 
-	// Trim the list, but never below its previous size.
-	static int count = VINE_TASK_INFO_MIN_SIZE;
-	count = MAX(count, 2 * q->stats->tasks_on_workers);
+	// Trim the list, but never below its previous size, which each manager keeps.
+	q->task_info_limit = MAX(q->task_info_limit, MAX(VINE_TASK_INFO_MIN_SIZE, 2 * q->stats->tasks_on_workers));
 
-	while (list_size(q->task_info_list) >= count) {
+	while (list_size(q->task_info_list) >= q->task_info_limit) {
 		ti = list_pop_head(q->task_info_list);
 		vine_task_info_delete(ti);
 	}
