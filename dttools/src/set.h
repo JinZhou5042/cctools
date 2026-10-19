@@ -148,11 +148,11 @@ int set_remove(struct set *s, const void *element);
 
 /** Free the entries removed since the last compaction.
 A removed entry stays allocated, so that an iteration standing on it stays valid, until a later insert, a new
-iteration, a resize, a clear, or this call frees it. A table that only shrinks, such as one
-emptied when an application drops its work, otherwise keeps every removed entry and pins the memory around it.
-Call it only while no iteration of the set is in progress: an iteration continued after a compaction that freed
-entries aborts. Its cost is amortized O(1) per removal, so it may
-be called as often as convenient, and it also shrinks the buckets when most entries were removed.
+iteration, a resize, a clear, or this call frees it. A table that only shrinks, such as one emptied when an
+application drops its work, otherwise keeps every removed entry and pins the memory around it. Call it only while no
+iteration of the set is in progress: an iteration continued after a compaction that freed entries aborts. Its cost is
+amortized O(1) per removal, so it may be called as often as convenient, and it also shrinks the buckets when most
+entries were removed.
 @param s A pointer to a set.
 @return The number of removed entries freed.
 */

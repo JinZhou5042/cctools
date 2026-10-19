@@ -81,6 +81,9 @@ See the file COPYING for details.
 #include <malloc.h>
 #endif
 #include <math.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -5057,6 +5060,11 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->time_last_large_tasks_check = timestamp_get();
 	q->task_info_list = list_create();
 
+	q->time_last_compaction = 0;
+	q->compacted_since_trim = 0;
+	q->tables_peak_since_trim = 0;
+	q->tables_held_last = 0;
+
 	q->time_last_wait = 0;
 	q->time_last_log_stats = 0;
 
@@ -6440,18 +6448,14 @@ struct vine_task *find_task_to_return(struct vine_manager *q, const char *tag, i
 
 /* Free the removed entries of the tables that grow with tasks, files, and transfers, and return freed memory to the
  * operating system once a large part of the tables was removed. dttools tables keep removed entries until a later
- * insert or walk compacts them, and after an application drops its work no insert may come, so those entries pinned
- * the freed pages around them and the process kept its peak memory: malloc_trim() alone returned 5% of it.
+ * insert or walk compacts them, and after an application deletes most of its tasks and files no insert may come, so
+ * those entries pinned the freed pages around them and the process kept its peak memory.
  * A compaction must not run while a walk of its table is in progress, or while a caller holds a key pointer of a
- * removed entry. This runs at the top of a step of vine_wait(), outside every walk and every operation of the Manager,
- * and the application cannot be inside a walk of a Manager table. Any later insert or walk of a table could already
- * free its removed entries, so no correct caller keeps a key pointer of a removed entry beyond its current operation.
- * Compaction costs O(removed entries), amortized O(1) per removal. The heap is trimmed only once the tasks and files
- * held fell to half of their peak since the last trim and stopped falling, as when an application dropped its work:
- * a run that only replaces its tasks reuses its free memory, and trimming it would make the Manager fault the same
- * pages in again, and a drop that takes several seconds is trimmed once, at its end. The trim's pass over the heap's
- * free chunks is then paid for by the removals of at least half of that peak. A trim also returns what other threads
- * of the process freed. */
+ * removed entry. This runs at the top of a step of vine_wait(), outside every walk and every operation of the manager,
+ * and the application cannot be inside a walk of a manager table. Compaction costs O(removed entries), amortized O(1)
+ * per removal. The heap is trimmed only once the tasks and files held fell to half of their peak since the last trim
+ * and stopped falling: a run that only replaces its tasks reuses its free memory, and trimming it would make the
+ * manager fault the same pages in again, and a deletion that takes several seconds is trimmed once, at its end. */
 static void compact_tables(struct vine_manager *q)
 {
 	int64_t freed = 0;
