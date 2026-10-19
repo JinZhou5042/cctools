@@ -102,6 +102,8 @@ struct vine_worker_info {
 
 	int incoming_xfer_counter;
 	int outgoing_xfer_counter;
+	/* The bytes of the files this worker sends to other workers now, see vine_current_transfers_source_has_room(). */
+	int64_t outgoing_xfer_bytes;
 };
 
 struct vine_worker_info * vine_worker_create( struct link * lnk );

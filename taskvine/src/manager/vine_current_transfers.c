@@ -20,19 +20,24 @@ struct vine_transfer_pair {
 	struct vine_worker_info *dest_worker;
 	struct vine_worker_info *source_worker;
 	char *source_url;
+	int64_t bytes; /* The size of the source worker's replica, counted in its outgoing_xfer_bytes. */
 };
 
-static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url)
+static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename)
 {
 	struct vine_transfer_pair *t = malloc(sizeof(struct vine_transfer_pair));
 	t->dest_worker = dest_worker;
 	t->source_worker = source_worker;
 	t->source_url = source_url ? xxstrdup(source_url) : 0;
+	t->bytes = 0;
 
 	if (t->dest_worker) {
 		t->dest_worker->incoming_xfer_counter++;
 	}
 	if (t->source_worker) {
+		struct vine_file_replica *replica = cachename ? vine_file_replica_table_lookup(source_worker, cachename) : 0;
+		t->bytes = replica ? MAX(replica->size, 0) : 0;
+		t->source_worker->outgoing_xfer_bytes += t->bytes;
 		t->source_worker->outgoing_xfer_counter++;
 	}
 
@@ -46,6 +51,7 @@ static void vine_transfer_pair_delete(struct vine_transfer_pair *p)
 			p->dest_worker->incoming_xfer_counter--;
 		}
 		if (p->source_worker) {
+			p->source_worker->outgoing_xfer_bytes -= p->bytes;
 			p->source_worker->outgoing_xfer_counter--;
 		}
 		free(p->source_url);
@@ -54,13 +60,13 @@ static void vine_transfer_pair_delete(struct vine_transfer_pair *p)
 }
 
 // add a current transaction to the transfer table
-char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url)
+char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename)
 {
 	cctools_uuid_t uuid;
 	cctools_uuid_create(&uuid);
 
 	char *transfer_id = strdup(uuid.str);
-	struct vine_transfer_pair *t = vine_transfer_pair_create(dest_worker, source_worker, source_url);
+	struct vine_transfer_pair *t = vine_transfer_pair_create(dest_worker, source_worker, source_url, cachename);
 
 	hash_table_insert(q->current_transfer_table, transfer_id, t);
 	return transfer_id;
@@ -77,6 +83,16 @@ int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 	} else {
 		return 0;
 	}
+}
+
+int vine_current_transfers_source_has_room(struct vine_manager *q, struct vine_worker_info *w, int64_t size)
+{
+	if (w->outgoing_xfer_counter >= q->worker_source_max_transfers) {
+		return 0;
+	}
+	/* A size that is not known counts as none, so the count alone limits such a file. */
+	size = MAX(size, 0);
+	return w->outgoing_xfer_bytes == 0 || w->outgoing_xfer_bytes + size <= VINE_WORKER_SOURCE_MAX_BYTES;
 }
 
 void set_throttle(struct vine_manager *m, struct vine_worker_info *w, int is_destination)
