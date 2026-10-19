@@ -544,10 +544,12 @@ vine_result_code_t vine_manager_put_task(
 	/* Note that even when environment variables after resources, values for
 	 * CORES, MEMORY, etc. will be set at the worker to the values of
 	 * set_*, if used. */
-	char *var;
-	LIST_ITERATE(t->env_list, var)
-	{
-		vine_manager_send(q, w, "env %zu\n%s\n", strlen(var), var);
+	if (t->env_list) {
+		char *var;
+		LIST_ITERATE(t->env_list, var)
+		{
+			vine_manager_send(q, w, "env %zu\n%s\n", strlen(var), var);
+		}
 	}
 
 	if (t->input_mounts) {

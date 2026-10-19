@@ -8,6 +8,7 @@ See the file COPYING for details.
 #include "debug.h"
 #include "vine_mount.h"
 #include "vine_task.h"
+#include "vine_task_recipe.h"
 #include "stringtools.h"
 
 // create a new task group for this task based on the temp mount file
@@ -28,7 +29,7 @@ static int vine_task_groups_create_group(struct vine_manager *q, struct vine_tas
 // locate the group with the task which outputs the desired file, and add the new task
 static int vine_task_groups_add_to_group(struct vine_manager *q, struct vine_task *t, struct vine_mount *m)
 {
-	int id = m->file->recovery_task->group_id;
+	int id = vine_task_recipe_group_id(m->file);
 
 	if (id) {
 		struct list *group = itable_lookup(q->task_group_table, id);

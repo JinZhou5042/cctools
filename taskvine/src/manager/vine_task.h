@@ -72,8 +72,8 @@ struct vine_task {
 	
 	struct list *input_mounts;    /**< The mounted files expected as inputs. */
 	struct list *output_mounts;   /**< The mounted files expected as outputs. */
-	struct list *env_list;       /**< Environment variables applied to the task. */
-	struct list *feature_list;   /**< User-defined features this task requires. (See vine_worker's --feature option.) */
+	struct list *env_list;       /**< Environment variables applied to the task, or NULL in a copy of a task without any. */
+	struct list *feature_list;   /**< User-defined features this task requires, or NULL in a copy of a task without any. (See vine_worker's --feature option.) */
 
 	category_allocation_t resource_request; /**< See @ref category_allocation_t */
 	vine_schedule_t worker_selection_algorithm; /**< How to choose worker to run the task. */
@@ -136,8 +136,8 @@ struct vine_task {
 	int64_t bytes_sent;                                    /**< Number of bytes sent since task has last started sending input data. */
 	int64_t bytes_transferred;                             /**< Number of bytes transferred since task has last started transferring input data. */
 
-	struct rmsummary *resources_allocated;                 /**< Resources allocated to the task its latest attempt. */
-	struct rmsummary *resources_measured;                  /**< When monitoring is enabled, it points to the measured resources used by the task in its latest attempt. */
+	struct rmsummary *resources_allocated;                 /**< Resources allocated to the task its latest attempt. NULL in a recovery task until it is submitted. */
+	struct rmsummary *resources_measured;                  /**< When monitoring is enabled, it points to the measured resources used by the task in its latest attempt. NULL in a recovery task until it is submitted. */
 	struct rmsummary *resources_requested;                 /**< Number of cores, disk, memory, time, etc. the task requires. */
 	struct rmsummary *current_resource_box;                /**< Resources allocated to the task on this specific worker. */
 
@@ -149,6 +149,8 @@ struct vine_task {
 	int group_id;					       /**< When enabled, group ID will be assigned based on temp file dependencies of this task */	
 
 	int refcount;                                          /**< Number of remaining references to this object. */
+	int recovery_refs;				       /**< Number of temporary files whose recovery source is this task, each with a reference to it
+								  (see vine_task_recipe.h). Once only they hold the task, they keep its recipe instead. */
 };
 
 void vine_task_delete(struct vine_task *t);

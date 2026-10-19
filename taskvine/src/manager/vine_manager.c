@@ -24,6 +24,7 @@ See the file COPYING for details.
 #include "vine_runtime_dir.h"
 #include "vine_schedule.h"
 #include "vine_task.h"
+#include "vine_task_recipe.h"
 #include "vine_task_groups.h"
 #include "vine_task_info.h"
 #include "vine_taskgraph_log.h"
@@ -168,7 +169,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 static void disconnect_all_workers(struct vine_manager *q);
 
 static int vine_manager_check_inputs_available(struct vine_manager *q, struct vine_task *t);
-static void vine_manager_consider_recovery_task(struct vine_manager *q, struct vine_file *lost_file, struct vine_task *rt);
+static void vine_manager_consider_recovery_task(struct vine_manager *q, struct vine_file *lost_file);
 
 static void delete_uncacheable_files(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
 static int release_worker(struct vine_manager *q, struct vine_worker_info *w);
@@ -1026,7 +1027,7 @@ static void cleanup_worker_files(struct vine_manager *q, struct vine_worker_info
 		/* consider if this replica needs recovery because of worker removal */
 		if (f) {
 			if (q->immediate_recovery && f->type == VINE_TEMP && !vine_temp_exists_somewhere(q, f)) {
-				vine_manager_consider_recovery_task(q, f, f->recovery_task);
+				vine_manager_consider_recovery_task(q, f);
 			}
 		}
 	}
@@ -3513,17 +3514,15 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 }
 
 /*
-If this task produces temporary files, then we must create a recovery task as a copy
-of the original task that can be used to re-create those files if they are lost.
-The recovery task must be a distinct copy of the original, because the original will
-be returned to the user and may be deleted, modified, etc before the recovery task
-even needs to be used.
+If this task produces temporary files, the task becomes their recovery source, so that they can be re-created if they
+are lost. The recovery task, a copy of the task, is made only then (see vine_task_recipe.h). The original will be
+returned to the user and may be deleted, modified, etc before the recovery task even needs to be used: once only the
+files hold the task they keep its recipe instead, and a change to the task gives them a recipe of it as submitted.
 */
 
-static void vine_manager_create_recovery_tasks(struct vine_manager *q, struct vine_task *t)
+static void vine_manager_set_recovery_sources(struct vine_manager *q, struct vine_task *t)
 {
 	struct vine_mount *m;
-	struct vine_task *recovery_task = 0;
 
 	/* Only regular tasks get recovery tasks */
 	if (t->type != VINE_TASK_TYPE_STANDARD) {
@@ -3533,35 +3532,22 @@ static void vine_manager_create_recovery_tasks(struct vine_manager *q, struct vi
 	LIST_ITERATE(t->output_mounts, m)
 	{
 		if (m->file->type == VINE_TEMP) {
-			if (!recovery_task) {
-				recovery_task = vine_task_copy(t);
-				recovery_task->type = VINE_TASK_TYPE_RECOVERY;
-			}
-
-			m->file->recovery_task = vine_task_addref(recovery_task);
+			/* A new task that writes the same file (such as a rerun) replaces the earlier recovery source. */
+			vine_task_recipe_set_source(m->file, t);
 			m->file->original_producer_task_id = t->task_id;
 		}
 	}
-
-	/*
-	Remove the original reference to the recovery task,
-	so that only the file pointers carry the needed reference.
-	The recovery task does not get entered into the task table
-	unless it is needed for execution.
-	*/
-
-	vine_task_delete(recovery_task);
 }
 
 /*
-Consider whether a given recovery task rt should be submitted, so as to re-generate
+Consider whether the recovery task of a lost file should be submitted, so as to re-generate
 the necessary output files.  This should only happen if the output files have not been
 generated yet.
 */
 
-static void vine_manager_consider_recovery_task(struct vine_manager *q, struct vine_file *lost_file, struct vine_task *rt)
+static void vine_manager_consider_recovery_task(struct vine_manager *q, struct vine_file *lost_file)
 {
-	if (!rt) {
+	if (!lost_file->recovery_task && !lost_file->recovery_recipe) {
 		return;
 	}
 
@@ -3575,6 +3561,23 @@ static void vine_manager_consider_recovery_task(struct vine_manager *q, struct v
 		if (original_task && original_task->state != VINE_TASK_DONE) {
 			return;
 		}
+	}
+
+	struct vine_task *rt = lost_file->recovery_task;
+	if (!rt || rt->type != VINE_TASK_TYPE_RECOVERY) {
+		/* The recovery task has never been made, so make it from the task that wrote the file and submit it now. */
+		rt = vine_task_recipe_start_recovery(lost_file);
+		if (!rt) {
+			debug(D_VINE, "Could not create a recovery task to re-create lost temporary file %s.", lost_file->cached_name);
+			return;
+		}
+		/* Do not try to group recovery tasks */
+		rt->group_id = 0;
+		vine_submit(q, rt);
+		debug(D_VINE, "Submitted recovery task %d (%s) to re-create lost temporary file %s.", rt->task_id, rt->command_line, lost_file->cached_name);
+		/* The files hold the recovery task from now on, and the manager while it is active. */
+		vine_task_delete(rt);
+		return;
 	}
 
 	/* Do not try to group recovery tasks */
@@ -3622,7 +3625,7 @@ static int vine_manager_check_inputs_available(struct vine_manager *q, struct vi
 		if (f->type == VINE_FILE && f->state == VINE_FILE_STATE_PENDING) {
 			all_available = 0;
 		} else if (f->type == VINE_TEMP && !vine_temp_exists_somewhere(q, f)) {
-			vine_manager_consider_recovery_task(q, f, f->recovery_task);
+			vine_manager_consider_recovery_task(q, f);
 			all_available = 0;
 		}
 	}
@@ -4975,6 +4978,13 @@ int vine_submit(struct vine_manager *q, struct vine_task *t)
 
 	if (t->type == VINE_TASK_TYPE_RECOVERY) {
 		q->stats->tasks_recovery++;
+		/* A recovery task is kept without the resources of an attempt until it runs. */
+		if (!t->resources_measured) {
+			t->resources_measured = rmsummary_create(-1);
+		}
+		if (!t->resources_allocated) {
+			t->resources_allocated = rmsummary_create(-1);
+		}
 	}
 
 	if (t->has_fixed_locations) {
@@ -4987,8 +4997,8 @@ int vine_submit(struct vine_manager *q, struct vine_task *t)
 		vine_task_groups_assign_task(q, t);
 	}
 
-	/* If the task produces temporary files, create recovery tasks for those. */
-	vine_manager_create_recovery_tasks(q, t);
+	/* If the task produces temporary files, it becomes their recovery source. */
+	vine_manager_set_recovery_sources(q, t);
 
 	/* If the task produces watched output files, truncate them. */
 	vine_task_truncate_watched_outputs(t);

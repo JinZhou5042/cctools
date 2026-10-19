@@ -8,6 +8,7 @@ See the file COPYING for details.
 #include "vine_cached_name.h"
 #include "vine_counters.h"
 #include "vine_task.h"
+#include "vine_task_recipe.h"
 
 #include "copy_stream.h"
 #include "debug.h"
@@ -35,12 +36,10 @@ int vine_file_delete(struct vine_file *f)
 
 		vine_counters.file.deleted++;
 
-		if (f->refcount == 1 && f->recovery_task) {
-			/* delete the recovery task for this file, if any, to break the refcount cycle.
-			 * (The f and f->recovery_task have pointers to each other.) */
-			struct vine_task *rt = f->recovery_task;
-			f->recovery_task = NULL;
-			vine_task_delete(rt);
+		if (f->refcount == 1 && (f->recovery_task || f->recovery_recipe)) {
+			/* delete the recovery source for this file, if any, to break the refcount cycle.
+			 * (The f and its recovery source have pointers to each other.) */
+			vine_task_recipe_clear_source(f);
 			return 0;
 		}
 
@@ -88,6 +87,7 @@ struct vine_file *vine_file_create(const char *source, const char *cached_name, 
 	f->mode = 0;
 	f->mini_task = mini_task;
 	f->recovery_task = 0;
+	f->recovery_recipe = 0;
 	f->original_producer_task_id = 0;
 	f->state = VINE_FILE_STATE_CREATED; /* Assume state created until told otherwise */
 	f->cache_level = cache_level;
