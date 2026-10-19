@@ -1,4 +1,5 @@
 #include "vine_temp.h"
+#include "vine_current_transfers.h"
 #include "vine_file.h"
 #include "vine_worker_info.h"
 #include "vine_file_replica_table.h"
