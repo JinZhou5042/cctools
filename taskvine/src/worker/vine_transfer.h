@@ -4,10 +4,13 @@ This software is distributed under the GNU General Public License.
 See the file COPYING for details.
 */
 
+/* Send and receive cached files and directories using the Worker transfer protocol. */
+
 #ifndef VINE_TRANSFER_H
 #define VINE_TRANSFER_H
 
 #include "vine_cache.h"
+#include "vine_transfer_receive.h"
 #include "link.h"
 
 typedef enum {
@@ -18,11 +21,6 @@ typedef enum {
 /* Send any cached file/dir along the connection to a remote party. */
 
 int vine_transfer_put_any( struct link *lnk, struct vine_cache *cache, const char *filename, vine_transfer_mode_t mode, time_t stoptime );
-
-/* Receive a named file/dir from the connection to a local transfer path. The receive fails when no data arrives for
-timeout seconds, however long the whole transfer takes. */
-
-int vine_transfer_get_any(struct link *lnk, const char *dirname, int64_t *totalsize, int *mode, int *mtime, int timeout, char **error_message);
 
 /* Request an item by name, and then receive it in the same way as vine_transfer_get_any. */
 

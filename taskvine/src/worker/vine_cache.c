@@ -594,7 +594,7 @@ static int do_worker_transfer(struct vine_cache *c, struct vine_cache_file *f, c
 	int64_t totalsize;
 	int mode, mtime;
 
-	if (!vine_transfer_request_any(worker_link, source_path, transfer_dir, &totalsize, &mode, &mtime, VINE_PEER_TRANSFER_TIMEOUT, error_message)) {
+	if (vine_transfer_request_any(worker_link, source_path, transfer_dir, &totalsize, &mode, &mtime, VINE_PEER_TRANSFER_TIMEOUT, error_message) != 1) {
 		if (error_message && *error_message == NULL) {
 			*error_message = string_format("Could not transfer file from %s", f->source);
 		}
