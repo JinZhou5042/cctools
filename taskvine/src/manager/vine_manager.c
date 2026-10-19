@@ -1212,6 +1212,8 @@ void vine_manager_mark_worker_for_removal(struct vine_manager *q, struct vine_wo
 
 	w->pending_removal = reason;
 	hash_table_remove(q->worker_table, w->hashkey);
+	/* Like every link outside worker_table, its link is no longer polled. */
+	link_poll_set_remove(q->poll_set, w->link);
 	list_push_tail(q->zombie_workers, w);
 }
 
@@ -1299,6 +1301,12 @@ static void add_worker(struct vine_manager *q)
 
 	w->hashkey = link_to_hash_key(link);
 	w->addrport = string_format("%s:%d", addr, port);
+
+	if (!link_poll_set_add(q->poll_set, link, LINK_READ, w)) {
+		debug(D_NOTICE, "Cannot watch the connection of worker %s:%d.", addr, port);
+		vine_worker_delete(w);
+		return;
+	}
 
 	hash_table_insert(q->worker_table, w->hashkey, w);
 }
@@ -2675,18 +2683,9 @@ between the link and the vine_worker, then processing on or more
 messages available.
 */
 
-static vine_result_code_t handle_worker(struct vine_manager *q, struct link *l)
+static vine_result_code_t handle_worker(struct vine_manager *q, struct vine_worker_info *w)
 {
 	char line[VINE_LINE_MAX];
-	struct vine_worker_info *w;
-
-	char *key = link_to_hash_key(l);
-	w = hash_table_lookup(q->worker_table, key);
-	free(key);
-
-	/* This should not happen, but just in case: */
-	if (!w)
-		return VINE_WORKER_FAILURE;
 
 	vine_msg_code_t mcode;
 	mcode = vine_manager_recv_no_retry(q, w, line, sizeof(line));
@@ -2723,56 +2722,6 @@ static vine_result_code_t handle_worker(struct vine_manager *q, struct link *l)
 	}
 
 	return VINE_SUCCESS;
-}
-
-/*
-Construct the table of network links to be considered,
-including the manager's accepting link, and one for
-each active worker.
-*/
-
-static int build_poll_table(struct vine_manager *q)
-{
-	int n = 0;
-	char *key;
-	struct vine_worker_info *w;
-	int iteration;
-
-	// Allocate a small table, if it hasn't been done yet.
-	if (!q->poll_table) {
-		q->poll_table = malloc(sizeof(*q->poll_table) * q->poll_table_size);
-		if (!q->poll_table) {
-			// if we can't allocate a poll table, we can't do anything else.
-			fatal("allocating memory for poll table failed.");
-		}
-	}
-
-	// The first item in the poll table is the manager link, which accepts new connections.
-	q->poll_table[0].link = q->manager_link;
-	q->poll_table[0].events = LINK_READ;
-	q->poll_table[0].revents = 0;
-	n = 1;
-
-	// For every worker in the hash table, add an item to the poll table
-	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
-	{
-		// If poll table is not large enough, reallocate it
-		if (n >= q->poll_table_size) {
-			q->poll_table_size *= 2;
-			q->poll_table = realloc(q->poll_table, sizeof(*q->poll_table) * q->poll_table_size);
-			if (q->poll_table == NULL) {
-				// if we can't allocate a poll table, we can't do anything else.
-				fatal("reallocating memory for poll table failed.");
-			}
-		}
-
-		q->poll_table[n].link = w->link;
-		q->poll_table[n].events = LINK_READ;
-		q->poll_table[n].revents = 0;
-		n++;
-	}
-
-	return n;
 }
 
 static void vine_manager_compute_input_size(struct vine_manager *q, struct vine_task *t)
@@ -4178,6 +4127,16 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 		link_address_local(q->manager_link, address, &q->port);
 	}
 
+	q->poll_set = link_poll_set_create();
+	if (!q->poll_set || !link_poll_set_add(q->poll_set, q->manager_link, LINK_READ, NULL)) {
+		debug(D_NOTICE, "Could not create the poll set of the manager.");
+		link_poll_set_delete(q->poll_set);
+		link_close(q->manager_link);
+		free(runtime_dir);
+		free(q);
+		return 0;
+	}
+
 	debug(D_VINE, "manager start");
 
 	q->runtime_directory = runtime_dir;
@@ -4241,10 +4200,6 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->stats_measure = calloc(1, sizeof(struct vine_stats));
 
 	q->workers_with_watched_file_updates = hash_table_create(0, 0);
-
-	// The poll table is initially null, and will be created
-	// (and resized) as needed by build_poll_table.
-	q->poll_table_size = 8;
 
 	q->worker_selection_algorithm = VINE_SCHEDULE_FILES;
 	q->process_pending_check = 0;
@@ -4649,7 +4604,7 @@ void vine_delete(struct vine_manager *q)
 	hash_table_clear(q->properties, (void *)free);
 	hash_table_delete(q->properties);
 
-	free(q->poll_table);
+	link_poll_set_delete(q->poll_set);
 	free(q->ssl_cert);
 	free(q->ssl_key);
 
@@ -5232,16 +5187,14 @@ struct vine_task *vine_wait_for_task_id(struct vine_manager *q, int task_id, int
 }
 
 /*
-Consider all of the connected workers, and act open each connection
-that has pending input data, until the input buffer is empty.
-Return the number of workers that *failed* and disconnected.
+Wait for activity on the manager link and the worker connections, and act upon each worker connection that has pending
+input data, until its input buffer is empty. The poll set reports only the links that are ready, so a step costs time in
+proportion to them, not to all connected workers. Return the number of workers that *failed* and disconnected.
 */
 
 static int poll_active_workers(struct vine_manager *q, int stoptime)
 {
 	BEGIN_ACCUM_TIME(q, time_polling);
-
-	int n = build_poll_table(q);
 
 	// We poll in at most small time segments (of a half a second). This lets
 	// promptly dispatch tasks, while avoiding wasting cpu cycles when the
@@ -5260,30 +5213,34 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 	BEGIN_ACCUM_TIME(q, time_polling);
 
 	// Poll all links for activity.
-	link_poll(q->poll_table, n, msec);
+	link_poll_set_wait(q->poll_set, msec);
 	q->link_poll_end = timestamp_get();
 
 	END_ACCUM_TIME(q, time_polling);
 
 	BEGIN_ACCUM_TIME(q, time_status_msgs);
 
-	int i;
 	int workers_failed = 0;
 
-	/* Consider all active connections of any kind. */
-	for (i = 1; i < n; i++) {
+	q->connections_waiting = link_poll_set_take(q->poll_set, q->manager_link, LINK_READ);
 
-		/* If there is pending input data on that connection. */
-		if (q->poll_table[i].revents) {
-
-			/* Act on the next input message, until there is no more buffered data. */
-			do {
-				if (handle_worker(q, q->poll_table[i].link) == VINE_WORKER_FAILURE) {
-					workers_failed++;
-					break;
-				}
-			} while (!link_buffer_empty(q->poll_table[i].link));
+	/* Consider the ready worker connections in turn. A worker marked for removal while handling another one leaves
+	 * the poll set, and so is not reached. */
+	struct link *link;
+	struct vine_worker_info *w;
+	int revents;
+	while ((link = link_poll_set_next(q->poll_set, &revents, (void **)&w))) {
+		if (!w) {
+			continue;
 		}
+
+		/* Act on the next input message, until there is no more buffered data. */
+		do {
+			if (handle_worker(q, w) == VINE_WORKER_FAILURE) {
+				workers_failed++;
+				break;
+			}
+		} while (!link_buffer_empty(link));
 	}
 
 	END_ACCUM_TIME(q, time_status_msgs);
@@ -5298,7 +5255,7 @@ static int connect_new_workers(struct vine_manager *q, int stoptime, int max_new
 	// If the manager link was awake, then accept at most max_new_workers.
 	// Note we are using the information gathered in poll_active_workers, which
 	// is a little ugly.
-	if (q->poll_table[0].revents) {
+	if (q->connections_waiting) {
 		do {
 			add_worker(q);
 			new_workers++;
