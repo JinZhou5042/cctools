@@ -622,13 +622,6 @@ Change the state of a file replica on an event.
 If the final state is DELETED, remove the replica from the table.
 */
 
-static int process_replica_event(struct vine_manager *q, struct vine_worker_info *w, const char *cachename, struct vine_file_replica *replica, vine_file_replica_state_transition_event_t event);
-
-static int process_replica_on_event(struct vine_manager *q, struct vine_worker_info *w, const char *cachename, vine_file_replica_state_transition_event_t event)
-{
-	return process_replica_event(q, w, cachename, vine_file_replica_table_lookup(w, cachename), event);
-}
-
 /* Apply an event to the replica of cachename that worker w holds, already looked up by the caller. Return 0 when the
  * state did not change, 1 when it changed, and 2 when the replica reached DELETED and was deleted. */
 static int process_replica_event(struct vine_manager *q, struct vine_worker_info *w, const char *cachename, struct vine_file_replica *replica, vine_file_replica_state_transition_event_t event)
@@ -658,6 +651,11 @@ static int process_replica_event(struct vine_manager *q, struct vine_worker_info
 	}
 
 	return 1;
+}
+
+static int process_replica_on_event(struct vine_manager *q, struct vine_worker_info *w, const char *cachename, vine_file_replica_state_transition_event_t event)
+{
+	return process_replica_event(q, w, cachename, vine_file_replica_table_lookup(w, cachename), event) != 0;
 }
 
 /*

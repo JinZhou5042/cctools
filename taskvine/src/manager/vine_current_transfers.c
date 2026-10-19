@@ -155,6 +155,8 @@ int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 	return 1;
 }
 
+/* Remove the record of a transfer that succeeded, and clear the failure streaks of its source and destination. The
+ * record is looked up once. */
 int vine_current_transfers_remove_success(struct vine_manager *q, const char *id)
 {
 	struct vine_transfer_pair *p = hash_table_remove(q->current_transfer_table, id);
@@ -324,17 +326,6 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 	}
 
 	return 0;
-}
-
-void vine_current_transfers_set_success(struct vine_manager *q, char *id)
-{
-	struct vine_transfer_pair *p = hash_table_lookup(q->current_transfer_table, id);
-
-	if (!p) {
-		return;
-	}
-
-	count_success(q, p);
 }
 
 /* Clear the failure streaks of the source and destination of a successful transfer. */

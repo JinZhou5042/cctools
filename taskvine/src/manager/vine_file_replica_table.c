@@ -232,7 +232,7 @@ struct vine_file_replica *vine_file_replica_table_get_or_create(struct vine_mana
 		return replica;
 	}
 
-	// Create a new replica
+	// Create a new replica, which the worker does not hold, as the lookup above found.
 	replica = vine_file_replica_create(type, cache_level, size, mtime);
 	replica_table_add(m, w, cachename, replica);
 
