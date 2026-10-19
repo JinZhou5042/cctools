@@ -392,11 +392,13 @@ int vine_current_transfers_wipe_worker(struct vine_manager *q, struct vine_worke
 	return removed;
 }
 
-/* A destination keeps waiting for data from a removed source until its peer transfer timeout, because a source whose
- * host hangs keeps its connections open. Unlinking the pending file kills the transfer process at the destination,
- * which reports cache-invalid ("transfer of X was cancelled"), so the reader is set up again from another source at
- * once. The records stay until vine_current_transfers_wipe_worker(), so the late failures are not counted against
- * either worker. */
+/*
+A destination keeps waiting for data from a removed source until its peer transfer timeout, because a source whose host
+hangs keeps its connections open. Unlinking the pending file kills the transfer process at the destination, which
+reports cache-invalid, so the task that needs the file is set up again from another source at once. The records stay
+until vine_current_transfers_wipe_worker(), so the failures that follow are not counted against either worker.
+*/
+
 int vine_current_transfers_abandon_source(struct vine_manager *q, struct vine_worker_info *w)
 {
 	int abandoned = 0;
