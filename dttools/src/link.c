@@ -47,6 +47,11 @@ See the file COPYING for details.
 #define TCP_HIGH_PORT_DEFAULT 32767
 #endif
 
+/* Connections that wait for accept() on a listening socket. A manager with thousands of workers receives bursts of
+connections, and a connection dropped from a full queue costs its client a retransmitted SYN of at least a second.
+The kernel caps the value at net.core.somaxconn. */
+#define LINK_LISTEN_BACKLOG 4096
+
 #ifdef HAS_OPENSSL
 #include "openssl/bio.h"
 #include "openssl/err.h"
@@ -492,7 +497,7 @@ struct link *link_serve_address(const char *addr, int port)
 	if (success < 0)
 		goto failure;
 
-	success = listen(link->fd, 5);
+	success = listen(link->fd, LINK_LISTEN_BACKLOG);
 	if (success < 0)
 		goto failure;
 
