@@ -1252,6 +1252,8 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	vine_txn_log_write_worker(q, w, 1, reason);
 
+	vine_schedule_quarantine_remove_worker(q, w);
+
 	hash_table_remove(q->worker_table, w->hashkey);
 	hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
 	hash_table_remove(q->workers_idle_disconnecting, w->hashkey);
@@ -3280,6 +3282,7 @@ static vine_result_code_t commit_task_to_worker(struct vine_manager *q, struct v
 
 	itable_insert(w->current_tasks, t->task_id, t);
 	t->worker = w;
+	vine_schedule_quarantine_commit(q, w, t);
 
 	change_task_state(q, t, VINE_TASK_RUNNING);
 
@@ -3447,6 +3450,8 @@ static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_inf
 
 	/* Make sure the task and worker agree before changing anything. */
 	assert(t->worker == w);
+
+	vine_schedule_quarantine_reap(q, w, t);
 
 	/* Tell worker to remove the task sandbox (and if necessary, the running process) */
 	vine_manager_send(q, w, "kill %d\n", t->task_id);
@@ -4894,6 +4899,10 @@ static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_t
 		break;
 	case VINE_TASK_READY:
 		c->vine_stats->tasks_waiting--;
+		/* A task that is no longer ready keeps no worker reserved for it. */
+		if (new_state != VINE_TASK_READY) {
+			vine_schedule_quarantine_release(t);
+		}
 		break;
 	case VINE_TASK_RUNNING:
 		c->vine_stats->tasks_running--;

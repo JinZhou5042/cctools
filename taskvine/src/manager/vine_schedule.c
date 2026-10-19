@@ -188,20 +188,9 @@ static int check_worker_have_committable_resources(struct vine_manager *q, struc
 	return 0;
 }
 
-/* Check if this task is compatible with this given worker by considering
- * resources availability, features, blocklist, and all other relevant factors.
- * Used by all scheduling methods for basic compatibility.
- * @param q The manager structure.
- * @param w The worker info structure.
- * @param t The task structure.
- * @return 0 if the task is not compatible with the worker, 1 otherwise.
- */
-
-int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
+/* Check the conditions under which a worker accepts no task at all, apart from its free resources. */
+static int check_worker_is_available(struct vine_manager *q, struct vine_worker_info *w)
 {
-	/* THIS FUNCTION SHOULD NOT MODIFY t IN ANY WAY. */
-	/* Otherwise library templates are modified during the run. */
-
 	/* worker has not reported any resources yet */
 	if (w->resources->tag < 0 || w->resources->workers.total < 1 || w->end_time < 0) {
 		return 0;
@@ -234,6 +223,67 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 
 	/* Check if worker is blocked from the manager. */
 	if (vine_blocklist_is_blocked(q, w->hostname)) {
+		return 0;
+	}
+
+	return 1;
+}
+
+/* Return true if a worker runs a task other than its libraries. */
+static int worker_runs_tasks(struct vine_worker_info *w)
+{
+	return itable_size(w->current_tasks) > itable_size(w->current_libraries);
+}
+
+/* Return true if worker w is reserved for a quarantined task other than t. A reservation whose task is no longer ready,
+ * or reserved another worker meanwhile, is dropped here. */
+static int worker_reserved_for_other(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
+{
+	if (!w->quarantine_reserved_id || w->quarantine_reserved_id == t->task_id) {
+		return 0;
+	}
+	struct vine_task *reserved = itable_lookup(q->tasks, w->quarantine_reserved_id);
+	if (reserved && reserved->state == VINE_TASK_READY && reserved->quarantine_worker == w) {
+		return 1;
+	}
+	w->quarantine_reserved_id = 0;
+	return 0;
+}
+
+/* Return true if worker w may take task t under the quarantine of tasks charged a lost worker. */
+static int check_worker_quarantine(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
+{
+	if (t->type == VINE_TASK_TYPE_LIBRARY) {
+		return 1;
+	}
+	if (w->quarantine_task_id || worker_reserved_for_other(q, w, t)) {
+		return 0;
+	}
+	if (t->worker_loss_charged && worker_runs_tasks(w)) {
+		return 0;
+	}
+	return 1;
+}
+
+/* Check if this task is compatible with this given worker by considering
+ * resources availability, features, blocklist, and all other relevant factors.
+ * Used by all scheduling methods for basic compatibility.
+ * @param q The manager structure.
+ * @param w The worker info structure.
+ * @param t The task structure.
+ * @return 0 if the task is not compatible with the worker, 1 otherwise.
+ */
+
+int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
+{
+	/* THIS FUNCTION SHOULD NOT MODIFY t IN ANY WAY. */
+	/* Otherwise library templates are modified during the run. */
+
+	if (!check_worker_is_available(q, w)) {
+		return 0;
+	}
+
+	if (!check_worker_quarantine(q, w, t)) {
 		return 0;
 	}
 
@@ -354,12 +404,94 @@ static int count_worker_free_cores(struct vine_manager *q, struct vine_worker_in
 	return free_cores;
 }
 
+/* Drop the reservation of a quarantined task, if any. */
+void vine_schedule_quarantine_release(struct vine_task *t)
+{
+	struct vine_worker_info *w = t->quarantine_worker;
+	if (w && w->quarantine_reserved_id == t->task_id) {
+		w->quarantine_reserved_id = 0;
+	}
+	t->quarantine_worker = NULL;
+}
+
+/* Reserve for a quarantined task that found no free worker the available worker with the most free cores that is not
+ * reserved and runs no quarantined task. It takes no new task until it runs nothing. */
+static void quarantine_reserve(struct vine_manager *q, struct vine_task *t)
+{
+	struct vine_worker_info *best = NULL;
+	int best_free_cores = 0;
+
+	char *key;
+	struct vine_worker_info *w;
+	int iteration;
+	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+	{
+		if (!w || !w->resources || w->type != VINE_WORKER_TYPE_WORKER || w->quarantine_task_id) {
+			continue;
+		}
+		if (worker_reserved_for_other(q, w, t) || !check_worker_is_available(q, w)) {
+			continue;
+		}
+		int free_cores = count_worker_free_cores(q, w);
+		if (!best || free_cores > best_free_cores) {
+			best = w;
+			best_free_cores = free_cores;
+		}
+	}
+
+	if (best) {
+		best->quarantine_reserved_id = t->task_id;
+		t->quarantine_worker = best;
+		debug(D_VINE, "task %d was charged a lost worker and waits for %s to run nothing else", t->task_id, best->addrport);
+	}
+}
+
+void vine_schedule_quarantine_commit(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
+{
+	if (t->type == VINE_TASK_TYPE_LIBRARY || !t->worker_loss_charged) {
+		return;
+	}
+	vine_schedule_quarantine_release(t);
+	w->quarantine_task_id = t->task_id;
+}
+
+void vine_schedule_quarantine_reap(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
+{
+	if (w->quarantine_task_id == t->task_id) {
+		w->quarantine_task_id = 0;
+	}
+}
+
+void vine_schedule_quarantine_remove_worker(struct vine_manager *q, struct vine_worker_info *w)
+{
+	if (w->quarantine_reserved_id) {
+		struct vine_task *t = itable_lookup(q->tasks, w->quarantine_reserved_id);
+		if (t && t->quarantine_worker == w) {
+			t->quarantine_worker = NULL;
+		}
+		w->quarantine_reserved_id = 0;
+	}
+}
+
 /* Select the best worker for this task, based on the current scheduling mode. */
 
 struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, struct vine_task *t)
 {
 	if (!q || !t) {
 		return NULL;
+	}
+
+	/* A quarantined task with a reservation takes its worker once that worker runs nothing, or any other worker that
+	 * runs nothing first, so a long task on the reserved worker does not hold it back while other workers are free. A
+	 * reserved worker that runs nothing and still cannot take the task is released, and the task searches again. */
+	if (t->quarantine_worker) {
+		struct vine_worker_info *reserved = t->quarantine_worker;
+		if (check_worker_against_task(q, reserved, t)) {
+			return reserved;
+		}
+		if (!worker_runs_tasks(reserved)) {
+			vine_schedule_quarantine_release(t);
+		}
 	}
 
 	/* first sort by the strategy-specific criterion, then run @check_worker_against_task on the sorted list */
@@ -471,6 +603,10 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 	}
 
 	priority_queue_delete(workers);
+
+	if (!best_worker && t->worker_loss_charged && !t->quarantine_worker) {
+		quarantine_reserve(q, t);
+	}
 
 	return best_worker;
 }

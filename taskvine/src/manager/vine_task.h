@@ -98,7 +98,10 @@ struct vine_task {
 	int workers_slow;           /**< Number of times this task has been terminated for running too long. */
 	timestamp_t time_worker_lost[2]; /**< When workers running this task last disconnected unexpectedly, the latest first, or zero. */
 	timestamp_t time_unexplained_loss; /**< When a worker running this task was last lost in a way that no task explained, or zero. */
-	int worker_loss_charged;    /**< Set once an unexpected loss of a worker counted as one of this task's tries. */
+	int worker_loss_charged;    /**< Set once an unexpected loss of a worker counted as one of this task's tries. The
+				       task is then quarantined: it runs only on a worker that runs nothing else (see vine_schedule.h). */
+	struct vine_worker_info *quarantine_worker; /**< If quarantined and no worker was free, the worker that takes no new task
+				       until it is free for this one, or null. */
 	int function_slots_total;   /**< If a library, the total number of function slots usable. */
 	int function_slots_inuse;   /**< If a library, the number of functions currently running. */
 		

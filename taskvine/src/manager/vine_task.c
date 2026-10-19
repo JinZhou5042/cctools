@@ -152,6 +152,7 @@ void vine_task_reset(struct vine_task *t)
 	t->time_worker_lost[0] = t->time_worker_lost[1] = 0;
 	t->time_unexplained_loss = 0;
 	t->worker_loss_charged = 0;
+	t->quarantine_worker = NULL;
 
 	t->time_workers_execute_all = 0;
 	t->time_workers_execute_exhaustion = 0;
