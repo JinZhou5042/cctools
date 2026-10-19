@@ -419,11 +419,13 @@ def main():
                     pid, func_id = start_function(in_pipe_fd, thread_limit)
                     # pid == -1 indicates a failure during fork/setup of the function execution
                     if pid == -1:
+                        # The status that waitpid() returns for a process that exited with status 1, as the worker
+                        # receives for every other call. A plain 1 would read as a process killed by signal 1.
                         send_result(
                             out_pipe_fd,
                             args.worker_pid,
                             func_id,
-                            1,
+                            1 << 8,
                         )
                     else:
                         pid_to_func_id[pid] = func_id
