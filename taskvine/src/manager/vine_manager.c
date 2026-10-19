@@ -117,6 +117,10 @@ See the file COPYING for details.
 /* Default value for how frequently to check for tasks that do not fit any worker. */
 #define VINE_LARGE_TASK_CHECK_INTERVAL 180000000 // 3 minutes in usecs
 
+/* An unexpected loss of a worker is not charged to the tasks it ran if another worker was lost in a way that no task
+ * explains within this time before. See cleanup_worker(). */
+#define VINE_WORKER_LOSS_EXCUSE_WINDOW (5 * ONE_SECOND)
+
 /* Default value for how frequently to allow calls to vine_hungry_computation. */
 #define VINE_HUNGRY_CHECK_INTERVAL 5000000 // 5 seconds in usecs
 
@@ -1106,6 +1110,22 @@ static int enforce_worker_eviction_interval(struct vine_manager *q)
 	return vine_manager_release_random_worker(q);
 }
 
+/* Whether the unexpected loss of a worker at time now is excused for task t, because another worker was lost shortly
+ * before in a way that no task explains: it held tasks, none of which had been charged a loss. A loss of t itself never
+ * excuses t, so a task that makes each worker it lands on exit cannot excuse itself with its own losses: its last two
+ * losses, and the last unexplained one, which a task that kills a worker every second outlives by more than two. See
+ * cleanup_worker(). */
+static int worker_loss_is_excused(struct vine_manager *q, struct vine_task *t, timestamp_t now)
+{
+	for (int i = 0; i < 2; i++) {
+		timestamp_t evidence = q->time_unexplained_worker_losses[i];
+		if (evidence && evidence != t->time_worker_lost[0] && evidence != t->time_worker_lost[1] && evidence != t->time_unexplained_loss && now - evidence <= VINE_WORKER_LOSS_EXCUSE_WINDOW) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 /* Remove all tasks and other associated state from a given worker. */
 static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w, vine_worker_disconnect_reason_t reason)
 {
@@ -1117,6 +1137,29 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w, v
 		return;
 
 	vine_current_transfers_wipe_worker(q, w);
+
+	/* Each dispatch counts as a try. A loss is charged to the tasks the worker ran only when the worker disconnected
+	 * unexpectedly and no other worker was lost shortly before in a way that no task explains, that is, while it held
+	 * only tasks that had never been charged a loss; a task's own losses never excuse it. A task that makes every
+	 * worker it lands on exit, such as one that exceeds the memory of its worker, is charged once it loses a worker
+	 * with no such loss of another worker shortly before, then explains each later loss of its workers, which keep
+	 * being charged, and it returns once it is out of retries instead of taking every worker in turn. Losses during a
+	 * mass loss or a cascade of external removals are excused and give the try back, as forsaken tasks do, and the
+	 * tasks they excuse stay uncharged, so their later losses still count as evidence while the cascade continues. */
+	timestamp_t now = timestamp_get();
+	int unexpected = reason == VINE_WORKER_DISCONNECT_FAILURE;
+	int unexplained = 0;
+	ITABLE_ITERATE(w->current_tasks, iteration, task_id, t)
+	{
+		if (t->type == VINE_TASK_TYPE_LIBRARY) {
+			continue;
+		}
+		if (t->worker_loss_charged) {
+			unexplained = 0;
+			break;
+		}
+		unexplained = 1;
+	}
 
 	ITABLE_ITERATE(w->current_tasks, iteration, task_id, t)
 	{
@@ -1131,17 +1174,39 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w, v
 			t->time_workers_execute_all += delta_time;
 		}
 
-		/* Remove the unfinished task and update data structures. Each dispatch counts as a try, so a task that
-		 * makes every worker it runs on exit, such as one that exceeds the memory of its worker, returns once it
-		 * is out of retries instead of taking every worker in turn. */
-		if (reason == VINE_WORKER_DISCONNECT_FAILURE && t->type != VINE_TASK_TYPE_LIBRARY && t->max_retries > 0 && t->try_count > t->max_retries) {
-			debug(D_VINE, "task %d lost worker %s (%s) after %d tries, returning it", t->task_id, w->hostname, w->addrport, t->try_count);
-			vine_task_set_result(t, VINE_RESULT_MAX_RETRIES);
-			reap_task_from_worker(q, w, t, VINE_TASK_RETRIEVED);
-		} else {
-			reap_task_from_worker(q, w, t, VINE_TASK_READY);
+		/* Remove the unfinished task and update data structures. A task out of retries returns to the application
+		 * instead of going to another worker. */
+		vine_task_state_t new_state = VINE_TASK_READY;
+		if (t->type != VINE_TASK_TYPE_LIBRARY) {
+			if (!unexpected || worker_loss_is_excused(q, t, now)) {
+				t->try_count -= 1;
+			} else {
+				t->worker_loss_charged = 1;
+				if (t->max_retries > 0 && t->try_count > t->max_retries) {
+					vine_task_set_result(t, VINE_RESULT_MAX_RETRIES);
+					new_state = VINE_TASK_RETRIEVED;
+				}
+			}
+			if (unexpected) {
+				t->time_worker_lost[1] = t->time_worker_lost[0];
+				t->time_worker_lost[0] = now;
+				/* The loss becomes evidence below. A task that loses workers faster than one every few seconds
+				 * outlives its last two losses within the excuse window, so it remembers this one too. */
+				if (unexplained) {
+					t->time_unexplained_loss = now;
+				}
+			}
+			debug(D_VINE, "task %d lost worker %s (%s): %d of %d tries used", t->task_id, w->hostname, w->addrport, t->try_count, t->max_retries);
+		}
+		reap_task_from_worker(q, w, t, new_state);
+		if (new_state == VINE_TASK_READY) {
 			vine_task_clean(t);
 		}
+	}
+
+	if (unexpected && unexplained) {
+		q->time_unexplained_worker_losses[1] = q->time_unexplained_worker_losses[0];
+		q->time_unexplained_worker_losses[0] = now;
 	}
 
 	itable_clear(w->current_tasks, 0);

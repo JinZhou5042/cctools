@@ -153,6 +153,9 @@ struct vine_manager {
 	timestamp_t time_last_wait;
 	timestamp_t time_last_log_stats;
 	timestamp_t time_last_large_tasks_check;
+	timestamp_t time_unexplained_worker_losses[2]; /* The two most recent unexpected losses of workers that held tasks
+							  none of which had been charged a loss, newest first, or zero.
+							  See cleanup_worker(). */
 	timestamp_t link_poll_end;
 	time_t      catalog_last_update_time;
 	time_t      resources_last_update_time;
