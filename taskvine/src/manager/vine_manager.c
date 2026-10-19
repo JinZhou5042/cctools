@@ -1107,7 +1107,7 @@ static int enforce_worker_eviction_interval(struct vine_manager *q)
 }
 
 /* Remove all tasks and other associated state from a given worker. */
-static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w)
+static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w, vine_worker_disconnect_reason_t reason)
 {
 	struct vine_task *t;
 	uint64_t task_id;
@@ -1131,9 +1131,17 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w)
 			t->time_workers_execute_all += delta_time;
 		}
 
-		/* Remove the unfinished task and update data structures. */
-		reap_task_from_worker(q, w, t, VINE_TASK_READY);
-		vine_task_clean(t);
+		/* Remove the unfinished task and update data structures. Each dispatch counts as a try, so a task that
+		 * makes every worker it runs on exit, such as one that exceeds the memory of its worker, returns once it
+		 * is out of retries instead of taking every worker in turn. */
+		if (reason == VINE_WORKER_DISCONNECT_FAILURE && t->type != VINE_TASK_TYPE_LIBRARY && t->max_retries > 0 && t->try_count > t->max_retries) {
+			debug(D_VINE, "task %d lost worker %s (%s) after %d tries, returning it", t->task_id, w->hostname, w->addrport, t->try_count);
+			vine_task_set_result(t, VINE_RESULT_MAX_RETRIES);
+			reap_task_from_worker(q, w, t, VINE_TASK_RETRIEVED);
+		} else {
+			reap_task_from_worker(q, w, t, VINE_TASK_READY);
+			vine_task_clean(t);
+		}
 	}
 
 	itable_clear(w->current_tasks, 0);
@@ -1187,7 +1195,7 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 		recall_worker_lost_temp_files(q, w);
 	}
 
-	cleanup_worker(q, w);
+	cleanup_worker(q, w, reason);
 
 	vine_manager_factory_worker_leave(q, w);
 
