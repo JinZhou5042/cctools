@@ -167,12 +167,14 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 	return 0;
 }
 
-void vine_current_transfers_set_success(struct vine_manager *q, char *id)
+/* Remove the record of a transfer that succeeded, and clear the failure streaks of its source and destination. The
+ * record is looked up once. */
+int vine_current_transfers_remove_success(struct vine_manager *q, const char *id)
 {
-	struct vine_transfer_pair *p = hash_table_lookup(q->current_transfer_table, id);
+	struct vine_transfer_pair *p = hash_table_remove(q->current_transfer_table, id);
 
 	if (!p) {
-		return;
+		return 0;
 	}
 
 	struct vine_worker_info *source = p->source_worker;
@@ -190,6 +192,9 @@ void vine_current_transfers_set_success(struct vine_manager *q, char *id)
 		dest_worker->xfer_streak_bad_destination_counter = 0;
 		dest_worker->xfer_total_good_destination_counter++;
 	}
+
+	vine_transfer_pair_delete(p);
+	return 1;
 }
 
 // count the number transfers coming from a specific remote url (not a worker)
