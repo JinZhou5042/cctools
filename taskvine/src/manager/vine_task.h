@@ -170,7 +170,7 @@ struct vine_task {
 								  instead of a transfer of its own from a peer (see vine_manager_data_service_receiving_inline()). */
 
 	int refcount;                                          /**< Number of remaining references to this object. */
-	int recovery_refs;                                     /**< Number of temporary files whose recovery source is this task, each with a reference to it
+	int recovery_refs;				       /**< Number of temporary files whose recovery source is this task, each with a reference to it
 								  (see vine_task_recipe.h). Once only they hold the task, they keep its recipe instead. */
 };
 

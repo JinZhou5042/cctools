@@ -10,6 +10,7 @@ See the file COPYING for details.
 #include "vine_file.h"
 #include "vine_manager.h"
 #include "vine_mount.h"
+#include "vine_task_recipe.h"
 #include "vine_worker_info.h"
 
 #include "debug.h"
@@ -499,6 +500,7 @@ void vine_task_set_category(struct vine_task *t, const char *category)
 
 void vine_task_add_feature(struct vine_task *t, const char *name)
 {
+	vine_task_before_change(t);
 	if (!name) {
 		return;
 	}

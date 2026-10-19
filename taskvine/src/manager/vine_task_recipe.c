@@ -28,19 +28,19 @@ struct vine_task_recipe_mount {
 /* The fields of a task that vine_task_copy() copies, which are what a recovery task needs. A recovery task starts
  * from the first resource allocation and without fixed locations, as a copy does. */
 struct vine_task_recipe {
-	int refcount;				   // Number of files whose recovery_recipe is this recipe.
-	int input_count;			   // Input mounts, the first entries of mounts.
-	int output_count;			   // Output mounts, the entries after the inputs.
+	int refcount;	  // Number of files whose recovery_recipe is this recipe.
+	int input_count;  // Input mounts, the first entries of mounts.
+	int output_count; // Output mounts, the entries after the inputs.
 	char *command_line;
 	char *needs_library;
 	char *provides_library;
 	char *tag;
 	char *category;
 	char *monitor_output_directory;
-	struct vine_file *monitor_snapshot_file;   // Also an input mount, which holds its reference.
-	struct list *env_list;			   // NULL when the task sets no environment variables.
-	struct list *feature_list;		   // NULL when the task requires no features.
-	struct rmsummary *resources_requested;	   // NULL when a new task with the same library requests the same.
+	struct vine_file *monitor_snapshot_file; // Also an input mount, which holds its reference.
+	struct list *env_list;			 // NULL when the task sets no environment variables.
+	struct list *feature_list;		 // NULL when the task requires no features.
+	struct rmsummary *resources_requested;	 // NULL when a new task with the same library requests the same.
 	vine_task_func_exec_mode_t func_exec_mode;
 	int function_slots_requested;
 	vine_schedule_t worker_selection_algorithm;
@@ -102,7 +102,7 @@ static struct vine_task_recipe_mount *fill_mounts(struct vine_task_recipe_mount 
 		{
 			if (!(m->flags & VINE_RETRACT_ON_RESET)) {
 				entry->file = vine_file_addref(m->file);
-				entry->remote_name = xxstrdup(m->remote_name);
+				entry->remote_name = m->remote_name ? xxstrdup(m->remote_name) : NULL;
 				entry->flags = m->flags;
 				entry++;
 			}
