@@ -1196,7 +1196,11 @@ static int do_unlink(struct link *manager, const char *path)
 
 	int result = 0;
 
-	if (path_within_dir(cached_path, workspace->workspace_dir)) {
+	/* A cache name of one path component names an entry of the cache directory, which is within the workspace.
+	 * Other names are checked by resolving their parents, which takes a system call per path component. */
+	int plain_name = !strchr(path, '/') && strcmp(path, ".") && strcmp(path, "..");
+
+	if (plain_name || path_within_dir(cached_path, workspace->workspace_dir)) {
 		vine_cache_remove(cache_manager, path, manager);
 		result = 1;
 	} else {

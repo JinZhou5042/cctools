@@ -304,7 +304,11 @@ int vine_cache_add_file(
 		/* File has data and is ready to use. */
 		f->status = VINE_CACHE_STATUS_READY;
 
-		vine_cache_file_save_metadata(f, meta_path);
+		/* Only vine_cache_load() reads metadata, when a worker starts on an existing cache, and it keeps only files
+		 * cached forever: it deletes other files whether their metadata exists or not. */
+		if (f->cache_level >= VINE_CACHE_LEVEL_FOREVER) {
+			vine_cache_file_save_metadata(f, meta_path);
+		}
 
 		/* Inform the manager that we now have the file */
 		vine_worker_send_cache_update(manager, cachename, f);
