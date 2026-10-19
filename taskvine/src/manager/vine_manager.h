@@ -89,8 +89,8 @@ struct vine_manager {
 	struct hash_table *properties;   /* Set of additional properties to report to catalog server. */
 
 	struct link *manager_link;       /* Listening TCP connection for accepting new workers. */
-	struct link_info *poll_table;    /* Table for polling on all connected workers. */
-	int poll_table_size;             /* Number of entries in poll_table. */
+	struct link_poll_set *poll_set;  /* The manager link and the link of every worker in worker_table, polled together. */
+	int connections_waiting;         /* The last poll found connections waiting on manager_link. */
 
 	/* Security configuration */
 
