@@ -894,6 +894,11 @@ ssize_t read_aux(struct link *link, char *data, size_t count)
 			}
 		}
 
+		/* A wait of the link's poll set reports what the read left inside the SSL object. */
+		if (SSL_pending(link->ssl) > 0) {
+			poll_set_note_buffer(link);
+		}
+
 		return result;
 	}
 #endif
@@ -1826,7 +1831,7 @@ int link_poll_set_wait(struct link_poll_set *set, int msec)
 
 	/* Links that a read left with data in their buffer are readable without a look at their sockets. */
 	while ((link = poll_list_pop(set, POLL_CHECK))) {
-		if (link->buffer_length > 0) {
+		if (link_has_buffered_data(link)) {
 			poll_set_mark(set, link, LINK_READ);
 			msec = 0;
 		}
