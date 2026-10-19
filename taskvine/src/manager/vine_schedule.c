@@ -247,8 +247,8 @@ static int check_worker_quarantine(struct vine_manager *q, struct vine_worker_in
 
 static int check_worker_is_available(struct vine_manager *q, struct vine_worker_info *w);
 
-/* Drop the reservation of a quarantined task. */
-static void quarantine_release(struct vine_task *t)
+/* Drop the reservation of a quarantined task, if any. */
+void vine_schedule_quarantine_release(struct vine_task *t)
 {
 	struct vine_worker_info *w = t->quarantine_worker;
 	if (w && w->quarantine_reserved_id == t->task_id) {
@@ -284,7 +284,7 @@ void vine_schedule_quarantine_commit(struct vine_manager *q, struct vine_worker_
 	if (t->type == VINE_TASK_TYPE_LIBRARY || !t->worker_loss_charged) {
 		return;
 	}
-	quarantine_release(t);
+	vine_schedule_quarantine_release(t);
 	w->quarantine_task_id = t->task_id;
 }
 
@@ -1075,7 +1075,7 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 			}
 			return NULL;
 		}
-		quarantine_release(t);
+		vine_schedule_quarantine_release(t);
 	}
 
 	uint64_t stamp = ++q->schedule_stamp;
@@ -1192,10 +1192,6 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 
 	list_delete(holders);
 
-	if (!best_worker && t->worker_loss_charged && !t->quarantine_worker) {
-		quarantine_reserve(q, t);
-	}
-
 	/* Only holders of the input without a source were considered, and none could take the task. A task with an input
 	 * that comes inline into the vault waits for it, whatever else it reads. */
 	if (!best_worker && receiving) {
@@ -1203,6 +1199,10 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 		t->blocking_vault = 1;
 	} else if (!best_worker && unsourced) {
 		t->blocking_inputs[0] = unsourced;
+	}
+
+	if (!best_worker && t->worker_loss_charged && !t->quarantine_worker) {
+		quarantine_reserve(q, t);
 	}
 
 	return best_worker;

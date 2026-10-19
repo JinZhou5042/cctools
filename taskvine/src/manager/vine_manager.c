@@ -114,10 +114,6 @@ See the file COPYING for details.
 /* Default value before entity is considered again after last failure, in usecs */
 #define VINE_DEFAULT_TRANSIENT_ERROR_INTERVAL (15 * ONE_SECOND)
 
-/* How long after an unexpected loss of a worker that no task explains the losses of other workers are excused for the
- * tasks they ran. See cleanup_worker(). */
-#define VINE_WORKER_LOSS_EXCUSE_WINDOW (5 * ONE_SECOND)
-
 /* Default maximum time that a library template can fail and retry, it over this number the template should be removed
  */
 #define VINE_TASK_MAX_LIBRARY_RETRIES 15
@@ -5704,6 +5700,10 @@ static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_t
 		break;
 	case VINE_TASK_READY:
 		c->vine_stats->tasks_waiting--;
+		/* A task that is no longer ready keeps no worker reserved for it. */
+		if (new_state != VINE_TASK_READY) {
+			vine_schedule_quarantine_release(t);
+		}
 		break;
 	case VINE_TASK_RUNNING:
 		c->vine_stats->tasks_running--;

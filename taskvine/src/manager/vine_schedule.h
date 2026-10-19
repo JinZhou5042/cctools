@@ -66,10 +66,12 @@ void vine_schedule_delete_blocked_sources(struct vine_manager *q);
  * runs only on a worker that runs no other task, and that worker takes no other task while it runs. The losses of a
  * task that kills its workers are then its own, and a task that only shared a worker with it runs alone and
  * completes. When no worker is free, the task reserves one, which takes no new task until its tasks end, so a
- * quarantined task never waits for a worker to become free by chance. Committing the task releases the reservation.
- * The checks cost O(1) per worker tried, and finding a worker to reserve walks the capacity index once per task. */
+ * quarantined task never waits for a worker to become free by chance. The reservation ends when the task is
+ * committed to a worker, when it leaves the ready state, or when its worker is removed. The checks cost O(1) per
+ * worker tried, and finding a worker to reserve walks the capacity index once per task. */
 void vine_schedule_quarantine_commit(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
 void vine_schedule_quarantine_reap(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
+void vine_schedule_quarantine_release(struct vine_task *t);
 void vine_schedule_quarantine_remove_worker(struct vine_manager *q, struct vine_worker_info *w);
 /* Keep the capacity index, which orders the workers of worker_table by their free cores and function slots so that
  * VINE_SCHEDULE_FILES finds the best worker without a pass over all workers. A worker is added when it enters
