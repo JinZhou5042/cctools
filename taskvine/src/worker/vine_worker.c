@@ -117,9 +117,6 @@ static struct link *pending_async_link = 0;
  * their exit status remains to be collected, which the main loop does without waiting and a disconnect does waiting. */
 static struct itable *procs_killed = NULL;
 
-/* Table of killed function calls still running in their library, indexed by task_id, with the library as value. */
-static struct itable *procs_killed_functions = NULL;
-
 /* Table of all processes with results to be sent back, indexed by task_id. */
 /* These are additional pointers into procs_table and should not be deleted */
 static struct itable *procs_complete = NULL;
@@ -128,6 +125,9 @@ static struct itable *procs_complete = NULL;
  * table but procs_table until continue_stageout() moves it to procs_complete, so it is neither running nor reported.
  * These are additional pointers into procs_table and should not be deleted. */
 static struct list *procs_stageout = NULL;
+
+/* Table of killed function calls still running in their library, indexed by task_id, with the library as value. */
+static struct itable *procs_killed_functions = NULL;
 
 /* Table of current transfers and their id. */
 static struct hash_table *current_transfers = NULL;
