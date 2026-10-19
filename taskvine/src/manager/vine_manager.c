@@ -661,6 +661,16 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 		t->time_when_last_failure = w->last_failure_time;
 	}
 
+	/* A task that the worker forsook, such as a function call whose library died, or a library that exited, did not
+	 * complete, but the worker still sends the standard output it has after the message. It is discarded so that the
+	 * next message is read from its start. */
+	if ((task_status == VINE_RESULT_FORSAKEN || task_status == VINE_RESULT_LIBRARY_EXIT) && bytes_sent > 0) {
+		time_t stoptime = time(0) + vine_manager_transfer_time(q, w, bytes_sent);
+		if (link_soak(w->link, bytes_sent, stoptime) != bytes_sent) {
+			return VINE_WORKER_FAILURE;
+		}
+	}
+
 	/* If the task was forsaken by the worker or couldn't exeute, it didn't really complete.*/
 	if (task_status == VINE_RESULT_FORSAKEN) {
 		t->forsaken_count++;
