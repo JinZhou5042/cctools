@@ -1565,6 +1565,24 @@ static int fetch_outputs_from_worker(struct vine_manager *q, struct vine_worker_
 	return 1;
 }
 
+/* Return whether a library template named name exists. Every check of a ready function call asks this, and the calls
+ * of a run usually need one library, so the last answer is kept until a template is added or removed. */
+static int library_template_exists(struct vine_manager *q, const char *name)
+{
+	if (q->library_checked_name && q->library_checked_serial == q->library_templates_serial && !strcmp(q->library_checked_name, name)) {
+		return q->library_checked_found;
+	}
+	char *copy = strdup(name);
+	if (!copy) {
+		return hash_table_lookup(q->library_templates, name) != NULL;
+	}
+	free(q->library_checked_name);
+	q->library_checked_name = copy;
+	q->library_checked_serial = q->library_templates_serial;
+	q->library_checked_found = hash_table_lookup(q->library_templates, name) != NULL;
+	return q->library_checked_found;
+}
+
 /*
 Retrieve task that cannot run for unfixable policy reasons,
 such as exceeded the absolute end time, no library task available, etc.
@@ -1582,7 +1600,7 @@ static int retrieve_ready_task(struct vine_manager *q, struct vine_task *t, doub
 	if (t->resources_requested->end > 0 && t->resources_requested->end <= now_secs) {
 		debug(D_VINE, "task %d has exceeded its end time", t->task_id);
 		result = VINE_RESULT_MAX_END_TIME;
-	} else if (t->needs_library && !hash_table_lookup(q->library_templates, t->needs_library)) {
+	} else if (t->needs_library && !library_template_exists(q, t->needs_library)) {
 		debug(D_VINE, "task %d does not match any submitted library named \"%s\"", t->task_id, t->needs_library);
 		result = VINE_RESULT_MISSING_LIBRARY;
 	}
@@ -3635,8 +3653,9 @@ Determine whether there is a suitable library task for a function call task.
 
 static int vine_manager_check_library_for_function_call(struct vine_manager *q, struct vine_task *t)
 {
-	if (!t->needs_library || hash_table_lookup(q->library_templates, t->needs_library))
+	if (!t->needs_library || library_template_exists(q, t->needs_library)) {
 		return 1;
+	}
 	return 0;
 }
 
@@ -4619,11 +4638,13 @@ void vine_delete(struct vine_manager *q)
 
 	hash_table_clear(q->library_templates, (void *)vine_task_delete);
 	hash_table_delete(q->library_templates);
+	free(q->library_checked_name);
 
 	/* delete files after deleting tasks so that rc are correctly updated. */
 	hash_table_clear(q->file_table, (void *)vine_file_delete);
 	hash_table_delete(q->file_table);
 
+	q->last_category = NULL;
 	hash_table_clear(q->categories, (void *)category_free);
 	hash_table_delete(q->categories);
 
@@ -5100,6 +5121,7 @@ void vine_manager_install_library(struct vine_manager *q, struct vine_task *t, c
 	t->task_id = -1;
 	vine_task_set_library_provided(t, name);
 	hash_table_insert(q->library_templates, name, t);
+	q->library_templates_serial++;
 	t->time_when_submitted = timestamp_get();
 }
 
@@ -5138,6 +5160,7 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 	list_delete(instances);
 
 	hash_table_remove(q->library_templates, name);
+	q->library_templates_serial++;
 	debug(D_VINE, "All instances and the template for library %s have been removed", name);
 }
 
@@ -6636,6 +6659,12 @@ const struct rmsummary *vine_manager_task_resources_min(struct vine_manager *q, 
 
 struct category *vine_category_lookup_or_create(struct vine_manager *q, const char *name)
 {
+	/* The manager looks up the category of a task many times, and most tasks share one, so the last one is compared
+	 * first. Categories live until the manager is deleted, so the pointer stays valid. */
+	if (q->last_category && name && !strcmp(q->last_category->name, name)) {
+		return q->last_category;
+	}
+
 	struct category *c = category_lookup_or_create(q->categories, name);
 
 	if (!c->vine_stats) {
@@ -6643,6 +6672,7 @@ struct category *vine_category_lookup_or_create(struct vine_manager *q, const ch
 		category_specify_allocation_mode(c, (category_mode_t)q->allocation_default_mode);
 	}
 
+	q->last_category = c;
 	return c;
 }
 

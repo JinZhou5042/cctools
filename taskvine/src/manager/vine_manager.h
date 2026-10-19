@@ -108,7 +108,12 @@ struct vine_manager {
 	struct list   *retrieved_list;      /* List of vine_task that have been retrieved. */
 	struct list   *task_info_list;  /* List of last N vine_task_infos for computing capacity. */
 	struct hash_table *categories;  /* Maps category_name -> struct category */
+	struct category *last_category; /* The category that vine_category_lookup_or_create() returned last, which most calls ask for again. */
 	struct hash_table *library_templates; /* Maps library name -> vine_task of library with that name. */
+	uint64_t library_templates_serial;    /* Advanced whenever a library template is added or removed. */
+	char *library_checked_name;           /* The library name whose presence was checked last, a copy, or NULL. */
+	uint64_t library_checked_serial;      /* library_templates_serial when library_checked_name was checked. */
+	int library_checked_found;            /* Whether that library had a template then. */
 
 	struct skip_list_cursor *ready_tasks_cr;      /* Iterates ready_list in order */
 
