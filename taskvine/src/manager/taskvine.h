@@ -358,7 +358,8 @@ int vine_task_add_output(struct vine_task *t, struct vine_file *f, const char *r
 
 /** Specify the number of times this task is retried on worker errors. If less than one, the task is retried
 indefinitely (this the default). A task that did not succeed after the given number of retries is returned with the
-result of its last attempt.
+result of its last attempt. A task whose worker disconnected unexpectedly while running it after it used all its retries
+is returned with VINE_RESULT_MAX_RETRIES.
 @param t A task object.
 @param max_retries The number of retries.
 */
