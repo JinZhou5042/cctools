@@ -660,7 +660,7 @@ char *rmsummary_print_string(const struct rmsummary *s, int only_resources)
 static void rmsummary_fill(struct rmsummary *s, double default_value);
 
 /* Summaries of the usual default values, made once for the process and copied by rmsummary_create(), which fills a
- * summary field by field otherwise: the manager creates several summaries for every task it submits and dispatches. */
+ * summary field by field otherwise. Applications such as the TaskVine manager create several summaries per task. */
 static struct rmsummary rmsummary_minus_one;
 static struct rmsummary rmsummary_zero;
 static pthread_once_t rmsummary_defaults_once = PTHREAD_ONCE_INIT;
@@ -1123,42 +1123,38 @@ const char *rmsummary_resource_to_str(const char *resource, double value, int in
 	}
 	const char *separator = include_units ? " " : "";
 	const char *units = include_units ? info->units : "";
+	size_t separator_length = strlen(separator);
+	size_t units_length = strlen(units);
 
-	/* A whole number, as resources usually are, is printed as an integer and zeros, which is what %.*f prints for it,
-	 * without the floating-point conversion of printf. The manager formats four resources for every task it sends. */
-	if (value == floor(value) && fabs(value) < 1e15 && !(value == 0 && signbit(value))) {
-		int decimals = MIN(info->decimals, 15);
-		size_t separator_length = strlen(separator);
-		size_t units_length = strlen(units);
-		if (separator_length + units_length < sizeof(output) - 40) {
-			/* At most 16 digits and a sign, a point, 15 zeros, and the units, so it fits. */
-			char digits[20];
-			int count = 0;
-			long long whole = (long long)value;
-			unsigned long long magnitude = whole < 0 ? -(unsigned long long)whole : (unsigned long long)whole;
-			do {
-				digits[count++] = '0' + magnitude % 10;
-				magnitude /= 10;
-			} while (magnitude);
-			char *p = output;
-			if (whole < 0) {
-				*p++ = '-';
-			}
-			while (count) {
-				*p++ = digits[--count];
-			}
-			if (decimals) {
-				*p++ = '.';
-				memset(p, '0', decimals);
-				p += decimals;
-			}
-			memcpy(p, separator, separator_length);
-			p += separator_length;
-			memcpy(p, units, units_length);
-			p[units_length] = 0;
-			return output;
+	/* A whole number, as resources usually are, is written as its digits followed by zeros for the decimals, which is
+	 * what %.*f prints for it, without the floating point conversion of printf. -0 keeps printf for its sign. */
+	if (value == floor(value) && fabs(value) < 1e15 && !(value == 0 && signbit(value)) && info->decimals <= 15 && separator_length + units_length < sizeof(output) - 40) {
+		/* At most 15 digits, a sign, a point, 15 zeros, and the units, so it fits. */
+		char digits[20];
+		int count = 0;
+		long long whole = (long long)value;
+		unsigned long long magnitude = whole < 0 ? -(unsigned long long)whole : (unsigned long long)whole;
+		do {
+			digits[count++] = '0' + magnitude % 10;
+			magnitude /= 10;
+		} while (magnitude);
+
+		char *p = output;
+		if (whole < 0) {
+			*p++ = '-';
 		}
-		string_nformat(output, sizeof(output), "%.*f%s%s", info->decimals, value, separator, units);
+		while (count) {
+			*p++ = digits[--count];
+		}
+		if (info->decimals > 0) {
+			*p++ = '.';
+			memset(p, '0', info->decimals);
+			p += info->decimals;
+		}
+		memcpy(p, separator, separator_length);
+		p += separator_length;
+		memcpy(p, units, units_length);
+		p[units_length] = 0;
 	} else {
 		string_nformat(output, sizeof(output), "%.*f%s%s", info->decimals, value, separator, units);
 	}
