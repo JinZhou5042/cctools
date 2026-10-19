@@ -308,7 +308,7 @@ int link_sleep(struct link *link, time_t stoptime, int reading, int writing)
 	} else {
 		time_t timeout = stoptime - time(0);
 		if (timeout <= 0) {
-			errno = ECONNRESET;
+			errno = ETIMEDOUT;
 			return 0;
 		}
 		tm.tv_sec = timeout;
