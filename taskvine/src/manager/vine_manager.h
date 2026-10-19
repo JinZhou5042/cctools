@@ -187,10 +187,11 @@ struct vine_manager {
 	timestamp_t time_last_log_stats;
 	timestamp_t time_last_large_tasks_check;
 	timestamp_t time_last_ready_tasks_check;
-	timestamp_t time_last_compaction; /* When the tables were last compacted, see compact_tables(). */
-	int64_t compacted_since_trim;     /* Removed table entries freed since the heap was last trimmed. */
-	int64_t tables_peak_since_trim;   /* Most tasks and files held at a compaction since the last trim. */
-	int64_t tables_held_last;         /* Tasks and files held at the last compaction. */
+	timestamp_t time_last_worker_checks; /* When keepalives, slow and drained workers, and blocks were last checked. */
+	timestamp_t time_last_compaction;    /* When the tables were last compacted, see compact_tables(). */
+	int64_t compacted_since_trim;        /* Removed table entries freed since the heap was last trimmed. */
+	int64_t tables_peak_since_trim;      /* Most tasks and files held at a compaction since the last trim. */
+	int64_t tables_held_last;            /* Tasks and files held at the last compaction. */
 	timestamp_t time_unexplained_worker_losses[2]; /* The two most recent unexpected losses of workers that held tasks
 							  none of which had been charged a loss, newest first, or zero.
 							  See cleanup_worker(). */

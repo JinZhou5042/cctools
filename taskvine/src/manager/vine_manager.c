@@ -6132,21 +6132,28 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			continue;
 		}
 
-		// send keepalives to appropriate workers
-		BEGIN_ACCUM_TIME(q, time_status_msgs);
-		ask_for_workers_updates(q);
-		END_ACCUM_TIME(q, time_status_msgs);
+		/* Keepalives, slow and drained workers, and blocks are measured in seconds, and each check takes a pass
+		 * over the workers or the tasks at workers, so the checks run at most once a second. */
+		timestamp_t worker_checks_time = timestamp_get();
+		if (worker_checks_time - q->time_last_worker_checks >= ONE_SECOND) {
+			q->time_last_worker_checks = worker_checks_time;
 
-		// Kill off slow/drained workers.
-		BEGIN_ACCUM_TIME(q, time_internal);
-		result = disconnect_slow_workers(q);
-		result += shutdown_drained_workers(q);
-		vine_blocklist_unblock_all_by_time(q, time(0));
-		END_ACCUM_TIME(q, time_internal);
-		if (result) {
-			// removed at least one worker
-			events++;
-			continue;
+			// send keepalives to appropriate workers
+			BEGIN_ACCUM_TIME(q, time_status_msgs);
+			ask_for_workers_updates(q);
+			END_ACCUM_TIME(q, time_status_msgs);
+
+			// Kill off slow/drained workers.
+			BEGIN_ACCUM_TIME(q, time_internal);
+			result = disconnect_slow_workers(q);
+			result += shutdown_drained_workers(q);
+			vine_blocklist_unblock_all_by_time(q, time(0));
+			END_ACCUM_TIME(q, time_internal);
+			if (result) {
+				// removed at least one worker
+				events++;
+				continue;
+			}
 		}
 
 		// if new workers, connect n of them
