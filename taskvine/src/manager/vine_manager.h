@@ -13,6 +13,7 @@ This module is private to the manager and should not be invoked by the end user.
 */
 
 #include "taskvine.h"
+#include "budget.h"
 #include <limits.h>
 
 /*
@@ -91,6 +92,7 @@ struct vine_manager {
 	struct link *manager_link;       /* Listening TCP connection for accepting new workers. */
 	struct link_poll_set *poll_set;  /* The manager link and the link of every worker in worker_table, polled together. */
 	int connections_waiting;         /* The last poll found connections waiting on manager_link. */
+	struct budget round;             /* Time for the work of one step of vine_wait(), started after its poll. */
 
 	/* Security configuration */
 
