@@ -129,6 +129,7 @@ struct vine_manager {
 	struct hash_table *factory_table;    /* Maps factory_name -> vine_factory_info */
 	struct hash_table *workers_with_watched_file_updates;  /* Maps link -> vine_worker_info */
 	struct hash_table *current_transfer_table; 	/* Maps uuid -> struct transfer_pair */
+	struct hash_table *current_transfer_url_table; 	/* Maps source url -> int count of current transfers */
 	struct itable     *task_group_table; 	/* Maps group id -> list vine_task */
 	struct hash_table *workers_idle_disconnecting;  /* set of workers that were granted a request to idle disconnect, and are in the process of disconnecting. */
 
@@ -162,6 +163,10 @@ struct vine_manager {
 	timestamp_t time_last_wait;
 	timestamp_t time_last_log_stats;
 	timestamp_t time_last_large_tasks_check;
+	timestamp_t time_last_compaction; /* When the tables were last compacted, see compact_tables(). */
+	int64_t compacted_since_trim;     /* Removed table entries freed since the heap was last trimmed. */
+	int64_t tables_peak_since_trim;   /* Most tasks and files held at a compaction since the last trim. */
+	int64_t tables_held_last;         /* Tasks and files held at the last compaction. */
 	timestamp_t link_poll_end;
 	time_t      catalog_last_update_time;
 	time_t      resources_last_update_time;
