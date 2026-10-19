@@ -21,6 +21,8 @@ See the file COPYING for details.
 #include "debug.h"
 #include "macros.h"
 
+static void replica_table_add(struct vine_manager *m, struct vine_worker_info *w, const char *cachename, struct vine_file_replica *replica);
+
 // add a file to the remote file table.
 int vine_file_replica_table_insert(struct vine_manager *m, struct vine_worker_info *w, const char *cachename, struct vine_file_replica *replica)
 {
@@ -28,6 +30,13 @@ int vine_file_replica_table_insert(struct vine_manager *m, struct vine_worker_in
 		return 0;
 	}
 
+	replica_table_add(m, w, cachename, replica);
+	return 1;
+}
+
+/* Add a replica that the worker does not hold yet, which the caller checked. */
+static void replica_table_add(struct vine_manager *m, struct vine_worker_info *w, const char *cachename, struct vine_file_replica *replica)
+{
 	double prev_available = w->resources->disk.total - BYTES_TO_MEGABYTES(w->inuse_cache);
 
 	hash_table_insert(w->current_files, cachename, replica);
@@ -45,8 +54,6 @@ int vine_file_replica_table_insert(struct vine_manager *m, struct vine_worker_in
 	}
 
 	set_insert(workers, w);
-
-	return 1;
 }
 
 // remove a file from the remote file table.
@@ -57,14 +64,11 @@ struct vine_file_replica *vine_file_replica_table_remove(struct vine_manager *m,
 		return 0;
 	}
 
-	if (!hash_table_lookup(w->current_files, cachename)) {
+	struct vine_file_replica *replica = hash_table_remove(w->current_files, cachename);
+	if (!replica) {
 		return 0;
 	}
-
-	struct vine_file_replica *replica = hash_table_remove(w->current_files, cachename);
-	if (replica) {
-		w->inuse_cache -= replica->size;
-	}
+	w->inuse_cache -= replica->size;
 
 	double available = w->resources->disk.total - BYTES_TO_MEGABYTES(w->inuse_cache);
 	if (available > m->current_max_worker->disk) {
@@ -192,9 +196,9 @@ struct vine_file_replica *vine_file_replica_table_get_or_create(struct vine_mana
 		return replica;
 	}
 
-	// Create a new replica
+	// Create a new replica, which the worker does not hold, as the lookup above found.
 	replica = vine_file_replica_create(type, cache_level, size, mtime);
-	vine_file_replica_table_insert(m, w, cachename, replica);
+	replica_table_add(m, w, cachename, replica);
 
 	return replica;
 }

@@ -75,6 +75,9 @@ See the file COPYING for details.
 #include <fcntl.h>
 #include <float.h>
 #include <math.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -365,17 +368,59 @@ static void handle_idle_disconnect_request(struct vine_manager *q, struct vine_w
 	return;
 }
 
+/* Copy the next space-separated word of a message into word, which holds size bytes, and return the position after it,
+ * or NULL when there is no word or it does not fit. */
+static const char *message_word(const char *s, char *word, size_t size)
+{
+	if (!s) {
+		return NULL;
+	}
+	while (*s == ' ') {
+		s++;
+	}
+	size_t length = strcspn(s, " \n");
+	if (length == 0 || length >= size) {
+		return NULL;
+	}
+	memcpy(word, s, length);
+	word[length] = 0;
+	return s + length;
+}
+
+/* Parse the next space-separated word of a message as a decimal integer, and return the position after it, or NULL. */
+static const char *message_integer(const char *s, long long *value)
+{
+	if (!s) {
+		return NULL;
+	}
+	char *end;
+	errno = 0;
+	*value = strtoll(s, &end, 10);
+	if (end == s || errno || (*end && *end != ' ' && *end != '\n')) {
+		return NULL;
+	}
+	return end;
+}
+
 /* Handle an info message coming from the worker that provides a variety of metrics. */
 
 static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_info *w, char *line)
 {
 	char field[VINE_LINE_MAX];
-	char value[VINE_LINE_MAX];
 
-	int n = sscanf(line, "info %s %[^\n]", field, value);
-
-	if (n != 2)
+	/* The field is a word and the value the rest of the line, which must not be empty. It is parsed without sscanf,
+	 * because a worker sends info tasks_running for every task. */
+	const char *rest = message_word(string_prefix_is(line, "info ") ? line + strlen("info") : NULL, field, sizeof(field));
+	if (!rest) {
 		return VINE_MSG_FAILURE;
+	}
+	while (*rest == ' ') {
+		rest++;
+	}
+	const char *value = rest;
+	if (!*value || *value == '\n') {
+		return VINE_MSG_FAILURE;
+	}
 
 	if (string_prefix_is(field, "tasks_running")) {
 		w->dynamic_tasks_running = atoi(value);
@@ -404,9 +449,10 @@ Change the state of a file replica on an event.
 If the final state is DELETED, remove the replica from the table.
 */
 
-static int process_replica_on_event(struct vine_manager *q, struct vine_worker_info *w, const char *cachename, vine_file_replica_state_transition_event_t event)
+/* Apply an event to the replica of cachename that worker w holds, already looked up by the caller. Return 0 when the
+ * state did not change, 1 when it changed, and 2 when the replica reached DELETED and was deleted. */
+static int process_replica_event(struct vine_manager *q, struct vine_worker_info *w, const char *cachename, struct vine_file_replica *replica, vine_file_replica_state_transition_event_t event)
 {
-	struct vine_file_replica *replica = vine_file_replica_table_lookup(w, cachename);
 	if (!replica) {
 		return 0;
 	}
@@ -422,9 +468,15 @@ static int process_replica_on_event(struct vine_manager *q, struct vine_worker_i
 		if (removed_replica) {
 			vine_file_replica_delete(removed_replica);
 		}
+		return 2;
 	}
 
 	return 1;
+}
+
+static int process_replica_on_event(struct vine_manager *q, struct vine_worker_info *w, const char *cachename, vine_file_replica_state_transition_event_t event)
+{
+	return process_replica_event(q, w, cachename, vine_file_replica_table_lookup(w, cachename), event) != 0;
 }
 
 /*
@@ -436,15 +488,25 @@ of the file for the purposes of cache storage management.
 static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_worker_info *w, const char *line)
 {
 	char cachename[VINE_LINE_MAX];
-	int type;
-	int cache_level;
+	long long type;
+	long long cache_level;
 	long long size;
 	long long mtime;
 	long long transfer_time;
 	long long start_time;
 	char id[VINE_LINE_MAX];
 
-	if (sscanf(line, "cache-update %s %d %d %lld %lld %lld %lld %s", cachename, &type, &cache_level, &size, &mtime, &transfer_time, &start_time, id) == 8) {
+	/* cache-update <cachename> <type> <cache_level> <size> <mtime> <transfer_time> <start_time> <transfer_id>, parsed
+	 * without sscanf because a worker sends one for every file it receives or creates. */
+	const char *s = message_word(line + strlen("cache-update"), cachename, sizeof(cachename));
+	s = message_integer(s, &type);
+	s = message_integer(s, &cache_level);
+	s = message_integer(s, &size);
+	s = message_integer(s, &mtime);
+	s = message_integer(s, &transfer_time);
+	s = message_integer(s, &start_time);
+	s = message_word(s, id, sizeof(id));
+	if (s) {
 		/*
 		If an unsolicited cache-update arrives, there are several possibilities:
 		- The worker is telling us about an item from a previous run.
@@ -458,18 +520,17 @@ static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_w
 		replica->mtime = mtime;
 		replica->transfer_time = transfer_time;
 
-		process_replica_on_event(q, w, cachename, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_CACHE_UPDATE);
+		int deleted = process_replica_event(q, w, cachename, replica, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_CACHE_UPDATE) == 2;
 
-		vine_current_transfers_set_success(q, id);
-		vine_current_transfers_remove(q, id);
+		/* A worker sends X for a file that no transfer record describes, such as the output of a task. */
+		if (strcmp(id, "X")) {
+			vine_current_transfers_remove_success(q, id);
+		}
 
 		vine_txn_log_write_cache_update(q, w, size, transfer_time, start_time, cachename);
 
-		/* process_replica_on_eventt may have deleted the replica,
-		 * so we check here again and return if there's nothing
-		 * more to update */
-		replica = vine_file_replica_table_lookup(w, cachename);
-		if (!replica) {
+		/* The event deletes a replica that was being deleted, and then there is nothing more to update. */
+		if (deleted) {
 			return VINE_MSG_PROCESSED;
 		}
 
@@ -627,23 +688,25 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 	timestamp_t execution_time, start_time, end_time;
 	timestamp_t observed_execution_time;
 
-	// Format: task completion status, exit status (exit code or signal), output length, bytes_sent, execution time,
-	// task_id
-	int n = sscanf(line,
-			"complete %d %d %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64 "",
-			&task_status,
-			&exit_status,
-			&output_length,
-			&bytes_sent,
-			&start_time,
-			&end_time,
-			&sandbox_used,
-			&task_id);
-
-	if (n < 7) {
+	// Format: task completion status, exit status (exit code or signal), output length, bytes_sent, start time, end
+	// time, sandbox used, task_id. It is parsed without sscanf, because a worker sends one for every task.
+	long long fields[8];
+	const char *s = string_prefix_is(line, "complete ") ? line + strlen("complete") : NULL;
+	for (int i = 0; i < 8; i++) {
+		s = message_integer(s, &fields[i]);
+	}
+	if (!s) {
 		debug(D_VINE, "Invalid message from worker %s (%s): %s", w->hostname, w->addrport, line);
 		return VINE_WORKER_FAILURE;
 	}
+	task_status = fields[0];
+	exit_status = fields[1];
+	output_length = fields[2];
+	bytes_sent = fields[3];
+	start_time = fields[4];
+	end_time = fields[5];
+	sandbox_used = fields[6];
+	task_id = fields[7];
 
 	execution_time = end_time - start_time;
 
@@ -810,8 +873,13 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 
 	char path[length];
 
-	// Check for status updates that can be consumed here.
-	if (string_prefix_is(line, "alive")) {
+	// Check for status updates that can be consumed here. The most frequent messages, a cache-update for every file
+	// and a complete for every task, are matched first.
+	if (string_prefix_is(line, "cache-update")) {
+		result = handle_cache_update(q, w, line);
+	} else if (string_prefix_is(line, "complete")) {
+		result = handle_complete(q, w, line);
+	} else if (string_prefix_is(line, "alive")) {
 		result = VINE_MSG_PROCESSED;
 	} else if (string_prefix_is(line, "taskvine")) {
 		result = handle_taskvine(q, w, line);
@@ -832,8 +900,6 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		result = handle_name(q, w, line);
 	} else if (string_prefix_is(line, "info")) {
 		result = handle_info(q, w, line);
-	} else if (string_prefix_is(line, "cache-update")) {
-		result = handle_cache_update(q, w, line);
 	} else if (string_prefix_is(line, "cache-invalid")) {
 		result = handle_cache_invalid(q, w, line);
 	} else if (string_prefix_is(line, "transfer-hostport")) {
@@ -842,8 +908,6 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		result = handle_transfer_port(q, w, line);
 	} else if (sscanf(line, "GET %s HTTP/%*d.%*d", path) == 1) {
 		result = handle_http_request(q, w, path, stoptime);
-	} else if (string_prefix_is(line, "complete")) {
-		result = handle_complete(q, w, line);
 	} else {
 		// Message is not a status update: return it to the user.
 		result = VINE_MSG_NOT_PROCESSED;
@@ -1654,6 +1718,24 @@ static int fetch_outputs_from_worker(struct vine_manager *q, struct vine_worker_
 	return 1;
 }
 
+/* Return whether a library template named name exists. Every check of a ready function call asks this, and the calls
+ * of a run usually need one library, so the last answer is kept until a template is added or removed. */
+static int library_template_exists(struct vine_manager *q, const char *name)
+{
+	if (q->library_checked_name && q->library_checked_serial == q->library_templates_serial && !strcmp(q->library_checked_name, name)) {
+		return q->library_checked_found;
+	}
+	char *copy = strdup(name);
+	if (!copy) {
+		return hash_table_lookup(q->library_templates, name) != NULL;
+	}
+	free(q->library_checked_name);
+	q->library_checked_name = copy;
+	q->library_checked_serial = q->library_templates_serial;
+	q->library_checked_found = hash_table_lookup(q->library_templates, name) != NULL;
+	return q->library_checked_found;
+}
+
 /*
 Retrieve task that cannot run for unfixable policy reasons,
 such as exceeded the absolute end time, no library task available, etc.
@@ -1671,7 +1753,7 @@ static int retrieve_ready_task(struct vine_manager *q, struct vine_task *t, doub
 	if (t->resources_requested->end > 0 && t->resources_requested->end <= now_secs) {
 		debug(D_VINE, "task %d has exceeded its end time", t->task_id);
 		result = VINE_RESULT_MAX_END_TIME;
-	} else if (t->needs_library && !hash_table_lookup(q->library_templates, t->needs_library)) {
+	} else if (t->needs_library && !library_template_exists(q, t->needs_library)) {
 		debug(D_VINE, "task %d does not match any submitted library named \"%s\"", t->task_id, t->needs_library);
 		result = VINE_RESULT_MISSING_LIBRARY;
 	}
@@ -3775,8 +3857,9 @@ Determine whether there is a suitable library task for a function call task.
 
 static int vine_manager_check_library_for_function_call(struct vine_manager *q, struct vine_task *t)
 {
-	if (!t->needs_library || hash_table_lookup(q->library_templates, t->needs_library))
+	if (!t->needs_library || library_template_exists(q, t->needs_library)) {
 		return 1;
+	}
 	return 0;
 }
 
@@ -4366,6 +4449,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->factory_table = hash_table_create(0, 0);
 	q->current_transfer_table = hash_table_create(0, 0);
+	q->current_transfer_url_table = hash_table_create(0, 0);
+	q->next_transfer_id = (uint64_t)random_int64();
 	q->task_group_table = itable_create(0);
 	q->group_id_counter = 1;
 	q->fetch_factory = 0;
@@ -4395,6 +4480,11 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->stats->time_when_started = timestamp_get();
 	q->time_last_large_tasks_check = timestamp_get();
 	q->task_info_list = list_create();
+
+	q->time_last_compaction = 0;
+	q->compacted_since_trim = 0;
+	q->tables_peak_since_trim = 0;
+	q->tables_held_last = 0;
 
 	q->time_last_wait = 0;
 	q->time_last_log_stats = 0;
@@ -4743,6 +4833,7 @@ void vine_delete(struct vine_manager *q)
 
 	vine_current_transfers_clear(q);
 	hash_table_delete(q->current_transfer_table);
+	hash_table_delete(q->current_transfer_url_table);
 
 	vine_task_groups_clear(q);
 	itable_delete(q->task_group_table);
@@ -4759,11 +4850,13 @@ void vine_delete(struct vine_manager *q)
 
 	hash_table_clear(q->library_templates, (void *)vine_task_delete);
 	hash_table_delete(q->library_templates);
+	free(q->library_checked_name);
 
 	/* delete files after deleting tasks so that rc are correctly updated. */
 	hash_table_clear(q->file_table, (void *)vine_file_delete);
 	hash_table_delete(q->file_table);
 
+	q->last_category = NULL;
 	hash_table_clear(q->categories, (void *)category_free);
 	hash_table_delete(q->categories);
 
@@ -5139,6 +5232,9 @@ int vine_submit(struct vine_manager *q, struct vine_task *t)
 
 	/* Add reference to task when adding it to primary table. */
 	itable_insert(q->tasks, t->task_id, vine_task_addref(t));
+	if (t->type == VINE_TASK_TYPE_STANDARD) {
+		q->standard_tasks_count++;
+	}
 
 	/* Ensure category structure is created. */
 	vine_category_lookup_or_create(q, t->category);
@@ -5244,6 +5340,7 @@ void vine_manager_install_library(struct vine_manager *q, struct vine_task *t, c
 	t->task_id = -1;
 	vine_task_set_library_provided(t, name);
 	hash_table_insert(q->library_templates, name, t);
+	q->library_templates_serial++;
 	t->time_when_submitted = timestamp_get();
 }
 
@@ -5282,6 +5379,7 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 	list_delete(instances);
 
 	hash_table_remove(q->library_templates, name);
+	q->library_templates_serial++;
 	debug(D_VINE, "All instances and the template for library %s have been removed", name);
 }
 
@@ -5526,6 +5624,9 @@ struct vine_task *find_task_to_return(struct vine_manager *q, const char *tag, i
 
 		/* The task was given a reference when added to the table, so delete a reference on removal. */
 		itable_remove(q->tasks, t->task_id);
+		if (type == VINE_TASK_TYPE_STANDARD) {
+			q->standard_tasks_count--;
+		}
 		vine_task_delete(t);
 
 		/* CAREFUL: a non-standard task *may* no longer exist following vine_delete! */
@@ -5573,6 +5674,54 @@ struct vine_task *find_task_to_return(struct vine_manager *q, const char *tag, i
 	}
 
 	return NULL;
+}
+
+/* Removed table entries that the compactions must free before the heap is trimmed. Below it, a trim would return too
+ * little to pay for its pass over the free chunks. */
+#define VINE_TRIM_MIN_ENTRIES 65536
+
+/* Free the removed entries of the tables that grow with tasks, files, and transfers, and return freed memory to the
+ * operating system once a large part of the tables was removed. dttools tables keep removed entries until a later
+ * insert or walk compacts them, and after an application deletes most of its tasks and files no insert may come, so
+ * those entries pinned the freed pages around them and the process kept its peak memory.
+ * A compaction must not run while a walk of its table is in progress, or while a caller holds a key pointer of a
+ * removed entry. This runs at the top of a step of vine_wait(), outside every walk and every operation of the manager,
+ * and the application cannot be inside a walk of a manager table. Compaction costs O(removed entries), amortized O(1)
+ * per removal. The heap is trimmed only once the tasks and files held fell to half of their peak since the last trim
+ * and stopped falling: a run that only replaces its tasks reuses its free memory, and trimming it would make the
+ * manager fault the same pages in again, and a deletion that takes several seconds is trimmed once, at its end. */
+static void compact_tables(struct vine_manager *q)
+{
+	int64_t freed = 0;
+	freed += itable_compact(q->tasks);
+	freed += itable_compact(q->running_table);
+	freed += hash_table_compact(q->file_table);
+	freed += hash_table_compact(q->file_worker_table);
+	freed += hash_table_compact(q->current_transfer_table);
+
+	char *key;
+	struct vine_worker_info *w;
+	int iteration;
+	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+	{
+		freed += hash_table_compact(w->current_files);
+		freed += itable_compact(w->current_tasks);
+	}
+
+	q->compacted_since_trim += freed;
+	int64_t held = itable_size(q->tasks) + hash_table_size(q->file_table);
+	q->tables_peak_since_trim = MAX(q->tables_peak_since_trim, held);
+	int shrinking = held < q->tables_held_last;
+	q->tables_held_last = held;
+	if (q->compacted_since_trim >= VINE_TRIM_MIN_ENTRIES && held <= q->tables_peak_since_trim / 2 && !shrinking) {
+#ifdef __GLIBC__
+		timestamp_t start = timestamp_get();
+		malloc_trim(0);
+		debug(D_VINE, "freed %" PRId64 " removed table entries and trimmed the heap in %.3f s", q->compacted_since_trim, (timestamp_get() - start) / 1e6);
+#endif
+		q->compacted_since_trim = 0;
+		q->tables_peak_since_trim = held;
+	}
 }
 
 static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout, const char *tag, int task_id)
@@ -5633,6 +5782,14 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		// remove workers that were marked since the last cycle.
 		if (disconnect_failed_workers(q) > 0) {
 			events++;
+		}
+
+		timestamp_t compaction_time = timestamp_get();
+		if (compaction_time - q->time_last_compaction >= ONE_SECOND) {
+			q->time_last_compaction = compaction_time;
+			BEGIN_ACCUM_TIME(q, time_internal);
+			compact_tables(q);
+			END_ACCUM_TIME(q, time_internal);
 		}
 
 		BEGIN_ACCUM_TIME(q, time_internal);
@@ -6154,22 +6311,11 @@ static void disconnect_all_workers(struct vine_manager *q)
 If there are any standard tasks (those submitted by the user)
 known to the manager, then the system is not empty, and the caller
 should wait some more.
-XXX This is a linear-time operation, perhaps there is a more efficient way to do it.
 */
 
 int vine_empty(struct vine_manager *q)
 {
-	struct vine_task *t;
-	uint64_t task_id;
-	int iteration;
-
-	ITABLE_ITERATE(q->tasks, iteration, task_id, t)
-	{
-		if (t->type == VINE_TASK_TYPE_STANDARD)
-			return 0;
-	}
-
-	return 1;
+	return q->standard_tasks_count == 0;
 }
 
 void vine_set_keepalive_interval(struct vine_manager *q, int interval)
@@ -6780,6 +6926,12 @@ const struct rmsummary *vine_manager_task_resources_min(struct vine_manager *q, 
 
 struct category *vine_category_lookup_or_create(struct vine_manager *q, const char *name)
 {
+	/* The manager looks up the category of a task many times, and most tasks share one, so the last one is compared
+	 * first. Categories live until the manager is deleted, so the pointer stays valid. */
+	if (q->last_category && name && !strcmp(q->last_category->name, name)) {
+		return q->last_category;
+	}
+
 	struct category *c = category_lookup_or_create(q->categories, name);
 
 	if (!c->vine_stats) {
@@ -6787,6 +6939,7 @@ struct category *vine_category_lookup_or_create(struct vine_manager *q, const ch
 		category_specify_allocation_mode(c, (category_mode_t)q->allocation_default_mode);
 	}
 
+	q->last_category = c;
 	return c;
 }
 

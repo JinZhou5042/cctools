@@ -33,7 +33,7 @@ int vine_current_transfers_source_has_room(struct vine_manager *q, struct vine_w
 
 int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const char *cachename);
 
-void vine_current_transfers_set_success(struct vine_manager *q, char *id);
+int vine_current_transfers_remove_success(struct vine_manager *q, const char *id);
 
 int vine_current_transfers_url_in_use(struct vine_manager *q, const char *source);
 

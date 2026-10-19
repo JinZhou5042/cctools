@@ -98,16 +98,44 @@ static void vine_transfer_pair_delete(struct vine_transfer_pair *p)
 	}
 }
 
+// adjust the number of current transfers from a source url - the entry is removed when the count reaches zero
+static void update_url_count(struct vine_manager *q, const char *source_url, int delta)
+{
+	if (!source_url) {
+		return;
+	}
+
+	int *count = hash_table_lookup(q->current_transfer_url_table, source_url);
+	if (!count) {
+		count = xxmalloc(sizeof(*count));
+		*count = 0;
+		hash_table_insert(q->current_transfer_url_table, source_url, count);
+	}
+
+	*count += delta;
+	if (*count <= 0) {
+		hash_table_remove(q->current_transfer_url_table, source_url);
+		free(count);
+	}
+}
+
 // add a current transaction to the transfer table
 char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename)
 {
-	cctools_uuid_t uuid;
-	cctools_uuid_create(&uuid);
-
-	char *transfer_id = strdup(uuid.str);
+	/* The id only has to be unique among the manager's records and differ from "X", which a worker sends for a file
+	 * without a record. Sixteen hex digits of a counter cost less than formatting a uuid. */
+	static const char digits[] = "0123456789abcdef";
+	uint64_t number = q->next_transfer_id++;
+	char *transfer_id = xxmalloc(17);
+	for (int i = 15; i >= 0; i--) {
+		transfer_id[i] = digits[number & 0xf];
+		number >>= 4;
+	}
+	transfer_id[16] = 0;
 	struct vine_transfer_pair *t = vine_transfer_pair_create(dest_worker, source_worker, source_url, cachename, transfer_id);
 
 	hash_table_insert(q->current_transfer_table, transfer_id, t);
+	update_url_count(q, t->source_url, 1);
 	return transfer_id;
 }
 
@@ -117,6 +145,7 @@ int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 	struct vine_transfer_pair *p;
 	p = hash_table_remove(q->current_transfer_table, id);
 	if (p) {
+		update_url_count(q, p->source_url, -1);
 		vine_transfer_pair_delete(p);
 		return 1;
 	} else {
@@ -257,12 +286,14 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 	return 0;
 }
 
-void vine_current_transfers_set_success(struct vine_manager *q, char *id)
+/* Remove the record of a transfer that succeeded, and clear the failure streaks of its source and destination. The
+ * record is looked up once. */
+int vine_current_transfers_remove_success(struct vine_manager *q, const char *id)
 {
-	struct vine_transfer_pair *p = hash_table_lookup(q->current_transfer_table, id);
+	struct vine_transfer_pair *p = hash_table_remove(q->current_transfer_table, id);
 
 	if (!p) {
-		return;
+		return 0;
 	}
 
 	struct vine_worker_info *source = p->source_worker;
@@ -280,24 +311,21 @@ void vine_current_transfers_set_success(struct vine_manager *q, char *id)
 		dest_worker->xfer_streak_bad_destination_counter = 0;
 		dest_worker->xfer_total_good_destination_counter++;
 	}
+
+	update_url_count(q, p->source_url, -1);
+	vine_transfer_pair_delete(p);
+	return 1;
 }
 
 // count the number transfers coming from a specific remote url (not a worker)
 int vine_current_transfers_url_in_use(struct vine_manager *q, const char *source)
 {
-	char *id;
-	struct vine_transfer_pair *t;
-	int iteration;
-
-	int c = 0;
-	HASH_TABLE_ITERATE(q->current_transfer_table, iteration, id, t)
-	{
-		/* Each transfer owns a copy of its source URL, so compare contents. */
-		if (source && t->source_url && !strcmp(source, t->source_url)) {
-			c++;
-		}
+	if (!source) {
+		return 0;
 	}
-	return c;
+
+	int *count = hash_table_lookup(q->current_transfer_url_table, source);
+	return count ? *count : 0;
 }
 
 // remove all transactions involving a worker from the transfer table - if a worker failed or is being deleted
@@ -373,6 +401,7 @@ void vine_current_transfers_print_table(struct vine_manager *q)
 void vine_current_transfers_clear(struct vine_manager *q)
 {
 	hash_table_clear(q->current_transfer_table, (void *)vine_transfer_pair_delete);
+	hash_table_clear(q->current_transfer_url_table, free);
 }
 
 int vine_current_transfers_get_table_size(struct vine_manager *q)
