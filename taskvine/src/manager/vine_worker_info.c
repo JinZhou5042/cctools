@@ -5,6 +5,8 @@ See the file COPYING for details.
 */
 
 #include "vine_worker_info.h"
+#include "set.h"
+#include "vine_file.h"
 #include "vine_counters.h"
 #include "vine_file_replica.h"
 #include "vine_protocol.h"
@@ -48,12 +50,15 @@ struct vine_worker_info *vine_worker_create(struct link *lnk)
 
 	w->last_update_msg_time = w->start_time;
 	w->last_transfer_failure = 0;
+	w->last_source_failure = 0;
 	w->last_failure_time = 0;
 
 	vine_counters.worker.created++;
 
 	w->incoming_xfer_counter = 0;
 	w->outgoing_xfer_counter = 0;
+	w->outgoing_xfer_bytes = 0;
+	w->outgoing_refused_bytes = -1;
 
 	return w;
 }
@@ -82,6 +87,13 @@ void vine_worker_delete(struct vine_worker_info *w)
 	hash_table_delete(w->current_files);
 	itable_delete(w->current_tasks);
 	itable_delete(w->current_libraries);
+	if (w->blocked_files) {
+		struct vine_file *f;
+		while ((f = set_pop(w->blocked_files))) {
+			vine_file_delete(f);
+		}
+		set_delete(w->blocked_files);
+	}
 
 	free(w);
 
@@ -143,4 +155,15 @@ struct jx *vine_worker_to_jx(struct vine_worker_info *w)
 	current_tasks_to_jx(j, w);
 
 	return j;
+}
+
+/*
+A transfer from this worker failed at its destination, and the worker sent nothing since. Its host may hang with its
+connections open, so another transfer from it would wait for the same peer transfer timeout. It is not chosen as a
+source until any message from it shows that it is alive.
+*/
+
+int vine_worker_source_is_suspect(struct vine_worker_info *w)
+{
+	return w->last_source_failure > w->last_msg_recv_time;
 }

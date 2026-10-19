@@ -93,6 +93,12 @@ def vine_graph_executor_add_output(e, node_id, task_path):
 def vine_graph_executor_add_input(e, node_id, file_id, task_path):
     return _vine_graph_capi.vine_graph_executor_add_input(e, node_id, file_id, task_path)
 
+def vine_graph_executor_add_inputs(e, node_id, count):
+    return _vine_graph_capi.vine_graph_executor_add_inputs(e, node_id, count)
+
+def vine_graph_executor_add_input_buffer(e, node_id, buffer, task_path):
+    return _vine_graph_capi.vine_graph_executor_add_input_buffer(e, node_id, buffer, task_path)
+
 def vine_graph_executor_submit_node(e, node_id):
     return _vine_graph_capi.vine_graph_executor_submit_node(e, node_id)
 
@@ -105,6 +111,15 @@ def vine_graph_executor_unpin_file(e, file_id):
 def vine_graph_executor_fetch_file(e, file_id):
     return _vine_graph_capi.vine_graph_executor_fetch_file(e, file_id)
 
+def vine_graph_executor_next_fetched(e):
+    return _vine_graph_capi.vine_graph_executor_next_fetched(e)
+
+def vine_graph_executor_next_fetch_failed(e):
+    return _vine_graph_capi.vine_graph_executor_next_fetch_failed(e)
+
+def vine_graph_executor_get_local_data(e, file_id):
+    return _vine_graph_capi.vine_graph_executor_get_local_data(e, file_id)
+
 def vine_graph_executor_get_local_path(e, file_id):
     return _vine_graph_capi.vine_graph_executor_get_local_path(e, file_id)
 
@@ -113,6 +128,12 @@ def vine_graph_executor_wait(e, timeout):
 
 def vine_graph_executor_wake(e):
     return _vine_graph_capi.vine_graph_executor_wake(e)
+
+def vine_graph_executor_hold_sends(e):
+    return _vine_graph_capi.vine_graph_executor_hold_sends(e)
+
+def vine_graph_executor_release_sends(e):
+    return _vine_graph_capi.vine_graph_executor_release_sends(e)
 
 def vine_graph_executor_next_finished(e):
     return _vine_graph_capi.vine_graph_executor_next_finished(e)
@@ -140,6 +161,9 @@ def vine_graph_executor_get_completed_recovery_tasks(e):
 
 def vine_graph_executor_drop_node(e, node_id):
     return _vine_graph_capi.vine_graph_executor_drop_node(e, node_id)
+
+def vine_graph_executor_remove_dropped(e, limit):
+    return _vine_graph_capi.vine_graph_executor_remove_dropped(e, limit)
 
 def vine_graph_executor_next_removed(e):
     return _vine_graph_capi.vine_graph_executor_next_removed(e)

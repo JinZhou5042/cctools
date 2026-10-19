@@ -36,6 +36,27 @@ void vine_task_info_delete(struct vine_task_info *ti)
 	free(ti);
 }
 
+/* Add a report to the sums of task_info_list (sign 1) or remove it (sign -1). The times are unsigned, so their sums
+ * wrap exactly as a pass over the list does, and the resources are whole numbers, which doubles add exactly. */
+static void task_info_sums_update(struct vine_manager *q, const struct vine_task_info *ti, int sign)
+{
+	if (sign > 0) {
+		q->task_info_sums.transfer_time += ti->transfer_time;
+		q->task_info_sums.exec_time += ti->exec_time;
+		q->task_info_sums.manager_time += ti->manager_time;
+	} else {
+		q->task_info_sums.transfer_time -= ti->transfer_time;
+		q->task_info_sums.exec_time -= ti->exec_time;
+		q->task_info_sums.manager_time -= ti->manager_time;
+	}
+	if (ti->resources) {
+		q->task_info_sums.cores += sign * ti->resources->cores;
+		q->task_info_sums.memory += sign * ti->resources->memory;
+		q->task_info_sums.disk += sign * ti->resources->disk;
+		q->task_info_sums.gpus += sign * ti->resources->gpus;
+	}
+}
+
 void vine_task_info_add(struct vine_manager *q, struct vine_task *t)
 {
 	if (!t->resources_allocated) {
@@ -49,13 +70,15 @@ void vine_task_info_add(struct vine_manager *q, struct vine_task *t)
 	struct vine_task_info *ti = vine_task_info_create(t);
 
 	list_push_tail(q->task_info_list, ti);
+	task_info_sums_update(q, ti, 1);
 
-	// Trim the list, but never below its previous size.
-	static int count = VINE_TASK_INFO_MIN_SIZE;
-	count = MAX(count, 2 * q->stats->tasks_on_workers);
+	// Trim the list, but never below its previous size. The bound belongs to the manager, because several managers
+	// may run in threads of one process.
+	q->task_info_sums.limit = MAX(MAX(q->task_info_sums.limit, VINE_TASK_INFO_MIN_SIZE), 2 * q->stats->tasks_on_workers);
 
-	while (list_size(q->task_info_list) >= count) {
+	while (list_size(q->task_info_list) >= q->task_info_sums.limit) {
 		ti = list_pop_head(q->task_info_list);
+		task_info_sums_update(q, ti, -1);
 		vine_task_info_delete(ti);
 	}
 }
@@ -90,21 +113,14 @@ void vine_task_info_compute_capacity(const struct vine_manager *q, struct vine_s
 
 		count = 1;
 	} else {
-		// Sum up the task reports available.
-
-		LIST_ITERATE(q->task_info_list, ti)
-		{
-			capacity->transfer_time += ti->transfer_time;
-			capacity->exec_time += ti->exec_time;
-			capacity->manager_time += ti->manager_time;
-
-			if (ti->resources) {
-				capacity->resources->cores += ti->resources ? ti->resources->cores : 1;
-				capacity->resources->memory += ti->resources ? ti->resources->memory : 512;
-				capacity->resources->disk += ti->resources ? ti->resources->disk : 1024;
-				capacity->resources->gpus += ti->resources ? ti->resources->gpus : 0;
-			}
-		}
+		// The sums of the task reports available.
+		capacity->transfer_time = q->task_info_sums.transfer_time;
+		capacity->exec_time = q->task_info_sums.exec_time;
+		capacity->manager_time = q->task_info_sums.manager_time;
+		capacity->resources->cores = q->task_info_sums.cores;
+		capacity->resources->memory = q->task_info_sums.memory;
+		capacity->resources->disk = q->task_info_sums.disk;
+		capacity->resources->gpus = q->task_info_sums.gpus;
 
 		ti = list_peek_tail(q->task_info_list);
 		if (ti->transfer_time > 0) {

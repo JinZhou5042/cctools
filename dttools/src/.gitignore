@@ -44,3 +44,8 @@ hash_table_benchmark
 priority_queue_test
 progress_bar_test
 skip_list_test
+link_poll_set_test
+jx_print_number_test
+hash_table_removal_test
+link_queue_test
+list_iterate_test

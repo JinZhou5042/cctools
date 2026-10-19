@@ -30,7 +30,9 @@ SOURCES = \
 	vine_fair.c \
 	vine_runtime_dir.c \
 	vine_task_groups.c \
-	vine_temp.c
+	vine_task_recipe.c \
+	vine_temp.c \
+	vine_transfer_receive.c
 
 PUBLIC_HEADERS = taskvine.h
 

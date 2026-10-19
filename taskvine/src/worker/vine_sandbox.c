@@ -20,6 +20,7 @@ See the file COPYING for details.
 
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -112,7 +113,10 @@ static int stage_input_file(struct vine_process *p, struct vine_mount *m, struct
 	vine_cache_status_t status;
 	status = vine_cache_ensure(cache, f->cached_name);
 	if (status == VINE_CACHE_STATUS_READY) {
-		create_dir_parents(sandbox_path, 0777);
+		/* The sandbox exists, so only an input named inside a subdirectory needs its parents created. */
+		if (strchr(m->remote_name, '/')) {
+			create_dir_parents(sandbox_path, 0777);
+		}
 		debug(D_VINE, "input: link %s -> %s", cache_path, sandbox_path);
 		if (m->flags & VINE_MOUNT_SYMLINK) {
 			/* If the user has requested a symlink, just do that b/c it is faster for large dirs. */
@@ -287,7 +291,7 @@ int vine_sandbox_stageout(struct vine_process *p, struct vine_cache *cache, stru
 		list_next(p->output_cursor);
 	}
 
-	list_cursor_destroy(p->output_cursor);
+	list_cursor_delete(p->output_cursor);
 	p->output_cursor = NULL;
 	return 1;
 }

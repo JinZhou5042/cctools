@@ -288,7 +288,9 @@ char *vine_meta_name(const struct vine_file *f, ssize_t *totalsize)
 
 	if (stat(f->source, &info))
 		return 0;
-	char *mtime = ctime(&info.st_mtime);
+	/* ctime() returns a static string, which managers in other threads of the process may overwrite. */
+	char mtime[32];
+	ctime_r(&info.st_mtime, mtime);
 	char *meta = string_format("%s-%" PRIu64 "-%s", f->source, info.st_size, mtime);
 	char *metahash = md5_of_string(meta);
 	char *name = string_format("file-meta-%s", metahash);
@@ -306,31 +308,34 @@ Returns a string that must be freed with free().
 
 char *vine_random_name(const struct vine_file *f)
 {
-	char *name;
-	char random[17];
-	string_cookie(random, 16);
-
+	const char *prefix;
 	switch (f->type) {
 	case VINE_FILE:
-		name = string_format("file-rnd-%s", random);
+		prefix = "file-rnd-";
 		break;
 	case VINE_MINI_TASK:
-		name = string_format("task-rnd-%s", random);
+		prefix = "task-rnd-";
 		break;
 	case VINE_URL:
-		name = string_format("url-rnd-%s", random);
+		prefix = "url-rnd-";
 		break;
 	case VINE_TEMP:
-		name = string_format("temp-rnd-%s", random);
+		prefix = "temp-rnd-";
 		break;
 	case VINE_BUFFER:
-		name = string_format("buffer-rnd-%s", random);
+		prefix = "buffer-rnd-";
 		break;
 	default:
 		fatal("invalid file type %d", f->type);
-		name = strdup("notreached");
-		break;
+		return strdup("notreached");
 	}
+
+	/* The prefix and 15 random letters, written in place: the manager names two files of every task this way, and
+	 * formatting the name took most of the time. */
+	size_t length = strlen(prefix);
+	char *name = xxmalloc(length + 16);
+	memcpy(name, prefix, length);
+	string_cookie(name + length, 16);
 	return name;
 }
 

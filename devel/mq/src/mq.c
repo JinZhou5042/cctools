@@ -188,7 +188,7 @@ static void mq_die(struct mq *mq, int err)
 	for (struct mq_msg *msg; list_get(cur, (void **)&msg); list_next(cur)) {
 		mq_msg_delete(msg);
 	}
-	list_cursor_destroy(cur);
+	list_cursor_delete(cur);
 
 	if (mq->poll_group) {
 		set_remove(mq->poll_group->acceptable, mq);

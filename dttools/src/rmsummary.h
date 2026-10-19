@@ -79,6 +79,10 @@ struct rmsummary
 
 void rmsummary_print(FILE *stream, struct rmsummary *s, int pprint, struct jx *verbatim_fields);
 void rmsummary_print_buffer(struct buffer *B, const struct rmsummary *s, int only_resources);
+/* Append the defined resources of s to B as the members of a JSON object, without braces, in the order and format
+ * that rmsummary_print_buffer() prints them with only_resources set. count is the number of members that the object
+ * already holds, which decides whether a comma comes first. Returns count plus the number of members appended. */
+int rmsummary_print_buffer_members(struct buffer *B, const struct rmsummary *s, int count);
 char *rmsummary_print_string(const struct rmsummary *s, int only_resources);
 
 /* Returns 1 if resource set, 0 if resource does not exist. */

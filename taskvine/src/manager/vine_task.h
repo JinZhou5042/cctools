@@ -72,8 +72,8 @@ struct vine_task {
 	
 	struct list *input_mounts;    /**< The mounted files expected as inputs. */
 	struct list *output_mounts;   /**< The mounted files expected as outputs. */
-	struct list *env_list;       /**< Environment variables applied to the task. */
-	struct list *feature_list;   /**< User-defined features this task requires. (See vine_worker's --feature option.) */
+	struct list *env_list;       /**< Environment variables applied to the task, or NULL in a copy of a task without any. */
+	struct list *feature_list;   /**< User-defined features this task requires, or NULL in a copy of a task without any. (See vine_worker's --feature option.) */
 
 	category_allocation_t resource_request; /**< See @ref category_allocation_t */
 	vine_schedule_t worker_selection_algorithm; /**< How to choose worker to run the task. */
@@ -88,18 +88,27 @@ struct vine_task {
 
 	vine_task_state_t state;       /**< Current state of task: READY, RUNNING, etc */
 	struct vine_worker_info *worker;    /**< Worker to which this task has been dispatched. */
+	struct list_cursor *retrieval;      /**< Position of the task in the manager's waiting_retrieval_list while it waits for retrieval, or null, so it leaves the list without a search. */
     struct vine_task* library_task; /**< Library task to which a function task has been matched. */
 	char *library_log_path; /**< The path of the library log file, used only for library task if set q->watch_library_logfiles */
 	int try_count;               /**< The number of times the task has been dispatched to a worker without being forsaken. If larger than max_retries, return with result of last attempt. */
 	int forsaken_count;         /**< The number of times the task has been dispatched to a worker. If larger than max_forsaken, return with VINE_RESULT_FORSAKEN. */
-	int library_failed_count;   /**< The number of times the duplicated library instances failed on the workers. Only count for the template. */
+	int library_failed_count;   /**< The number of library instances in a row that failed on the workers before any of their function calls completed. Only count for the template. */
 	int exhausted_attempts;     /**< Number of times the task failed given exhausted resources. */
 	int forsaken_attempts;      /**< Number of times the task was submitted to a worker but failed to start execution. */
 	int workers_slow;           /**< Number of times this task has been terminated for running too long. */
+	timestamp_t time_worker_lost[2]; /**< When workers running this task last disconnected unexpectedly, the latest first, or zero. */
+	timestamp_t time_unexplained_loss; /**< When a worker running this task was last lost in a way that no task explained, or zero. */
+	int worker_loss_charged;	  /**< Set once an unexpected loss of a worker counted as one of this task's tries. The
+				       task is then quarantined: it runs only on a worker that runs nothing else (see vine_schedule.h). */
+	struct vine_worker_info *quarantine_worker; /**< If quarantined and no worker was free, the worker that takes no new task
+				       until it is free for this one, or null. */
 	int function_slots_total;   /**< If a library, the total number of function slots usable. */
 	int function_slots_inuse;   /**< If a library, the number of functions currently running. */
 	int library_retired;        /**< If a library instance, set when its library is removed while functions run. It
 				       takes no new functions and ends when the last one ends. */
+	int library_ran_function;   /**< If a library instance, set when a function call it ran completed, which shows
+				       that the instance started. Its later death does not count as a failure to start. */
 		
 	/***** Results of task once it has reached completion. *****/
 
@@ -138,8 +147,8 @@ struct vine_task {
 	int64_t bytes_sent;                                    /**< Number of bytes sent since task has last started sending input data. */
 	int64_t bytes_transferred;                             /**< Number of bytes transferred since task has last started transferring input data. */
 
-	struct rmsummary *resources_allocated;                 /**< Resources allocated to the task its latest attempt. */
-	struct rmsummary *resources_measured;                  /**< When monitoring is enabled, it points to the measured resources used by the task in its latest attempt. */
+	struct rmsummary *resources_allocated;                 /**< Resources allocated to the task its latest attempt. NULL in a recovery task until it is submitted. */
+	struct rmsummary *resources_measured;                  /**< When monitoring is enabled, it points to the measured resources used by the task in its latest attempt. NULL in a recovery task until it is submitted. */
 	struct rmsummary *resources_requested;                 /**< Number of cores, disk, memory, time, etc. the task requires. */
 	struct rmsummary *current_resource_box;                /**< Resources allocated to the task on this specific worker. */
 
@@ -150,7 +159,19 @@ struct vine_task {
 
 	int group_id;					       /**< When enabled, group ID will be assigned based on temp file dependencies of this task */	
 
+	struct vine_file *blocking_inputs[2];                  /**< Inputs of this ready task that exist but have no transfer source, recorded when the scheduler found no worker
+								  for it. The second, if set, is held by no worker that holds the first. The dispatch pass skips the task while
+								  vine_schedule_task_is_blocked() finds them still blocking. Both are among the task's input mounts, which hold
+								  their references. */
+	uint64_t blocked_epoch;                                /**< The manager's blocked_epoch when this ready task was found blocked, or zero. While it and the
+								  blocking serials of its blocking inputs are unchanged, the task waits for an event (see vine_schedule.h). */
+	uint64_t blocked_serials[2];                           /**< Blocking serials of blocking_inputs when the task was found blocked. */
+	int blocking_vault;                                    /**< Set when the first blocking input comes inline into the vault, and the task waits for that receive to end
+								  instead of a transfer of its own from a peer (see vine_manager_data_service_receiving_inline()). */
+
 	int refcount;                                          /**< Number of remaining references to this object. */
+	int recovery_refs;                                     /**< Number of temporary files whose recovery source is this task, each with a reference to it
+								  (see vine_task_recipe.h). Once only they hold the task, they keep its recipe instead. */
 };
 
 void vine_task_delete(struct vine_task *t);

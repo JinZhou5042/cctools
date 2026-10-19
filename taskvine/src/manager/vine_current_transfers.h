@@ -10,17 +10,45 @@ See the file COPYING for details.
 #define VINE_FILE_SOURCE_MAX_TRANSFERS 1
 #define VINE_WORKER_SOURCE_MAX_TRANSFERS 10
 
-char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url);
+/*
+Bytes that one source worker sends at once, beyond the transfer of a single file. Transfers that together fit this
+bound take about 50 ms of a 10 Gb/s link and 0.5 s of a 1 Gb/s link, so sharing the link among them delays none much,
+and up to worker-source-max-transfers small files still overlap the fork and connection of each transfer. A larger file
+is sent one copy at a time: every finished copy becomes a source of further copies, so a file read on many workers
+doubles its copies each time one copy takes to send, while ten copies at once that split the link took ten times as
+long each and the copies grew by 11 per ten such times (cluster, one 1 GB file read on 400 workers: 142 s with ten
+copies at once, 56 s with one).
+*/
+#define VINE_WORKER_SOURCE_MAX_BYTES (64LL * 1024 * 1024)
+
+/* Record a transfer of the file cachename from source_url (of source_worker, if a worker) to dest_worker (if a
+ * worker), and return its id. A transfer from a source worker counts the size of the worker's replica of cachename
+ * among the bytes it sends at once. cachename may be null, and such a transfer counts no bytes. */
+char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename);
 
 int vine_current_transfers_remove(struct vine_manager *q, const char *id);
+
+/* Return true if source worker w can start sending another file of size bytes now: it sends fewer than
+ * worker-source-max-transfers files, and it sends nothing else or the bytes it sends, with this file, stay within
+ * VINE_WORKER_SOURCE_MAX_BYTES. A refusal for bytes is remembered, so the end of a transfer that makes room wakes the
+ * tasks that wait for the worker's files (vine_schedule_wake_worker()). */
+int vine_current_transfers_source_has_room(struct vine_manager *q, struct vine_worker_info *w, int64_t size);
 
 int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const char *cachename);
 
 void vine_current_transfers_set_success(struct vine_manager *q, char *id);
 
+/* Count the transfer with this id as successful and remove its record, as vine_current_transfers_set_success() and
+ * vine_current_transfers_remove() do, with one lookup. Return one if the record existed. */
+int vine_current_transfers_remove_success(struct vine_manager *q, const char *id);
+
 int vine_current_transfers_url_in_use(struct vine_manager *q, const char *source);
 
 int vine_current_transfers_wipe_worker(struct vine_manager *q, struct vine_worker_info *w);
+
+/* Tell every other worker that is receiving a file from w, which is being removed, to abandon the transfer, so it
+ * fails at once instead of after the peer transfer timeout. Return the number of transfers abandoned. */
+int vine_current_transfers_abandon_source(struct vine_manager *q, struct vine_worker_info *w);
 
 void vine_current_transfers_print_table(struct vine_manager *q);
 

@@ -39,13 +39,43 @@ struct vine_file {
 	size_t size;        // Length of source data, if known.
 	time_t mtime;       // Modification time of source data, if known.
 	mode_t mode;        // Manual override for Unix mode bits sent to worker.  Zero if unset.
+	int original_producer_task_id;   // For temp files, the task ID of the original task that produces this file.
 	char *data;         // Raw data for an input or output buffer.
 	struct vine_task *mini_task; // Mini task used to generate the desired output file.
-	struct vine_task *recovery_task; // For temp files, a copy of the task that created it.
-	int original_producer_task_id;   // For temp files, the task ID of the original task that produces this file.
+	/* For temp files, the source that recreates a lost file (see vine_task_recipe.h): the task that last wrote it, or
+	 * the recovery task that recreates it, or else the recipe of the task that last wrote it. */
+	struct vine_task *recovery_task;
+	struct vine_task_recipe *recovery_recipe;
 	struct vine_worker_info *source_worker; // if this is a substitute file, attach the worker serving it. 
 	int change_message_shown; // True if error message already shown.
 	int refcount;       // Number of references from a task object, delete when zero.
+
+	/* Scheduler state of a file that keeps ready tasks from every worker (see vine_schedule.h). blocked_serial advances
+	 * on every event that may change whether the file blocks them. blocked_registered is one more than the serial at
+	 * which the file was registered with those events, or zero. The memo holds the file's own check, valid for one
+	 * dispatch pass and serial: whether it is held without a transfer source, and whether no holder has room. */
+	uint64_t blocked_serial;
+	uint64_t blocked_registered;
+	uint64_t blocked_memo_pass;
+	uint64_t blocked_memo_serial;
+	int blocked_memo_held;
+	int blocked_memo_alone;
+
+	/* The data service's index entry of this file's copy in the vault, or NULL when the vault holds none. The data
+	 * service sets and clears it with the entry, so the scheduler and dispatch learn whether a declared file is in the
+	 * vault without a lookup by cache name, which they otherwise make for every input of every task they consider. */
+	void *vault_entry;
+
+	/* The number of data service jobs of this file: checkpoint receives, including cancelled ones whose executors have
+	 * not returned, and writes of its vault entry to disk. The data service counts them as it indexes them by cache
+	 * name, so a vault removal of a file with no entry and no job, such as the second pruning of a released output
+	 * when its node is removed, costs no lookup by name. */
+	int vault_jobs;
+
+	/* The number of copies of this local file that the manager is sending itself and that are not ready yet, counted
+	 * only for a file that peers may share (see vine_manager_limits_sends()). Each such replica holds a reference to
+	 * the file (vine_file_replica.manager_send) and returns it when it becomes ready or is deleted. */
+	int manager_sends;
 };
 
 struct vine_file * vine_file_create( const char *source, const char *cached_name, const char *data, size_t size, vine_file_type_t type, struct vine_task *mini_task, vine_cache_level_t cache_level, vine_file_flags_t flags);

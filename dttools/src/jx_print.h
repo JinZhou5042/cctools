@@ -34,6 +34,13 @@ void jx_print_buffer( struct jx *j, buffer_t *buffer);
 
 void jx_print_link( struct jx *j, struct link *l, time_t stoptime );
 
+/** Print an integer to a buffer, as printf("%lld") does. @param value The integer. @param b The buffer for output. */
+void jx_print_integer( jx_int_t value, buffer_t *b );
+
+/** Print a double to a buffer, as printf("%.16g") does, which is how a JX double is printed. Common values are
+formatted without printf. @param value The double. @param b The buffer for output. */
+void jx_print_double( double value, buffer_t *b );
+
 /** Print a C string in JSON format (with escape codes) into a buffer.  @param s A C string.  @param b The buffer for output.  @see buffer.h */
 void jx_escape_string( const char *s, buffer_t *b );
 

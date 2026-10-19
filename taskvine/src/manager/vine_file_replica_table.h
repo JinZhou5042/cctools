@@ -29,6 +29,9 @@ struct vine_file_replica *vine_file_replica_table_lookup(struct vine_worker_info
 struct vine_file_replica *vine_file_replica_table_get_or_create(struct vine_manager *m, struct vine_worker_info *w, const char *cachename, vine_file_type_t type, vine_cache_level_t cache_level, int64_t size, time_t mtime);
 
 struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager *q, const char *cachename);
+/* Return non-zero when some holder of the file can send it now, as vine_file_replica_table_find_worker() would choose
+ * one, without choosing: the first such holder answers, so a file that many workers hold costs O(1) to check. */
+int vine_file_replica_table_has_source(struct vine_manager *q, const char *cachename);
 
 int vine_file_replica_table_count_replicas( struct vine_manager *q, const char *cachename, vine_file_replica_state_t state );
 

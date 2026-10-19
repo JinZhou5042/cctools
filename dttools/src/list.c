@@ -119,7 +119,7 @@ bool list_destroy(struct list *list)
 		return false;
 	if (list->refcount > 1)
 		return false;
-	list_cursor_destroy(list->iter);
+	list_cursor_delete(list->iter);
 	debug_assert(list->refcount == 0);
 	free(list);
 	return true;
@@ -143,13 +143,23 @@ void list_reset(struct list_cursor *cur)
 	cur->target = NULL;
 }
 
-void list_cursor_destroy(struct list_cursor *cur)
+void list_cursor_delete(struct list_cursor *cur)
 {
 	debug_assert(cur);
 	debug_assert(cur->list);
 	list_reset(cur);
 	list_unref(cur->list);
 	free(cur);
+}
+
+/*
+Helper function to simplify the use of __attribute__((cleanup))
+which passes around a void double-pointer to the object to be freed.
+*/
+
+void list_cursor_delete_vpp(struct list_cursor **cursor)
+{
+	list_cursor_delete(*cursor);
 }
 
 bool list_get(struct list_cursor *cur, void **item)
@@ -361,8 +371,8 @@ struct list *list_splice(struct list *top, struct list *bottom)
 		list_drop(cur_bot);
 	}
 
-	list_cursor_destroy(cur_bot);
-	list_cursor_destroy(cur_top);
+	list_cursor_delete(cur_bot);
+	list_cursor_delete(cur_top);
 
 	ok = list_destroy(bottom);
 	debug_assert(ok);
@@ -394,12 +404,12 @@ struct list *list_split(struct list *l, list_op_t comparator, const void *arg)
 			out = list_create();
 		struct list_cursor *end = list_cursor_create(out);
 		list_insert(end, item);
-		list_cursor_destroy(end);
+		list_cursor_delete(end);
 		list_drop(cur);
 		list_next(cur);
 	}
 
-	list_cursor_destroy(cur);
+	list_cursor_delete(cur);
 	return out;
 }
 
@@ -413,7 +423,7 @@ void list_delete(struct list *l)
 	do {
 		list_drop(cur);
 	} while (list_next(cur));
-	list_cursor_destroy(cur);
+	list_cursor_delete(cur);
 
 	bool ok = list_destroy(l);
 	debug_assert(ok);
@@ -436,20 +446,26 @@ void list_clear(struct list *l, void (*delete_func)(void *item))
 	}
 }
 
+/* The push and pop functions use a cursor on the stack, with the references of list_cursor_create() and
+ * list_cursor_delete(), instead of allocating one: they run for every queue operation of the TaskVine manager. */
 int list_push_head(struct list *l, void *item)
 {
-	struct list_cursor *cur = list_cursor_create(l);
-	list_seek(cur, 0);
-	list_insert(cur, item);
-	list_cursor_destroy(cur);
+	struct list_cursor cur = {.list = l, .target = NULL};
+	list_ref(l);
+	list_seek(&cur, 0);
+	list_insert(&cur, item);
+	list_reset(&cur);
+	list_unref(l);
 	return 1;
 }
 
 int list_push_tail(struct list *l, void *item)
 {
-	struct list_cursor *cur = list_cursor_create(l);
-	list_insert(cur, item);
-	list_cursor_destroy(cur);
+	struct list_cursor cur = {.list = l, .target = NULL};
+	list_ref(l);
+	list_insert(&cur, item);
+	list_reset(&cur);
+	list_unref(l);
 	return 1;
 }
 
@@ -460,11 +476,13 @@ void *list_pop_head(struct list *l)
 	if (!l)
 		return NULL;
 
-	struct list_cursor *cur = list_cursor_create(l);
-	list_seek(cur, 0);
-	list_get(cur, &item);
-	list_drop(cur);
-	list_cursor_destroy(cur);
+	struct list_cursor cur = {.list = l, .target = NULL};
+	list_ref(l);
+	list_seek(&cur, 0);
+	list_get(&cur, &item);
+	list_drop(&cur);
+	list_reset(&cur);
+	list_unref(l);
 
 	return item;
 }
@@ -476,11 +494,13 @@ void *list_pop_tail(struct list *l)
 	if (!l)
 		return NULL;
 
-	struct list_cursor *cur = list_cursor_create(l);
-	list_seek(cur, -1);
-	list_get(cur, &item);
-	list_drop(cur);
-	list_cursor_destroy(cur);
+	struct list_cursor cur = {.list = l, .target = NULL};
+	list_ref(l);
+	list_seek(&cur, -1);
+	list_get(&cur, &item);
+	list_drop(&cur);
+	list_reset(&cur);
+	list_unref(l);
 
 	return item;
 }
@@ -534,10 +554,13 @@ void *list_peek_head(struct list *l)
 	if (!l)
 		return NULL;
 
-	struct list_cursor *cur = list_cursor_create(l);
-	list_seek(cur, 0);
-	list_get(cur, &item);
-	list_cursor_destroy(cur);
+	/* A cursor on the stack, as in list_pop_head(): peeking allocates nothing. */
+	struct list_cursor cur = {.list = l, .target = NULL};
+	list_ref(l);
+	list_seek(&cur, 0);
+	list_get(&cur, &item);
+	list_reset(&cur);
+	list_unref(l);
 
 	return item;
 }
@@ -549,10 +572,13 @@ void *list_peek_tail(struct list *l)
 	if (!l)
 		return NULL;
 
-	struct list_cursor *cur = list_cursor_create(l);
-	list_seek(cur, -1);
-	list_get(cur, &item);
-	list_cursor_destroy(cur);
+	/* A cursor on the stack, as in list_pop_head(): peeking allocates nothing. */
+	struct list_cursor cur = {.list = l, .target = NULL};
+	list_ref(l);
+	list_seek(&cur, -1);
+	list_get(&cur, &item);
+	list_reset(&cur);
+	list_unref(l);
 
 	return item;
 }
@@ -586,7 +612,7 @@ void *list_remove(struct list *l, const void *value)
 			break;
 		}
 	}
-	list_cursor_destroy(cur);
+	list_cursor_delete(cur);
 
 	return out;
 }
@@ -603,7 +629,7 @@ void *list_find(struct list *l, list_op_t comparator, const void *arg)
 			break;
 		}
 	}
-	list_cursor_destroy(cur);
+	list_cursor_delete(cur);
 
 	return out;
 }
@@ -620,24 +646,7 @@ int list_iterate(struct list *l, list_op_t operator, const void *arg)
 			break;
 		}
 	}
-	list_cursor_destroy(cur);
-
-	return alltheway;
-}
-
-int list_iterate_reverse(struct list *l, list_op_t operator, const void *arg)
-{
-	void *item;
-	int alltheway = 1;
-
-	struct list_cursor *cur = list_cursor_create(l);
-	for (list_seek(cur, -1); list_get(cur, &item); list_prev(cur)) {
-		if (!operator(item, arg)) {
-			alltheway = 0;
-			break;
-		}
-	}
-	list_cursor_destroy(cur);
+	list_cursor_delete(cur);
 
 	return alltheway;
 }
@@ -699,8 +708,8 @@ struct list *list_duplicate(struct list *src)
 		list_insert(dst_cur, item);
 	}
 
-	list_cursor_destroy(src_cur);
-	list_cursor_destroy(dst_cur);
+	list_cursor_delete(src_cur);
+	list_cursor_delete(dst_cur);
 	return dst;
 }
 
@@ -716,7 +725,7 @@ struct list *list_copy(struct list *src, void *(*copy)(void *item))
 		list_push_tail(dst, copy(item));
 	}
 
-	list_cursor_destroy(cur);
+	list_cursor_delete(cur);
 	return dst;
 }
 
@@ -743,7 +752,7 @@ struct list *list_sort(struct list *list, int (*comparator)(const void *, const 
 	}
 DONE:
 	free(array);
-	list_cursor_destroy(cur);
+	list_cursor_delete(cur);
 	return list;
 }
 
@@ -765,7 +774,7 @@ void list_push_priority(struct list *list, list_priority_t p, void *item)
 	// i is NULL here
 	if (!i)
 		list_insert(cur, item);
-	list_cursor_destroy(cur);
+	list_cursor_delete(cur);
 }
 
 /* vim: set noexpandtab tabstop=8: */

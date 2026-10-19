@@ -87,6 +87,7 @@ uint64_t vine_graph_executor_add_node(struct vine_graph_executor *e);
  * run ends. Its loss fails the nodes that read it, because it cannot be recomputed. */
 uint64_t vine_graph_executor_declare_file(struct vine_graph_executor *e, const char *source_path, int vault);
 
+
 /* Undeclare a file the frontend provided, removing its vault entry and its copies on Workers. The frontend calls this
  * only when no node that may still run reads the file under any id: every reader failed, or was released and will not
  * be asked for again. Return zero, or -1 for an unknown file or a node output. */
@@ -99,13 +100,28 @@ uint64_t vine_graph_executor_add_output(struct vine_graph_executor *e, uint64_t 
  * on that node. Return zero, or -1 for an unknown node or file, or a submitted node. */
 int vine_graph_executor_add_input(struct vine_graph_executor *e, uint64_t node_id, uint64_t file_id, const char *task_path);
 
+/* Mount count files at once, file_ids[i] at task_paths[i], as vine_graph_executor_add_input() does for each, so a
+ * frontend makes one call for a node that reads many files. Return zero, or -1 at the first mount that fails, with the
+ * mounts before it in place. */
+int vine_graph_executor_add_inputs(struct vine_graph_executor *e, uint64_t node_id, int count, const uint64_t *file_ids, const char *const *task_paths);
+
+/* Declare data the frontend holds in memory, such as the manifest of a node, and mount it at task_path in the sandbox
+ * of a node not yet submitted. The Manager keeps a copy, sends it with each task of the node, and has the Worker remove
+ * it when that task ends, so the Manager side creates no file. Each declaration has a cache name of its own, even for
+ * equal data. The node owns it: it has no file id, and the executor undeclares it when it removes the node, so the
+ * frontend keeps no record of it. Return zero, or -1 for an unknown or submitted node or a failed declaration. */
+int vine_graph_executor_add_input_buffer(struct vine_graph_executor *e, uint64_t node_id, const char *buffer, size_t size, const char *task_path);
+
 /* Submit a node whose files are mounted. It runs once every node whose output it reads has completed, and it fails at
  * once when it reads an output of a failed node that exists nowhere. Return zero, or -1 for an unknown or submitted
  * node, a node that reads an output of a node not submitted before it, or a failed run. */
 int vine_graph_executor_submit_node(struct vine_graph_executor *e, uint64_t node_id);
 
 /* Pin or unpin a node output. A pinned output is never released. Pins are counted, so each pin needs one unpin.
- * Return zero, or -1 for a file that is not a node output, or an unpin without a pin. */
+ * Return zero, or -1 for a file that is not a node output, or an unpin without a pin. An unpin returns one instead when
+ * it leaves the producer released, because it released the producer or took the last pin of an output of a released
+ * producer that was not restored: vine_graph_executor_next_released() does not report the producer for it, so the
+ * frontend lets the producer go as if it had been reported. Ancestors that it releases in turn are reported. */
 int vine_graph_executor_pin_file(struct vine_graph_executor *e, uint64_t file_id);
 int vine_graph_executor_unpin_file(struct vine_graph_executor *e, uint64_t file_id);
 
@@ -114,8 +130,27 @@ int vine_graph_executor_unpin_file(struct vine_graph_executor *e, uint64_t file_
  * Return zero, or -1 for a file that is not a pinned output of a submitted node. */
 int vine_graph_executor_fetch_file(struct vine_graph_executor *e, uint64_t file_id);
 
+/* Return the next file whose fetch made it readable since the last call, or zero when none did. Each call of
+ * vine_graph_executor_fetch_file() is reported once, at once when the file is already readable, unless its producer
+ * fails. Its bytes, when the Manager holds them in memory, are then available from vine_graph_executor_get_local_data(),
+ * and its path from vine_graph_executor_get_local_path(), while the output stays pinned. */
+uint64_t vine_graph_executor_next_fetched(struct vine_graph_executor *e);
+
+/* Return the next file whose fetch failed because its Worker cannot send it, such as a directory that holds an entry
+ * the Worker cannot read, or zero when none did. Such a fetch is not tried again: another call of
+ * vine_graph_executor_fetch_file() tries again, which succeeds once the producer has run again and written a file its
+ * Worker can send. */
+uint64_t vine_graph_executor_next_fetch_failed(struct vine_graph_executor *e);
+
+/* Set data and length to the bytes of a fetched node output that the Manager holds in memory, a small result that came
+ * inline, and return one. Return zero, and set data to NULL, when the Manager holds no copy of the file in memory, which
+ * vine_graph_executor_get_local_path() then provides. The bytes stay valid until the next call into the executor, so
+ * the caller copies them at once. Reading them never writes the file. */
+int vine_graph_executor_get_local_data(struct vine_graph_executor *e, uint64_t file_id, const char **data, int64_t *length);
+
 /* Return a readable local path of a file, or NULL while none is available. A provided file is at its source path. A
- * node output is available once fetched, and its path stays valid while the output stays pinned. */
+ * node output is available once fetched, and its path stays valid while the output stays pinned. A fetched output that
+ * the Manager holds in memory is written to its vault path first. */
 const char *vine_graph_executor_get_local_path(struct vine_graph_executor *e, uint64_t file_id);
 
 /* Advance the run and return its state. The wait ends once a node finished or a requested fetch became available, or
@@ -127,6 +162,14 @@ vine_graph_status_t vine_graph_executor_wait(struct vine_graph_executor *e, int 
 /* End a wait that runs in another thread soon, so that thread can apply calls queued for it. This is the only function
  * that may be called while another thread uses the executor, and only while the executor exists. */
 void vine_graph_executor_wake(struct vine_graph_executor *e);
+
+/* Hold and release the messages to Workers that the calls between them send, such as the unlinks of the outputs that
+ * unpins release and removals undeclare. While held, messages only queue, and the outermost release writes each
+ * Worker's queue once, so a frontend that lets go of many tasks in a row makes one write per Worker instead of one per
+ * message. Holds nest, and each hold needs one release. A frontend calls vine_graph_executor_wait() only outside a
+ * hold, because the Manager would send nothing while it waits. */
+void vine_graph_executor_hold_sends(struct vine_graph_executor *e);
+void vine_graph_executor_release_sends(struct vine_graph_executor *e);
 
 /* Return the next node that completed or failed since the last call, or zero when none did. A completed node whose
  * outputs later cannot be restored is reported again as failed. */
@@ -153,9 +196,13 @@ uint64_t vine_graph_executor_get_completed_recovery_tasks(const struct vine_grap
 /* Drop a submitted node the frontend no longer needs: it will not pin, fetch, or read the node's outputs, and no node it
  * submits later reads them. The node is removed once it failed, or once it completed and its outputs were released,
  * and once every node that reads its outputs was removed, so a node is never removed before its descendants. A removed
- * node frees its task and undeclares its outputs, and its id is no longer valid. Return zero, or -1 for an unknown or
- * unsubmitted node. */
+ * node frees its task and undeclares its outputs, and its id is no longer valid. Dropping only queues the node, in
+ * O(1): vine_graph_executor_wait() removes a few hundred queued nodes per step, and the frontend may remove more with
+ * vine_graph_executor_remove_dropped(). Return zero, or -1 for an unknown or unsubmitted node. */
 int vine_graph_executor_drop_node(struct vine_graph_executor *e, uint64_t node_id);
+/* Remove dropped nodes that are removable, and the dropped parents that their removal makes removable in turn, taking
+ * at most limit queued entries. Return the number of entries still queued, zero when none is. */
+int vine_graph_executor_remove_dropped(struct vine_graph_executor *e, int limit);
 /* Return the next node removed since the last call, or zero when none was. The frontend forgets it then. */
 uint64_t vine_graph_executor_next_removed(struct vine_graph_executor *e);
 

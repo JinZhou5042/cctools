@@ -97,7 +97,15 @@ static struct itable *procs_running = NULL;
 /* These are additional pointers into procs_table and should not be deleted */
 static struct list *procs_waiting = NULL;
 
-/* List of asynchronous messages pending to be sent to the manager */
+/* A message of the worker's own, waiting to be sent to the manager. Most are text, and an inline-data reply also carries
+ * the bytes of a cached file, which may hold NUL bytes, so a message has an explicit length. */
+struct async_message {
+	size_t length;	      /* Bytes of data. */
+	size_t header_length; /* Bytes at the start of data that the debug log shows. */
+	char data[];	      /* The message itself. */
+};
+
+/* List of asynchronous messages (struct async_message) pending to be sent to the manager */
 static struct list *pending_async_messages = NULL;
 
 /* Bytes of the message at the head of pending_async_messages that the socket already took. */
@@ -252,10 +260,10 @@ intact, and the main loop waits for the link to become writable while messages r
 
 void deliver_async_messages(struct link *l)
 {
-	char *message;
+	struct async_message *message;
 	while ((message = list_peek_head(pending_async_messages))) {
-		size_t length = strlen(message + pending_async_offset);
-		ssize_t written = link_write(l, message + pending_async_offset, length, LINK_NOWAIT);
+		size_t length = message->length - pending_async_offset;
+		ssize_t written = link_write(l, message->data + pending_async_offset, length, LINK_NOWAIT);
 		if (written <= 0) {
 			break;
 		}
@@ -263,7 +271,7 @@ void deliver_async_messages(struct link *l)
 			pending_async_offset += written;
 			break;
 		}
-		debug(D_VINE, "tx: %s", message);
+		debug(D_VINE, "tx: %.*s", (int)message->header_length, message->data);
 		list_pop_head(pending_async_messages);
 		free(message);
 		pending_async_offset = 0;
@@ -282,17 +290,17 @@ static int flush_async_messages(struct link *l, time_t stoptime)
 		return 1;
 	}
 
-	char *message;
+	struct async_message *message;
 	while ((message = list_peek_head(pending_async_messages))) {
-		size_t length = strlen(message + pending_async_offset);
-		ssize_t written = link_write(l, message + pending_async_offset, length, stoptime);
+		size_t length = message->length - pending_async_offset;
+		ssize_t written = link_write(l, message->data + pending_async_offset, length, stoptime);
 		if (written > 0) {
 			pending_async_offset += written;
 		}
 		if (written < 0 || (size_t)written < length) {
 			return 0;
 		}
-		debug(D_VINE, "tx: %s", message);
+		debug(D_VINE, "tx: %.*s", (int)message->header_length, message->data);
 		list_pop_head(pending_async_messages);
 		free(message);
 		pending_async_offset = 0;
@@ -300,13 +308,56 @@ static int flush_async_messages(struct link *l, time_t stoptime)
 	return 1;
 }
 
-/* Buffer an asynchronous message to be sent to the manager */
+/*
+Write the rest of an asynchronous message that the socket took only in part, waiting as needed. The manager reads the
+rest of a message it has begun synchronously and writes nothing to this worker meanwhile, so a worker that then waits
+for data from the manager, such as the file of a put, would wait for the manager while the manager waits for it. The
+manager is reading, so the rest goes out. Return 0 if the link failed.
+*/
 
-void send_async_message(struct link *l, const char *fmt, ...)
+static int finish_partial_async_message(struct link *l, time_t stoptime)
+{
+	if (l != pending_async_link || pending_async_offset == 0) {
+		return 1;
+	}
+
+	struct async_message *message = list_peek_head(pending_async_messages);
+	size_t length = message->length - pending_async_offset;
+	ssize_t written = link_write(l, message->data + pending_async_offset, length, stoptime);
+	if (written < 0 || (size_t)written < length) {
+		return 0;
+	}
+	debug(D_VINE, "tx: %.*s", (int)message->header_length, message->data);
+	list_pop_head(pending_async_messages);
+	free(message);
+	pending_async_offset = 0;
+	return 1;
+}
+
+/* Queue a message of a text line and length bytes of data that follow it, and send what the socket takes now. */
+
+static void queue_async_message(struct link *l, const char *line, size_t line_length, const char *data, size_t length)
 {
 	assert(l);
 	pending_async_link = l;
 
+	struct async_message *message = xxmalloc(sizeof(*message) + line_length + length + 1);
+	memcpy(message->data, line, line_length);
+	if (length > 0) {
+		memcpy(message->data + line_length, data, length);
+	}
+	message->data[line_length + length] = 0;
+	message->length = line_length + length;
+	message->header_length = data ? line_length : message->length;
+
+	list_push_tail(pending_async_messages, message);
+	deliver_async_messages(l); // attempt to deliver message, will be delivered later if buffer is full.
+}
+
+/* Buffer an asynchronous message to be sent to the manager */
+
+void send_async_message(struct link *l, const char *fmt, ...)
+{
 	va_list va;
 	va_start(va, fmt);
 	int length = vsnprintf(NULL, 0, fmt, va);
@@ -317,13 +368,67 @@ void send_async_message(struct link *l, const char *fmt, ...)
 		fatal("message to the manager is %d bytes, more than VINE_LINE_MAX", length);
 	}
 
-	char *message = xxmalloc(length + 1);
+	char message[VINE_LINE_MAX];
 	va_start(va, fmt);
 	vsnprintf(message, length + 1, fmt, va);
 	va_end(va);
 
-	list_push_tail(pending_async_messages, message);
-	deliver_async_messages(l); // attempt to deliver message, will be delivered later if buffer is full.
+	queue_async_message(l, message, length, NULL, 0);
+}
+
+/*
+Answer a manager request for the data of a cached file over the control link: "inline-data <name> <length> <mode>"
+followed by the bytes, or "inline-error <name> <errno>". The manager asks only for small files, so a connection of
+their own, which costs more than the file and occupies an entry of the host's connection tracking table for minutes,
+is not needed. A file larger than limit or not a regular file, such as a directory, is refused with EFBIG or EISDIR,
+and the manager then fetches it over a connection, as it does larger files. The reply goes through the asynchronous queue, ordered
+with the other messages of the worker, and the manager reads it without waiting for the rest of a partial reply.
+*/
+
+static int do_inline_get(struct link *manager, const char *cachename, int64_t limit)
+{
+	char cachename_encoded[VINE_LINE_MAX];
+	url_encode(cachename, cachename_encoded, sizeof(cachename_encoded));
+
+	int error = 0;
+	int fd = -1;
+	struct stat info;
+	char *data = NULL;
+
+	if (!cachename[0] || strchr(cachename, '/') || !strcmp(cachename, ".") || !strcmp(cachename, "..")) {
+		error = EACCES;
+	} else {
+		char *path = vine_cache_data_path(cache_manager, cachename);
+		/* A FIFO would block the open until a writer comes, which never does. */
+		fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+		free(path);
+		if (fd < 0 || fstat(fd, &info) < 0) {
+			error = errno;
+		} else if (!S_ISREG(info.st_mode)) {
+			error = EISDIR;
+		} else if (info.st_size > limit) {
+			error = EFBIG;
+		} else {
+			data = xxmalloc(info.st_size + 1);
+			if (full_read(fd, data, info.st_size) != info.st_size) {
+				error = EIO;
+			}
+		}
+	}
+	if (fd >= 0) {
+		close(fd);
+	}
+
+	if (error) {
+		debug(D_VINE, "cannot send %s inline: %s", cachename, strerror(error));
+		send_async_message(manager, "inline-error %s %d\n", cachename_encoded, error);
+	} else {
+		char line[VINE_LINE_MAX];
+		int length = snprintf(line, sizeof(line), "inline-data %s %lld %o\n", cachename_encoded, (long long)info.st_size, (unsigned)(info.st_mode & 0777));
+		queue_async_message(manager, line, length, data, info.st_size);
+	}
+	free(data);
+	return 1;
 }
 
 /* Send asynchronous task completion messages for current complete processes */
@@ -1258,7 +1363,7 @@ static int do_put(struct link *manager, const char *cachename, vine_cache_level_
 
 	timestamp_t start = timestamp_get();
 	char *error_message = NULL;
-	int r = vine_transfer_get_any(manager, transfer_dir, &actual_size, &mode, &mtime, options->active_timeout, &error_message);
+	int r = vine_transfer_get_any(manager, transfer_dir, &actual_size, &mode, &mtime, options->active_timeout, &error_message) == 1;
 	timestamp_t stop = timestamp_get();
 
 	/* XXX actual_size should equal expected size, but only for a simple file, not a dir. */
@@ -1321,7 +1426,11 @@ static int do_unlink(struct link *manager, const char *path)
 
 	int result = 0;
 
-	if (path_within_dir(cached_path, workspace->workspace_dir)) {
+	/* A cache name of one path component names an entry of the cache directory, which is within the workspace.
+	 * Other names are checked by resolving their parents, which takes a system call per path component. */
+	int plain_name = !strchr(path, '/') && strcmp(path, ".") && strcmp(path, "..");
+
+	if (plain_name || path_within_dir(cached_path, workspace->workspace_dir)) {
 		vine_cache_remove(cache_manager, path, manager);
 		result = 1;
 	} else {
@@ -1493,7 +1602,7 @@ static void disconnect_manager(struct link *manager)
 	link_close(manager);
 
 	/* Messages that this manager did not take belong to its session, and a partly sent one would corrupt the next. */
-	char *message;
+	struct async_message *message;
 	while ((message = list_pop_head(pending_async_messages))) {
 		free(message);
 	}
@@ -1557,6 +1666,10 @@ static int handle_manager(struct link *manager)
 	int cache_level;
 
 	if (recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
+		/* Handling a message may read more from the manager synchronously, which waits for the manager. */
+		if (!finish_partial_async_message(manager, time(0) + options->active_timeout)) {
+			return 0;
+		}
 		if (sscanf(line, "task %" SCNd64, &task_id) == 1) {
 			r = do_task(manager, task_id, time(0) + options->active_timeout);
 		} else if (sscanf(line, "connect-back %" SCNu64, &token) == 1) {
@@ -1592,6 +1705,9 @@ static int handle_manager(struct link *manager)
 		} else if (sscanf(line, "unlink %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = do_unlink(manager, filename);
+		} else if (sscanf(line, "inline-get %s %" SCNd64, filename_encoded, &length) == 2) {
+			url_decode(filename_encoded, filename, sizeof(filename));
+			r = do_inline_get(manager, filename, length);
 		} else if (sscanf(line, "getfile %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = vine_transfer_put_any(manager, cache_manager, filename, VINE_TRANSFER_MODE_FILE_ONLY, time(0) + options->active_timeout);
@@ -2677,6 +2793,12 @@ int main(int argc, char *argv[])
 
 	/* Move to the workspace directory. */
 	chdir(workspace->workspace_dir);
+
+	/* A worker killed before it cleaned up leaves its task sandboxes, partial transfers, and trash in a workspace given
+	 * with --workspace. A task of a later worker with the same task id would then run in a sandbox that holds the
+	 * files of the earlier one, so everything but the cache, which vine_cache_load() checks, is removed first. */
+	trash_setup(workspace->trash_dir);
+	vine_workspace_cleanup(workspace);
 
 	/* If the total number of cores was not set manually, fix it to the observed number of cores. */
 	if (options->cores_total < 1) {

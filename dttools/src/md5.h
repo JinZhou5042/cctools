@@ -50,7 +50,7 @@ void md5_buffer(const void *buffer, size_t length, unsigned char digest[MD5_DIGE
 
 /** Convert an MD5 digest into a printable string.
 @param digest A binary digest returned from @ref md5_file, @ref md5_buffer, or @ref chirp_reli_md5.
-@returns A static pointer to a human readable form of the digest.
+@returns A static pointer to a human readable form of the digest, one per thread.
 */
 const char *md5_to_string(unsigned char digest[MD5_DIGEST_LENGTH]);
 

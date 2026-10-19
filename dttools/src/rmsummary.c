@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <math.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,16 +83,21 @@ unsigned hash_fn(const char *key)
 	return (key[0] << 8) + strlen(key);
 }
 
+/* The table is created once, because managers in different threads of one process look up resources at once. */
+static pthread_once_t info_of_resource_once = PTHREAD_ONCE_INIT;
+
+static void info_of_resource_create(void)
+{
+	info_of_resource_table = hash_table_create(0, 0);
+	size_t i;
+	for (i = 0; i < rmsummary_num_resources(); i++) {
+		hash_table_insert(info_of_resource_table, resources_info[i].name, (void *)&resources_info[i]);
+	}
+}
+
 static const struct resource_info *info_of_resource(const char *resource_name)
 {
-	if (!info_of_resource_table) {
-		info_of_resource_table = hash_table_create(0, 0);
-		size_t i;
-		for (i = 0; i < rmsummary_num_resources(); i++) {
-			hash_table_insert(info_of_resource_table, resources_info[i].name, (void *)&resources_info[i]);
-		}
-	}
-
+	pthread_once(&info_of_resource_once, info_of_resource_create);
 	return hash_table_lookup(info_of_resource_table, resource_name);
 }
 
@@ -280,6 +286,15 @@ int rmsummary_assign_summary_field(struct rmsummary *s, char *key, struct jx *va
 	return 0;
 }
 
+/* round to the specified number of decimals, for a resource that has decimals */
+static double round_to_decimals(double value, int decimals)
+{
+	double factor = pow(10, decimals);
+	int64_t scaled = (jx_int_t)((value * factor) + 0.5);
+
+	return scaled / factor;
+}
+
 /* truncate to specified number of decimals */
 struct jx *value_to_jx_number(double value, int decimals)
 {
@@ -287,10 +302,7 @@ struct jx *value_to_jx_number(double value, int decimals)
 		return jx_integer((jx_int_t)value);
 	}
 
-	double factor = pow(10, decimals);
-	int64_t scaled = (jx_int_t)((value * factor) + 0.5);
-
-	return jx_double(scaled / factor);
+	return jx_double(round_to_decimals(value, decimals));
 }
 
 struct jx *peak_times_to_json(struct rmsummary *s)
@@ -574,16 +586,57 @@ void rmsummary_print(FILE *stream, struct rmsummary *s, int pprint, struct jx *v
 	jx_delete(jsum);
 }
 
+int rmsummary_print_buffer_members(struct buffer *B, const struct rmsummary *s, int count)
+{
+	size_t i;
+	for (i = 0; i < rmsummary_num_resources(); i++) {
+		const struct resource_info *info = &resources_info[i];
+		double value = rmsummary_get_by_offset(s, info->offset);
+
+		/* do not output undefined values */
+		if (value < 0) {
+			continue;
+		}
+
+		if (count++ > 0) {
+			buffer_putliteral(B, ",");
+		}
+		buffer_putliteral(B, "\"");
+		buffer_putstring(B, info->name);
+		buffer_putliteral(B, "\":[");
+		if (info->decimals == 0) {
+			jx_print_integer((jx_int_t)value, B);
+		} else {
+			jx_print_double(round_to_decimals(value, info->decimals), B);
+		}
+		buffer_putliteral(B, ",\"");
+		buffer_putstring(B, info->units);
+		buffer_putliteral(B, "\"]");
+	}
+
+	return count;
+}
+
 void rmsummary_print_buffer(struct buffer *B, const struct rmsummary *s, int only_resources)
 {
 	if (!s)
 		return;
 
-	char *str = rmsummary_print_string(s, only_resources);
+	/* Resources alone are printed without building a JX object, which dominated the cost of the TaskVine
+	 * transactions log. The output is the same as that of rmsummary_to_json(). */
+	if (only_resources) {
+		buffer_putliteral(B, "{");
+		rmsummary_print_buffer_members(B, s, 0);
+		buffer_putliteral(B, "}");
+		return;
+	}
 
-	if (str) {
-		buffer_printf(B, "%s", str);
-		free(str);
+	/* Print into the caller's buffer directly instead of formatting a copy of the whole string. */
+	struct jx *jsum = rmsummary_to_json(s, only_resources);
+
+	if (jsum) {
+		jx_print_buffer(jsum, B);
+		jx_delete(jsum);
 	}
 }
 
@@ -604,11 +657,39 @@ char *rmsummary_print_string(const struct rmsummary *s, int only_resources)
 	return NULL;
 }
 
+static void rmsummary_fill(struct rmsummary *s, double default_value);
+
+/* Summaries of the usual default values, made once for the process and copied by rmsummary_create(), which fills a
+ * summary field by field otherwise: the manager creates several summaries for every task it submits and dispatches. */
+static struct rmsummary rmsummary_minus_one;
+static struct rmsummary rmsummary_zero;
+static pthread_once_t rmsummary_defaults_once = PTHREAD_ONCE_INIT;
+
+static void rmsummary_defaults_create(void)
+{
+	rmsummary_fill(&rmsummary_minus_one, -1);
+	rmsummary_fill(&rmsummary_zero, 0);
+}
+
 /* Create summary filling all numeric fields with default_value, and
 all string fields with NULL. Usual values are 0, or -1. */
 struct rmsummary *rmsummary_create(double default_value)
 {
 	struct rmsummary *s = malloc(sizeof(struct rmsummary));
+	if (!s) {
+		return NULL;
+	}
+	if (default_value == -1 || default_value == 0) {
+		pthread_once(&rmsummary_defaults_once, rmsummary_defaults_create);
+		memcpy(s, default_value == 0 ? &rmsummary_zero : &rmsummary_minus_one, sizeof(*s));
+	} else {
+		rmsummary_fill(s, default_value);
+	}
+	return s;
+}
+
+static void rmsummary_fill(struct rmsummary *s, double default_value)
+{
 	memset(s, default_value, sizeof(struct rmsummary));
 
 	s->command = NULL;
@@ -631,7 +712,6 @@ struct rmsummary *rmsummary_create(double default_value)
 		size_t offset = resources_info[i].offset;
 		rmsummary_set_by_offset(s, offset, default_value);
 	}
-	return s;
 }
 
 void rmsummary_delete(struct rmsummary *s)
@@ -1033,17 +1113,55 @@ const char **rmsummary_list_resources()
 /* will overwrite the previous calls leading to incorrect results */
 const char *rmsummary_resource_to_str(const char *resource, double value, int include_units)
 {
-	static char output[256];
+	/* One array per thread, because managers in different threads of one process format resources at once. */
+	static __thread char output[256];
 
-	int decimals = rmsummary_resource_decimals(resource);
-	const char *units = rmsummary_resource_units(resource);
-
-	if (!units) {
+	const struct resource_info *info = info_of_resource(resource);
+	if (!info) {
 		notice(D_RMON, "There is not such a resource: %s", resource);
 		return NULL;
 	}
+	const char *separator = include_units ? " " : "";
+	const char *units = include_units ? info->units : "";
 
-	string_nformat(output, sizeof(output), "%.*f%s%s", decimals, value, include_units ? " " : "", include_units ? units : "");
+	/* A whole number, as resources usually are, is printed as an integer and zeros, which is what %.*f prints for it,
+	 * without the floating-point conversion of printf. The manager formats four resources for every task it sends. */
+	if (value == floor(value) && fabs(value) < 1e15 && !(value == 0 && signbit(value))) {
+		int decimals = MIN(info->decimals, 15);
+		size_t separator_length = strlen(separator);
+		size_t units_length = strlen(units);
+		if (separator_length + units_length < sizeof(output) - 40) {
+			/* At most 16 digits and a sign, a point, 15 zeros, and the units, so it fits. */
+			char digits[20];
+			int count = 0;
+			long long whole = (long long)value;
+			unsigned long long magnitude = whole < 0 ? -(unsigned long long)whole : (unsigned long long)whole;
+			do {
+				digits[count++] = '0' + magnitude % 10;
+				magnitude /= 10;
+			} while (magnitude);
+			char *p = output;
+			if (whole < 0) {
+				*p++ = '-';
+			}
+			while (count) {
+				*p++ = digits[--count];
+			}
+			if (decimals) {
+				*p++ = '.';
+				memset(p, '0', decimals);
+				p += decimals;
+			}
+			memcpy(p, separator, separator_length);
+			p += separator_length;
+			memcpy(p, units, units_length);
+			p[units_length] = 0;
+			return output;
+		}
+		string_nformat(output, sizeof(output), "%.*f%s%s", info->decimals, value, separator, units);
+	} else {
+		string_nformat(output, sizeof(output), "%.*f%s%s", info->decimals, value, separator, units);
+	}
 
 	return output;
 }

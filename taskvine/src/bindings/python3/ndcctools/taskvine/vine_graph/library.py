@@ -6,8 +6,8 @@
 
 An Executor installs one library with installed() and removes it when it closes. Every task calls run_node(), the
 library's only function, without arguments. The task sandbox holds a manifest at MANIFEST with the function and the
-arguments of the task, small ones serialized inside it and larger ones as staged files named by sandbox path, and the
-sandbox paths of the results and files the task reads. run_node()
+arguments of the task, small ones serialized inside it, larger ones as staged files named by sandbox path, and
+references to results and files as they are, and the sandbox paths of the results and files the task reads. run_node()
 returns the function's result, which the TaskVine library writes to RESULT as {"Result", "Success", "Reason"}. A
 function that raises ends the task process with a non-zero status after printing its traceback, because the library
 otherwise reports exceptions with status zero. Local execution calls run_task() too, so both run a function alike.
@@ -23,6 +23,7 @@ forks inherits all of them, so tasks neither import those modules nor load those
 cached object instead of the file that its manifest names.
 """
 
+import collections
 import contextlib
 import gc
 import importlib
@@ -30,13 +31,14 @@ import os
 import types
 import shutil
 import sys
+import tempfile
 import traceback
 import uuid
 from pathlib import Path
 
 import cloudpickle
 
-from .graph import File, Hoisted, _Attribute, _Ref, replace_symbols
+from .graph import File, Hoisted, _Attribute, _Ref, _Symbol, replace_symbols
 
 # Sandbox path of the manifest that describes the task.
 MANIFEST = "vine-graph-node.pkl"
@@ -134,7 +136,47 @@ def prepare(module_names, hoisted_path, edata_path=None):
             with open(path, "rb") as stream:
                 blobs = cloudpickle.load(stream)
             objects.update((name, cloudpickle.loads(blob)) for name, blob in blobs.items())
+    rehearse()
     gc.freeze()
+
+
+# Number of times rehearse() runs a task, enough for the interpreter to specialize the code that tasks run.
+REHEARSALS = 4
+
+
+def rehearse():
+    """Run a small task in a scratch sandbox a few times. A forked task that runs code for the first time pays for
+    work that the library process could do once for all of them: the first check of a type against an abstract base
+    class, such as the Mapping check that finds references in arguments, walks every subclass of that class, and the
+    interpreter specializes code by writing to it, which makes the kernel copy the page in each task. Done here, the
+    answers and the specialized code are inherited by every task. A failure only leaves the work to the tasks. Return
+    whether the task ran."""
+    cwd = os.getcwd()
+    sandbox = None
+    try:
+        # Arguments may hold other containers, which the task below does not.
+        replace_symbols(([], set(), frozenset(), collections.deque()), lambda symbol: symbol)
+        sandbox = tempfile.mkdtemp(prefix="vine-graph-rehearsal-", dir=cwd)
+        os.chdir(sandbox)
+        # A function defined outside any module is serialized by value, as functions of a user's script are.
+        namespace = {}
+        exec("def increment(value, step=1):\n    return value + step\n", namespace)
+        save_result("result", 0)
+        manifest = {"objects": [cloudpickle.dumps(namespace["increment"]), cloudpickle.dumps(_Ref(None, "parent")),
+                                cloudpickle.dumps(1)],
+                    "callable": 0, "args": [1], "kwargs": {"step": 2}, "inputs": {(None, "parent"): "result"},
+                    "selected": {}, "selections": [], "files": {}}
+        with open(MANIFEST, "wb") as stream:
+            cloudpickle.dump(manifest, stream)
+        for _ in range(REHEARSALS):
+            save_result(RESULT, _run_node())
+        return load_result(RESULT) == 1
+    except Exception:
+        return False
+    finally:
+        os.chdir(cwd)
+        if sandbox:
+            shutil.rmtree(sandbox, ignore_errors=True)
 
 
 def save_result(path, value):
@@ -207,10 +249,13 @@ def file_identity(ref):
 
 
 def _select(value, steps):
+    """Apply selection steps to a value: an attribute step reads the attribute, and an item step reads value[step],
+    or, for an object that does not support items, such as a plain class instance or a dataclass, the attribute named
+    step."""
     for step in steps:
         if isinstance(step, _Attribute):
             value = getattr(value, step.name)
-        elif isinstance(value, (list, tuple, dict)):
+        elif hasattr(type(value), "__getitem__"):
             value = value[step]
         else:
             value = getattr(value, step)
@@ -273,11 +318,18 @@ def _run_node():
     objects = {}
 
     def load(entry):
-        # An entry is the index of an object serialized inside the manifest, or the sandbox path of a staged file,
-        # which the library may hold already.
+        # An entry is the index of an object serialized inside the manifest, the sandbox path of a staged file, which
+        # the library may hold already, the task (graph id, key) whose whole result the argument is, or another
+        # reference to data the task reads, which the manifest holds as it is.
+        if type(entry) is tuple:
+            return _Ref(*entry)
+        if isinstance(entry, _Symbol):
+            return entry
         if entry not in objects:
             if isinstance(entry, int):
-                objects[entry] = cloudpickle.loads(manifest["objects"][entry])
+                # A number, None, or string is held as it is (executor._LITERAL_TYPES), and any other object as bytes.
+                value = manifest["objects"][entry]
+                objects[entry] = cloudpickle.loads(value) if type(value) is bytes else value
             elif entry in _edata:
                 objects[entry] = _edata[entry]
             else:
@@ -295,8 +347,16 @@ def _run_node():
     function = load(manifest["callable"])
     args = tuple(load(task_path) for task_path in manifest["args"])
     kwargs = {name: load(task_path) for name, task_path in manifest["kwargs"].items()}
-    output = run_task(function, args, kwargs, lambda task: load_result(manifest["inputs"][task]),
-                      manifest["files"].__getitem__, _hoisted.__getitem__, manifest["selected"], load_selected)
+    # A function may change its working directory, so it receives the paths of its files in the sandbox as absolute
+    # paths, as a local Executor gives them, and the selections and the result are written to the sandbox afterwards.
+    sandbox = os.getcwd()
+    files = manifest["files"]
+    try:
+        output = run_task(function, args, kwargs, lambda task: load_result(manifest["inputs"][task]),
+                          lambda identity: os.path.join(sandbox, files[identity]), _hoisted.__getitem__,
+                          manifest["selected"], load_selected)
+    finally:
+        os.chdir(sandbox)
     del function, args, kwargs
     objects.clear()
     for steps, path in manifest["selections"]:

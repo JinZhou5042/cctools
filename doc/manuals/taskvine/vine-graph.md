@@ -471,7 +471,8 @@ effect at once:
 | `task-priority-mode` | `largest-input-first` | Order of ready tasks: `largest-input-first`, `depth-first`, or `fifo`. |
 | `max-retries` | `5` | Failed attempts allowed per task for infrastructure failures. See below. |
 | `progress-bar` | `1` | Draw a progress bar on standard output while tasks run; `0` disables it. Notebooks and interactive shells default to `0`: a notebook shows progress in the cell, and `executor.progress()` reports it anywhere. |
-| `vault-disk-limit` | `1536` | Gigabytes of checkpointed task results the manager may store. `0` means unlimited. |
+| `vault-disk-limit` | `1536` | Gigabytes of checkpointed task results the manager may store, in memory or on disk. `0` means unlimited. |
+| `vault-memory-limit` | `1` | Gigabytes of small checkpointed results (up to 64 KB each) the manager keeps in memory instead of writing them to disk. Beyond it, the oldest are written to the vault directory. `0` writes every checkpoint to disk. |
 
 Other names are TaskVine manager tuning parameters, such as
 `wait-for-workers`. A name the manager does not recognize raises `ValueError`.
@@ -588,7 +589,7 @@ Vine Graph moves three kinds of data:
 | --- | --- | --- | --- |
 | Arguments | The function and each argument of a task, serialized one by one. Objects up to 4 KB travel inside the task's manifest; larger ones are files, and an object passed to several tasks is stored once. | Manager disk, served to workers from the data port | When the program can no longer ask for any task that uses them, and none of those tasks can run again |
 | Results | The return value of a task, and any files it writes | Worker caches, as TaskVine temporary files | When every task that reads them has a durable result |
-| Checkpoints | Copies of results | The vault, a directory on the manager disk | With the result they copy |
+| Checkpoints | Copies of results | The vault: manager memory for results up to 64 KB, within `vault-memory-limit`, and otherwise a directory on the manager disk | With the result they copy |
 
 Workers fetch arguments and checkpoints from the manager's data port, except
 that files up to 64 KB, such as manifests, travel with their task. They fetch
@@ -627,6 +628,14 @@ A recovery task runs because another task needs its result now. When it
 completes, the results it read may be removed, but its own result waits until
 the tasks that read it complete. Removing it at once would let worker churn
 lose it again before it is read.
+
+A Graph may grow after it ran, as in a notebook, and a task added later may
+read a result that was already removed, which then runs again. While the
+program holds the Graph, a task that no task of the Graph read when it was
+submitted keeps its result until a task that reads it is submitted, so a loop
+that adds a step reading the previous one and runs it runs each step once. A
+removed result that new tasks read runs again at most once per `submit()` or
+`run()` call, and then stays until the Graph is dropped.
 
 When the vault is full, new checkpoints are refused and the rule stays the
 same. Results wait on the workers until downstream tasks are done or the vault
