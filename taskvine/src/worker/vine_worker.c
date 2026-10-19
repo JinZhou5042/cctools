@@ -339,12 +339,23 @@ void send_complete_tasks(struct link *l)
 	}
 }
 
-static void report_changes(struct link *manager)
-{
-	vine_watcher_send_changes(watcher, manager, time(0) + options->active_timeout);
-	send_message(manager, "end\n");
+/*
+Send the changes of watched files, followed by "end". If the data of a change could not be sent in full, because the
+file shrank while it was sent or the link failed, the manager is still reading that data, and anything sent next
+would be read as part of it. Return false then, so the worker disconnects instead of sending "end".
+*/
 
+static int report_changes(struct link *manager)
+{
 	results_to_be_sent_msg = 0;
+
+	if (!vine_watcher_send_changes(watcher, manager, time(0) + options->active_timeout)) {
+		debug(D_VINE, "failed to send the changes of watched files");
+		return 0;
+	}
+
+	send_message(manager, "end\n");
+	return 1;
 }
 
 /* Receive a single-line message from the current manager. */
@@ -1402,8 +1413,7 @@ static int handle_manager(struct link *manager)
 			fprintf(stderr, "vine_worker: this manager requires a password. (use the -P option)\n");
 			r = 0;
 		} else if (sscanf(line, "send_results %d", &n) == 1) {
-			report_changes(manager);
-			r = 1;
+			r = report_changes(manager);
 		} else if (sscanf(line, "send_stdout %" SCNd64 "", &task_id) == 1) {
 			send_stdout(manager, task_id);
 			r = 1;
