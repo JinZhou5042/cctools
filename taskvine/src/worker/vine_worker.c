@@ -308,6 +308,32 @@ static int flush_async_messages(struct link *l, time_t stoptime)
 	return 1;
 }
 
+/*
+Write the rest of an asynchronous message that the socket took only in part, waiting as needed. The manager reads the
+rest of a message it has begun synchronously and writes nothing to this worker meanwhile, so a worker that then waits
+for data from the manager, such as the file of a put, would wait for the manager while the manager waits for it. The
+manager is reading, so the rest goes out. Return 0 if the link failed.
+*/
+
+static int finish_partial_async_message(struct link *l, time_t stoptime)
+{
+	if (l != pending_async_link || pending_async_offset == 0) {
+		return 1;
+	}
+
+	struct async_message *message = list_peek_head(pending_async_messages);
+	size_t length = message->length - pending_async_offset;
+	ssize_t written = link_write(l, message->data + pending_async_offset, length, stoptime);
+	if (written < 0 || (size_t)written < length) {
+		return 0;
+	}
+	debug(D_VINE, "tx: %.*s", (int)message->header_length, message->data);
+	list_pop_head(pending_async_messages);
+	free(message);
+	pending_async_offset = 0;
+	return 1;
+}
+
 /* Queue a message of a text line and length bytes of data that follow it, and send what the socket takes now. */
 
 static void queue_async_message(struct link *l, const char *line, size_t line_length, const char *data, size_t length)
@@ -1583,6 +1609,10 @@ static int handle_manager(struct link *manager)
 	int cache_level;
 
 	if (recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
+		/* Handling a message may read more from the manager synchronously, which waits for the manager. */
+		if (!finish_partial_async_message(manager, time(0) + options->active_timeout)) {
+			return 0;
+		}
 		if (sscanf(line, "task %" SCNd64, &task_id) == 1) {
 			r = do_task(manager, task_id, time(0) + options->active_timeout);
 		} else if (sscanf(line, "put %s %d %" SCNd64, filename_encoded, &cache_level, &length) == 3) {
