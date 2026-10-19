@@ -321,6 +321,16 @@ class Manager(object):
         return cvine.vine_port(self._taskvine)
 
     ##
+    # Get the port on which the manager serves data to workers. Behind a
+    # firewall, give the manager a range of two ports so that both are known.
+    # @code
+    # >>> print(q.data_port)
+    # @endcode
+    @property
+    def data_port(self):
+        return cvine.vine_data_port(self._taskvine)
+
+    ##
     # Whether the manager is using ssl to talk to workers
     # @code
     # >>> print(q.using_ssl)
