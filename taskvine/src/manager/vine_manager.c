@@ -6683,12 +6683,23 @@ int vine_prune_file(struct vine_manager *m, struct vine_file *f)
 		if (workers_array) {
 			for (int i = 0; workers_array[i] != NULL; i++) {
 				struct vine_worker_info *w = (struct vine_worker_info *)workers_array[i];
+
+				/* A replica that is still being created, such as one whose put was sent, gets a
+				 * cache-update or cache-invalid that the worker sent before it read the unlink. The
+				 * unlink makes it DELETING, and it stays until that message deletes it. Removing it now
+				 * would let a late cache-update create a READY replica of a file that the unlink then
+				 * removed from the worker. Other replicas are removed at once. */
+				struct vine_file_replica *replica = vine_file_replica_table_lookup(w, f->cached_name);
+				int creating = replica && replica->state == VINE_FILE_REPLICA_STATE_CREATING;
+
 				delete_worker_file(m, w, f->cached_name, 0, 0);
 
 				/* update replica table for the worker */
-				struct vine_file_replica *removed_replica = vine_file_replica_table_remove(m, w, f->cached_name);
-				if (removed_replica) {
-					vine_file_replica_delete(removed_replica);
+				if (!creating) {
+					struct vine_file_replica *removed_replica = vine_file_replica_table_remove(m, w, f->cached_name);
+					if (removed_replica) {
+						vine_file_replica_delete(removed_replica);
+					}
 				}
 
 				pruned_replica_count++;
