@@ -98,6 +98,9 @@ See the file COPYING for details.
 /* Default value for keepalive timeout in seconds. */
 #define VINE_DEFAULT_KEEPALIVE_TIMEOUT 900
 
+/* Length of the budget for the work of one step of vine_wait(). */
+#define VINE_ROUND_BUDGET ONE_SECOND
+
 /* Default value before entity is considered again after last failure, in usecs */
 #define VINE_DEFAULT_TRANSIENT_ERROR_INTERVAL (15 * ONE_SECOND)
 
@@ -3646,6 +3649,11 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 		if (iter_count >= iter_depth) {
 			break;
 		}
+
+		/* Tasks left when the step's budget expires are considered in the next step, from this cursor. */
+		if (iter_count > 0 && budget_expired(&q->round)) {
+			break;
+		}
 		iter_count++;
 
 		if (retrieve_ready_task(q, t, now_secs)) {
@@ -3750,10 +3758,10 @@ static int receive_tasks_from_worker(struct vine_manager *q, struct vine_worker_
 		if (t->state == VINE_TASK_WAITING_RETRIEVAL) {
 			/* Attempt to fetch it. */
 			if (fetch_outputs_from_worker(q, w, task_id)) {
-				/* If it was fetched, update stats and keep going. */
+				/* If it was fetched, update stats and keep going, until the step's budget expires. */
 				tasks_received++;
 
-				if (tasks_received >= max_to_receive) {
+				if (tasks_received >= max_to_receive || budget_expired(&q->round)) {
 					break;
 				}
 			} else {
@@ -5187,9 +5195,10 @@ struct vine_task *vine_wait_for_task_id(struct vine_manager *q, int task_id, int
 }
 
 /*
-Wait for activity on the manager link and the worker connections, and act upon each worker connection that has pending
-input data, until its input buffer is empty. The poll set reports only the links that are ready, so a step costs time in
-proportion to them, not to all connected workers. Return the number of workers that *failed* and disconnected.
+Wait for activity on the links of the poll set, and act upon each worker connection that has pending input data, until
+its input buffer is empty or the step's budget expires. A step costs time in proportion to the links that are ready, not
+to all connected workers. Workers that were not reached keep their place ahead of workers that became ready later, and
+messages left in a buffer keep the next poll from waiting. Return the number of workers that *failed* and disconnected.
 */
 
 static int poll_active_workers(struct vine_manager *q, int stoptime)
@@ -5218,6 +5227,10 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 
 	END_ACCUM_TIME(q, time_polling);
 
+	/* The work of this step starts after the poll. Message handling, retrievals, and accepting workers stop when its
+	 * budget expires and continue in the next step. */
+	budget_start(&q->round, VINE_ROUND_BUDGET);
+
 	BEGIN_ACCUM_TIME(q, time_status_msgs);
 
 	int workers_failed = 0;
@@ -5225,14 +5238,16 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 	q->connections_waiting = link_poll_set_take(q->poll_set, q->manager_link, LINK_READ);
 
 	/* Consider the ready worker connections in turn. A worker marked for removal while handling another one leaves
-	 * the poll set, and so is not reached. */
+	 * the poll set, and so is not reached. A worker that is not reached keeps its place for the next step. */
+	int handled = 0;
 	struct link *link;
 	struct vine_worker_info *w;
 	int revents;
-	while ((link = link_poll_set_next(q->poll_set, &revents, (void **)&w))) {
+	while ((handled == 0 || !budget_expired(&q->round)) && (link = link_poll_set_next(q->poll_set, &revents, (void **)&w))) {
 		if (!w) {
 			continue;
 		}
+		handled++;
 
 		/* Act on the next input message, until there is no more buffered data. */
 		do {
@@ -5240,7 +5255,7 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 				workers_failed++;
 				break;
 			}
-		} while (!link_buffer_empty(link));
+		} while (!link_buffer_empty(link) && !budget_expired(&q->round));
 	}
 
 	END_ACCUM_TIME(q, time_status_msgs);
@@ -5259,7 +5274,7 @@ static int connect_new_workers(struct vine_manager *q, int stoptime, int max_new
 		do {
 			add_worker(q);
 			new_workers++;
-		} while (link_usleep(q->manager_link, 0, 1, 0) && (stoptime >= time(0) && (max_new_workers > new_workers)));
+		} while (link_usleep(q->manager_link, 0, 1, 0) && (stoptime >= time(0) && (max_new_workers > new_workers)) && !budget_expired(&q->round));
 	}
 
 	return new_workers;
@@ -5531,7 +5546,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			int retrieved_from_worker = receive_tasks_from_worker(q, w, retrieved_this_cycle);
 			retrieved_this_cycle += retrieved_from_worker;
 			events += retrieved_from_worker;
-		} while (q->max_retrievals < 0 || retrieved_this_cycle < q->max_retrievals || !skip_list_size(q->ready_tasks));
+		} while ((q->max_retrievals < 0 || retrieved_this_cycle < q->max_retrievals || !skip_list_size(q->ready_tasks)) && !budget_expired(&q->round));
 		END_ACCUM_TIME(q, time_receive);
 
 		if (retrieved_this_cycle) {
