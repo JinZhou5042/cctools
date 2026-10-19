@@ -29,7 +29,8 @@
 
 void buffer_init(buffer_t *b)
 {
-	bzero(b->initial, sizeof(b->initial));
+	/* The initial buffer is not cleared: only the bytes up to the terminating NUL are ever read, and clearing 4 KB
+	 * for every buffer was a measurable cost of each debug message. */
 	b->buf = b->end = b->initial;
 	b->len = sizeof(b->initial);
 	b->ubuf.buf = NULL;
