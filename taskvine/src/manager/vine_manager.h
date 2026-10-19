@@ -301,6 +301,7 @@ void vine_manager_mark_worker_for_removal(struct vine_manager *q, struct vine_wo
 
 /* Check if the worker is able to transfer the necessary files for this task. */
 int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
+int vine_manager_limits_sends(struct vine_manager *q, struct vine_file *f);
 
 /* Delete a file from a worker. */
 int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const char *filename, vine_cache_level_t cache_level, vine_cache_level_t delete_upto_level);

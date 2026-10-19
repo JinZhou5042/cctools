@@ -3504,12 +3504,32 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 			if (!vine_manager_transfer_capacity_available(q, w, m->file->mini_task)) {
 				return 0;
 			}
+		} else if (vine_manager_limits_sends(q, m->file) && m->file->manager_sends >= q->file_source_max_transfers) {
+			/* The manager is already sending as many copies of this file as it sends at once. */
+			return 0;
 		} else {
 			/* keep going */
 		}
 	}
 
 	return 1;
+}
+
+/*
+A local file that peers may share is sent by the manager itself to at most file-source-max-transfers workers at a time,
+like a URL source, and the other workers get it from peers once a copy is ready. Without the bound, a large file read
+by tasks on many workers went from the manager to every worker, before any worker held a copy that a peer could serve,
+and every copy went through the manager's link. Each send counts in manager_sends until its replica becomes ready or
+is deleted, so a send to a worker that is lost ends when the worker is removed. A small file is not limited. Without peer transfers, no other worker can serve the copies that wait, so the manager
+sends every one.
+*/
+
+/* A file of at most this size goes with its task like a message, and the manager sends it to every worker that needs it. */
+#define VINE_MANAGER_SEND_UNLIMITED_BYTES (64 * 1024)
+
+int vine_manager_limits_sends(struct vine_manager *q, struct vine_file *f)
+{
+	return q->peer_transfers_enabled && f->type == VINE_FILE && f->size > VINE_MANAGER_SEND_UNLIMITED_BYTES && !(f->flags & VINE_PEER_NOSHARE) && f->cache_level > VINE_CACHE_LEVEL_TASK;
 }
 
 /*
