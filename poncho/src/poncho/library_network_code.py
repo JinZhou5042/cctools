@@ -28,6 +28,15 @@ from ndcctools.taskvine.utils import load_variable_from_library
 r, w = os.pipe()
 exec_method = None
 
+# Pipe on which a forked function process reports its exit status right before it exits, so the worker learns the
+# result without waiting for the process to end. Processes that reported are in `reported` until they are reaped, and
+# a process that ends without reporting is reported when it is reaped.
+report_r, report_w = os.pipe()
+reported = set()
+
+# The standard output file of each forked function process, by pid, for a call that ends without reporting.
+pid_to_stdout = {}
+
 
 # This class captures how results from FunctionCalls are conveyed from
 # the library to the manager.
@@ -214,6 +223,13 @@ def start_function(in_pipe_fd, thread_limit=1):
                 except Exception as e:
                     stdout_timed_message(f"TASK {function_id} error: execution failed due to {e}")
                 finally:
+                    # Report the status that waitpid() would return before exiting, because tearing down a copy
+                    # of the library takes longer than most functions. The report is one write shorter than
+                    # PIPE_BUF, so reports of different processes never interleave.
+                    try:
+                        os.write(report_w, f"{os.getpid()} {exit_status << 8}\n".encode())
+                    except Exception:
+                        pass
                     os._exit(exit_status)
             elif p < 0:
                 stdout_timed_message(f"TASK {function_id} error: unable to fork to execute {function_name}")
@@ -221,6 +237,7 @@ def start_function(in_pipe_fd, thread_limit=1):
 
             # return pid and function id of child process to parent.
             else:
+                pid_to_stdout[p] = os.path.join(function_sandbox, function_stdout_filename)
                 return p, function_id
         else:
             stdout_timed_message(f"error: invalid execution method {exec_method}")
@@ -341,6 +358,24 @@ def main():
 
     # mapping of child pid to function id of currently running functions
     pid_to_func_id = {}
+    # the start of a report that the last read of the report pipe ended in
+    report_buffer = b""
+
+    # Read the reports that wait in the report pipe and send the result of each to the worker.
+    def read_reports():
+        nonlocal report_buffer
+        report_buffer += os.read(report_r, 65536)
+        *reports, report_buffer = report_buffer.split(b"\n")
+        for report in reports:
+            c_pid, c_exit_status = (int(field) for field in report.split())
+            if c_pid in pid_to_func_id and c_pid not in reported:
+                send_result(
+                    out_pipe_fd,
+                    args.worker_pid,
+                    pid_to_func_id[c_pid],
+                    c_exit_status,
+                )
+                reported.add(c_pid)
 
     # read in information about this library
     with open('library_info.clpk', 'rb') as f:
@@ -400,7 +435,7 @@ def main():
         # in case of "fork" exec method, wait for messages from worker or child to return
         # in case of "direct" exec method, wait for messages from worker
         try:
-            rlist, wlist, xlist = select.select([in_pipe_fd, r], [], [], timeout)
+            rlist, wlist, xlist = select.select([in_pipe_fd, report_r, r], [], [], timeout)
         except Exception as e:
             stdout_timed_message(f"error unable to read from pipe {in_pipe_fd}\n{e}")
 
@@ -427,6 +462,10 @@ def main():
                         )
                     else:
                         pid_to_func_id[pid] = func_id
+            elif re == report_r:
+                # function processes report their status before they exit, so a report is read before its process
+                # is reaped. A read may end inside a report, whose rest the next read returns.
+                read_reports()
             else:
                 # at least 1 child exits, reap all.
                 # read only once as os.read is blocking if there's nothing to read.
@@ -436,13 +475,32 @@ def main():
                 while len(pid_to_func_id) > 0:
                     c_pid, c_exit_status = os.waitpid(-1, os.WNOHANG)
                     if c_pid > 0:
-                        send_result(
-                            out_pipe_fd,
-                            args.worker_pid,
-                            pid_to_func_id[c_pid],
-                            c_exit_status,
-                        )
+                        # A process writes its report before it exits, so a report not read yet is in the pipe now.
+                        if c_pid not in reported and c_exit_status == 0:
+                            while c_pid not in reported and select.select([report_r], [], [], 0)[0]:
+                                read_reports()
+                        # a process that reported its status was reported to the worker already.
+                        if c_pid in reported:
+                            reported.discard(c_pid)
+                        else:
+                            # A process that exited with status 0 without reporting ended inside its function, such
+                            # as with os._exit(0), and wrote no result. It failed like a call that could not start,
+                            # instead of looking like a success whose result went missing.
+                            if c_exit_status == 0:
+                                c_exit_status = 1 << 8
+                                try:
+                                    with open(pid_to_stdout[c_pid], "a") as f:
+                                        f.write("error: the function ended its process with status 0 instead of returning\n")
+                                except OSError:
+                                    pass
+                            send_result(
+                                out_pipe_fd,
+                                args.worker_pid,
+                                pid_to_func_id[c_pid],
+                                c_exit_status,
+                            )
                         del pid_to_func_id[c_pid]
+                        pid_to_stdout.pop(c_pid, None)
                     # no exited child to reap, break
                     else:
                         break
