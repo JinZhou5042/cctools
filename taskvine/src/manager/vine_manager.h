@@ -90,8 +90,12 @@ struct vine_manager {
 	struct hash_table *properties;   /* Set of additional properties to report to catalog server. */
 
 	struct link *manager_link;       /* Listening TCP connection for accepting new workers. */
-	struct link_poll_set *poll_set;  /* The manager link and the link of every worker in worker_table, polled together. */
+	struct link_poll_set *poll_set;  /* Links that a step waits on: the manager link, every worker in worker_table (with its worker as data), and departing links. */
+	struct list *sending_workers;    /* Workers whose output queue held data, visited by send_to_workers() in every step. */
+	int send_holds;                  /* Nesting depth of vine_manager_send_hold(). While positive, sends only queue. */
+	struct list *send_held_workers;  /* Workers given data while sends were held, written once at the outermost release. */
 	int connections_waiting;         /* The last poll found connections waiting on manager_link. */
+	struct list *departing_links;    /* Links of removed workers whose sealed queues still hold a final message. */
 	struct budget round;             /* Time for the work of one step of vine_wait(), started after its poll. */
 
 	/* Security configuration */
@@ -262,13 +266,39 @@ be called on the manager object by other elements of the manager process.
 struct vine_file *vine_manager_declare_file(struct vine_manager *m, struct vine_file *f);
 struct vine_file *vine_manager_lookup_file(struct vine_manager *q, const char *cached_name);
 
-/* Send a printf-style message to a remote worker. */
+/*
+Send a printf-style message to a remote worker. Everything sent to a worker goes through its queue in order, and the
+manager writes only what the worker's link takes, so a worker that stops reading never blocks the manager. Return the
+length of the message, or -1 if the worker's link has failed.
+*/
 #ifndef SWIG
 __attribute__ (( format(printf,3,4) ))
 #endif
 int vine_manager_send( struct vine_manager *q, struct vine_worker_info *w, const char *fmt, ... );
 
-/* Receive a line-oriented message from a remote worker. */
+/* Send bytes to a remote worker through its queue, such as the body of a message. Return 0, or -1 if the worker's link
+ * has failed. */
+int vine_manager_send_data(struct vine_manager *q, struct vine_worker_info *w, const char *data, size_t length);
+
+/* Hold the immediate write that a send to a worker with an empty queue makes, until the matching
+ * vine_manager_send_release(). The messages of one operation, such as the input files and description of a dispatched
+ * task or the unlinks of released files, then leave in one write per worker instead of one write per message. Holds
+ * nest, and the outermost release writes each worker that was given data once, as much as its link takes. Whatever
+ * remains is written by later steps of vine_wait(), as for any queue that the link did not take at once. */
+void vine_manager_send_hold(struct vine_manager *q);
+void vine_manager_send_release(struct vine_manager *q);
+
+/* Send a byte range of a local file to a remote worker through its queue. The file is read in chunks when the range
+ * reaches the head of the queue, so it must not shrink before then. Return 0, or -1 if the worker's link has failed. */
+int vine_manager_send_file(struct vine_manager *q, struct vine_worker_info *w, const char *path, int64_t offset, int64_t length);
+
+/* Send shared data to a remote worker through its queue, which holds a reference instead of a copy until it writes the
+ * data, so data sent to many workers is held once. Return 0, or -1 if the worker's link has failed. */
+struct link_queue_shared;
+int vine_manager_send_shared(struct vine_manager *q, struct vine_worker_info *w, struct link_queue_shared *s);
+
+/* Receive a line-oriented message from a remote worker, as the reply to a request. Everything queued for the worker,
+ * including the request, is written first, so the exchange stays synchronous. */
 vine_msg_code_t vine_manager_recv( struct vine_manager *q, struct vine_worker_info *w, char *line, int length );
 
 /* Compute the expected wait time for a transfer of length bytes. */

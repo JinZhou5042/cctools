@@ -53,7 +53,9 @@ static int vine_manager_put_symlink(struct vine_manager *q, struct vine_worker_i
 
 	vine_manager_send(q, w, "symlink %s %d\n", remotename_encoded, length);
 
-	link_write(w->link, target, length, time(0) + q->long_timeout);
+	if (vine_manager_send_data(q, w, target, length) < 0) {
+		return VINE_WORKER_FAILURE;
+	}
 
 	*total_bytes += length;
 
@@ -62,15 +64,13 @@ static int vine_manager_put_symlink(struct vine_manager *q, struct vine_worker_i
 
 /*
 Send a single file to the remote worker.
-The transfer time is controlled by the size of the file.
-If the transfer takes too long, then cancel it.
+The file is queued for the worker and read in chunks as its link takes them. If the worker stops taking data for the
+minimum transfer timeout, or the file shrinks before it is sent, the manager removes the worker.
 */
 
 static int vine_manager_put_file(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, const char *localname, const char *remotename, struct stat info, int override_mode, int64_t *total_bytes)
 {
-	time_t stoptime;
 	timestamp_t effective_stoptime = 0;
-	int64_t actual = 0;
 
 	/* normalize the mode so as not to set up invalid permissions */
 	int mode = (info.st_mode | 0x600) & 0777;
@@ -81,11 +81,13 @@ static int vine_manager_put_file(struct vine_manager *q, struct vine_worker_info
 
 	int64_t length = info.st_size;
 
+	/* A file that cannot be read fails the task before anything is sent. */
 	int fd = open(localname, O_RDONLY, 0);
 	if (fd < 0) {
 		debug(D_NOTICE, "Cannot open file %s: %s", localname, strerror(errno));
 		return VINE_APP_FAILURE;
 	}
+	close(fd);
 
 	if (q->bandwidth_limit) {
 		effective_stoptime = (length / q->bandwidth_limit) * 1000000 + timestamp_get();
@@ -95,15 +97,12 @@ static int vine_manager_put_file(struct vine_manager *q, struct vine_worker_info
 	char remotename_encoded[VINE_LINE_MAX];
 	url_encode(remotename, remotename_encoded, sizeof(remotename_encoded));
 
-	stoptime = time(0) + vine_manager_transfer_time(q, w, length);
 	vine_manager_send(q, w, "file %s %" PRId64 " 0%o %lld\n", remotename_encoded, length, mode, (long long)info.st_mtime);
-	actual = link_stream_from_fd(w->link, fd, length, stoptime);
-	close(fd);
-
-	*total_bytes += actual;
-
-	if (actual != length)
+	if (vine_manager_send_file(q, w, localname, 0, length) < 0) {
 		return VINE_WORKER_FAILURE;
+	}
+
+	*total_bytes += length;
 
 	timestamp_t current_time = timestamp_get();
 	if (effective_stoptime && effective_stoptime > current_time) {
@@ -300,16 +299,13 @@ vine_result_code_t vine_manager_put_buffer(struct vine_manager *q, struct vine_w
 	if (mode == 0)
 		mode = 0755;
 
-	time_t stoptime = time(0) + vine_manager_transfer_time(q, w, f->size);
 	vine_manager_send(q, w, "file %s %lld 0%o 0\n", f->cached_name, (long long)f->size, (int)mode);
-	int64_t actual = link_putlstring(w->link, f->data, f->size, stoptime);
-	if (actual >= 0 && (size_t)actual == f->size) {
-		*total_bytes = actual;
-		return VINE_SUCCESS;
-	} else {
+	if (vine_manager_send_data(q, w, f->data, f->size) < 0) {
 		*total_bytes = 0;
 		return VINE_WORKER_FAILURE;
 	}
+	*total_bytes = f->size;
+	return VINE_SUCCESS;
 }
 
 /*
@@ -508,7 +504,7 @@ vine_result_code_t vine_manager_put_task(
 
 	long long cmd_len = strlen(command_line);
 	vine_manager_send(q, w, "cmd %lld\n", (long long)cmd_len);
-	link_putlstring(w->link, command_line, cmd_len, time(0) + q->short_timeout);
+	vine_manager_send_data(q, w, command_line, cmd_len);
 	debug(D_VINE, "%s\n", command_line);
 
 	if (t->needs_library) {
