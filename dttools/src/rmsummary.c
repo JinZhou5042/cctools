@@ -83,7 +83,7 @@ unsigned hash_fn(const char *key)
 	return (key[0] << 8) + strlen(key);
 }
 
-/* The table is created once, because managers in different threads of one process look up resources at once. */
+/* The table is created once, because threads of one process, such as managers, may look up resources at once. */
 static pthread_once_t info_of_resource_once = PTHREAD_ONCE_INIT;
 
 static void info_of_resource_create(void)
@@ -1112,7 +1112,7 @@ const char **rmsummary_list_resources()
 /* will overwrite the previous calls leading to incorrect results */
 const char *rmsummary_resource_to_str(const char *resource, double value, int include_units)
 {
-	/* One array per thread, because managers in different threads of one process format resources at once. */
+	/* One array per thread, so that threads, such as managers running in one process, do not overwrite each other's. */
 	static __thread char output[256];
 
 	const struct resource_info *info = info_of_resource(resource);

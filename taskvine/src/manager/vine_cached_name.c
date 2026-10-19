@@ -288,7 +288,7 @@ char *vine_meta_name(const struct vine_file *f, ssize_t *totalsize)
 
 	if (stat(f->source, &info))
 		return 0;
-	/* ctime() returns a static string, which managers in other threads of the process may overwrite. */
+	/* ctime() returns a static string, which other threads of the process may overwrite. */
 	char mtime[32];
 	ctime_r(&info.st_mtime, mtime);
 	char *meta = string_format("%s-%" PRIu64 "-%s", f->source, info.st_size, mtime);

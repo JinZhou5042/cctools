@@ -412,7 +412,7 @@ int md5_file(const char *filename, unsigned char digest[MD5_DIGEST_LENGTH])
 
 const char *md5_to_string(unsigned char digest[16])
 {
-	/* One string per thread, because managers in different threads of one process name files at the same time. */
+	/* One string per thread, so that threads, such as managers running in one process, do not overwrite each other's. */
 	static __thread char str[33];
 	int i;
 	for (i = 0; i < 16; i++) {

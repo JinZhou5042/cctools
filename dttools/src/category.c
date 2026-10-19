@@ -36,7 +36,7 @@ static const size_t labeled_resources[] = {
 		offsetof(struct rmsummary, cores), offsetof(struct rmsummary, gpus), offsetof(struct rmsummary, memory), offsetof(struct rmsummary, disk), 0};
 
 /* map from resoure name to int bucket size. Created once, by the first thread that needs it, because managers in
- * several threads of one process create categories at the same time. */
+ * several threads of one process may create categories at the same time. */
 static struct rmsummary *bucket_sizes = NULL;
 static pthread_once_t bucket_sizes_once = PTHREAD_ONCE_INIT;
 
@@ -879,8 +879,8 @@ category_allocation_t category_next_label(struct category *c, category_allocatio
 // taskid >=0 means real task needs prediction, -1 means function called for other purposes
 const struct rmsummary *category_task_max_resources(struct category *c, struct rmsummary *user, category_allocation_t request, int taskid)
 {
-	/* The category keeps the result so that the caller does not have to worry about memory leaks. A category belongs
-	 * to one manager, so managers in different threads never share it, as they shared a static result. */
+	/* The category keeps the result so that the caller does not have to worry about memory leaks. A static result
+	 * was shared by managers running in different threads of one process. */
 	rmsummary_delete(c->max_resources_result);
 	struct rmsummary *internal = c->max_resources_result = rmsummary_create(-1);
 

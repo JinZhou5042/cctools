@@ -57,7 +57,7 @@ static char *vine_checksum_dir(const char *path, ssize_t *totalsize)
 			return 0;
 		}
 
-		/* ctime() returns a static string, which managers in other threads of the process may overwrite. */
+		/* ctime() returns a static string, which other threads of the process may overwrite. */
 		char mtime[32];
 		ctime_r(&info.st_mtime, mtime);
 		char *line = string_format("%s:%o:%s:%s:\n", entries[i], info.st_mode, mtime, subhash);
