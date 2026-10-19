@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <math.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,16 +83,21 @@ unsigned hash_fn(const char *key)
 	return (key[0] << 8) + strlen(key);
 }
 
+/* The table is created once, because threads of one process, such as managers, may look up resources at once. */
+static pthread_once_t info_of_resource_once = PTHREAD_ONCE_INIT;
+
+static void info_of_resource_create(void)
+{
+	info_of_resource_table = hash_table_create(0, 0);
+	size_t i;
+	for (i = 0; i < rmsummary_num_resources(); i++) {
+		hash_table_insert(info_of_resource_table, resources_info[i].name, (void *)&resources_info[i]);
+	}
+}
+
 static const struct resource_info *info_of_resource(const char *resource_name)
 {
-	if (!info_of_resource_table) {
-		info_of_resource_table = hash_table_create(0, 0);
-		size_t i;
-		for (i = 0; i < rmsummary_num_resources(); i++) {
-			hash_table_insert(info_of_resource_table, resources_info[i].name, (void *)&resources_info[i]);
-		}
-	}
-
+	pthread_once(&info_of_resource_once, info_of_resource_create);
 	return hash_table_lookup(info_of_resource_table, resource_name);
 }
 
@@ -1033,7 +1039,8 @@ const char **rmsummary_list_resources()
 /* will overwrite the previous calls leading to incorrect results */
 const char *rmsummary_resource_to_str(const char *resource, double value, int include_units)
 {
-	static char output[256];
+	/* One array per thread, so that threads, such as managers running in one process, do not overwrite each other's. */
+	static __thread char output[256];
 
 	int decimals = rmsummary_resource_decimals(resource);
 	const char *units = rmsummary_resource_units(resource);

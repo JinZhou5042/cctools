@@ -7,6 +7,7 @@ See the file COPYING for details.
 #include <errno.h>
 #include <float.h>
 #include <math.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <stdlib.h>
 
@@ -34,8 +35,19 @@ static int64_t first_allocation_every_n_tasks = 25; /* tasks */
 static const size_t labeled_resources[] = {
 		offsetof(struct rmsummary, cores), offsetof(struct rmsummary, gpus), offsetof(struct rmsummary, memory), offsetof(struct rmsummary, disk), 0};
 
-/* map from resoure name to int bucket size. Initialized in category_create first time it is called. */
+/* map from resoure name to int bucket size. Created once, by the first thread that needs it, because managers in
+ * several threads of one process may create categories at the same time. */
 static struct rmsummary *bucket_sizes = NULL;
+static pthread_once_t bucket_sizes_once = PTHREAD_ONCE_INIT;
+
+static void bucket_sizes_create(void)
+{
+	bucket_sizes = rmsummary_create(-1);
+	bucket_sizes->cores = 1;
+	bucket_sizes->gpus = 1;
+	bucket_sizes->memory = 250; /* 250 MB */
+	bucket_sizes->disk = 250;   /* 250 MB */
+}
 
 struct category *category_create(const char *name)
 {
@@ -59,13 +71,7 @@ struct category *category_create(const char *name)
 
 	c->histograms = itable_create(0);
 
-	if (!bucket_sizes) {
-		bucket_sizes = rmsummary_create(-1);
-		bucket_sizes->cores = 1;
-		bucket_sizes->gpus = 1;
-		bucket_sizes->memory = 250; /* 250 MB */
-		bucket_sizes->disk = 250;   /* 250 MB */
-	}
+	pthread_once(&bucket_sizes_once, bucket_sizes_create);
 
 	size_t i;
 	for (i = 0; labeled_resources[i]; i++) {
@@ -265,6 +271,8 @@ void category_free(struct category *c)
 	rmsummary_delete(c->first_allocation);
 	rmsummary_delete(c->autolabel_resource);
 	rmsummary_delete(c->max_resources_seen);
+	rmsummary_delete(c->max_resources_result);
+	rmsummary_delete(c->min_resources_result);
 
 	free(c);
 }
@@ -871,15 +879,10 @@ category_allocation_t category_next_label(struct category *c, category_allocatio
 // taskid >=0 means real task needs prediction, -1 means function called for other purposes
 const struct rmsummary *category_task_max_resources(struct category *c, struct rmsummary *user, category_allocation_t request, int taskid)
 {
-	/* we keep an internal label so that the caller does not have to worry
-	 * about memory leaks. */
-	static struct rmsummary *internal = NULL;
-
-	if (internal) {
-		rmsummary_delete(internal);
-	}
-
-	internal = rmsummary_create(-1);
+	/* The category keeps the result so that the caller does not have to worry about memory leaks. A static result
+	 * was shared by managers running in different threads of one process. */
+	rmsummary_delete(c->max_resources_result);
+	struct rmsummary *internal = c->max_resources_result = rmsummary_create(-1);
 
 	if (c->allocation_mode != CATEGORY_ALLOCATION_MODE_FIXED && c->allocation_mode != CATEGORY_ALLOCATION_MODE_MAX) {
 		if (category_in_steady_state(c) && (c->allocation_mode == CATEGORY_ALLOCATION_MODE_MIN_WASTE || c->allocation_mode == CATEGORY_ALLOCATION_MODE_MAX_THROUGHPUT)) {
@@ -914,14 +917,10 @@ const struct rmsummary *category_task_max_resources(struct category *c, struct r
 
 const struct rmsummary *category_task_min_resources(struct category *c, struct rmsummary *user, category_allocation_t request, int taskid)
 {
-	static struct rmsummary *internal = NULL;
 	const struct rmsummary *allocation = category_task_max_resources(c, user, request, taskid);
 
-	if (internal) {
-		rmsummary_delete(internal);
-	}
-
-	internal = rmsummary_create(-1);
+	rmsummary_delete(c->min_resources_result);
+	struct rmsummary *internal = c->min_resources_result = rmsummary_create(-1);
 
 	/* load seen values */
 	struct rmsummary *seen = c->max_resources_seen;
@@ -958,6 +957,7 @@ void category_tune_bucket_size(const char *resource, int64_t size)
 	if (strcmp(resource, "category-steady-n-tasks") == 0) {
 		first_allocation_every_n_tasks = size;
 	} else {
+		pthread_once(&bucket_sizes_once, bucket_sizes_create);
 		rmsummary_set(bucket_sizes, resource, size);
 	}
 }
@@ -967,6 +967,7 @@ int64_t category_get_bucket_size(const char *resource)
 	if (strcmp(resource, "category-steady-n-tasks") == 0) {
 		return first_allocation_every_n_tasks;
 	} else {
+		pthread_once(&bucket_sizes_once, bucket_sizes_create);
 		return rmsummary_get(bucket_sizes, resource);
 	}
 }
