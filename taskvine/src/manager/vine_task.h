@@ -88,8 +88,8 @@ struct vine_task {
 
 	vine_task_state_t state;       /**< Current state of task: READY, RUNNING, etc */
 	struct vine_worker_info *worker;    /**< Worker to which this task has been dispatched. */
-	struct list_cursor *retrieval;      /**< Position of the task in the manager's waiting_retrieval_list while it waits for retrieval, or null, so it leaves the list without a search. */
     struct vine_task* library_task; /**< Library task to which a function task has been matched. */
+	struct list_cursor *retrieval;      /**< Position of the task in waiting_retrieval_list while it waits for retrieval, or null, so it leaves the list without a search. */
 	char *library_log_path; /**< The path of the library log file, used only for library task if set q->watch_library_logfiles */
 	int try_count;               /**< The number of times the task has been dispatched to a worker without being forsaken. If larger than max_retries, return with result of last attempt. */
 	int forsaken_count;         /**< The number of times the task has been dispatched to a worker. If larger than max_forsaken, return with VINE_RESULT_FORSAKEN. */
