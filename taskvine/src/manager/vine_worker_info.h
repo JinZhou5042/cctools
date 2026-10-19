@@ -83,6 +83,9 @@ struct vine_worker_info {
 	timestamp_t total_task_time;
 	timestamp_t total_transfer_time;
 	timestamp_t last_transfer_failure;
+	/* Time of the last failed transfer from this worker as a source. It is not chosen as a source again until a
+	 * message from it arrives after this time. */
+	timestamp_t last_source_failure;
 	timestamp_t start_time;
 	timestamp_t last_msg_recv_time;
 	timestamp_t last_update_msg_time;
@@ -113,4 +116,6 @@ struct vine_worker_info * vine_worker_create( struct link * lnk );
 void vine_worker_delete( struct vine_worker_info *w );
 
 struct jx * vine_worker_to_jx( struct vine_worker_info *w );
+
+int vine_worker_source_is_suspect( struct vine_worker_info *w );
 #endif
