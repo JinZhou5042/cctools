@@ -1103,26 +1103,35 @@ int link_buffer_output(struct link *link, size_t size)
 	}
 }
 
-int link_flush_output(struct link *link)
+/* Write the buffered output of link_printf, waiting until stoptime. */
+static int link_flush_output_until(struct link *link, time_t stoptime)
 {
 	if (buffer_pos(&link->output_buffer) == 0)
 		return 0;
 
 	size_t len;
 	const char *str = buffer_tolstring(&link->output_buffer, &len);
-	int rc = link_putlstring(link, str, len, time(0) + 60);
+	int rc = link_putlstring(link, str, len, stoptime);
 	buffer_free(&link->output_buffer);
 	buffer_init(&link->output_buffer);
 	return rc;
+}
+
+int link_flush_output(struct link *link)
+{
+	return link_flush_output_until(link, time(0) + 60);
 }
 
 ssize_t link_vprintf(struct link *link, time_t stoptime, const char *fmt, va_list va)
 {
 	int rc = buffer_putvfstring(&link->output_buffer, fmt, va);
 
+	/* Wait as long as the caller allows: a fixed deadline would drop the rest of a message that a slow reader is
+	 * still taking, and the stream would continue in the middle of it. */
 	if (buffer_pos(&link->output_buffer) > link->output_buffer_size) {
-		if (link_flush_output(link) < 0)
+		if (link_flush_output_until(link, stoptime) < 0) {
 			rc = -1;
+		}
 	}
 
 	return rc;
