@@ -21,6 +21,7 @@ See the file COPYING for details.
 #include "vine_workspace.h"
 
 #include "address.h"
+#include "budget.h"
 #include "catalog_query.h"
 #include "cctools.h"
 #include "change_process_title.h"
@@ -75,6 +76,7 @@ See the file COPYING for details.
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 /***************************************************************/
 /* Primary Worker Data Structures for Tracking Tasks and Files */
@@ -111,9 +113,18 @@ static size_t pending_async_offset = 0;
 /* The manager link that the queued messages go to. Only a direct write to this link waits for them. */
 static struct link *pending_async_link = 0;
 
+/* Processes that do_kill() signalled and dropped before they exited, indexed by pid. Their tasks are gone, so only
+ * their exit status remains to be collected, which the main loop does without waiting and a disconnect does waiting. */
+static struct itable *procs_killed = NULL;
+
 /* Table of all processes with results to be sent back, indexed by task_id. */
 /* These are additional pointers into procs_table and should not be deleted */
 static struct itable *procs_complete = NULL;
+
+/* Processes that ended and whose outputs are moving into the cache, in the order they ended. A process is in no other
+ * table but procs_table until continue_stageout() moves it to procs_complete, so it is neither running nor reported.
+ * These are additional pointers into procs_table and should not be deleted. */
+static struct list *procs_stageout = NULL;
 
 /* Table of killed function calls still running in their library, indexed by task_id, with the library as value. */
 static struct itable *procs_killed_functions = NULL;
@@ -214,6 +225,7 @@ struct vine_worker_options *options = 0;
 extern int vine_hack_do_not_compute_cached_name;
 
 static int flush_async_messages(struct link *l, time_t stoptime);
+static void finish_running_task(struct vine_process *p, vine_result_t result);
 
 /* Send a printf-formatted message to the current manager, or to a peer. */
 
@@ -427,41 +439,159 @@ static void reset_idle_timer()
 }
 
 /*
-Measure the disk used by the worker. We only manually measure the cache directory, as processes measure themselves.
+Disk measurement runs on the main loop in pieces, each limited by the budget of a round. A measurement starts at most
+every check_resources_interval seconds. It measures the cache directory, then the sandbox of every task that requested
+disk and was running when the measurement started, and resumes in the next round where the budget stopped it. A large
+cache or sandbox, or a slow disk, then never keeps the main loop from reading the manager.
+*/
+
+/* Non-zero while a measurement is in progress. */
+static int disk_measurement_active = 0;
+
+/* State of the cache directory measurement between rounds. NULL when it has not started or has completed. */
+static struct path_disk_size_info *cache_disk_state = NULL;
+
+/* Non-zero once the current measurement completed the cache directory and moved on to sandboxes. */
+static int cache_disk_measured_now = 0;
+
+/* Ids of the tasks whose sandboxes the current measurement has yet to measure. The head is the one in progress. */
+static struct list *disk_measurement_tasks = NULL;
+
+/* Megabytes and files of the cache directory, from the last complete measurement. */
+static int64_t cache_disk_measured = 0;
+static int64_t cache_files_measured = 0;
+
+static void start_disk_measurement()
+{
+	if (disk_measurement_active || !cache_manager) {
+		return;
+	}
+
+	disk_measurement_active = 1;
+	cache_disk_measured_now = 0;
+
+	struct vine_process *p;
+	uint64_t task_id;
+	int iteration;
+	ITABLE_ITERATE(procs_running, iteration, task_id, p)
+	{
+		if (p->task->resources_requested->disk >= 1) {
+			list_push_tail(disk_measurement_tasks, (void *)(uintptr_t)task_id);
+		}
+	}
+}
+
+/* Abandon a measurement in progress, as when the worker disconnects from its manager. */
+
+static void stop_disk_measurement()
+{
+	path_disk_size_info_delete_state(cache_disk_state);
+	cache_disk_state = NULL;
+	while (list_pop_head(disk_measurement_tasks)) {
+	}
+	disk_measurement_active = 0;
+	cache_disk_measured_now = 0;
+}
+
+/* Measure the cache directory until the budget expires. Return 1 once the measurement of the cache completed. */
+
+static int measure_cache_disk(const struct budget *b)
+{
+	char *cache_dir = vine_cache_data_path(cache_manager, ".");
+	int result = path_disk_size_info_get_budget(cache_dir, b, &cache_disk_state, NULL);
+	free(cache_dir);
+
+	if (result == 0 && !cache_disk_state->complete_measurement) {
+		return 0;
+	}
+
+	if (result == 0 && cache_disk_state->last_byte_size_complete >= 0) {
+		cache_disk_measured = (int64_t)ceil(cache_disk_state->last_byte_size_complete / (1.0 * MEGA));
+		cache_files_measured = cache_disk_state->last_file_count_complete;
+		debug(D_VINE, "disk measurement: cache uses %" PRId64 " MB in %" PRId64 " files", cache_disk_measured, cache_files_measured);
+	} else {
+		debug(D_VINE, "disk measurement of the cache did not complete");
+	}
+
+	path_disk_size_info_delete_state(cache_disk_state);
+	cache_disk_state = NULL;
+	return 1;
+}
+
+/*
+Continue the disk measurement until the budget expires, and end each running task whose sandbox went over the disk
+it requested once its measurement completes. Return 0 if a task was ended.
+*/
+
+static int continue_disk_measurement(const struct budget *b)
+{
+	if (!disk_measurement_active) {
+		return 1;
+	}
+
+	if (!cache_disk_measured_now) {
+		if (!measure_cache_disk(b)) {
+			return 1;
+		}
+		cache_disk_measured_now = 1;
+	}
+
+	int ok = 1;
+	void *item;
+	while ((item = list_peek_head(disk_measurement_tasks))) {
+		if (budget_expired(b)) {
+			return ok;
+		}
+
+		/* The task may have ended since the measurement began. */
+		struct vine_process *p = itable_lookup(procs_running, (uint64_t)(uintptr_t)item);
+		if (p && !vine_process_measure_disk(p, b)) {
+			return ok;
+		}
+		list_pop_head(disk_measurement_tasks);
+
+		if (p && p->sandbox_size > p->task->resources_requested->disk) {
+			debug(D_VINE,
+					"Task %d went over its disk size limit: %s > %s\n",
+					p->task->task_id,
+					rmsummary_resource_to_str("disk", p->sandbox_size, /* with units */ 1),
+					rmsummary_resource_to_str("disk", p->task->resources_requested->disk, 1));
+			finish_running_task(p, VINE_RESULT_SANDBOX_EXHAUSTION);
+			trash_move(p->sandbox);
+			ok = 0;
+		}
+	}
+
+	disk_measurement_active = 0;
+	cache_disk_measured_now = 0;
+	return ok;
+}
+
+/*
+Measure the disk used by the worker: start a new measurement unless one is in progress, and return the usage of the
+cache directory from the last complete measurement and of task sandboxes from their latest measurements.
 */
 
 static int64_t measure_worker_disk()
 {
-	static struct path_disk_size_info *state = NULL;
-
-	if (!cache_manager)
+	if (!cache_manager) {
 		return 0;
-
-	char *cache_dir = vine_cache_data_path(cache_manager, ".");
-	path_disk_size_info_get_r(cache_dir, options->max_time_on_measurement, &state, NULL);
-	free(cache_dir);
-
-	int64_t disk_measured = 0;
-	if (state->last_byte_size_complete >= 0) {
-		disk_measured = (int64_t)ceil(state->last_byte_size_complete / (1.0 * MEGA));
 	}
 
-	files_counted = state->last_file_count_complete;
+	start_disk_measurement();
 
-	if (state->complete_measurement) {
-		/* if a complete measurement has been done, then update
-		 * for the found value, and add the known values of the processes. */
+	int64_t disk_measured = cache_disk_measured;
+	files_counted = cache_files_measured;
 
-		struct vine_process *p;
-		uint64_t task_id;
-		int iteration;
+	struct vine_process *p;
+	uint64_t task_id;
+	int iteration;
 
-		ITABLE_ITERATE(procs_table, iteration, task_id, p)
-		{
-			if (p->sandbox_size > 0) {
-				disk_measured += p->sandbox_size;
-				files_counted += p->sandbox_file_count;
-			}
+	ITABLE_ITERATE(procs_table, iteration, task_id, p)
+	{
+		if (p->sandbox_size > 0) {
+			disk_measured += p->sandbox_size;
+			files_counted += p->sandbox_file_count;
 		}
 	}
 
@@ -763,7 +893,21 @@ static int start_process(struct vine_process *p, struct link *manager)
 This process has ended so mark it complete and
 account for the resources as necessary.
 Should maintain parallel structure to start_process() above.
+With a manager, its outputs are moved into the cache by continue_stageout(), which then reports it complete.
 */
+
+/* Measure the standard output after stage-out, which moves it into the cache when it is also a task output. */
+
+static void complete_process(struct vine_process *p)
+{
+	struct stat info;
+	if (!stat(p->output_file_name, &info)) {
+		p->output_length = info.st_size;
+	} else {
+		p->output_length = 0;
+	}
+	itable_insert(procs_complete, p->task->task_id, p);
+}
 
 static void reap_process(struct vine_process *p, struct link *manager)
 {
@@ -777,26 +921,41 @@ static void reap_process(struct vine_process *p, struct link *manager)
 	xpu_tracker_free(gpu_tracker, p->task->task_id);
 	xpu_tracker_free(core_tracker, p->task->task_id);
 
-	if (manager) {
-		vine_sandbox_stageout(p, cache_manager, manager);
-	}
-
 	if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
 		p->library_process->functions_running--;
 	}
 
 	itable_remove(procs_running, p->task->task_id);
-	itable_insert(procs_complete, p->task->task_id, p);
-
-	struct stat info;
-	if (!stat(p->output_file_name, &info)) {
-		p->output_length = info.st_size;
+	if (manager) {
+		list_push_tail(procs_stageout, p);
 	} else {
-		p->output_length = 0;
+		complete_process(p);
 	}
 
 	total_task_execution_time += (p->execution_end - p->execution_start);
 	total_tasks_executed++;
+}
+
+/*
+Move the outputs of ended processes into the cache, in the order the processes ended, until the budget expires, and
+then report each process complete. Measuring a directory output resumes in the next round where the budget stopped
+it. Each call makes progress even with an expired budget, so a process whose outputs are regular files is reported in
+the round it ended.
+*/
+
+static void continue_stageout(struct link *manager, const struct budget *b)
+{
+	struct vine_process *p;
+	while ((p = list_peek_head(procs_stageout))) {
+		if (!vine_sandbox_stageout(p, cache_manager, manager, b)) {
+			return;
+		}
+		list_pop_head(procs_stageout);
+		complete_process(p);
+		if (budget_expired(b)) {
+			return;
+		}
+	}
 }
 
 /*
@@ -1130,7 +1289,7 @@ static int do_put(struct link *manager, const char *cachename, vine_cache_level_
 	if (r) {
 		vine_cache_add_file(cache_manager, cachename, transfer_path, cache_level, mode, actual_size, mtime, start, stop - start, manager);
 	} else {
-		trash_file(transfer_path);
+		trash_move(transfer_path);
 	}
 
 	free(transfer_path);
@@ -1221,7 +1380,12 @@ static int do_kill(int task_id)
 		if (p->type == VINE_PROCESS_TYPE_LIBRARY) {
 			reap_library_functions(p);
 		}
-		vine_process_kill_and_wait(p);
+		/* The process is not waited for here, which would stop the main loop until it exits. Its sandbox goes to the
+		 * trash below, so a task sent again under the same id gets a new one, and its exit status is collected later. */
+		vine_process_kill(p);
+		if (p->pid > 0) {
+			itable_insert(procs_killed, p->pid, (void *)(uintptr_t)p->pid);
+		}
 		reap_process(p, /* do not stage out */ NULL);
 		if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
 			p->library_process->functions_running++;
@@ -1234,12 +1398,36 @@ static int do_kill(int task_id)
 
 	itable_remove(procs_complete, p->task->task_id);
 	list_remove(procs_waiting, p);
+	list_remove(procs_stageout, p);
 
 	vine_watcher_remove_process(watcher, p);
 
 	vine_process_delete(p);
 
 	return 1;
+}
+
+/*
+Collect the exit status of processes that do_kill() dropped. Without waiting, collect only those that exited. With
+waiting, as when disconnecting, wait for each, which is short because each was sent SIGKILL.
+*/
+
+static void reap_killed_processes(int wait)
+{
+	uint64_t pid;
+	void *dummy;
+	int iteration;
+	ITABLE_ITERATE(procs_killed, iteration, pid, dummy)
+	{
+		pid_t result;
+		do {
+			result = waitpid((pid_t)pid, NULL, wait ? 0 : WNOHANG);
+		} while (wait && result < 0 && errno == EINTR);
+		/* An error other than an interruption means the process is no longer a child to wait for. */
+		if (result != 0) {
+			itable_remove(procs_killed, pid);
+		}
+	}
 }
 
 /*
@@ -1265,64 +1453,13 @@ static void kill_all_tasks()
 	assert(itable_size(procs_running) == 0);
 	assert(itable_size(procs_complete) == 0);
 	assert(list_size(procs_waiting) == 0);
+	assert(list_size(procs_stageout) == 0);
 	assert(cores_allocated == 0);
 	assert(memory_allocated == 0);
 	assert(disk_allocated == 0);
 	assert(gpus_allocated == 0);
 
 	debug(D_VINE, "all data structures are clean");
-}
-
-/* Check whether a given process is still within the various limits imposed on it. */
-
-static int enforce_process_sanbox_limits(struct vine_process *p)
-{
-	/* If the task did not set disk usage, return right away. */
-	if (p->task->resources_requested->disk < 1)
-		return 1;
-
-	vine_process_measure_disk(p, options->max_time_on_measurement);
-	if (p->sandbox_size > p->task->resources_requested->disk) {
-		debug(D_VINE,
-				"Task %d went over its disk size limit: %s > %s\n",
-				p->task->task_id,
-				rmsummary_resource_to_str("disk", p->sandbox_size, /* with units */ 1),
-				rmsummary_resource_to_str("disk", p->task->resources_requested->disk, 1));
-		return 0;
-	}
-
-	return 1;
-}
-
-/* Check all processes to see whether they have exceeded various limits, and kill if necessary. */
-
-static int enforce_processes_sandbox_limits()
-{
-	static time_t last_check_time = 0;
-
-	struct vine_process *p;
-	uint64_t task_id;
-	int iteration;
-
-	int ok = 1;
-
-	/* Do not check too often, as it is expensive (particularly disk) */
-	if ((time(0) - last_check_time) < options->check_resources_interval)
-		return 1;
-
-	ITABLE_ITERATE(procs_running, iteration, task_id, p)
-	{
-		if (!enforce_process_sanbox_limits(p)) {
-			finish_running_task(p, VINE_RESULT_SANDBOX_EXHAUSTION);
-			trash_file(p->sandbox);
-
-			ok = 0;
-		}
-	}
-
-	last_check_time = time(0);
-
-	return ok;
 }
 
 /*
@@ -1388,6 +1525,7 @@ static void disconnect_manager(struct link *manager)
 
 	debug(D_VINE, "killing all outstanding tasks");
 	kill_all_tasks();
+	reap_killed_processes(1);
 
 	if (released_by_manager) {
 		released_by_manager = 0;
@@ -1841,6 +1979,18 @@ static void wake_main_loop(void)
 	errno = saved_errno;
 }
 
+/*
+Each round of the main loop waits for the manager, and then works for at most a budget of one second before it waits
+again. A step that may take long, such as measuring the disk, measuring outputs as they move into the cache, emptying
+the trash, or reading many buffered messages, checks the budget between items and continues in the next round, so a
+request of the manager never waits long behind background work. When a round leaves work, the next round does not wait
+for the manager.
+
+Some steps remain unbounded by design: hard-linking a directory input into a sandbox (file_link_recursive) and single
+system calls.
+*/
+#define ROUND_BUDGET USECOND
+
 /* Start working for the (newly connected) manager on this given link. */
 
 static void vine_worker_serve_manager(struct link *manager)
@@ -1848,6 +1998,9 @@ static void vine_worker_serve_manager(struct link *manager)
 	debug(D_VINE, "working for manager at %s:%d.\n", current_manager_address->addr, current_manager_address->port);
 
 	reset_idle_timer();
+
+	/* Non-zero when the last round left work that continues in the next round, which then does not wait. */
+	int work_remains = 0;
 
 	// Start serving managers
 	while (!abort_flag) {
@@ -1869,12 +2022,15 @@ static void vine_worker_serve_manager(struct link *manager)
 		}
 
 		/* Wait for the manager or a signal. A flag set before the wait skips it, and the wake pipe ends it for a
-		 * signal that arrives in between. */
+		 * signal that arrives in between. Work left by the last round also skips it. */
 		int wait_msec = 5000;
 
 		if (sigchld_received_flag) {
 			wait_msec = 0;
 			sigchld_received_flag = 0;
+		}
+		if (work_remains) {
+			wait_msec = 0;
 		}
 
 		/* Queued messages also wait for the manager to make room for them. */
@@ -1884,16 +2040,28 @@ static void vine_worker_serve_manager(struct link *manager)
 		char drain[64];
 		while (wake_link && read(wake_pipe[0], drain, sizeof(drain)) > 0) {
 		}
-		int manager_activity = ready > 0 && (waits[0].revents & LINK_READ);
+		/* Messages that an earlier round left in the link's buffer do not make the socket readable. */
+		int manager_activity = (ready > 0 && (waits[0].revents & LINK_READ)) || !link_buffer_empty(manager);
 
+		struct budget round;
+		budget_start(&round, ROUND_BUDGET);
+
+		/* Handle the messages already in the link's buffer until the budget expires, as the manager does, so that a
+		 * long task, such as one with thousands of inputs, is read at once rather than one line per round. */
 		int ok = 1;
 		if (manager_activity) {
-			ok &= handle_manager(manager);
+			do {
+				ok &= handle_manager(manager);
+			} while (ok && !abort_flag && !link_buffer_empty(manager) && !budget_expired(&round));
 		}
 
 		expire_procs_running();
 
 		ok &= handle_completed_tasks(manager);
+		reap_killed_processes(0);
+
+		continue_stageout(manager, &round);
+
 		ok &= vine_cache_check_xfer_files(cache_manager, manager);
 
 		measure_worker_resources();
@@ -1908,7 +2076,7 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		/* end a running processes if goes above its declared limits.
 		 * Mark offending process as RESOURCE_EXHASTION. */
-		enforce_processes_sandbox_limits();
+		continue_disk_measurement(&round);
 
 		/* end running processes if worker resources are exhasusted, and marked
 		 * them as FORSAKEN, so they can be resubmitted somewhere else. */
@@ -1961,9 +2129,14 @@ static void vine_worker_serve_manager(struct link *manager)
 			}
 		}
 
+		/* Delete what was moved to the trash, after everything else this round. */
+		int trash_done = trash_empty_budget(&round);
+
 		if (!ok) {
 			break;
 		}
+
+		work_remains = !link_buffer_empty(manager) || list_size(procs_stageout) > 0 || disk_measurement_active || !trash_done;
 
 		// Reset options->idle_stoptime if something interesting is happening at this worker.
 		if (list_size(procs_waiting) > 0 || itable_size(procs_table) > 0 || itable_size(procs_complete) > 0) {
@@ -2084,6 +2257,9 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 
 	/* Stop the transfer server from serving the cache directory. */
 	vine_transfer_server_stop();
+
+	/* A disk measurement in progress belongs to this manager's cache. */
+	stop_disk_measurement();
 
 	/* Remove all cached files of workflow or less. */
 	vine_cache_prune(cache_manager, VINE_CACHE_LEVEL_WORKFLOW);
@@ -2385,7 +2561,10 @@ void vine_worker_create_structures()
 	procs_waiting = list_create();
 	pending_async_messages = list_create();
 	procs_complete = itable_create(0);
+	procs_stageout = list_create();
+	procs_killed = itable_create(0);
 	procs_killed_functions = itable_create(0);
+	disk_measurement_tasks = list_create();
 
 	current_transfers = hash_table_create(0, 0);
 
@@ -2416,8 +2595,14 @@ static void vine_worker_delete_structures()
 		itable_delete(procs_running);
 	if (procs_complete)
 		itable_delete(procs_complete);
+	if (procs_stageout)
+		list_delete(procs_stageout);
+	if (procs_killed)
+		itable_delete(procs_killed);
 	if (procs_killed_functions)
 		itable_delete(procs_killed_functions);
+	if (disk_measurement_tasks)
+		list_delete(disk_measurement_tasks);
 	if (procs_waiting)
 		list_delete(procs_waiting);
 }
