@@ -278,6 +278,14 @@ int vine_process_invoke_function(struct vine_process *p)
 	}
 }
 
+int vine_process_cancel_function(struct vine_process *p)
+{
+	char *buffer = string_format("cancel %d", p->task->task_id);
+	ssize_t result = link_printf(p->library_process->library_write_link, time(0) + options->active_timeout, "%ld\n%s", strlen(buffer), buffer);
+	free(buffer);
+	return result >= 0;
+}
+
 /*
 Start a process executing and if successful, return true.
 Otherwise return false.

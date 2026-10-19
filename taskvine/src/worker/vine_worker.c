@@ -102,6 +102,9 @@ static struct list *pending_async_messages = NULL;
 /* These are additional pointers into procs_table and should not be deleted */
 static struct itable *procs_complete = NULL;
 
+/* Table of killed function calls still running in their library, indexed by task_id, with the library as value. */
+static struct itable *procs_killed_functions = NULL;
+
 /* Table of current transfers and their id. */
 static struct hash_table *current_transfers = NULL;
 
@@ -805,6 +808,13 @@ static void reap_library_functions(struct vine_process *library)
 			p->library_process = NULL;
 		}
 	}
+
+	ITABLE_ITERATE(procs_killed_functions, iteration, task_id, p)
+	{
+		if (p == library) {
+			itable_remove(procs_killed_functions, task_id);
+		}
+	}
 }
 
 /*
@@ -866,6 +876,11 @@ static int handle_completed_tasks(struct link *manager)
 
 		/* If p is a library, check to see if any results waiting. */
 		while (vine_process_library_get_result(p, &done_task_id, &done_exit_code)) {
+			if (itable_lookup(procs_killed_functions, done_task_id) == p) {
+				itable_remove(procs_killed_functions, done_task_id);
+				p->functions_running--;
+				continue;
+			}
 			fp = itable_lookup(procs_table, done_task_id);
 			if (fp) {
 				fp->exit_code = done_exit_code;
@@ -1152,6 +1167,13 @@ static int do_kill(int task_id)
 		}
 		vine_process_kill_and_wait(p);
 		reap_process(p, /* do not stage out */ NULL);
+		if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
+			p->library_process->functions_running++;
+			itable_insert(procs_killed_functions, task_id, p->library_process);
+			if (p->library_process->library_can_cancel) {
+				vine_process_cancel_function(p);
+			}
+		}
 	}
 
 	itable_remove(procs_complete, p->task->task_id);
@@ -1486,6 +1508,10 @@ static int process_ready_to_run_now(struct vine_process *p, struct vine_cache *c
 		return 0;
 
 	if (p->task->needs_library) {
+		if (itable_lookup(procs_killed_functions, p->task->task_id)) {
+			return 0;
+		}
+
 		/* Here is where we attach a function to a specific library. */
 		p->library_process = find_running_library_for_function(p->task->needs_library);
 		if (!p->library_process)
@@ -1676,6 +1702,7 @@ static int check_library_startup(struct vine_process *p)
 		if (p->task->func_exec_mode && converted_exec_mode != p->task->func_exec_mode) {
 			ok = 0;
 		}
+		p->library_can_cancel = jx_lookup_boolean(response, "cancel");
 	}
 	if (response) {
 		jx_delete(response);
@@ -2292,6 +2319,7 @@ void vine_worker_create_structures()
 	procs_waiting = list_create();
 	pending_async_messages = list_create();
 	procs_complete = itable_create(0);
+	procs_killed_functions = itable_create(0);
 
 	current_transfers = hash_table_create(0, 0);
 
@@ -2322,6 +2350,8 @@ static void vine_worker_delete_structures()
 		itable_delete(procs_running);
 	if (procs_complete)
 		itable_delete(procs_complete);
+	if (procs_killed_functions)
+		itable_delete(procs_killed_functions);
 	if (procs_waiting)
 		list_delete(procs_waiting);
 }
