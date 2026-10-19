@@ -119,7 +119,8 @@ struct vine_manager {
 	struct hash_table *worker_blocklist; /* Maps hostname -> vine_blocklist_info */
 	struct hash_table *factory_table;    /* Maps factory_name -> vine_factory_info */
 	struct hash_table *workers_with_watched_file_updates;  /* Maps link -> vine_worker_info */
-	struct hash_table *current_transfer_table; 	/* Maps uuid -> struct transfer_pair */
+	struct hash_table *current_transfer_table; 	/* Maps transfer id -> struct transfer_pair */
+	uint64_t next_transfer_id;	/* Number of the next transfer record, from a random start, so ids of another manager never match. */
 	struct hash_table *current_transfer_url_table; 	/* Maps source url -> int count of current transfers */
 	struct itable     *task_group_table; 	/* Maps group id -> list vine_task */
 	struct hash_table *workers_idle_disconnecting;  /* set of workers that were granted a request to idle disconnect, and are in the process of disconnecting. */

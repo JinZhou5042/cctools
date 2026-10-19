@@ -77,10 +77,16 @@ static void update_url_count(struct vine_manager *q, const char *source_url, int
 // add a current transaction to the transfer table
 char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url)
 {
-	cctools_uuid_t uuid;
-	cctools_uuid_create(&uuid);
-
-	char *transfer_id = strdup(uuid.str);
+	/* The id only has to be unique among the manager's records and differ from "X", which a worker sends for a file
+	 * without a record. Sixteen hex digits of a counter cost less than formatting a uuid. */
+	static const char digits[] = "0123456789abcdef";
+	uint64_t number = q->next_transfer_id++;
+	char *transfer_id = xxmalloc(17);
+	for (int i = 15; i >= 0; i--) {
+		transfer_id[i] = digits[number & 0xf];
+		number >>= 4;
+	}
+	transfer_id[16] = 0;
 	struct vine_transfer_pair *t = vine_transfer_pair_create(dest_worker, source_worker, source_url);
 
 	hash_table_insert(q->current_transfer_table, transfer_id, t);
