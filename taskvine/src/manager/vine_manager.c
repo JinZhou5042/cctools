@@ -3359,6 +3359,34 @@ static int should_resubmit_task(struct vine_manager *q, struct vine_worker_info 
 	}
 }
 
+/* Put a task at the head of waiting_retrieval_list and keep its position, so that removing it, also when its worker is
+ * removed, does not search the list. */
+static void retrieval_list_push(struct vine_manager *q, struct vine_task *t)
+{
+	if (t->retrieval) {
+		return;
+	}
+	t->retrieval = list_cursor_create(q->waiting_retrieval_list);
+	if (list_seek(t->retrieval, 0)) {
+		list_insert(t->retrieval, t);
+		list_prev(t->retrieval);
+	} else {
+		list_insert(t->retrieval, t);
+		list_seek(t->retrieval, 0);
+	}
+}
+
+/* Take a task out of waiting_retrieval_list. A task that is not there is left alone. */
+static void retrieval_list_remove(struct vine_task *t)
+{
+	if (!t->retrieval) {
+		return;
+	}
+	list_drop(t->retrieval);
+	list_cursor_delete(t->retrieval);
+	t->retrieval = NULL;
+}
+
 /*
 Remove a running or completed task from a worker, and then update
 all auxiliary data structures to remove the association
@@ -3404,7 +3432,7 @@ static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_inf
 		itable_remove(q->running_table, t->task_id);
 		break;
 	case VINE_TASK_WAITING_RETRIEVAL:
-		list_remove(q->waiting_retrieval_list, t);
+		retrieval_list_remove(t);
 		break;
 	default:
 		assert(t->state > VINE_TASK_READY);
@@ -4072,7 +4100,7 @@ static void reset_task_to_state(struct vine_manager *q, struct vine_task *t, vin
 
 	case VINE_TASK_WAITING_RETRIEVAL:
 		/* do the same for run vs waiting retrieval, only difference is waiting_retrieval_list */
-		list_remove(q->waiting_retrieval_list, t);
+		retrieval_list_remove(t);
 		/* fall through */
 	case VINE_TASK_RUNNING:
 		/* t->worker must be set if in RUNNING state */
@@ -4854,7 +4882,7 @@ static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_t
 		c->vine_stats->tasks_running++;
 		break;
 	case VINE_TASK_WAITING_RETRIEVAL:
-		list_push_head(q->waiting_retrieval_list, t);
+		retrieval_list_push(q, t);
 		c->vine_stats->tasks_with_results++;
 		break;
 	case VINE_TASK_RETRIEVED:
