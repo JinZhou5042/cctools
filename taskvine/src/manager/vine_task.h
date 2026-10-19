@@ -96,6 +96,9 @@ struct vine_task {
 	int exhausted_attempts;     /**< Number of times the task failed given exhausted resources. */
 	int forsaken_attempts;      /**< Number of times the task was submitted to a worker but failed to start execution. */
 	int workers_slow;           /**< Number of times this task has been terminated for running too long. */
+	timestamp_t time_worker_lost[2]; /**< When workers running this task last disconnected unexpectedly, the latest first, or zero. */
+	timestamp_t time_unexplained_loss; /**< When a worker running this task was last lost in a way that no task explained, or zero. */
+	int worker_loss_charged;    /**< Set once an unexpected loss of a worker counted as one of this task's tries. */
 	int function_slots_total;   /**< If a library, the total number of function slots usable. */
 	int function_slots_inuse;   /**< If a library, the number of functions currently running. */
 	int library_ran_function;   /**< If a library instance, set when a function call it ran completed, which shows
