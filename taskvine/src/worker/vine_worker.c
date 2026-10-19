@@ -2786,9 +2786,9 @@ int main(int argc, char *argv[])
 	/* Move to the workspace directory. */
 	chdir(workspace->workspace_dir);
 
-	/* A worker killed before it cleaned up leaves its task sandboxes, partial transfers, and trash in a workspace given
-	 * with --workspace. A task of a later worker with the same task id would then run in a sandbox that holds the
-	 * files of the earlier one, so everything but the cache, which vine_cache_load() checks, is removed first. */
+	/* A worker that was killed before it disconnected leaves its task sandboxes, partial transfers, and trash in a
+	 * workspace given with --workspace. A task of a later worker with the same task id would then find a sandbox that
+	 * holds the files of the earlier task, so everything but the cache, which vine_cache_load() checks, is removed. */
 	trash_setup(workspace->trash_dir);
 	vine_workspace_cleanup(workspace);
 
