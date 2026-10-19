@@ -97,6 +97,9 @@ struct vine_manager {
 	int connections_waiting;         /* The last poll found connections waiting on manager_link. */
 	struct list *departing_links;    /* Links of removed workers whose sealed queues still hold a final message. */
 	struct budget round;             /* Time for the work of one step of vine_wait(), started after its poll. */
+	struct link *wake_link;          /* Read end of the pipe that vine_wake() writes to from other threads. */
+	int wake_fd;                     /* Write end of that pipe. */
+	int woken;                       /* A wake arrived during the current vine_wait(), which then returns. */
 
 	/* Security configuration */
 

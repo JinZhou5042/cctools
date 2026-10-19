@@ -1045,6 +1045,15 @@ process).
 */
 struct vine_task *vine_wait(struct vine_manager *m, int timeout);
 
+/** Make a blocking @ref vine_wait return soon, from any thread.
+An application whose thread waits in @ref vine_wait can call this from another thread to regain control, for example
+after it queued work that the waiting thread hands to the manager. The wait returns after its current step, with or
+without a completed task. A wake that arrives while no wait runs makes the next wait return after one step.
+This is the only manager function that is safe to call from another thread, and only while the manager exists.
+@param m A manager object
+*/
+void vine_wake(struct vine_manager *m);
+
 /** Wait for a task with a given task to complete.
 Similar to @ref vine_wait, but guarantees that the returned task has the specified tag.
 @param m A manager object
