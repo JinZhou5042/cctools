@@ -330,8 +330,8 @@ char *vine_random_name(const struct vine_file *f)
 		return strdup("notreached");
 	}
 
-	/* The prefix and 15 random letters, written in place: the manager names two files of every task this way, and
-	 * formatting the name took most of the time. */
+	/* The prefix and 15 random letters, written in place: the manager names files of every task this way, and
+	 * formatting the name with printf took most of the time. */
 	size_t length = strlen(prefix);
 	char *name = xxmalloc(length + 16);
 	memcpy(name, prefix, length);
