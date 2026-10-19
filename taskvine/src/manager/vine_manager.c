@@ -6469,8 +6469,42 @@ void vine_set_manager_preferred_connection(struct vine_manager *q, const char *p
 	q->manager_preferred_connection = xxstrdup(preferred_connection);
 }
 
+/* The names that vine_tune() takes. vine_tune() refuses a name that is not listed before it looks at its branches, so
+ * a name works only when it is both listed here and handled there, and the list stays complete. */
+static const char *const vine_tune_names[] = {
+	"attempt-schedule-depth", "category-steady-n-tasks", "default-transfer-rate",
+	"disconnect-slow-worker-factor", "hungry-minimum", "hungry-minimum-factor", "immediate-recovery",
+	"keepalive-interval", "keepalive-timeout", "long-timeout", "max-retrievals", "min-transfer-timeout",
+	"monitor-interval", "prefer-dispatch", "force-proportional-resources", "proportional-resources",
+	"force-proportional-resources-whole-tasks", "proportional-whole-tasks", "ramp-down-heuristic",
+	"resource-submit-multiplier", "asynchrony-multiplier", "short-timeout", "temp-replica-count",
+	"transfer-outlier-factor", "transfer-replica-per-cycle", "transfer-temps-recovery",
+	"transient-error-interval", "wait-for-workers", "max-workers", "worker-retrievals",
+	"file-source-max-transfers", "worker-source-max-transfers",
+	"load-from-shared-filesystem", "perf-log-interval", "update-interval", "task-groups",
+	"resource-management-interval", "max-task-stdout-storage", "max-new-workers", "large-task-check-interval",
+	"option-blocklist-slow-workers-timeout", "watch-library-logfiles", "sandbox-grow-factor",
+	"max-library-retries", "disk-proportion-available-to-task", "enforce-worker-eviction-interval",
+	"clean-redundant-replicas", "shift-disk-load",
+	NULL};
+
+int vine_tune_known(const char *name)
+{
+	for (int i = 0; vine_tune_names[i]; i++) {
+		if (!strcmp(name, vine_tune_names[i])) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 int vine_tune(struct vine_manager *q, const char *name, double value)
 {
+	if (!vine_tune_known(name)) {
+		debug(D_NOTICE | D_VINE, "Warning: tuning parameter \"%s\" not recognized\n", name);
+		return -1;
+	}
+
 	if (!strcmp(name, "attempt-schedule-depth")) {
 		q->attempt_schedule_depth = MAX(1, (int)value);
 
