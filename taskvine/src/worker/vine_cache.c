@@ -1102,12 +1102,17 @@ static void vine_cache_check_file(struct vine_cache *c, struct vine_cache_file *
 }
 
 /*
+Search the processing transfer table to determine if any transfer processes have completed.
+If any have definitively failed, they are removed from the cache.
+*/
+
+/*
 Return the peer part of a worker transfer source ("workerip://host:port/"), or null for any other source.
 */
 
 static char *worker_source_peer(const char *source)
 {
-	if (!string_prefix_is(source, VINE_TRANSFER_WORKER_IP_PREFIX) && !string_prefix_is(source, VINE_TRANSFER_WORKER_PREFIX)) {
+	if (!string_prefix_is(source, "workerip://") && !string_prefix_is(source, "worker://")) {
 		return NULL;
 	}
 	const char *slash = strchr(strstr(source, "://") + 3, '/');
@@ -1152,11 +1157,6 @@ static void fail_pending_transfers_from(struct vine_cache *c, const char *peer, 
 	list_delete(names);
 }
 
-/*
-Search the processing transfer table to determine if any transfer processes have completed.
-If any have definitively failed, they are removed from the cache.
-*/
-
 int vine_cache_check_xfer_files(struct vine_cache *c, struct link *manager)
 {
 	vine_cache_reap_killed_transfers(c, 0);
@@ -1180,10 +1180,10 @@ int vine_cache_check_xfer_files(struct vine_cache *c, struct link *manager)
 			/* The connect deadline counts whole seconds, so a connect that timed out may take a second less. */
 			if (f->cache_type == VINE_CACHE_TRANSFER && f->stop_time - f->start_time >= (timestamp_t)(VINE_PEER_TRANSFER_TIMEOUT - 1) * 1000000) {
 				char *peer = worker_source_peer(f->source);
-				if (peer && !silent_peers) {
-					silent_peers = list_create();
-				}
 				if (peer) {
+					if (!silent_peers) {
+						silent_peers = list_create();
+					}
 					list_push_tail(silent_peers, peer);
 				}
 			}
