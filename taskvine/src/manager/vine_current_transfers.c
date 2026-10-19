@@ -20,6 +20,7 @@ struct vine_transfer_pair {
 	struct vine_worker_info *dest_worker;
 	struct vine_worker_info *source_worker;
 	char *source_url;
+	timestamp_t start_time;
 };
 
 static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url)
@@ -28,6 +29,7 @@ static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_i
 	t->dest_worker = dest_worker;
 	t->source_worker = source_worker;
 	t->source_url = source_url ? xxstrdup(source_url) : 0;
+	t->start_time = timestamp_get();
 
 	if (t->dest_worker) {
 		t->dest_worker->incoming_xfer_counter++;
@@ -79,7 +81,14 @@ int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 	}
 }
 
-void set_throttle(struct vine_manager *m, struct vine_worker_info *w, int is_destination)
+/*
+Count a failed transfer against a worker, and release the worker after repeated failures. A worker is released after
+a streak of failures when it failed more often than not. A source is also released after a streak when it sent
+nothing since the failed transfer was requested (silent), because its host then hangs with its connections open: it
+does not answer keepalives either, and the tasks that it runs never return until it is removed.
+*/
+
+void set_throttle(struct vine_manager *m, struct vine_worker_info *w, int is_destination, int silent)
 {
 	if (!w) {
 		return;
@@ -111,15 +120,31 @@ void set_throttle(struct vine_manager *m, struct vine_worker_info *w, int is_des
 
 	w->last_transfer_failure = timestamp_get();
 
-	/* first error treat as a normal error */
-	if (streak < grace) {
-		return;
-	}
-
-	if (good <= bad) {
+	/* The first errors of a streak are treated as normal errors. */
+	if (streak >= grace && good <= bad) {
 		/* this worker has failed more often than not, release it. */
 		notice(D_VINE, "Releasing worker %s because of repeated %s transfer failures: %d/%d", dir, w->addrport, bad, bad + good);
 		vine_manager_mark_worker_for_removal(m, w, VINE_WORKER_DISCONNECT_XFER_ERRORS);
+		return;
+	}
+
+	if (streak >= grace && silent) {
+		notice(D_VINE, "Releasing worker %s because %d transfers from it failed in a row and it sent nothing since the last one started", w->addrport, streak);
+		vine_manager_mark_worker_for_removal(m, w, VINE_WORKER_DISCONNECT_XFER_ERRORS);
+		return;
+	}
+
+	if (is_destination) {
+		return;
+	}
+
+	/* The source is not chosen again until it sends a message. A check asks a live source for one now, unless a
+	 * check is already outstanding. */
+	w->last_source_failure = w->last_transfer_failure;
+	if (w->last_msg_recv_time > w->last_update_msg_time) {
+		if (vine_manager_send(m, w, "check\n") > 0) {
+			w->last_update_msg_time = w->last_source_failure;
+		}
 	}
 }
 
@@ -154,13 +179,25 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 	if (source_replica && source_replica->state == VINE_FILE_REPLICA_STATE_READY) {
 		debug(D_VINE, "Unable to transfer a READY replica from %s (%s) to %s (%s) for file %s \n", source_worker->hostname, source_worker->addrport, dest_worker->hostname, dest_worker->addrport, cachename);
 
+		/* A source that is being removed is already judged. */
+		if (source_worker->pending_removal) {
+			return 1;
+		}
+
+		/* A source that failed before and sent nothing since explains the failure, so it does not count against
+		 * the destination. Otherwise a source whose host hangs fails every transfer to healthy destinations, which
+		 * would be released in turn. */
+		int source_suspect = vine_worker_source_is_suspect(source_worker);
+
 		source_worker->xfer_streak_bad_source_counter++;
 		source_worker->xfer_total_bad_source_counter++;
-		set_throttle(q, source_worker, 0);
+		set_throttle(q, source_worker, 0, source_worker->last_msg_recv_time < p->start_time);
 
-		dest_worker->xfer_streak_bad_destination_counter++;
-		dest_worker->xfer_total_bad_destination_counter++;
-		set_throttle(q, dest_worker, 1);
+		if (!source_suspect) {
+			dest_worker->xfer_streak_bad_destination_counter++;
+			dest_worker->xfer_total_bad_destination_counter++;
+			set_throttle(q, dest_worker, 1, 0);
+		}
 		return 1;
 	}
 
