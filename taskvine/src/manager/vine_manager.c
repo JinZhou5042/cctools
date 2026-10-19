@@ -134,6 +134,10 @@ See the file COPYING for details.
 /* Default value for how frequently to check for tasks that do not fit any worker. */
 #define VINE_LARGE_TASK_CHECK_INTERVAL 180000000 // 3 minutes in usecs
 
+/* An unexpected loss of a worker is not charged to the tasks it ran if another worker was lost in a way that no task
+ * explains within this time before. See cleanup_worker(). */
+#define VINE_WORKER_LOSS_EXCUSE_WINDOW (5 * ONE_SECOND)
+
 /* Default value for how frequently to allow calls to vine_hungry_computation. */
 #define VINE_HUNGRY_CHECK_INTERVAL 5000000 // 5 seconds in usecs
 
