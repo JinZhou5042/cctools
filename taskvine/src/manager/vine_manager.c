@@ -1781,26 +1781,6 @@ static void send_unlink(struct vine_manager *q, struct vine_worker_info *w, cons
 	vine_manager_send_data(q, w, message, length + 8);
 }
 
-/* Ask a worker to delete a file from its cache. The message is assembled without formatting, because a release sends
- * one for every replica of every released file. */
-static void send_unlink(struct vine_manager *q, struct vine_worker_info *w, const char *filename)
-{
-	if (!w || w->pending_removal) {
-		return;
-	}
-	char message[VINE_LINE_MAX];
-	size_t length = strlen(filename);
-	if (length + 8 > sizeof(message)) {
-		vine_manager_send(q, w, "unlink %s\n", filename);
-		return;
-	}
-	memcpy(message, "unlink ", 7);
-	memcpy(message + 7, filename, length);
-	message[7 + length] = '\n';
-	debug(D_VINE, "tx to %s (%s): unlink %s", w->hostname, w->addrport, filename);
-	vine_manager_send_data(q, w, message, length + 8);
-}
-
 /* Delete a single file on a remote worker except those with greater delete_upto_level cache level */
 
 int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const char *filename, vine_cache_level_t cache_level, vine_cache_level_t delete_upto_level)
@@ -5042,7 +5022,6 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->current_transfer_table = hash_table_create(0, 0);
 	q->next_transfer_id = (uint64_t)random_int64();
 	q->current_transfer_url_table = hash_table_create(0, 0);
-	q->next_transfer_id = (uint64_t)random_int64();
 	q->task_group_table = itable_create(0);
 	q->group_id_counter = 1;
 	q->fetch_factory = 0;
@@ -6015,13 +5994,12 @@ void vine_manager_install_library(struct vine_manager *q, struct vine_task *t, c
 	t->time_when_submitted = timestamp_get();
 }
 
-/* Cancel every instance of a library and remove its template from the table. Return the template, or NULL.
- * Instances are collected before any is cancelled, because a task state change can iterate the worker table, for
+/* End every instance of a library and delete its template. An idle instance is cancelled at once. A busy one is
+ * retired: it takes no new function calls and is cancelled when its last call ends, so running calls complete. Idle
+ * instances are collected before any is cancelled, because a task state change can iterate the worker table, for
  * example to write the performance log, and that would break an iteration in progress. */
 void vine_manager_remove_library(struct vine_manager *q, const char *name)
 {
-	/* Cancelling a task can iterate the worker table, for example to write the performance log, so the instances
-	 * are collected before any is cancelled. */
 	struct list *instances = list_create();
 	char *worker_key;
 	struct vine_worker_info *w;
