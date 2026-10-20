@@ -1042,7 +1042,11 @@ static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct 
 		node->error = error;
 		node->failure = failure;
 		size_t length = error ? strlen(error) : 0;
-		debug(D_VINE, "node %" PRIu64 " failed (%zu bytes): %.*s", node->node_id, length, (int)MIN(length, VINE_GRAPH_ERROR_LOGGED), error ? error : "");
+		if (length > VINE_GRAPH_ERROR_LOGGED) {
+			debug(D_VINE, "node %" PRIu64 " failed: %.*s... (%zu bytes)", node->node_id, VINE_GRAPH_ERROR_LOGGED, error, length);
+		} else {
+			debug(D_VINE, "node %" PRIu64 " failed: %s", node->node_id, error ? error : "");
+		}
 	}
 	vine_graph_executor_mark_failed(e, node, source_id);
 	vine_graph_executor_fail_dependents(e, node);
@@ -1756,6 +1760,19 @@ uint64_t vine_graph_executor_get_makespan_us(const struct vine_graph_executor *e
 uint64_t vine_graph_executor_get_completed_recovery_tasks(const struct vine_graph_executor *e)
 {
 	return e ? e->completed_recovery_tasks : 0;
+}
+
+struct vine_graph_capacity vine_graph_executor_get_capacity(struct vine_graph_executor *e)
+{
+	struct vine_graph_capacity capacity = {0, 0};
+	if (!e) {
+		return capacity;
+	}
+	struct vine_stats stats;
+	vine_get_stats(e->manager, &stats);
+	capacity.workers = stats.workers_connected;
+	capacity.cores = stats.total_cores;
+	return capacity;
 }
 
 int vine_graph_executor_cancel_node(struct vine_graph_executor *e, uint64_t node_id)

@@ -58,7 +58,7 @@ from . import vine_graph_capi as capi  # noqa: E402
 # generated wrapper around each.
 _capi = capi._vine_graph_capi
 from .graph import File, Graph, Hoisted, Node, NodeFile, _FileRef, _Ref, _Selectable, _Symbol  # noqa: E402
-from . import library  # noqa: E402
+from . import install, library  # noqa: E402
 
 # Manager tuning that suits graph execution. set_params() overrides it.
 MANAGER_TUNING = {
@@ -621,7 +621,7 @@ class Executor:
         # Hoisted objects, each serialized on its own: name -> bytes. A local Executor loads one copy per task, as
         # forked tasks get on Workers, and a Worker library loads them from a file.
         self._hoisted = _serialize_hoisted(hoist)
-        library_modules = [library.module_name(module) for module in library_modules]
+        library_modules = [install.module_name(module) for module in library_modules]
         if not isinstance(edata_cache, int) or edata_cache < 0:
             raise ValueError("edata_cache takes a number of bytes, zero or more")
         self._edata_cache = edata_cache
@@ -768,8 +768,8 @@ class Executor:
         hoisted_path = None
         if self._hoisted:
             hoisted_path = os.path.join(self._run_dir, library.HOISTED)
-            library.save_objects(hoisted_path, self._hoisted)
-        self._library_name = library.unique_name()
+            install.save_objects(hoisted_path, self._hoisted)
+        self._library_name = install.unique_name()
         self._library_options = (library_modules, library_files, hoisted_path)
         if not self._library_pending:
             self._install_library(None)
@@ -788,7 +788,7 @@ class Executor:
         """Install the library, which loads the cached edata at edata_path, if any, when it starts on a Worker."""
         modules, files, hoisted_path = self._library_options
         self._resources.enter_context(
-            library.installed(self._manager, self._library_name, modules, files, hoisted_path, edata_path))
+            install.installed(self._manager, self._library_name, modules, files, hoisted_path, edata_path))
 
     @contextlib.contextmanager
     def _first_submission(self):
@@ -838,7 +838,7 @@ class Executor:
         if not chosen:
             return None
         path = os.path.join(self._run_dir, library.EDATA_CACHE)
-        library.save_objects(path, chosen)
+        install.save_objects(path, chosen)
         self._cached_edata = frozenset(chosen)
         # Only the library file holds cached objects, so their staged files go now, and the vault never sees them.
         with self._lock:
@@ -2129,10 +2129,9 @@ class Executor:
 
     def _read_capacity(self):
         """Read the Workers and cores of the Manager in the background thread, at O(Workers)."""
-        stats = cvine.vine_stats()
-        cvine.vine_get_stats(self._manager._taskvine, stats)
+        capacity = capi.vine_graph_executor_get_capacity(self._executor)
         self._capacity_read = time.monotonic()
-        return Capacity(stats.workers_connected, stats.total_cores)
+        return Capacity(capacity.workers, capacity.cores)
 
     def _add_done_callback(self, future, fn):
         task = future._task

@@ -71,6 +71,12 @@ typedef enum {
 /* An opaque executor. */
 struct vine_graph_executor;
 
+/* The workers connected to an executor's Manager and their cores. Each core runs one node at a time. */
+struct vine_graph_capacity {
+	int64_t workers; /* workers connected */
+	int64_t cores;	 /* cores of those workers */
+};
+
 /* Create an executor whose nodes call function_name in the library library_name. Return NULL on failure. */
 struct vine_graph_executor *vine_graph_executor_create(struct vine_manager *manager, const char *library_name, const char *function_name);
 
@@ -214,6 +220,8 @@ const char *vine_graph_executor_get_error(const struct vine_graph_executor *e);
 uint64_t vine_graph_executor_get_makespan_us(const struct vine_graph_executor *e);
 /* Return how many tasks recomputed outputs of completed nodes in this run. */
 uint64_t vine_graph_executor_get_completed_recovery_tasks(const struct vine_graph_executor *e);
+/* Return the workers connected now and their cores, at O(workers), or zeros for a NULL executor. */
+struct vine_graph_capacity vine_graph_executor_get_capacity(struct vine_graph_executor *e);
 
 /* Drop a submitted node the frontend no longer needs: it will not pin, fetch, or read the node's outputs, and no node it
  * submits later reads them. The node is removed once it failed, or once it completed and its outputs were released,
