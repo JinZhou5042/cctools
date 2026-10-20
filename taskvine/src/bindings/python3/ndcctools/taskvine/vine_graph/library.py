@@ -111,7 +111,8 @@ def installed(manager, name, modules=(), files=None, hoisted=None, edata_cache=N
                 for file in inputs:
                     manager.undeclare_file(file)
             finally:
-                if generated:
+                # Only a directory of the library cache is removed, whatever the Manager's files turn out to be.
+                if generated and os.path.basename(os.path.dirname(generated)) == "vine-library-cache":
                     shutil.rmtree(generated, ignore_errors=True)
 
 
