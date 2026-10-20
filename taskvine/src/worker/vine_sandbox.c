@@ -34,15 +34,21 @@ Determine whether all the files needed by this process are present.
 Return VINE_STATUS_READY if all are present.
 Return VINE_STATUS_PROCESSING if some are not ready.
 Return VINE_STATUS_FAILED if some have definitely failed.
+
+Files stay in the cache once present, so each call resumes at the first input that was not ready the last time.
+The cache starts the transfers of all inputs on its own.
 */
 
 vine_cache_status_t vine_sandbox_ensure(struct vine_process *p, struct vine_cache *cache, struct link *manager, struct itable *procs_table)
 {
-	int processing = 0;
+	if (!p->input_cursor) {
+		p->input_cursor = list_cursor_create(p->task->input_mounts);
+		list_seek(p->input_cursor, 0);
+	}
 
 	struct vine_mount *m;
-	LIST_ITERATE(p->task->input_mounts, m)
-	{
+	while (list_get(p->input_cursor, (void **)&m)) {
+		int processing = 0;
 		vine_cache_status_t cache_status = vine_cache_ensure(cache, m->file->cached_name);
 
 		switch (cache_status) {
@@ -81,13 +87,14 @@ vine_cache_status_t vine_sandbox_ensure(struct vine_process *p, struct vine_cach
 			debug(D_VINE, "unavailable in cache for task sandbox: %s", m->file->cached_name);
 			return VINE_CACHE_STATUS_FAILED;
 		}
+
+		if (processing) {
+			return VINE_CACHE_STATUS_PROCESSING;
+		}
+		list_next(p->input_cursor);
 	}
 
-	if (processing) {
-		return VINE_CACHE_STATUS_PROCESSING;
-	} else {
-		return VINE_CACHE_STATUS_READY;
-	}
+	return VINE_CACHE_STATUS_READY;
 }
 
 /*

@@ -115,6 +115,10 @@ struct vine_process *vine_process_create(struct vine_task *task, vine_process_ty
 
 void vine_process_delete(struct vine_process *p)
 {
+	if (p->input_cursor) {
+		list_cursor_delete(p->input_cursor);
+	}
+
 	if (p->output_cursor) {
 		list_cursor_delete(p->output_cursor);
 	}

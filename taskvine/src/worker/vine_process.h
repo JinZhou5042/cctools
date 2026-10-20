@@ -51,6 +51,7 @@ struct vine_process {
 
 	/* If a function-call task, this is the specific library process to invoke. */
 	struct vine_process *library_process;
+	struct list_cursor *input_cursor; /* first input not known to be in the cache, kept by vine_sandbox_ensure */
 	
 	/* If this is a library process, the links to communicate with the library. */
 	struct link *library_read_link;
