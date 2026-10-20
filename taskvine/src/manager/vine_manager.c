@@ -2687,6 +2687,11 @@ static vine_result_code_t handle_worker(struct vine_manager *q, struct vine_work
 {
 	char line[VINE_LINE_MAX];
 
+	/* The poll set gives the worker of the link. A worker that a message just marked for removal left worker_table. */
+	if (w->pending_removal) {
+		return VINE_WORKER_FAILURE;
+	}
+
 	vine_msg_code_t mcode;
 	mcode = vine_manager_recv_no_retry(q, w, line, sizeof(line));
 
