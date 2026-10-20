@@ -319,7 +319,7 @@ otherwise in a thread of the Executor, one callback at a time in the order the
 tasks finished. A callback may call `result()`, should not wait long, and is
 logged and ignored when it raises. Callbacks of tasks still unfinished run when
 the Executor closes. `executor.capacity()` returns the connected workers and
-their cores as a `vg.Capacity`, read at most a second ago, for programs that
+their cores as a `vg.Capacity`, read about once a second, for programs that
 size how many tasks they keep in flight.
 
 A background thread advances the run, in scripts and notebooks alike, for as

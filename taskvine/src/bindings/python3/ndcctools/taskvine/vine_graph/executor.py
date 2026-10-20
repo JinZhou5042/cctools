@@ -424,8 +424,9 @@ class _Task:
         self.result = 0  # C file id of the task result
         self.futures = 0  # live Futures that stand for the task, its result or its files
         self.holds = 0  # live Futures that pin the task result
-        self.finished = None  # (COMPLETED, None, None), or (FAILED, source task, message, reason) once the task finished, whose message and
-        # reason only a source holds
+        # (COMPLETED, None, None), or (FAILED, source task, message, reason) once the task finished. Only a source holds
+        # its message and reason, which its dependents read from it.
+        self.finished = None
 
 
 # The C file id of a task's result, from its _Task, for map() over the tasks whose results a task mounts.
@@ -2112,8 +2113,8 @@ class Executor:
                 self._watchers.discard(watcher)
 
     def capacity(self):
-        """Return the Workers connected now and their cores, as the background thread read them at most a second ago. A
-        local Executor runs one task at a time."""
+        """Return the Workers connected and their cores, which the background thread reads about once a second. A local
+        Executor runs one task at a time."""
         self._check_open()
         if self._local:
             return Capacity(1, 1)
@@ -2390,7 +2391,8 @@ class Executor:
                 raise
             except BaseException as error:
                 # As on a Worker, anything else the function raises, including an exit, fails the task.
-                self._finish_local((task, (FAILED, task, library.failure_report(error, __file__, library.__file__), "function")))
+                report = library.failure_report(error, __file__, library.__file__)
+                self._finish_local((task, (FAILED, task, report, "function")))
             finally:
                 os.chdir(previous_cwd)
                 self._local_seconds += time.time() - started

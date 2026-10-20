@@ -26,6 +26,10 @@
  * rest with vine_graph_executor_remove_dropped() at its own pace, so a step never spends long on removals. */
 #define VINE_GRAPH_REMOVALS_PER_STEP 256
 
+/* Bytes of a node's failure message that the debug log keeps. The message ends with the function's output, which may
+ * be long, while the frontend reads the whole message. */
+#define VINE_GRAPH_ERROR_LOGGED 4096
+
 /* Order in which ready nodes are submitted. */
 typedef enum {
 	VINE_GRAPH_PRIORITY_LARGEST_INPUT_FIRST = 0, /* Largest total input size first. */
@@ -1037,7 +1041,8 @@ static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct 
 	if (node->node_id == source_id) {
 		node->error = error;
 		node->failure = failure;
-		debug(D_VINE, "node %" PRIu64 " failed: %s", node->node_id, error);
+		size_t length = error ? strlen(error) : 0;
+		debug(D_VINE, "node %" PRIu64 " failed (%zu bytes): %.*s", node->node_id, length, (int)MIN(length, VINE_GRAPH_ERROR_LOGGED), error ? error : "");
 	}
 	vine_graph_executor_mark_failed(e, node, source_id);
 	vine_graph_executor_fail_dependents(e, node);
