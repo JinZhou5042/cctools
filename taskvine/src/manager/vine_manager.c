@@ -6052,6 +6052,27 @@ void vine_set_manager_preferred_connection(struct vine_manager *q, const char *p
 	q->manager_preferred_connection = xxstrdup(preferred_connection);
 }
 
+/* Turn the debug log down to errors and notices, and close the performance, transactions, and taskgraph logs for the
+ * rest of the run. Their writers skip a log that is not open. */
+static void disable_logs(struct vine_manager *q)
+{
+	debug_flags_restore(D_NOTICE | D_ERROR | D_FATAL);
+	if (q->perf_logfile) {
+		fclose(q->perf_logfile);
+		q->perf_logfile = NULL;
+	}
+	if (q->txn_logfile) {
+		vine_txn_log_write_manager(q, "END");
+		fclose(q->txn_logfile);
+		q->txn_logfile = NULL;
+	}
+	if (q->graph_logfile) {
+		vine_taskgraph_log_write_footer(q);
+		fclose(q->graph_logfile);
+		q->graph_logfile = NULL;
+	}
+}
+
 int vine_tune(struct vine_manager *q, const char *name, double value)
 {
 	if (!strcmp(name, "attempt-schedule-depth")) {
@@ -6157,6 +6178,12 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "perf-log-interval")) {
 		q->perf_log_interval = MAX(1, (int)value);
+
+	} else if (!strcmp(name, "enable-logs")) {
+		/* Logs that were turned off stay off, because reopening them would lose what they recorded. */
+		if (!(int)value) {
+			disable_logs(q);
+		}
 
 	} else if (!strcmp(name, "update-interval")) {
 		q->update_interval = MAX(1, (int)value);
