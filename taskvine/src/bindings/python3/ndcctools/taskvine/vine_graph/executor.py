@@ -530,6 +530,50 @@ class _Watcher:
         self.finished = []
 
 
+class _Completions:
+    """A stream of finished Futures that grows while it is read, for frontends that need a callback per Future, such as
+    graphed-executors' backend. add() watches a Future, and wait() returns the watched Futures whose tasks finished
+    since the last call. Both cost O(1) per Future, where as_completed() takes a fixed set of Futures."""
+
+    def __init__(self, executor):
+        self._executor = executor
+        self._watcher = _Watcher(collections.defaultdict(list))
+        with executor._lock:
+            executor._check_open()
+            executor._watchers.add(self._watcher)
+
+    def add(self, future):
+        executor = self._executor
+        if future._executor is not executor:
+            raise ValueError("a completion stream takes Futures of its Executor")
+        task = future._task
+        with executor._lock:
+            waiting = self._watcher.tasks[task]
+            waiting.append(future)
+            record = executor._records.get(task)
+            # A task that finished before it was watched is reported at once.
+            if len(waiting) == 1 and (record is None or record.finished is not None):
+                self._watcher.finished.append(task)
+                executor._changed.notify_all()
+
+    def wait(self, timeout=None):
+        """Return the watched Futures whose tasks finished, waiting up to timeout seconds for one. A timeout that
+        expires returns an empty list."""
+        executor = self._executor
+        try:
+            executor._wait_until(lambda: self._watcher.finished, timeout, "")
+        except TimeoutError:
+            return []
+        with executor._lock:
+            ready, self._watcher.finished = self._watcher.finished, []
+            tasks = self._watcher.tasks
+            return [future for task in ready for future in tasks.pop(task, ())]
+
+    def close(self):
+        with self._executor._lock:
+            self._executor._watchers.discard(self._watcher)
+
+
 class Executor:
     """Run tasks on TaskVine Workers that connect to port, or to the Manager named name through the catalog.
 
@@ -2040,6 +2084,23 @@ class Executor:
         finally:
             with self._lock:
                 self._watchers.discard(watcher)
+
+    def _completions(self):
+        """Return a _Completions stream of this Executor's Futures, for frontends built on the Executor."""
+        return _Completions(self)
+
+    def _capacity(self):
+        """Return (connected Workers, their cores), for frontends that size their windows of tasks in flight. A local
+        Executor runs one task at a time."""
+        self._check_open()
+        if self._local:
+            return 1, 1
+
+        def read():
+            stats = cvine.vine_stats()
+            cvine.vine_get_stats(self._manager._taskvine, stats)
+            return stats.workers_connected, stats.total_cores
+        return self._call(read)
 
     def run(self, graph, targets=None):
         """Run the targets of a Graph, and every task they read, and return {target: result}. Targets are Nodes,
