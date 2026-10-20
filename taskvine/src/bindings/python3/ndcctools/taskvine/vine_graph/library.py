@@ -77,18 +77,21 @@ def installed(manager, name, modules=(), files=None, hoisted=None, edata_cache=N
     for local in files:
         if not os.path.exists(local):
             raise FileNotFoundError(f"Local file {local} not found")
-    cache_root = Path(manager.cache_directory) / "vine-library-cache"
-    before = set(cache_root.iterdir()) if cache_root.exists() else set()
     inputs = []
     installed_library = False
+    generated = None
     try:
+        context = [prepare, [module_names, HOISTED if hoisted else None, EDATA_CACHE if edata_cache else None,
+                             runtime_identity()], {}]
         try:
-            context = [prepare, [module_names, HOISTED if hoisted else None, EDATA_CACHE if edata_cache else None,
-                                 runtime_identity()], {}]
             library = manager.create_library_from_functions(name, run_node, add_env=False, library_context_info=context)
-        finally:
-            # Library construction is synchronous, so new cache directories belong to this library.
-            generated = set(cache_root.iterdir()) - before if cache_root.exists() else set()
+        except BaseException:
+            generated = generated_directory(manager, name, context)
+            raise
+        # The Manager generates the library's code in a directory of the shared library cache that is named by a hash
+        # of the library, and the name is unique, so the directory of the code belongs to this library alone. Other
+        # Executors that use the same cache directory, in this process or another, keep theirs.
+        generated = os.path.dirname(library._library_files[0].source())
         for local, remote in files.items():
             inputs.append(manager.declare_file(local, cache=True, peer_transfer=True))
             library.add_input(inputs[-1], remote)
@@ -108,8 +111,19 @@ def installed(manager, name, modules=(), files=None, hoisted=None, edata_cache=N
                 for file in inputs:
                     manager.undeclare_file(file)
             finally:
-                for directory in generated:
-                    shutil.rmtree(directory)
+                if generated:
+                    shutil.rmtree(generated, ignore_errors=True)
+
+
+def generated_directory(manager, name, context):
+    """Return the directory of the library cache where the Manager generates the code of the library named name, as
+    create_library_from_functions() names it, for a construction that failed before it declared the code."""
+    from ndcctools.poncho import package_serverize
+
+    library_hash = package_serverize.generate_library_hash(library_name=name, function_list=[run_node], poncho_env=None,
+                                                           init_command=None, add_env=False, exec_mode="fork",
+                                                           hoisting_modules=None, library_context_info=context)
+    return os.path.join(manager.cache_directory, "vine-library-cache", library_hash)
 
 
 def save_objects(path, blobs):
