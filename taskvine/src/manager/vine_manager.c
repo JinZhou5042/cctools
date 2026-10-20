@@ -1551,13 +1551,33 @@ static void add_worker(struct vine_manager *q)
 	hash_table_insert(q->worker_table, w->hashkey, w);
 }
 
+/* Ask a worker to delete a file from its cache. The message is assembled without formatting, because a release sends
+ * one for every replica of every released file. */
+static void send_unlink(struct vine_manager *q, struct vine_worker_info *w, const char *filename)
+{
+	if (!w || w->pending_removal) {
+		return;
+	}
+	char message[VINE_LINE_MAX];
+	size_t length = strlen(filename);
+	if (length + 8 > sizeof(message)) {
+		vine_manager_send(q, w, "unlink %s\n", filename);
+		return;
+	}
+	memcpy(message, "unlink ", 7);
+	memcpy(message + 7, filename, length);
+	message[7 + length] = '\n';
+	debug(D_VINE, "tx to %s (%s): unlink %s", w->hostname, w->addrport, filename);
+	vine_manager_send_data(q, w, message, length + 8);
+}
+
 /* Delete a single file on a remote worker except those with greater delete_upto_level cache level */
 
 int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const char *filename, vine_cache_level_t cache_level, vine_cache_level_t delete_upto_level)
 {
 	if (cache_level <= delete_upto_level) {
 		process_replica_on_event(q, w, filename, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_UNLINK);
-		vine_manager_send(q, w, "unlink %s\n", filename);
+		send_unlink(q, w, filename);
 		return 1;
 	}
 
@@ -7081,24 +7101,36 @@ int vine_prune_file(struct vine_manager *m, struct vine_file *f)
 
 	int pruned_replica_count = 0;
 
-	/* delete all of the replicas present at remote workers. */
+	/* delete all of the replicas present at remote workers. Removing a replica removes its worker from the set, so
+	 * the workers are copied first, into an array on the stack when they fit, as they usually do. */
 	struct set *source_workers = hash_table_lookup(m->file_worker_table, f->cached_name);
 	if (source_workers && set_size(source_workers) > 0) {
-		void **workers_array = set_values_array(source_workers);
-		if (workers_array) {
-			for (int i = 0; workers_array[i] != NULL; i++) {
-				struct vine_worker_info *w = (struct vine_worker_info *)workers_array[i];
-				delete_worker_file(m, w, f->cached_name, 0, 0);
+		struct vine_worker_info *stack_workers[16];
+		int count = set_size(source_workers);
+		struct vine_worker_info **workers = count <= 16 ? stack_workers : malloc(sizeof(*workers) * count);
+		if (!workers) {
+			return 0;
+		}
+		int n = 0;
+		int iteration;
+		struct vine_worker_info *w;
+		SET_ITERATE(source_workers, iteration, w)
+		{
+			workers[n++] = w;
+		}
+		for (int i = 0; i < n; i++) {
+			w = workers[i];
+			send_unlink(m, w, f->cached_name);
 
-				/* update replica table for the worker */
-				struct vine_file_replica *removed_replica = vine_file_replica_table_remove(m, w, f->cached_name);
-				if (removed_replica) {
-					vine_file_replica_delete(removed_replica);
-				}
-
-				pruned_replica_count++;
+			struct vine_file_replica *removed_replica = vine_file_replica_table_remove(m, w, f->cached_name);
+			if (removed_replica) {
+				vine_file_replica_delete(removed_replica);
 			}
-			set_free_values_array(workers_array);
+
+			pruned_replica_count++;
+		}
+		if (workers != stack_workers) {
+			free(workers);
 		}
 	}
 
@@ -7140,8 +7172,7 @@ void vine_undeclare_file(struct vine_manager *m, struct vine_file *f)
 	vine_prune_file(m, f);
 
 	/* Then, remove the object from our table and delete a reference. */
-	if (hash_table_lookup(m->file_table, f->cached_name)) {
-		hash_table_remove(m->file_table, f->cached_name);
+	if (hash_table_remove(m->file_table, f->cached_name)) {
 		vine_file_delete(f);
 	}
 
