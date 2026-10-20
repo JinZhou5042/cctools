@@ -1205,6 +1205,10 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 		quarantine_reserve(q, t);
 	}
 
+	if (!best_worker && t->worker_loss_charged && !t->quarantine_worker) {
+		quarantine_reserve(q, t);
+	}
+
 	return best_worker;
 }
 
