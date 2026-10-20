@@ -323,7 +323,7 @@ struct vine_task *vine_schedule_find_library(struct vine_manager *q, struct vine
 	int iteration;
 	ITABLE_ITERATE(w->current_libraries, iteration, task_id, library_task)
 	{
-		if (!strcmp(library_task->provides_library, library_name) && (library_task->function_slots_inuse < library_task->function_slots_total)) {
+		if (!strcmp(library_task->provides_library, library_name) && !library_task->library_retired && (library_task->function_slots_inuse < library_task->function_slots_total)) {
 			return library_task;
 		}
 	}

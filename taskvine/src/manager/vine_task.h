@@ -98,6 +98,8 @@ struct vine_task {
 	int workers_slow;           /**< Number of times this task has been terminated for running too long. */
 	int function_slots_total;   /**< If a library, the total number of function slots usable. */
 	int function_slots_inuse;   /**< If a library, the number of functions currently running. */
+	int library_retired;        /**< If a library instance, set when its library is removed while functions run. It
+				       takes no new functions and ends when the last one ends. */
 		
 	/***** Results of task once it has reached completion. *****/
 

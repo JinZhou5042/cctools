@@ -3343,8 +3343,13 @@ static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_inf
 	/* if t is a function task, t->library_task should not be invalidated, and we decrement the reference count of the library task.
 	 * if t->library_task is NULL or it had been released before, then something is going wrong. */
 	if (t->needs_library && t->library_task) {
-		t->library_task->function_slots_inuse = MAX(0, t->library_task->function_slots_inuse - 1);
-		vine_task_delete(t->library_task);
+		struct vine_task *library = t->library_task;
+		library->function_slots_inuse = MAX(0, library->function_slots_inuse - 1);
+		/* The last function of an instance whose library was removed ends the instance. */
+		if (library->library_retired && library->function_slots_inuse == 0 && library->worker) {
+			vine_cancel_by_task_id(q, library->task_id);
+		}
+		vine_task_delete(library);
 		t->library_task = NULL;
 	}
 
@@ -5052,10 +5057,12 @@ void vine_manager_install_library(struct vine_manager *q, struct vine_task *t, c
 	t->time_when_submitted = timestamp_get();
 }
 
+/* End every instance of a library and delete its template. An idle instance is cancelled at once. A busy one is
+ * retired: it takes no new function calls and is cancelled when its last call ends, so running calls complete. Idle
+ * instances are collected before any is cancelled, because a task state change can iterate the worker table, for
+ * example to write the performance log, and that would break an iteration in progress. */
 void vine_manager_remove_library(struct vine_manager *q, const char *name)
 {
-	/* Cancelling a task can iterate the worker table, for example to write the performance log, so the instances
-	 * are collected before any is cancelled. */
 	struct list *instances = list_create();
 	char *worker_key;
 	struct vine_worker_info *w;
@@ -5069,7 +5076,13 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 		int library_iteration;
 		ITABLE_ITERATE(w->current_libraries, library_iteration, task_id, library)
 		{
-			if (!strcmp(library->provides_library, name)) {
+			if (strcmp(library->provides_library, name)) {
+				continue;
+			}
+			if (library->function_slots_inuse > 0) {
+				/* A busy instance finishes its running functions and ends with the last one. */
+				library->library_retired = 1;
+			} else {
 				list_push_tail(instances, library);
 			}
 		}
