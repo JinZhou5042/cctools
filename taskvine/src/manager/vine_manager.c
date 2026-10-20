@@ -1256,7 +1256,8 @@ static void add_worker(struct vine_manager *q)
 	char addr[LINK_ADDRESS_MAX];
 	int port;
 
-	struct link *link = link_accept(q->manager_link, time(0) + q->short_timeout);
+	/* The listener is readable when this is called, so a connection is waiting. */
+	struct link *link = link_accept(q->manager_link, LINK_NOWAIT);
 	if (!link) {
 		return;
 	}

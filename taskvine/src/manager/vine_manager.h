@@ -90,7 +90,7 @@ struct vine_manager {
 
 	struct link *manager_link;       /* Listening TCP connection for accepting new workers. */
 	struct link_poll_set *poll_set;  /* The manager link and the link of every worker in worker_table, polled together. */
-	int connections_waiting;         /* The last poll found connections waiting on manager_link. */
+	int connections_waiting;         /* The manager link was readable at the last poll. */
 
 	/* Security configuration */
 
