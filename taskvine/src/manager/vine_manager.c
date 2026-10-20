@@ -1781,6 +1781,26 @@ static void send_unlink(struct vine_manager *q, struct vine_worker_info *w, cons
 	vine_manager_send_data(q, w, message, length + 8);
 }
 
+/* Ask a worker to delete a file from its cache. The message is assembled without formatting, because a release sends
+ * one for every replica of every released file. */
+static void send_unlink(struct vine_manager *q, struct vine_worker_info *w, const char *filename)
+{
+	if (!w || w->pending_removal) {
+		return;
+	}
+	char message[VINE_LINE_MAX];
+	size_t length = strlen(filename);
+	if (length + 8 > sizeof(message)) {
+		vine_manager_send(q, w, "unlink %s\n", filename);
+		return;
+	}
+	memcpy(message, "unlink ", 7);
+	memcpy(message + 7, filename, length);
+	message[7 + length] = '\n';
+	debug(D_VINE, "tx to %s (%s): unlink %s", w->hostname, w->addrport, filename);
+	vine_manager_send_data(q, w, message, length + 8);
+}
+
 /* Delete a single file on a remote worker except those with greater delete_upto_level cache level */
 
 int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const char *filename, vine_cache_level_t cache_level, vine_cache_level_t delete_upto_level)
