@@ -2758,6 +2758,8 @@ int main(int argc, char *argv[])
 	vine_worker_options_delete(options);
 	options = 0;
 
+	debug_close();
+
 	return 0;
 }
 
