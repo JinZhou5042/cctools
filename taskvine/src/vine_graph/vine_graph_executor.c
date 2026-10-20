@@ -489,7 +489,7 @@ static double vine_graph_executor_priority(struct vine_graph_executor *e, struct
 	return priority;
 }
 
-static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct vine_graph_node *node, uint64_t source_id, char *error);
+static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct vine_graph_node *node, uint64_t source_id, vine_graph_failure_t failure, char *error);
 static struct vine_graph_node *vine_graph_executor_find_failed_parent(struct vine_graph_executor *e, struct vine_graph_node *node);
 
 /* Queue a node for a report to the frontend. The entry keeps the node's structure until the report. */
@@ -522,12 +522,12 @@ static int vine_graph_executor_submit_task(struct vine_graph_executor *e, struct
 {
 	struct vine_graph_node *failed_parent = vine_graph_executor_find_failed_parent(e, node);
 	if (failed_parent) {
-		vine_graph_executor_fail_node(e, node, failed_parent->failure_source_id, NULL);
+		vine_graph_executor_fail_node(e, node, failed_parent->failure_source_id, VINE_GRAPH_FAILURE_NONE, NULL);
 		return -1;
 	}
 	struct vine_task *task = vine_task_create(e->function_name);
 	if (!task) {
-		vine_graph_executor_fail_node(e, node, node->node_id, xxstrdup("could not create its task"));
+		vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_SUBMIT, xxstrdup("could not create its task"));
 		return -1;
 	}
 	vine_task_set_library_required(task, e->library_name);
@@ -549,7 +549,7 @@ static int vine_graph_executor_submit_task(struct vine_graph_executor *e, struct
 	int task_id = mounted ? vine_submit(e->manager, task) : 0;
 	if (task_id <= 0) {
 		vine_task_delete(task);
-		vine_graph_executor_fail_node(e, node, node->node_id, xxstrdup("could not submit its task"));
+		vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_SUBMIT, xxstrdup("could not submit its task"));
 		return -1;
 	}
 
@@ -1027,8 +1027,8 @@ static void vine_graph_executor_fail_dependents(struct vine_graph_executor *e, s
 }
 
 /* Fail a node because of the node source_id, whose own failure explains it, and the dependents that need its lost
- * outputs. error is set only when node is the source. */
-static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct vine_graph_node *node, uint64_t source_id, char *error)
+ * outputs. failure and error are set only when node is the source. */
+static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct vine_graph_node *node, uint64_t source_id, vine_graph_failure_t failure, char *error)
 {
 	if (node->failed) {
 		free(error);
@@ -1036,6 +1036,7 @@ static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct 
 	}
 	if (node->node_id == source_id) {
 		node->error = error;
+		node->failure = failure;
 		debug(D_VINE, "node %" PRIu64 " failed: %s", node->node_id, error);
 	}
 	vine_graph_executor_mark_failed(e, node, source_id);
@@ -1089,14 +1090,14 @@ static void vine_graph_executor_handle_failure(struct vine_graph_executor *e, st
 		/* A function call reports the status that waitpid() returned for its process. */
 		int status = vine_task_get_exit_code(task);
 		if (WIFSIGNALED(status)) {
-			vine_graph_executor_fail_node(e, node, node->node_id, string_format("its function was killed by signal %d (%s):\n%s", WTERMSIG(status), strsignal(WTERMSIG(status)), output ? output : ""));
+			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_SIGNAL, string_format("its function was killed by signal %d (%s):\n%s", WTERMSIG(status), strsignal(WTERMSIG(status)), output ? output : ""));
 		} else {
-			vine_graph_executor_fail_node(e, node, node->node_id, string_format("its function failed:\n%s", output ? output : ""));
+			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_FUNCTION, string_format("its function failed:\n%s", output ? output : ""));
 		}
 		return;
 	}
 	if (result == VINE_RESULT_MAX_RETRIES) {
-		vine_graph_executor_fail_node(e, node, node->node_id, string_format("%d workers disconnected while running its task, at times when no other workers were being lost; a task that exceeds the memory of its worker or crashes it makes the worker exit", MAX(e->max_retries, 1) + 1));
+		vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_WORKERS, string_format("%d workers disconnected while running its task, at times when no other workers were being lost; a task that exceeds the memory of its worker or crashes it makes the worker exit", MAX(e->max_retries, 1) + 1));
 		return;
 	}
 	struct vine_file *lost = result == VINE_RESULT_INPUT_MISSING ? vine_graph_executor_find_lost_input(node) : NULL;
@@ -1106,17 +1107,17 @@ static void vine_graph_executor_handle_failure(struct vine_graph_executor *e, st
 		ssize_t length = readlink(vine_file_source(lost), target, sizeof(target) - 1);
 		if (length > 0) {
 			target[length] = 0;
-			vine_graph_executor_fail_node(e, node, node->node_id, string_format("its input %s is missing at the Manager", target));
+			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_INPUT, string_format("its input %s is missing at the Manager", target));
 		} else {
-			vine_graph_executor_fail_node(e, node, node->node_id, string_format("its input %s is missing at the Manager", vine_file_source(lost)));
+			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_INPUT, string_format("its input %s is missing at the Manager", vine_file_source(lost)));
 		}
 		return;
 	}
 	if (++node->failures > e->max_retries) {
 		if (missing_output) {
-			vine_graph_executor_fail_node(e, node, node->node_id, string_format("it failed %d times; last result: %s: the task did not create its output %s", node->failures, vine_result_string(result), missing_output));
+			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_RETRIES, string_format("it failed %d times; last result: %s: the task did not create its output %s", node->failures, vine_result_string(result), missing_output));
 		} else {
-			vine_graph_executor_fail_node(e, node, node->node_id, string_format("it failed %d times; last result: %s", node->failures, vine_result_string(result)));
+			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_RETRIES, string_format("it failed %d times; last result: %s", node->failures, vine_result_string(result)));
 		}
 		return;
 	}
@@ -1256,7 +1257,7 @@ int vine_graph_executor_submit_node(struct vine_graph_executor *e, uint64_t node
 	if (node->remaining_parents == 0) {
 		vine_graph_executor_submit_task(e, node);
 	} else if ((failed_parent = vine_graph_executor_find_failed_parent(e, node))) {
-		vine_graph_executor_fail_node(e, node, failed_parent->failure_source_id, NULL);
+		vine_graph_executor_fail_node(e, node, failed_parent->failure_source_id, VINE_GRAPH_FAILURE_NONE, NULL);
 	}
 	return 0;
 }
@@ -1727,6 +1728,13 @@ const char *vine_graph_executor_get_node_error(const struct vine_graph_executor 
 	return source ? source->error : NULL;
 }
 
+vine_graph_failure_t vine_graph_executor_get_node_failure(const struct vine_graph_executor *e, uint64_t node_id)
+{
+	struct vine_graph_node *node = e ? vine_graph_get_node(e->graph, node_id) : NULL;
+	struct vine_graph_node *source = node && node->failed ? vine_graph_get_node(e->graph, node->failure_source_id) : NULL;
+	return source ? source->failure : VINE_GRAPH_FAILURE_NONE;
+}
+
 const char *vine_graph_executor_get_error(const struct vine_graph_executor *e)
 {
 	return e ? e->error : NULL;
@@ -1751,6 +1759,6 @@ int vine_graph_executor_cancel_node(struct vine_graph_executor *e, uint64_t node
 	if (!node || !node->submitted || node->completed || node->failed) {
 		return -1;
 	}
-	vine_graph_executor_fail_node(e, node, node->node_id, xxstrdup("it was cancelled"));
+	vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_CANCELLED, xxstrdup("it was cancelled"));
 	return 0;
 }

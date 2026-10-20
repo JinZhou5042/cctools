@@ -23,6 +23,7 @@ forks inherits all of them, so tasks neither import those modules nor load those
 cached object instead of the file that its manifest names.
 """
 
+import base64
 import collections
 import contextlib
 import gc
@@ -334,12 +335,46 @@ def format_user_traceback(error, *runner_files):
     return "".join(traceback.format_exception(type(error), error, frames))
 
 
+# A failed task's report ends with a line that holds its exception serialized, which the Executor loads for
+# TaskError.exception. A serialization larger than FAILURE_LIMIT bytes is left out, and so is one that fails.
+FAILURE_MARK = "\nvine-graph-exception "
+FAILURE_LIMIT = 65536
+
+
+def failure_report(error, *runner_files):
+    """Return the traceback of an exception that a task raised, followed by the exception serialized on one line."""
+    report = format_user_traceback(error, *runner_files)
+    try:
+        data = cloudpickle.dumps(error)
+    except Exception:
+        return report
+    if len(data) > FAILURE_LIMIT:
+        return report
+    return f"{report}{FAILURE_MARK}{base64.b64encode(data).decode()}\n"
+
+
+def load_failure(message):
+    """Split the report of a failed task into its text and the exception it carries, or None when it carries none or
+    the exception cannot be loaded in this process."""
+    start = message.rfind(FAILURE_MARK)
+    if start < 0:
+        return message, None
+    line_end = message.find("\n", start + len(FAILURE_MARK))
+    encoded = message[start + len(FAILURE_MARK):] if line_end < 0 else message[start + len(FAILURE_MARK):line_end]
+    text = message[:start + 1] + ("" if line_end < 0 else message[line_end + 1:])
+    try:
+        error = cloudpickle.loads(base64.b64decode(encoded, validate=True))
+    except Exception:
+        return text, None
+    return text, error if isinstance(error, BaseException) else None
+
+
 def run_node():
     """Run the task described by the sandbox manifest and return its result for the library to write."""
     try:
         return _run_node()
     except BaseException as error:
-        sys.stdout.write(format_user_traceback(error, __file__))
+        sys.stdout.write(failure_report(error, __file__))
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(1)

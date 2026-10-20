@@ -65,6 +65,14 @@ VINE_GRAPH_FAILED = _vine_graph_capi.VINE_GRAPH_FAILED
 VINE_GRAPH_NODE_WAITING = _vine_graph_capi.VINE_GRAPH_NODE_WAITING
 VINE_GRAPH_NODE_COMPLETED = _vine_graph_capi.VINE_GRAPH_NODE_COMPLETED
 VINE_GRAPH_NODE_FAILED = _vine_graph_capi.VINE_GRAPH_NODE_FAILED
+VINE_GRAPH_FAILURE_NONE = _vine_graph_capi.VINE_GRAPH_FAILURE_NONE
+VINE_GRAPH_FAILURE_FUNCTION = _vine_graph_capi.VINE_GRAPH_FAILURE_FUNCTION
+VINE_GRAPH_FAILURE_SIGNAL = _vine_graph_capi.VINE_GRAPH_FAILURE_SIGNAL
+VINE_GRAPH_FAILURE_WORKERS = _vine_graph_capi.VINE_GRAPH_FAILURE_WORKERS
+VINE_GRAPH_FAILURE_INPUT = _vine_graph_capi.VINE_GRAPH_FAILURE_INPUT
+VINE_GRAPH_FAILURE_RETRIES = _vine_graph_capi.VINE_GRAPH_FAILURE_RETRIES
+VINE_GRAPH_FAILURE_CANCELLED = _vine_graph_capi.VINE_GRAPH_FAILURE_CANCELLED
+VINE_GRAPH_FAILURE_SUBMIT = _vine_graph_capi.VINE_GRAPH_FAILURE_SUBMIT
 
 def vine_graph_executor_create(manager, library_name, function_name):
     return _vine_graph_capi.vine_graph_executor_create(manager, library_name, function_name)
@@ -141,6 +149,12 @@ def vine_graph_executor_next_finished(e):
 def vine_graph_executor_next_released(e):
     return _vine_graph_capi.vine_graph_executor_next_released(e)
 
+def vine_graph_executor_next_kept(e):
+    return _vine_graph_capi.vine_graph_executor_next_kept(e)
+
+def vine_graph_executor_unkeep_node(e, node_id):
+    return _vine_graph_capi.vine_graph_executor_unkeep_node(e, node_id)
+
 def vine_graph_executor_get_node_state(e, node_id):
     return _vine_graph_capi.vine_graph_executor_get_node_state(e, node_id)
 
@@ -149,6 +163,9 @@ def vine_graph_executor_get_failure_source(e, node_id):
 
 def vine_graph_executor_get_node_error(e, node_id):
     return _vine_graph_capi.vine_graph_executor_get_node_error(e, node_id)
+
+def vine_graph_executor_get_node_failure(e, node_id):
+    return _vine_graph_capi.vine_graph_executor_get_node_failure(e, node_id)
 
 def vine_graph_executor_get_error(e):
     return _vine_graph_capi.vine_graph_executor_get_error(e)

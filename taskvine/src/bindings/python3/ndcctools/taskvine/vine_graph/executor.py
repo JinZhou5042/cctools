@@ -23,6 +23,7 @@ import functools
 import html
 import io
 import importlib
+import logging
 import math
 import operator
 import os
@@ -90,6 +91,16 @@ COMPLETED = "completed"
 FAILED = "failed"
 # The entry of every task that completed, which the tasks share.
 _COMPLETED_ENTRY = (COMPLETED, None, None)
+# TaskError.reason of each kind of failure that C reports
+_FAILURE_REASONS = {
+    capi.VINE_GRAPH_FAILURE_FUNCTION: "function",
+    capi.VINE_GRAPH_FAILURE_SIGNAL: "signal",
+    capi.VINE_GRAPH_FAILURE_WORKERS: "workers",
+    capi.VINE_GRAPH_FAILURE_INPUT: "input",
+    capi.VINE_GRAPH_FAILURE_RETRIES: "retries",
+    capi.VINE_GRAPH_FAILURE_CANCELLED: "cancelled",
+    capi.VINE_GRAPH_FAILURE_SUBMIT: "submit",
+}
 
 # Seconds the background thread spends on queued calls before it advances the run one step.
 COMMAND_SECONDS = 0.05
@@ -155,12 +166,29 @@ def _close_open_executors():
 class TaskError(RuntimeError):
     """A task failed, or it could not run because a task it depends on failed. task is the Node of the task, and
     source the Node of the task whose own failure explains it, or None when nothing holds that task anymore: its Graph
-    is gone, or it was a call without a Future. The message names both tasks either way."""
+    is gone, or it was a call without a Future. The message names both tasks either way.
 
-    def __init__(self, message, task, source):
+    reason says why the source failed:
+
+    - "function": its function raised an exception or exited with an error status
+    - "signal": its function was killed by a signal
+    - "workers": Workers kept disconnecting while they ran it, as when it exceeds their memory or crashes them
+    - "input": a file it reads is missing at the Manager
+    - "retries": more of its attempts failed for other reasons than the setting max-retries allows
+    - "cancelled": Future.cancel() stopped it
+    - "submit": its task could not be created or submitted
+    - "result": it completed, but its result cannot be loaded in this process or sent by its Worker
+
+    exception is the exception that the function of the source raised, loaded in this process with the source's
+    traceback as a note, so a caller can handle it by its type. It is None for any other reason, and when the
+    exception cannot be serialized or loaded here."""
+
+    def __init__(self, message, task, source, reason=None, exception=None):
         super().__init__(message)
         self.task = task
         self.source = source
+        self.reason = reason
+        self.exception = exception
 
 
 @dataclasses.dataclass(frozen=True)
@@ -182,6 +210,14 @@ class Progress:
     def _repr_html_(self):
         done = self.completed + self.failed
         return f'<progress value="{done}" max="{max(self.total, 1)}"></progress> {html.escape(str(self))}'
+
+
+@dataclasses.dataclass(frozen=True)
+class Capacity:
+    """The Workers connected to an Executor and their cores, which run one task each at a time."""
+
+    workers: int
+    cores: int
 
 
 class Future(_Selectable):
@@ -255,6 +291,12 @@ class Future(_Selectable):
     def cancelled(self):
         """Return True if cancel() stopped the task."""
         return self._task in self._executor._cancelled
+
+    def add_done_callback(self, fn):
+        """Call fn(future) once the task completes or fails, or at once in this thread when it has finished already or
+        the Executor is closed. Other calls run in a thread of the Executor, one at a time and in the order the tasks
+        finished, so a callback should not wait long. A callback that raises is logged and ignored."""
+        self._executor._add_done_callback(self, fn)
 
     @property
     def _task(self):
@@ -382,7 +424,8 @@ class _Task:
         self.result = 0  # C file id of the task result
         self.futures = 0  # live Futures that stand for the task, its result or its files
         self.holds = 0  # live Futures that pin the task result
-        self.finished = None  # (COMPLETED, None, None) or (FAILED, source task, message) once the task finished
+        self.finished = None  # (COMPLETED, None, None), or (FAILED, source task, message, reason) once the task finished, whose message and
+        # reason only a source holds
 
 
 # The C file id of a task's result, from its _Task, for map() over the tasks whose results a task mounts.
@@ -530,50 +573,6 @@ class _Watcher:
         self.finished = []
 
 
-class _Completions:
-    """A stream of finished Futures that grows while it is read, for frontends that need a callback per Future, such as
-    graphed-executors' backend. add() watches a Future, and wait() returns the watched Futures whose tasks finished
-    since the last call. Both cost O(1) per Future, where as_completed() takes a fixed set of Futures."""
-
-    def __init__(self, executor):
-        self._executor = executor
-        self._watcher = _Watcher(collections.defaultdict(list))
-        with executor._lock:
-            executor._check_open()
-            executor._watchers.add(self._watcher)
-
-    def add(self, future):
-        executor = self._executor
-        if future._executor is not executor:
-            raise ValueError("a completion stream takes Futures of its Executor")
-        task = future._task
-        with executor._lock:
-            waiting = self._watcher.tasks[task]
-            waiting.append(future)
-            record = executor._records.get(task)
-            # A task that finished before it was watched is reported at once.
-            if len(waiting) == 1 and (record is None or record.finished is not None):
-                self._watcher.finished.append(task)
-                executor._changed.notify_all()
-
-    def wait(self, timeout=None):
-        """Return the watched Futures whose tasks finished, waiting up to timeout seconds for one. A timeout that
-        expires returns an empty list."""
-        executor = self._executor
-        try:
-            executor._wait_until(lambda: self._watcher.finished, timeout, "")
-        except TimeoutError:
-            return []
-        with executor._lock:
-            ready, self._watcher.finished = self._watcher.finished, []
-            tasks = self._watcher.tasks
-            return [future for task in ready for future in tasks.pop(task, ())]
-
-    def close(self):
-        with self._executor._lock:
-            self._executor._watchers.discard(self._watcher)
-
-
 class Executor:
     """Run tasks on TaskVine Workers that connect to port, or to the Manager named name through the catalog.
 
@@ -709,6 +708,14 @@ class Executor:
         # _NO_READER while its Graph holds no reader of it. The pin goes when the set is empty or the Graph is gone.
         self._unsubmitted_readers = {}
         self._run_error = None  # why the run stopped as a whole
+        # (graph id, key) of an unfinished task -> its done-callbacks as (Future, function), which move to
+        # _callbacks_due when it finishes, for the callback thread to run in order
+        self._callbacks = {}
+        self._callbacks_due = collections.deque()
+        self._callback_thread = None
+        # Capacity that the background thread reads once a second, from the first call of capacity() on
+        self._capacity = None
+        self._capacity_read = 0.0
         self._driver = None
         self._driver_ident = None
         self._pickler = _Pickler()
@@ -863,6 +870,10 @@ class Executor:
             if self._closed:
                 return
             self._closed = True
+            # Callbacks of tasks that will not finish now run, as their Futures report the Executor closed.
+            for callbacks in self._callbacks.values():
+                self._callbacks_due.extend(callbacks)
+            self._callbacks.clear()
             # Waiters in other threads see the Executor closed, and the background thread wakes up to stop.
             self._changed.notify_all()
             if self._driver is not None:
@@ -1935,6 +1946,9 @@ class Executor:
         status = capi.vine_graph_executor_wait(self._executor, 1)
         error = capi.vine_graph_executor_get_error(self._executor) if status == capi.VINE_GRAPH_FAILED else None
         self._publish_finished()
+        capacity = None
+        if self._capacity is not None and monotonic() - self._capacity_read >= 1:
+            capacity = self._read_capacity()
         fetched = None
         fetches = self._fetches
         while file := capi.vine_graph_executor_next_fetched(self._executor):
@@ -1960,6 +1974,8 @@ class Executor:
                 self._unsendable.update(unsendable)
             if error:
                 self._run_error = error
+            if capacity is not None:
+                self._capacity = capacity
             self._changed.notify_all()
             progress = self._progress_locked() if self._display is not None else None
         if progress is not None:
@@ -1980,8 +1996,12 @@ class Executor:
             if get_node_state(executor, node) == capi.VINE_GRAPH_NODE_FAILED:
                 source = tasks[capi.vine_graph_executor_get_failure_source(executor, node)]
                 # Only the source keeps the message, which its dependents read from it.
-                message = capi.vine_graph_executor_get_node_error(executor, node) if source is record else None
-                finished.append((record, (FAILED, source.task, message)))
+                if source is record:
+                    entry = (FAILED, source.task, capi.vine_graph_executor_get_node_error(executor, node),
+                             _FAILURE_REASONS.get(capi.vine_graph_executor_get_node_failure(executor, node)))
+                else:
+                    entry = (FAILED, source.task, None, None)
+                finished.append((record, entry))
                 failed.append(record)
             else:
                 finished.append((record, _COMPLETED_ENTRY))
@@ -2022,6 +2042,12 @@ class Executor:
                 counts[previous[0]] -= 1
             record.finished = entry
             counts[entry[0]] += 1
+        if self._callbacks:
+            callbacks = self._callbacks
+            for record, _ in finished:
+                due = callbacks.pop(record.task, None)
+                if due is not None:
+                    self._callbacks_due.extend(due)
         if self._watchers:
             for record, _ in finished:
                 task = record.task
@@ -2085,22 +2111,41 @@ class Executor:
             with self._lock:
                 self._watchers.discard(watcher)
 
-    def _completions(self):
-        """Return a _Completions stream of this Executor's Futures, for frontends built on the Executor."""
-        return _Completions(self)
-
-    def _capacity(self):
-        """Return (connected Workers, their cores), for frontends that size their windows of tasks in flight. A local
-        Executor runs one task at a time."""
+    def capacity(self):
+        """Return the Workers connected now and their cores, as the background thread read them at most a second ago. A
+        local Executor runs one task at a time."""
         self._check_open()
         if self._local:
-            return 1, 1
+            return Capacity(1, 1)
+        with self._lock:
+            capacity = self._capacity
+        if capacity is None:
+            # The first call reads it, and the background thread keeps it current from then on.
+            capacity = self._call(self._read_capacity)
+            with self._lock:
+                self._capacity = capacity
+        return capacity
 
-        def read():
-            stats = cvine.vine_stats()
-            cvine.vine_get_stats(self._manager._taskvine, stats)
-            return stats.workers_connected, stats.total_cores
-        return self._call(read)
+    def _read_capacity(self):
+        """Read the Workers and cores of the Manager in the background thread, at O(Workers)."""
+        stats = cvine.vine_stats()
+        cvine.vine_get_stats(self._manager._taskvine, stats)
+        self._capacity_read = time.monotonic()
+        return Capacity(stats.workers_connected, stats.total_cores)
+
+    def _add_done_callback(self, future, fn):
+        task = future._task
+        with self._lock:
+            if not self._closed and task is not None:
+                record = self._records.get(task)
+                if record is not None and record.finished is None:
+                    self._callbacks.setdefault(task, []).append((future, fn))
+                    if self._callback_thread is None:
+                        self._callback_thread = threading.Thread(target=_call_back, args=(weakref.ref(self),),
+                                                                 name="vine-graph-callbacks", daemon=True)
+                        self._callback_thread.start()
+                    return
+        _run_callback(future, fn)
 
     def run(self, graph, targets=None):
         """Run the targets of a Graph, and every task they read, and return {target: result}. Targets are Nodes,
@@ -2183,10 +2228,10 @@ class Executor:
     def _error(self, task):
         if self._finished_state(task) != FAILED:
             return None
-        _, source, message = self._finished_entry(task)
+        _, source, message, reason = self._finished_entry(task)
         if source != task:
-            message = self._finished_entry(source)[2]
-        message = message or ""
+            _, _, message, reason = self._finished_entry(source)
+        message, exception = library.load_failure(message or "")
         task_node, source_node = self._node(task), self._node(source)
         task_label, source_label = self._label(task), self._label(source)
         # A function failure ends with its traceback. Lines the library writes before it are not about the function,
@@ -2194,12 +2239,14 @@ class Executor:
         start = message.find("Traceback (most recent call last):")
         if start >= 0:
             message = f"\n{message[start:]}"
+            if exception is not None:
+                exception.add_note(f"raised by task {source_label}:{message.rstrip()}")
         else:
             message = f" {LIBRARY_LOG_LINE.sub('', message)}"
         if source == task:
-            return TaskError(f"task {task_label} failed:{message}", task_node, source_node)
+            return TaskError(f"task {task_label} failed:{message}", task_node, source_node, reason, exception)
         return TaskError(f"task {task_label} did not run because task {source_label} failed:{message}", task_node,
-                         source_node)
+                         source_node, reason, exception)
 
     def _cancel(self, task):
         self._check_open()
@@ -2271,7 +2318,7 @@ class Executor:
         except Exception as error:
             node = self._node(task)
             raise TaskError(f"task {self._label(task)} completed, but its result cannot be loaded: "
-                            f"{type(error).__name__}: {error}", node, node) from error
+                            f"{type(error).__name__}: {error}", node, node, "result") from error
 
     def _fetched_path(self, task, key, deadline=None):
         """Wait until a pinned output of a completed task is readable at the Manager, and return its path, or its
@@ -2290,7 +2337,8 @@ class Executor:
             output = "result" if path is None else f"output file {path!r}"
             node = self._node(task)
             raise TaskError(f"task {self._label(task)} completed, but its Worker cannot send its {output}, which is "
-                            f"or holds a file that the Worker cannot read, or is a FIFO, socket, or device", node, node)
+                            f"or holds a file that the Worker cannot read, or is a FIFO, socket, or device", node, node,
+                            "result")
         raise self._error(task)
 
     # Local execution.
@@ -2308,7 +2356,7 @@ class Executor:
         for parent in graph._parents.get(key, ()):
             entry = self._records[_resolve(graph_id, parent)].finished
             if entry[0] == FAILED:
-                self._finish_local((task, (FAILED, entry[1], entry[2])))
+                self._finish_local((task, (FAILED, entry[1], None, None)))
                 return
         task_dir = os.path.join(self._run_dir, ".tasks", f"task-{self._records[task].number}")
         shutil.rmtree(task_dir, ignore_errors=True)
@@ -2342,8 +2390,7 @@ class Executor:
                 raise
             except BaseException as error:
                 # As on a Worker, anything else the function raises, including an exit, fails the task.
-                self._finish_local((task, (FAILED, task, library.format_user_traceback(error, __file__,
-                                                                                       library.__file__))))
+                self._finish_local((task, (FAILED, task, library.failure_report(error, __file__, library.__file__), "function")))
             finally:
                 os.chdir(previous_cwd)
                 self._local_seconds += time.time() - started
@@ -2547,6 +2594,34 @@ def _drive(executor_reference):
                 executor._changed.notify_all()
             return
         del executor
+
+
+def _call_back(executor_reference):
+    """Run the done-callbacks of an Executor's Futures as their tasks finish, until it closes and the last of them ran.
+    Like the background thread, it holds the Executor only while it takes callbacks, and blocks SIGINT (_drive())."""
+    _signal.pthread_sigmask(_signal.SIG_BLOCK, _INTERRUPT)
+    while True:
+        executor = executor_reference()
+        if executor is None:
+            return
+        with executor._lock:
+            if not executor._callbacks_due:
+                if executor._closed:
+                    return
+                executor._changed.wait(0.5)
+            due = executor._callbacks_due
+            executor._callbacks_due = collections.deque()
+        del executor
+        for future, fn in due:
+            _run_callback(future, fn)
+        del due
+
+
+def _run_callback(future, fn):
+    try:
+        fn(future)
+    except Exception:
+        logging.getLogger(__name__).exception("a done-callback of %r raised", future)
 
 
 def _in_notebook():

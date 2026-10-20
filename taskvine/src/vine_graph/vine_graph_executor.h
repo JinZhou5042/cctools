@@ -56,6 +56,18 @@ typedef enum {
 	VINE_GRAPH_NODE_FAILED	     /* It cannot complete, or its outputs cannot be restored. */
 } vine_graph_node_state_t;
 
+/* Why a node that is a failure source failed. */
+typedef enum {
+	VINE_GRAPH_FAILURE_NONE = 0,  /* The node did not fail. */
+	VINE_GRAPH_FAILURE_FUNCTION,  /* Its function raised an exception or exited with an error status. */
+	VINE_GRAPH_FAILURE_SIGNAL,    /* Its function was killed by a signal. */
+	VINE_GRAPH_FAILURE_WORKERS,   /* Workers kept disconnecting while they ran its task, as when it exceeds their memory. */
+	VINE_GRAPH_FAILURE_INPUT,     /* An input at the Manager is missing. */
+	VINE_GRAPH_FAILURE_RETRIES,   /* More attempts failed for other reasons than max-retries allows. */
+	VINE_GRAPH_FAILURE_CANCELLED, /* The frontend cancelled it. */
+	VINE_GRAPH_FAILURE_SUBMIT     /* Its task could not be created or submitted. */
+} vine_graph_failure_t;
+
 /* An opaque executor. */
 struct vine_graph_executor;
 
@@ -192,6 +204,9 @@ vine_graph_node_state_t vine_graph_executor_get_node_state(const struct vine_gra
 uint64_t vine_graph_executor_get_failure_source(const struct vine_graph_executor *e, uint64_t node_id);
 /* Return why the failure source of a failed node failed, or NULL when the node did not fail. */
 const char *vine_graph_executor_get_node_error(const struct vine_graph_executor *e, uint64_t node_id);
+/* Return the kind of failure of the failure source of a failed node, or VINE_GRAPH_FAILURE_NONE when the node did not
+ * fail. */
+vine_graph_failure_t vine_graph_executor_get_node_failure(const struct vine_graph_executor *e, uint64_t node_id);
 
 /* Return why the run failed as a whole, or NULL. */
 const char *vine_graph_executor_get_error(const struct vine_graph_executor *e);

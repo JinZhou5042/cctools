@@ -73,6 +73,7 @@ struct vine_graph_node {
 
 	uint64_t failure_source_id; // the node whose own failure made this one fail
 	char *error;		    // why the node failed, set only on a failure source
+	int failure;		    // a vine_graph_failure_t: the kind of failure, set only on a failure source
 
 	int live_children; // children not removed yet
 	int refs;	   // entries that point to the node in its parents' children arrays and in the executor's lists

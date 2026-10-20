@@ -313,6 +313,14 @@ submitted tasks completed, failed, or are still waiting, as a `vg.Progress`.
 `future.cancel()` stops a task that has not finished, and fails it together
 with every task that reads its result. It returns `False` when the task had
 already finished, and `future.cancelled()` tells whether `cancel()` stopped it.
+`future.add_done_callback(fn)` calls `fn(future)` once the task completes or
+fails: at once in the calling thread when it has finished already, and
+otherwise in a thread of the Executor, one callback at a time in the order the
+tasks finished. A callback may call `result()`, should not wait long, and is
+logged and ignored when it raises. Callbacks of tasks still unfinished run when
+the Executor closes. `executor.capacity()` returns the connected workers and
+their cores as a `vg.Capacity`, read at most a second ago, for programs that
+size how many tasks they keep in flight.
 
 A background thread advances the run, in scripts and notebooks alike, for as
 long as the Executor is open. It uses no CPU while nothing is running and stops
@@ -490,13 +498,23 @@ lost, or when other failures repeat more than `max-retries` times, such as a
 declared output file that the task did not write. The tasks that depend on a
 failed task fail too, and their error names the task that failed first. Tasks
 that do not depend on it keep running, and the Executor keeps accepting tasks.
-Lost workers are handled by TaskVine and do not count as failures.
+Lost workers are handled by TaskVine and do not count as failures, unless a
+task keeps making its workers exit, as a task that exceeds their memory does.
 
 `future.result()` raises the task's `TaskError`, whose message includes the
 traceback printed where the function ran. `error.task` is the Node of the task
 and `error.source` the Node of the task whose own failure explains it, or
 `None` when the program no longer holds that task through its Graph or a
-Future. The message names both tasks either way.
+Future. The message names both tasks either way. `error.reason` says why the
+source failed: `"function"` (its function raised or exited with an error),
+`"signal"`, `"workers"` (workers kept exiting while they ran it), `"input"` (a
+file it reads is missing), `"retries"`, `"cancelled"`, `"submit"`, or
+`"result"` (it completed, but its result cannot be loaded or sent).
+`error.exception` is the exception the source's function raised, loaded in the
+calling process with the traceback where it ran as a note, so a program can
+handle it by its type, for the task and for each task that depends on it. It
+is `None` for other reasons, and when the exception cannot be serialized or
+loaded where the program runs.
 `executor.run()` raises a `TaskError` once its targets finished, preferring a
 task that failed on its own. A failed task stays failed in its Executor: fix
 the cause, then add the task again or run the Graph in a new Executor.
