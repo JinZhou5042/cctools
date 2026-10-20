@@ -94,6 +94,10 @@ void vine_task_clean(struct vine_task *t)
 	t->time_when_retrieval = 0;
 	t->time_when_done = 0;
 
+	t->blocking_inputs[0] = NULL;
+	t->blocking_inputs[1] = NULL;
+	t->blocked_epoch = 0;
+
 	t->time_workers_execute_last = 0;
 	t->time_workers_execute_last_start = 0;
 	t->time_workers_execute_last_end = 0;
@@ -149,6 +153,10 @@ void vine_task_reset(struct vine_task *t)
 	t->library_failed_count = 0;
 	t->exhausted_attempts = 0;
 	t->workers_slow = 0;
+	t->time_worker_lost[0] = t->time_worker_lost[1] = 0;
+	t->time_unexplained_loss = 0;
+	t->worker_loss_charged = 0;
+	t->quarantine_worker = NULL;
 
 	t->time_workers_execute_all = 0;
 	t->time_workers_execute_exhaustion = 0;
@@ -470,7 +478,18 @@ Emit warnings if inconsistencies are detected, but keep going otherwise.
 
 void vine_task_check_consistency(struct vine_task *t)
 {
-	struct hash_table *table = hash_table_create(0, 0);
+	/* Names conflict only within a list of two or more mounts. The check runs at every submission, and a table of the
+	 * default 127 buckets was an allocation of 1 KB for a task with one input and one output. */
+	int inputs = list_size(t->input_mounts);
+	int outputs = list_size(t->output_mounts);
+	if (inputs < 2 && outputs < 2) {
+		return;
+	}
+
+	struct hash_table *table = hash_table_create(MAX(inputs, outputs), 0);
+	if (!table) {
+		return;
+	}
 	struct vine_mount *m;
 
 	/* Cannot have multiple input files mapped to the same remote name. */

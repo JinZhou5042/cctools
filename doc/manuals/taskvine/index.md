@@ -1222,7 +1222,9 @@ limit on the number of retries:
 
 When a task cannot be completed in the set number of tries, then the its result
 is set to the result of the last attempt (e.g. `"resource exhaustion"` in python,
-or `VINE_RESULT_RESOURCE_EXHAUSTION` in C).
+or `VINE_RESULT_RESOURCE_EXHAUSTION` in C). If the last try ended because its
+worker disconnected unexpectedly, the result is `"max retries"` in python, or
+`VINE_RESULT_MAX_RETRIES` in C.
 
 
 ### Pipelined Submission

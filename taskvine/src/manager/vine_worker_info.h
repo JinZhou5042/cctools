@@ -62,6 +62,22 @@ struct vine_worker_info {
 	char *transfer_url;       /* worker(ip)?://transfer_addr:transfer_port */
 	int  transfer_connect_back; /* The Manager cannot reach the transfer port, so the Worker connects back to send files. */
 
+	/* Scratch space of vine_schedule_task_to_worker(): bytes of the task's inputs cached on this worker, and whether it
+	 * holds the task's first input without a transfer source, valid only while schedule_stamp equals the manager's
+	 * schedule_stamp. */
+	int64_t schedule_cached_bytes;
+	int schedule_holds_unsourced;
+	uint64_t schedule_stamp;
+
+	/* Entry of the manager's capacity index (workers_by_capacity): the worker's free capacity priority when it was last
+	 * placed there, and its serial, which is unique among workers and zero while the worker is not in the index. */
+	double schedule_capacity;
+	uint64_t schedule_serial;
+
+	/* Blocking inputs of ready tasks that this worker holds, each with a reference. When the worker frees a transfer
+	 * slot, gains room for a task, or leaves, each of them is woken (see vine_schedule.h). */
+	struct set *blocked_files;
+
 	/* Worker condition that may affect task start or cancellation. */
 	int  draining;                          // if 1, worker does not accept anymore tasks. It is shutdown if no task running.
 	int  pending_removal;                   // if not 0, the vine_worker_disconnect_reason_t with which the worker will be removed
@@ -120,10 +136,22 @@ struct vine_worker_info {
 	int incoming_xfer_counter;
 	int outgoing_xfer_counter;
 
+	/* Bytes of the files that this worker sends as a source in the manager's transfer records, and the smallest file
+	 * refused since the last wake because it would not fit beside them (-1 if none). See
+	 * vine_current_transfers_source_has_room(). */
+	int64_t outgoing_xfer_bytes;
+	int64_t outgoing_refused_bytes;
+
 	/* The records of current_transfer_table with this worker as destination or source, linked through the records,
 	 * so the records of a removed worker are found without a pass over the table. */
 	struct vine_transfer_pair *incoming_transfers;
 	struct vine_transfer_pair *outgoing_transfers;
+
+	/* Quarantine of tasks charged a lost worker (see vine_schedule.h): the id of the quarantined task that runs here,
+	 * so the worker takes no other task, and the id of the quarantined task for which the worker takes no new task
+	 * until it runs nothing, or zero. */
+	int quarantine_task_id;
+	int quarantine_reserved_id;
 };
 
 struct vine_worker_info * vine_worker_create( struct link * lnk );

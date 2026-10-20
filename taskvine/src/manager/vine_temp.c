@@ -1,4 +1,5 @@
 #include "vine_temp.h"
+#include "vine_current_transfers.h"
 #include "vine_file.h"
 #include "vine_worker_info.h"
 #include "vine_file_replica_table.h"
@@ -95,10 +96,6 @@ static struct vine_worker_info *get_best_source_worker(struct vine_manager *q, s
 		if (!worker_can_peer_transfer(w)) {
 			continue;
 		}
-		/* skip if outgoing transfer counter is too high */
-		if (w->outgoing_xfer_counter >= q->worker_source_max_transfers) {
-			continue;
-		}
 		/* skip if the worker does not have this file (which is faulty) */
 		struct vine_file_replica *replica = vine_file_replica_table_lookup(w, f->cached_name);
 		if (!replica) {
@@ -106,6 +103,10 @@ static struct vine_worker_info *get_best_source_worker(struct vine_manager *q, s
 		}
 		/* skip if the file is not ready */
 		if (replica->state != VINE_FILE_REPLICA_STATE_READY) {
+			continue;
+		}
+		/* skip if the worker sends as many transfers or bytes as a source sends at once */
+		if (!vine_current_transfers_source_has_room(q, w, replica->size)) {
 			continue;
 		}
 		/* workers with fewer outgoing transfers are preferred */

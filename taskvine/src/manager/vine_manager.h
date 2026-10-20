@@ -112,13 +112,31 @@ struct vine_manager {
 	/* Primary data structures for tracking task state. */
 
 	struct itable *tasks;           /* Maps task_id -> vine_task of all tasks in any state. */
+	int standard_tasks_count;       /* Number of standard tasks in the tasks table, so that vine_empty() takes constant time. */
 	struct skip_list   *ready_tasks;       /* Skip list of vine_task that are waiting to execute. */
 	struct itable   *running_table;      /* Table of vine_task that are running at workers. */
 	struct list   *waiting_retrieval_list;      /* List of vine_task that are waiting to be retrieved. */
 	struct list   *retrieved_list;      /* List of vine_task that have been retrieved. */
 	struct list   *task_info_list;  /* List of last N vine_task_infos for computing capacity. */
+	/* Sums of the reports in task_info_list, kept as reports are added and removed, so that the capacity costs O(1) per
+	 * returned task instead of a pass over the list. limit is the list's bound, which never shrinks. */
+	struct {
+		timestamp_t transfer_time;
+		timestamp_t exec_time;
+		timestamp_t manager_time;
+		double cores;
+		double memory;
+		double disk;
+		double gpus;
+		int limit;
+	} task_info_sums;
 	struct hash_table *categories;  /* Maps category_name -> struct category */
+	struct category *last_category; /* The category that vine_category_lookup_or_create() returned last, which most calls ask for again. */
 	struct hash_table *library_templates; /* Maps library name -> vine_task of library with that name. */
+	uint64_t library_templates_serial;    /* Advanced whenever a library template is added or removed. */
+	char *library_checked_name;           /* The library name whose presence was checked last, a copy, or NULL. */
+	uint64_t library_checked_serial;      /* library_templates_serial when library_checked_name was checked. */
+	int library_checked_found;            /* Whether that library had a template then. */
 
 	struct skip_list_cursor *ready_tasks_cr;      /* Iterates ready_list in order */
 
@@ -129,7 +147,8 @@ struct vine_manager {
 	struct hash_table *worker_blocklist; /* Maps hostname -> vine_blocklist_info */
 	struct hash_table *factory_table;    /* Maps factory_name -> vine_factory_info */
 	struct hash_table *workers_with_watched_file_updates;  /* Maps link -> vine_worker_info */
-	struct hash_table *current_transfer_table; 	/* Maps uuid -> struct transfer_pair */
+	struct hash_table *current_transfer_table; 	/* Maps transfer id -> struct transfer_pair */
+	uint64_t next_transfer_id;	/* Number of the next transfer record, from a random start, so ids of another manager never match. */
 	struct hash_table *current_transfer_url_table; 	/* Maps source url -> int count of current transfers */
 	struct itable     *task_group_table; 	/* Maps group id -> list vine_task */
 	struct hash_table *workers_idle_disconnecting;  /* set of workers that were granted a request to idle disconnect, and are in the process of disconnecting. */
@@ -144,6 +163,17 @@ struct vine_manager {
 	/* Primary scheduling controls. */
 
 	vine_schedule_t worker_selection_algorithm;    /* Mode for selecting best worker for task in main scheduler. */
+	uint64_t schedule_stamp;                       /* Marks worker scratch space of the current vine_schedule_task_to_worker(). */
+	struct skip_list *workers_by_capacity;         /* Capacity index: the workers of worker_table by free cores and function slots, see vine_schedule.h. */
+	uint64_t worker_serial;                        /* Last serial given to a worker that entered the capacity index. */
+	struct hash_table *blocked_sources;            /* Blocking inputs by the URL of their source, each a set of file references, see vine_schedule.h. */
+	uint64_t blocked_epoch;                        /* Advanced by vine_schedule_wake_all(), which ends the wait of every blocked ready task. */
+	uint64_t blocked_pass;                         /* Counts dispatch passes, so a blocking input is checked once per pass. */
+	uint64_t schedule_wakes;                       /* Counts the events that may end the wait of a blocked ready task, and changes of the ready tasks. */
+	uint64_t blocked_files_registered;             /* Files registered as blocking at their current serial, so a wake by name of a file looks it up only while some file is. */
+	uint64_t schedule_waiting_wakes;               /* The value of schedule_wakes while schedule_waiting_run counts. */
+	uint64_t schedule_waiting_run;                 /* Ready tasks found waiting in a row by dispatch passes since schedule_wakes last changed. */
+	timestamp_t time_last_blocked_wake;            /* When every blocked ready task was last woken by time. */
 	vine_category_mode_t allocation_default_mode;  /* Mode for computing resources allocations for each task. */
 
 	/* Internal state modified by the manager */
@@ -153,6 +183,8 @@ struct vine_manager {
 	int num_tasks_left;    /* Optional: Number of tasks remaining, if given by user.  @ref vine_set_num_tasks */
 	int nothing_happened_last_wait_cycle; /* Set internally in main loop if no messages or tasks were processed during the last wait loop.
 																					 If set, poll longer to avoid wasting cpu cycles, and growing log files unnecessarily.*/
+	int dispatch_blocked;  /* Set when the last dispatch attempt found no worker with room for a task, or every ready task waiting for an event. */
+	int gpus_requested;    /* Set once a ready task or a category requests gpus. Until then, idle gpus are not room for a task. */
 
 	/* Accumulation of statistics for reporting to the caller. */
 
@@ -164,10 +196,15 @@ struct vine_manager {
 	timestamp_t time_last_wait;
 	timestamp_t time_last_log_stats;
 	timestamp_t time_last_large_tasks_check;
-	timestamp_t time_last_compaction; /* When the tables were last compacted, see compact_tables(). */
-	int64_t compacted_since_trim;     /* Removed table entries freed since the heap was last trimmed. */
-	int64_t tables_peak_since_trim;   /* Most tasks and files held at a compaction since the last trim. */
-	int64_t tables_held_last;         /* Tasks and files held at the last compaction. */
+	timestamp_t time_last_ready_tasks_check;
+	timestamp_t time_last_worker_checks; /* When keepalives, slow and drained workers, and blocks were last checked. */
+	timestamp_t time_last_compaction;    /* When the tables were last compacted, see compact_tables(). */
+	int64_t compacted_since_trim;        /* Removed table entries freed since the heap was last trimmed. */
+	int64_t tables_peak_since_trim;      /* Most tasks and files held at a compaction since the last trim. */
+	int64_t tables_held_last;            /* Tasks and files held at the last compaction. */
+	timestamp_t time_unexplained_worker_losses[2]; /* The two most recent unexpected losses of workers that held tasks
+							  none of which had been charged a loss, newest first, or zero.
+							  See cleanup_worker(). */
 	timestamp_t link_poll_end;
 	time_t      catalog_last_update_time;
 	time_t      resources_last_update_time;
@@ -342,6 +379,11 @@ void vine_manager_mark_worker_for_removal(struct vine_manager *q, struct vine_wo
 
 /* Check if the worker is able to transfer the necessary files for this task. */
 int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
+int vine_manager_limits_sends(struct vine_manager *q, struct vine_file *f);
+
+/* Check if an input that a worker does not hold can be fetched now, whatever the worker. */
+int vine_manager_transfer_source_available(struct vine_manager *q, struct vine_file *f);
+
 
 /* Delete a file from a worker. */
 int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const char *filename, vine_cache_level_t cache_level, vine_cache_level_t delete_upto_level);

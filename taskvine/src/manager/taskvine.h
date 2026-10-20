@@ -96,7 +96,7 @@ typedef enum {
 	VINE_RESULT_MAX_END_TIME = 3 << 3,  /**< The task ran after the specified (absolute since epoch) end time. **/
 	VINE_RESULT_UNKNOWN = 4 << 3,	    /**< The result could not be classified. **/
 	VINE_RESULT_FORSAKEN = 5 << 3,	    /**< The task failed, but it was not a task error **/
-	VINE_RESULT_MAX_RETRIES = 6 << 3,   /**< Currently unused. **/
+	VINE_RESULT_MAX_RETRIES = 6 << 3,   /**< The task lost its worker after using all its retries. **/
 	VINE_RESULT_MAX_WALL_TIME = 7 << 3, /**< The task ran for more than the specified time (relative since running
 					       in a worker). **/
 	VINE_RESULT_RMONITOR_ERROR =
@@ -352,7 +352,8 @@ int vine_task_add_output(struct vine_task *t, struct vine_file *f, const char *r
 
 /** Specify the number of times this task is retried on worker errors. If less than one, the task is retried
 indefinitely (this the default). A task that did not succeed after the given number of retries is returned with the
-result of its last attempt.
+result of its last attempt. A task whose worker disconnected unexpectedly while running it after it used all its retries
+is returned with VINE_RESULT_MAX_RETRIES.
 @param t A task object.
 @param max_retries The number of retries.
 */

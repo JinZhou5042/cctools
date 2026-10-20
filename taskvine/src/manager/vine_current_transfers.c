@@ -10,6 +10,7 @@ See the file COPYING for details.
 #include "vine_file_replica_table.h"
 #include "vine_blocklist.h"
 #include "vine_manager.h"
+#include "vine_schedule.h"
 #include "xxmalloc.h"
 
 #include <string.h>
@@ -23,6 +24,7 @@ struct vine_transfer_pair {
 	struct vine_worker_info *source_worker;
 	char *source_url;
 	char *cachename;		      /* The file that the destination receives. */
+	int64_t bytes; /* The size of the source worker's replica, counted in its outgoing_xfer_bytes. */
 	timestamp_t start_time;		      /* When the transfer was requested, to tell whether its source spoke since. */
 	char *id;			      /* A copy of the record's key in current_transfer_table. */
 	struct vine_transfer_pair *dest_prev; /* Neighbors in dest_worker->incoming_transfers. */
@@ -50,6 +52,9 @@ static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_i
 		dest_worker->incoming_transfers = t;
 	}
 	if (t->source_worker) {
+		struct vine_file_replica *replica = cachename ? vine_file_replica_table_lookup(source_worker, cachename) : 0;
+		t->bytes = replica ? MAX(replica->size, 0) : 0;
+		t->source_worker->outgoing_xfer_bytes += t->bytes;
 		t->source_worker->outgoing_xfer_counter++;
 		t->source_next = source_worker->outgoing_transfers;
 		if (t->source_next) {
@@ -76,6 +81,7 @@ static void vine_transfer_pair_delete(struct vine_transfer_pair *p)
 			}
 		}
 		if (p->source_worker) {
+			p->source_worker->outgoing_xfer_bytes -= p->bytes;
 			p->source_worker->outgoing_xfer_counter--;
 			if (p->source_prev) {
 				p->source_prev->source_next = p->source_next;
@@ -117,10 +123,16 @@ static void update_url_count(struct vine_manager *q, const char *source_url, int
 // add a current transaction to the transfer table
 char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename)
 {
-	cctools_uuid_t uuid;
-	cctools_uuid_create(&uuid);
-
-	char *transfer_id = strdup(uuid.str);
+	/* The id only has to be unique among the manager's records and differ from "X", which a worker sends for a file
+	 * without a record. Sixteen hex digits of a counter cost less than formatting a uuid. */
+	static const char digits[] = "0123456789abcdef";
+	uint64_t number = q->next_transfer_id++;
+	char *transfer_id = xxmalloc(17);
+	for (int i = 15; i >= 0; i--) {
+		transfer_id[i] = digits[number & 0xf];
+		number >>= 4;
+	}
+	transfer_id[16] = 0;
 	struct vine_transfer_pair *t = vine_transfer_pair_create(dest_worker, source_worker, source_url, cachename, transfer_id);
 
 	hash_table_insert(q->current_transfer_table, transfer_id, t);
@@ -128,18 +140,68 @@ char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info
 	return transfer_id;
 }
 
+static void remove_pair(struct vine_manager *q, struct vine_transfer_pair *p);
+static void count_success(struct vine_manager *q, struct vine_transfer_pair *p);
+
 // remove a completed transaction from the transfer table - i.e. open the source to an additional transfer
 int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 {
-	struct vine_transfer_pair *p;
-	p = hash_table_remove(q->current_transfer_table, id);
-	if (p) {
-		update_url_count(q, p->source_url, -1);
-		vine_transfer_pair_delete(p);
-		return 1;
-	} else {
+	struct vine_transfer_pair *p = hash_table_remove(q->current_transfer_table, id);
+	if (!p) {
 		return 0;
 	}
+	remove_pair(q, p);
+	return 1;
+}
+
+/* Remove the record of a transfer that succeeded, and clear the failure streaks of its source and destination. The
+ * record is looked up once. */
+int vine_current_transfers_remove_success(struct vine_manager *q, const char *id)
+{
+	struct vine_transfer_pair *p = hash_table_remove(q->current_transfer_table, id);
+	if (!p) {
+		return 0;
+	}
+	count_success(q, p);
+	remove_pair(q, p);
+	return 1;
+}
+
+/* Release a record taken out of the transfer table. */
+static void remove_pair(struct vine_manager *q, struct vine_transfer_pair *p)
+{
+	update_url_count(q, p->source_url, -1);
+	/* A source that leaves its limit of transfers, or now has room for the smallest file it refused for its bytes in
+	 * flight, can serve another one, so ready tasks that wait for one of its files may run. Other ends of transfers
+	 * change nothing for them. */
+	if (p->source_worker) {
+		struct vine_worker_info *w = p->source_worker;
+		int64_t remaining = w->outgoing_xfer_bytes - p->bytes;
+		int64_t refused = w->outgoing_refused_bytes;
+		if (w->outgoing_xfer_counter == q->worker_source_max_transfers || (refused >= 0 && (remaining == 0 || remaining + refused <= VINE_WORKER_SOURCE_MAX_BYTES))) {
+			w->outgoing_refused_bytes = -1;
+			vine_schedule_wake_worker(q, w);
+		}
+	} else if (p->source_url && vine_current_transfers_url_in_use(q, p->source_url) == q->file_source_max_transfers - 1) {
+		vine_schedule_wake_file(q, p->source_url);
+	}
+	vine_transfer_pair_delete(p);
+}
+
+int vine_current_transfers_source_has_room(struct vine_manager *q, struct vine_worker_info *w, int64_t size)
+{
+	if (w->outgoing_xfer_counter >= q->worker_source_max_transfers) {
+		return 0;
+	}
+	/* A size that is not known counts as none, so the count alone limits such a file. */
+	size = MAX(size, 0);
+	if (w->outgoing_xfer_bytes == 0 || w->outgoing_xfer_bytes + size <= VINE_WORKER_SOURCE_MAX_BYTES) {
+		return 1;
+	}
+	if (w->outgoing_refused_bytes < 0 || size < w->outgoing_refused_bytes) {
+		w->outgoing_refused_bytes = size;
+	}
+	return 0;
 }
 
 /*
@@ -221,15 +283,15 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 	struct vine_worker_info *source_worker = p->source_worker;
 	struct vine_worker_info *dest_worker = p->dest_worker;
 
-	/* If p is valid, the elements of p should always be valid, because a failed worker causes the transfer record to be removed,
+	/* A transfer from a URL has no source worker, so no worker is at fault. */
+	if (!source_worker) {
+		return 0;
+	}
+
+	/* If p is valid, the destination should always be valid, because a failed worker causes the transfer record to be removed,
 	 * not nulled out. This shouldn't happen, but we check and emit an error just in case. */
-	if (!source_worker || !dest_worker) {
-		if (!source_worker) {
-			debug(D_ERROR, "%s: transfer record for file %s with id %s is found, but source worker is null", __func__, cachename, id);
-		}
-		if (!dest_worker) {
-			debug(D_ERROR, "%s: transfer record for file %s with id %s is found, but destination worker is null", __func__, cachename, id);
-		}
+	if (!dest_worker) {
+		debug(D_ERROR, "%s: transfer record for file %s with id %s is found, but destination worker is null", __func__, cachename, id);
 		return 0;
 	}
 
@@ -265,14 +327,9 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 	return 0;
 }
 
-void vine_current_transfers_set_success(struct vine_manager *q, char *id)
+/* Clear the failure streaks of the source and destination of a successful transfer. */
+static void count_success(struct vine_manager *q, struct vine_transfer_pair *p)
 {
-	struct vine_transfer_pair *p = hash_table_lookup(q->current_transfer_table, id);
-
-	if (!p) {
-		return;
-	}
-
 	struct vine_worker_info *source = p->source_worker;
 	if (source) {
 		vine_blocklist_unblock(q, source->addrport);

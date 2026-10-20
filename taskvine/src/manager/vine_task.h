@@ -93,12 +93,20 @@ struct vine_task {
 	char *library_log_path; /**< The path of the library log file, used only for library task if set q->watch_library_logfiles */
 	int try_count;               /**< The number of times the task has been dispatched to a worker without being forsaken. If larger than max_retries, return with result of last attempt. */
 	int forsaken_count;         /**< The number of times the task has been dispatched to a worker. If larger than max_forsaken, return with VINE_RESULT_FORSAKEN. */
-	int library_failed_count;   /**< The number of times the duplicated library instances failed on the workers. Only count for the template. */
+	int library_failed_count;   /**< The number of library instances in a row that failed on the workers before any of their function calls completed. Only count for the template. */
 	int exhausted_attempts;     /**< Number of times the task failed given exhausted resources. */
 	int forsaken_attempts;      /**< Number of times the task was submitted to a worker but failed to start execution. */
 	int workers_slow;           /**< Number of times this task has been terminated for running too long. */
+	timestamp_t time_worker_lost[2]; /**< When workers running this task last disconnected unexpectedly, the latest first, or zero. */
+	timestamp_t time_unexplained_loss; /**< When a worker running this task was last lost in a way that no task explained, or zero. */
+	int worker_loss_charged;    /**< Set once an unexpected loss of a worker counted as one of this task's tries. The
+				       task is then quarantined: it runs only on a worker that runs nothing else (see vine_schedule.h). */
+	struct vine_worker_info *quarantine_worker; /**< If quarantined and no worker was free, the worker that takes no new task
+				       until it is free for this one, or null. */
 	int function_slots_total;   /**< If a library, the total number of function slots usable. */
 	int function_slots_inuse;   /**< If a library, the number of functions currently running. */
+	int library_ran_function;   /**< If a library instance, set when a function call it ran completed, which shows
+				       that the instance started. Its later death does not count as a failure to start. */
 		
 	/***** Results of task once it has reached completion. *****/
 
@@ -148,6 +156,14 @@ struct vine_task {
 															 worker can satisfy all the strict inputs of the task. */
 
 	int group_id;					       /**< When enabled, group ID will be assigned based on temp file dependencies of this task */	
+
+	struct vine_file *blocking_inputs[2];                  /**< Inputs of this ready task that exist but have no transfer source, recorded when the scheduler found no worker
+								  for it. The second, if set, is held by no worker that holds the first. The dispatch pass skips the task while
+								  vine_schedule_task_is_blocked() finds them still blocking. Both are among the task's input mounts, which hold
+								  their references. */
+	uint64_t blocked_epoch;                                /**< The manager's blocked_epoch when this ready task was found blocked, or zero. While it and the
+								  blocking serials of its blocking inputs are unchanged, the task waits for an event (see vine_schedule.h). */
+	uint64_t blocked_serials[2];                           /**< Blocking serials of blocking_inputs when the task was found blocked. */
 
 	int refcount;                                          /**< Number of remaining references to this object. */
 };

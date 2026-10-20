@@ -45,7 +45,19 @@ struct vine_file {
 	int original_producer_task_id;   // For temp files, the task ID of the original task that produces this file.
 	struct vine_worker_info *source_worker; // if this is a substitute file, attach the worker serving it. 
 	int change_message_shown; // True if error message already shown.
+	int manager_sends;	  // Copies of this file that the manager is sending itself, counted only for a file whose sends it limits (see vine_manager_limits_sends()).
 	int refcount;       // Number of references from a task object, delete when zero.
+
+	/* Scheduler state of a file that keeps ready tasks from every worker (see vine_schedule.h). blocked_serial advances
+	 * on every event that may change whether the file blocks them. blocked_registered is one more than the serial at
+	 * which the file was registered with those events, or zero. The memo holds the file's own check, valid for one
+	 * dispatch pass and serial: whether it is held without a transfer source, and whether no holder has room. */
+	uint64_t blocked_serial;
+	uint64_t blocked_registered;
+	uint64_t blocked_memo_pass;
+	uint64_t blocked_memo_serial;
+	int blocked_memo_held;
+	int blocked_memo_alone;
 
 	/* The data service's index entry of this file's copy in the vault, or NULL when the vault holds none. The data
 	 * service sets and clears it with the entry, so the scheduler and dispatch learn whether a declared file is in the

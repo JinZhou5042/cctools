@@ -476,7 +476,11 @@ static vine_result_code_t vine_manager_put_input_file_if_needed(struct vine_mana
 	/* If will be marked as READY when a cache-update message comes back. */
 
 	if (result == VINE_SUCCESS) {
-		vine_file_replica_table_get_or_create(q, w, f->cached_name, f->type, f->cache_level, f->size, f->mtime);
+		struct vine_file_replica *created = vine_file_replica_table_get_or_create(q, w, f->cached_name, f->type, f->cache_level, f->size, f->mtime);
+		/* A copy that the manager sends itself counts against its limit of copies at a time until it is ready. */
+		if (file_to_send == f && vine_manager_limits_sends(q, f)) {
+			vine_file_replica_set_manager_send(created, f);
+		}
 	}
 
 	return result;

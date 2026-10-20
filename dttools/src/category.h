@@ -88,6 +88,11 @@ struct category {
 	struct rmsummary *min_allocation;
 	struct rmsummary *max_resources_seen;
 
+	/* The results of category_task_max_resources() and category_task_min_resources(), which stay valid until the next
+	 * call of the same function for this category. */
+	struct rmsummary *max_resources_result;
+	struct rmsummary *min_resources_result;
+
 	/* if 1, use first allocations. 0, use max fixed (if given) */
 	struct rmsummary *autolabel_resource;
 
