@@ -80,6 +80,22 @@ struct vine_worker_info {
 	 * slot, gains room for a task, or leaves, each of them is woken (see vine_schedule.h). */
 	struct set *blocked_files;
 
+	/* Scratch space of vine_schedule_task_to_worker(): bytes of the task's inputs cached on this worker, and whether it
+	 * holds the task's first input without a transfer source, valid only while schedule_stamp equals the manager's
+	 * schedule_stamp. */
+	int64_t schedule_cached_bytes;
+	int schedule_holds_unsourced;
+	uint64_t schedule_stamp;
+
+	/* Entry of the manager's capacity index (workers_by_capacity): the worker's free capacity priority when it was last
+	 * placed there, and its serial, which is unique among workers and zero while the worker is not in the index. */
+	double schedule_capacity;
+	uint64_t schedule_serial;
+
+	/* Blocking inputs of ready tasks that this worker holds, each with a reference. When the worker frees a transfer
+	 * slot, gains room for a task, or leaves, each of them is woken (see vine_schedule.h). */
+	struct set *blocked_files;
+
 	/* Worker condition that may affect task start or cancellation. */
 	int  draining;                          // if 1, worker does not accept anymore tasks. It is shutdown if no task running.
 	int  pending_removal;                   // if not 0, the vine_worker_disconnect_reason_t with which the worker will be removed

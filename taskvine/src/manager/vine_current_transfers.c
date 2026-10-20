@@ -346,10 +346,6 @@ static void count_success(struct vine_manager *q, struct vine_transfer_pair *p)
 		dest_worker->xfer_streak_bad_destination_counter = 0;
 		dest_worker->xfer_total_good_destination_counter++;
 	}
-
-	update_url_count(q, p->source_url, -1);
-	vine_transfer_pair_delete(p);
-	return 1;
 }
 
 // count the number transfers coming from a specific remote url (not a worker)
