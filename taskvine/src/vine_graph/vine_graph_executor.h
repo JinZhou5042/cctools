@@ -178,6 +178,13 @@ uint64_t vine_graph_executor_next_finished(struct vine_graph_executor *e);
  * every child is durable, so a released node runs again only when the frontend asks for its outputs, by pinning them
  * or by submitting a node that reads them. */
 uint64_t vine_graph_executor_next_released(struct vine_graph_executor *e);
+/* Return the next node that the executor keeps since the last call, or zero when none. A node whose outputs were
+ * released and that runs again, because the frontend asked for its outputs or for those of a descendant, is kept: it is
+ * never released until the frontend lets it go with vine_graph_executor_unkeep_node(), so requests for its neighbours
+ * do not recompute it again. Return of vine_graph_executor_unkeep_node(): zero, one when it released the node, which
+ * vine_graph_executor_next_released() then does not report, or -1 for a node that is not kept. */
+uint64_t vine_graph_executor_next_kept(struct vine_graph_executor *e);
+int vine_graph_executor_unkeep_node(struct vine_graph_executor *e, uint64_t node_id);
 /* Return the state of a node. */
 vine_graph_node_state_t vine_graph_executor_get_node_state(const struct vine_graph_executor *e, uint64_t node_id);
 /* Return the node whose own failure made this node fail, which is the node itself or one it depends on, or zero

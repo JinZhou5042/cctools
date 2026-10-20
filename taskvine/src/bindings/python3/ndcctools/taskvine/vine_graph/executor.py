@@ -607,6 +607,9 @@ class Executor:
         # Tasks of user Graphs that ran again because a late reader read them after their release, and keep their
         # results while their Graphs live (_submit_node()).
         self._reread = set()
+        # Tasks of user Graphs that C keeps because they ran again after their release (vine_graph_executor_next_kept()),
+        # until their Graphs are gone.
+        self._kept = set()
 
         # State both threads share, guarded by the lock. The background thread notifies the condition when it
         # publishes changes or finishes a call that a caller waits for.
@@ -1540,6 +1543,14 @@ class Executor:
                 if self._let_go(record, True):
                     self._drop(record)
 
+    def _unkeep(self, task):
+        """Let go of a task that C kept because it ran again after its release, as _unpin_result() does for a pin."""
+        record = self._records[task]
+        if _capi.vine_graph_executor_unkeep_node(self._executor, record.node) == 1:
+            with self._lock:
+                if self._let_go(record, True):
+                    self._drop(record)
+
     def _unpin_results(self, tasks):
         """Release the pins that tasks took for the readers of a call that ended."""
         for task in tasks:
@@ -1645,6 +1656,7 @@ class Executor:
         deadline = self._cleanup_deadline
         unsubmitted_readers = self._unsubmitted_readers
         reread = self._reread
+        kept = self._kept
         let_go = self._let_go
         records = self._records
         executor = self._executor
@@ -1658,6 +1670,9 @@ class Executor:
             if reread and task in reread:
                 reread.discard(task)
                 self._unpin_result(task)
+            if kept and task in kept:
+                kept.discard(task)
+                self._unkeep(task)
             record = records.get(task)
             if record is not None and let_go(record):
                 drop_node(executor, record.node)
@@ -1929,6 +1944,16 @@ class Executor:
         released = []
         while node := capi.vine_graph_executor_next_released(executor):
             released.append(tasks[node])
+        while node := capi.vine_graph_executor_next_kept(executor):
+            record = tasks[node]
+            task = record.task
+            # A task of a live user Graph stays kept while its Graph lives, as one that a late reader read again after
+            # its release does (_reread), whose own pin already keeps it. Calls of the Executor have no Graph that could
+            # ask again, so C lets them go at once.
+            if task[0] != self._dynamic._id and task[0] in self._graph_references and task not in self._reread:
+                self._kept.add(task)
+            elif capi.vine_graph_executor_unkeep_node(executor, node) == 1:
+                released.append(record)
         if not finished and not released:
             return
         with self._lock:

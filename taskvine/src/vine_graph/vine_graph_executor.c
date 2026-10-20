@@ -69,6 +69,7 @@ struct vine_graph_executor {
 	struct list *fetch_failed;  // ids of requested files that their Workers cannot send, not reported yet
 	struct list *finished;	    // nodes that completed or failed and were not reported yet, counted in their refs
 	struct list *released;	    // nodes whose outputs were released and were not reported yet, counted in their refs
+	struct list *kept;	    // released nodes that ran again and are kept, not reported yet, counted in their refs
 	struct vine_graph_id_queue removable; // ids of nodes let go by the frontend that may have become removable
 	struct vine_graph_id_queue removed;   // ids of removed nodes that were not reported yet
 	int vault_full_noticed;	    // the user was told once that the vault is full
@@ -159,6 +160,7 @@ struct vine_graph_executor *vine_graph_executor_create(struct vine_manager *mana
 	e->vault_paths = itable_create(0);
 	e->finished = list_create();
 	e->released = list_create();
+	e->kept = list_create();
 	e->fetched = list_create();
 	e->fetch_failed = list_create();
 	e->checkpoint_unsendable = list_create();
@@ -255,6 +257,9 @@ void vine_graph_executor_delete(struct vine_graph_executor *e)
 	while ((node = list_pop_head(e->released))) {
 		vine_graph_node_unref(node);
 	}
+	while ((node = list_pop_head(e->kept))) {
+		vine_graph_node_unref(node);
+	}
 	vine_graph_delete(e->graph);
 	itable_delete(e->task_id_to_node);
 	/* Queued files hold references of their own. */
@@ -275,6 +280,7 @@ void vine_graph_executor_delete(struct vine_graph_executor *e)
 	itable_delete(e->vault_paths);
 	list_delete(e->finished);
 	list_delete(e->released);
+	list_delete(e->kept);
 	free(e->removable.ids);
 	free(e->removed.ids);
 	list_delete(e->fetched);
@@ -710,7 +716,7 @@ static int vine_graph_executor_try_release(struct vine_graph_executor *e, struct
 	if (node->released || !node->completed) {
 		return 0;
 	}
-	if (node->pinned_outputs > 0) {
+	if (node->pinned_outputs > 0 || node->kept) {
 		return 0;
 	}
 	if (!vine_graph_executor_children_durable(e, node)) {
@@ -1142,6 +1148,15 @@ static void vine_graph_executor_handle_success(struct vine_graph_executor *e, st
 
 	if (restores) {
 		e->completed_recovery_tasks++;
+		/* A released node that runs again was asked for after its release, by a fetch or by a consumer submitted
+		 * later, or it is an ancestor that such a request needed. Requests of this kind tend to come again for its
+		 * neighbours, which would recompute the same ancestors each time, so the node is kept, never released, until
+		 * the frontend lets it go (vine_graph_executor_unkeep_node()). It is kept before the release walk below, in
+		 * which its consumers may already release it. */
+		if (node->released && !node->kept) {
+			node->kept = 1;
+			vine_graph_executor_report(e->kept, node);
+		}
 		node->released = 0;
 		/* A Manager recovery task runs for a consumer that needs the output now, and that consumer releases the node
 		 * later. A restore that a fetch started runs for the frontend's pin, which may be gone already, so the node is
@@ -1651,6 +1666,28 @@ uint64_t vine_graph_executor_next_finished(struct vine_graph_executor *e)
 uint64_t vine_graph_executor_next_released(struct vine_graph_executor *e)
 {
 	return e ? vine_graph_executor_next_report(e->released) : 0;
+}
+
+uint64_t vine_graph_executor_next_kept(struct vine_graph_executor *e)
+{
+	return e ? vine_graph_executor_next_report(e->kept) : 0;
+}
+
+int vine_graph_executor_unkeep_node(struct vine_graph_executor *e, uint64_t node_id)
+{
+	struct vine_graph_node *node = e ? vine_graph_get_node(e->graph, node_id) : NULL;
+	if (!node || !node->kept) {
+		debug(D_ERROR, "node %" PRIu64 " is not kept", node_id);
+		return -1;
+	}
+	node->kept = 0;
+	/* As for the last unpin, the caller hears of the node's release from the result, and released ancestors are
+	 * reported. */
+	if (vine_graph_executor_try_release(e, node, 0)) {
+		vine_graph_executor_release_from(e, node, 0);
+		return 1;
+	}
+	return 0;
 }
 
 uint64_t vine_graph_executor_next_removed(struct vine_graph_executor *e)

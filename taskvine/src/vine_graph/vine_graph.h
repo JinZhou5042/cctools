@@ -60,6 +60,7 @@ struct vine_graph_node {
 	unsigned restoring : 1; // a new task of this completed node is recomputing its outputs
 	unsigned failed : 1;	// the node cannot complete, or its outputs cannot be restored
 	unsigned let_go : 1;	// the frontend no longer needs the node, which is removed once every child was removed
+	unsigned kept : 1;	// ran again after its release, and kept until the frontend lets it go (never released meanwhile)
 	unsigned removed : 1;	// removed from the graph, so only the entries counted in refs still hold the structure
 
 	int remaining_parents;	    // parents not completed yet
