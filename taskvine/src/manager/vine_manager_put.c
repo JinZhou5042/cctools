@@ -15,6 +15,7 @@ See the file COPYING for details.
 #include "vine_txn_log.h"
 #include "vine_worker_info.h"
 
+#include "buffer.h"
 #include "create_dir.h"
 #include "debug.h"
 #include "host_disk_info.h"
@@ -471,6 +472,44 @@ It does not perform any resource management.
 This allows it to be used for both regular tasks and mini tasks.
 */
 
+/* Append "<name> <value>\n" to a task description. The lines that every task carries are assembled without printf,
+ * because the manager describes every task it sends. */
+static void put_string_line(buffer_t *b, const char *name, const char *value)
+{
+	if (!value) {
+		/* What printf prints for a null string, as the description did before. */
+		value = "(null)";
+	}
+	buffer_putstring(b, name);
+	buffer_putliteral(b, " ");
+	buffer_putstring(b, value);
+	buffer_putliteral(b, "\n");
+}
+
+/* Append "<name> <value>\n" with a decimal integer value, as "%lld" prints it. */
+static void put_integer_line(buffer_t *b, const char *name, int64_t value)
+{
+	buffer_putstring(b, name);
+	buffer_putliteral(b, " ");
+	buffer_putfstring(b, "%lld", (long long)value);
+	buffer_putliteral(b, "\n");
+}
+
+/* Append "<keyword> <cached name> <encoded remote name> <flags>\n" for a mount. */
+static void put_mount_line(buffer_t *b, const char *keyword, struct vine_mount *m)
+{
+	char remote_name_encoded[PATH_MAX];
+	url_encode(m->remote_name, remote_name_encoded, PATH_MAX);
+	buffer_putstring(b, keyword);
+	buffer_putliteral(b, " ");
+	buffer_putstring(b, m->file->cached_name);
+	buffer_putliteral(b, " ");
+	buffer_putstring(b, remote_name_encoded);
+	buffer_putliteral(b, " ");
+	buffer_putfstring(b, "%d", m->flags);
+	buffer_putliteral(b, "\n");
+}
+
 vine_result_code_t vine_manager_put_task(
 		struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, const char *command_line, struct rmsummary *limits, struct vine_file *target)
 {
@@ -483,19 +522,26 @@ vine_result_code_t vine_manager_put_task(
 	}
 
 	vine_result_code_t result = vine_manager_put_input_files(q, w, t);
-	if (result != VINE_SUCCESS)
+	if (result != VINE_SUCCESS) {
 		return result;
+	}
+
+	/* Assemble one task description without changing the wire protocol. */
+	buffer_t description;
+	buffer_init(&description);
+	buffer_abortonfailure(&description, 1);
 
 	if (target) {
 		/* If the user provide mode bits manually, use them here. */
 		int mode = target->mode;
-		if (mode == 0)
+		if (mode == 0) {
 			mode = 0755;
+		}
 		/* A mini-task is identified by the file it creates. */
-		vine_manager_send(q, w, "mini_task %s %s %d %lld 0%o\n", target->source, target->cached_name, target->cache_level, (long long)target->size, mode);
+		buffer_putfstring(&description, "mini_task %s %s %d %lld 0%o\n", target->source, target->cached_name, target->cache_level, (long long)target->size, mode);
 	} else {
 		/* A regular task is simply identified by a task id. */
-		vine_manager_send(q, w, "task %lld\n", (long long)t->task_id);
+		put_integer_line(&description, "task", t->task_id);
 	}
 
 	if (!command_line) {
@@ -503,36 +549,35 @@ vine_result_code_t vine_manager_put_task(
 	}
 
 	long long cmd_len = strlen(command_line);
-	vine_manager_send(q, w, "cmd %lld\n", (long long)cmd_len);
-	vine_manager_send_data(q, w, command_line, cmd_len);
-	debug(D_VINE, "%s\n", command_line);
+	put_integer_line(&description, "cmd", cmd_len);
+	buffer_putlstring(&description, command_line, cmd_len);
 
 	if (t->needs_library) {
-		vine_manager_send(q, w, "needs_library %s\n", t->needs_library);
+		put_string_line(&description, "needs_library", t->needs_library);
 	}
 
 	if (t->provides_library) {
-		vine_manager_send(q, w, "provides_library %s\n", t->provides_library);
-		vine_manager_send(q, w, "function_slots %d\n", t->function_slots_total);
-		vine_manager_send(q, w, "func_exec_mode %d\n", t->func_exec_mode);
+		buffer_putfstring(&description, "provides_library %s\n", t->provides_library);
+		buffer_putfstring(&description, "function_slots %d\n", t->function_slots_total);
+		buffer_putfstring(&description, "func_exec_mode %d\n", t->func_exec_mode);
 	}
 
-	vine_manager_send(q, w, "category %s\n", t->category);
+	put_string_line(&description, "category", t->category);
 
 	if (limits) {
-		vine_manager_send(q, w, "cores %s\n", rmsummary_resource_to_str("cores", limits->cores, 0));
-		vine_manager_send(q, w, "gpus %s\n", rmsummary_resource_to_str("gpus", limits->gpus, 0));
-		vine_manager_send(q, w, "memory %s\n", rmsummary_resource_to_str("memory", limits->memory, 0));
-		vine_manager_send(q, w, "disk %s\n", rmsummary_resource_to_str("disk", limits->disk, 0));
+		put_string_line(&description, "cores", rmsummary_resource_to_str("cores", limits->cores, 0));
+		put_string_line(&description, "gpus", rmsummary_resource_to_str("gpus", limits->gpus, 0));
+		put_string_line(&description, "memory", rmsummary_resource_to_str("memory", limits->memory, 0));
+		put_string_line(&description, "disk", rmsummary_resource_to_str("disk", limits->disk, 0));
 
 		/* Do not set end, wall_time if running the resource monitor. We let the monitor police these resources.
 		 */
 		if (q->monitor_mode != VINE_MON_WATCHDOG) {
 			if (limits->end > 0) {
-				vine_manager_send(q, w, "end_time %s\n", rmsummary_resource_to_str("end", limits->end, 0));
+				buffer_putfstring(&description, "end_time %s\n", rmsummary_resource_to_str("end", limits->end, 0));
 			}
 			if (limits->wall_time > 0) {
-				vine_manager_send(q, w, "wall_time %s\n", rmsummary_resource_to_str("wall_time", limits->wall_time, 0));
+				buffer_putfstring(&description, "wall_time %s\n", rmsummary_resource_to_str("wall_time", limits->wall_time, 0));
 			}
 		}
 	}
@@ -543,16 +588,14 @@ vine_result_code_t vine_manager_put_task(
 	char *var;
 	LIST_ITERATE(t->env_list, var)
 	{
-		vine_manager_send(q, w, "env %zu\n%s\n", strlen(var), var);
+		buffer_putfstring(&description, "env %zu\n%s\n", strlen(var), var);
 	}
 
 	if (t->input_mounts) {
 		struct vine_mount *m;
 		LIST_ITERATE(t->input_mounts, m)
 		{
-			char remote_name_encoded[PATH_MAX];
-			url_encode(m->remote_name, remote_name_encoded, PATH_MAX);
-			vine_manager_send(q, w, "infile %s %s %d\n", m->file->cached_name, remote_name_encoded, m->flags);
+			put_mount_line(&description, "infile", m);
 		}
 	}
 
@@ -560,22 +603,21 @@ vine_result_code_t vine_manager_put_task(
 		struct vine_mount *m;
 		LIST_ITERATE(t->output_mounts, m)
 		{
-			char remote_name_encoded[PATH_MAX];
-			url_encode(m->remote_name, remote_name_encoded, PATH_MAX);
-			vine_manager_send(q, w, "outfile %s %s %d\n", m->file->cached_name, remote_name_encoded, m->flags);
+			put_mount_line(&description, "outfile", m);
 		}
 	}
 
 	if (t->group_id) {
-		vine_manager_send(q, w, "groupid %d\n", t->group_id);
+		buffer_putfstring(&description, "groupid %d\n", t->group_id);
 	}
 
-	// vine_manager_send returns the number of bytes sent, or a number less than
-	// zero to indicate errors. We are lazy here, we only check the last
-	// message we sent to the worker (other messages may have failed above).
+	buffer_putliteral(&description, "end\n");
+	debug(D_VINE, "tx to %s (%s): %s", w->hostname, w->addrport, buffer_tostring(&description));
 
-	int r = vine_manager_send(q, w, "end\n");
-	if (r >= 0) {
+	/* A long description to a busy worker may take a while, so it waits in the worker's queue. */
+	int sent = vine_manager_send_data(q, w, buffer_tostring(&description), buffer_pos(&description));
+	buffer_free(&description);
+	if (sent == 0) {
 		if (target) {
 			vine_file_replica_table_get_or_create(q, w, target->cached_name, target->type, target->cache_level, target->size, target->mtime);
 		}
