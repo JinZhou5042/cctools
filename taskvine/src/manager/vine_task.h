@@ -164,6 +164,8 @@ struct vine_task {
 	uint64_t blocked_epoch;                                /**< The manager's blocked_epoch when this ready task was found blocked, or zero. While it and the
 								  blocking serials of its blocking inputs are unchanged, the task waits for an event (see vine_schedule.h). */
 	uint64_t blocked_serials[2];                           /**< Blocking serials of blocking_inputs when the task was found blocked. */
+	int blocking_vault;                                    /**< Set when the first blocking input comes inline into the vault, and the task waits for that receive to end
+								  instead of a transfer of its own from a peer (see vine_manager_data_service_receiving_inline()). */
 
 	int refcount;                                          /**< Number of remaining references to this object. */
 };

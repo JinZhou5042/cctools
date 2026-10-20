@@ -11,6 +11,7 @@ See the file COPYING for details.
 #include "vine_blocklist.h"
 #include "vine_manager.h"
 #include "vine_schedule.h"
+#include "stringtools.h"
 #include "xxmalloc.h"
 
 #include <string.h>
@@ -173,7 +174,7 @@ static void remove_pair(struct vine_manager *q, struct vine_transfer_pair *p)
 	update_url_count(q, p->source_url, -1);
 	/* A source that leaves its limit of transfers, or now has room for the smallest file it refused for its bytes in
 	 * flight, can serve another one, so ready tasks that wait for one of its files may run. Other ends of transfers
-	 * change nothing for them. */
+	 * change nothing for them. A transfer from the data service vault names its file after the manager:// prefix. */
 	if (p->source_worker) {
 		struct vine_worker_info *w = p->source_worker;
 		int64_t remaining = w->outgoing_xfer_bytes - p->bytes;
@@ -183,7 +184,7 @@ static void remove_pair(struct vine_manager *q, struct vine_transfer_pair *p)
 			vine_schedule_wake_worker(q, w);
 		}
 	} else if (p->source_url && vine_current_transfers_url_in_use(q, p->source_url) == q->file_source_max_transfers - 1) {
-		vine_schedule_wake_file(q, p->source_url);
+		vine_schedule_wake_file(q, string_prefix_is(p->source_url, "manager://") ? p->source_url + strlen("manager://") : p->source_url);
 	}
 	vine_transfer_pair_delete(p);
 }

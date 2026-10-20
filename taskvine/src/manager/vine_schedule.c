@@ -10,6 +10,7 @@ See the file COPYING for details.
 #include "vine_file.h"
 #include "vine_file_replica.h"
 #include "vine_file_replica_table.h"
+#include "vine_manager_data_service.h"
 #include "vine_mount.h"
 #include "vine_temp.h"
 
@@ -485,19 +486,20 @@ int vine_schedule_task_waits(struct vine_manager *q, struct vine_task *t)
 {
 	struct vine_file *first = t->blocking_inputs[0];
 	struct vine_file *second = t->blocking_inputs[1];
-	return q->peer_transfers_enabled && first && t->blocked_epoch == q->blocked_epoch && first->blocked_serial == t->blocked_serials[0] && (!second || second->blocked_serial == t->blocked_serials[1]);
+	return (q->peer_transfers_enabled || t->blocking_vault) && first && t->blocked_epoch == q->blocked_epoch && first->blocked_serial == t->blocked_serials[0] && (!second || second->blocked_serial == t->blocked_serials[1]);
 }
 
 int vine_schedule_task_is_blocked(struct vine_manager *q, struct vine_task *t)
 {
-	if (!t->blocking_inputs[0] || !q->peer_transfers_enabled) {
+	if (!t->blocking_inputs[0] || (!q->peer_transfers_enabled && !t->blocking_vault)) {
 		return 0;
 	}
 	if (vine_schedule_task_waits(q, t)) {
 		return 1;
 	}
 	t->blocked_epoch = 0;
-	if (!blocking_inputs_still_block(q, t)) {
+	/* A task that waits for an input to come inline into the vault waits until that receive ends, which wakes it. */
+	if (t->blocking_vault ? !vine_manager_data_service_receiving_inline(q, t->blocking_inputs[0]) : !blocking_inputs_still_block(q, t)) {
 		return 0;
 	}
 
@@ -554,6 +556,21 @@ void vine_schedule_wake_file(struct vine_manager *q, const char *key)
 	}
 	if (q->blocked_sources && hash_table_size(q->blocked_sources) > 0) {
 		struct set *files = hash_table_remove(q->blocked_sources, key);
+		if (files) {
+			wake_files(q, files);
+			set_delete(files);
+		}
+	}
+}
+
+void vine_schedule_wake_declared_file(struct vine_manager *q, struct vine_file *f)
+{
+	if (!f) {
+		return;
+	}
+	wake_one_file(q, f);
+	if (q->blocked_sources && hash_table_size(q->blocked_sources) > 0) {
+		struct set *files = hash_table_remove(q->blocked_sources, f->cached_name);
 		if (files) {
 			wake_files(q, files);
 			set_delete(files);
@@ -1016,6 +1033,7 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 	t->blocking_inputs[0] = NULL;
 	t->blocking_inputs[1] = NULL;
 	t->blocked_epoch = 0;
+	t->blocking_vault = 0;
 
 	/* A quarantined task with a reservation waits for its worker until that worker runs nothing, or takes the worker at
 	 * the head of the capacity index if that one runs nothing first, so a long task on the reserved worker does not hold
@@ -1047,6 +1065,11 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 	uint64_t stamp = ++q->schedule_stamp;
 	int64_t input_size = 0;
 	struct vine_file *unsourced = NULL;
+	/* Of the inputs that come inline into the vault, and have no source until then, the one whose receive started
+	 * last. Such inputs do not end the pass early, so a task that reads many of them waits for the one that tends to
+	 * arrive last, instead of being checked again as each arrives. */
+	struct vine_file *receiving = NULL;
+	uint64_t receiving_order = 0;
 	/* The first input with a transfer source and at least VINE_SCHEDULE_WIDE_HOLDERS holders, whose holders are
 	 * visited only if another input has holders or no source (find_worker_by_wide_input()). */
 	struct vine_file *wide = NULL;
@@ -1058,6 +1081,11 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 			continue;
 		}
 		input_size += m->file->size;
+		uint64_t order = vine_manager_data_service_receiving_inline(q, m->file);
+		if (order > receiving_order) {
+			receiving_order = order;
+			receiving = m->file;
+		}
 		int first_unsourced = 0;
 		int other_unsourced = 0;
 		if (q->peer_transfers_enabled && !vine_manager_transfer_source_available(q, m->file)) {
@@ -1093,7 +1121,7 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 		}
 		/* Each worker lacks the first input without a source when it has no holder, or lacks one of two such inputs
 		 * when no holder of the first holds the second. */
-		if ((first_unsourced && (!input_holders || set_size(input_holders) < 1)) || (other_unsourced && !held_with_unsourced)) {
+		if (!order && ((first_unsourced && (!input_holders || set_size(input_holders) < 1)) || (other_unsourced && !held_with_unsourced))) {
 			t->blocking_inputs[0] = unsourced;
 			t->blocking_inputs[1] = first_unsourced ? NULL : m->file;
 			list_delete(holders);
@@ -1148,8 +1176,12 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 
 	list_delete(holders);
 
-	/* Only holders of the input without a source were considered, and none could take the task. */
-	if (!best_worker && unsourced) {
+	/* Only holders of the input without a source were considered, and none could take the task. A task with an input
+	 * that comes inline into the vault waits for it, whatever else it reads. */
+	if (!best_worker && receiving) {
+		t->blocking_inputs[0] = receiving;
+		t->blocking_vault = 1;
+	} else if (!best_worker && unsourced) {
 		t->blocking_inputs[0] = unsourced;
 	}
 

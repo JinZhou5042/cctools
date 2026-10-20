@@ -97,6 +97,7 @@ void vine_task_clean(struct vine_task *t)
 	t->blocking_inputs[0] = NULL;
 	t->blocking_inputs[1] = NULL;
 	t->blocked_epoch = 0;
+	t->blocking_vault = 0;
 
 	t->time_workers_execute_last = 0;
 	t->time_workers_execute_last_start = 0;

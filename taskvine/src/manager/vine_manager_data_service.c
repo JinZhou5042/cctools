@@ -20,6 +20,7 @@
 #include "url_encode.h"
 #include "vine_cached_name.h"
 #include "vine_current_transfers.h"
+#include "vine_schedule.h"
 #include "vine_transfer_receive.h"
 #include "unlink_recursive.h"
 
@@ -984,6 +985,9 @@ static void finish_receive(struct vine_manager *manager, struct transfer_job *jo
 		}
 	}
 	link_queue_shared_release(held);
+	/* The vault is a source of a published file, so ready tasks that wait for one may run, and tasks that waited for
+	 * the file to come inline use another source when it did not. */
+	vine_schedule_wake_declared_file(manager, job->file);
 	/* A receive withdrawn by vault removal, such as the pruning of its file, is cancelled, not failed. */
 	log_receive_end(ds, job, published ? "complete" : (job->removed ? "cancelled" : "failed"), in_memory);
 	if (job->transfer_id) {
@@ -1099,10 +1103,12 @@ static void send_inline_request(struct vine_manager *manager, struct transfer_jo
 static void fall_back_to_connection(struct vine_manager *manager, struct transfer_job *job, struct vine_worker_info *worker)
 {
 	debug(D_VINE, "checkpoint %s: not sent inline, receiving it over a connection", job->name);
-	/* The receive takes a receive slot now, even beyond their number, because it was admitted already. */
+	/* The receive takes a receive slot now, even beyond their number, because it was admitted already. Tasks that wait
+	 * for it to come inline are woken, because it does not anymore. */
 	receive_hold(manager->ds, job, -1);
 	job->inline_counted = 0;
 	receive_hold(manager->ds, job, 1);
+	vine_schedule_wake_file(manager, job->name);
 	if (!job_set_connection(manager->ds, job, worker)) {
 		fail_receive(manager->ds, job);
 		return;

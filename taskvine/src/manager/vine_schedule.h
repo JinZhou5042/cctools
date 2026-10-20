@@ -32,9 +32,10 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
  * input (blocked_serials) and the manager's blocked_epoch, and vine_schedule_task_waits() skips it in O(1) while none
  * of them changed. A recorded input found blocking is registered once per serial with the events that can change the
  * answer, which advance its serial:
- * - vine_schedule_wake_file() with its cached name, when a replica of it is added, becomes ready, or is removed, and
- *   with a source URL when a transfer from it ends at the limit of file-source-max-transfers (the manager's own send
- *   of a local file ends when its replica becomes ready or is removed, see vine_manager_limits_sends());
+ * - vine_schedule_wake_file() with its cached name, when a replica of it is added, becomes ready, or is removed, or its
+ *   vault entry is published or removed, and with a source URL when a transfer from it ends at the limit of
+ *   file-source-max-transfers (a vault transfer, manager://<cached name>, wakes the cached name; the manager's own
+ *   send of a local file ends when its replica becomes ready or is removed, see vine_manager_limits_sends());
  * - vine_schedule_wake_worker() with a holder of it, through the holder's set of blocking files, when the holder frees
  *   a transfer slot at worker-source-max-transfers, may have gained room for a task, ends its suspicion as a source
  *   with a message, reports its transfer port, or leaves;
@@ -43,13 +44,19 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
  *   limits.
  * An event thus costs O(1), or O(blocking files) that a worker holds, never a pass over the tasks that wait. A task
  * whose wait ended checks its inputs again when the dispatch pass reaches it, and the check of each input is shared by
- * every task that it blocks within one pass (the file's memo). Entries hold file references, so no entry dangles. */
+ * every task that it blocks within one pass (the file's memo). Entries hold file references, so no entry dangles.
+ * A task with an input that comes inline into the vault, and has no source until it is published, records instead the
+ * one whose receive started last (blocking_vault). It waits while that receive is in progress, whatever the holders,
+ * and the receive's end wakes it by cached name. */
 int vine_schedule_task_is_blocked(struct vine_manager *q, struct vine_task *t);
 /* Return non-zero, in O(1), while a task found blocked waits for an event that can unblock it. A dispatch pass skips
  * such a task before anything else, so the checks of retrieve_ready_task() reach it once its wait ends, at least
  * once a second. */
 int vine_schedule_task_waits(struct vine_manager *q, struct vine_task *t);
 void vine_schedule_wake_file(struct vine_manager *q, const char *key);
+/* Wake the tasks blocked by declared file f, as vine_schedule_wake_file() does for its cached name, without looking
+ * the file up by name. */
+void vine_schedule_wake_declared_file(struct vine_manager *q, struct vine_file *f);
 void vine_schedule_wake_worker(struct vine_manager *q, struct vine_worker_info *w);
 void vine_schedule_wake_all(struct vine_manager *q);
 /* Drop the registrations by source URL when the manager is deleted. */

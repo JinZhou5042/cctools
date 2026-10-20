@@ -4022,8 +4022,10 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 
 /*
 Determine whether an input that the destination worker does not hold can be fetched now: from a peer with transfer
-capacity, from its URL within file-source-max-transfers, or from the manager at dispatch, which sends a local file that
-peers may share within file-source-max-transfers copies at a time (vine_manager_limits_sends()).
+capacity, from the data service vault or its URL within file-source-max-transfers, or from the manager at dispatch,
+which also sends a small checkpoint from the vault, and sends a local file that peers may share within
+file-source-max-transfers copies at a time (vine_manager_limits_sends()). A small file that comes inline into the vault
+has no source until it is published.
 It applies the rules of vine_manager_transfer_capacity_available() without choosing a source or allocating a
 substitute, and the answer does not depend on the destination. A mini task depends on the destination and counts as
 available, so the full check decides for it.
@@ -4031,8 +4033,23 @@ available, so the full check decides for it.
 
 int vine_manager_transfer_source_available(struct vine_manager *q, struct vine_file *f)
 {
+	if (vine_manager_data_service_vault_small_file(q, f)) {
+		return 1;
+	}
+
+	if (vine_manager_data_service_receiving_inline(q, f)) {
+		return 0;
+	}
+
 	if (!(f->flags & VINE_PEER_NOSHARE) && (f->cache_level > VINE_CACHE_LEVEL_TASK) && vine_file_replica_table_has_source(q, f->cached_name)) {
 		return 1;
+	}
+
+	int small_local_file = f->type == VINE_FILE && f->size <= VINE_DATA_INLINE_BYTES;
+	if (!small_local_file && vine_manager_data_service_vault_contains(q, f)) {
+		char source[VINE_LINE_MAX];
+		snprintf(source, sizeof(source), "manager://%s", f->cached_name);
+		return vine_current_transfers_url_in_use(q, source) < q->file_source_max_transfers;
 	}
 
 	if (f->type == VINE_URL) {
@@ -4414,8 +4431,8 @@ static int send_one_task(struct vine_manager *q)
 	/* Once passes have found every ready task waiting, in a row and with no event since that may end a wait or change
 	 * the ready tasks, another pass would only find them waiting again, so it is skipped. A step then costs O(1)
 	 * instead of a visit to each waiting task. Like a pass without a worker with room, it lets the next poll wait:
-	 * the events that end a wait come with a worker message, a finished transfer, a submission, or the wake above once
-	 * a second. */
+	 * the events that end a wait come with a worker message, a finished transfer of the data service, a submission,
+	 * or the wake above once a second. */
 	if (q->schedule_waiting_wakes != q->schedule_wakes) {
 		q->schedule_waiting_wakes = q->schedule_wakes;
 		q->schedule_waiting_run = 0;
@@ -7711,6 +7728,7 @@ int vine_prune_file(struct vine_manager *m, struct vine_file *f)
 	/* A vault entry of a temporary file is one of its replicas. A VINE_FILE vault entry is Manager-local data. */
 	if (f->type == VINE_TEMP) {
 		vine_manager_data_service_vault_remove(m->ds, f);
+		vine_schedule_wake_declared_file(m, f);
 	}
 
 	/* delete all of the replicas present at remote workers. */
@@ -7771,6 +7789,7 @@ void vine_undeclare_file(struct vine_manager *m, struct vine_file *f)
 	/* vine_prune_file() removes the vault entry of a temporary file itself. */
 	if (f->type != VINE_TEMP) {
 		vine_manager_data_service_vault_remove(m->ds, f);
+		vine_schedule_wake_declared_file(m, f);
 	}
 
 	/* First prune the file on all workers */

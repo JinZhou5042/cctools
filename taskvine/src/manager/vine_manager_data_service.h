@@ -65,7 +65,8 @@ vine_manager_checkpoint_result_t vine_manager_data_service_fetch(struct vine_man
  * zero when there is none. While a small file comes inline, a task that reads it waits for its publication instead of a
  * transfer of its own from a peer, which costs a process on the source Worker and a connection: the vault holds it in
  * a moment and sends it with the task over the control connection. The receive started last tends to end last, so a
- * task that waits for several waits for that one. Does not touch the filesystem. */
+ * task that waits for several waits for that one. Publication, failure, and cancellation of the receive wake the
+ * tasks that wait for it (vine_schedule_wake_file()). Does not touch the filesystem. */
 uint64_t vine_manager_data_service_receiving_inline(struct vine_manager *manager, struct vine_file *file);
 
 /* Handle the header line of a Worker's reply to an inline request, "inline-data <name> <length> <mode>" or
