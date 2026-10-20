@@ -4,6 +4,7 @@ This software is distributed under the GNU General Public License.
 See the file COPYING for details.
 */
 
+#include <errno.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -21,6 +22,8 @@ See the file COPYING for details.
 
 static char *vine_runtime_info_path = "vine-run-info";
 static char *vine_runtime_info_template = "%Y-%m-%dT%H%M%S";
+/* Whether the template is the default, which names a directory by the second it was created in. */
+static int vine_runtime_info_template_is_default = 1;
 
 static struct list *known_staging_dirs = NULL;
 
@@ -52,6 +55,27 @@ void register_staging_dir(const char *path)
 	}
 
 	list_push_head(known_staging_dirs, xxstrdup(path));
+}
+
+/* Create a directory that no other manager uses, at path or, when path exists, at path.1, path.2, and so on. Return
+ * the path created, or NULL on failure. Managers created in the same second in one directory, by one process or by
+ * several, would otherwise share the directory that the default template names, and the first manager deleted would
+ * delete the staging directory of the others. */
+static char *create_unique_dir(const char *path)
+{
+	if (!create_dir_parents(path, 0755)) {
+		return NULL;
+	}
+	for (int suffix = 0;; suffix++) {
+		char *candidate = suffix ? string_format("%s.%d", path, suffix) : xxstrdup(path);
+		if (mkdir(candidate, 0755) == 0) {
+			return candidate;
+		}
+		free(candidate);
+		if (errno != EEXIST) {
+			return NULL;
+		}
+	}
 }
 
 char *vine_runtime_directory_create()
@@ -89,11 +113,18 @@ char *vine_runtime_directory_create()
 		runtime_dir = tmp;
 	}
 
-	setenv("VINE_RUNTIME_INFO_DIR", runtime_dir, 1);
-	if (!create_dir(runtime_dir, 0755)) {
+	if (vine_runtime_info_template_is_default) {
+		char *unique = create_unique_dir(runtime_dir);
+		free(runtime_dir);
+		if (!unique) {
+			return NULL;
+		}
+		runtime_dir = unique;
+	} else if (!create_dir(runtime_dir, 0755)) {
 		free(runtime_dir);
 		return NULL;
 	}
+	setenv("VINE_RUNTIME_INFO_DIR", runtime_dir, 1);
 
 	char pabs[PATH_MAX];
 	path_absolute(runtime_dir, pabs, 0);
@@ -185,4 +216,5 @@ void vine_set_runtime_info_template(const char *template)
 {
 	assert(template);
 	vine_runtime_info_template = xxstrdup(template);
+	vine_runtime_info_template_is_default = 0;
 }
