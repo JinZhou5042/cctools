@@ -1252,17 +1252,20 @@ int vine_manager_release_random_worker(struct vine_manager *q)
 	struct vine_worker_info *w;
 	int iteration;
 
+	struct vine_worker_info *chosen = 0;
 	HASH_TABLE_ITERATE_RANDOM_START(q->worker_table, iteration, offset_bookkeep, key, w)
 	{
-		if (!w) {
-			continue;
+		if (w) {
+			chosen = w;
+			break;
 		}
+	}
 
-		/* evict this worker */
-		debug(D_VINE | D_NOTICE, "Intentionally evicting worker %s", w->hostname);
-		release_worker(q, w);
+	/* Releasing a worker can iterate the worker table, so the worker is released after the iteration. */
+	if (chosen) {
+		debug(D_VINE | D_NOTICE, "Intentionally evicting worker %s", chosen->hostname);
+		release_worker(q, chosen);
 		removed = 1;
-		break;
 	}
 
 	return removed;
@@ -4033,6 +4036,9 @@ static void ask_for_workers_updates(struct vine_manager *q)
 	int iteration;
 	timestamp_t current_time = timestamp_get();
 
+	/* Removing a worker changes worker_table, so failed workers are removed after the iteration. */
+	struct list *failed = list_create();
+
 	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
 	{
 
@@ -4043,7 +4049,7 @@ static void ask_for_workers_updates(struct vine_manager *q)
 			if (!strcmp(w->hostname, "unknown")) {
 				if ((int)((current_time - w->start_time) / 1000000) >= q->keepalive_timeout) {
 					debug(D_VINE, "Removing worker %s (%s): hasn't sent its initialization in more than %d s", w->hostname, w->addrport, q->keepalive_timeout);
-					handle_worker_failure(q, w);
+					list_push_tail(failed, w);
 				}
 				continue;
 			}
@@ -4061,7 +4067,7 @@ static void ask_for_workers_updates(struct vine_manager *q)
 				if (last_update_elapsed_time >= q->keepalive_interval) {
 					if (vine_manager_send(q, w, "check\n") < 0) {
 						debug(D_VINE, "Failed to send keepalive check to worker %s (%s).", w->hostname, w->addrport);
-						handle_worker_failure(q, w);
+						list_push_tail(failed, w);
 					} else {
 						debug(D_VINE, "Sent keepalive check to worker %s (%s)", w->hostname, w->addrport);
 						w->last_update_msg_time = current_time;
@@ -4078,12 +4084,17 @@ static void ask_for_workers_updates(struct vine_manager *q)
 								w->hostname,
 								w->addrport,
 								q->keepalive_timeout);
-						handle_worker_failure(q, w);
+						list_push_tail(failed, w);
 					}
 				}
 			}
 		}
 	}
+
+	while ((w = list_pop_head(failed))) {
+		handle_worker_failure(q, w);
+	}
+	list_delete(failed);
 }
 
 /*
@@ -5894,14 +5905,32 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 
 		// get updates for watched files.
 		if (hash_table_size(q->workers_with_watched_file_updates)) {
+			/* Receiving the updates also handles other messages of a worker, which can iterate the worker table or
+			 * remove a worker, so the workers that announced updates are collected by key before any is asked. */
+			struct list *keys = list_create();
 			struct vine_worker_info *w;
 			char *key;
 			int iteration;
-			HASH_TABLE_ITERATE(q->worker_table, iteration, key, w) // should this be workers_with_watched_file_updates?
+			HASH_TABLE_ITERATE(q->workers_with_watched_file_updates, iteration, key, w)
 			{
-				get_watched_file_updates(q, w);
-				hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
+				list_push_tail(keys, xxstrdup(key));
 			}
+			hash_table_clear(q->workers_with_watched_file_updates, 0);
+			int asked = 0;
+			while ((key = list_pop_head(keys))) {
+				w = hash_table_lookup(q->worker_table, key);
+				if (w) {
+					/* Workers left when the step's budget expires are asked in the next step. */
+					if (asked && budget_expired(&q->round)) {
+						hash_table_insert(q->workers_with_watched_file_updates, key, w);
+					} else {
+						get_watched_file_updates(q, w);
+						asked++;
+					}
+				}
+				free(key);
+			}
+			list_delete(keys);
 		}
 
 		// check if we need to kill any workers if the user has specified an eviction interval.
@@ -6230,16 +6259,23 @@ int vine_workers_shutdown(struct vine_manager *q, int n)
 	if (n < 1)
 		n = hash_table_size(q->worker_table);
 
-	// send worker the "exit" msg
+	/* Removing a worker changes worker_table, so the workers are chosen first and shut down after the iteration. */
+	struct list *chosen = list_create();
 	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
 	{
 		if (i >= n)
 			break;
 		if (w->tasks_committed == 0) {
-			vine_manager_shut_down_worker(q, w);
+			list_push_tail(chosen, w);
 			i++;
 		}
 	}
+
+	// send worker the "exit" msg
+	while ((w = list_pop_head(chosen))) {
+		vine_manager_shut_down_worker(q, w);
+	}
+	list_delete(chosen);
 
 	return i;
 }
