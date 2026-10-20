@@ -5979,6 +5979,13 @@ struct vine_task *send_library_to_worker(struct vine_manager *q, struct vine_wor
 		return t;
 	} else {
 		/* if failure, tasks was handled by handle_failure(...) according to result. */
+		if (result == VINE_APP_FAILURE) {
+			/* The instance could not be sent because of the library itself, such as an input file that no longer
+			 * exists. That is a failure to start: it counts toward max_library_retries and waits for the transient
+			 * error interval, so the template is not sent again at once by every scheduling attempt. */
+			original->library_failed_count++;
+			original->time_when_last_failure = timestamp_get();
+		}
 		return 0;
 	}
 }
