@@ -4282,11 +4282,13 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 			break;
 		}
 
-		/* Tasks left when the step's budget expires are considered in the next step, from this cursor. */
-		if (iter_count > 0 && budget_expired(&q->round)) {
+		/* Tasks left when the step's budget expires are considered in the next step, from this cursor. A blocked task
+		 * that waits for an event costs O(1), without the library lookup of the checks below, so the clock is read
+		 * before each task that is checked and only every 64 tasks among those that wait. */
+		int waits = vine_schedule_task_waits(q, t);
+		if (iter_count > 0 && (!waits || iter_count % 64 == 0) && budget_expired(&q->round)) {
 			break;
 		}
-		int waits = vine_schedule_task_waits(q, t);
 		iter_count++;
 
 		if (waits) {
