@@ -17,7 +17,7 @@ we ourselves work before yielding. It is not a timeout on another party.
 
 /** A time budget: the time at which it expires. */
 struct budget {
-	timestamp_t end; /**< Time in microseconds since the epoch at which the budget expires. */
+	timestamp_t end; /**< Time of @ref timestamp_monotonic at which the budget expires. */
 };
 
 /** Start a budget that expires after the given length.

@@ -27,6 +27,13 @@ typedef UINT64_T timestamp_t;
 
 timestamp_t timestamp_get(void);
 
+/** Get the time of a clock that never steps, for measuring durations and deadlines. Changes of the time of day, which
+make @ref timestamp_get jump forward or back, do not affect it.
+@return The time in microseconds since an arbitrary start, which is fixed while the system runs.
+*/
+
+timestamp_t timestamp_monotonic(void);
+
 /** Formats timestamp_t ts according to the format specification fmt and stores the result as a string in array buf.
 @param buf The array that holds the formatted string.
 @param size The size of array buf.

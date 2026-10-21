@@ -1127,9 +1127,10 @@ the tail of the queue is written, so every message read here is asynchronous, an
 static int flush_worker_queue_reading(struct vine_manager *q, struct vine_worker_info *w, char *line, size_t length)
 {
 	time_t stoptime = time(0) + q->long_timeout;
+	timestamp_t deadline = timestamp_monotonic() + (timestamp_t)q->long_timeout * 1000000;
 	int result = 1;
 	while (!link_queue_empty(w->queue)) {
-		if (!link_queue_send(w->queue, (timestamp_t)stoptime * 1000000) || link_queue_empty(w->queue)) {
+		if (!link_queue_send(w->queue, deadline) || link_queue_empty(w->queue)) {
 			break;
 		}
 		struct link_info info = {w->link, LINK_READ | LINK_WRITE, 0};

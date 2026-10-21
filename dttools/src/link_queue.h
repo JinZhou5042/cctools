@@ -135,7 +135,7 @@ int link_queue_push_shared(struct link_queue *q, struct link_queue_shared *s);
 /** Write what the link takes without waiting, until the queue is empty, the link takes no more, or the deadline
 passes. At least one write is attempted, so each call makes progress when the link has room.
 @param q The queue.
-@param deadline The time in microseconds since the epoch after which no further write is started.
+@param deadline The time of @ref timestamp_monotonic after which no further write is started.
 @return One if the queue is intact, empty or waiting for room, or zero if it has failed.
 */
 int link_queue_send(struct link_queue *q, timestamp_t deadline);

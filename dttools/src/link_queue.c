@@ -148,7 +148,7 @@ static void append(struct link_queue *q, struct link_queue_entry *e)
 {
 	if (!q->head) {
 		q->head = e;
-		q->last_progress = timestamp_get();
+		q->last_progress = timestamp_monotonic();
 	} else {
 		q->tail->next = e;
 	}
@@ -504,7 +504,7 @@ static ssize_t write_head(struct link_queue *q, time_t stoptime, int *full)
 	if (n > 0) {
 		*full = (size_t)n < offered;
 		e->offset += n;
-		q->last_progress = timestamp_get();
+		q->last_progress = timestamp_monotonic();
 		if (entry_done(e)) {
 			q->head = e->next;
 			if (!q->head) {
@@ -528,7 +528,7 @@ int link_queue_send(struct link_queue *q, timestamp_t deadline)
 {
 	while (!q->failed && q->head) {
 		int full = 0;
-		if (write_head(q, LINK_NOWAIT, &full) < 0 || full || timestamp_get() >= deadline) {
+		if (write_head(q, LINK_NOWAIT, &full) < 0 || full || timestamp_monotonic() >= deadline) {
 			break;
 		}
 	}
@@ -567,5 +567,5 @@ int link_queue_stalled(struct link_queue *q, int seconds)
 	if (seconds <= 0 || !q->head) {
 		return 0;
 	}
-	return timestamp_get() - q->last_progress >= (timestamp_t)seconds * 1000000;
+	return timestamp_monotonic() - q->last_progress >= (timestamp_t)seconds * 1000000;
 }
