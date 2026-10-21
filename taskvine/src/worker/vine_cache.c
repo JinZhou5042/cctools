@@ -40,11 +40,12 @@ See the file COPYING for details.
 #include <unistd.h>
 
 /*
-A transfer from another worker fails when it connects or receives nothing for this many seconds. A worker whose host
-hangs leaves its connections open without sending anything, and the fetching worker then reports the file as invalid,
-so that the manager can find another source or recreate the file, instead of waiting for a fixed deadline.
+A transfer from another worker fails when it connects or receives nothing for T = 2X seconds, where X is the response
+time of the worker (--response-timeout), which its peers share. A worker whose host hangs leaves its connections open
+without sending anything, and the fetching worker then reports the file as invalid, so that the manager can find
+another source or recreate the file, instead of waiting for a fixed deadline.
 */
-#define VINE_PEER_TRANSFER_TIMEOUT 60
+#define VINE_PEER_TRANSFER_TIMEOUT vine_worker_options_idle_timeout(options)
 
 struct vine_cache {
 	struct hash_table *table;
@@ -556,11 +557,13 @@ Transfer a single input file from a url to the local transfer path via curl.
 -S Show errors.
 -L Follow redirects as needed.
 --stderr Send errors to /dev/stdout so that they are observed by popen.
+--connect-timeout, -y, -Y Fail when connecting takes, or the transfer makes no progress for, the idle timeout T.
 */
 
 static int do_curl_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *transfer_path, const char *cache_path, char **error_message)
 {
-	char *command = string_format("curl -sSL --stderr /dev/stdout -o \"%s\" \"%s\"", transfer_path, f->source);
+	int timeout = vine_worker_options_idle_timeout(options);
+	char *command = string_format("curl -sSL --stderr /dev/stdout --connect-timeout %d -y %d -Y 1 -o \"%s\" \"%s\"", timeout, timeout, transfer_path, f->source);
 	int result = do_internal_command(c, command, error_message);
 	free(command);
 

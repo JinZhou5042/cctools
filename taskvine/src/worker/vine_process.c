@@ -365,6 +365,12 @@ int vine_process_execute(struct vine_process *p)
 			p->library_read_link = link_attach_to_fd(pipe_out[0]);
 			p->library_write_link = link_attach_to_fd(pipe_in[1]);
 
+			/* The pipes do not block, so a wait on the library fails when it makes no progress for T. */
+			link_nonblocking(p->library_read_link, 1);
+			link_nonblocking(p->library_write_link, 1);
+			link_set_idle_timeout(p->library_read_link, vine_worker_options_idle_timeout(options));
+			link_set_idle_timeout(p->library_write_link, vine_worker_options_idle_timeout(options));
+
 			/* Close the ends of the pipes that the parent process won't use. */
 			close(pipe_in[0]);
 			close(pipe_out[1]);

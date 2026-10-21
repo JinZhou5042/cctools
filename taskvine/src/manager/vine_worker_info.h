@@ -64,6 +64,10 @@ struct vine_worker_info {
 	char *transfer_url;       /* worker(ip)?://transfer_addr:transfer_port */
 	int  transfer_connect_back; /* The Manager cannot reach the transfer port, so the Worker connects back to send files. */
 
+	/* Response time X in seconds that the worker declared (info response-timeout), or zero before it did. The manager
+	 * judges the worker failed when it makes no progress for T = 2X, see vine_manager_worker_timeout(). */
+	int  response_timeout;
+
 	/* Scratch space of vine_schedule_task_to_worker(): bytes of the task's inputs cached on this worker, and whether it
 	 * holds the task's first input without a transfer source, valid only while schedule_stamp equals the manager's
 	 * schedule_stamp. */

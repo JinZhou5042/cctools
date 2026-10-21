@@ -37,6 +37,11 @@ struct vine_worker_options {
 	/* Maximum time to attempt sending/receiving any given file or message. */
 	int active_timeout;
 
+	/* Response time X in seconds: the longest this worker stays silent while it works, declared to the manager when
+	 * it connects. A link to another party fails when the party makes no progress for T = 2X, see
+	 * vine_worker_options_idle_timeout(). */
+	int response_timeout;
+
 	/* Initial value for backoff interval (in seconds) when worker fails to connect to a manager. */
 	int init_backoff_interval;
 
@@ -122,6 +127,9 @@ struct vine_worker_options * vine_worker_options_create();
 void vine_worker_options_show_help( const char *cmd, struct vine_worker_options *options );
 void vine_worker_options_get( struct vine_worker_options *options, int argc, char *argv[] );
 void vine_worker_options_delete( struct vine_worker_options *options );
+
+/* Return T = 2X in seconds, the idle timeout of every link of the worker. */
+int vine_worker_options_idle_timeout( struct vine_worker_options *options );
 
 #endif
 

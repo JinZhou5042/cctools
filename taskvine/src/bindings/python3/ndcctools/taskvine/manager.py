@@ -982,8 +982,8 @@ class Manager(object):
     # - "hungry-minimum" Mimimum number of tasks to consider manager not hungry. (default=10)
     # - "hungry-minimum-factor" Queue is hungry if number of waiting tasks is less than hungry-minumum-factor x (number of workers) | 2 |
     # - "immediate-recovery" If set to 1, create recovery tasks for temporary files as soon as their worker disconnects. Otherwise, create recovery tasks only if the temporary files are used as input when trying to dispatch another task.
-    # - "keepalive-interval" Set the minimum number of seconds to wait before sending new keepalive checks to workers. (default=300)
-    # - "keepalive-timeout" Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. (default=30)
+    # - "keepalive-interval" Set the minimum number of seconds to wait before sending new keepalive checks to workers. (default=T/2, see response-timeout)
+    # - "keepalive-timeout" Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. (default=T, see response-timeout)
     # - "long-timeout" Set the minimum timeout in seconds when sending a large message to a single worker. (default=3600)
     # - "max-retrievals" Sets the max number of tasks to retrieve per manager wait(). If less than 1, the manager prefers to retrieve all completed tasks before dispatching new tasks to workers. (default=1)
     # - "min-transfer-timeout" Set the minimum number of seconds to wait for files to be transferred to or from a worker. (default=10)
@@ -992,6 +992,7 @@ class Manager(object):
     # - "proportional-resources" If set to 0, do not assign resources proportionally to tasks. The default is to use proportions.
     # - "proportional-whole-tasks" Round up resource proportions such that only an integer number of tasks could be fit in the worker. The default is to use proportions.
     # - "ramp-down-heuristic" If set to 1 and there are more workers than tasks waiting, then tasks are allocated all the free resources of a worker large enough to run them. If monitoring watchdog is not enabled, then this heuristic has no effect. (default=0)
+    # - "response-timeout" The response time X in seconds of a worker that has not declared its own (vine_worker --response-timeout): a worker that makes no progress for T = 2X is removed. (default=15)
     # - "resource-submit-multiplier" Treat each worker as having ({cores,memory,gpus} * multiplier) when submitting tasks. This allows for tasks to wait at a worker rather than the manager. (default = 1.0)
     # - "short-timeout" Set the minimum timeout when sending a brief message to a single worker. (default=5s)
     # - "transfer-outlier-factor" Transfer that are this many times slower than the average will be terminated.  (default=10x)

@@ -910,6 +910,8 @@ static void report_worker_ready(struct link *manager)
 		send_async_message(manager, "info connect-back 1\n");
 	}
 	send_async_message(manager, "info worker-end-time %" PRId64 "\n", (int64_t)DIV_INT_ROUND_UP(options->end_time, USECOND));
+	/* Declare the response time X, by which the manager judges this worker. */
+	send_async_message(manager, "info response-timeout %d\n", options->response_timeout);
 
 	if (options->factory_name) {
 		send_async_message(manager, "info from-factory %s\n", options->factory_name);
@@ -1978,15 +1980,18 @@ static int check_library_startup(struct vine_process *p)
 	char buffer_len[VINE_LINE_MAX];
 	int length = 0;
 
+	/* The library began its message on a pipe that does not block, so read the rest of it within T in total. */
+	time_t stoptime = time(0) + vine_worker_options_idle_timeout(options);
+
 	/* Read a line that gives the length of the response message. */
-	if (!link_readline(p->library_read_link, buffer_len, VINE_LINE_MAX, LINK_NOWAIT)) {
+	if (!link_readline(p->library_read_link, buffer_len, VINE_LINE_MAX, stoptime)) {
 		return 0;
 	}
 	sscanf(buffer_len, "%d", &length);
 
 	/* Now read that length of message and null-terminate it. */
 	char buffer[length + 1];
-	if (link_read(p->library_read_link, buffer, length, LINK_NOWAIT) <= 0) {
+	if (link_read(p->library_read_link, buffer, length, stoptime) <= 0) {
 		return 0;
 	}
 	buffer[length] = 0;
@@ -2153,6 +2158,7 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		struct budget round;
 		budget_start(&round, ROUND_BUDGET);
+		timestamp_t round_start = timestamp_monotonic();
 
 		/* Handle the messages already in the link's buffer until the budget expires, as the manager does, so that a
 		 * long task, such as one with thousands of inputs, is read at once rather than one line per round. */
@@ -2250,6 +2256,12 @@ static void vine_worker_serve_manager(struct link *manager)
 		if (list_size(procs_waiting) > 0 || itable_size(procs_table) > 0 || itable_size(procs_complete) > 0) {
 			reset_idle_timer();
 		}
+
+		/* A round longer than X breaks the response time this worker declared to the manager. */
+		timestamp_t round_us = timestamp_monotonic() - round_start;
+		if (round_us > (timestamp_t)options->response_timeout * USECOND) {
+			debug(D_NOTICE, "a round of the main loop took %.3f s, longer than the response time %d s", round_us / 1e6, options->response_timeout);
+		}
 	}
 }
 
@@ -2280,6 +2292,9 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 		fprintf(stderr, "couldn't connect to %s:%d: %s\n", current_manager_address->addr, port, strerror(errno));
 		return 0;
 	}
+
+	/* Every wait on the manager fails when it makes no progress for T, within the stoptime of each call. */
+	link_set_idle_timeout(manager, vine_worker_options_idle_timeout(options));
 
 	if (options->ssl_requested && !use_ssl) {
 		fprintf(stderr, "vine_worker: --ssl was given, but manager %s:%d is not using ssl.\n", host, port);

@@ -17,4 +17,9 @@ worker, and catalog, but should not be visible to the public user API.
 
 #define VINE_LINE_MAX 4096       /**< Maximum length of a vine message line. */
 
+/* Default response time X in seconds of a healthy manager or worker: the longest it stays silent while it works. A
+ * party that makes no progress for T = 2X is judged failed. A worker declares its X to the manager when it connects
+ * (info response-timeout), and the manager's response-timeout applies until then. */
+#define VINE_DEFAULT_RESPONSE_TIMEOUT 15
+
 #endif

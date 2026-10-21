@@ -593,7 +593,8 @@ static int job_submit(struct vine_manager *manager, struct transfer_job *job)
 {
 	struct vine_manager_data_service *ds = manager->ds;
 	job->owner = ds;
-	job->timeout = manager->minimum_transfer_timeout;
+	/* A transfer fails when its worker makes no progress for T. The source is still a valid worker here. */
+	job->timeout = vine_manager_worker_timeout(manager, job->source);
 	job->password = manager->password ? strdup(manager->password) : NULL;
 	job_track(ds, job);
 	if (!job->request && !job_start(ds, job)) {
@@ -1053,9 +1054,9 @@ static void prepare_connection(struct vine_manager *manager, struct transfer_job
 	if (!ds->next_token) {
 		ds->next_token = 1;
 	}
-	/* The Worker answers the request and connects within the minimum transfer timeout. Its connection may then wait in
-	 * the listener backlog while every request slot is busy, so it is allowed another one. */
-	job->deadline = time(NULL) + 2 * manager->minimum_transfer_timeout;
+	/* The Worker answers the request and connects within T. Its connection may then wait in the listener backlog while
+	 * every request slot is busy, so it is allowed another T. */
+	job->deadline = time(NULL) + 2 * vine_manager_worker_timeout(manager, worker);
 }
 
 /* Count a started receive over a connection like a peer transfer, and ask a Worker that connects back to connect. */

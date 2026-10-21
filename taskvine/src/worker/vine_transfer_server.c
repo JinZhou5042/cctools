@@ -61,6 +61,9 @@ static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
 {
 	change_process_title("vine_worker [transfer]");
 
+	/* The reply fails when the peer takes nothing for T, within the outer stoptimes below. */
+	link_set_idle_timeout(lnk, vine_worker_options_idle_timeout(options));
+
 	if (options->password) {
 		if (!link_auth_password(lnk, options->password, time(0) + command_timeout)) {
 			debug(D_VINE, "transfer server: could not authenticate peer worker via password!");
@@ -186,6 +189,7 @@ int vine_transfer_server_connect_back(struct vine_cache *cache, struct link *man
 			change_process_title("vine_worker [connect back]");
 			struct link *lnk = link_connect(ip, port, time(0) + VINE_CONNECT_BACK_CONNECT_SECONDS);
 			if (lnk) {
+				link_set_idle_timeout(lnk, vine_worker_options_idle_timeout(options));
 				if ((!options->password || link_auth_password(lnk, options->password, time(0) + command_timeout)) &&
 						link_printf(lnk, time(0) + command_timeout, "connect-back %" PRIu64 "\n", token) >= 0) {
 					vine_transfer_serve_request(lnk, cache, time(0) + VINE_CONNECT_BACK_REQUEST_SECONDS);
