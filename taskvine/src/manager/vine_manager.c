@@ -4653,6 +4653,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->file_source_max_transfers = VINE_FILE_SOURCE_MAX_TRANSFERS;
 	q->worker_source_max_transfers = VINE_WORKER_SOURCE_MAX_TRANSFERS;
+	q->worker_source_max_checkpoints = VINE_WORKER_SOURCE_MAX_CHECKPOINTS;
 	q->perf_log_interval = VINE_PERF_LOG_INTERVAL;
 
 	q->temp_replica_count = 1;
@@ -6625,7 +6626,8 @@ static const char *const vine_tune_names[] = {
 	"resource-submit-multiplier", "asynchrony-multiplier", "short-timeout", "temp-replica-count",
 	"transfer-outlier-factor", "transfer-replica-per-cycle", "transfer-temps-recovery",
 	"transient-error-interval", "wait-for-workers", "max-workers", "worker-retrievals",
-	"file-source-max-transfers", "worker-source-max-transfers", "vault-disk-limit", "vault-memory-limit", "vault-shared-min-bytes",
+	"file-source-max-transfers", "worker-source-max-transfers", "worker-source-max-checkpoints", "vault-disk-limit",
+	"vault-memory-limit", "vault-shared-min-bytes",
 	"load-from-shared-filesystem", "perf-log-interval", "update-interval", "task-groups",
 	"resource-management-interval", "max-task-stdout-storage", "max-new-workers", "large-task-check-interval",
 	"option-blocklist-slow-workers-timeout", "watch-library-logfiles", "sandbox-grow-factor",
@@ -6747,6 +6749,9 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "worker-source-max-transfers")) {
 		q->worker_source_max_transfers = MAX(1, (int)value);
+
+	} else if (!strcmp(name, "worker-source-max-checkpoints")) {
+		q->worker_source_max_checkpoints = MAX(1, (int)value);
 
 	} else if (!strcmp(name, "vault-disk-limit")) {
 		/* Gigabytes of checkpoint data the data service vault may hold. Zero means unlimited. */

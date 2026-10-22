@@ -119,6 +119,10 @@ struct vine_worker_info {
 
 	int incoming_xfer_counter;
 	int outgoing_xfer_counter;
+	/* Checkpoints of the data service that this worker sends: copies to the vault's shared directory and receives over
+	 * connections. They are counted apart from outgoing_xfer_counter and limited by worker-source-max-checkpoints, so
+	 * a worker that anchors its outputs still serves the tasks that read them. */
+	int outgoing_checkpoints;
 
 	/* The records of current_transfer_table with this worker as destination or source, linked through the records,
 	 * so the records of a removed worker are found without a pass over the table. */

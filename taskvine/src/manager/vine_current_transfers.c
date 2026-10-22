@@ -23,6 +23,7 @@ struct vine_transfer_pair {
 	struct vine_worker_info *source_worker;
 	char *source_url;
 	char *cachename;		      /* The file that the destination receives. */
+	int checkpoint;			      /* Set for a checkpoint, counted in the source's outgoing_checkpoints. */
 	timestamp_t start_time;		      /* When the transfer was requested, to tell whether its source spoke since. */
 	char *id;			      /* A copy of the record's key in current_transfer_table. */
 	struct vine_transfer_pair *dest_prev; /* Neighbors in dest_worker->incoming_transfers. */
@@ -31,9 +32,10 @@ struct vine_transfer_pair {
 	struct vine_transfer_pair *source_next;
 };
 
-static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename, const char *id)
+static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename, const char *id, int checkpoint)
 {
 	struct vine_transfer_pair *t = xxcalloc(1, sizeof(struct vine_transfer_pair));
+	t->checkpoint = checkpoint;
 	t->dest_worker = dest_worker;
 	t->source_worker = source_worker;
 	t->source_url = source_url ? xxstrdup(source_url) : 0;
@@ -49,8 +51,12 @@ static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_i
 		}
 		dest_worker->incoming_transfers = t;
 	}
-	if (t->source_worker) {
+	if (t->source_worker && t->checkpoint) {
+		t->source_worker->outgoing_checkpoints++;
+	} else if (t->source_worker) {
 		t->source_worker->outgoing_xfer_counter++;
+	}
+	if (t->source_worker) {
 		t->source_next = source_worker->outgoing_transfers;
 		if (t->source_next) {
 			t->source_next->source_prev = t;
@@ -75,8 +81,12 @@ static void vine_transfer_pair_delete(struct vine_transfer_pair *p)
 				p->dest_next->dest_prev = p->dest_prev;
 			}
 		}
-		if (p->source_worker) {
+		if (p->source_worker && p->checkpoint) {
+			p->source_worker->outgoing_checkpoints--;
+		} else if (p->source_worker) {
 			p->source_worker->outgoing_xfer_counter--;
+		}
+		if (p->source_worker) {
 			if (p->source_prev) {
 				p->source_prev->source_next = p->source_next;
 			} else {
@@ -114,18 +124,28 @@ static void update_url_count(struct vine_manager *q, const char *source_url, int
 	}
 }
 
-// add a current transaction to the transfer table
-char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename)
+static char *add_record(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename, int checkpoint)
 {
 	cctools_uuid_t uuid;
 	cctools_uuid_create(&uuid);
 
 	char *transfer_id = strdup(uuid.str);
-	struct vine_transfer_pair *t = vine_transfer_pair_create(dest_worker, source_worker, source_url, cachename, transfer_id);
+	struct vine_transfer_pair *t = vine_transfer_pair_create(dest_worker, source_worker, source_url, cachename, transfer_id, checkpoint);
 
 	hash_table_insert(q->current_transfer_table, transfer_id, t);
 	update_url_count(q, t->source_url, 1);
 	return transfer_id;
+}
+
+// add a current transaction to the transfer table
+char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename)
+{
+	return add_record(q, dest_worker, source_worker, source_url, cachename, 0);
+}
+
+char *vine_current_transfers_add_checkpoint(struct vine_manager *q, struct vine_worker_info *source_worker, const char *source_url, const char *cachename)
+{
+	return add_record(q, NULL, source_worker, source_url, cachename, 1);
 }
 
 // remove a completed transaction from the transfer table - i.e. open the source to an additional transfer

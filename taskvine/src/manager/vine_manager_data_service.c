@@ -1179,14 +1179,14 @@ static void prepare_connection(struct vine_manager *manager, struct transfer_job
 	job->deadline = time(NULL) + 2 * manager->minimum_transfer_timeout;
 }
 
-/* Count a started receive over a connection like a peer transfer, and ask a Worker that connects back to connect. */
+/* Count a started receive over a connection among the checkpoints its Worker sends, and ask a Worker that connects back
+ * to connect. */
 static void start_connection(struct vine_manager *manager, struct transfer_job *job, struct vine_worker_info *worker)
 {
 	struct vine_manager_data_service *ds = manager->ds;
-	/* Source selection sees the Worker's outgoing load, transfers and bytes, because the receive shares the Worker's
-	 * link with its peer transfers. The record has no destination Worker and never penalizes the source on failure. */
+	/* The record has no destination Worker and never penalizes the source on failure. */
 	char *source = string_format("%s/%s", worker->transfer_url, job->name);
-	job->transfer_id = vine_current_transfers_add(manager, NULL, worker, source, job->name);
+	job->transfer_id = vine_current_transfers_add_checkpoint(manager, worker, source, job->name);
 	free(source);
 	/* The Worker connects to the data port and sends the token before it answers the native get. */
 	if (job->token && vine_manager_send(manager, worker, "connect-back %" PRIu64 "\n", job->token) < 0) {
@@ -1221,8 +1221,8 @@ static void send_inline_request(struct vine_manager *manager, struct transfer_jo
 }
 
 /* Ask the source Worker to copy a large file to the shared directory in the background. Its answer links the copy into
- * the vault (vine_manager_data_service_copy_reply()). The copy is counted like a peer transfer from the Worker, because
- * it shares the Worker's link. A request that cannot be sent fails its receive at once. */
+ * the vault (vine_manager_data_service_copy_reply()). The copy is counted among the checkpoints its Worker sends. A
+ * request that cannot be sent fails its receive at once. */
 static void send_copy_request(struct vine_manager *manager, struct transfer_job *job, struct vine_worker_info *worker)
 {
 	struct vine_manager_data_service *ds = manager->ds;
@@ -1237,7 +1237,7 @@ static void send_copy_request(struct vine_manager *manager, struct transfer_job 
 		return;
 	}
 	char *source = string_format("%s/%s", worker->transfer_url, job->name);
-	job->transfer_id = vine_current_transfers_add(manager, NULL, worker, source, job->name);
+	job->transfer_id = vine_current_transfers_add_checkpoint(manager, worker, source, job->name);
 	free(source);
 	struct list *requests = itable_lookup(ds->copy_requests, (uintptr_t)worker);
 	if (!requests) {
@@ -1481,12 +1481,16 @@ typedef enum {
 	RECEIVE_REQUIRED = 2,
 } receive_kind_t;
 
-/* Return a Worker that holds a READY replica of the file and can answer an inline request for it, starting from a random
- * holder, or NULL. The Worker reads the file in its main loop and answers over its control connection, not from its
- * transfer server, so the limits on a source's transfers do not apply: a Worker that sends a large file answers at once.
- * Under those limits, a small result whose Worker was sending a 64 MB checkpoint waited for that checkpoint, up to a
- * minute into a busy vault disk. */
-static struct vine_worker_info *find_inline_source(struct vine_manager *manager, const char *cachename)
+/* Return a Worker that holds a READY replica of the file and can send it to the vault, starting from a random holder, or
+ * NULL. Neither kind of checkpoint counts against the limits on the transfers that a source serves to other Workers,
+ * so a Worker that anchors its outputs still serves the tasks that read them, and the reverse. A Worker answers an
+ * inline request in its main loop over its control connection, without limit: under the transfer limits, a small result
+ * whose Worker was sending a 64 MB checkpoint waited for that checkpoint, up to a minute into a busy vault disk. A large
+ * file, copied to the shared directory or received over a connection, needs a Worker that sends fewer than
+ * worker-source-max-checkpoints checkpoints and had no transfer failure within the transient error interval. While
+ * checkpoints counted among a source's transfers, one 128 MiB copy held every reader of the source back for its 16 s,
+ * and readers held back anchoring. */
+static struct vine_worker_info *find_checkpoint_source(struct vine_manager *manager, const char *cachename, int inline_receive)
 {
 	struct set *workers = hash_table_lookup(manager->file_worker_table, cachename);
 	if (!workers || set_size(workers) < 1) {
@@ -1498,6 +1502,9 @@ static struct vine_worker_info *find_inline_source(struct vine_manager *manager,
 	SET_ITERATE_RANDOM_START(workers, offset_bookkeep, iteration, worker)
 	{
 		if (worker->pending_removal || vine_worker_source_is_suspect(worker)) {
+			continue;
+		}
+		if (!inline_receive && (!worker->transfer_port_active || worker->outgoing_checkpoints >= manager->worker_source_max_checkpoints || timestamp_get() - worker->last_transfer_failure < manager->transient_error_interval)) {
 			continue;
 		}
 		struct vine_file_replica *replica = vine_file_replica_table_lookup(worker, cachename);
@@ -1554,7 +1561,7 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 	if (kind != RECEIVE_REQUIRED && ds->vault_limit > 0 && ds->vault_used + ds->vault_reserved + size > ds->vault_limit) {
 		return VINE_CHECKPOINT_FULL;
 	}
-	struct vine_worker_info *worker = inline_receive ? find_inline_source(manager, file->cached_name) : vine_file_replica_table_find_worker(manager, file->cached_name);
+	struct vine_worker_info *worker = find_checkpoint_source(manager, file->cached_name, inline_receive);
 	if (!worker || strlen(file->cached_name) >= VINE_DATA_LINE_MAX / 3) {
 		return VINE_CHECKPOINT_NO_SOURCE;
 	}
