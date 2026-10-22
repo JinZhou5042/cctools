@@ -1481,6 +1481,33 @@ typedef enum {
 	RECEIVE_REQUIRED = 2,
 } receive_kind_t;
 
+/* Return a Worker that holds a READY replica of the file and can answer an inline request for it, starting from a random
+ * holder, or NULL. The Worker reads the file in its main loop and answers over its control connection, not from its
+ * transfer server, so the limits on a source's transfers do not apply: a Worker that sends a large file answers at once.
+ * Under those limits, a small result whose Worker was sending a 64 MB checkpoint waited for that checkpoint, up to a
+ * minute into a busy vault disk. */
+static struct vine_worker_info *find_inline_source(struct vine_manager *manager, const char *cachename)
+{
+	struct set *workers = hash_table_lookup(manager->file_worker_table, cachename);
+	if (!workers || set_size(workers) < 1) {
+		return NULL;
+	}
+	struct vine_worker_info *worker;
+	int offset_bookkeep;
+	int iteration;
+	SET_ITERATE_RANDOM_START(workers, offset_bookkeep, iteration, worker)
+	{
+		if (worker->pending_removal || vine_worker_source_is_suspect(worker)) {
+			continue;
+		}
+		struct vine_file_replica *replica = vine_file_replica_table_lookup(worker, cachename);
+		if (replica && replica->state == VINE_FILE_REPLICA_STATE_READY) {
+			return worker;
+		}
+	}
+	return NULL;
+}
+
 /* Admit a receive of a temporary file into the vault. */
 static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manager, struct vine_file *file, receive_kind_t kind, void (*complete)(void *, struct vine_file *, int), void *argument)
 {
@@ -1527,7 +1554,7 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 	if (kind != RECEIVE_REQUIRED && ds->vault_limit > 0 && ds->vault_used + ds->vault_reserved + size > ds->vault_limit) {
 		return VINE_CHECKPOINT_FULL;
 	}
-	struct vine_worker_info *worker = vine_file_replica_table_find_worker(manager, file->cached_name);
+	struct vine_worker_info *worker = inline_receive ? find_inline_source(manager, file->cached_name) : vine_file_replica_table_find_worker(manager, file->cached_name);
 	if (!worker || strlen(file->cached_name) >= VINE_DATA_LINE_MAX / 3) {
 		return VINE_CHECKPOINT_NO_SOURCE;
 	}
