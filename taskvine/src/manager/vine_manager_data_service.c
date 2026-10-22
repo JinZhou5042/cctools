@@ -1522,9 +1522,13 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 	if (kind == RECEIVE_URGENT && !inline_receive) {
 		return VINE_CHECKPOINT_BUSY;
 	}
-	/* A large file goes to the shared directory, which its Worker writes, while a copy slot is free, and otherwise over a
-	 * connection to the Manager, so the shared directory adds its bandwidth to the Manager's. */
-	int copy = !inline_receive && ds->shared_directory && size >= ds->shared_min_bytes && ds->copies_active < VINE_DATA_COPY_SLOTS;
+	/* A large file goes to the path with fewer receives in flight: a copy to the shared directory, which its Worker
+	 * writes, or a connection to the Manager, and a tie goes to the shared directory. Each path moves data at its own
+	 * rate while it holds a receive, so their bandwidths add, and the faster path empties sooner and takes more files.
+	 * Taking the copy whenever a copy slot was free left the Manager's link idle while every source copied, because a
+	 * source sends one large file at a time. */
+	int receiving = (int)slots_in_use(ds, 1);
+	int copy = !inline_receive && ds->shared_directory && size >= ds->shared_min_bytes && ds->copies_active < VINE_DATA_COPY_SLOTS && (receiving >= (int)VINE_DATA_RECEIVE_SLOTS || (int)ds->copies_active <= receiving);
 	if (inline_receive ? kind == RECEIVE_CHECKPOINT && ds->inline_flight + counted > VINE_DATA_INLINE_FLIGHT : !copy && slots_in_use(ds, 1) >= VINE_DATA_RECEIVE_SLOTS) {
 		return VINE_CHECKPOINT_BUSY;
 	}
