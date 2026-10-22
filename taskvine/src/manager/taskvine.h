@@ -1119,6 +1119,18 @@ so a range of two ports places both listening ports of the manager behind a fire
 */
 int vine_data_port(struct vine_manager *m);
 
+/** Keep large checkpoints of temporary files in a directory that the manager and every worker mount at the same path,
+such as a shared file system. The worker that holds such a file copies it there in the background, so the vault takes
+it without the manager's network link, and both add to the vault's bandwidth. A file that finds no free copy slot comes
+to the manager as before. The manager makes a directory of its own inside, deletes each copy with its vault entry, and
+removes the directory when it is deleted. Files of at least vault-shared-min-bytes go there (see @ref vine_tune,
+4 MiB by default).
+@param m A manager object
+@param path An existing directory on a file system that every worker mounts at the same path.
+@return One on success, zero on failure with errno set. The directory can be set once.
+*/
+int vine_set_vault_shared_directory(struct vine_manager *m, const char *path);
+
 /** Change the project name for a given manager.
 @param m A manager object
 @param name The new project name.
