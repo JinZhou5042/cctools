@@ -124,6 +124,8 @@ struct vault_entry {
 	struct vault_entry *older;	    /* Neighbors in the list of entries held in memory and not being written. */
 	struct vault_entry *newer;
 	char *shared_path; /* Own the copy in the shared directory that the entry's vault name links to, or NULL. */
+	void (*complete)(void *, struct vine_file *, int); /* For a copy: the callback of the receive that published it. */
+	void *argument;					   /* For a copy: that callback's context. */
 };
 
 /* Hold one transfer until its completion is consumed by the Manager. A job with a file is a checkpoint receive
@@ -165,6 +167,7 @@ struct transfer_job {
 	int copying;		   /* Set for a receive that its Worker copies to the shared directory, which holds a copy slot. */
 	struct copy_request *copy; /* The copy that this receive waits for, while it waits. */
 	char *shared_path;	   /* Own the path of a complete copy in the shared directory until publication links it. */
+	int missing;		   /* Set for a request whose vault entry did not exist when it was opened. */
 };
 
 /* A request sent to a Worker over its control connection for the data of a small file. The Worker answers each request
@@ -465,6 +468,10 @@ static int send_entry(struct transfer_job *job, const char *path, const char *na
 	char encoded[VINE_DATA_LINE_MAX];
 	url_encode(name, encoded, sizeof(encoded));
 	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0 && name == job->name && (errno == ENOENT || errno == ESTALE)) {
+		/* The entry itself is gone, such as a copy deleted from the shared directory outside the vault. */
+		job->missing = 1;
+	}
 	DIR *dir = NULL;
 	int valid = fd >= 0 && fstat(fd, &info) == 0 && (S_ISREG(info.st_mode) || (S_ISDIR(info.st_mode) && (dir = fdopendir(fd))));
 	if (!valid) {
@@ -1068,6 +1075,8 @@ static void finish_receive(struct vine_manager *manager, struct transfer_job *jo
 		if (entry && job->shared_path) {
 			entry->shared_path = job->shared_path;
 			job->shared_path = NULL;
+			entry->complete = job->complete;
+			entry->argument = job->argument;
 		}
 	}
 	/* A copy that was not published is removed. */
@@ -1090,6 +1099,28 @@ static void finish_receive(struct vine_manager *manager, struct transfer_job *jo
 	}
 }
 
+/* A Worker asked for a vault entry that was gone. A copy in the shared directory, which others than the vault may
+ * delete, is no longer a copy of the file: the entry is removed, so the Manager recreates the file for the tasks that
+ * read it, and the receive's caller learns that the vault lost it. Other entries are the vault's own, and stay. */
+static void lose_entry(struct vine_manager *manager, const char *name)
+{
+	struct vine_manager_data_service *ds = manager->ds;
+	struct vault_entry *entry = hash_table_lookup(ds->vault_table, name);
+	struct stat info;
+	if (!entry || !entry->shared_path || stat(entry->shared_path, &info) == 0 || (errno != ENOENT && errno != ESTALE)) {
+		return;
+	}
+	debug(D_NOTICE | D_VINE, "vault entry %s lost: its copy %s is gone", name, entry->shared_path);
+	struct vine_file *file = vine_file_addref(entry->file);
+	void (*complete)(void *, struct vine_file *, int) = entry->complete;
+	void *argument = entry->argument;
+	vine_manager_data_service_vault_remove(ds, file);
+	if (complete) {
+		complete(argument, file, -2);
+	}
+	vine_file_delete(file);
+}
+
 void vine_manager_data_service_handle(struct vine_manager *manager)
 {
 	struct vine_manager_data_service *ds = manager->ds;
@@ -1108,6 +1139,8 @@ void vine_manager_data_service_handle(struct vine_manager *manager)
 			finish_spill(ds, job);
 		} else if (job->file) {
 			finish_receive(manager, job);
+		} else if (job->missing && job->name) {
+			lose_entry(manager, job->name);
 		}
 		job_delete(job);
 	}
