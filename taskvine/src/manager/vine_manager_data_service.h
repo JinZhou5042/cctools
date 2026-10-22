@@ -47,7 +47,10 @@ void vine_manager_data_service_handle(struct vine_manager *manager);
  * When admitted, the Manager thread later calls complete with one when the complete file is published, with zero
  * when the receive fails, or with -1 when it fails because the source answered that it cannot send the file or an
  * entry inside it, such as one it cannot read, which a retry from that source cannot change. An existing vault entry
- * completes immediately.
+ * completes immediately. A checkpoint published as a copy in the shared directory (see
+ * vine_manager_data_service_set_shared_directory()) keeps its callback while its entry exists: when a Worker's request
+ * finds the copy gone, deleted outside the vault, the entry is removed and complete is called again with -2, so the
+ * caller must keep its context valid until it removes the file from the vault.
  * An in-progress request keeps its original callback. Removing the vault entry cancels the receive and drops
  * its callback. */
 vine_manager_checkpoint_result_t vine_manager_data_service_checkpoint(struct vine_manager *manager, struct vine_file *file, void (*complete)(void *, struct vine_file *, int), void *argument);
@@ -137,7 +140,8 @@ void vine_manager_data_service_vault_set_memory_limit(struct vine_manager_data_s
  * process of its own ("cache-copy"), up to VINE_DATA_COPY_SLOTS at once, and the vault links the copy under the file's
  * cache name when the Worker answers. A file that finds no free copy slot comes over a connection, so both paths add to
  * the vault's bandwidth. Removing an entry deletes its copy off the Manager thread, and deleting the service removes the
- * directory. May be set once. Return zero with errno set on failure. */
+ * directory. A copy deleted by others is noticed when a Worker asks for it: the entry is removed, so the Manager
+ * recreates the file for its readers. May be set once. Return zero with errno set on failure. */
 int vine_manager_data_service_set_shared_directory(struct vine_manager_data_service *ds, const char *path);
 /* Set the smallest checkpoint that goes to the shared directory, VINE_DATA_SHARED_MIN_BYTES by default. */
 void vine_manager_data_service_set_shared_min_bytes(struct vine_manager_data_service *ds, int64_t bytes);
