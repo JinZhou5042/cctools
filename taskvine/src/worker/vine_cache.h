@@ -68,6 +68,12 @@ int vine_cache_remove( struct vine_cache *c, const char *cachename, struct link 
 int vine_cache_contains( struct vine_cache *c, const char *cachename );
 
 int vine_cache_check_xfer_files( struct vine_cache *c, struct link *manager );
+/* Copy the regular file cachename to a new file at target, outside the cache, in a child process, as the manager asks
+with "cache-copy". When the process ends, the worker answers "cache-copied <token> <size>", or "cache-copy-error <token>
+<errno>": ENOENT for a file that is not in the cache, EISDIR for one that is not a regular file, and the error of the
+copy otherwise, after it removed the partial copy. vine_cache_check_xfer_files() collects ended copies, and
+vine_cache_delete() kills those in progress, whose partial copies the manager removes. */
+int vine_cache_copy( struct vine_cache *c, uint64_t token, const char *cachename, const char *target, struct link *manager );
 int vine_cache_start_transfers(struct vine_cache *c);
 
 #endif

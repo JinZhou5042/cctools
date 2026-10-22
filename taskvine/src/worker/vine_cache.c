@@ -18,6 +18,7 @@ See the file COPYING for details.
 #include "copy_stream.h"
 #include "debug.h"
 #include "domain_name_cache.h"
+#include "full_io.h"
 #include "hash_table.h"
 #include "itable.h"
 #include "link.h"
@@ -31,6 +32,7 @@ See the file COPYING for details.
 
 #include <dirent.h>
 #include <errno.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/fcntl.h>
@@ -38,6 +40,9 @@ See the file COPYING for details.
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 /*
 A transfer from another worker fails when it connects or receives nothing for this many seconds. A worker whose host
@@ -46,11 +51,24 @@ so that the manager can find another source or recreate the file, instead of wai
 */
 #define VINE_PEER_TRANSFER_TIMEOUT 60
 
+/* Bytes that a copy of a cached file reads and writes at a time. */
+#define VINE_CACHE_COPY_BUFFER (1 << 20)
+
+/*
+A copy of a cached file to a path outside the cache, such as the manager's vault on a shared file system, which a
+child process makes at the manager's request (vine_cache_copy()). The worker answers when the process ends.
+*/
+struct vine_cache_copy {
+	uint64_t token; /* The manager's number for the request, which the answer repeats. */
+	int64_t size;	/* Bytes of the cached file, which a copy that succeeded wrote. */
+};
+
 struct vine_cache {
 	struct hash_table *table;
 	struct hash_table *pending_transfers;
 	struct hash_table *processing_transfers;
 	struct itable *killed_transfers; /* Transfer processes killed with their files but not yet reaped, by pid. */
+	struct itable *copies;		 /* Copies of cached files in progress, by pid of the copying process. */
 	char *cache_dir;
 	int max_transfer_procs;
 	char manager_ip[LINK_ADDRESS_MAX]; /* This holds the control connection peer address inherited by download processes. */
@@ -70,6 +88,7 @@ struct vine_cache *vine_cache_create(const char *cache_dir, int max_procs)
 	c->pending_transfers = hash_table_create(0, 0);
 	c->processing_transfers = hash_table_create(0, 0);
 	c->killed_transfers = itable_create(0);
+	c->copies = itable_create(0);
 	c->cache_dir = strdup(cache_dir);
 	c->max_transfer_procs = max_procs;
 	c->manager_ip[0] = 0;
@@ -276,6 +295,18 @@ void vine_cache_delete(struct vine_cache *c)
 	}
 	vine_cache_reap_killed_transfers(c, 1);
 	itable_delete(c->killed_transfers);
+
+	/* The manager of a copy in progress no longer waits for it, and removes what it wrote. */
+	uint64_t pid;
+	struct vine_cache_copy *copy;
+	ITABLE_ITERATE(c->copies, iteration, pid, copy)
+	{
+		kill((pid_t)pid, SIGKILL);
+		while (waitpid((pid_t)pid, NULL, 0) < 0 && errno == EINTR) {
+		}
+		free(copy);
+	}
+	itable_delete(c->copies);
 
 	hash_table_clear(c->pending_transfers, NULL);
 	hash_table_clear(c->processing_transfers, NULL);
@@ -1157,9 +1188,130 @@ static void fail_pending_transfers_from(struct vine_cache *c, const char *peer, 
 	list_delete(names);
 }
 
+/*
+Copy a regular file to a new file at target, in the copying process. The copy is created writable by its owner and
+given the source's mode only when complete, because an NFS server may check each write against the mode. Return zero,
+or the errno of the step that failed, after removing the partial copy.
+*/
+
+static int vine_cache_copy_file(const char *source, const char *target, int64_t size, int mode)
+{
+	int in = open(source, O_RDONLY | O_NONBLOCK);
+	if (in < 0) {
+		return errno;
+	}
+	int out = open(target, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	if (out < 0) {
+		int error = errno;
+		close(in);
+		return error;
+	}
+	int error = 0;
+	int64_t total = 0;
+	char *buffer = malloc(VINE_CACHE_COPY_BUFFER);
+	if (!buffer) {
+		error = ENOMEM;
+	}
+	while (!error) {
+		ssize_t actual = read(in, buffer, VINE_CACHE_COPY_BUFFER);
+		if (actual < 0 && errno == EINTR) {
+			continue;
+		} else if (actual < 0) {
+			error = errno;
+		} else if (actual == 0) {
+			break;
+		} else if (full_write(out, buffer, actual) != actual) {
+			error = errno ? errno : EIO;
+		} else {
+			total += actual;
+		}
+	}
+	free(buffer);
+	close(in);
+	/* Cached content does not change, so a copy of another size read a file that is not the cached one. */
+	if (!error && total != size) {
+		error = EIO;
+	}
+	if (!error && fchmod(out, mode & 0777) < 0) {
+		error = errno;
+	}
+	/* An NFS client reports write errors when the file is closed. */
+	if (close(out) < 0 && !error) {
+		error = errno;
+	}
+	if (error) {
+		unlink(target);
+	}
+	return error;
+}
+
+int vine_cache_copy(struct vine_cache *c, uint64_t token, const char *cachename, const char *target, struct link *manager)
+{
+	struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
+	char *source = vine_cache_data_path(c, cachename);
+	struct stat info = {0};
+	int error = 0;
+	if (!f || f->status != VINE_CACHE_STATUS_READY || stat(source, &info) < 0) {
+		error = ENOENT;
+	} else if (!S_ISREG(info.st_mode)) {
+		error = EISDIR;
+	}
+	pid_t parent = getpid();
+	pid_t pid = error ? -1 : fork();
+	if (pid == 0) {
+#ifdef __linux__
+		/* A copy whose worker is gone has no one to answer, so it ends with the worker. */
+		prctl(PR_SET_PDEATHSIG, SIGKILL);
+#endif
+		if (getppid() != parent) {
+			_exit(EIO);
+		}
+		int result = vine_cache_copy_file(source, target, info.st_size, info.st_mode);
+		_exit(result > 0 && result < 256 ? result : (result ? EIO : 0));
+	}
+	free(source);
+	if (!error && pid < 0) {
+		error = errno;
+	}
+	if (error) {
+		debug(D_VINE, "cache: cannot copy %s to %s: %s", cachename, target, strerror(error));
+		vine_worker_send_cache_copied(manager, token, 0, error);
+		return 1;
+	}
+	struct vine_cache_copy *copy = xxmalloc(sizeof(*copy));
+	copy->token = token;
+	copy->size = info.st_size;
+	itable_insert(c->copies, pid, copy);
+	debug(D_VINE, "cache: copying %s to %s (pid %d)", cachename, target, (int)pid);
+	return 1;
+}
+
+/* Answer the copies whose processes ended, without waiting for the others. */
+
+static void vine_cache_check_copies(struct vine_cache *c, struct link *manager)
+{
+	uint64_t pid;
+	struct vine_cache_copy *copy;
+	int iteration;
+	ITABLE_ITERATE(c->copies, iteration, pid, copy)
+	{
+		int status;
+		pid_t result = waitpid((pid_t)pid, &status, WNOHANG);
+		if (result == 0 || (result < 0 && errno == EINTR)) {
+			continue;
+		}
+		int error = result < 0 ? ECHILD : (WIFEXITED(status) ? WEXITSTATUS(status) : EIO);
+		debug(D_VINE, "cache: copy process %d ended: %s", (int)pid, error ? strerror(error) : "complete");
+		vine_worker_send_cache_copied(manager, copy->token, copy->size, error);
+		itable_remove(c->copies, pid);
+		free(copy);
+	}
+}
+
 int vine_cache_check_xfer_files(struct vine_cache *c, struct link *manager)
 {
 	vine_cache_reap_killed_transfers(c, 0);
+	vine_cache_check_copies(c, manager);
 
 	/* Peers that did not answer a transfer for the peer transfer timeout, created when one is found. */
 	struct list *silent_peers = NULL;

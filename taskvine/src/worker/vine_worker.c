@@ -851,6 +851,23 @@ void vine_worker_send_cache_invalid(struct link *manager, const char *cachename,
 }
 
 /*
+Answer the manager's request to copy a cached file to a path outside the cache ("cache-copy", see vine_cache_copy()):
+"cache-copied <token> <size>" when the copy is complete, or "cache-copy-error <token> <errno>".
+*/
+
+void vine_worker_send_cache_copied(struct link *manager, uint64_t token, int64_t size, int error)
+{
+	if (!manager) {
+		return;
+	}
+	if (error) {
+		send_async_message(manager, "cache-copy-error %" PRIu64 " %d\n", token, error);
+	} else {
+		send_async_message(manager, "cache-copied %" PRIu64 " %" PRId64 "\n", token, size);
+	}
+}
+
+/*
 Send an asynchronous message to the manager indicating where the worker is listening for transfers.
 */
 
@@ -1713,6 +1730,10 @@ static int handle_manager(struct link *manager)
 		} else if (sscanf(line, "inline-get %s %" SCNd64, filename_encoded, &length) == 2) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = do_inline_get(manager, filename, length);
+		} else if (sscanf(line, "cache-copy %" SCNu64 " %s %s", &token, filename_encoded, source_encoded) == 3) {
+			url_decode(filename_encoded, filename, sizeof(filename));
+			url_decode(source_encoded, source, sizeof(source));
+			r = vine_cache_copy(cache_manager, token, filename, source, manager);
 		} else if (sscanf(line, "getfile %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = vine_transfer_put_any(manager, cache_manager, filename, VINE_TRANSFER_MODE_FILE_ONLY, time(0) + options->active_timeout);

@@ -62,6 +62,13 @@
 /* Bytes of checkpoints that the vault holds in memory by default. */
 #define VINE_DATA_MEMORY_LIMIT ((int64_t)1000000000)
 
+/* Copies of checkpoints that their Workers write to the shared directory at once, each holding a copy slot. */
+#define VINE_DATA_COPY_SLOTS 128U
+
+/* Smallest checkpoint that goes to the shared directory by default: about 16 ms at 250 MB/s, against the few
+ * milliseconds that a network file system takes to create and close a file. */
+#define VINE_DATA_SHARED_MIN_BYTES ((int64_t)4 << 20)
+
 /* Own the data listener, bounded jobs, the index of vault entries, and the vault disk budget. */
 struct vine_manager_data_service {
 	char *vault_directory;		/* Own the fixed directory of published cache names. */
@@ -93,9 +100,14 @@ struct vine_manager_data_service {
 	uint64_t next_token;		/* Token of the next receive from a Worker that connects back. Never zero. */
 	time_t next_expiry;		/* Earliest time to look for receives whose Worker did not connect back. */
 	struct itable *inline_requests; /* Maps source Worker -> list of inline_request, in the order they were sent. */
-	struct list *removals;		/* Paths of removed directory entries, renamed out of the vault's names, to delete. */
+	struct list *removals;		/* Paths to delete: removed directory entries, renamed out of the vault's names, and copies in the shared directory. */
 	int removing;			/* Set while an executor deletes the paths in removals. */
 	uint64_t next_removal;		/* Number that makes the name of the next renamed directory entry unique. */
+	char *shared_directory;		/* Own the vault's directory on a file system that every Worker mounts, or NULL. */
+	int64_t shared_min_bytes;	/* Smallest checkpoint that its Worker copies to the shared directory. */
+	unsigned copies_active;		/* Copies to the shared directory that are not cancelled, each holding a copy slot. */
+	uint64_t next_copy;		/* Number of the next copy, which names its file and the Worker's answer. Never zero. */
+	struct itable *copy_requests;	/* Maps source Worker -> list of copy_request, the copies it has not answered. */
 };
 
 /* Index one complete vault entry: a link to a declared local file, or a published checkpoint. A checkpoint that came
@@ -112,6 +124,7 @@ struct vault_entry {
 	struct transfer_job *spill;	    /* The job writing the bytes to disk, or NULL. */
 	struct vault_entry *older;	    /* Neighbors in the list of entries held in memory and not being written. */
 	struct vault_entry *newer;
+	char *shared_path; /* Own the copy in the shared directory that the entry's vault name links to, or NULL. */
 };
 
 /* Hold one transfer until its completion is consumed by the Manager. A job with a file is a checkpoint receive
@@ -150,6 +163,9 @@ struct transfer_job {
 	struct transfer_job *next_file_job;		   /* The next older job of the same file in file_jobs. */
 	struct transfer_job *next_source_job;		   /* Neighbors among the receives of the same source in source_jobs. */
 	struct transfer_job *prev_source_job;
+	int copying;		   /* Set for a receive that its Worker copies to the shared directory, which holds a copy slot. */
+	struct copy_request *copy; /* The copy that this receive waits for, while it waits. */
+	char *shared_path;	   /* Own the path of a complete copy in the shared directory until publication links it. */
 };
 
 /* A request sent to a Worker over its control connection for the data of a small file. The Worker answers each request
@@ -165,6 +181,16 @@ struct inline_request {
 	int mode;		  /* Permission bits that the reply reports. */
 };
 
+/* A copy of a large checkpoint that its source Worker writes to the shared directory in a process of its own, and
+ * answers with "cache-copied <token> <size>" or "cache-copy-error <token> <errno>". The Manager holds a copy slot for it,
+ * but no connection, executor, or bandwidth of its own. A request outlives a receive that ends first by cancellation, so
+ * the copy is removed once the Worker answered and stopped writing it. */
+struct copy_request {
+	struct transfer_job *job; /* The receive waiting for this copy, or NULL once it ended. */
+	uint64_t token;		  /* Number of the copy, which the answer repeats. */
+	char *path;		  /* Own the path in the shared directory that the Worker writes. */
+};
+
 static void vault_entry_delete(struct vault_entry *entry)
 {
 	if (entry->file->vault_entry == entry) {
@@ -173,6 +199,7 @@ static void vault_entry_delete(struct vault_entry *entry)
 	vine_file_delete(entry->file);
 	link_queue_shared_release(entry->data);
 	link_queue_shared_release(entry->on_disk);
+	free(entry->shared_path);
 	free(entry);
 }
 
@@ -188,6 +215,7 @@ static void job_delete(struct transfer_job *job)
 	free(job->name);
 	free(job->ip);
 	free(job->path);
+	free(job->shared_path);
 	free(job->transfer_id);
 	if (job->spilled) {
 		link_queue_shared_release(job->spilled);
@@ -231,6 +259,12 @@ static void inline_request_delete(struct inline_request *request)
 	free(request);
 }
 
+static void copy_request_delete(struct copy_request *request)
+{
+	free(request->path);
+	free(request);
+}
+
 /* Return non-zero for a checkpoint receive that has not been cancelled. Only the Manager thread writes the
  * cancellation flag, and the file is fixed at admission, so this needs no lock on the Manager thread. */
 static int job_is_active_receive(struct transfer_job *job)
@@ -245,11 +279,13 @@ static unsigned slots_in_use(struct vine_manager_data_service *ds, int receives)
 	return receives ? ds->receives_active : ds->requests_active;
 }
 
-/* Take or return what an active receive holds: a receive slot, or its bytes of inline receives in flight. */
+/* Take or return what an active receive holds: a receive slot, a copy slot, or its bytes of inline receives in flight. */
 static void receive_hold(struct vine_manager_data_service *ds, struct transfer_job *job, int delta)
 {
 	if (job->inline_counted) {
 		ds->inline_flight += delta * job->inline_counted;
+	} else if (job->copying) {
+		ds->copies_active += delta;
 	} else {
 		ds->receives_active += delta;
 	}
@@ -484,6 +520,8 @@ static void stop_waiting_locked(struct vine_manager_data_service *ds, struct tra
 }
 
 static void transfer_run(void *argument);
+static void queue_removal(struct vine_manager_data_service *ds, char *path);
+static void fall_back_to_connection(struct vine_manager *manager, struct transfer_job *job, struct vine_worker_info *worker);
 
 /* Hand the connection of a Worker that connected back to the receive waiting for it. The receive then runs on an
  * executor of its own, so the connection holds a request slot only until it is identified. */
@@ -587,8 +625,8 @@ static int job_start(struct vine_manager_data_service *ds, struct transfer_job *
 	return thread_pool_submit(ds->threads, transfer_run, job);
 }
 
-/* Admit a job and start it, except a receive over the control connection, which waits for its reply without an
- * executor. On failure the job is released and zero is returned. */
+/* Admit a job and start it, except a receive over the control connection or a copy to the shared directory, which
+ * waits for its Worker's answer without an executor. On failure the job is released and zero is returned. */
 static int job_submit(struct vine_manager *manager, struct transfer_job *job)
 {
 	struct vine_manager_data_service *ds = manager->ds;
@@ -596,7 +634,7 @@ static int job_submit(struct vine_manager *manager, struct transfer_job *job)
 	job->timeout = manager->minimum_transfer_timeout;
 	job->password = manager->password ? strdup(manager->password) : NULL;
 	job_track(ds, job);
-	if (!job->request && !job_start(ds, job)) {
+	if (!job->request && !job->copy && !job_start(ds, job)) {
 		job_untrack(ds, job);
 		job_delete(job);
 		return 0;
@@ -628,6 +666,12 @@ static void cancel_receive(struct vine_manager_data_service *ds, struct transfer
 	} else if (job->request) {
 		job->request->job = NULL;
 		job->request = NULL;
+		job->success = 0;
+		job_finish_locked(ds, job);
+	} else if (job->copy) {
+		/* The Worker may still write the copy, so its request stays until the answer, which removes the copy. */
+		job->copy->job = NULL;
+		job->copy = NULL;
 		job->success = 0;
 		job_finish_locked(ds, job);
 	} else if (job->link) {
@@ -680,8 +724,11 @@ struct vine_manager_data_service *vine_manager_data_service_create(const char *r
 	ds->vault_table = hash_table_create(0, 0);
 	ds->waiting = itable_create(0);
 	ds->inline_requests = itable_create(0);
+	ds->copy_requests = itable_create(0);
 	ds->next_token = (uint64_t)random_int64() | 1;
+	ds->next_copy = (uint64_t)random_int64() | 1;
 	ds->memory_limit = VINE_DATA_MEMORY_LIMIT;
+	ds->shared_min_bytes = VINE_DATA_SHARED_MIN_BYTES;
 	ds->vault_directory = string_format("%s/staging/vault-XXXXXX", runtime_directory);
 	if (!mkdtemp(ds->vault_directory)) {
 		free(ds->vault_directory);
@@ -712,7 +759,7 @@ struct vine_manager_data_service *vine_manager_data_service_create(const char *r
 	}
 	/* Cancelled receives release their slots before their executors return, so allow one spare executor per slot. */
 	ds->threads = thread_pool_create(VINE_DATA_THREADS);
-	if (!ds->listener || !ds->notification || !ds->threads || !ds->vault_table || !ds->waiting || !ds->inline_requests || !ds->source_jobs) {
+	if (!ds->listener || !ds->notification || !ds->threads || !ds->vault_table || !ds->waiting || !ds->inline_requests || !ds->copy_requests || !ds->source_jobs) {
 		vine_manager_data_service_delete(ds);
 		return NULL;
 	}
@@ -772,6 +819,17 @@ void vine_manager_data_service_delete(struct vine_manager_data_service *ds)
 		}
 		itable_delete(ds->inline_requests);
 	}
+	if (ds->copy_requests) {
+		int iteration;
+		uint64_t worker;
+		struct list *requests;
+		ITABLE_ITERATE(ds->copy_requests, iteration, worker, requests)
+		{
+			list_clear(requests, (void *)copy_request_delete);
+			list_delete(requests);
+		}
+		itable_delete(ds->copy_requests);
+	}
 	if (ds->listener) {
 		link_close(ds->listener);
 	}
@@ -788,6 +846,14 @@ void vine_manager_data_service_delete(struct vine_manager_data_service *ds)
 	if (ds->vault_directory) {
 		unlink_recursive(ds->vault_directory);
 		free(ds->vault_directory);
+	}
+	/* Copies that no executor deleted, and copies that Workers wrote after their requests ended, are removed with the
+	 * directory. */
+	if (ds->shared_directory) {
+		if (unlink_recursive(ds->shared_directory) != 0 && errno != ENOENT) {
+			debug(D_NOTICE | D_VINE, "could not remove the vault's shared directory %s: %s", ds->shared_directory, strerror(errno));
+		}
+		free(ds->shared_directory);
 	}
 	pthread_mutex_destroy(&ds->lock);
 	free(ds);
@@ -953,6 +1019,20 @@ static void finish_spill(struct vine_manager_data_service *ds, struct transfer_j
 	}
 }
 
+/* Link a copy that its Worker wrote to the shared directory into the vault under its cache name, as a declared file is
+ * linked, so the vault serves it, gives its path, and removes it like any entry. Return zero when it cannot be linked. */
+static int link_shared_copy(struct vine_manager_data_service *ds, struct transfer_job *job)
+{
+	if (!job_set_path(ds, job)) {
+		return 0;
+	}
+	if (symlink(job->shared_path, job->path) != 0) {
+		debug(D_VINE, "checkpoint %s: could not link its copy %s: %s", job->name, job->shared_path, strerror(errno));
+		return 0;
+	}
+	return 1;
+}
+
 /* Release a finished receive: return its reservation, publish its file, and report the result.
  * Success means the file was renamed into the vault before any cancellation, or that the data of an inline reply is
  * held in memory. A removed receive, whose name vault removal already unlinked, never publishes. */
@@ -961,6 +1041,9 @@ static void finish_receive(struct vine_manager *manager, struct transfer_job *jo
 	struct vine_manager_data_service *ds = manager->ds;
 	int published = job->success && !job->removed;
 	int in_memory = 0;
+	if (published && job->shared_path && !link_shared_copy(ds, job)) {
+		published = 0;
+	}
 	struct link_queue_shared *held = NULL;
 	if (published && job->held) {
 		/* The data of an inline reply was not written: the entry holds it. A receive that cannot keep it fails. */
@@ -983,6 +1066,15 @@ static void finish_receive(struct vine_manager *manager, struct transfer_job *jo
 			ds->memory_used += entry->size;
 			in_memory = 1;
 		}
+		if (entry && job->shared_path) {
+			entry->shared_path = job->shared_path;
+			job->shared_path = NULL;
+		}
+	}
+	/* A copy that was not published is removed. */
+	if (job->shared_path) {
+		queue_removal(ds, job->shared_path);
+		job->shared_path = NULL;
 	}
 	link_queue_shared_release(held);
 	/* The vault is a source of a published file, so ready tasks that wait for one may run, and tasks that waited for
@@ -1099,16 +1191,108 @@ static void send_inline_request(struct vine_manager *manager, struct transfer_jo
 	list_push_tail(requests, request);
 }
 
-/* Receive a file that its Worker would not send inline, too large or not a regular file, over a connection. */
+/* Ask the source Worker to copy a large file to the shared directory in the background. Its answer links the copy into
+ * the vault (vine_manager_data_service_copy_reply()). The copy is counted like a peer transfer from the Worker, because
+ * it shares the Worker's link. A request that cannot be sent fails its receive at once. */
+static void send_copy_request(struct vine_manager *manager, struct transfer_job *job, struct vine_worker_info *worker)
+{
+	struct vine_manager_data_service *ds = manager->ds;
+	struct copy_request *request = job->copy;
+	char name[VINE_DATA_LINE_MAX], path[VINE_DATA_LINE_MAX];
+	url_encode(job->name, name, sizeof(name));
+	url_encode(request->path, path, sizeof(path));
+	if (vine_manager_send(manager, worker, "cache-copy %" PRIu64 " %s %s\n", request->token, name, path) < 0) {
+		job->copy = NULL;
+		copy_request_delete(request);
+		fail_receive(ds, job);
+		return;
+	}
+	char *source = string_format("%s/%s", worker->transfer_url, job->name);
+	job->transfer_id = vine_current_transfers_add(manager, NULL, worker, source, job->name);
+	free(source);
+	struct list *requests = itable_lookup(ds->copy_requests, (uintptr_t)worker);
+	if (!requests) {
+		requests = list_create();
+		itable_insert(ds->copy_requests, (uintptr_t)worker, requests);
+	}
+	list_push_tail(requests, request);
+}
+
+static int copy_request_has_token(void *request, const void *token)
+{
+	return ((struct copy_request *)request)->token == *(const uint64_t *)token;
+}
+
+int vine_manager_data_service_copy_reply(struct vine_manager *manager, struct vine_worker_info *w, const char *line)
+{
+	struct vine_manager_data_service *ds = manager->ds;
+	uint64_t token;
+	int64_t size = 0;
+	int error = 0, used = 0;
+	if (sscanf(line, "cache-copied %" SCNu64 " %" SCNd64 "%n", &token, &size, &used) == 2 && !line[used] && size >= 0) {
+		error = 0;
+	} else if (sscanf(line, "cache-copy-error %" SCNu64 " %d%n", &token, &error, &used) == 2 && !line[used] && error > 0) {
+		size = 0;
+	} else {
+		return 0;
+	}
+	/* A Worker has few copies in progress, so its list is short. */
+	struct list *requests = ds ? itable_lookup(ds->copy_requests, (uintptr_t)w) : NULL;
+	struct copy_request *request = requests ? list_find(requests, copy_request_has_token, &token) : NULL;
+	if (!request) {
+		debug(D_VINE, "copy answer from %s without a request: %s", w->addrport, line);
+		return 0;
+	}
+	list_remove(requests, request);
+	struct transfer_job *job = request->job;
+	char *path = request->path;
+	request->path = NULL;
+	copy_request_delete(request);
+	if (!job || error) {
+		/* A copy whose receive ended is removed, and so is a failed one, which a copy process that was killed leaves. */
+		queue_removal(ds, path);
+		path = NULL;
+	}
+	if (!job) {
+		return 1;
+	}
+	job->copy = NULL;
+	if (!error) {
+		job->shared_path = path;
+		job->success = 1;
+		job->received = size;
+		job_untrack(ds, job);
+		finish_receive(manager, job);
+		job_delete(job);
+	} else if (error == ENOENT) {
+		/* Like a failed transfer: the file left the Worker's cache. */
+		debug(D_VINE, "checkpoint %s: not copied to the shared directory: %s", job->name, strerror(error));
+		fail_receive(ds, job);
+	} else {
+		/* A file that is not a regular file, or a shared directory that cannot take it, comes over a connection. */
+		debug(D_VINE, "checkpoint %s: %s", job->name, strerror(error));
+		fall_back_to_connection(manager, job, w);
+	}
+	return 1;
+}
+
+/* Receive a file over a connection that its Worker would not send inline, too large or not a regular file, or did not
+ * copy to the shared directory. */
 static void fall_back_to_connection(struct vine_manager *manager, struct transfer_job *job, struct vine_worker_info *worker)
 {
-	debug(D_VINE, "checkpoint %s: not sent inline, receiving it over a connection", job->name);
+	debug(D_VINE, "checkpoint %s: not %s, receiving it over a connection", job->name, job->copying ? "copied to the shared directory" : "sent inline");
 	/* The receive takes a receive slot now, even beyond their number, because it was admitted already. Tasks that wait
 	 * for it to come inline are woken, because it does not anymore. */
 	receive_hold(manager->ds, job, -1);
 	job->inline_counted = 0;
+	job->copying = 0;
 	receive_hold(manager->ds, job, 1);
 	vine_schedule_wake_file(manager, job->name);
+	if (job->transfer_id) {
+		vine_current_transfers_remove(manager, job->transfer_id);
+		free(job->transfer_id);
+		job->transfer_id = NULL;
+	}
 	if (!job_set_connection(manager->ds, job, worker)) {
 		fail_receive(manager->ds, job);
 		return;
@@ -1303,7 +1487,10 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 	if (kind == RECEIVE_URGENT && !inline_receive) {
 		return VINE_CHECKPOINT_BUSY;
 	}
-	if (inline_receive ? kind == RECEIVE_CHECKPOINT && ds->inline_flight + counted > VINE_DATA_INLINE_FLIGHT : slots_in_use(ds, 1) >= VINE_DATA_RECEIVE_SLOTS) {
+	/* A large file goes to the shared directory, which its Worker writes, while a copy slot is free, and otherwise over a
+	 * connection to the Manager, so the shared directory adds its bandwidth to the Manager's. */
+	int copy = !inline_receive && ds->shared_directory && size >= ds->shared_min_bytes && ds->copies_active < VINE_DATA_COPY_SLOTS;
+	if (inline_receive ? kind == RECEIVE_CHECKPOINT && ds->inline_flight + counted > VINE_DATA_INLINE_FLIGHT : !copy && slots_in_use(ds, 1) >= VINE_DATA_RECEIVE_SLOTS) {
 		return VINE_CHECKPOINT_BUSY;
 	}
 	if (kind != RECEIVE_REQUIRED && ds->vault_limit > 0 && ds->vault_used + ds->vault_reserved + size > ds->vault_limit) {
@@ -1321,9 +1508,10 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 	job->port = worker->transfer_port;
 	job->name = strdup(file->cached_name);
 	job->file = vine_file_addref(file);
-	/* A receive that comes inline and stays in memory needs neither the source's address nor a vault path, so they are
-	 * made only for a receive over a connection or a write to disk (job_set_connection(), job_set_path()). */
-	if (!job->name || (!inline_receive && !job_set_connection(ds, job, worker))) {
+	/* A receive that comes inline and stays in memory, or that its Worker copies to the shared directory, needs neither the
+	 * source's address nor a vault path, so they are made only for a receive over a connection, a write to disk, or the
+	 * link to a copy (job_set_connection(), job_set_path()). */
+	if (!job->name || (!inline_receive && !copy && !job_set_connection(ds, job, worker))) {
 		job_delete(job);
 		return VINE_CHECKPOINT_BUSY;
 	}
@@ -1343,6 +1531,23 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 		request->job = job;
 		job->request = request;
 		job->inline_counted = counted;
+	} else if (copy) {
+		struct copy_request *copy_request = calloc(1, sizeof(*copy_request));
+		if (copy_request) {
+			copy_request->token = ds->next_copy++;
+			copy_request->path = string_format("%s/%016" PRIx64, ds->shared_directory, copy_request->token);
+		}
+		if (!copy_request || !copy_request->path) {
+			free(copy_request);
+			job_delete(job);
+			return VINE_CHECKPOINT_BUSY;
+		}
+		if (!ds->next_copy) {
+			ds->next_copy = 1;
+		}
+		copy_request->job = job;
+		job->copy = copy_request;
+		job->copying = 1;
 	} else {
 		prepare_connection(manager, job, worker);
 	}
@@ -1350,9 +1555,11 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 		return VINE_CHECKPOINT_BUSY;
 	}
 	ds->vault_reserved += size;
-	debug(D_VINE, "checkpoint started: %s from %s:%d size=%" PRId64 " required=%d urgent=%d connect_back=%d inline=%d vault_used=%" PRId64 " vault_reserved=%" PRId64 " vault_limit=%" PRId64, file->cached_name, worker->transfer_host, worker->transfer_port, size, kind == RECEIVE_REQUIRED, kind == RECEIVE_URGENT, worker->transfer_connect_back, inline_receive, ds->vault_used, ds->vault_reserved, ds->vault_limit);
+	debug(D_VINE, "checkpoint started: %s from %s:%d size=%" PRId64 " required=%d urgent=%d connect_back=%d inline=%d shared=%d vault_used=%" PRId64 " vault_reserved=%" PRId64 " vault_limit=%" PRId64, file->cached_name, worker->transfer_host, worker->transfer_port, size, kind == RECEIVE_REQUIRED, kind == RECEIVE_URGENT, worker->transfer_connect_back, inline_receive, copy, ds->vault_used, ds->vault_reserved, ds->vault_limit);
 	if (inline_receive) {
 		send_inline_request(manager, job, worker);
+	} else if (copy) {
+		send_copy_request(manager, job, worker);
 	} else {
 		start_connection(manager, job, worker);
 	}
@@ -1443,6 +1650,25 @@ static void delete_removed_entries(void *argument)
 	pthread_mutex_unlock(&ds->lock);
 }
 
+/* Delete a path, which the queue takes, on one executor after the paths queued before it, off the Manager thread. A path
+ * that no executor takes is inside the vault or its shared directory, which are deleted when the service ends. */
+static void queue_removal(struct vine_manager_data_service *ds, char *path)
+{
+	if (!path) {
+		return;
+	}
+	pthread_mutex_lock(&ds->lock);
+	list_push_tail(ds->removals, path);
+	int start = !ds->removing;
+	ds->removing = 1;
+	pthread_mutex_unlock(&ds->lock);
+	if (start && !thread_pool_submit(ds->threads, delete_removed_entries, ds)) {
+		pthread_mutex_lock(&ds->lock);
+		ds->removing = 0;
+		pthread_mutex_unlock(&ds->lock);
+	}
+}
+
 /* Remove the item at a vault path without waiting for the deletion of a directory. A file or a link is unlinked at
  * once. A directory, which may hold many entries, is renamed to a name that no cache name takes, so the name is free
  * for a new entry at once, and an executor deletes it. */
@@ -1461,17 +1687,7 @@ static void remove_entry_path(struct vine_manager_data_service *ds, const char *
 		free(removed);
 		return;
 	}
-	pthread_mutex_lock(&ds->lock);
-	list_push_tail(ds->removals, removed);
-	int start = !ds->removing;
-	ds->removing = 1;
-	pthread_mutex_unlock(&ds->lock);
-	/* An executor that cannot start leaves the directory to the deletion of the vault when the service ends. */
-	if (start && !thread_pool_submit(ds->threads, delete_removed_entries, ds)) {
-		pthread_mutex_lock(&ds->lock);
-		ds->removing = 0;
-		pthread_mutex_unlock(&ds->lock);
-	}
+	queue_removal(ds, removed);
 }
 
 void vine_manager_data_service_vault_remove(struct vine_manager_data_service *ds, struct vine_file *file)
@@ -1514,6 +1730,10 @@ void vine_manager_data_service_vault_remove(struct vine_manager_data_service *ds
 		free(path);
 	}
 	if (held) {
+		/* The vault name of a copy in the shared directory is a link, unlinked above, and the copy is deleted off the
+		 * Manager thread, because a network file system may be slow to answer. */
+		queue_removal(ds, held->shared_path);
+		held->shared_path = NULL;
 		memory_release(ds, held, NULL);
 		ds->vault_used -= MIN(ds->vault_used, held->size);
 		vault_entry_delete(held);
@@ -1532,6 +1752,7 @@ int vine_manager_data_service_compact(struct vine_manager_data_service *ds)
 	freed += set_compact(ds->jobs);
 	freed += itable_compact(ds->source_jobs);
 	freed += itable_compact(ds->inline_requests);
+	freed += itable_compact(ds->copy_requests);
 	return freed;
 }
 
@@ -1557,6 +1778,17 @@ void vine_manager_data_service_remove_worker(struct vine_manager_data_service *d
 	struct list *requests = itable_remove(ds->inline_requests, (uintptr_t)w);
 	if (requests) {
 		list_clear(requests, (void *)inline_request_delete);
+		list_delete(requests);
+	}
+	/* The Worker kills its copies when it leaves the Manager, so the copies it has not answered are removed. */
+	requests = itable_remove(ds->copy_requests, (uintptr_t)w);
+	if (requests) {
+		struct copy_request *request;
+		while ((request = list_pop_head(requests))) {
+			queue_removal(ds, request->path);
+			request->path = NULL;
+			copy_request_delete(request);
+		}
 		list_delete(requests);
 	}
 }
@@ -1648,6 +1880,46 @@ void vine_manager_data_service_vault_set_memory_limit(struct vine_manager_data_s
 	if (ds) {
 		ds->memory_limit = MAX(0, bytes);
 		memory_spill(ds);
+	}
+}
+
+int vine_manager_data_service_set_shared_directory(struct vine_manager_data_service *ds, const char *path)
+{
+	if (!ds || !path) {
+		errno = EINVAL;
+		return 0;
+	}
+	if (ds->shared_directory) {
+		errno = EEXIST;
+		return 0;
+	}
+	/* Workers write at this path, so it is absolute and the same on every host. */
+	char *root = realpath(path, NULL);
+	if (!root) {
+		return 0;
+	}
+	char *directory = string_format("%s/vine-vault-XXXXXX", root);
+	free(root);
+	if (strlen(directory) >= VINE_DATA_LINE_MAX / 4) {
+		free(directory);
+		errno = ENAMETOOLONG;
+		return 0;
+	}
+	if (!mkdtemp(directory)) {
+		int error = errno;
+		free(directory);
+		errno = error;
+		return 0;
+	}
+	ds->shared_directory = directory;
+	debug(D_VINE, "vault shared directory %s for checkpoints of at least %" PRId64 " bytes", directory, ds->shared_min_bytes);
+	return 1;
+}
+
+void vine_manager_data_service_set_shared_min_bytes(struct vine_manager_data_service *ds, int64_t bytes)
+{
+	if (ds) {
+		ds->shared_min_bytes = MAX(0, bytes);
 	}
 }
 

@@ -334,6 +334,23 @@ class Manager(object):
         return cvine.vine_data_port(self._taskvine)
 
     ##
+    # Keep large checkpoints of temporary files in a directory that the
+    # manager and every worker mount at the same path, such as a shared file
+    # system. The worker that holds such a file copies it there in the
+    # background, so the manager's network link and the shared file system
+    # both carry checkpoints. The manager removes its directory inside when it
+    # ends. The tuning parameter vault-shared-min-bytes sets the smallest file
+    # that goes there.
+    # @code
+    # >>> q.set_vault_shared_directory("/shared/scratch")
+    # @endcode
+    # @param self Reference to the current manager object.
+    # @param path An existing directory on the shared file system.
+    def set_vault_shared_directory(self, path):
+        if not cvine.vine_set_vault_shared_directory(self._taskvine, str(path)):
+            raise OSError(f"could not use {path} as the vault's shared directory")
+
+    ##
     # Whether the manager is using ssl to talk to workers
     # @code
     # >>> print(q.using_ssl)

@@ -1100,6 +1100,8 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		result = handle_info(q, w, line);
 	} else if (string_prefix_is(line, "cache-invalid")) {
 		result = handle_cache_invalid(q, w, line);
+	} else if (string_prefix_is(line, "cache-copied ") || string_prefix_is(line, "cache-copy-error ")) {
+		result = vine_manager_data_service_copy_reply(q, w, line) ? VINE_MSG_PROCESSED : VINE_MSG_FAILURE;
 	} else if (string_prefix_is(line, "transfer-hostport")) {
 		result = handle_transfer_hostport(q, w, line);
 	} else if (string_prefix_is(line, "transfer-port")) {
@@ -5284,6 +5286,11 @@ int vine_data_port(struct vine_manager *q)
 	return q ? vine_manager_data_service_port(q->ds) : 0;
 }
 
+int vine_set_vault_shared_directory(struct vine_manager *q, const char *path)
+{
+	return q && vine_manager_data_service_set_shared_directory(q->ds, path);
+}
+
 void vine_set_scheduler(struct vine_manager *q, vine_schedule_t algorithm)
 {
 	q->worker_selection_algorithm = algorithm;
@@ -7194,7 +7201,7 @@ static const char *const vine_tune_names[] = {
 	"resource-submit-multiplier", "asynchrony-multiplier", "short-timeout", "temp-replica-count",
 	"transfer-outlier-factor", "transfer-replica-per-cycle", "transfer-temps-recovery",
 	"transient-error-interval", "wait-for-workers", "max-workers", "worker-retrievals",
-	"file-source-max-transfers", "worker-source-max-transfers", "vault-disk-limit", "vault-memory-limit",
+	"file-source-max-transfers", "worker-source-max-transfers", "vault-disk-limit", "vault-memory-limit", "vault-shared-min-bytes",
 	"load-from-shared-filesystem", "perf-log-interval", "enable-logs", "update-interval", "task-groups",
 	"resource-management-interval", "max-task-stdout-storage", "max-new-workers", "large-task-check-interval",
 	"option-blocklist-slow-workers-timeout", "watch-library-logfiles", "sandbox-grow-factor",
@@ -7325,6 +7332,10 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 	} else if (!strcmp(name, "vault-memory-limit")) {
 		/* Gigabytes of small checkpoints the vault holds in memory before it writes them to disk. Zero writes all. */
 		vine_manager_data_service_vault_set_memory_limit(q->ds, (int64_t)(MAX(0, value) * 1e9));
+
+	} else if (!strcmp(name, "vault-shared-min-bytes")) {
+		/* Smallest checkpoint that its Worker copies to the vault's shared directory. */
+		vine_manager_data_service_set_shared_min_bytes(q->ds, (int64_t)MAX(0, value));
 
 	} else if (!strcmp(name, "load-from-shared-filesystem")) {
 		q->load_from_shared_fs_enabled = !!((int)value);
