@@ -231,6 +231,7 @@ struct vine_manager {
 	int peer_transfers_enabled;
 	int file_source_max_transfers;
 	int worker_source_max_transfers;
+	int worker_source_max_checkpoints; /* Checkpoints that one worker sends to the data service at once. */
 
 	/* Hungry call optimization */
 	timestamp_t time_last_hungry;      /* Last time vine_hungry_computation was called. */

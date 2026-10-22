@@ -9,6 +9,8 @@ See the file COPYING for details.
 
 #define VINE_FILE_SOURCE_MAX_TRANSFERS 1
 #define VINE_WORKER_SOURCE_MAX_TRANSFERS 10
+/* Checkpoints that one worker sends at once, by default. */
+#define VINE_WORKER_SOURCE_MAX_CHECKPOINTS 10
 
 /*
 Bytes that one source worker sends at once, beyond the transfer of a single file. Transfers that together fit this
@@ -25,6 +27,10 @@ copies at once, 56 s with one).
  * worker), and return its id. A transfer from a source worker counts the size of the worker's replica of cachename
  * among the bytes it sends at once. cachename may be null, and such a transfer counts no bytes. */
 char *vine_current_transfers_add(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename);
+
+/* Record a checkpoint of the file cachename that source_worker sends to the data service, and return its id. It counts
+ * in the worker's outgoing_checkpoints, not among the files and bytes it sends to other workers. */
+char *vine_current_transfers_add_checkpoint(struct vine_manager *q, struct vine_worker_info *source_worker, const char *source_url, const char *cachename);
 
 int vine_current_transfers_remove(struct vine_manager *q, const char *id);
 

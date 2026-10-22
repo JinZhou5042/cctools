@@ -59,6 +59,7 @@ struct vine_worker_info *vine_worker_create(struct link *lnk)
 	w->outgoing_xfer_counter = 0;
 	w->outgoing_xfer_bytes = 0;
 	w->outgoing_refused_bytes = -1;
+	w->outgoing_checkpoints = 0;
 
 	return w;
 }

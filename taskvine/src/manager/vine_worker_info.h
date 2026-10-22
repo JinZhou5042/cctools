@@ -137,8 +137,12 @@ struct vine_worker_info {
 
 	int incoming_xfer_counter;
 	int outgoing_xfer_counter;
+	/* Checkpoints of the data service that this worker sends: copies to the vault's shared directory and receives over
+	 * connections. They are counted apart from outgoing_xfer_counter and limited by worker-source-max-checkpoints, so
+	 * a worker that anchors its outputs still serves the tasks that read them. */
+	int outgoing_checkpoints;
 
-	/* Bytes of the files that this worker sends as a source in the manager's transfer records, and the smallest file
+	/* Bytes of the files that this worker sends to other workers in the manager's transfer records, and the smallest file
 	 * refused since the last wake because it would not fit beside them (-1 if none). See
 	 * vine_current_transfers_source_has_room(). */
 	int64_t outgoing_xfer_bytes;

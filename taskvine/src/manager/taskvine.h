@@ -1168,7 +1168,8 @@ it without the manager's network link. Each such file takes the path with fewer 
 connection to the manager, so both add to the vault's bandwidth. The manager makes a directory of its own inside, deletes each copy with its vault entry, and
 removes the directory when it is deleted. A copy that something else deletes is noticed when a worker asks for it, and
 the file is then recreated for the tasks that read it. Files of at least vault-shared-min-bytes go there (see
-@ref vine_tune, 4 MiB by default).
+@ref vine_tune, 4 MiB by default). A worker sends at most worker-source-max-checkpoints such files at once (10 by
+default), counted apart from the files it sends to other workers.
 @param m A manager object
 @param path An existing directory on a file system that every worker mounts at the same path.
 @return One on success, zero on failure with errno set. The directory can be set once.
@@ -1555,6 +1556,8 @@ a times series, if this feature is enabled. See @ref vine_enable_monitoring.
  - "option_blocklist_slow_workers_timeout" Timeout for slow workers to come back to the pool. (default=900)
  - "watch-library-logfiles" If 1, watch the output files produced by each of the library processes running on the remote workers, take them back the current logging directory. (default=0)
  - "max-library-retries" The number of times a library task can fail and be retried before it is permanently removed.
+ - "worker-source-max-checkpoints" The number of checkpoints that one worker sends to the manager's vault at once, over
+connections or as copies to its shared directory. They do not count against worker-source-max-transfers. (default=10)
 @param value The value to set the parameter to.
 @return 0 on succes, -1 on failure.
 */
