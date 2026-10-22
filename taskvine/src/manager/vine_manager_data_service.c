@@ -68,9 +68,25 @@
  * about 1 GB/s in all, while a copy into another directory at the same time moved 80-430 MB/s. */
 #define VINE_DATA_SHARED_SUBDIRECTORIES 256
 
+/* Each path of large checkpoints, copies to the shared directory and receives over connections, measures its throughput
+ * from the bytes it completes in windows of this many microseconds of time in which it holds receives. */
+#define VINE_DATA_METER_WINDOW 5000000
+/* Receives that a path whose throughput is not known holds at most, so it is measured before it takes more. */
+#define VINE_DATA_PROBE_RECEIVES 8U
+
 /* Smallest checkpoint that goes to the shared directory by default: about 16 ms at 250 MB/s, against the few
  * milliseconds that a network file system takes to create and close a file. */
 #define VINE_DATA_SHARED_MIN_BYTES ((int64_t)4 << 20)
+
+/* The throughput of one path of large checkpoints: the bytes it completed over the time in which it held receives,
+ * measured in windows of VINE_DATA_METER_WINDOW of such time. A rate of zero is not known: the path has not yet completed
+ * anything in a window. A window that completes nothing halves a known rate. */
+struct path_meter {
+	int64_t bytes;	  /* Bytes completed in the current window. */
+	timestamp_t busy; /* Time in the current window in which the path held receives. */
+	timestamp_t last; /* Time of the last tick, or zero before the first. */
+	double rate;	  /* Bytes per second, averaged over the windows measured, or zero if not known. */
+};
 
 /* Own the data listener, bounded jobs, the index of vault entries, and the vault disk budget. */
 struct vine_manager_data_service {
@@ -109,6 +125,10 @@ struct vine_manager_data_service {
 	char *shared_directory;		/* Own the vault's directory on a file system that every Worker mounts, or NULL. */
 	int64_t shared_min_bytes;	/* Smallest checkpoint that its Worker copies to the shared directory. */
 	unsigned copies_active;		/* Copies to the shared directory that are not cancelled, each holding a copy slot. */
+	int64_t copy_bytes;		/* Bytes of those copies. */
+	int64_t receive_bytes;		/* Bytes of the receives over connections that hold receive slots. */
+	struct path_meter copy_meter;	/* Throughput of copies to the shared directory. */
+	struct path_meter receive_meter; /* Throughput of receives over connections. */
 	uint64_t next_copy;		/* Number of the next copy, which names its file and the Worker's answer. Never zero. */
 	struct itable *copy_requests;	/* Maps source Worker -> list of copy_request, the copies it has not answered. */
 };
@@ -285,16 +305,68 @@ static unsigned slots_in_use(struct vine_manager_data_service *ds, int receives)
 	return receives ? ds->receives_active : ds->requests_active;
 }
 
+/* Advance a path's meter to now, given the receives it held since the last tick, and end its window once the path held
+ * receives for VINE_DATA_METER_WINDOW. Called before every change of the path's receives in flight and when a receive
+ * completes. */
+static void meter_tick(struct vine_manager_data_service *ds, struct path_meter *meter, unsigned active)
+{
+	timestamp_t now = timestamp_get();
+	if (active > 0 && meter->last && now > meter->last) {
+		meter->busy += now - meter->last;
+	}
+	meter->last = now;
+	if (meter->busy < VINE_DATA_METER_WINDOW) {
+		return;
+	}
+	double sample = meter->bytes * 1e6 / meter->busy;
+	double rate = meter->rate > 0 ? (meter->rate + sample) / 2 : sample;
+	meter->bytes = 0;
+	meter->busy = 0;
+	if (rate != meter->rate) {
+		meter->rate = rate;
+		debug(D_VINE, "checkpoint paths: copies %.1f MB/s with %" PRId64 " MB in flight, connections %.1f MB/s with %" PRId64 " MB in flight", ds->copy_meter.rate / 1e6, ds->copy_bytes >> 20, ds->receive_meter.rate / 1e6, ds->receive_bytes >> 20);
+	}
+}
+
 /* Take or return what an active receive holds: a receive slot, a copy slot, or its bytes of inline receives in flight. */
 static void receive_hold(struct vine_manager_data_service *ds, struct transfer_job *job, int delta)
 {
 	if (job->inline_counted) {
 		ds->inline_flight += delta * job->inline_counted;
 	} else if (job->copying) {
+		meter_tick(ds, &ds->copy_meter, ds->copies_active);
 		ds->copies_active += delta;
+		ds->copy_bytes += delta * MAX(job->reserved, 0);
 	} else {
+		meter_tick(ds, &ds->receive_meter, ds->receives_active);
 		ds->receives_active += delta;
+		ds->receive_bytes += delta * MAX(job->reserved, 0);
 	}
+}
+
+/* Choose the path of a large checkpoint that may take either: 1 for a copy to the shared directory, 0 for a receive over a
+ * connection, or -1 to wait for a slot. Once both throughputs are known, the file takes the path that would complete it
+ * sooner, the bytes in flight on it and the file at its rate, and waits for a slot of that path. A path whose throughput
+ * is not known takes at most VINE_DATA_PROBE_RECEIVES receives until it is measured, and until both are, the file takes
+ * the path with fewer receives in flight, a tie going to the copy. Each path moves data at its own rate, so their
+ * bandwidths add, and both end together: with the fewer receives in flight alone, a path ten times slower than the other
+ * held as many receives and ended 75 s after it (cluster, 429 GB). */
+static int choose_copy(struct vine_manager_data_service *ds, int64_t size)
+{
+	int copy_room = ds->copies_active < VINE_DATA_COPY_SLOTS && (ds->copy_meter.rate > 0 || ds->copies_active < VINE_DATA_PROBE_RECEIVES);
+	int receive_room = ds->receives_active < VINE_DATA_RECEIVE_SLOTS && (ds->receive_meter.rate > 0 || ds->receives_active < VINE_DATA_PROBE_RECEIVES);
+	if (ds->copy_meter.rate > 0 && ds->receive_meter.rate > 0) {
+		double copy_time = (ds->copy_bytes + size) / ds->copy_meter.rate;
+		double receive_time = (ds->receive_bytes + size) / ds->receive_meter.rate;
+		if (copy_time <= receive_time) {
+			return copy_room ? 1 : -1;
+		}
+		return receive_room ? 0 : -1;
+	}
+	if (copy_room && (!receive_room || ds->copies_active <= ds->receives_active)) {
+		return 1;
+	}
+	return receive_room ? 0 : -1;
 }
 
 /* Index a receive by its source Worker, so the receives of a removed Worker are found without a pass over all jobs. */
@@ -1064,6 +1136,11 @@ static void finish_receive(struct vine_manager *manager, struct transfer_job *jo
 			published = 0;
 		}
 	}
+	if (published && !job->inline_counted && !job->held) {
+		struct path_meter *meter = job->copying ? &ds->copy_meter : &ds->receive_meter;
+		meter_tick(ds, meter, job->copying ? ds->copies_active : ds->receives_active);
+		meter->bytes += MAX(job->received, 0);
+	}
 	if (published) {
 		struct vault_entry *entry = vault_insert(ds, job->file, job->received, job->data != NULL || held);
 		if (entry && entry->small) {
@@ -1552,13 +1629,15 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 	if (kind == RECEIVE_URGENT && !inline_receive) {
 		return VINE_CHECKPOINT_BUSY;
 	}
-	/* A large file goes to the path with fewer receives in flight: a copy to the shared directory, which its Worker
-	 * writes, or a connection to the Manager, and a tie goes to the shared directory. Each path moves data at its own
-	 * rate while it holds a receive, so their bandwidths add, and the faster path empties sooner and takes more files.
-	 * Taking the copy whenever a copy slot was free left the Manager's link idle while every source copied, because a
-	 * source sends one large file at a time. */
-	int receiving = (int)slots_in_use(ds, 1);
-	int copy = !inline_receive && ds->shared_directory && size >= ds->shared_min_bytes && ds->copies_active < VINE_DATA_COPY_SLOTS && (receiving >= (int)VINE_DATA_RECEIVE_SLOTS || (int)ds->copies_active <= receiving);
+	/* A large file that its Worker may copy to the shared directory takes the path that would complete it sooner
+	 * (choose_copy()). Others come over a connection. */
+	int copy = 0;
+	if (!inline_receive && ds->shared_directory && size >= ds->shared_min_bytes) {
+		copy = choose_copy(ds, size);
+		if (copy < 0) {
+			return VINE_CHECKPOINT_BUSY;
+		}
+	}
 	if (inline_receive ? kind == RECEIVE_CHECKPOINT && ds->inline_flight + counted > VINE_DATA_INLINE_FLIGHT : !copy && slots_in_use(ds, 1) >= VINE_DATA_RECEIVE_SLOTS) {
 		return VINE_CHECKPOINT_BUSY;
 	}
