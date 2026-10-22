@@ -138,8 +138,8 @@ void vine_manager_data_service_vault_set_memory_limit(struct vine_manager_data_s
 /* Keep checkpoints of at least the shared minimum size in a directory of their own, made inside path, on a file system
  * that the Manager and every Worker mount at the same path. The Worker that holds such a file copies it there in a
  * process of its own ("cache-copy"), up to VINE_DATA_COPY_SLOTS at once, and the vault links the copy under the file's
- * cache name when the Worker answers. Such a file takes the path with fewer receives in flight, the copy or a
- * connection, so both paths add to the vault's bandwidth. Removing an entry deletes its copy off the Manager thread,
+ * cache name when the Worker answers. While every copy slot is taken, up to VINE_DATA_SHARED_RECEIVES such files come
+ * over connections instead, so the vault's own disk adds to the bandwidth without holding the tail of a run. Removing an entry deletes its copy off the Manager thread,
  * and deleting the service removes the directory. A copy deleted by others is noticed when a Worker asks for it: the
  * entry is removed, so the Manager recreates the file for its readers. May be set once. Return zero with errno set on
  * failure. */

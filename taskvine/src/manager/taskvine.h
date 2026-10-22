@@ -1164,9 +1164,9 @@ int vine_data_port(struct vine_manager *m);
 
 /** Keep large checkpoints of temporary files in a directory that the manager and every worker mount at the same path,
 such as a shared file system. The worker that holds such a file copies it there in the background, so the vault takes
-it without the manager's network link. Each such file takes the path with fewer receives in flight, the copy or a
-connection to the manager, so both add to the vault's bandwidth. The manager makes a directory of its own inside, deletes each copy with its vault entry, and
-removes the directory when it is deleted. A copy that something else deletes is noticed when a worker asks for it, and
+it without the manager's network link. While the manager's copies at once are at their bound, a few such files come
+over connections into the manager's own vault instead, so both add to the vault's bandwidth. The manager makes a
+directory of its own inside, deletes each copy with its vault entry, and removes the directory when it is deleted. A copy that something else deletes is noticed when a worker asks for it, and
 the file is then recreated for the tasks that read it. Files of at least vault-shared-min-bytes go there (see
 @ref vine_tune, 4 MiB by default). A worker sends at most worker-source-max-checkpoints such files at once (10 by
 default), counted apart from the files it sends to other workers.
