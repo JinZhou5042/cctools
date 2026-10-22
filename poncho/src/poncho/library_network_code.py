@@ -22,6 +22,7 @@ import time
 from datetime import datetime
 import socket
 from threadpoolctl import threadpool_limits
+from ndcctools.taskvine import utils as library_utils
 from ndcctools.taskvine.utils import load_variable_from_library
 
 # self-pipe to turn a sigchld signal when a child finishes execution
@@ -42,8 +43,13 @@ pid_to_stdout = {}
 failed_imports = set()
 learning_imports = True
 
-# The spare process for the next function call in fork mode, as (pid, write end of its invocation pipe, number of
-# modules loaded when it was forked), or None. A spare is kept once a call arrived in fork mode (`spare_wanted`).
+# Whether the library still passes the notes of calls to its note handler (library_utils.set_library_note_handler()),
+# and how many times the handler changed what forked calls inherit.
+passing_notes = True
+library_changes = 0
+
+# The spare process for the next function call in fork mode, as (pid, write end of its invocation pipe, state of the
+# library when it was forked: the number of modules loaded and the changes of the note handler), or None. A spare is kept once a call arrived in fork mode (`spare_wanted`).
 # Spares that were discarded without running a call are in `discarded_spares` until they are reaped.
 spare = None
 spare_wanted = False
@@ -209,6 +215,8 @@ def start_function(line, thread_limit=1):
             sys.exit(1)
         finally:
             os.chdir(library_sandbox)
+            # notes tell the library about forked calls, and this call ran in the library itself.
+            library_utils.library_notes.clear()
         return -1, function_id
     elif exec_method == "fork":
         try:
@@ -300,12 +308,13 @@ def run_function(function_id, function_name, function_sandbox, function_stdout_f
         stdout_timed_message(f"TASK {function_id} error: execution failed due to {e}")
     finally:
         # Report the status that waitpid() would return before exiting, because tearing down a copy of the library
-        # takes longer than most functions, and the modules the call imported, which the library then imports once
-        # for later calls. The report is one write shorter than PIPE_BUF, so reports of different processes never
-        # interleave.
+        # takes longer than most functions, then the notes the call left for the library, or "-", and the modules the
+        # call imported, which the library then imports once for later calls. The report is one write shorter than
+        # PIPE_BUF, so reports of different processes never interleave, and notes take at most half of it.
         try:
             report = f"{os.getpid()} {exit_status << 8}"
             if exit_status == 0:
+                report += " " + joined_notes(library_utils.library_notes, select.PIPE_BUF // 2)
                 report += imported_modules(inherited_modules, select.PIPE_BUF - len(report) - 2)
             os.write(report_w, f"{report}\n".encode())
         except Exception:
@@ -354,20 +363,21 @@ def fork_spare(thread_limit):
         finally:
             os._exit(exit_status)
     os.close(read_fd)
-    spare = (p, write_fd, len(sys.modules))
+    spare = (p, write_fd, (len(sys.modules), library_changes))
 
 
 # Hand an invocation to the spare process and return its pid, or -1 without a spare that can run it. A spare forked
-# before the library imported more modules lacks them, so it is discarded.
+# before the library imported more modules, or before its note handler changed what calls inherit, lacks them, so it
+# is discarded.
 def start_in_spare(line):
     global spare
     if not spare:
         return -1
-    pid, write_fd, module_count = spare
+    pid, write_fd, state = spare
     spare = None
     started = False
     try:
-        if module_count == len(sys.modules):
+        if state == (len(sys.modules), library_changes):
             data = line.encode()
             while data:
                 data = data[os.write(write_fd, data):]
@@ -398,6 +408,38 @@ def imported_modules(count, limit):
             break
         names.append(name)
     return " " + ",".join(names) if names else ""
+
+
+# Return the notes a call left for the library, joined by commas, within limit characters, or "-" when there are none.
+# A note that does not fit is dropped.
+def joined_notes(notes, limit):
+    kept = []
+    length = 0
+    for note in notes:
+        if length + len(note) + 1 > limit:
+            break
+        kept.append(note)
+        length += len(note) + 1
+    return ",".join(kept) if kept else "-"
+
+
+# Pass the notes that calls left to the library's note handler, in the library process, so the calls forked afterwards
+# inherit what it loads. The handler is not called again once it raises or leaves a thread running.
+def pass_notes(notes):
+    global passing_notes, library_changes
+    handler = library_utils.library_note_handler
+    if not passing_notes or handler is None:
+        return
+    try:
+        if handler(notes):
+            library_changes += 1
+    except Exception:
+        passing_notes = False
+        stdout_timed_message(f"error: the library's note handler failed, so it is not called again: {traceback.format_exc()}")
+    threading_module = sys.modules.get("threading")
+    if passing_notes and threading_module and threading_module.active_count() > 1:
+        passing_notes = False
+        stdout_timed_message("the library's note handler started a thread, so it is not called again")
 
 
 # Import, in the library process, modules that a call imported, so the calls forked afterwards inherit them instead of
@@ -543,6 +585,7 @@ def main():
         report_buffer += os.read(report_r, 65536)
         *reports, report_buffer = report_buffer.split(b"\n")
         imported = []
+        notes = []
         for report in reports:
             fields = report.decode().split()
             c_pid, c_exit_status = int(fields[0]), int(fields[1])
@@ -554,11 +597,15 @@ def main():
                     c_exit_status,
                 )
                 reported.add(c_pid)
-            if len(fields) > 2:
-                imported.extend(fields[2].split(","))
-        # results go out first.
+            if len(fields) > 2 and fields[2] != "-":
+                notes.extend(fields[2].split(","))
+            if len(fields) > 3:
+                imported.extend(fields[3].split(","))
+        # results go out first, and notes may need the modules.
         if imported:
             learn_imports(imported)
+        if notes:
+            pass_notes(notes)
 
     # read in information about this library
     with open('library_info.clpk', 'rb') as f:
