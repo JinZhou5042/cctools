@@ -64,6 +64,10 @@
 
 /* Copies of checkpoints that their Workers write to the shared directory at once, each holding a copy slot. */
 #define VINE_DATA_COPY_SLOTS 128U
+/* Subdirectories of the vault's shared directory, among which copies are spread by token. A shared file system may
+ * bound the writes into one directory: on the cluster's /groups, 128 copies into one directory moved 7.5 MB/s each,
+ * about 1 GB/s in all, while a copy into another directory at the same time moved 80-430 MB/s. */
+#define VINE_DATA_SHARED_SUBDIRECTORIES 256
 
 /* Smallest checkpoint that goes to the shared directory by default: about 16 ms at 250 MB/s, against the few
  * milliseconds that a network file system takes to create and close a file. */
@@ -1608,7 +1612,7 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 		struct copy_request *copy_request = calloc(1, sizeof(*copy_request));
 		if (copy_request) {
 			copy_request->token = ds->next_copy++;
-			copy_request->path = string_format("%s/%016" PRIx64, ds->shared_directory, copy_request->token);
+			copy_request->path = string_format("%s/%02x/%016" PRIx64, ds->shared_directory, (unsigned)(copy_request->token % VINE_DATA_SHARED_SUBDIRECTORIES), copy_request->token);
 		}
 		if (!copy_request || !copy_request->path) {
 			free(copy_request);
@@ -1983,6 +1987,18 @@ int vine_manager_data_service_set_shared_directory(struct vine_manager_data_serv
 		free(directory);
 		errno = error;
 		return 0;
+	}
+	for (int i = 0; i < VINE_DATA_SHARED_SUBDIRECTORIES; i++) {
+		char *subdirectory = string_format("%s/%02x", directory, i);
+		int made = subdirectory && mkdir(subdirectory, 0700) == 0;
+		int error = errno;
+		free(subdirectory);
+		if (!made) {
+			unlink_recursive(directory);
+			free(directory);
+			errno = error;
+			return 0;
+		}
 	}
 	ds->shared_directory = directory;
 	debug(D_VINE, "vault shared directory %s for checkpoints of at least %" PRId64 " bytes", directory, ds->shared_min_bytes);
