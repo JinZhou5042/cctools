@@ -1448,14 +1448,18 @@ static int enforce_worker_eviction_interval(struct vine_manager *q)
 
 /* Whether the unexpected loss of a worker at time now is excused for task t, because another worker was lost shortly
  * before in a way that no task explains: it held tasks, none of which had been charged a loss. A loss of t itself never
- * excuses t, so a task that makes each worker it lands on exit cannot excuse itself with its own losses: its last two
- * losses, and the last unexplained one, which a task that kills a worker every second outlives by more than two. See
- * cleanup_worker(). */
+ * excuses t. Only the two most recent unexplained losses are consulted, and those of t are among its own two most
+ * recent unexplained losses, which t remembers. A task is excused at most max_retries + 1 losses, as many as it may be
+ * charged, because tasks that make their workers exit provide each other's evidence while none of them is charged:
+ * two of them, once another loss had excused their first losses, excused each other without end. See cleanup_worker(). */
 static int worker_loss_is_excused(struct vine_manager *q, struct vine_task *t, timestamp_t now)
 {
+	if (t->max_retries > 0 && t->worker_losses_excused > t->max_retries) {
+		return 0;
+	}
 	for (int i = 0; i < 2; i++) {
 		timestamp_t evidence = q->time_unexplained_worker_losses[i];
-		if (evidence && evidence != t->time_worker_lost[0] && evidence != t->time_worker_lost[1] && evidence != t->time_unexplained_loss && now - evidence <= VINE_WORKER_LOSS_EXCUSE_WINDOW) {
+		if (evidence && evidence != t->time_unexplained_losses[0] && evidence != t->time_unexplained_losses[1] && now - evidence <= VINE_WORKER_LOSS_EXCUSE_WINDOW) {
 			return 1;
 		}
 	}
@@ -1481,7 +1485,8 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w, v
 	 * with no such loss of another worker shortly before, then explains each later loss of its workers, which keep
 	 * being charged, and it returns once it is out of retries instead of taking every worker in turn. Losses during a
 	 * mass loss or a cascade of external removals are excused and give the try back, as forsaken tasks do, and the
-	 * tasks they excuse stay uncharged, so their later losses still count as evidence while the cascade continues. */
+	 * tasks they excuse stay uncharged, so their later losses still count as evidence while the cascade continues. A
+	 * task is excused at most max_retries + 1 losses, so it loses at most 2 * (max_retries + 1) workers. */
 	timestamp_t now = timestamp_get();
 	int unexpected = reason == VINE_WORKER_DISCONNECT_FAILURE;
 	int unexplained = 0;
@@ -1514,8 +1519,11 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w, v
 		 * instead of going to another worker. */
 		vine_task_state_t new_state = VINE_TASK_READY;
 		if (t->type != VINE_TASK_TYPE_LIBRARY) {
-			if (!unexpected || worker_loss_is_excused(q, t, now)) {
+			if (!unexpected) {
 				t->try_count -= 1;
+			} else if (worker_loss_is_excused(q, t, now)) {
+				t->try_count -= 1;
+				t->worker_losses_excused += 1;
 			} else {
 				t->worker_loss_charged = 1;
 				if (t->max_retries > 0 && t->try_count > t->max_retries) {
@@ -1523,14 +1531,10 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w, v
 					new_state = VINE_TASK_RETRIEVED;
 				}
 			}
-			if (unexpected) {
-				t->time_worker_lost[1] = t->time_worker_lost[0];
-				t->time_worker_lost[0] = now;
-				/* The loss becomes evidence below. A task that loses workers faster than one every few seconds
-				 * outlives its last two losses within the excuse window, so it remembers this one too. */
-				if (unexplained) {
-					t->time_unexplained_loss = now;
-				}
+			if (unexpected && unexplained) {
+				/* The loss becomes evidence below, which never excuses this task. */
+				t->time_unexplained_losses[1] = t->time_unexplained_losses[0];
+				t->time_unexplained_losses[0] = now;
 			}
 			debug(D_VINE, "task %d lost worker %s (%s): %d of %d tries used", t->task_id, w->hostname, w->addrport, t->try_count, t->max_retries);
 		}
