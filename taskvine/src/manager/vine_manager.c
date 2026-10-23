@@ -3907,6 +3907,18 @@ static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_inf
 	count_worker_resources(q, w);
 }
 
+/* Return non-zero when a large temporary file that the vault holds should still come from a peer: a worker holds a READY
+ * copy that it may send, and only its transfers in flight keep it from sending now. Its next free transfer wakes the
+ * task (vine_schedule_wake_worker()), and a holder that is removed, suspected, or fails a transfer leaves the vault to
+ * serve it. Decided on 2026-10-23: two readers of a large output were dispatched about 20 ms apart, the first took
+ * the producer as its source and put it at its byte budget, and the second read the vault's copy through manager://
+ * at 22-55 MB/s, 6-7 s for 136-243 MB, where the peer would have sent it in 0.15-0.25 s once the first ended. On the
+ * cluster, 20 of 21 vault reads above 8 MB in a logged run happened while a connected worker held a READY copy. */
+static int vault_read_waits_for_peer(struct vine_manager *q, struct vine_file *f)
+{
+	return f->type == VINE_TEMP && f->size > VINE_DATA_INLINE_BYTES && !(f->flags & VINE_PEER_NOSHARE) && f->cache_level > VINE_CACHE_LEVEL_TASK && vine_file_replica_table_has_holder(q, f->cached_name);
+}
+
 /*
 Determine whether there is transfer capacity to assign this task to this worker.
 Returns true on success, false if there are insufficient transfer sources.
@@ -3977,6 +3989,9 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 		*/
 		int small_local_file = m->file->type == VINE_FILE && m->file->size <= VINE_DATA_INLINE_BYTES;
 		if (!small_local_file && vine_manager_data_service_vault_contains(q, m->file)) {
+			if (vault_read_waits_for_peer(q, m->file)) {
+				return 0;
+			}
 			char *source = string_format("manager://%s", m->file->cached_name);
 			if (vine_current_transfers_url_in_use(q, source) >= q->file_source_max_transfers) {
 				free(source);
@@ -4047,6 +4062,9 @@ int vine_manager_transfer_source_available(struct vine_manager *q, struct vine_f
 
 	int small_local_file = f->type == VINE_FILE && f->size <= VINE_DATA_INLINE_BYTES;
 	if (!small_local_file && vine_manager_data_service_vault_contains(q, f)) {
+		if (vault_read_waits_for_peer(q, f)) {
+			return 0;
+		}
 		char source[VINE_LINE_MAX];
 		snprintf(source, sizeof(source), "manager://%s", f->cached_name);
 		return vine_current_transfers_url_in_use(q, source) < q->file_source_max_transfers;
