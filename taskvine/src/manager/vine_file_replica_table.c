@@ -113,23 +113,34 @@ int vine_file_replica_count(struct vine_manager *m, struct vine_file *f)
 }
 
 // find a worker (randomly) in posession of a specific file, and is ready to transfer it.
-/* Return non-zero when holder peer can send the file named cachename now: it serves transfers, is not suspect or being
- * removed, did not fail a transfer within the transient error interval, holds a READY replica, and has room under its
- * limits. current_time is read once, for the first holder that needs it. */
-static int holder_can_serve(struct vine_manager *q, struct vine_worker_info *peer, const char *cachename, timestamp_t *current_time)
+/* Return the READY replica of the file named cachename on holder peer when peer may send it: it serves transfers, is not
+ * suspect or being removed, and did not fail a transfer within the transient error interval. Return NULL otherwise.
+ * current_time is read once, for the first holder that needs it. */
+static struct vine_file_replica *holder_may_serve(struct vine_manager *q, struct vine_worker_info *peer, const char *cachename, timestamp_t *current_time)
 {
 	if (!peer->transfer_port_active || peer->pending_removal || vine_worker_source_is_suspect(peer)) {
-		return 0;
+		return NULL;
 	}
 	if (!*current_time) {
 		*current_time = timestamp_get();
 	}
 	if (*current_time - peer->last_transfer_failure < q->transient_error_interval) {
 		debug(D_VINE, "Skipping worker source after recent failure : %s", peer->transfer_host);
-		return 0;
+		return NULL;
 	}
 	struct vine_file_replica *replica = hash_table_lookup(peer->current_files, cachename);
 	if (!replica || replica->state != VINE_FILE_REPLICA_STATE_READY) {
+		return NULL;
+	}
+	return replica;
+}
+
+/* Return non-zero when holder peer can send the file named cachename now: it may serve it and has room under its
+ * limits. */
+static int holder_can_serve(struct vine_manager *q, struct vine_worker_info *peer, const char *cachename, timestamp_t *current_time)
+{
+	struct vine_file_replica *replica = holder_may_serve(q, peer, cachename, current_time);
+	if (!replica) {
 		return 0;
 	}
 	/* The source's transfers in flight limit it by count and by bytes, so a large file goes one copy at a time while
@@ -169,6 +180,24 @@ struct vine_worker_info *vine_file_replica_table_find_worker(struct vine_manager
 	}
 
 	return peer_selected;
+}
+
+int vine_file_replica_table_has_holder(struct vine_manager *q, const char *cachename)
+{
+	struct set *workers = hash_table_lookup(q->file_worker_table, cachename);
+	if (!workers) {
+		return 0;
+	}
+	timestamp_t current_time = 0;
+	struct vine_worker_info *peer;
+	int iteration;
+	SET_ITERATE(workers, iteration, peer)
+	{
+		if (holder_may_serve(q, peer, cachename, &current_time)) {
+			return 1;
+		}
+	}
+	return 0;
 }
 
 int vine_file_replica_table_has_source(struct vine_manager *q, const char *cachename)
