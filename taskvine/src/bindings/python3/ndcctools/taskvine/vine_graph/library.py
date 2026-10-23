@@ -24,6 +24,11 @@ the hoisted objects from one file, HOISTED, which maps each name to the object s
 edata from another, EDATA_CACHE, which maps sandbox names of staged objects to their serialized bytes. Every task it
 forks inherits all of them, so tasks neither import those modules nor load those objects again, and a task reads a
 cached object instead of the file that its manifest names.
+
+The library also learns objects from its tasks: a staged object, result, or selection whose load took a task at least
+LEARN_SECONDS is linked into the library sandbox and reported to the library (ndcctools.taskvine.utils.note_library()),
+which loads it once a second task reported it, within a budget of file bytes, so the tasks forked afterwards inherit it
+instead of loading the file each (_learn()).
 """
 
 import base64
@@ -35,10 +40,13 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 
 import cloudpickle
+
+from .. import utils as library_utils
 
 from .graph import File, Hoisted, _Attribute, _Ref, _Symbol, replace_symbols
 
@@ -55,6 +63,25 @@ EDATA_CACHE = "vine-graph-edata-cache.pkl"
 _hoisted = {}
 # The cached edata of this library process, by the sandbox name of its staged file, which forked tasks inherit.
 _edata = {}
+
+# Seconds that loading a file takes a task before the task reports the file to its library.
+LEARN_SECONDS = 0.01
+# Library sandbox directory of the links to the files that tasks reported.
+LEARNED = "vine-graph-learned"
+# Seconds that a file reported by one task keeps its link while no second task reports it.
+REPORT_SECONDS = 60
+# The absolute path of LEARNED in a library process that learns objects, or None, as in a local Executor.
+_learn_directory = None
+# Bytes of reported files that the library may hold links to and objects of, and the bytes it holds of each.
+_learn_budget = 0
+_learned_bytes = 0
+_reported_bytes = 0
+# The objects that the library process learned, which forked tasks inherit, by the name of the file's link
+# (_load_file()): (object, bytes of the file).
+_learned = {}
+# Files that one task reported and the library has not learned, by the name of their link: (time, bytes of the file).
+_reported = {}
+_last_sweep = 0.0
 
 
 def runtime_identity():
@@ -85,7 +112,126 @@ def prepare(module_names, hoisted_path, edata_path=None, manager_identity=None):
                 blobs = cloudpickle.load(stream)
             objects.update((name, cloudpickle.loads(blob)) for name, blob in blobs.items())
     rehearse()
+    _start_learning()
     gc.freeze()
+
+
+def _start_learning():
+    """Let this library process learn objects from its tasks, when its runtime passes notes. The budget is a 32nd of
+    the host's memory, at most 1 GB of files, because objects take more memory than their files."""
+    global _learn_directory, _learn_budget
+    install = getattr(library_utils, "set_library_note_handler", None)
+    if install is None:
+        return
+    try:
+        memory = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        directory = os.path.abspath(LEARNED)
+        os.makedirs(directory, exist_ok=True)
+    except (OSError, ValueError):
+        return
+    _learn_directory = directory
+    _learn_budget = min(1 << 30, memory // 32)
+    install(_learn)
+
+
+def _load_pickle(path):
+    with open(path, "rb") as stream:
+        return cloudpickle.load(stream)
+
+
+def _load_file(path, kind, loader):
+    """Return loader(path), or the library's object of the file when the library learned it. A load that takes at
+    least LEARN_SECONDS links the file into the library sandbox under a name of its kind, device, inode, size, and
+    modification time, and reports the name to the library. The link keeps the inode, so the name stands for no other
+    file while the link exists, which a task checks before it takes the library's object."""
+    if _learn_directory is None:
+        return loader(path)
+    try:
+        info = os.stat(path)
+    except OSError:
+        return loader(path)
+    name = f"{kind}-{info.st_dev}-{info.st_ino}-{info.st_size}-{info.st_mtime_ns}"
+    link = os.path.join(_learn_directory, name)
+    entry = _learned.get(name)
+    if entry is not None:
+        try:
+            if os.stat(link).st_ino == info.st_ino:
+                return entry[0]
+        except OSError:
+            pass
+    started = time.perf_counter()
+    value = loader(path)
+    if time.perf_counter() - started >= LEARN_SECONDS and info.st_size <= _learn_budget:
+        try:
+            os.link(path, link)
+        except FileExistsError:
+            pass
+        except OSError:
+            return value
+        library_utils.note_library(name)
+    return value
+
+
+def _unlink(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _learn(names):
+    """Note handler of the library process (ndcctools.taskvine.utils.set_library_note_handler()): load the objects of
+    the files that a second task reported, within the budget, so the tasks forked afterwards inherit them, and return
+    whether it loaded any. A file that one task reported keeps its link for REPORT_SECONDS. Every ten seconds, objects
+    of files that left the Worker's cache, which only the library's link still holds, are dropped with their links."""
+    global _learned_bytes, _reported_bytes, _last_sweep
+    loaders = {"e": _load_pickle, "r": load_result, "s": load_selection}
+    now = time.monotonic()
+    changed = False
+    for name in names:
+        if name in _learned:
+            continue
+        link = os.path.join(_learn_directory, name)
+        size = int(name.split("-")[3])
+        if name not in _reported:
+            if _learned_bytes + _reported_bytes + size > _learn_budget:
+                _unlink(link)
+            else:
+                _reported[name] = (now, size)
+                _reported_bytes += size
+            continue
+        _reported_bytes -= _reported.pop(name)[1]
+        try:
+            if _learned_bytes + size > _learn_budget:
+                raise MemoryError
+            value = loaders[name[0]](link)
+        except Exception:
+            _unlink(link)
+            continue
+        _learned[name] = (value, size)
+        _learned_bytes += size
+        changed = True
+    if now - _last_sweep >= 10:
+        _last_sweep = now
+        for name, (_, size) in list(_learned.items()):
+            link = os.path.join(_learn_directory, name)
+            try:
+                held = os.stat(link).st_nlink > 1
+            except OSError:
+                held = False
+            if not held:
+                del _learned[name]
+                _learned_bytes -= size
+                _unlink(link)
+        for name, (reported, size) in list(_reported.items()):
+            if now - reported < REPORT_SECONDS:
+                break
+            del _reported[name]
+            _reported_bytes -= size
+            _unlink(os.path.join(_learn_directory, name))
+    if changed:
+        gc.freeze()
+    return changed
 
 
 # Number of times rehearse() runs a task, enough for the interpreter to specialize the code that tasks run.
@@ -112,7 +258,8 @@ def rehearse():
         save_result("result", 0)
         manifest = {"objects": [cloudpickle.dumps(namespace["increment"]), cloudpickle.dumps(_Ref(None, "parent")),
                                 cloudpickle.dumps(1)],
-                    "callable": 0, "args": [1], "kwargs": {"step": 2}, "inputs": {(None, "parent"): "result"},
+                    "callable": 0, "args": [1], "kwargs": {"step": 2}, "scan": ((0,), ()),
+                    "inputs": {(None, "parent"): "result"},
                     "selected": {}, "selections": [], "files": {}}
         with open(MANIFEST, "wb") as stream:
             cloudpickle.dump(manifest, stream)
@@ -210,12 +357,15 @@ def _select(value, steps):
     return value
 
 
-def run_task(func, args, kwargs, load_task_result, file_path, load_hoisted_object, read_once=(), load_selected=None):
+def run_task(func, args, kwargs, load_task_result, file_path, load_hoisted_object, read_once=(), load_selected=None,
+             scan=None):
     """Call func after replacing each reference in its arguments: a task result with load_task_result((graph id,
     key)), a file with file_path(file_identity(file)), and a hoisted object with load_hoisted_object(name). Other
     arguments reach func unchanged. A result or hoisted object read twice is one object. A task in read_once is read at
     exactly one place, through a selection, and load_selected(task, steps) returns the selected value, by default
-    selected from load_task_result(task), so the whole result does not stay in memory while func runs."""
+    selected from load_task_result(task), so the whole result does not stay in memory while func runs. scan, the
+    positions and keywords of the arguments that may hold references, limits the search to them, and None searches
+    every argument."""
     results = {}
     hoisted = {}
     if load_selected is None:
@@ -236,8 +386,18 @@ def run_task(func, args, kwargs, load_task_result, file_path, load_hoisted_objec
             return _select(results[task], ref.steps)
         return file_path(file_identity(ref))
 
-    # Replacing all arguments at once keeps an object passed as several arguments one object.
-    args, kwargs = replace_symbols((tuple(args), dict(kwargs)), replace)
+    # Replacing all arguments at once keeps an object passed as several arguments one object. An object that holds no
+    # reference stays as it is, also inside an argument that is searched.
+    if scan is None:
+        args, kwargs = replace_symbols((tuple(args), dict(kwargs)), replace)
+    elif scan[0] or scan[1]:
+        positions, names = scan
+        found, named = replace_symbols((tuple(args[index] for index in positions), {name: kwargs[name] for name in names}),
+                                       replace)
+        args = list(args)
+        for index, value in zip(positions, found):
+            args[index] = value
+        kwargs = {**kwargs, **named}
     return func(*args, **kwargs)
 
 
@@ -315,16 +475,18 @@ def _run_node():
             elif entry in _edata:
                 objects[entry] = _edata[entry]
             else:
-                with open(entry, "rb") as stream:
-                    objects[entry] = cloudpickle.load(stream)
+                objects[entry] = _load_file(entry, "e", _load_pickle)
         return objects[entry]
+
+    def load_task_result(task):
+        return _load_file(manifest["inputs"][task], "r", load_result)
 
     def load_selected(task, steps):
         # A result read only through a selection is either a file of its own or selected from the whole result.
         path = manifest["selected"][task]
         if path is None:
-            return _select(load_result(manifest["inputs"][task]), steps)
-        return load_selection(path)
+            return _select(load_task_result(task), steps)
+        return _load_file(path, "s", load_selection)
 
     function = load(manifest["callable"])
     args = tuple(load(task_path) for task_path in manifest["args"])
@@ -334,9 +496,9 @@ def _run_node():
     sandbox = os.getcwd()
     files = manifest["files"]
     try:
-        output = run_task(function, args, kwargs, lambda task: load_result(manifest["inputs"][task]),
+        output = run_task(function, args, kwargs, load_task_result,
                           lambda identity: os.path.join(sandbox, files[identity]), _hoisted.__getitem__,
-                          manifest["selected"], load_selected)
+                          manifest["selected"], load_selected, manifest.get("scan"))
     finally:
         os.chdir(sandbox)
     del function, args, kwargs

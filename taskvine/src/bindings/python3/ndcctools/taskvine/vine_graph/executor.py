@@ -57,7 +57,7 @@ from . import vine_graph_capi as capi  # noqa: E402
 # The C functions themselves, which the background thread calls for every task without the Python function of the
 # generated wrapper around each.
 _capi = capi._vine_graph_capi
-from .graph import File, Graph, Hoisted, Node, NodeFile, _FileRef, _Ref, _Selectable, _Symbol  # noqa: E402
+from .graph import _LEAF_TYPE_SET, File, Graph, Hoisted, Node, NodeFile, _FileRef, _Ref, _Selectable, _Symbol  # noqa: E402
 from . import install, library  # noqa: E402
 
 # Manager tuning that suits graph execution. set_params() overrides it.
@@ -1343,6 +1343,22 @@ class Executor:
         manifest_args = [(value.graph_id, value.key) if type(value) is _Ref and not value.steps
                          else stage(value, entries, names, inline, edata) for value in args]
         manifest_kwargs = {argument: stage(value, entries, names, inline, edata) for argument, value in kwargs.items()}
+        # The library replaces the references in arguments that may hold them: references, and the copies the Graph
+        # stored of containers that held symbols. An argument stored as it was passed holds none (Graph._plain), and
+        # scanning an object-heavy one took the task longer than loading it.
+        plain = graph._plain
+
+        def holds_references(value):
+            kind = type(value)
+            if kind in _LEAF_TYPE_SET:
+                return False
+            if kind in _REFERENCE_TYPES:
+                return True
+            entry = plain.get(id(value))
+            return entry is None or entry[0] is not value
+
+        scan = (tuple(index for index, value in enumerate(args) if holds_references(value)),
+                tuple(argument for argument, value in kwargs.items() if holds_references(value)))
         # A result that the task reads at exactly one place, through a selection, is selected, and the task mounts
         # the producer's file of that selection when the producer writes one, instead of the whole result.
         # The tasks whose whole results the task mounts and their sandbox paths, vine-graph-result-<number of the
@@ -1381,6 +1397,7 @@ class Executor:
             "callable": stage(func, entries, names, inline, edata),
             "args": manifest_args,
             "kwargs": manifest_kwargs,
+            "scan": scan,
             "inputs": inputs,
             "selected": selected,
             "selections": list(selections.values()) if selections else [],
