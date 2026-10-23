@@ -85,7 +85,18 @@ EXECUTOR_TUNING = {
     # the bar would draw over later cells or the prompt, and use progress() instead.
     "progress-bar": 1,
     "progress-bar-update-interval-sec": 0.1,
+    # auto anchors every output in the vault while it keeps up, and only the outputs on the boundaries of bands of
+    # generations while large outputs complete faster than it anchors them. 0 anchors every output, k fixes the band.
+    "checkpoint-cut": "auto",
+    # Seconds a large output's checkpoint waits, once, while tasks that read it run, because the Worker that holds it
+    # sends the checkpoint through the link its readers fetch it from. 0 starts every checkpoint at once.
+    "checkpoint-yield": 10,
 }
+
+# Graph executor settings: those above, and shared-directory, which has no default. It names a directory that the
+# Manager and every Worker mount at one path, such as a shared file system, where the vault keeps large checkpoints
+# that the Workers holding them write, besides those it receives itself (Manager tuning vault-shared-min-bytes).
+EXECUTOR_SETTINGS = frozenset(EXECUTOR_TUNING) | {"shared-directory"}
 
 COMPLETED = "completed"
 FAILED = "failed"
@@ -950,12 +961,14 @@ class Executor:
         return None if self._manager is None else self._manager.name
 
     def set_params(self, params):
-        """Apply settings by name. Graph executor settings are task-priority-mode, max-retries, progress-bar, and
-        progress-bar-update-interval-sec, and every other name is TaskVine Manager tuning, such as vault-disk-limit.
-        Settings take effect at once, and an unknown name raises ValueError. A local Executor ignores Manager tuning."""
+        """Apply settings by name. Graph executor settings are task-priority-mode, max-retries, progress-bar,
+        progress-bar-update-interval-sec, checkpoint-cut, checkpoint-yield, and shared-directory, and every other name
+        is TaskVine Manager tuning, such as vault-disk-limit. Settings take effect at once, and an unknown name raises
+        ValueError.
+        A local Executor ignores Manager tuning and the shared directory."""
         self._check_open()
         for setting, value in params.items():
-            if setting in EXECUTOR_TUNING:
+            if setting in EXECUTOR_SETTINGS:
                 # The C executor owns the rules, which a local Executor follows too.
                 problem = capi.vine_graph_executor_check_setting(setting, str(value))
                 if problem:
@@ -2196,14 +2209,21 @@ class Executor:
         return Progress(self._submitted, self._counts[COMPLETED], self._counts[FAILED])
 
     def stats(self):
-        """Return the makespan in seconds, the number of submitted tasks, and the number of recovery tasks."""
+        """Return the makespan in seconds, the number of submitted tasks, the number of recovery tasks, and how far
+        durability lags behind completions (durability): results of completed tasks that only Workers hold and that
+        their readers still need (exposed), which a Worker's loss makes run again, results waiting for or being
+        received by the Manager (pending), results completed per second (output_rate), the mean seconds a result stays
+        exposed (lag), large results completed per second and the rate at which the Manager receives them while others
+        wait (large_rate, large_capacity), the generations per band when only band boundaries are kept (cut, 0 while
+        every result is)."""
         self._check_open()
         if self._local:
-            return {"makespan": self._local_seconds, "tasks": self._submitted, "recovery_tasks": 0}
+            return {"makespan": self._local_seconds, "tasks": self._submitted, "recovery_tasks": 0, "durability": None}
         return self._call(lambda: {
             "makespan": capi.vine_graph_executor_get_makespan_us(self._executor) / 1e6,
             "tasks": self._submitted,
             "recovery_tasks": capi.vine_graph_executor_get_completed_recovery_tasks(self._executor),
+            "durability": _durability(capi.vine_graph_executor_get_durability(self._executor)),
         })
 
     def _wait_for(self, futures, timeout):
@@ -2499,6 +2519,13 @@ def _check_input_file(path):
     if os.path.isdir(path):
         raise IsADirectoryError(errno.EISDIR, "a File must be a regular file, not a directory", path)
     raise FileNotFoundError(errno.ENOENT, "a File must name an existing regular file", path)
+
+
+def _durability(durability):
+    """Return the fields of a C vine_graph_durability as a dictionary."""
+    return {"exposed": durability.exposed, "pending": durability.pending, "output_rate": durability.output_rate,
+            "lag": durability.lag, "large_rate": durability.large_rate, "large_capacity": durability.large_capacity,
+            "cut": durability.cut}
 
 
 def _link_or_copy(source, destination):

@@ -62,6 +62,7 @@ struct vine_graph_node {
 	unsigned let_go : 1;	// the frontend no longer needs the node, which is removed once every child was removed
 	unsigned kept : 1;	// ran again after its release, and kept until the frontend lets it go (never released meanwhile)
 	unsigned removed : 1;	// removed from the graph, so only the entries counted in refs still hold the structure
+	unsigned reading : 1;	// submitted and not finished, so counted in each parent's readers
 
 	int remaining_parents;	    // parents not completed yet
 	int depth;		    // longest path from a source, computed by vine_graph_link_node
@@ -69,6 +70,8 @@ struct vine_graph_node {
 	int pinned_outputs;	    // outputs with pins, so a release check costs O(1) instead of a pass over outputs
 	int local_outputs;	    // outputs with a vault copy, so the anchor check costs O(1) instead of a pass over outputs
 	int durable_children;	    // executor's release check: every child before this index was durable when checked
+	int exposed;		    // outputs the executor counts as exposed: completed, neither anchored nor released
+	int readers;		    // submitted children that have not finished, before which large checkpoints wait
 	uint64_t execution_time_us; // latest successful execution time on a Worker
 
 	uint64_t failure_source_id; // the node whose own failure made this one fail

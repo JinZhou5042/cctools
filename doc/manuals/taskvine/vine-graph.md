@@ -305,7 +305,8 @@ of a file. `future.exception()` returns the task's `TaskError` instead of
 raising it, and `future.done()` tells whether the task finished. Both
 `result()` and `exception()` take an optional `timeout` in seconds.
 `executor.wait()` waits for every submitted task, or for the given Futures,
-and `executor.stats()` reports the makespan and task counts.
+and `executor.stats()` reports the makespan, task counts, and how far
+checkpoints lag behind completed tasks (`durability`).
 
 Tasks run in the background from the moment they are submitted, so the
 program can do other work meanwhile. `executor.progress()` returns how many
@@ -481,6 +482,10 @@ effect at once:
 | `progress-bar` | `1` | Draw a progress bar on standard output while tasks run; `0` disables it. Notebooks and interactive shells default to `0`: a notebook shows progress in the cell, and `executor.progress()` reports it anywhere. |
 | `vault-disk-limit` | `1536` | Gigabytes of checkpointed task results the manager may store, in memory or on disk. `0` means unlimited. |
 | `vault-memory-limit` | `1` | Gigabytes of small checkpointed results (up to 64 KB each) the manager keeps in memory instead of writing them to disk. Beyond it, the oldest are written to the vault directory. `0` writes every checkpoint to disk. |
+| `checkpoint-cut` | `auto` | Which large results are checkpointed. `auto` checkpoints every result while the manager keeps up, and only every few generations while large results complete faster than it stores them. `0` checkpoints every result, and `k` the last generation of each band of `k`. |
+| `checkpoint-yield` | `10` | Seconds the checkpoint of a large result waits while tasks that read it run, so the worker's network link serves those tasks first. Each result waits at most once, and a result that `result()` waits for never waits. `0` starts every checkpoint at once. |
+| `shared-directory` | none | A directory that the manager and every worker mount at the same path, such as a shared file system. Workers then copy large results there themselves as checkpoints, besides those the manager receives. It can be set once. |
+| `vault-shared-min-bytes` | `4194304` | Bytes from which a result is copied to `shared-directory` instead of being sent to the manager. |
 
 Other names are TaskVine manager tuning parameters, such as
 `wait-for-workers`. A name the manager does not recognize raises `ValueError`.
@@ -525,7 +530,9 @@ the cause, then add the task again or run the Graph in a new Executor.
 Every task result is copied from a worker to the manager in the background
 after its task completes. Results of longer-running tasks are copied first.
 Copies use spare transfer capacity only: workers fetching data from the
-manager always come first. When the stored copies reach `vault-disk-limit`, new
+manager always come first. The copy of a large result also waits, at most
+`checkpoint-yield` seconds, while tasks that read it run, because both leave
+its worker through the same network link. When the stored copies reach `vault-disk-limit`, new
 copies wait until space is freed, and the manager prints a notice once. A
 result is removed from its worker only after the results of the tasks that read
 it are copied, so a lost result never needs more than its producer to run again.
@@ -533,6 +540,19 @@ While the limit is reached, results therefore stay on workers longer and worker
 disk use grows until downstream tasks finish. Raise `vault-disk-limit` if that
 happens. A result that is no longer needed is removed, along with its copy or
 any copy in progress.
+
+With `shared-directory` set, the worker that holds a large result copies it
+into a directory of the manager's own there, in the background, and the
+manager receives smaller results itself, so checkpoints use the bandwidth of
+both. Tasks never wait for these copies. A copy counts toward
+`vault-disk-limit`, is deleted when its result is no longer needed, and the
+directory is removed when the Executor closes.
+
+When large results still complete faster than they can be stored,
+`checkpoint-cut auto` checkpoints only the last generation of each band of a
+few generations, with bands just wide enough for the copies to keep up, so a
+lost result recomputes at most its band. The Executor prints a notice once
+when this starts.
 
 If workers are lost while the Executor is open, new workers can fetch
 checkpointed results from the manager instead of rerunning their producers.
@@ -668,7 +688,8 @@ help, because consecutive tasks of a chain tend to run on the same worker.
 Every result is queued for checkpointing when its task completes, and results
 of longer-running tasks are copied first. The data service handles up to 128
 workers fetching data and up to 128 checkpoint copies at once, and neither
-direction waits for the other. A failed copy is queued again after the
+direction waits for the other. With a shared directory, up to 128 more large
+results are copied by their workers at once. A failed copy is queued again after the
 manager's `transient-error-interval`.
 
 ### Arguments and recovery

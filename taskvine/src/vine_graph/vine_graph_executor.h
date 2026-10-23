@@ -77,6 +77,20 @@ struct vine_graph_capacity {
 	int64_t cores;	 /* cores of those workers */
 };
 
+/* How far durability lags behind completions. An output is anchored when it has a copy in the vault, at the Manager
+ * or in the vault's shared directory. Until then, or until its readers no longer need it and it is released, its loss makes its
+ * producer run again. Rates and the lag are measured over the last complete window of a few seconds. Large outputs are
+ * those the vault receives over connections of their own, above an inline transfer (64 KiB). */
+struct vine_graph_durability {
+	int64_t exposed;	/* outputs of completed nodes that are neither anchored nor released */
+	int64_t pending;	/* outputs queued for the vault or being received */
+	double output_rate;	/* outputs per second that completed and needed the vault */
+	double lag;		/* mean seconds an output stayed exposed, from the mean exposed count by Little's law */
+	double large_rate;	/* large outputs per second that completed and needed the vault */
+	double large_capacity;	/* large outputs per second the vault anchored while others waited, or 0 if not measured */
+	int64_t cut;		/* generations per anchored band of large outputs, or 0 while every output is anchored */
+};
+
 /* Create an executor whose nodes call function_name in the library library_name. Return NULL on failure. */
 struct vine_graph_executor *vine_graph_executor_create(struct vine_manager *manager, const char *library_name, const char *function_name);
 
@@ -89,7 +103,20 @@ void vine_graph_executor_delete(struct vine_graph_executor *e);
  * task-priority-mode     Order of ready nodes: largest-input-first (default), depth-first, or fifo.
  * max-retries            Failed attempts allowed per node for infrastructure failures (default 5).
  * progress-bar           Draw a progress bar on standard output: 1 (default) or 0.
- * progress-bar-update-interval-sec  Seconds between progress bar updates (default 0.1). */
+ * progress-bar-update-interval-sec  Seconds between progress bar updates (default 0.1).
+ * checkpoint-cut         Anchoring of large outputs: auto (default) anchors every output while the vault keeps up,
+ *                        and only the outputs on the boundaries of bands of generations while large outputs complete
+ *                        faster than it anchors them, with bands just wide enough for it to keep up. 0 anchors every
+ *                        output, and k anchors the boundaries of bands of k generations. Small outputs are always
+ *                        anchored. A lost output then recomputes at most a band, never a longer chain.
+ * checkpoint-yield       Seconds a large output's checkpoint waits, once, while the node has children whose tasks run
+ *                        and read it from the Worker that also sends the checkpoint (default 10, 0 disables it). An
+ *                        output the frontend fetches never waits.
+ * shared-directory       A directory that the Manager and every Worker mount at the same path, such as a shared
+ *                        file system. The vault keeps large checkpoints in a directory of its own there, which the
+ *                        Workers holding them write in the background, besides those it receives itself
+ *                        (vine_set_vault_shared_directory(), and the Manager tuning vault-shared-min-bytes). It can be
+ *                        set once. */
 int vine_graph_executor_tune(struct vine_graph_executor *e, const char *name, const char *value);
 
 /* Return NULL if vine_graph_executor_tune would accept a setting, or a static string that explains what the setting
@@ -222,6 +249,8 @@ uint64_t vine_graph_executor_get_makespan_us(const struct vine_graph_executor *e
 uint64_t vine_graph_executor_get_completed_recovery_tasks(const struct vine_graph_executor *e);
 /* Return the workers connected now and their cores, at O(workers), or zeros for a NULL executor. */
 struct vine_graph_capacity vine_graph_executor_get_capacity(struct vine_graph_executor *e);
+/* Return how far durability lags behind completions, at O(1), or zeros for a NULL executor. */
+struct vine_graph_durability vine_graph_executor_get_durability(const struct vine_graph_executor *e);
 
 /* Drop a submitted node the frontend no longer needs: it will not pin, fetch, or read the node's outputs, and no node it
  * submits later reads them. The node is removed once it failed, or once it completed and its outputs were released,
