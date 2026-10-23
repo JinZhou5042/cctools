@@ -40,6 +40,19 @@ int vine_current_transfers_remove(struct vine_manager *q, const char *id);
  * tasks that wait for the worker's files (vine_schedule_wake_worker()). */
 int vine_current_transfers_source_has_room(struct vine_manager *q, struct vine_worker_info *w, int64_t size);
 
+/* Count the outgoing transfers of worker w with those of the other workers of its host, once it reported its hostname.
+ * The workers of one host share its network link, so a choice of source that avoids a busy link counts their transfers
+ * together, to other workers and checkpoints alike. */
+void vine_current_transfers_attach_host(struct vine_manager *q, struct vine_worker_info *w);
+
+/* Stop counting the transfers of worker w with its host. Its own records are wiped before. */
+void vine_current_transfers_detach_host(struct vine_manager *q, struct vine_worker_info *w);
+
+/* When the oldest transfer to a worker from the host of worker w still in progress started, or zero when it sends none
+ * or w has no host yet. The number of those transfers, the sizes of their files, and the number of the host's
+ * checkpoints go to sends, bytes, and checkpoints. */
+timestamp_t vine_current_transfers_host_load(struct vine_worker_info *w, int *sends, int64_t *bytes, int *checkpoints);
+
 int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const char *cachename);
 
 int vine_current_transfers_remove_success(struct vine_manager *q, const char *id);

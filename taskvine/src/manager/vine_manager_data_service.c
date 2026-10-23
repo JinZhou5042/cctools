@@ -1506,21 +1506,38 @@ typedef enum {
 	RECEIVE_REQUIRED = 2,
 } receive_kind_t;
 
-/* Return a Worker that holds a READY replica of the file and can send it to the vault, starting from a random holder, or
- * NULL. Neither kind of checkpoint counts against the limits on the transfers that a source serves to other Workers,
- * so a Worker that anchors its outputs still serves the tasks that read them, and the reverse. A Worker answers an
- * inline request in its main loop over its control connection, without limit: under the transfer limits, a small result
- * whose Worker was sending a 64 MB checkpoint waited for that checkpoint, up to a minute into a busy vault disk. A large
- * file, copied to the shared directory or received over a connection, needs a Worker that sends fewer than
- * worker-source-max-checkpoints checkpoints and had no transfer failure within the transient error interval. While
- * checkpoints counted among a source's transfers, one 128 MiB copy held every reader of the source back for its 16 s,
- * and readers held back anchoring. */
-static struct vine_worker_info *find_checkpoint_source(struct vine_manager *manager, const char *cachename, int inline_receive)
+/* Return a Worker that holds a READY replica of the file and can send it to the vault, or NULL. Neither kind of
+ * checkpoint counts against the limits on the transfers that a source serves to other Workers, so a Worker that anchors
+ * its outputs still serves the tasks that read them, and the reverse. A Worker answers an inline request in its main
+ * loop over its control connection, without limit, and the first eligible holder from a random start sends it: under
+ * the transfer limits, a small result whose Worker was sending a 64 MB checkpoint waited for that checkpoint, up to a
+ * minute into a busy vault disk. A large file, copied to the shared directory or received over a connection, needs a
+ * Worker that sends fewer than worker-source-max-checkpoints checkpoints and had no transfer failure within the
+ * transient error interval. While checkpoints counted among a source's transfers, one 128 MiB copy held every reader of
+ * the source back for its 16 s, and readers held back anchoring.
+ *
+ * A large file also leaves through its source's network link, which the Workers of one host share with the readers they
+ * serve, so it is sent from a holder whose host sends nothing to other Workers, the fewest bytes, files, and then
+ * checkpoints first. Checkpoints of a host only rank it, because they slow each other but no reader. When the host of
+ * every holder sends files to other Workers, a checkpoint waits (busy is set and NULL returned) for the transfers in
+ * progress at its first such refusal (file->checkpoint_deferred), not for ones that start later, so it waits at most
+ * for those transfers to end, which they do within the peer transfer timeout or with their Worker's removal. A fetch,
+ * which the application needs now, takes the least loaded holder at once. Decided on 2026-10-23: on the cluster, hosts
+ * with 1 Gb/s links ran up to 5 Workers, and readers of a file whose host was copying a checkpoint to the shared
+ * directory moved 24 MB/s instead of 78. Costs O(holders). */
+static struct vine_worker_info *find_checkpoint_source(struct vine_manager *manager, struct vine_file *file, int inline_receive, receive_kind_t kind, int *busy)
 {
-	struct set *workers = hash_table_lookup(manager->file_worker_table, cachename);
+	*busy = 0;
+	struct set *workers = hash_table_lookup(manager->file_worker_table, file->cached_name);
 	if (!workers || set_size(workers) < 1) {
 		return NULL;
 	}
+	timestamp_t now = timestamp_get();
+	struct vine_worker_info *best = NULL;
+	int best_idle = 0;
+	int best_sends = 0;
+	int64_t best_bytes = 0;
+	int best_checkpoints = 0;
 	struct vine_worker_info *worker;
 	int offset_bookkeep;
 	int iteration;
@@ -1529,15 +1546,43 @@ static struct vine_worker_info *find_checkpoint_source(struct vine_manager *mana
 		if (worker->pending_removal || vine_worker_source_is_suspect(worker)) {
 			continue;
 		}
-		if (!inline_receive && (!worker->transfer_port_active || worker->outgoing_checkpoints >= manager->worker_source_max_checkpoints || timestamp_get() - worker->last_transfer_failure < manager->transient_error_interval)) {
+		if (!inline_receive && (!worker->transfer_port_active || worker->outgoing_checkpoints >= manager->worker_source_max_checkpoints || now - worker->last_transfer_failure < manager->transient_error_interval)) {
 			continue;
 		}
-		struct vine_file_replica *replica = vine_file_replica_table_lookup(worker, cachename);
-		if (replica && replica->state == VINE_FILE_REPLICA_STATE_READY) {
+		struct vine_file_replica *replica = vine_file_replica_table_lookup(worker, file->cached_name);
+		if (!replica || replica->state != VINE_FILE_REPLICA_STATE_READY) {
+			continue;
+		}
+		if (inline_receive) {
 			return worker;
 		}
+		int sends;
+		int64_t bytes;
+		int checkpoints;
+		timestamp_t oldest = vine_current_transfers_host_load(worker, &sends, &bytes, &checkpoints);
+		if (!oldest && !checkpoints) {
+			/* Its host sends nothing. */
+			return worker;
+		}
+		/* A host idle for this file serves no reader, or only readers that came after the file's first refusal. */
+		int idle = !oldest || (file->checkpoint_deferred && oldest >= file->checkpoint_deferred);
+		if (!best || idle > best_idle || (idle == best_idle && (bytes < best_bytes || (bytes == best_bytes && (sends < best_sends || (sends == best_sends && checkpoints < best_checkpoints)))))) {
+			best = worker;
+			best_idle = idle;
+			best_sends = sends;
+			best_bytes = bytes;
+			best_checkpoints = checkpoints;
+		}
 	}
-	return NULL;
+	if (best && !best_idle && kind == RECEIVE_CHECKPOINT) {
+		if (!file->checkpoint_deferred) {
+			file->checkpoint_deferred = now;
+			debug(D_VINE, "checkpoint of %s waits for the transfers to workers of the hosts that hold it", file->cached_name);
+		}
+		*busy = 1;
+		return NULL;
+	}
+	return best;
 }
 
 /* Admit a receive of a temporary file into the vault. */
@@ -1586,7 +1631,11 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 	if (kind != RECEIVE_REQUIRED && ds->vault_limit > 0 && ds->vault_used + ds->vault_reserved + size > ds->vault_limit) {
 		return VINE_CHECKPOINT_FULL;
 	}
-	struct vine_worker_info *worker = find_checkpoint_source(manager, file->cached_name, inline_receive);
+	int busy;
+	struct vine_worker_info *worker = find_checkpoint_source(manager, file, inline_receive, kind, &busy);
+	if (busy) {
+		return VINE_CHECKPOINT_BUSY;
+	}
 	if (!worker || strlen(file->cached_name) >= VINE_DATA_LINE_MAX / 3) {
 		return VINE_CHECKPOINT_NO_SOURCE;
 	}
@@ -1646,6 +1695,10 @@ static vine_manager_checkpoint_result_t admit_receive(struct vine_manager *manag
 		return VINE_CHECKPOINT_BUSY;
 	}
 	ds->vault_reserved += size;
+	if (file->checkpoint_deferred) {
+		debug(D_VINE, "checkpoint of %s waited %.3f s for the transfers to workers of the hosts that hold it", file->cached_name, (timestamp_get() - file->checkpoint_deferred) / 1000000.0);
+		file->checkpoint_deferred = 0;
+	}
 	debug(D_VINE, "checkpoint started: %s from %s:%d size=%" PRId64 " required=%d urgent=%d connect_back=%d inline=%d shared=%d vault_used=%" PRId64 " vault_reserved=%" PRId64 " vault_limit=%" PRId64, file->cached_name, worker->transfer_host, worker->transfer_port, size, kind == RECEIVE_REQUIRED, kind == RECEIVE_URGENT, worker->transfer_connect_back, inline_receive, copy, ds->vault_used, ds->vault_reserved, ds->vault_limit);
 	if (inline_receive) {
 		send_inline_request(manager, job, worker);

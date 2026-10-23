@@ -158,6 +158,10 @@ struct vine_worker_info {
 	 * until it runs nothing, or zero. */
 	int quarantine_task_id;
 	int quarantine_reserved_id;
+
+	/* The outgoing transfers of every worker on this worker's host, named by its hostname, or null before the worker
+	 * reported it (see vine_current_transfers.h). */
+	struct vine_transfer_host *transfer_host_load;
 };
 
 struct vine_worker_info * vine_worker_create( struct link * lnk );
