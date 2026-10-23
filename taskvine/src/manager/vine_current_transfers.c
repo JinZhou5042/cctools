@@ -30,7 +30,61 @@ struct vine_transfer_pair {
 	struct vine_transfer_pair *dest_next;
 	struct vine_transfer_pair *source_prev; /* Neighbors in source_worker->outgoing_transfers. */
 	struct vine_transfer_pair *source_next;
+	struct vine_transfer_host *host;      /* The source worker's host, or null. */
+	int64_t host_bytes;		      /* The size of the source's replica, counted in the host's bytes. */
+	struct vine_transfer_pair *host_prev; /* Neighbors in the host's transfers to workers, in the order they started. */
+	struct vine_transfer_pair *host_next;
 };
+
+/* The outgoing transfer records of the workers of one host, as their hostname names it, in q->transfer_hosts. */
+struct vine_transfer_host {
+	char *name;
+	int refs;	   /* Workers attached to it plus its records, which keep it after its workers leave. */
+	int sends;	   /* Its transfers to workers. */
+	int64_t bytes;	   /* The sizes of the source replicas of those transfers. */
+	int checkpoints;   /* Its checkpoints. */
+	struct vine_transfer_pair *oldest; /* Its transfers to workers in the order they started. */
+	struct vine_transfer_pair *newest;
+};
+
+static void host_unref(struct vine_manager *q, struct vine_transfer_host *h)
+{
+	if (--h->refs == 0) {
+		hash_table_remove(q->transfer_hosts, h->name);
+		free(h->name);
+		free(h);
+	}
+}
+
+void vine_current_transfers_attach_host(struct vine_manager *q, struct vine_worker_info *w)
+{
+	vine_current_transfers_detach_host(q, w);
+	struct vine_transfer_host *h = hash_table_lookup(q->transfer_hosts, w->hostname);
+	if (!h) {
+		h = xxcalloc(1, sizeof(*h));
+		h->name = xxstrdup(w->hostname);
+		hash_table_insert(q->transfer_hosts, h->name, h);
+	}
+	h->refs++;
+	w->transfer_host_load = h;
+}
+
+void vine_current_transfers_detach_host(struct vine_manager *q, struct vine_worker_info *w)
+{
+	if (w->transfer_host_load) {
+		host_unref(q, w->transfer_host_load);
+		w->transfer_host_load = NULL;
+	}
+}
+
+timestamp_t vine_current_transfers_host_load(struct vine_worker_info *w, int *sends, int64_t *bytes, int *checkpoints)
+{
+	struct vine_transfer_host *h = w->transfer_host_load;
+	*sends = h ? h->sends : 0;
+	*bytes = h ? h->bytes : 0;
+	*checkpoints = h ? h->checkpoints : 0;
+	return h && h->oldest ? h->oldest->start_time : 0;
+}
 
 static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename, const char *id, int checkpoint)
 {
@@ -63,11 +117,31 @@ static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_i
 		}
 		source_worker->outgoing_transfers = t;
 	}
+	if (t->source_worker && t->source_worker->transfer_host_load) {
+		struct vine_transfer_host *h = t->source_worker->transfer_host_load;
+		t->host = h;
+		h->refs++;
+		if (t->checkpoint) {
+			h->checkpoints++;
+		} else {
+			struct vine_file_replica *replica = cachename ? vine_file_replica_table_lookup(source_worker, cachename) : 0;
+			t->host_bytes = replica ? MAX(replica->size, 0) : 0;
+			h->sends++;
+			h->bytes += t->host_bytes;
+			t->host_prev = h->newest;
+			if (h->newest) {
+				h->newest->host_next = t;
+			} else {
+				h->oldest = t;
+			}
+			h->newest = t;
+		}
+	}
 
 	return t;
 }
 
-static void vine_transfer_pair_delete(struct vine_transfer_pair *p)
+static void vine_transfer_pair_delete(struct vine_manager *q, struct vine_transfer_pair *p)
 {
 	if (p) {
 		if (p->dest_worker) {
@@ -95,6 +169,26 @@ static void vine_transfer_pair_delete(struct vine_transfer_pair *p)
 			if (p->source_next) {
 				p->source_next->source_prev = p->source_prev;
 			}
+		}
+		if (p->host && p->checkpoint) {
+			p->host->checkpoints--;
+		} else if (p->host) {
+			struct vine_transfer_host *h = p->host;
+			h->sends--;
+			h->bytes -= p->host_bytes;
+			if (p->host_prev) {
+				p->host_prev->host_next = p->host_next;
+			} else {
+				h->oldest = p->host_next;
+			}
+			if (p->host_next) {
+				p->host_next->host_prev = p->host_prev;
+			} else {
+				h->newest = p->host_prev;
+			}
+		}
+		if (p->host) {
+			host_unref(q, p->host);
 		}
 		free(p->source_url);
 		free(p->cachename);
@@ -155,7 +249,7 @@ int vine_current_transfers_remove(struct vine_manager *q, const char *id)
 	p = hash_table_remove(q->current_transfer_table, id);
 	if (p) {
 		update_url_count(q, p->source_url, -1);
-		vine_transfer_pair_delete(p);
+		vine_transfer_pair_delete(q, p);
 		return 1;
 	} else {
 		return 0;
@@ -393,7 +487,23 @@ void vine_current_transfers_print_table(struct vine_manager *q)
 
 void vine_current_transfers_clear(struct vine_manager *q)
 {
-	hash_table_clear(q->current_transfer_table, (void *)vine_transfer_pair_delete);
+	char *id;
+	struct vine_transfer_pair *p;
+	int iteration;
+	/* A record's deletion also releases its host, so it needs the manager. */
+	HASH_TABLE_ITERATE(q->current_transfer_table, iteration, id, p)
+	{
+		vine_transfer_pair_delete(q, p);
+	}
+	hash_table_clear(q->current_transfer_table, 0);
+	/* Hosts that workers still attached are freed with the manager. */
+	struct vine_transfer_host *h;
+	HASH_TABLE_ITERATE(q->transfer_hosts, iteration, id, h)
+	{
+		free(h->name);
+		free(h);
+	}
+	hash_table_clear(q->transfer_hosts, 0);
 	hash_table_clear(q->current_transfer_url_table, free);
 }
 

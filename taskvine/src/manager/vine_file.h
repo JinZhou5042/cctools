@@ -21,6 +21,7 @@ This module is private to the manager and should not be invoked by the end user.
 */
 
 #include "taskvine.h"
+#include "timestamp.h"
 
 #include <sys/types.h>
 
@@ -58,6 +59,10 @@ struct vine_file {
 	 * undeclared, costs no lookup by name. */
 	int vault_jobs;
 
+	/* When a checkpoint of this file over a connection or to the shared directory first found the host of every Worker
+	 * that holds it sending files, or zero. The checkpoint then waits for those transfers only, not for ones that start
+	 * later, so readers of other files never hold it back for good (see find_checkpoint_source()). */
+	timestamp_t checkpoint_deferred;
 };
 
 struct vine_file * vine_file_create( const char *source, const char *cached_name, const char *data, size_t size, vine_file_type_t type, struct vine_task *mini_task, vine_cache_level_t cache_level, vine_file_flags_t flags);

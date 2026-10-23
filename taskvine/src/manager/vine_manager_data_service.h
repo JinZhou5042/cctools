@@ -24,7 +24,8 @@ struct link_poll_set;
 /* Result of a checkpoint request. Every refusal leaves nothing behind and can be retried later. */
 typedef enum {
 	VINE_CHECKPOINT_ADMITTED = 1,	/* Started, already in progress, or already in the vault. */
-	VINE_CHECKPOINT_BUSY = 0,	/* Every receive slot is in use, or, for a file that comes inline, the bound of inline bytes in flight. */
+	VINE_CHECKPOINT_BUSY = 0,	/* Every receive slot is in use, or, for a file that comes inline, the bound of inline bytes in flight, or the
+				 * host of every Worker that holds a large file sends files to others. */
 	VINE_CHECKPOINT_NO_SOURCE = -1, /* The file is not a temporary file with a ready Worker replica. */
 	VINE_CHECKPOINT_FULL = -2,	/* The vault limit leaves no room for the file. */
 } vine_manager_checkpoint_result_t;

@@ -1445,6 +1445,7 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 	}
 
 	cleanup_worker(q, w);
+	vine_current_transfers_detach_host(q, w);
 
 	vine_manager_factory_worker_leave(q, w);
 
@@ -1971,6 +1972,7 @@ static vine_msg_code_t handle_taskvine(struct vine_manager *q, struct vine_worke
 		free(w->version);
 
 	w->hostname = strdup(items[0]);
+	vine_current_transfers_attach_host(q, w);
 	w->os = strdup(items[1]);
 	w->arch = strdup(items[2]);
 	w->version = strdup(items[3]);
@@ -4574,6 +4576,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->factory_table = hash_table_create(0, 0);
 	q->current_transfer_table = hash_table_create(0, 0);
 	q->current_transfer_url_table = hash_table_create(0, 0);
+	q->transfer_hosts = hash_table_create(0, 0);
 	q->task_group_table = itable_create(0);
 	q->group_id_counter = 1;
 	q->fetch_factory = 0;
@@ -4995,6 +4998,7 @@ void vine_delete(struct vine_manager *q)
 	vine_current_transfers_clear(q);
 	hash_table_delete(q->current_transfer_table);
 	hash_table_delete(q->current_transfer_url_table);
+	hash_table_delete(q->transfer_hosts);
 
 	vine_task_groups_clear(q);
 	itable_delete(q->task_group_table);

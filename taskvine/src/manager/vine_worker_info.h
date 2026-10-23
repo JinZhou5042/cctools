@@ -128,6 +128,10 @@ struct vine_worker_info {
 	 * so the records of a removed worker are found without a pass over the table. */
 	struct vine_transfer_pair *incoming_transfers;
 	struct vine_transfer_pair *outgoing_transfers;
+
+	/* The outgoing transfers of every worker on this worker's host, named by its hostname, or null before the worker
+	 * reported it (see vine_current_transfers.h). */
+	struct vine_transfer_host *transfer_host_load;
 };
 
 struct vine_worker_info * vine_worker_create( struct link * lnk );

@@ -131,6 +131,7 @@ struct vine_manager {
 	struct hash_table *workers_with_watched_file_updates;  /* Maps link -> vine_worker_info */
 	struct hash_table *current_transfer_table; 	/* Maps uuid -> struct transfer_pair */
 	struct hash_table *current_transfer_url_table; 	/* Maps source url -> int count of current transfers */
+	struct hash_table *transfer_hosts;	/* Maps a worker's hostname -> struct vine_transfer_host, the outgoing transfers of its workers. */
 	struct itable     *task_group_table; 	/* Maps group id -> list vine_task */
 	struct hash_table *workers_idle_disconnecting;  /* set of workers that were granted a request to idle disconnect, and are in the process of disconnecting. */
 
