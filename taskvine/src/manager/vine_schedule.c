@@ -902,6 +902,34 @@ static struct vine_worker_info *next_capacity_candidate(struct vine_manager *q, 
 	return NULL;
 }
 
+/* Return true if a holder of @receiving, an input of @t that comes inline into the vault and has no transfer source
+ * until it is published, lacks a large temporary input of @t. Running @t on that holder now would fetch the large
+ * input over the network, while the receive takes milliseconds. The cost is one lookup per large input and holder of
+ * @receiving, usually its producer alone. */
+static int receiving_input_draws_task_away(struct vine_manager *q, struct vine_task *t, struct vine_file *receiving)
+{
+	struct set *producers = hash_table_lookup(q->file_worker_table, receiving->cached_name);
+	struct vine_mount *m;
+	LIST_ITERATE(t->input_mounts, m)
+	{
+		if (!m || !m->file || m->file->type != VINE_TEMP || m->file->size <= VINE_DATA_INLINE_BYTES) {
+			continue;
+		}
+		if (!producers) {
+			return 1;
+		}
+		struct vine_worker_info *w;
+		int iteration;
+		SET_ITERATE(producers, iteration, w)
+		{
+			if (!vine_file_replica_table_lookup(w, m->file->cached_name)) {
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+
 /* Return the first worker that passes check_worker_against_task() in the order of VINE_SCHEDULE_FILES. A worker that
  * holds no input of the task has priority free_capacity_priority(), the order of the capacity index, so only the
  * holders are ranked here, with their cached bytes, and the two orders are merged. Workers are thus tried in the same
@@ -1127,6 +1155,17 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 			list_delete(holders);
 			return NULL;
 		}
+	}
+
+	/* A task that reads a large temporary input and an input still coming inline into the vault waits for that
+	 * receive, unless the holders of the inline input hold the large inputs too. Otherwise only those holders could
+	 * take it now, usually the small input's producer, which then fetches the large inputs over the network, while
+	 * the receive takes milliseconds and its publication wakes the task for the holders of its large inputs. */
+	if (receiving && receiving_input_draws_task_away(q, t, receiving)) {
+		list_delete(holders);
+		t->blocking_inputs[0] = receiving;
+		t->blocking_vault = 1;
+		return NULL;
 	}
 
 	struct vine_worker_info *best_worker = NULL;
