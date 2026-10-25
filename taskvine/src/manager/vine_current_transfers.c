@@ -35,9 +35,26 @@ struct vine_transfer_pair {
 	struct vine_transfer_pair *source_next;
 	struct vine_transfer_host *host;      /* The source worker's host, or null. */
 	int64_t host_bytes;		      /* The size of the source's replica, counted in the host's bytes. */
+	int rated;			      /* Set for a large file sent to another host, counted in the host's rate. */
 	struct vine_transfer_pair *host_prev; /* Neighbors in the host's transfers to workers, in the order they started. */
 	struct vine_transfer_pair *host_next;
 };
+
+/*
+The rate at which a host sends files to workers on other hosts is its bytes sent over the time during which it sent
+any, so it measures the host's link whatever the number of transfers that share it. Only files of at least
+HOST_RATE_MIN_BYTES count, because the fork and connection of each transfer dominate the time of a smaller one. The
+evidence halves once it spans HOST_RATE_WINDOW of sending, so the rate follows the last tens of seconds, and the rate is
+known once the evidence holds HOST_RATE_MIN_SENDS sends. A host is slow when its rate is below the highest rate that any
+host reached (q->transfer_rate_peak) by HOST_RATE_SLOW_FACTOR. On the cluster the peak was 790-880 MB/s, hosts with 1 Gb/s
+links sent 32 MB files at 40-80 MB/s as the manager measures them, and the others at 150-450 MB/s under load. A
+comparison with the mean rate of the hosts was tried first and failed: once a slow host congested its readers, the
+other hosts' rates fell with it, and the slow host no longer counted as slow.
+*/
+#define HOST_RATE_MIN_BYTES ((int64_t)1 << 20)
+#define HOST_RATE_WINDOW ((timestamp_t)30000000)
+#define HOST_RATE_MIN_SENDS 4
+#define HOST_RATE_SLOW_FACTOR 8
 
 /* The outgoing transfer records of the workers of one host, as their hostname names it, in q->transfer_hosts. */
 struct vine_transfer_host {
@@ -48,7 +65,42 @@ struct vine_transfer_host {
 	int checkpoints;   /* Its checkpoints. */
 	struct vine_transfer_pair *oldest; /* Its transfers to workers in the order they started. */
 	struct vine_transfer_pair *newest;
+	int large_sends;	/* Its transfers to workers of files of at least HOST_RATE_MIN_BYTES. */
+	timestamp_t rate_mark;	/* When its time of sending was last counted. */
+	timestamp_t rate_time;	/* The time during which it sent such files, the evidence of its rate. */
+	double rate_bytes;	/* The bytes of such files that it sent within rate_time. */
+	double rate_sends;	/* Their number. */
+	double rate;		/* rate_bytes per second of rate_time once known, else 0. */
 };
+
+static void host_set_rate(struct vine_manager *q, struct vine_transfer_host *h, double rate)
+{
+	h->rate = rate;
+	if (rate > q->transfer_rate_peak) {
+		q->transfer_rate_peak = rate;
+	}
+}
+
+/* Count the time during which host h sent large files since it was last counted, and a large file of bytes that it
+ * finished sending, if any. Called before the number of its large sends changes. */
+static void host_count_rate(struct vine_manager *q, struct vine_transfer_host *h, int64_t bytes)
+{
+	timestamp_t now = timestamp_get();
+	if (h->large_sends > 0 && now > h->rate_mark) {
+		h->rate_time += now - h->rate_mark;
+	}
+	h->rate_mark = now;
+	if (bytes > 0) {
+		h->rate_bytes += bytes;
+		h->rate_sends++;
+	}
+	if (h->rate_time > HOST_RATE_WINDOW) {
+		h->rate_time /= 2;
+		h->rate_bytes /= 2;
+		h->rate_sends /= 2;
+	}
+	host_set_rate(q, h, h->rate_sends >= HOST_RATE_MIN_SENDS && h->rate_time > 0 ? h->rate_bytes * 1000000.0 / h->rate_time : 0);
+}
 
 static void host_unref(struct vine_manager *q, struct vine_transfer_host *h)
 {
@@ -89,7 +141,15 @@ timestamp_t vine_current_transfers_host_load(struct vine_worker_info *w, int *se
 	return h && h->oldest ? h->oldest->start_time : 0;
 }
 
-static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename, const char *id, int checkpoint)
+double vine_current_transfers_host_rate(struct vine_manager *q, struct vine_worker_info *w, int *slow)
+{
+	struct vine_transfer_host *h = w->transfer_host_load;
+	double rate = h ? h->rate : 0;
+	*slow = rate > 0 && rate * HOST_RATE_SLOW_FACTOR < q->transfer_rate_peak;
+	return rate;
+}
+
+static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_manager *q, struct vine_worker_info *dest_worker, struct vine_worker_info *source_worker, const char *source_url, const char *cachename, const char *id, int checkpoint)
 {
 	struct vine_transfer_pair *t = xxcalloc(1, sizeof(struct vine_transfer_pair));
 	t->checkpoint = checkpoint;
@@ -132,6 +192,11 @@ static struct vine_transfer_pair *vine_transfer_pair_create(struct vine_worker_i
 		} else {
 			struct vine_file_replica *replica = cachename ? vine_file_replica_table_lookup(source_worker, cachename) : 0;
 			t->host_bytes = replica ? MAX(replica->size, 0) : 0;
+			t->rated = t->host_bytes >= HOST_RATE_MIN_BYTES && dest_worker && dest_worker->transfer_host_load != h;
+			if (t->rated) {
+				host_count_rate(q, h, 0);
+				h->large_sends++;
+			}
 			h->sends++;
 			h->bytes += t->host_bytes;
 			t->host_prev = h->newest;
@@ -181,6 +246,10 @@ static void vine_transfer_pair_delete(struct vine_manager *q, struct vine_transf
 			p->host->checkpoints--;
 		} else if (p->host) {
 			struct vine_transfer_host *h = p->host;
+			if (p->rated) {
+				host_count_rate(q, h, 0);
+				h->large_sends--;
+			}
 			h->sends--;
 			h->bytes -= p->host_bytes;
 			if (p->host_prev) {
@@ -237,7 +306,7 @@ static char *add_record(struct vine_manager *q, struct vine_worker_info *dest_wo
 		number >>= 4;
 	}
 	transfer_id[16] = 0;
-	struct vine_transfer_pair *t = vine_transfer_pair_create(dest_worker, source_worker, source_url, cachename, transfer_id, checkpoint);
+	struct vine_transfer_pair *t = vine_transfer_pair_create(q, dest_worker, source_worker, source_url, cachename, transfer_id, checkpoint);
 
 	hash_table_insert(q->current_transfer_table, transfer_id, t);
 	update_url_count(q, t->source_url, 1);
@@ -446,6 +515,11 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 /* Clear the failure streaks of the source and destination of a successful transfer. */
 static void count_success(struct vine_manager *q, struct vine_transfer_pair *p)
 {
+	/* A large file sent to a worker on another host counts in the rate of its source's host. */
+	if (p->rated) {
+		host_count_rate(q, p->host, p->host_bytes);
+	}
+
 	struct vine_worker_info *source = p->source_worker;
 	if (source) {
 		vine_blocklist_unblock(q, source->addrport);

@@ -80,6 +80,10 @@
  * milliseconds that a network file system takes to create and close a file. */
 #define VINE_DATA_SHARED_MIN_BYTES ((int64_t)4 << 20)
 
+/* How long a large checkpoint whose holders are all on slow hosts waits for a moment in which one of them sends nothing
+ * to other Workers (see find_checkpoint_source()). */
+#define VINE_DATA_SLOW_HOST_WAIT ((timestamp_t)10000000)
+
 /* Own the data listener, bounded jobs, the index of vault entries, and the vault disk budget. */
 struct vine_manager_data_service {
 	char *vault_directory;		/* Own the fixed directory of published cache names. */
@@ -1524,7 +1528,16 @@ typedef enum {
  * for those transfers to end, which they do within the peer transfer timeout or with their Worker's removal. A fetch,
  * which the application needs now, takes the least loaded holder at once. Decided on 2026-10-23: on the cluster, hosts
  * with 1 Gb/s links ran up to 5 Workers, and readers of a file whose host was copying a checkpoint to the shared
- * directory moved 24 MB/s instead of 78. Costs O(holders). */
+ * directory moved 24 MB/s instead of 78.
+ *
+ * A host whose link is far slower than the others' (vine_current_transfers_host_rate()) takes several times as long for
+ * a copy, during which the sends to the readers of its other files share its link, so a holder on such a host comes
+ * after every holder on another host, it sends one checkpoint at a time, and it sends only while its host sends
+ * nothing to other Workers, for up to VINE_DATA_SLOW_HOST_WAIT after the first refusal, and then as any host. Decided
+ * on 2026-10-24: on the cluster, two hosts with 1 Gb/s links copied 32 MB checkpoints in 0.65 s (0.16 s elsewhere),
+ * 40% of them begun while their hosts sent files to readers, and a send that overlapped a copy took 0.96 s instead of
+ * 0.45 s. Without the limit of one, the checkpoints that waited the full time left together, up to 10 at once, and
+ * each copy took 1.7 s. Costs O(holders). */
 static struct vine_worker_info *find_checkpoint_source(struct vine_manager *manager, struct vine_file *file, int inline_receive, receive_kind_t kind, int *busy)
 {
 	*busy = 0;
@@ -1535,6 +1548,7 @@ static struct vine_worker_info *find_checkpoint_source(struct vine_manager *mana
 	timestamp_t now = timestamp_get();
 	struct vine_worker_info *best = NULL;
 	int best_idle = 0;
+	int best_slow = 0;
 	int best_sends = 0;
 	int64_t best_bytes = 0;
 	int best_checkpoints = 0;
@@ -1560,15 +1574,21 @@ static struct vine_worker_info *find_checkpoint_source(struct vine_manager *mana
 		int64_t bytes;
 		int checkpoints;
 		timestamp_t oldest = vine_current_transfers_host_load(worker, &sends, &bytes, &checkpoints);
-		if (!oldest && !checkpoints) {
+		int slow;
+		vine_current_transfers_host_rate(manager, worker, &slow);
+		if (!oldest && !checkpoints && !slow) {
 			/* Its host sends nothing. */
 			return worker;
 		}
-		/* A host idle for this file serves no reader, or only readers that came after the file's first refusal. */
-		int idle = !oldest || (file->checkpoint_deferred && oldest >= file->checkpoint_deferred);
-		if (!best || idle > best_idle || (idle == best_idle && (bytes < best_bytes || (bytes == best_bytes && (sends < best_sends || (sends == best_sends && checkpoints < best_checkpoints)))))) {
+		/* A host idle for this file serves no reader, or only readers that came after the file's first refusal. A slow
+		 * host is idle only when it sends no checkpoint, and serves no reader until the file waited
+		 * VINE_DATA_SLOW_HOST_WAIT. */
+		int patient = slow && (!file->checkpoint_deferred || now - file->checkpoint_deferred < VINE_DATA_SLOW_HOST_WAIT);
+		int idle = (!oldest || (!patient && file->checkpoint_deferred && oldest >= file->checkpoint_deferred)) && !(slow && checkpoints);
+		if (!best || slow < best_slow || (slow == best_slow && (idle > best_idle || (idle == best_idle && (bytes < best_bytes || (bytes == best_bytes && (sends < best_sends || (sends == best_sends && checkpoints < best_checkpoints)))))))) {
 			best = worker;
 			best_idle = idle;
+			best_slow = slow;
 			best_sends = sends;
 			best_bytes = bytes;
 			best_checkpoints = checkpoints;
@@ -1577,7 +1597,7 @@ static struct vine_worker_info *find_checkpoint_source(struct vine_manager *mana
 	if (best && !best_idle && kind == RECEIVE_CHECKPOINT) {
 		if (!file->checkpoint_deferred) {
 			file->checkpoint_deferred = now;
-			debug(D_VINE, "checkpoint of %s waits for the transfers to workers of the hosts that hold it", file->cached_name);
+			debug(D_VINE, "checkpoint of %s waits for the transfers to workers of the hosts that hold it%s", file->cached_name, best_slow ? ", whose links are slow" : "");
 		}
 		*busy = 1;
 		return NULL;
