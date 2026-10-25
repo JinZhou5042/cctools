@@ -132,6 +132,7 @@ struct vine_manager {
 	struct hash_table *current_transfer_table; 	/* Maps uuid -> struct transfer_pair */
 	struct hash_table *current_transfer_url_table; 	/* Maps source url -> int count of current transfers */
 	struct hash_table *transfer_hosts;	/* Maps a worker's hostname -> struct vine_transfer_host, the outgoing transfers of its workers. */
+	double transfer_rate_peak;	/* The highest send rate that any of transfer_hosts reached, in bytes per second. */
 	struct itable     *task_group_table; 	/* Maps group id -> list vine_task */
 	struct hash_table *workers_idle_disconnecting;  /* set of workers that were granted a request to idle disconnect, and are in the process of disconnecting. */
 

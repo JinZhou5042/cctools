@@ -35,6 +35,11 @@ void vine_current_transfers_detach_host(struct vine_manager *q, struct vine_work
  * checkpoints go to sends, bytes, and checkpoints. */
 timestamp_t vine_current_transfers_host_load(struct vine_worker_info *w, int *sends, int64_t *bytes, int *checkpoints);
 
+/* The rate in bytes per second at which the host of worker w sent large files to workers on other hosts recently, or
+ * zero when it is not known. slow is set when the rate is known and below an eighth of the highest rate that any host
+ * reached, as on a host whose link is ten times slower than the fastest. */
+double vine_current_transfers_host_rate(struct vine_manager *q, struct vine_worker_info *w, int *slow);
+
 int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const char *cachename);
 
 void vine_current_transfers_set_success(struct vine_manager *q, char *id);
