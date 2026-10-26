@@ -1898,30 +1898,18 @@ back the library startup message with JSON containing the name of
 the library, which should match the task's provides_library label.
 */
 
-static int check_library_startup(struct vine_process *p)
+/* What a read of a library's startup message found (read_library_startup()). */
+typedef enum {
+	LIBRARY_STARTUP_FAILED,	  /* the message is invalid, or the library closed its pipe or failed to send it */
+	LIBRARY_STARTUP_READY,	  /* the message is complete and names the library this worker started */
+	LIBRARY_STARTUP_NOTHING,  /* the library sent nothing yet */
+	LIBRARY_STARTUP_PARTIAL,  /* the library began its message, and the rest has not arrived */
+} library_startup_t;
+
+/* Check the startup message of a library, a JX object that names it. */
+static int check_library_startup(struct vine_process *p, const char *message)
 {
-	char buffer_len[VINE_LINE_MAX];
-	int length = 0;
-
-	/* The library began its message. With the timeout framework on, its pipe does not block, so the rest of the
-	 * message is read within X in total, the response time of this worker's main loop (see vine_process_execute()). */
-	time_t stoptime = options->response_timeout > 0 ? time(0) + options->response_timeout : LINK_NOWAIT;
-
-	/* Read a line that gives the length of the response message. */
-	if (!link_readline(p->library_read_link, buffer_len, VINE_LINE_MAX, stoptime)) {
-		return 0;
-	}
-	sscanf(buffer_len, "%d", &length);
-
-	/* Now read that length of message and null-terminate it. */
-	char buffer[length + 1];
-	if (link_read(p->library_read_link, buffer, length, stoptime) <= 0) {
-		return 0;
-	}
-	buffer[length] = 0;
-
-	/* Check that the response is JX and contains the expected name. */
-	struct jx *response = jx_parse_string(buffer);
+	struct jx *response = jx_parse_string(message);
 
 	const char *name = jx_lookup_string(response, "name");
 	int taskid = jx_lookup_integer(response, "taskid");
@@ -1951,6 +1939,47 @@ static int check_library_startup(struct vine_process *p)
 	return ok;
 }
 
+/* Read what arrived of a library's startup message, a line with the length of the message and then the message,
+ * without waiting: the library's pipe does not block, and the parts already read are kept in the process, so a
+ * library that stops in the middle of its message never holds the main loop. */
+static library_startup_t read_library_startup(struct vine_process *p)
+{
+	struct link *l = p->library_read_link;
+	if (!p->library_startup) {
+		int line = link_buffer_has_line(l);
+		if (line == 0) {
+			return LIBRARY_STARTUP_NOTHING;
+		}
+		if (line < 0) {
+			return LIBRARY_STARTUP_PARTIAL;
+		}
+		char header[VINE_LINE_MAX];
+		int length = -1;
+		if (!link_readline(l, header, sizeof(header), LINK_NOWAIT) || sscanf(header, "%d", &length) != 1 || length < 0) {
+			return LIBRARY_STARTUP_FAILED;
+		}
+		p->library_startup = malloc(length + 1);
+		if (!p->library_startup) {
+			return LIBRARY_STARTUP_FAILED;
+		}
+		p->library_startup_length = length;
+		p->library_startup_received = 0;
+	}
+	while (p->library_startup_received < p->library_startup_length) {
+		ssize_t n = link_read_avail(l, p->library_startup + p->library_startup_received, p->library_startup_length - p->library_startup_received, LINK_NOWAIT);
+		if (n > 0) {
+			p->library_startup_received += n;
+		} else if (n < 0 && (errno_is_temporary(errno) || errno == ETIMEDOUT)) {
+			/* Nothing more arrived: a read that may not wait reports an expired stoptime as ETIMEDOUT. */
+			return LIBRARY_STARTUP_PARTIAL;
+		} else {
+			return LIBRARY_STARTUP_FAILED;
+		}
+	}
+	p->library_startup[p->library_startup_length] = 0;
+	return check_library_startup(p, p->library_startup) ? LIBRARY_STARTUP_READY : LIBRARY_STARTUP_FAILED;
+}
+
 /* Check whether all known libraries are ready to execute functions.
  * A library starts up and tells the vine_worker it's ready by reporting
  * back its library name. */
@@ -1962,9 +1991,10 @@ static void check_libraries_ready(struct link *manager)
 	int iteration;
 	struct list *failed_libraries = list_create();
 
-	struct link_info library_link_info;
-	library_link_info.events = LINK_READ;
-	library_link_info.revents = 0;
+	/* A library that began its message and sent nothing more for this long fails: X with the timeout framework on,
+	 * since the main loop must answer the manager within X, and otherwise active_timeout, the bound of every other
+	 * read from a library. */
+	timestamp_t stall = (timestamp_t)(options->response_timeout > 0 ? options->response_timeout : options->active_timeout) * USECOND;
 
 	/* Loop through all processes to find libraries and check if they are alive. */
 	ITABLE_ITERATE(procs_running, iteration, library_task_id, library_process)
@@ -1973,27 +2003,29 @@ static void check_libraries_ready(struct link *manager)
 		if (library_process->type != VINE_PROCESS_TYPE_LIBRARY || library_process->library_ready)
 			continue;
 
-		library_link_info.link = library_process->library_read_link;
-
-		/* Check if library has sent its startup message. */
-		if (link_poll(&library_link_info, 1, 0) && (library_link_info.revents & LINK_READ)) {
-			if (check_library_startup(library_process)) {
-				debug(D_VINE, "Library %s reports ready to execute functions.", library_process->task->provides_library);
-				library_process->library_ready = 1;
-			} else {
-				/* Collect failed libraries so procs_running is not re-iterated here. */
-				debug(D_VINE,
-						"Library %s task id %" PRIu64 " verification failed (unexpected response). Killing it.",
-						library_process->task->provides_library,
-						library_task_id);
-				list_push_tail(failed_libraries, library_process);
-			}
-		} else {
-			/* The library is running and the link has no readable data, do nothing until the
-			 * handle_completed_tasks detects its failure or it sends back the startup message */
+		/* A library that has not started sends nothing, which costs one read that finds nothing. Until the library
+		 * sends its message or ends, which handle_completed_tasks() detects, there is nothing to do. */
+		library_startup_t state = read_library_startup(library_process);
+		if (state == LIBRARY_STARTUP_READY) {
+			debug(D_VINE, "Library %s reports ready to execute functions.", library_process->task->provides_library);
+			library_process->library_ready = 1;
+			free(library_process->library_startup);
+			library_process->library_startup = NULL;
+		} else if (state == LIBRARY_STARTUP_FAILED) {
+			/* Collect failed libraries so procs_running is not re-iterated here. */
+			debug(D_VINE,
+					"Library %s task id %" PRIu64 " verification failed (unexpected response). Killing it.",
+					library_process->task->provides_library,
+					library_task_id);
+			list_push_tail(failed_libraries, library_process);
+		} else if (state == LIBRARY_STARTUP_PARTIAL && timestamp_monotonic() - link_last_read(library_process->library_read_link) > stall) {
+			debug(D_NOTICE,
+					"Library %s task id %" PRIu64 " verification failed (sent part of its startup message and nothing for %" PRIu64 " s). Killing it.",
+					library_process->task->provides_library,
+					library_task_id,
+					(uint64_t)(stall / USECOND));
+			list_push_tail(failed_libraries, library_process);
 		}
-
-		library_link_info.revents = 0;
 	}
 
 	while ((library_process = list_pop_head(failed_libraries))) {

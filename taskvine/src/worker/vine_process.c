@@ -137,6 +137,7 @@ void vine_process_delete(struct vine_process *p)
 	if (p->library_sending) {
 		list_remove(sending_libraries, p);
 	}
+	free(p->library_startup);
 	link_writer_delete(p->library_writer);
 	if (p->library_read_link)
 		link_close(p->library_read_link);
@@ -437,11 +438,13 @@ int vine_process_execute(struct vine_process *p)
 			/* The worker writes to the library only as its pipe takes data. */
 			fcntl(pipe_in[1], F_SETFL, fcntl(pipe_in[1], F_GETFL) | O_NONBLOCK);
 
-			/* With the timeout framework on, the worker reads the library's pipe without blocking too, so the read
-			 * of a message the library began fails when the library makes no progress. The worker reads it in its
-			 * main loop, which must answer the manager within X, so the limit is X rather than T. */
+			/* The worker reads the library's pipe without blocking too, so its main loop reads the startup
+			 * message as it arrives (check_libraries_ready()) and a read of a result waits in poll until its
+			 * stoptime. With the timeout framework on, a read of a message the library began also fails when the
+			 * library makes no progress. The worker reads it in its main loop, which must answer the manager
+			 * within X, so the limit is X rather than T. */
+			fcntl(pipe_out[0], F_SETFL, fcntl(pipe_out[0], F_GETFL) | O_NONBLOCK);
 			if (options->response_timeout > 0) {
-				fcntl(pipe_out[0], F_SETFL, fcntl(pipe_out[0], F_GETFL) | O_NONBLOCK);
 				link_set_idle_timeout(p->library_read_link, options->response_timeout);
 			}
 			p->library_writer = link_writer_create(p->library_write_link);

@@ -75,6 +75,12 @@ struct vine_process {
 	/* If this is a library process, whether the library stops a function call on request. */
 	int library_can_cancel;
 
+	/* If this is a library process that is starting, its startup message as it arrives: allocated once the line with
+	 * its length arrived, with that length and the bytes received so far. The worker reads it without waiting. */
+	char *library_startup;
+	int library_startup_length;
+	int library_startup_received;
+
 	/* expected disk usage by the process. If no cache is used, it is the same as in task. */
 	int64_t disk;
 
