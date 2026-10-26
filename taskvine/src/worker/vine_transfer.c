@@ -18,7 +18,6 @@ See the file COPYING for details.
 #include "url_encode.h"
 
 #include <dirent.h>
-#include <stdarg.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -71,214 +70,27 @@ end
 
 */
 
-/* Bytes of headers that one call of put_walk_produce() queues at most. */
-#define PUT_WALK_CHUNK (64 * 1024)
-
-struct put_frame {
-	DIR *dir;		  /* The open directory. */
-	char *path;		  /* Its full path. */
-	struct put_frame *parent; /* The directory that contains it, or NULL for the top of the walk. */
-};
-
-/* The walk of an item being sent, which queues its next entries each time it reaches the head of the queue. */
-struct put_walk {
-	char *full_name;	   /* Full path of the item. */
-	char *relative_name;	   /* Name the item is sent under. */
-	vine_transfer_mode_t mode; /* What the receiver accepts. */
-	int started;		   /* The item itself was queued. */
-	struct put_frame *top;	   /* The innermost directory being walked, or NULL. */
-	size_t queued;		   /* Bytes of headers queued by the current call. */
-};
-
-/* Queue a header line and log it. */
-__attribute__((format(printf, 3, 4))) static int put_line(struct link_writer *lw, struct put_walk *w, const char *fmt, ...)
-{
-	char line[2 * VINE_LINE_MAX];
-	va_list va;
-	va_start(va, fmt);
-	int length = vsnprintf(line, sizeof(line), fmt, va);
-	va_end(va);
-	if (length < 0 || (size_t)length >= sizeof(line)) {
-		return 0;
-	}
-	debug(D_VINE, "tx: %s", line);
-	w->queued += length;
-	return link_writer_push(lw, line, length);
-}
-
-/* Queue one item of a walk. A directory's entries follow in later calls. Return 2 for a file, 1 for any other item, or
- * zero if the queue refused it. */
-static int put_item(struct link_writer *lw, struct put_walk *w, const char *full_name, const char *relative_name)
-{
-	struct stat info;
-
-	/* URL encode filename to handle spaces and unprintable characters. */
-	char relative_name_encoded[VINE_LINE_MAX];
-	url_encode(relative_name, relative_name_encoded, sizeof(relative_name_encoded));
-
-	if (stat(full_name, &info) != 0) {
-		goto access_failure;
-	}
-
-	/* Send only the normal mode bits. */
-	int mode = info.st_mode & 0777;
-
-	if (S_ISREG(info.st_mode)) {
-		int fd = open(full_name, O_RDONLY, 0);
-		if (fd < 0) {
-			goto access_failure;
-		}
-		int64_t length = info.st_size;
-		if (!put_line(lw, w, "file %s %" PRId64 " 0%o %lld\n", relative_name_encoded, length, mode, (long long)info.st_mtime)) {
-			close(fd);
-			return 0;
-		}
-		return link_writer_push_fd(lw, fd, 0, length) ? 2 : 0;
-	} else if (w->mode == VINE_TRANSFER_MODE_FILE_ONLY) {
-		/*
-		The caller only wants a file, but full_name is something else.
-		Choose a suitable error number to return in the error message.
-		*/
-		if (S_ISDIR(info.st_mode)) {
-			errno = EISDIR;
-		} else {
-			errno = EINVAL;
-		}
-		goto access_failure;
-	} else if (S_ISDIR(info.st_mode)) {
-		DIR *dir = opendir(full_name);
-		if (!dir) {
-			goto access_failure;
-		}
-		struct put_frame *f = malloc(sizeof(*f));
-		char *path = strdup(full_name);
-		if (!f || !path) {
-			free(f);
-			free(path);
-			closedir(dir);
-			return 0;
-		}
-		f->dir = dir;
-		f->path = path;
-		f->parent = w->top;
-		w->top = f;
-		return put_line(lw, w, "dir %s %o %lld\n", relative_name_encoded, mode, (long long)info.st_mtime);
-	} else if (S_ISLNK(info.st_mode)) {
-		char link_target[VINE_LINE_MAX];
-		int result = readlink(full_name, link_target, sizeof(link_target));
-		if (result > 0) {
-			return put_line(lw, w, "symlink %s %d\n", relative_name_encoded, result) && link_writer_push(lw, link_target, result);
-		} else {
-			goto access_failure;
-		}
-	}
-
-access_failure:
-	// An error here is not a failure from our perspective, keep going.
-	return put_line(lw, w, "error %s %d\n", relative_name_encoded, errno);
-}
-
-static void put_walk_pop(struct put_walk *w)
-{
-	struct put_frame *f = w->top;
-	w->top = f->parent;
-	closedir(f->dir);
-	free(f->path);
-	free(f);
-}
-
-static void put_walk_delete(void *arg)
-{
-	struct put_walk *w = arg;
-	while (w->top) {
-		put_walk_pop(w);
-	}
-	free(w->full_name);
-	free(w->relative_name);
-	free(w);
-}
-
-/* Queue the next entries of a walk, up to a file or PUT_WALK_CHUNK bytes of headers. Return one while entries remain,
- * zero when the walk is done, or -1 if the queue refused an entry. */
-static int put_walk_produce(struct link_writer *lw, void *arg)
-{
-	struct put_walk *w = arg;
-	w->queued = 0;
-
-	if (!w->started) {
-		w->started = 1;
-		if (!put_item(lw, w, w->full_name, w->relative_name)) {
-			return -1;
-		}
-		return w->top ? 1 : 0;
-	}
-
-	while (w->top && w->queued < PUT_WALK_CHUNK) {
-		struct dirent *dent = readdir(w->top->dir);
-		if (!dent) {
-			put_walk_pop(w);
-			if (!put_line(lw, w, "end\n")) {
-				return -1;
-			}
-			continue;
-		}
-		if (!strcmp(dent->d_name, ".") || !strcmp(dent->d_name, "..")) {
-			continue;
-		}
-		char *sub_full_name = string_format("%s/%s", w->top->path, dent->d_name);
-		int result = put_item(lw, w, sub_full_name, dent->d_name);
-		free(sub_full_name);
-		if (!result) {
-			return -1;
-		}
-		/* One open file at a time. */
-		if (result == 2) {
-			break;
-		}
-	}
-	return w->top ? 1 : 0;
-}
-
-static int put_walk_start(struct link_writer *lw, const char *full_name, const char *relative_name, vine_transfer_mode_t mode)
-{
-	struct put_walk *w = calloc(1, sizeof(*w));
-	if (!w) {
-		return 0;
-	}
-	w->full_name = strdup(full_name);
-	w->relative_name = strdup(relative_name);
-	w->mode = mode;
-	if (!w->full_name || !w->relative_name) {
-		put_walk_delete(w);
-		return 0;
-	}
-	return link_writer_push_producer(lw, put_walk_produce, put_walk_delete, w);
-}
-
 /*
-Send a cached object of any type down the wire.
+Queue a cached object of any type to be sent. Return zero if the writer refused it.
 */
 
 int vine_transfer_put_any(struct link_writer *lw, struct vine_cache *cache, const char *filename, vine_transfer_mode_t xfer_mode)
 {
 	char *cached_path = vine_cache_data_path(cache, filename);
-	int r;
+	int result;
 
 	if (path_within_dir(cached_path, workspace->cache_dir)) {
-		r = put_walk_start(lw, cached_path, path_basename(filename), xfer_mode);
+		result = vine_transfer_queue_item(lw, cached_path, path_basename(filename), xfer_mode);
 	} else {
-		/* Same reply as an unreadable file in put_item. */
 		debug(D_VINE, "refusing to send %s: not within %s", cached_path, workspace->cache_dir);
-		char filename_encoded[VINE_LINE_MAX];
-		url_encode(path_basename(filename), filename_encoded, sizeof(filename_encoded));
-		char *line = string_format("error %s %d\n", filename_encoded, EACCES);
-		debug(D_VINE, "tx: %s", line);
-		r = link_writer_push(lw, line, strlen(line));
-		free(line);
+		result = EACCES;
+	}
+	if (result > 0) {
+		result = vine_transfer_queue_error(lw, path_basename(filename), result) ? 0 : -1;
 	}
 
 	free(cached_path);
-	return r;
+	return result == 0;
 }
 
 /*
@@ -494,7 +306,15 @@ static int vine_transfer_get_dir_internal(struct link *lnk, const char *dirname,
 int vine_transfer_request_any(struct link *lnk, const char *request_path, const char *dirname, int64_t *totalsize, int *mode, int *mtime, time_t stoptime, char **error_message)
 {
 	debug(D_VINE, "tx: get %s", request_path);
-	if (link_printf(lnk, stoptime, "get %s\n", request_path) < 0) {
+	struct link_writer *lw = link_writer_create(lnk);
+	if (!lw) {
+		return 0;
+	}
+	char *request = string_format("get %s\n", request_path);
+	int sent = link_writer_push(lw, request, strlen(request)) && link_writer_send_sync(lw, (timestamp_t)stoptime * 1000000, 0);
+	free(request);
+	link_writer_delete(lw);
+	if (!sent) {
 		return 0;
 	}
 	return vine_transfer_get_any(lnk, dirname, totalsize, mode, mtime, stoptime, error_message);

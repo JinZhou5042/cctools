@@ -10,14 +10,10 @@ See the file COPYING for details.
 #include "vine_cache.h"
 #include "link.h"
 #include "link_writer.h"
+#include "vine_transfer_send.h"
 
-typedef enum {
-	VINE_TRANSFER_MODE_ANY,
-	VINE_TRANSFER_MODE_FILE_ONLY
-} vine_transfer_mode_t;
-
-/* Queue a cached file or directory to be sent. A directory is walked as the queue writes it. Return 0 if the queue
- * refused it. */
+/* Queue a cached file or directory to be sent, or the error of one that cannot be sent. A directory is walked as the
+ * writer writes it. Return 0 if the writer refused it. */
 
 int vine_transfer_put_any(struct link_writer *lw, struct vine_cache *cache, const char *filename, vine_transfer_mode_t mode);
 

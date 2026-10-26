@@ -14,6 +14,11 @@ connects, accepts, reads, polls, and closes. A process that serves many peers fr
 peer that stops reading. A connection that serves one request writes synchronously (@ref link_writer_send_sync).
 A partly written entry stays at the head, so the stream stays intact and in order.
 <p>
+On a link where both sides send unprompted, two writers that wait for each other deadlock. The side that starts a
+synchronous exchange reads and handles the peer's messages while it writes its request, and the side that answers
+finishes any partly written push (@ref link_writer_send_partial) before it reads the next request. A link where only
+one side sends data, such as a transfer or a pipe to a library, may use @ref link_writer_send_sync freely.
+<p>
 An entry is copied data, a byte range of a file read in chunks at the head, or a producer that makes its data when it
 reaches the head. Small entries that reach the head together leave in one write. A writer that fails drops everything
 and refuses new data, and the owner should close the link.
