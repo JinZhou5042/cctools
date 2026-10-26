@@ -2839,8 +2839,8 @@ change.
 | hungry-minimum          | Smallest number of waiting tasks in the manager before declaring it hungry | 10 |
 | hungry-minimum-factor   | Queue is hungry if number of waiting tasks is less than hungry-minumum-factor x (number of workers) | 2 |
 | immediate-recovery    | If set to 1, create recovery tasks for temporary files as soon as their worker disconnects. Otherwise, create recovery tasks only if the temporary files are used as input when trying to dispatch another task. | 0 |
-| keepalive-interval | Set the minimum number of seconds to wait before sending new keepalive checks to workers. | 300 |
-| keepalive-timeout | Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. | 30 |
+| keepalive-interval | Set the minimum number of seconds to wait before sending new keepalive checks to workers. | 120, or T/2 with a response time (see below) |
+| keepalive-timeout | Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. | 900, or T with a response time (see below) |
 | load-from-shared-filesystem | If set to 1, workers can load in data to their caches from the shared filesystem | 0 |
 | long-timeout | Set the minimum timeout in seconds when sending a large message to a single worker. | 3600 |
 | max-retrievals | Sets the max number of tasks to retrieve per manager wait(). If less than 1, the manager prefers to retrieve all completed tasks before dispatching new tasks to workers. | 1 |
@@ -2850,6 +2850,7 @@ change.
 | prefer-dispatch | If 1, try to dispatch tasks even if there are retrieved tasks ready to be reportedas done. | 0 |
 | proportional-whole-tasks | Round up resource proportions such that only an integer number of tasks could be fit in the worker. The default is to use proportions. (See [task resources.](#task-resources) | 1 |
 | ramp-down-heuristic     | If set to 1 and there are more workers than tasks waiting, then tasks are allocated all the free resources of a worker large enough to run them. If monitoring watchdog is not enabled, then this heuristic has no effect. | 0 |
+| response-timeout | The response time X in seconds of a worker that has not declared its own (`--response-timeout`). If positive, a worker that makes no progress for T = 2X is removed (see below). 0 leaves the timeouts above in effect. | 0 |
 | resource-submit-multiplier | Assume that workers have `resource x resources-submit-multiplier` available.<br> This overcommits resources at the worker, causing tasks to be sent to workers that cannot be immediately executed.<br>The extra tasks wait at the worker until resources become available. | 1 |
 | sandbox-grow-factor    | When task disk sandboxes are exhausted, increase the allocation using their measured valued times this factor. Minimum is 1.1. | 2 |
 | shift-disk-load | Proactively shift temporary files away from the most disk-heavy worker to those with more available disk. | 0 |
@@ -2863,6 +2864,21 @@ change.
 | worker-retrievals | If 1, retrieve all completed tasks from a worker when retrieving results, even if going above the parameter max-retrievals . Otherwise, if 0, retrieve just one task before deciding to dispatch new tasks or connect new workers. | 1 |
 | watch-library-logfiles | If 1, watch the output files produced by each of the library processes running on the remote workers, take
 them back the current logging directory. | 0 |
+
+By default, the manager and its workers wait for each other with the fixed timeouts above. A response time X turns
+on a timeout by progress instead: a worker declares it when it connects (`vine_worker --response-timeout X`), and
+`response-timeout` at the manager applies to every worker that has not declared one. A healthy worker then makes
+progress within X, and the manager removes a worker that makes no progress for T = 2X: every read or write on its
+link, every file sent to it, and every transfer of the manager's data port fails after T without data moving, however
+large the data, and a worker that sends nothing gets a keepalive check after T/2 and is removed when it has not answered
+for T. A worker with a response time judges the manager, its peers, its libraries, and its downloads by the same T.
+These guarantees have these limits:
+
+- Operations keep their own timeouts as outer limits, so a slow transfer that keeps making progress lasts as long as
+  its data takes.
+- The TLS handshake and the password check of a new connection run on the manager's thread and may hold it for up to
+  T, or `short-timeout` without a response time.
+- The network must drain the buffers on the path within X/2, or a keepalive check waiting behind them arrives late.
 
 === "Python"
     ```python
