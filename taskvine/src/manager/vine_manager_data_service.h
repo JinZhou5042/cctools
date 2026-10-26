@@ -123,8 +123,8 @@ const char *vine_manager_data_service_vault_data(struct vine_manager *manager, s
  * vault path, which a queue reads when the data reaches its head. A queue holds its own reference, so the data stays
  * valid after its entry is written to disk or removed: removal reads data on disk into memory while queues hold it.
  * Does not touch the filesystem. */
-struct link_queue_shared;
-struct link_queue_shared *vine_manager_data_service_vault_shared(struct vine_manager *manager, struct vine_file *file, int64_t *length, int *mode);
+struct link_writer_shared;
+struct link_writer_shared *vine_manager_data_service_vault_shared(struct vine_manager *manager, struct vine_file *file, int64_t *length, int *mode);
 /* Return a newly allocated path of the file's vault entry, or NULL when the vault holds none. The entry stays until
  * the file is pruned or undeclared. An entry held in memory is first written to that path on the calling thread, a
  * single file of at most VINE_DATA_INLINE_BYTES, because the caller reads the path next. */

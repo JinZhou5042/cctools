@@ -8,17 +8,17 @@ See the file COPYING for details.
 
 void budget_start(struct budget *b, timestamp_t length)
 {
-	b->end = timestamp_get() + length;
+	b->end = timestamp_monotonic() + length;
 }
 
 int budget_expired(const struct budget *b)
 {
-	return timestamp_get() >= b->end;
+	return timestamp_monotonic() >= b->end;
 }
 
 timestamp_t budget_left(const struct budget *b)
 {
-	timestamp_t now = timestamp_get();
+	timestamp_t now = timestamp_monotonic();
 	if (now >= b->end) {
 		return 0;
 	}

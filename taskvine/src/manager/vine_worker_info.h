@@ -13,7 +13,7 @@ See the file COPYING for details.
 #include "domain_name.h"
 #include "hash_table.h"
 #include "link.h"
-#include "link_queue.h"
+#include "link_writer.h"
 #include "itable.h"
 
 typedef enum {
@@ -32,7 +32,7 @@ struct vine_worker_info {
 	struct link *link;
 
 	/* Everything sent to the worker. */
-	struct link_queue *lq;
+	struct link_writer *lw;
 
 	/* Entry in the manager's sending_workers, or NULL. */
 	struct list_cursor *sending;

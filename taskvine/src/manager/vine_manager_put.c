@@ -324,7 +324,7 @@ static vine_result_code_t vine_manager_put_vault_file(struct vine_manager *q, st
 {
 	int64_t length = 0;
 	int mode = 0;
-	struct link_queue_shared *data = vine_manager_data_service_vault_shared(q, f, &length, &mode);
+	struct link_writer_shared *data = vine_manager_data_service_vault_shared(q, f, &length, &mode);
 	if (!data) {
 		debug(D_NOTICE, "Cannot send vault entry %s", f->cached_name);
 		return VINE_APP_FAILURE;

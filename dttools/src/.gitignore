@@ -47,5 +47,5 @@ skip_list_test
 link_poll_set_test
 jx_print_number_test
 hash_table_removal_test
-link_queue_test
+link_writer_test
 list_iterate_test

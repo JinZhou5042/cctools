@@ -6,7 +6,7 @@ See the file COPYING for details.
 
 /* Receive cached files and directories with the streaming transfer protocol of the Worker transfer server. Workers
 receive from peers and from the Manager data port with it, and the Manager data service receives checkpoints with it.
-The sending side is vine_transfer_put_any() in the Worker and send_entry() in vine_manager_data_service.c.
+The sending side is vine_transfer_send.c, for both.
 
 Each file, directory, or symlink is one header line, "file <name> <size> <mode> <mtime>", "dir <name> <mode> <mtime>",
 or "symlink <name> <length>", with a URL-encoded name. A file or symlink is followed by its contents, and a directory

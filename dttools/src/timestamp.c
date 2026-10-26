@@ -8,6 +8,7 @@ See the file COPYING for details.
 #include "timestamp.h"
 
 #include <sys/select.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 
@@ -30,6 +31,15 @@ timestamp_t timestamp_get()
 	stamp = ((timestamp_t)current.tv_sec) * 1000000 + current.tv_usec;
 
 	return stamp;
+}
+
+timestamp_t timestamp_monotonic()
+{
+	struct timespec current;
+	if (clock_gettime(CLOCK_MONOTONIC, &current) < 0) {
+		return timestamp_get();
+	}
+	return ((timestamp_t)current.tv_sec) * 1000000 + current.tv_nsec / 1000;
 }
 
 int timestamp_fmt(char *buf, size_t size, const char *fmt, timestamp_t ts)

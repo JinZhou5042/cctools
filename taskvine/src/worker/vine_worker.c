@@ -42,7 +42,7 @@ See the file COPYING for details.
 #include "jx_parse.h"
 #include "jx_print.h"
 #include "link.h"
-#include "link_queue.h"
+#include "link_writer.h"
 #include "link_auth.h"
 #include "list.h"
 #include "load_average.h"
@@ -100,7 +100,8 @@ static struct list *procs_waiting = NULL;
 
 /* Everything sent to the manager, written only as the link takes it, so the worker and a manager that writes to it at
  * the same time never wait for each other. */
-static struct link_queue *manager_lq = NULL;
+static struct link_writer *manager_lw = NULL;
+static struct link *manager_link = NULL; /* The link that manager_lw writes to. */
 
 /* Processes that do_kill() signalled and dropped before they exited, indexed by pid. Their tasks are gone, so only
  * their exit status remains to be collected, which the main loop does without waiting and a disconnect does waiting. */
@@ -219,17 +220,17 @@ static void finish_running_task(struct vine_process *p, vine_result_t result);
 
 static void send_message_data(const char *line, size_t line_length, const char *data, size_t length)
 {
-	if (!manager_lq) {
+	if (!manager_lw) {
 		return;
 	}
 	debug(D_VINE, "tx: %.*s", (int)line_length, line);
 	if (length == 0) {
-		link_queue_push(manager_lq, line, line_length);
+		link_writer_push(manager_lw, line, line_length);
 	} else {
 		char *message = xxmalloc(line_length + length);
 		memcpy(message, line, line_length);
 		memcpy(message + line_length, data, length);
-		link_queue_push(manager_lq, message, line_length + length);
+		link_writer_push(manager_lw, message, line_length + length);
 		free(message);
 	}
 }
@@ -366,7 +367,7 @@ static int report_changes(struct link *manager)
 	results_to_be_sent_msg = 0;
 
 	/* The changes follow the messages already queued, and the queue sends each one's data whole. */
-	if (!vine_watcher_send_changes(watcher, manager_lq)) {
+	if (!vine_watcher_send_changes(watcher, manager_lw)) {
 		debug(D_VINE, "failed to send the changes of watched files");
 		return 0;
 	}
@@ -379,6 +380,12 @@ static int report_changes(struct link *manager)
 
 int recv_message(struct link *l, char *line, int length, time_t stoptime)
 {
+	/* The manager reads the rest of a message it has begun and writes nothing meanwhile, so a message that the link
+	 * took only in part goes out before the worker may wait for the rest of a manager message. Every blocking read of
+	 * a manager message starts with a line read here. */
+	if (l == manager_link && manager_lw && !link_writer_send_partial(manager_lw, timestamp_monotonic() + options->active_timeout * 1000000LL)) {
+		return 0;
+	}
 	int result = link_readline(l, line, length, stoptime);
 	if (result)
 		debug(D_VINE, "rx: %s", line);
@@ -1487,8 +1494,9 @@ static int do_release()
 
 static void close_manager_link(struct link *manager)
 {
-	link_queue_delete(manager_lq);
-	manager_lq = NULL;
+	link_writer_delete(manager_lw);
+	manager_lw = NULL;
+	manager_link = NULL;
 	link_close(manager);
 }
 
@@ -1500,7 +1508,7 @@ static void disconnect_manager(struct link *manager)
 
 	/* Queued messages, such as info vacating, go out before the link closes, unless the link fails. Messages that this
 	 * manager did not take belong to its session, and a partly sent one would corrupt the next. */
-	link_queue_flush(manager_lq, time(0) + options->active_timeout);
+	link_writer_send_sync(manager_lw, timestamp_monotonic() + options->active_timeout * 1000000LL, 0);
 	close_manager_link(manager);
 
 	debug(D_VINE, "killing all outstanding tasks");
@@ -1535,7 +1543,7 @@ static void send_stdout(int64_t task_id)
 
 	send_message("stdout %" SCNd64 " %lld\n", task_id, (long long)p->output_length);
 	/* The queue owns the descriptor and reads the output as the link takes it. */
-	link_queue_push_fd(manager_lq, output_file, 0, p->output_length);
+	link_writer_push_fd(manager_lw, output_file, 0, p->output_length);
 }
 
 /* Handle the next incoming message from the currently connected manager. */
@@ -1556,12 +1564,6 @@ static int handle_manager(struct link *manager)
 	int cache_level;
 
 	if (recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
-		/* Handling a message may read more from the manager synchronously, which waits for the manager. The manager
-		 * reads the rest of a message it has begun and writes nothing to this worker meanwhile, so the rest of a
-		 * message that the link took only in part goes out first. */
-		if (!link_queue_finish(manager_lq, time(0) + options->active_timeout)) {
-			return 0;
-		}
 		if (sscanf(line, "task %" SCNd64, &task_id) == 1) {
 			r = do_task(manager, task_id, time(0) + options->active_timeout);
 		} else if (sscanf(line, "connect-back %" SCNu64, &token) == 1) {
@@ -1606,10 +1608,10 @@ static int handle_manager(struct link *manager)
 			r = vine_cache_copy(cache_manager, token, filename, source, manager);
 		} else if (sscanf(line, "getfile %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = vine_transfer_put_any(manager_lq, cache_manager, filename, VINE_TRANSFER_MODE_FILE_ONLY);
+			r = vine_transfer_put_any(manager_lw, cache_manager, filename, VINE_TRANSFER_MODE_FILE_ONLY);
 		} else if (sscanf(line, "get %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = vine_transfer_put_any(manager_lq, cache_manager, filename, VINE_TRANSFER_MODE_ANY);
+			r = vine_transfer_put_any(manager_lw, cache_manager, filename, VINE_TRANSFER_MODE_ANY);
 		} else if (sscanf(line, "kill %" SCNd64, &task_id) == 1) {
 			if (task_id >= 0) {
 				r = do_kill(task_id);
@@ -2033,15 +2035,23 @@ static void vine_worker_serve_manager(struct link *manager)
 		}
 
 		/* Before the poll, because a read may wait for a manager that waits for these messages. */
-		if (!link_queue_send(manager_lq, timestamp_get() + ROUND_BUDGET)) {
+		if (!link_writer_send_async(manager_lw, timestamp_monotonic() + ROUND_BUDGET)) {
 			debug(D_VINE, "failed to send to the manager");
 			break;
 		}
 
-		/* Queued messages also wait for the manager to make room for them. */
-		int manager_events = LINK_READ | (link_queue_empty(manager_lq) ? 0 : LINK_WRITE);
-		struct link_info waits[2] = {{manager, manager_events, 0}, {wake_link, LINK_READ, 0}};
-		int ready = link_poll(waits, wake_link ? 2 : 1, wait_msec);
+		/* Queued messages also wait for the manager to make room for them, and calls queued to libraries for room in
+		 * their pipes. */
+		int manager_events = LINK_READ | (link_writer_empty(manager_lw) ? 0 : LINK_WRITE);
+		struct link_info waits[2 + vine_process_libraries_sending()];
+		int nwaits = 0;
+		waits[nwaits++] = (struct link_info){manager, manager_events, 0};
+		if (wake_link) {
+			waits[nwaits++] = (struct link_info){wake_link, LINK_READ, 0};
+		}
+		vine_process_libraries_poll(waits + nwaits);
+		nwaits += vine_process_libraries_sending();
+		int ready = link_poll(waits, nwaits, wait_msec);
 		char drain[64];
 		while (wake_link && read(wake_pipe[0], drain, sizeof(drain)) > 0) {
 		}
@@ -2061,10 +2071,11 @@ static void vine_worker_serve_manager(struct link *manager)
 		}
 
 		/* Replies leave at once. */
-		if (!link_queue_send(manager_lq, round.end)) {
+		if (!link_writer_send_async(manager_lw, round.end)) {
 			debug(D_VINE, "failed to send to the manager");
 			break;
 		}
+		vine_process_libraries_send(round.end);
 
 		expire_procs_running();
 
@@ -2200,8 +2211,9 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 
 	link_tune(manager, LINK_TUNE_INTERACTIVE);
 
-	manager_lq = link_queue_create(manager);
-	if (!manager_lq) {
+	manager_lw = link_writer_create(manager);
+	manager_link = manager;
+	if (!manager_lw) {
 		fprintf(stderr, "vine_worker: cannot allocate memory for the manager connection\n");
 		link_close(manager);
 		return 0;
@@ -2227,7 +2239,7 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 		char line[VINE_LINE_MAX];
 		debug(D_VINE, "verifying manager's project name");
 		send_message("name\n");
-		if (!link_queue_flush(manager_lq, options->idle_stoptime) || !recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
+		if (!link_writer_send_sync(manager_lw, timestamp_monotonic() + (options->idle_stoptime > time(0) ? (timestamp_t)(options->idle_stoptime - time(0)) * 1000000 : 0), 0) || !recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
 			debug(D_VINE, "no response from manager while verifying name");
 			close_manager_link(manager);
 			return 0;
