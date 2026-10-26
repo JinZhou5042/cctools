@@ -59,7 +59,7 @@ static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
 			struct link_queue *lq = link_queue_create(lnk);
 			if (lq) {
 				if (vine_transfer_put_any(lq, cache, filename, VINE_TRANSFER_MODE_ANY)) {
-					link_queue_flush(lq, time(0) + transfer_timeout);
+					link_queue_flush(lq, timestamp_get() + transfer_timeout * 1000000LL);
 				}
 				link_queue_delete(lq);
 			}

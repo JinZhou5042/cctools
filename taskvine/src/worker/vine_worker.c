@@ -1239,7 +1239,7 @@ static void disconnect_manager(struct link *manager)
 	debug(D_VINE, "disconnecting from manager %s:%d", current_manager_address->addr, current_manager_address->port);
 
 	/* Final messages such as info vacating. */
-	link_queue_flush(manager_lq, time(0) + options->active_timeout);
+	link_queue_flush(manager_lq, timestamp_get() + options->active_timeout * 1000000LL);
 	close_manager_link(manager);
 
 	debug(D_VINE, "killing all outstanding tasks");
@@ -1291,8 +1291,8 @@ static int handle_manager(struct link *manager)
 	int r = 0;
 	int cache_level;
 
-	/* A request may wait for data from the manager, which itself waits for the rest of a partly written message. */
-	if (!link_queue_finish(manager_lq, time(0) + options->active_timeout)) {
+	/* A request may wait for data from the manager, which itself waits for the rest of a push it has begun reading. */
+	if (!link_queue_finish(manager_lq, timestamp_get() + options->active_timeout * 1000000LL)) {
 		return 0;
 	}
 
@@ -1913,7 +1913,7 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 		char line[VINE_LINE_MAX];
 		debug(D_VINE, "verifying manager's project name");
 		send_message("name\n");
-		if (!link_queue_flush(manager_lq, options->idle_stoptime) || !recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
+		if (!link_queue_flush(manager_lq, options->idle_stoptime * 1000000LL) || !recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
 			debug(D_VINE, "no response from manager while verifying name");
 			close_manager_link(manager);
 			return 0;

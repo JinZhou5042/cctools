@@ -512,8 +512,15 @@ int link_queue_send(struct link_queue *lq, timestamp_t deadline)
 	return !lq->failed;
 }
 
-int link_queue_flush(struct link_queue *lq, time_t stoptime)
+/* The stoptime of link_write for a deadline, rounded up so the deadline is never shortened. */
+static time_t stoptime_of(timestamp_t deadline)
 {
+	return (time_t)((deadline + 999999) / 1000000);
+}
+
+int link_queue_flush(struct link_queue *lq, timestamp_t deadline)
+{
+	time_t stoptime = stoptime_of(deadline);
 	while (!lq->failed && lq->head) {
 		int full = 0;
 		ssize_t n = write_head(lq, stoptime, &full);
@@ -525,8 +532,9 @@ int link_queue_flush(struct link_queue *lq, time_t stoptime)
 	return !lq->failed;
 }
 
-int link_queue_finish(struct link_queue *lq, time_t stoptime)
+int link_queue_finish(struct link_queue *lq, timestamp_t deadline)
 {
+	time_t stoptime = stoptime_of(deadline);
 	struct link_queue_entry *e = lq->head;
 	while (!lq->failed && e && lq->head == e && e->started) {
 		int full = 0;

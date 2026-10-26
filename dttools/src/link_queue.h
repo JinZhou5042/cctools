@@ -93,18 +93,20 @@ int link_queue_send(struct link_queue *lq, timestamp_t deadline);
 
 /** Write everything, waiting as needed.
 @param lq The queue.
-@param stoptime The time at which to give up.
+@param deadline Microseconds since the epoch at which to give up.
 @return One if the queue is empty, zero if it has failed.
 */
-int link_queue_flush(struct link_queue *lq, time_t stoptime);
+int link_queue_flush(struct link_queue *lq, timestamp_t deadline);
 
-/** Write the rest of a partly written entry, waiting as needed, before waiting for a peer that may be reading it. A
-push stays whole within one entry.
+/** Write the rest of any push that a write took only in part, waiting as needed, so a peer never waits for the rest of
+a push, such as before waiting for a peer that may be reading it. Whole pushes that shared that write may go too. A
+message pushed in parts, such as a header and a file, is finished only to the end of the part being written, which
+suffices for messages a peer reads at any time, because those are pushed whole.
 @param lq The queue.
-@param stoptime The time at which to give up.
-@return One if no entry is partly written, zero if the queue has failed.
+@param deadline Microseconds since the epoch at which to give up.
+@return One if no push is partly written, zero if the queue has failed.
 */
-int link_queue_finish(struct link_queue *lq, time_t stoptime);
+int link_queue_finish(struct link_queue *lq, timestamp_t deadline);
 
 /** Refuse new data and keep writing what is queued, such as a final message.
 @param lq The queue.

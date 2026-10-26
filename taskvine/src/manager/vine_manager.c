@@ -415,7 +415,7 @@ __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager 
 /* Write everything queued for a client before the manager writes to its link directly, as for status answers. */
 static int flush_worker_queue(struct vine_manager *q, struct vine_worker_info *w)
 {
-	int result = link_queue_flush(w->lq, time(0) + q->long_timeout);
+	int result = link_queue_flush(w->lq, timestamp_get() + q->long_timeout * 1000000LL);
 	watch_worker_queue(q, w);
 	return result;
 }
@@ -4753,7 +4753,7 @@ void vine_delete(struct vine_manager *q)
 	struct list *written = list_create();
 	struct departing_link *d;
 	while ((d = list_pop_head(q->departing_links))) {
-		if (!d->draining && !link_queue_flush(d->lq, time(0) + 1)) {
+		if (!d->draining && !link_queue_flush(d->lq, timestamp_get() + 1000000)) {
 			departing_link_delete(d);
 		} else {
 			shutdown(link_fd(d->link), SHUT_WR);
