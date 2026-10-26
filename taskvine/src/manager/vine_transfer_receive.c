@@ -91,15 +91,19 @@ static int vine_transfer_get_file_internal(struct link *lnk, const char *filenam
 		return 0;
 	}
 
-	/* Each piece gets a new deadline, so a transfer fails only when no data arrives for timeout seconds, and a large
-	 * file that keeps arriving is never cut off. */
+	/* Each piece of 64 KB gets a new deadline, so a large file that keeps arriving is never cut off. A piece that
+	 * ends short ended at its deadline, at the end of the stream, or on an error, so the transfer stops there: a source
+	 * that stops in the middle of a piece costs one timeout, not that piece's and the next one's. */
 	int64_t actual = 0;
 	while (actual < length) {
-		int64_t piece = link_stream_to_fd(lnk, fd, MIN(length - actual, 1 << 16), time(0) + timeout);
-		if (piece <= 0) {
+		int64_t wanted = MIN(length - actual, 1 << 16);
+		int64_t piece = link_stream_to_fd(lnk, fd, wanted, time(0) + timeout);
+		if (piece > 0) {
+			actual += piece;
+		}
+		if (piece < wanted) {
 			break;
 		}
-		actual += piece;
 	}
 
 	if (actual != length) {
