@@ -23,8 +23,8 @@ struct vine_worker_info *vine_worker_create(struct link *lnk)
 
 	w->type = VINE_WORKER_TYPE_UNKNOWN;
 	w->link = lnk;
-	w->queue = link_queue_create(lnk);
-	if (!w->queue) {
+	w->lq = link_queue_create(lnk);
+	if (!w->lq) {
 		free(w);
 		return 0;
 	}
@@ -66,7 +66,7 @@ struct vine_worker_info *vine_worker_create(struct link *lnk)
 
 void vine_worker_delete(struct vine_worker_info *w)
 {
-	link_queue_delete(w->queue);
+	link_queue_delete(w->lq);
 	if (w->link)
 		link_close(w->link);
 

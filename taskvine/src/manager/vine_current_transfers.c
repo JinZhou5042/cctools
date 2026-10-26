@@ -449,7 +449,7 @@ void set_throttle(struct vine_manager *m, struct vine_worker_info *w, int is_des
 	/* The source is not chosen again until it sends a message. A check asks a live source for one now, unless a
 	 * check is outstanding or would wait behind queued data, whose progress judges the worker instead. */
 	w->last_source_failure = w->last_transfer_failure;
-	if (w->last_msg_recv_time > w->last_update_msg_time && link_queue_empty(w->queue)) {
+	if (w->last_msg_recv_time > w->last_update_msg_time && link_queue_empty(w->lq)) {
 		if (vine_manager_send(m, w, "check\n") > 0) {
 			w->last_update_msg_time = w->last_source_failure;
 		}

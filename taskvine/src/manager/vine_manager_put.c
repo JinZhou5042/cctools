@@ -69,8 +69,7 @@ static int vine_manager_put_symlink(struct vine_manager *q, struct vine_worker_i
 
 /*
 Send a single file to the remote worker.
-The file is queued for the worker and read in chunks as its link takes them. If the worker stops taking data for the
-minimum transfer timeout, or the file shrinks before it is sent, the manager removes the worker.
+The file is read as the worker's link takes it. A worker that takes nothing for the minimum transfer timeout is removed.
 */
 
 static int vine_manager_put_file(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, const char *localname, const char *remotename, struct stat info, int override_mode, int64_t *total_bytes)
