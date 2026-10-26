@@ -154,7 +154,9 @@ int link_writer_push_shared(struct link_writer *lw, struct link_writer_shared *s
 int link_writer_send_async(struct link_writer *lw, timestamp_t deadline);
 
 /** Write everything, waiting as needed. Each write gets a new stoptime of idle seconds, so a large file never fails
-while it moves, and a peer that takes nothing for that long fails the writer.
+while it moves, and a peer that takes nothing for that long fails the writer. A write is one entry of at most 64 KB
+for data read from a file, and a write that ends short with an idle bound fails the writer, so a peer that stops in
+the middle of a write costs one idle period.
 @param lw The writer.
 @param deadline The time of @ref timestamp_monotonic at which to give up, or zero for none.
 @param idle Seconds that a write may wait without progress, or zero for no limit.
