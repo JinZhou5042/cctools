@@ -131,11 +131,11 @@ int link_writer_empty(struct link_writer *lw);
 */
 int link_writer_failed(struct link_writer *lw);
 
-/** Check whether the peer took nothing for too long while data waited.
+/** Report when the writer last made progress, so the owner judges its peer with its own threshold, together with what
+it reads from the peer.
 @param lw The writer.
-@param seconds The longest time without progress, or zero or less for never.
-@return Non-zero if the queue is not empty and wrote nothing for that long.
+@return Microseconds since the epoch at which the writer last wrote a byte or became non-empty.
 */
-int link_writer_stalled(struct link_writer *lw, int seconds);
+timestamp_t link_writer_last_progress(struct link_writer *lw);
 
 #endif

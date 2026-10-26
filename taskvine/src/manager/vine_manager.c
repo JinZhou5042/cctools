@@ -353,7 +353,9 @@ static int advance_queue(struct vine_manager *q, struct link_writer *lw, int rev
 	if (revents & LINK_WRITE) {
 		write_queue(lw);
 	}
-	if (link_writer_failed(lw) || link_writer_stalled(lw, q->minimum_transfer_timeout)) {
+	int stalled = !link_writer_empty(lw) && q->minimum_transfer_timeout > 0 &&
+		      timestamp_get() - link_writer_last_progress(lw) >= (timestamp_t)q->minimum_transfer_timeout * 1000000;
+	if (link_writer_failed(lw) || stalled) {
 		return -1;
 	}
 	return link_writer_empty(lw);

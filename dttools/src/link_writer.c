@@ -570,10 +570,7 @@ int link_writer_failed(struct link_writer *lw)
 	return lw->failed;
 }
 
-int link_writer_stalled(struct link_writer *lw, int seconds)
+timestamp_t link_writer_last_progress(struct link_writer *lw)
 {
-	if (seconds <= 0 || !lw->head) {
-		return 0;
-	}
-	return timestamp_get() - lw->last_progress >= (timestamp_t)seconds * 1000000;
+	return lw->last_progress;
 }
