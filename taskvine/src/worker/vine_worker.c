@@ -209,6 +209,22 @@ static int send_queued_messages(void)
 	return link_writer_send_async(manager_lw, timestamp_get() + MANAGER_SEND_SLICE);
 }
 
+/* Wait for the manager link and for room in the pipes of libraries whose writers hold data, with the signals of mask
+ * unblocked as link_usleep_mask() waits for the manager alone. Return non-zero if the manager link is readable. */
+static int wait_with_libraries(struct link *manager, int msec, sigset_t *mask, int writing)
+{
+	int count = 1 + vine_process_libraries_sending();
+	struct link_info waits[count];
+	waits[0] = (struct link_info){manager, LINK_READ | (writing ? LINK_WRITE : 0), 0};
+	vine_process_libraries_poll(waits + 1);
+
+	sigset_t saved;
+	sigprocmask(SIG_UNBLOCK, mask, &saved);
+	int ready = link_poll(waits, count, msec);
+	sigprocmask(SIG_SETMASK, &saved, NULL);
+	return ready > 0 && (waits[0].revents & LINK_READ);
+}
+
 /* Queue a printf-formatted message to the current manager. */
 
 __attribute__((format(printf, 1, 2))) void send_message(const char *fmt, ...)
@@ -1743,14 +1759,20 @@ static void vine_worker_serve_manager(struct link *manager)
 		}
 
 		int writing = !link_writer_empty(manager_lw);
-		int manager_activity = link_usleep_mask(manager, wait_msec * 1000, &mask, 1, writing);
-		if (manager_activity < 0)
-			break;
+		int manager_activity;
+		if (vine_process_libraries_sending()) {
+			manager_activity = wait_with_libraries(manager, wait_msec, &mask, writing);
+		} else {
+			manager_activity = link_usleep_mask(manager, wait_msec * 1000, &mask, 1, writing);
+			if (manager_activity < 0)
+				break;
 
-		/* A wake for room is not a message. */
-		if (manager_activity && writing && link_buffer_empty(manager)) {
-			manager_activity = link_usleep_mask(manager, 0, 0, 1, 0) > 0;
+			/* A wake for room is not a message. */
+			if (manager_activity && writing && link_buffer_empty(manager)) {
+				manager_activity = link_usleep_mask(manager, 0, 0, 1, 0) > 0;
+			}
 		}
+		vine_process_libraries_send(timestamp_get() + MANAGER_SEND_SLICE);
 
 		int ok = 1;
 		if (manager_activity) {

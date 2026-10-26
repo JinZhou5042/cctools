@@ -11,6 +11,8 @@ See the file COPYING for details.
 #include "vine_task.h"
 
 #include "timestamp.h"
+#include "link.h"
+#include "link_writer.h"
 #include "path_disk_size_info.h"
 
 #include <unistd.h>
@@ -56,6 +58,13 @@ struct vine_process {
 	struct link *library_read_link;
 	struct link *library_write_link;
 
+	/* If this is a library process, everything sent to it, written as its pipe takes it, so the worker never waits
+	 * for a library that does not read. */
+	struct link_writer *library_writer;
+
+	/* If this is a library process, whether its writer holds data and it is in the list that the main loop polls. */
+	int library_sending;
+
 	/* If this is a library process, the number of functions it is currently running. */
 	int functions_running;
 	
@@ -87,6 +96,16 @@ void  vine_process_delete( struct vine_process *p );
 int   vine_process_execute_and_wait( struct vine_process *p );
 
 int   vine_process_library_get_result( struct vine_process *p, uint64_t *done_task_id, int *exit_code );
+
+/* The number of libraries whose writers hold data. */
+int   vine_process_libraries_sending( void );
+
+/* Fill one entry per library whose writer holds data, waiting for room in its pipe. */
+void  vine_process_libraries_poll( struct link_info *waits );
+
+/* Write to the libraries whose writers hold data, without waiting, and kill a library whose pipe failed, which then
+ * ends as any library that exits. */
+void  vine_process_libraries_send( timestamp_t deadline );
 
 void  vine_process_compute_disk_needed( struct vine_process *p );
 int   vine_process_measure_disk(struct vine_process *p, int max_time_on_measurement);

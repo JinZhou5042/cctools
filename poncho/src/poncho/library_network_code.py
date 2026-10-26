@@ -99,8 +99,15 @@ def start_function(in_pipe_fd, thread_limit=1):
         else:
             buffer_len += c
     buffer_len = int(buffer_len)
-    # now read the buffer to get invocation details
-    line = str(os.read(in_pipe_fd, buffer_len), encoding="utf-8")
+    # now read the buffer to get invocation details, which the worker may write in parts
+    data = b""
+    while len(data) < buffer_len:
+        chunk = os.read(in_pipe_fd, buffer_len - len(data))
+        if chunk == b"":
+            stdout_timed_message(f"can't read the invocation from in_pipe_fd {in_pipe_fd}")
+            exit(1)
+        data += chunk
+    line = str(data, encoding="utf-8")
 
     try:
         (
