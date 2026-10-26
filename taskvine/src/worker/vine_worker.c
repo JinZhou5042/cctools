@@ -198,6 +198,7 @@ extern int vine_hack_do_not_compute_cached_name;
 /* Everything sent to the manager, written only as the link takes it, so the worker and a manager that writes to it at
  * the same time never wait for each other. */
 static struct link_writer *manager_lw = NULL;
+static struct link *manager_link = NULL; /* The link that manager_lw writes to. */
 
 /* Longest time one call writes, so a large file does not hold the main loop. */
 #define MANAGER_SEND_SLICE 1000000
@@ -305,6 +306,12 @@ static void report_changes(void)
 
 int recv_message(struct link *l, char *line, int length, time_t stoptime)
 {
+	/* The manager reads the rest of a message it has begun and writes nothing meanwhile, so a message that the link
+	 * took only in part goes out before the worker may wait for the rest of a manager message. Every blocking read of
+	 * a manager message starts with a line read here. */
+	if (l == manager_link && manager_lw && !link_writer_send_partial(manager_lw, timestamp_monotonic() + options->active_timeout * 1000000LL)) {
+		return 0;
+	}
 	int result = link_readline(l, line, length, stoptime);
 	if (result)
 		debug(D_VINE, "rx: %s", line);
@@ -1245,6 +1252,7 @@ static void close_manager_link(struct link *manager)
 {
 	link_writer_delete(manager_lw);
 	manager_lw = NULL;
+	manager_link = NULL;
 	link_close(manager);
 }
 
@@ -1306,11 +1314,6 @@ static int handle_manager(struct link *manager)
 	int mode, n;
 	int r = 0;
 	int cache_level;
-
-	/* A request may wait for data from the manager, which itself waits for the rest of a push it has begun reading. */
-	if (!link_writer_send_partial(manager_lw, timestamp_monotonic() + options->active_timeout * 1000000LL)) {
-		return 0;
-	}
 
 	if (recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
 		if (sscanf(line, "task %" SCNd64, &task_id) == 1) {
@@ -1909,6 +1912,7 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	link_tune(manager, LINK_TUNE_INTERACTIVE);
 
 	manager_lw = link_writer_create(manager);
+	manager_link = manager;
 	if (!manager_lw) {
 		fprintf(stderr, "vine_worker: cannot allocate memory for the manager connection\n");
 		link_close(manager);
