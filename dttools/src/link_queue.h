@@ -8,23 +8,14 @@ See the file COPYING for details.
 #define LINK_QUEUE_H
 
 /** @file link_queue.h
-An output queue for a link. A process that serves several peers from one thread must not block writing to one of them:
-a peer that stops reading would stall every other peer. Such a process queues what it sends to a peer and writes only
-what the socket takes, keeping a partly written entry at the head, so the stream stays intact and in order. Its poll
-asks for @ref LINK_WRITE while the queue is not empty and calls @ref link_queue_send when the link is writable.
+An output queue for a link, so a process never blocks writing to a peer. A blocking write waits while the peer is busy
+writing too, and a process serving many peers from one thread would stall them all behind one that stops reading.
+The owner pushes what it sends, polls for @ref LINK_WRITE while the queue is not empty, and calls @ref link_queue_send
+when the link is writable. A partly written entry stays at the head, so the stream stays intact and in order.
 <p>
-An entry is either data, copied into the queue, a byte range of a file, which is opened when it reaches the head
-and read and sent in chunks, so a large file is never held in memory, or shared data (@ref link_queue_push_shared),
-which many queues send without a copy each. Once a write of an entry was attempted, the entry keeps its bytes in place
-until they are written, as an SSL write that must be retried requires. Entries that reach the head together and fit in
-one chunk, such as the lines of a message and the small files or shared data between them, are copied into that chunk
-and leave in one write.
-<p>
-The queue judges its peer by progress: @ref link_queue_stalled reports a queue that has waited to write for a given
-time without any byte taken. A queue that fails, because the link fails or a file range cannot be read in full, drops
-its entries and refuses new ones, and the owner should then close the link, because the peer received part of the
-stream at most. @ref link_queue_flush writes everything, waiting as needed, before a direct write or before reading a
-reply to a request in the queue.
+An entry is copied data, a byte range of a file read in chunks at the head, shared data that many queues hold by
+reference, or a producer that makes its data when it reaches the head. Small entries that reach the head together leave in one write. A queue that fails drops everything
+and refuses new data, and the owner should close the link.
 */
 
 #include "link.h"
@@ -34,142 +25,163 @@ reply to a request in the queue.
 #include <sys/types.h>
 #include <time.h>
 
-/** An output queue for one link. The structure is opaque. */
+/** An output queue for one link. */
 struct link_queue;
 
-/** Data that many queues send without a copy each, such as a small file that a server sends to many peers. Its bytes
-are held in memory, or in a file that a queue reads when the data reaches its head. The data is immutable, but it may
-move: data in memory that was written to a file may leave memory (@ref link_queue_shared_unload), and data in a file may
-be read into memory (@ref link_queue_shared_load), so that the file may be removed while queues still hold it. Each
-queue that holds the data keeps a reference, which it drops once the data is written or the queue drops it, and the
-data is freed with its last reference. References are not atomic: the data and every queue that holds it belong to one
-thread. The structure is opaque. */
+/** Immutable data that many queues send without a copy each, held in memory, in a file read at the head, or both. It
+may move between the two while queues hold it, and is freed with its last reference. It belongs to one thread. */
 struct link_queue_shared;
 
-/** Create an empty output queue.
-@param link The link the queue writes to. The queue does not own the link and never closes it.
+/** Makes the data of a producer entry when it reaches the head. What it pushes goes ahead of it, and is written before
+it is called again.
+@param lq The queue.
+@param arg The argument given to @ref link_queue_push_producer.
+@return One if more data follows, in which case it must have pushed some, zero when done, or -1 to fail the queue.
+*/
+typedef int (*link_queue_producer_t)(struct link_queue *lq, void *arg);
+
+/** Create an empty queue.
+@param link The link to write to, which the queue never closes.
 @return A new queue, or NULL if memory is exhausted.
 */
 struct link_queue *link_queue_create(struct link *link);
 
-/** Delete a queue and drop the entries it still holds.
-@param q The queue to delete.
+/** Delete a queue and what it still holds.
+@param lq The queue.
 */
-void link_queue_delete(struct link_queue *q);
+void link_queue_delete(struct link_queue *lq);
 
-/** Append data to the end of a queue. Nothing is written; the data is copied.
-@param q The queue.
-@param data The bytes to append.
-@param length The number of bytes to append.
-@return One if the data was queued, zero if the queue has failed or is sealed and dropped it.
+/** Append a copy of data.
+@param lq The queue.
+@param data The bytes.
+@param length The number of bytes.
+@return One if queued, zero if the queue has failed or is sealed.
 */
-int link_queue_push(struct link_queue *q, const char *data, size_t length);
+int link_queue_push(struct link_queue *lq, const char *data, size_t length);
 
-/** Append a byte range of a file to the end of a queue. Nothing is read or written now: the file is opened when the
-range reaches the head of the queue. A file that then cannot be opened, or ends before the range does, fails the queue,
-because the peer was promised the whole range.
-@param q The queue.
+/** Append a byte range of a file, opened when it reaches the head. A file that then cannot be read in full fails the
+queue.
+@param lq The queue.
 @param path The path of the file.
-@param offset The offset of the range in the file.
-@param length The number of bytes of the range.
-@return One if the range was queued, zero if the queue has failed or is sealed and dropped it.
+@param offset The offset of the range.
+@param length The number of bytes.
+@return One if queued, zero if the queue has failed or is sealed.
 */
-int link_queue_push_file(struct link_queue *q, const char *path, int64_t offset, int64_t length);
+int link_queue_push_file(struct link_queue *lq, const char *path, int64_t offset, int64_t length);
 
-/** Create shared data held in memory, with one reference for the caller.
-@param data The bytes, allocated with malloc. The shared data owns them from now on, or the caller keeps them on failure.
+/** Append a byte range of an open file. The queue owns the descriptor, also when it refuses the range, so a file
+removed meanwhile still reads.
+@param lq The queue.
+@param fd The open descriptor.
+@param offset The offset of the range.
+@param length The number of bytes.
+@return One if queued, zero if the queue has failed or is sealed.
+*/
+int link_queue_push_fd(struct link_queue *lq, int fd, int64_t offset, int64_t length);
+
+/** Append a producer (see @ref link_queue_producer_t).
+@param lq The queue.
+@param produce The function that makes the data.
+@param release Frees the argument when the producer is done or dropped, also when the queue refuses it, or NULL.
+@param arg The argument of both functions.
+@return One if queued, zero if the queue has failed or is sealed.
+*/
+int link_queue_push_producer(struct link_queue *lq, link_queue_producer_t produce, void (*release)(void *arg), void *arg);
+
+/** Create shared data in memory, with one reference for the caller.
+@param data Bytes from malloc, owned by the shared data from now on, or still the caller's on failure.
 @param length The number of bytes.
 @return The shared data, or NULL if memory is exhausted.
 */
 struct link_queue_shared *link_queue_shared_create(char *data, size_t length);
 
-/** Create shared data held in a file, with one reference for the caller. Nothing is read now: a queue reads the file
-when the data reaches its head, and fails as for @ref link_queue_push_file if the file cannot be read in full then.
+/** Create shared data in a file, read at the head of each queue, with one reference for the caller.
 @param path The path of the file, which is copied.
-@param length The number of bytes of the file to send, from its start.
+@param length The number of bytes from its start.
 @return The shared data, or NULL if memory is exhausted.
 */
 struct link_queue_shared *link_queue_shared_create_file(const char *path, size_t length);
 
-/** Add a reference to shared data.
-@param s The shared data.
-@return The same shared data.
+/** @param s The shared data.
+@return The same shared data, with one more reference.
 */
 struct link_queue_shared *link_queue_shared_hold(struct link_queue_shared *s);
 
-/** Drop a reference to shared data, and free the data with its last reference.
+/** Drop a reference, freeing the data with the last one.
 @param s The shared data, or NULL.
 */
 void link_queue_shared_release(struct link_queue_shared *s);
 
-/** Return the bytes of shared data held in memory.
-@param s The shared data.
-@return The bytes, valid while a reference is held and the data is not unloaded, or NULL for data held in a file.
+/** @param s The shared data.
+@return Its bytes in memory, or NULL for data in a file.
 */
 const char *link_queue_shared_bytes(const struct link_queue_shared *s);
 
-/** Free the bytes of shared data held in memory that is now also held in a file, so that queues that hold it read the
-file instead when it reaches their head. Bytes that a queue is writing in place stay until it wrote them.
+/** Free the bytes in memory of data now also in a file, which queues then read. Bytes a queue is writing stay until
+written.
 @param s The shared data.
 @param path The file that holds the data from its start, which is copied.
-@return One if the data is held in the file now, or zero if memory is exhausted, in which case it stays in memory.
+@return One if the data is in the file now, zero if memory is exhausted.
 */
 int link_queue_shared_unload(struct link_queue_shared *s, const char *path);
 
-/** Read shared data held in a file into memory while queues still hold it, so that the file may be removed. Data held
-by nobody but the caller is left as it is, and data whose bytes are still in memory keeps them.
+/** Read data in a file into memory, so the file may be removed while queues hold it.
 @param s The shared data.
-@return One if the data no longer needs its file, or zero if the file could not be read in full, in which case queues
-that still hold the data read the file as before.
+@return One if the data no longer needs its file, zero if the file could not be read in full.
 */
 int link_queue_shared_load(struct link_queue_shared *s);
 
-/** Append shared data to the end of a queue, which holds a reference to it until it is written or dropped. Nothing is
-copied, read, or written now.
-@param q The queue.
+/** Append a reference to shared data.
+@param lq The queue.
 @param s The shared data.
-@return One if the data was queued, zero if the queue has failed or is sealed and dropped it.
+@return One if queued, zero if the queue has failed or is sealed.
 */
-int link_queue_push_shared(struct link_queue *q, struct link_queue_shared *s);
+int link_queue_push_shared(struct link_queue *lq, struct link_queue_shared *s);
 
-/** Write what the link takes without waiting, until the queue is empty, the link takes no more, or the deadline
-passes. At least one write is attempted, so each call makes progress when the link has room.
-@param q The queue.
-@param deadline The time in microseconds since the epoch after which no further write is started.
-@return One if the queue is intact, empty or waiting for room, or zero if it has failed.
+/** Write without waiting until the queue is empty, the link is full, or the deadline passes, with at least one write.
+@param lq The queue.
+@param deadline Microseconds since the epoch after which no write starts.
+@return Zero if the queue has failed, else one.
 */
-int link_queue_send(struct link_queue *q, timestamp_t deadline);
+int link_queue_send(struct link_queue *lq, timestamp_t deadline);
 
-/** Write every queued byte, waiting for room as needed until the stoptime.
-@param q The queue.
-@param stoptime The absolute time at which to give up.
-@return One if the queue is empty, or zero if it has failed.
+/** Write everything, waiting as needed.
+@param lq The queue.
+@param deadline Microseconds since the epoch at which to give up.
+@return One if the queue is empty, zero if it has failed.
 */
-int link_queue_flush(struct link_queue *q, time_t stoptime);
+int link_queue_flush(struct link_queue *lq, timestamp_t deadline);
 
-/** Refuse new data. What the queue holds is still written, so a final message behind other data goes out.
-@param q The queue.
+/** Write the rest of any push that a write took only in part, waiting as needed, so a peer never waits for the rest of
+a push, such as before waiting for a peer that may be reading it. Whole pushes that shared that write may go too. A
+message pushed in parts, such as a header and a file, is finished only to the end of the part being written, which
+suffices for messages a peer reads at any time, because those are pushed whole.
+@param lq The queue.
+@param deadline Microseconds since the epoch at which to give up.
+@return One if no push is partly written, zero if the queue has failed.
 */
-void link_queue_seal(struct link_queue *q);
+int link_queue_finish(struct link_queue *lq, timestamp_t deadline);
 
-/** Check whether a queue holds nothing to write.
-@param q The queue.
-@return Non-zero if the queue is empty, including a queue that has failed.
+/** Refuse new data and keep writing what is queued, such as a final message.
+@param lq The queue.
 */
-int link_queue_empty(struct link_queue *q);
+void link_queue_seal(struct link_queue *lq);
 
-/** Check whether a queue has failed.
-@param q The queue.
-@return Non-zero if a write or a file read of the queue failed, after which the queue holds and accepts nothing.
+/** @param lq The queue.
+@return Non-zero if the queue holds nothing to write.
 */
-int link_queue_failed(struct link_queue *q);
+int link_queue_empty(struct link_queue *lq);
 
-/** Check whether a queue has waited for its peer too long. The wait starts when data is queued into an empty queue and
-is renewed by every byte the link takes.
-@param q The queue.
-@param seconds The longest acceptable time without progress. Zero or less never reports a stall.
-@return Non-zero if the queue is not empty and no byte was written for at least the given time.
+/** @param lq The queue.
+@return Non-zero if a write, a file read, or a producer failed.
 */
-int link_queue_stalled(struct link_queue *q, int seconds);
+int link_queue_failed(struct link_queue *lq);
+
+/** Check whether the peer took nothing for too long while data waited.
+@param lq The queue.
+@param seconds The longest time without progress, or zero or less for never.
+@return Non-zero if the queue is not empty and wrote nothing for that long.
+*/
+int link_queue_stalled(struct link_queue *lq, int seconds);
 
 #endif
