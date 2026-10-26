@@ -430,12 +430,19 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 
 		/* A source that failed before and sent nothing since explains the failure, so it does not count against
 		 * the destination. Otherwise a source whose host hangs fails every transfer to healthy destinations, which
-		 * would be released in turn. */
+		 * would be released in turn. In the same way, a destination that failed a receive before and completed none
+		 * since explains the failure, so it does not count against a source that is not suspect. Otherwise a
+		 * destination that fails every receive drives a healthy new source to a streak of failures and gets it
+		 * released. The first failure between them counts against both, and a suspect source is judged first, so a
+		 * hung source still reaches its streak with destinations that its earlier failures made suspect. */
 		int source_suspect = vine_worker_source_is_suspect(source_worker);
+		int destination_suspect = !source_suspect && dest_worker->xfer_streak_bad_destination_counter > 0;
 
-		source_worker->xfer_streak_bad_source_counter++;
-		source_worker->xfer_total_bad_source_counter++;
-		set_throttle(q, source_worker, 0, source_worker->last_msg_recv_time < p->start_time);
+		if (!destination_suspect) {
+			source_worker->xfer_streak_bad_source_counter++;
+			source_worker->xfer_total_bad_source_counter++;
+			set_throttle(q, source_worker, 0, source_worker->last_msg_recv_time < p->start_time);
+		}
 
 		if (!source_suspect) {
 			dest_worker->xfer_streak_bad_destination_counter++;
