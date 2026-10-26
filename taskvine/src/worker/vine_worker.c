@@ -50,6 +50,7 @@ See the file COPYING for details.
 #include "md5.h"
 #include "path.h"
 #include "path_disk_size_info.h"
+#include "round_timer.h"
 #include "pattern.h"
 #include "process.h"
 #include "random.h"
@@ -669,6 +670,31 @@ static void send_stats_update(struct link *manager)
 Send a periodic keepalive message to the manager, otherwise it will
 think that the worker has crashed and gone away.
 */
+
+/*
+Rounds of the main loop, measured by a round timer (round_timer.h). The report window holds the rounds since the last
+answer to a check of the manager, the summary window those since the last round summary in the debug log.
+*/
+static struct round_window round_report;
+static struct round_window round_summary;
+
+/* Seconds between round summaries in the debug log. */
+#define ROUND_SUMMARY_INTERVAL 60
+
+/*
+With the timeout framework on, each answer to a check also reports the rounds since the last answer, so the manager
+sees the worker's response time X as it is: info round-stats <rounds> <longest round> <its slowest step> <that step>
+<window>, durations in microseconds. A manager that does not know the field ignores it.
+*/
+static void send_round_stats(void)
+{
+	if (options->response_timeout <= 0) {
+		return;
+	}
+	struct round_window *w = &round_report;
+	send_message("info round-stats %" PRId64 " %" PRIu64 " %s %" PRIu64 " %" PRIu64 "\n", w->rounds, (uint64_t)w->longest, w->step, (uint64_t)w->step_time, (uint64_t)round_window_length(w));
+	round_window_reset(w);
+}
 
 static int send_keepalive(struct link *manager, int force_resources)
 {
@@ -1630,6 +1656,7 @@ static int handle_manager(struct link *manager)
 			abort_flag = 1;
 			r = 1;
 		} else if (!strncmp(line, "check", 6)) {
+			send_round_stats();
 			r = send_keepalive(manager, 0);
 		} else if (!strncmp(line, "auth", 4)) {
 			fprintf(stderr, "vine_worker: this manager requires a password. (use the -P option)\n");
@@ -2029,6 +2056,9 @@ static void vine_worker_serve_manager(struct link *manager)
 	/* Non-zero when the last round left work that continues in the next round, which then does not wait. */
 	int work_remains = 0;
 
+	round_window_reset(&round_report);
+	round_window_reset(&round_summary);
+
 	// Start serving managers
 	while (!abort_flag) {
 
@@ -2086,7 +2116,8 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		struct budget round;
 		budget_start(&round, ROUND_BUDGET);
-		timestamp_t round_start = timestamp_monotonic();
+		struct round_timer timer;
+		round_timer_start(&timer);
 
 		/* Handle the messages already in the link's buffer until the budget expires, as the manager does, so that a
 		 * long task, such as one with thousands of inputs, is read at once rather than one line per round. */
@@ -2096,6 +2127,8 @@ static void vine_worker_serve_manager(struct link *manager)
 				ok &= handle_manager(manager);
 			} while (ok && !abort_flag && !link_buffer_empty(manager) && !budget_expired(&round));
 		}
+
+		round_timer_step(&timer, "manager-messages");
 
 		/* Replies leave at once. */
 		if (!link_writer_send_async(manager_lw, round.end)) {
@@ -2107,15 +2140,19 @@ static void vine_worker_serve_manager(struct link *manager)
 			break;
 		}
 		vine_process_libraries_send(round.end);
+		round_timer_step(&timer, "send");
 
 		expire_procs_running();
 
 		ok &= handle_completed_tasks(manager);
 		reap_killed_processes(0);
+		round_timer_step(&timer, "completed-tasks");
 
 		continue_stageout(manager, &round);
+		round_timer_step(&timer, "stage-out");
 
 		ok &= vine_cache_check_xfer_files(cache_manager, manager);
+		round_timer_step(&timer, "finished-transfers");
 
 		measure_worker_resources();
 
@@ -2129,7 +2166,9 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		/* end a running processes if goes above its declared limits.
 		 * Mark offending process as RESOURCE_EXHASTION. */
+		round_timer_step(&timer, "resources");
 		continue_disk_measurement(&round);
+		round_timer_step(&timer, "disk-measurement");
 
 		/* end running processes if worker resources are exhasusted, and marked
 		 * them as FORSAKEN, so they can be resubmitted somewhere else. */
@@ -2144,6 +2183,7 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		/* Check all known libraries if they are ready to execute functions. */
 		check_libraries_ready(manager);
+		round_timer_step(&timer, "transfers-libraries");
 
 		int task_event = 0;
 		if (ok) {
@@ -2167,6 +2207,8 @@ static void vine_worker_serve_manager(struct link *manager)
 			}
 		}
 
+		round_timer_step(&timer, "task-start");
+
 		if (ok) {
 			if (vine_watcher_check(watcher)) {
 				send_message("available_results\n");
@@ -2179,8 +2221,11 @@ static void vine_worker_serve_manager(struct link *manager)
 			}
 		}
 
+		round_timer_step(&timer, "task-reports");
+
 		/* Delete what was moved to the trash, after everything else this round. */
 		int trash_done = trash_empty_budget(&round);
+		timestamp_t round_length = round_timer_finish(&timer, "trash", &round_report, &round_summary);
 
 		if (!ok) {
 			break;
@@ -2194,9 +2239,15 @@ static void vine_worker_serve_manager(struct link *manager)
 		}
 
 		/* A round longer than X breaks the response time that this worker declared to the manager. */
-		timestamp_t round_length = timestamp_monotonic() - round_start;
 		if (options->response_timeout > 0 && round_length > (timestamp_t)options->response_timeout * USECOND) {
-			debug(D_NOTICE, "a round of the main loop took %.3f s, longer than the response time %d s", round_length / 1e6, options->response_timeout);
+			debug(D_NOTICE, "a round of the main loop took %.3f s, longer than the response time %d s; its slowest step was %s (%.3f s)", round_length / 1e6, options->response_timeout, timer.slowest, timer.slowest_time / 1e6);
+		}
+
+		/* The longest round of each interval, and its slowest step, for measurements of the response time. */
+		if (round_window_length(&round_summary) >= (timestamp_t)ROUND_SUMMARY_INTERVAL * USECOND) {
+			struct round_window *w = &round_summary;
+			debug(D_VINE, "round summary: seconds=%.1f rounds=%" PRId64 " round_max_us=%" PRIu64 " step=%s step_us=%" PRIu64, round_window_length(w) / 1e6, w->rounds, (uint64_t)w->longest, w->step, (uint64_t)w->step_time);
+			round_window_reset(w);
 		}
 	}
 }

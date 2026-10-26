@@ -231,6 +231,7 @@ static void aggregate_workers_resources(
 		struct vine_manager *q, struct vine_resources *rtotal, struct vine_resources *rmin, struct vine_resources *rmax, int64_t *inuse_cache, struct hash_table *features);
 static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout, const char *tag, int task_id);
 static void disconnect_all_workers(struct vine_manager *q);
+static void round_summary_log(struct vine_manager *q);
 
 static int vine_manager_check_inputs_available(struct vine_manager *q, struct vine_task *t);
 static void vine_manager_consider_recovery_task(struct vine_manager *q, struct vine_file *lost_file, struct vine_task *rt);
@@ -663,6 +664,15 @@ static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_in
 		/* The worker declares its response time X, which turns the timeout framework on for it, see "Timeouts". */
 		w->response_timeout = MAX(0, atoi(value));
 		link_set_idle_timeout(w->link, vine_manager_worker_timeout(q, w, 0));
+	} else if (string_prefix_is(field, "round-stats")) {
+		/* With the timeout framework on, the worker reports the rounds of its main loop since its last answer to a
+		 * check: their number, the longest (its measured X), that round's slowest step and its length, and the
+		 * window, in microseconds. */
+		long long rounds, longest, step_time, window;
+		char step[64];
+		if (sscanf(value, "%lld %lld %63s %lld %lld", &rounds, &longest, step, &step_time, &window) == 5) {
+			debug(D_VINE, "round-stats: worker=%s host=%s rounds=%lld round_max_us=%lld step=%s step_us=%lld window_us=%lld", w->addrport, w->hostname, rounds, longest, step, step_time, window);
+		}
 	}
 
 	// Note we always mark info messages as processed, as they are optional.
@@ -5164,6 +5174,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->time_last_wait = 0;
 	q->time_last_log_stats = 0;
+	round_window_reset(&q->round_summary);
 
 	q->catalog_hosts = 0;
 
@@ -5494,6 +5505,10 @@ void vine_delete(struct vine_manager *q)
 {
 	if (!q) {
 		return;
+	}
+
+	if (q->round_summary.rounds > 0) {
+		round_summary_log(q);
 	}
 
 	/* now that the manager is shutting down, worker removals are not an invalid event, so we
@@ -6338,6 +6353,42 @@ to all connected workers. Workers that were not reached keep their place ahead o
 messages left in a buffer keep the next poll from waiting. Return the number of workers that *failed* and disconnected.
 */
 
+/*
+Each step of vine_wait() is timed as a round (round_timer.h): from the end of its poll to the start of the next poll or
+the return of vine_wait(), with its parts named, so the debug log tells how long the manager was unable to answer
+because of its own work. Every ROUND_SUMMARY_INTERVAL seconds, and at vine_delete(), a round summary line gives the
+number of steps, the longest step, and its slowest part. The cost is a reading of the clock per part.
+*/
+#define ROUND_SUMMARY_INTERVAL 60
+
+static void round_summary_log(struct vine_manager *q)
+{
+	struct round_window *w = &q->round_summary;
+	debug(D_VINE, "round summary: seconds=%.1f rounds=%" PRId64 " round_max_us=%" PRIu64 " step=%s step_us=%" PRIu64, round_window_length(w) / 1e6, w->rounds, (uint64_t)w->longest, w->step, (uint64_t)w->step_time);
+	round_window_reset(w);
+}
+
+/* End a part of the current step of vine_wait(), named by what it did. */
+static void vine_manager_round_step(struct vine_manager *q, const char *name)
+{
+	if (q->round_running) {
+		round_timer_step(&q->round_timer, name);
+	}
+}
+
+/* End the current step of vine_wait(), its last part named. */
+static void vine_manager_round_end(struct vine_manager *q, const char *name)
+{
+	if (!q->round_running) {
+		return;
+	}
+	q->round_running = 0;
+	round_timer_finish(&q->round_timer, name, &q->round_summary, NULL);
+	if (round_window_length(&q->round_summary) >= (timestamp_t)ROUND_SUMMARY_INTERVAL * 1000000) {
+		round_summary_log(q);
+	}
+}
+
 static int poll_active_workers(struct vine_manager *q, int stoptime)
 {
 	BEGIN_ACCUM_TIME(q, time_polling);
@@ -6360,9 +6411,13 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 
 	BEGIN_ACCUM_TIME(q, time_polling);
 
+	vine_manager_round_end(q, "other");
+
 	// Poll all links for activity.
 	link_poll_set_wait(q->poll_set, msec);
 	q->link_poll_end = timestamp_get();
+	round_timer_start(&q->round_timer);
+	q->round_running = 1;
 
 	END_ACCUM_TIME(q, time_polling);
 
@@ -6376,8 +6431,10 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 
 	int workers_failed = send_to_workers(q);
 	send_to_departing_links(q);
+	vine_manager_round_step(q, "send-to-workers");
 
 	vine_manager_data_service_handle(q);
+	vine_manager_round_step(q, "data-service");
 
 	if (link_poll_set_take(q->poll_set, q->wake_link, LINK_READ)) {
 		/* Several wakes before this poll end the same wait. */
@@ -6408,6 +6465,7 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 			}
 		} while (!link_buffer_empty(link) && !budget_expired(&q->round));
 	}
+	vine_manager_round_step(q, "worker-messages");
 
 	END_ACCUM_TIME(q, time_status_msgs);
 
@@ -6697,6 +6755,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		}
 
 		END_ACCUM_TIME(q, time_internal);
+		vine_manager_round_step(q, "housekeeping");
 
 		// break loop if there is a task to be returned to the user; or if prefering dispatching, if there
 		// are no tasks to be dispatched; or if we already looped once and no events were triggered.
@@ -6754,6 +6813,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 				free(key);
 			}
 			list_delete(keys);
+			vine_manager_round_step(q, "watched-files");
 		}
 
 		// check if we need to kill any workers if the user has specified an eviction interval.
@@ -6797,6 +6857,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		} while ((q->max_retrievals < 0 || retrieved_this_cycle < q->max_retrievals || !skip_list_size(q->ready_tasks)) && !budget_expired(&q->round));
 		vine_manager_send_release(q);
 		END_ACCUM_TIME(q, time_receive);
+		vine_manager_round_step(q, "retrieval");
 
 		if (retrieved_this_cycle) {
 			// reset priority cursor on task retrieval, as workers
@@ -6820,6 +6881,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			BEGIN_ACCUM_TIME(q, time_send);
 			result = send_one_task(q);
 			END_ACCUM_TIME(q, time_send);
+			vine_manager_round_step(q, "dispatch");
 			if (result) {
 				// sent at least one task
 				events++;
@@ -6835,6 +6897,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		BEGIN_ACCUM_TIME(q, time_internal);
 		result = vine_temp_start_replication(q);
 		END_ACCUM_TIME(q, time_internal);
+		vine_manager_round_step(q, "replication");
 		if (result) {
 			// recovered at least one temp file
 			events++;
@@ -6858,6 +6921,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			result += shutdown_drained_workers(q);
 			vine_blocklist_unblock_all_by_time(q, time(0));
 			END_ACCUM_TIME(q, time_internal);
+			vine_manager_round_step(q, "worker-checks");
 			if (result) {
 				// removed at least one worker
 				events++;
@@ -6869,6 +6933,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		BEGIN_ACCUM_TIME(q, time_status_msgs);
 		result = connect_new_workers(q, stoptime, MAX(q->wait_for_workers, q->max_new_workers));
 		END_ACCUM_TIME(q, time_status_msgs);
+		vine_manager_round_step(q, "accept-workers");
 		if (result) {
 			// accepted at least one worker
 			// reset priority cursor as new workers
@@ -6929,6 +6994,9 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 	if (events > 0 || q->perf_log_pending) {
 		vine_perf_log_write_update(q, 0);
 	}
+
+	/* The time until the next wait is the application's. */
+	vine_manager_round_end(q, "other");
 
 	q->time_last_wait = timestamp_get();
 

@@ -14,6 +14,7 @@ This module is private to the manager and should not be invoked by the end user.
 
 #include "taskvine.h"
 #include "budget.h"
+#include "round_timer.h"
 #include <limits.h>
 
 /*
@@ -98,6 +99,9 @@ struct vine_manager {
 	int connections_waiting;         /* The manager link was readable at the last poll. */
 	struct list *departing_links;	 /* Removed workers' links whose sealed queues still hold a final message. */
 	struct budget round;             /* Time for the work of one step of vine_wait(), started after its poll. */
+	struct round_timer round_timer;  /* The parts of the current step of vine_wait(), see vine_manager_round_step(). */
+	int round_running;               /* A step is being timed: its poll ended and its next poll has not begun. */
+	struct round_window round_summary; /* Steps since the last round summary in the debug log. */
 	struct link *wake_link;          /* Read end of the pipe that vine_wake() writes to from other threads. */
 	int wake_fd;                     /* Write end of that pipe. */
 	int woken;                       /* A wake arrived during the current vine_wait(), which then returns. */

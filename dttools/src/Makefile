@@ -106,6 +106,7 @@ SOURCES = \
 	rmonitor.c \
 	rmonitor_poll.c \
 	rmsummary.c \
+	round_timer.c \
 	set.c \
 	semaphore.c \
 	sha1.c \
@@ -182,6 +183,7 @@ HEADERS_PUBLIC = \
 	progress_bar.h \
 	rmonitor_poll.h \
 	rmsummary.h \
+	round_timer.h \
 	skip_list.h \
 	stringtools.h \
 	text_array.h \
