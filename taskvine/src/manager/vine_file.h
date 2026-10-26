@@ -42,10 +42,7 @@ struct vine_file {
 	mode_t mode;        // Manual override for Unix mode bits sent to worker.  Zero if unset.
 	char *data;         // Raw data for an input or output buffer.
 	struct vine_task *mini_task; // Mini task used to generate the desired output file.
-	/* For temp files, the source that recreates a lost file (see vine_task_recipe.h): the task that last wrote it, or
-	 * the recovery task made from it, or a recipe of that task once only the files hold it. */
-	struct vine_task *recovery_task;
-	struct vine_task_recipe *recovery_recipe;
+	struct vine_task *recovery_task; // For temp files, a copy of the task that created it.
 	int original_producer_task_id;   // For temp files, the task ID of the original task that produces this file.
 	struct vine_worker_info *source_worker; // if this is a substitute file, attach the worker serving it. 
 	int change_message_shown; // True if error message already shown.

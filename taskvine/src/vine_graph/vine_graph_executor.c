@@ -1646,8 +1646,8 @@ static void vine_graph_executor_handle_task(struct vine_graph_executor *e, struc
 	}
 	struct vine_task *attempt = node->task;
 	vine_graph_executor_handle_node_task(e, node, task);
-	/* A returned attempt is not needed anymore, and the node keeps only its id. The Manager keeps a recipe of it
-	 * for each temporary output, from which it makes a recovery task when the output is lost and needed, and the
+	/* A returned attempt is not needed anymore, and the node keeps only its id. The Manager keeps its own copy of
+	 * the task as the recovery task of its temporary outputs, which it runs when an output is lost and needed, and the
 	 * caller deletes the reference of a returned recovery task. A failed attempt that was submitted again was already
 	 * replaced. */
 	if (task == attempt && node->task == attempt) {
