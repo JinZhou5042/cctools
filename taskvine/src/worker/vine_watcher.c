@@ -163,7 +163,7 @@ In all cases, the complete file is sent back in the normal way
 when the task ends, to ensure reliable output.
 */
 
-int vine_watcher_send_changes(struct vine_watcher *w, struct link_queue *queue)
+int vine_watcher_send_changes(struct vine_watcher *w, struct link_queue *lq)
 {
 	struct entry *e;
 
@@ -184,10 +184,10 @@ int vine_watcher_send_changes(struct vine_watcher *w, struct link_queue *queue)
 				}
 
 				char *header = string_format("update %" PRId64 " %s %" PRId64 " %" PRId64 "\n", e->task_id, e->logical_path, offset, length);
-				int queued = link_queue_push(queue, header, strlen(header));
+				int queued = link_queue_push(lq, header, strlen(header));
 				free(header);
-				/* The queue owns the descriptor and sends exactly the announced bytes. */
-				if (!queued || !link_queue_push_fd(queue, fd, offset, length)) {
+				/* The queue owns the descriptor. */
+				if (!queued || !link_queue_push_fd(lq, fd, offset, length)) {
 					if (!queued) {
 						close(fd);
 					}

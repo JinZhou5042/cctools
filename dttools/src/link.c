@@ -213,10 +213,13 @@ static int link_internal_sleep(struct link *link, struct timeval *timeout, sigse
 		pfd.fd = link->fd;
 		pfd.revents = 0;
 
-		if (reading)
-			pfd.events = POLLIN;
-		if (writing)
-			pfd.events = POLLOUT;
+		pfd.events = 0;
+		if (reading) {
+			pfd.events |= POLLIN;
+		}
+		if (writing) {
+			pfd.events |= POLLOUT;
+		}
 
 		sigprocmask(SIG_UNBLOCK, mask, &cmask);
 		result = poll(&pfd, 1, msec);

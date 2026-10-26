@@ -29,9 +29,9 @@ struct vine_worker_info {
 
 	/* Connection to the worker or other client. */
 	struct link *link;
-	struct link_queue *queue;    // Everything sent to the worker, written as its link takes it.
-	struct list_cursor *sending; // Entry in the manager's sending_workers while the queue holds data or failed.
-	int poll_index;		     // Entry of the link in the manager's poll table in the current step.
+	struct link_queue *lq;	     // Everything sent to the worker.
+	struct list_cursor *sending; // Entry in the manager's sending_workers, or NULL.
+	int poll_index;		     // Entry of the link in the manager's poll table.
 
 	/* Static properties reported by worker when it connects. */
 	char *hostname;

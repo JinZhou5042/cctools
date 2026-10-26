@@ -91,8 +91,8 @@ struct vine_manager {
 	struct link *manager_link;       /* Listening TCP connection for accepting new workers. */
 	struct link_info *poll_table;    /* Table for polling on all connected workers. */
 	int poll_table_size;             /* Number of entries in poll_table. */
-	struct list *sending_workers;	 /* Workers whose output queue holds data or failed, visited by send_to_workers() in every step. */
-	struct list *departing_links;	 /* Links of removed workers whose sealed queues still hold a final message. */
+	struct list *sending_workers;	 /* Workers whose output queue holds data or failed. */
+	struct list *departing_links;	 /* Removed workers' links whose sealed queues still hold a final message. */
 
 	/* Security configuration */
 
@@ -262,26 +262,20 @@ be called on the manager object by other elements of the manager process.
 struct vine_file *vine_manager_declare_file(struct vine_manager *m, struct vine_file *f);
 struct vine_file *vine_manager_lookup_file(struct vine_manager *q, const char *cached_name);
 
-/*
-Send a printf-style message to a remote worker. Everything sent to a worker goes through its queue in order, and the
-manager writes only what the worker's link takes, so a worker that stops reading never blocks the manager. Return the
-length of the message, or -1 if the worker's link has failed.
-*/
+/* Queue a printf-style message for a remote worker. Return its length, or -1 if the worker's link has failed. */
 #ifndef SWIG
 __attribute__ (( format(printf,3,4) ))
 #endif
 int vine_manager_send( struct vine_manager *q, struct vine_worker_info *w, const char *fmt, ... );
 
-/* Send bytes to a remote worker through its queue, such as the body of a message. Return 0, or -1 if the worker's link
- * has failed. */
+/* Queue bytes for a remote worker. Return 0, or -1 if the worker's link has failed. */
 int vine_manager_send_data(struct vine_manager *q, struct vine_worker_info *w, const char *data, size_t length);
 
-/* Send a byte range of a local file to a remote worker through its queue. The file is read in chunks when the range
- * reaches the head of the queue, so it must not shrink before then. Return 0, or -1 if the worker's link has failed. */
+/* Queue a byte range of a local file for a remote worker, read when it reaches the head of the queue. Return 0, or -1
+ * if the worker's link has failed. */
 int vine_manager_send_file(struct vine_manager *q, struct vine_worker_info *w, const char *path, int64_t offset, int64_t length);
 
-/* Receive a line-oriented message from a remote worker, as the reply to a request. Everything queued for the worker,
- * including the request, is written first, so the exchange stays synchronous. */
+/* Receive a line-oriented message from a remote worker, after writing everything queued for it. */
 vine_msg_code_t vine_manager_recv( struct vine_manager *q, struct vine_worker_info *w, char *line, int length );
 
 /* Compute the expected wait time for a transfer of length bytes. */

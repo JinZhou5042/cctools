@@ -273,37 +273,33 @@ static char *link_to_hash_key(struct link *link)
 	return string_format("0x%p", link);
 }
 
-/* Writes to a worker's link that the manager starts within one call stop after this many microseconds, so a fast link
- * that keeps taking a large file does not hold the manager. */
+/* Longest time one call writes to a worker, so a fast link taking a large file does not hold the manager. */
 #define VINE_MANAGER_SEND_SLICE 100000
 
 /* The link of a removed worker whose sealed queue still holds a final message, such as exit or release. */
 struct departing_link {
 	struct link *link;
-	struct link_queue *queue;
+	struct link_queue *lq;
 	time_t draining; /* When the queue was written and the write side shut down, or zero while the queue is written. */
 	int poll_index;	 /* Entry of the link in the poll table in the current step. */
 };
 
 static void departing_link_delete(struct departing_link *d)
 {
-	link_queue_delete(d->queue);
+	link_queue_delete(d->lq);
 	link_close(d->link);
 	free(d);
 }
 
-/* Shut down the write side of a departing link whose queue was written, so the worker reads the end of the stream
- * after its final message. The link is closed only once the worker closed its side: closing a socket that holds unread
- * data, such as the messages that the worker sent while it read the queue, sends a reset instead of the end of the
- * stream, and the worker's kernel then discards what the worker had not read yet, which may be the final message. */
+/* Shut down the write side of a departing link once its queue is written, and close it only after the worker closes its
+ * side: closing a socket with unread data sends a reset, and the worker's kernel then discards the final message. */
 static void departing_link_drain_start(struct departing_link *d)
 {
 	shutdown(link_fd(d->link), SHUT_WR);
 	d->draining = time(0);
 }
 
-/* Read and discard what a departing worker sent, without waiting. Return one when the worker closed the link or the
- * link failed, so it can be closed. */
+/* Discard what a departing worker sent. Return one once the worker closed the link or it failed. */
 static int departing_link_drained(struct departing_link *d)
 {
 	char buffer[65536];
@@ -320,14 +316,13 @@ static int departing_link_drained(struct departing_link *d)
 	return 0;
 }
 
-/* Visit a worker in send_to_workers() while its queue holds data or until its failure is handled, which also makes the
- * poll watch its link for room. Workers marked for removal are not visited, because they are no longer polled. */
+/* Visit a worker in send_to_workers(), which also polls its link for room, while its queue holds data or failed. */
 static void watch_worker_queue(struct vine_manager *q, struct vine_worker_info *w)
 {
 	if (w->sending || w->pending_removal) {
 		return;
 	}
-	if (link_queue_empty(w->queue) && !link_queue_failed(w->queue)) {
+	if (link_queue_empty(w->lq) && !link_queue_failed(w->lq)) {
 		return;
 	}
 	w->sending = list_cursor_create(q->sending_workers);
@@ -335,7 +330,6 @@ static void watch_worker_queue(struct vine_manager *q, struct vine_worker_info *
 	list_seek(w->sending, -1);
 }
 
-/* Stop visiting a worker in send_to_workers(). */
 static void unwatch_worker_queue(struct vine_worker_info *w)
 {
 	if (!w->sending) {
@@ -346,31 +340,48 @@ static void unwatch_worker_queue(struct vine_worker_info *w)
 	w->sending = NULL;
 }
 
-/* Add data to a worker's queue. A queue that held nothing writes at once what the link takes, as a direct write would.
- * Later data waits until the poll finds the link writable. */
+/* Write what a link takes now, within the send slice. Return zero if the queue failed. */
+static int write_queue(struct link_queue *lq)
+{
+	return link_queue_send(lq, timestamp_get() + VINE_MANAGER_SEND_SLICE);
+}
+
+/* Write a queue whose link has room. Return -1 if it failed or took no data for the minimum transfer timeout, 1 if it
+ * is empty, or 0 while data waits. */
+static int advance_queue(struct vine_manager *q, struct link_queue *lq, int revents)
+{
+	if (revents & LINK_WRITE) {
+		write_queue(lq);
+	}
+	if (link_queue_failed(lq) || link_queue_stalled(lq, q->minimum_transfer_timeout)) {
+		return -1;
+	}
+	return link_queue_empty(lq);
+}
+
+/* A push into an empty queue writes at once what the link takes. Later data waits for the poll. */
 static int queue_to_worker(struct vine_manager *q, struct vine_worker_info *w, int was_empty, int queued)
 {
 	int result = 0;
 	if (!queued) {
 		result = -1;
-	} else if (was_empty && !link_queue_send(w->queue, timestamp_get() + VINE_MANAGER_SEND_SLICE)) {
+	} else if (was_empty && !write_queue(w->lq)) {
 		result = -1;
 	}
-	/* A failed queue is handled by send_to_workers(). */
 	watch_worker_queue(q, w);
 	return result;
 }
 
 int vine_manager_send_data(struct vine_manager *q, struct vine_worker_info *w, const char *data, size_t length)
 {
-	int was_empty = link_queue_empty(w->queue);
-	return queue_to_worker(q, w, was_empty, link_queue_push(w->queue, data, length));
+	int was_empty = link_queue_empty(w->lq);
+	return queue_to_worker(q, w, was_empty, link_queue_push(w->lq, data, length));
 }
 
 int vine_manager_send_file(struct vine_manager *q, struct vine_worker_info *w, const char *path, int64_t offset, int64_t length)
 {
-	int was_empty = link_queue_empty(w->queue);
-	return queue_to_worker(q, w, was_empty, link_queue_push_file(w->queue, path, offset, length));
+	int was_empty = link_queue_empty(w->lq);
+	return queue_to_worker(q, w, was_empty, link_queue_push_file(w->lq, path, offset, length));
 }
 
 __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager *q, struct vine_worker_info *w, const char *fmt, ...)
@@ -401,11 +412,10 @@ __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager 
 	return result < 0 ? -1 : length;
 }
 
-/* Write everything queued for a client before the manager writes to its link directly, as it does for status answers.
- * Return zero if the queue failed, which send_to_workers() then handles. */
+/* Write everything queued for a client before the manager writes to its link directly, as for status answers. */
 static int flush_worker_queue(struct vine_manager *q, struct vine_worker_info *w)
 {
-	int result = link_queue_flush(w->queue, time(0) + q->long_timeout);
+	int result = link_queue_flush(w->lq, time(0) + q->long_timeout);
 	watch_worker_queue(q, w);
 	return result;
 }
@@ -952,10 +962,8 @@ vine_msg_code_t vine_manager_recv(struct vine_manager *q, struct vine_worker_inf
 {
 	vine_msg_code_t result = VINE_MSG_PROCESSED;
 
-	if (!link_queue_flush(w->queue, time(0) + q->long_timeout)) {
+	if (!flush_worker_queue(q, w)) {
 		debug(D_VINE, "failed to send a request to %s (%s)", w->hostname, w->addrport);
-		/* The failed queue is handled by send_to_workers(). */
-		watch_worker_queue(q, w);
 		return VINE_MSG_FAILURE;
 	}
 
@@ -1293,21 +1301,16 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	vine_txn_log_write_worker(q, w, 1, reason);
 
-	/* A final message, such as exit or release, is written if the link takes it now. */
-	link_queue_send(w->queue, 0);
+	link_queue_send(w->lq, 0);
 
-	/* An exit or release keeps the link: the sealed queue refuses what cleanup would still send and is written in
-	 * later steps, until it fails or takes no data for the minimum transfer timeout, and once it is written the link
-	 * stays until the worker closes it (see departing_link_drain_start()), so the worker reads the final message even
-	 * when it went out at once. Otherwise the manager never waits on a worker it removes: the write side is shut down,
-	 * so the next write fails the queue, which then refuses what cleanup sends. A worker that loses its manager kills
-	 * its tasks and prunes its cache itself. */
-	int departing = reason == VINE_WORKER_DISCONNECT_EXPLICIT && !link_queue_failed(w->queue);
+	/* An exit or release keeps the link until its sealed queue is written, so the worker reads the final message. Any
+	 * other removal shuts the write side down, so the queue fails and refuses what cleanup sends. */
+	int departing = reason == VINE_WORKER_DISCONNECT_EXPLICIT && !link_queue_failed(w->lq);
 	if (departing) {
-		link_queue_seal(w->queue);
+		link_queue_seal(w->lq);
 	} else {
 		shutdown(link_fd(w->link), SHUT_WR);
-		link_queue_send(w->queue, 0);
+		link_queue_send(w->lq, 0);
 	}
 
 	hash_table_remove(q->worker_table, w->hashkey);
@@ -1322,18 +1325,17 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	vine_manager_factory_worker_leave(q, w);
 
-	/* Cleanup may have queued messages that the failed or sealed queue refused. */
 	unwatch_worker_queue(w);
 
 	if (departing) {
 		struct departing_link *d = xxmalloc(sizeof(*d));
 		d->link = w->link;
-		d->queue = w->queue;
+		d->lq = w->lq;
 		d->draining = 0;
 		d->poll_index = 0;
 		list_push_tail(q->departing_links, d);
 		w->link = NULL;
-		w->queue = NULL;
+		w->lq = NULL;
 	}
 
 	vine_worker_delete(w);
@@ -1357,7 +1359,6 @@ void vine_manager_mark_worker_for_removal(struct vine_manager *q, struct vine_wo
 
 	w->pending_removal = reason;
 	hash_table_remove(q->worker_table, w->hashkey);
-	/* Like every link outside worker_table, its link is no longer polled or written in later steps. */
 	unwatch_worker_queue(w);
 	list_push_tail(q->zombie_workers, w);
 }
@@ -2735,7 +2736,6 @@ static vine_msg_code_t handle_manager_status(struct vine_manager *q, struct vine
 		return VINE_MSG_FAILURE;
 	}
 
-	/* The answer is written directly, after the header lines that an http request queued. */
 	if (!flush_worker_queue(q, target)) {
 		jx_delete(a);
 		return VINE_MSG_FAILURE;
@@ -2853,7 +2853,6 @@ static vine_result_code_t handle_worker(struct vine_manager *q, struct link *l)
 
 	case VINE_MSG_PROCESSED_DISCONNECT:
 		// A status query was received and processed, so disconnect.
-		/* The client reads its whole answer before the link closes. */
 		flush_worker_queue(q, w);
 		vine_manager_mark_worker_for_removal(q, w, VINE_WORKER_DISCONNECT_STATUS_WORKER);
 		// It was not really a failure, but signals to the calling code that the worker
@@ -2897,9 +2896,8 @@ static void grow_poll_table(struct vine_manager *q, int n)
 	}
 }
 
-/* Workers whose queues hold data are also polled for room, and departing links follow the workers: for room while
- * their queues are written, then for what the worker still sends. Return the number of entries, and the end of the
- * entries of workers in workers_end. */
+/* Workers with queued data are also polled for room, and departing links follow the workers. Return the number of
+ * entries, and the end of the workers' entries in workers_end. */
 static int build_poll_table(struct vine_manager *q, int *workers_end)
 {
 	int n = 0;
@@ -4020,9 +4018,8 @@ static void ask_for_workers_updates(struct vine_manager *q)
 				continue;
 			}
 
-			/* A worker with queued data is judged by the progress of its queue instead, because a check would wait
-			 * behind that data, and a worker that takes data is alive. */
-			if (!link_queue_empty(w->queue)) {
+			/* A check would wait behind queued data, and the queue's progress already shows the worker is alive. */
+			if (!link_queue_empty(w->lq)) {
 				continue;
 			}
 
@@ -4752,13 +4749,11 @@ void vine_delete(struct vine_manager *q)
 
 	disconnect_all_workers(q);
 
-	/* A final message of a removed worker goes out if its link takes it within a second. The links whose messages went
-	 * out then close once their workers closed their sides, within one more second for all of them, so the workers
-	 * read the messages (see departing_link_drain_start()). */
+	/* Give the final messages of removed workers a second to go out, and their workers one more to close the links. */
 	struct list *written = list_create();
 	struct departing_link *d;
 	while ((d = list_pop_head(q->departing_links))) {
-		if (!d->draining && !link_queue_flush(d->queue, time(0) + 1)) {
+		if (!d->draining && !link_queue_flush(d->lq, time(0) + 1)) {
 			departing_link_delete(d);
 		} else {
 			shutdown(link_fd(d->link), SHUT_WR);
@@ -5455,25 +5450,17 @@ static int send_to_workers(struct vine_manager *q)
 	struct list_cursor *cursor = list_cursor_create(q->sending_workers);
 	list_seek(cursor, 0);
 	while (list_get(cursor, (void **)&w)) {
-		/* Marking this worker for removal drops its entry, so the cursor moves on first. */
+		/* Move on first: removing the worker drops its entry. */
 		list_next(cursor);
 
-		if (q->poll_table[w->poll_index].revents & LINK_WRITE) {
-			link_queue_send(w->queue, timestamp_get() + VINE_MANAGER_SEND_SLICE);
+		int state = advance_queue(q, w->lq, q->poll_table[w->poll_index].revents);
+		if (state > 0) {
+			unwatch_worker_queue(w);
+		} else if (state < 0) {
+			debug(D_VINE, "Removing worker %s (%s): %s", w->hostname, w->addrport, link_queue_failed(w->lq) ? "its link failed" : "it took no data");
+			handle_worker_failure(q, w);
+			failed++;
 		}
-
-		if (link_queue_failed(w->queue)) {
-			debug(D_VINE, "Failed to send to worker %s (%s).", w->hostname, w->addrport);
-		} else if (link_queue_stalled(w->queue, q->minimum_transfer_timeout)) {
-			debug(D_VINE, "Removing worker %s (%s): took no data for %d s", w->hostname, w->addrport, q->minimum_transfer_timeout);
-		} else {
-			if (link_queue_empty(w->queue)) {
-				unwatch_worker_queue(w);
-			}
-			continue;
-		}
-		handle_worker_failure(q, w);
-		failed++;
 	}
 	list_cursor_delete(cursor);
 	return failed;
@@ -5492,14 +5479,12 @@ static void send_to_departing_links(struct vine_manager *q)
 		int ready = q->poll_table[d->poll_index].revents;
 		d->poll_index = 0;
 		if (!d->draining) {
-			if (ready & LINK_WRITE) {
-				link_queue_send(d->queue, timestamp_get() + VINE_MANAGER_SEND_SLICE);
-			}
-			if (link_queue_failed(d->queue) || link_queue_stalled(d->queue, q->minimum_transfer_timeout)) {
+			int state = advance_queue(q, d->lq, ready);
+			if (state < 0) {
 				departing_link_delete(d);
 				continue;
 			}
-			if (link_queue_empty(d->queue)) {
+			if (state > 0) {
 				departing_link_drain_start(d);
 				ready = 0;
 			}
@@ -5562,7 +5547,6 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 		}
 	}
 
-	/* Messages handled above may have queued replies, which go out in the same step. */
 	workers_failed += send_to_workers(q);
 	send_to_departing_links(q);
 

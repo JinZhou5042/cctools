@@ -71,17 +71,16 @@ end
 
 */
 
-/* Bytes of headers that one call of put_walk_produce() queues at most, before it lets the queue write them. */
+/* Bytes of headers that one call of put_walk_produce() queues at most. */
 #define PUT_WALK_CHUNK (64 * 1024)
 
-/* A directory of a walk, open while its entries are queued. */
 struct put_frame {
 	DIR *dir;		  /* The open directory. */
 	char *path;		  /* Its full path. */
 	struct put_frame *parent; /* The directory that contains it, or NULL for the top of the walk. */
 };
 
-/* The walk of an item being sent, which queues its next entries each time the queue reaches it. */
+/* The walk of an item being sent, which queues its next entries each time it reaches the head of the queue. */
 struct put_walk {
 	char *full_name;	   /* Full path of the item. */
 	char *relative_name;	   /* Name the item is sent under. */
@@ -91,8 +90,8 @@ struct put_walk {
 	size_t queued;		   /* Bytes of headers queued by the current call. */
 };
 
-/* Queue a header line, with a debug line as every message to a peer has. */
-__attribute__((format(printf, 3, 4))) static int put_line(struct link_queue *queue, struct put_walk *w, const char *fmt, ...)
+/* Queue a header line and log it. */
+__attribute__((format(printf, 3, 4))) static int put_line(struct link_queue *lq, struct put_walk *w, const char *fmt, ...)
 {
 	char line[2 * VINE_LINE_MAX];
 	va_list va;
@@ -104,13 +103,12 @@ __attribute__((format(printf, 3, 4))) static int put_line(struct link_queue *que
 	}
 	debug(D_VINE, "tx: %s", line);
 	w->queued += length;
-	return link_queue_push(queue, line, length);
+	return link_queue_push(lq, line, length);
 }
 
-/* Queue one item of a walk: the header and contents of a file or symlink, the header of a directory, whose entries
- * follow in later calls, or an error. Return 2 for a file, whose contents fill the queue's next chunks, 1 for any other
- * item, or zero if the queue refused it. */
-static int put_item(struct link_queue *queue, struct put_walk *w, const char *full_name, const char *relative_name)
+/* Queue one item of a walk. A directory's entries follow in later calls. Return 2 for a file, 1 for any other item, or
+ * zero if the queue refused it. */
+static int put_item(struct link_queue *lq, struct put_walk *w, const char *full_name, const char *relative_name)
 {
 	struct stat info;
 
@@ -131,12 +129,11 @@ static int put_item(struct link_queue *queue, struct put_walk *w, const char *fu
 			goto access_failure;
 		}
 		int64_t length = info.st_size;
-		if (!put_line(queue, w, "file %s %" PRId64 " 0%o %lld\n", relative_name_encoded, length, mode, (long long)info.st_mtime)) {
+		if (!put_line(lq, w, "file %s %" PRId64 " 0%o %lld\n", relative_name_encoded, length, mode, (long long)info.st_mtime)) {
 			close(fd);
 			return 0;
 		}
-		/* The queue reads the file when it reaches it, and fails if the file is shorter by then. */
-		return link_queue_push_fd(queue, fd, 0, length) ? 2 : 0;
+		return link_queue_push_fd(lq, fd, 0, length) ? 2 : 0;
 	} else if (w->mode == VINE_TRANSFER_MODE_FILE_ONLY) {
 		/*
 		The caller only wants a file, but full_name is something else.
@@ -165,12 +162,12 @@ static int put_item(struct link_queue *queue, struct put_walk *w, const char *fu
 		f->path = path;
 		f->parent = w->top;
 		w->top = f;
-		return put_line(queue, w, "dir %s %o %lld\n", relative_name_encoded, mode, (long long)info.st_mtime);
+		return put_line(lq, w, "dir %s %o %lld\n", relative_name_encoded, mode, (long long)info.st_mtime);
 	} else if (S_ISLNK(info.st_mode)) {
 		char link_target[VINE_LINE_MAX];
 		int result = readlink(full_name, link_target, sizeof(link_target));
 		if (result > 0) {
-			return put_line(queue, w, "symlink %s %d\n", relative_name_encoded, result) && link_queue_push(queue, link_target, result);
+			return put_line(lq, w, "symlink %s %d\n", relative_name_encoded, result) && link_queue_push(lq, link_target, result);
 		} else {
 			goto access_failure;
 		}
@@ -178,10 +175,9 @@ static int put_item(struct link_queue *queue, struct put_walk *w, const char *fu
 
 access_failure:
 	// An error here is not a failure from our perspective, keep going.
-	return put_line(queue, w, "error %s %d\n", relative_name_encoded, errno);
+	return put_line(lq, w, "error %s %d\n", relative_name_encoded, errno);
 }
 
-/* Close the innermost directory of a walk. */
 static void put_walk_pop(struct put_walk *w)
 {
 	struct put_frame *f = w->top;
@@ -202,17 +198,16 @@ static void put_walk_delete(void *arg)
 	free(w);
 }
 
-/* Queue the next entries of a walk, up to a file or PUT_WALK_CHUNK bytes of headers, so the queue holds little of a
- * large directory at a time. Return one while entries remain, zero when the walk is done, or -1 if the queue refused
- * an entry. */
-static int put_walk_produce(struct link_queue *queue, void *arg)
+/* Queue the next entries of a walk, up to a file or PUT_WALK_CHUNK bytes of headers. Return one while entries remain,
+ * zero when the walk is done, or -1 if the queue refused an entry. */
+static int put_walk_produce(struct link_queue *lq, void *arg)
 {
 	struct put_walk *w = arg;
 	w->queued = 0;
 
 	if (!w->started) {
 		w->started = 1;
-		if (!put_item(queue, w, w->full_name, w->relative_name)) {
+		if (!put_item(lq, w, w->full_name, w->relative_name)) {
 			return -1;
 		}
 		return w->top ? 1 : 0;
@@ -222,7 +217,7 @@ static int put_walk_produce(struct link_queue *queue, void *arg)
 		struct dirent *dent = readdir(w->top->dir);
 		if (!dent) {
 			put_walk_pop(w);
-			if (!put_line(queue, w, "end\n")) {
+			if (!put_line(lq, w, "end\n")) {
 				return -1;
 			}
 			continue;
@@ -231,12 +226,12 @@ static int put_walk_produce(struct link_queue *queue, void *arg)
 			continue;
 		}
 		char *sub_full_name = string_format("%s/%s", w->top->path, dent->d_name);
-		int result = put_item(queue, w, sub_full_name, dent->d_name);
+		int result = put_item(lq, w, sub_full_name, dent->d_name);
 		free(sub_full_name);
 		if (!result) {
 			return -1;
 		}
-		/* A file's contents go out before the next entry is read, so the queue holds one open file at a time. */
+		/* One open file at a time. */
 		if (result == 2) {
 			break;
 		}
@@ -244,8 +239,7 @@ static int put_walk_produce(struct link_queue *queue, void *arg)
 	return w->top ? 1 : 0;
 }
 
-/* Queue the walk of an item to be sent. Return zero if the queue refused it. */
-static int put_walk_start(struct link_queue *queue, const char *full_name, const char *relative_name, vine_transfer_mode_t mode)
+static int put_walk_start(struct link_queue *lq, const char *full_name, const char *relative_name, vine_transfer_mode_t mode)
 {
 	struct put_walk *w = calloc(1, sizeof(*w));
 	if (!w) {
@@ -258,20 +252,20 @@ static int put_walk_start(struct link_queue *queue, const char *full_name, const
 		put_walk_delete(w);
 		return 0;
 	}
-	return link_queue_push_producer(queue, put_walk_produce, put_walk_delete, w);
+	return link_queue_push_producer(lq, put_walk_produce, put_walk_delete, w);
 }
 
 /*
 Send a cached object of any type down the wire.
 */
 
-int vine_transfer_put_any(struct link_queue *queue, struct vine_cache *cache, const char *filename, vine_transfer_mode_t xfer_mode)
+int vine_transfer_put_any(struct link_queue *lq, struct vine_cache *cache, const char *filename, vine_transfer_mode_t xfer_mode)
 {
 	char *cached_path = vine_cache_data_path(cache, filename);
 	int r;
 
 	if (path_within_dir(cached_path, workspace->cache_dir)) {
-		r = put_walk_start(queue, cached_path, path_basename(filename), xfer_mode);
+		r = put_walk_start(lq, cached_path, path_basename(filename), xfer_mode);
 	} else {
 		/* Same reply as an unreadable file in put_item. */
 		debug(D_VINE, "refusing to send %s: not within %s", cached_path, workspace->cache_dir);
@@ -279,7 +273,7 @@ int vine_transfer_put_any(struct link_queue *queue, struct vine_cache *cache, co
 		url_encode(path_basename(filename), filename_encoded, sizeof(filename_encoded));
 		char *line = string_format("error %s %d\n", filename_encoded, EACCES);
 		debug(D_VINE, "tx: %s", line);
-		r = link_queue_push(queue, line, strlen(line));
+		r = link_queue_push(lq, line, strlen(line));
 		free(line);
 	}
 

@@ -17,6 +17,6 @@ void vine_watcher_delete( struct vine_watcher *w );
 void vine_watcher_add_process( struct vine_watcher *w, struct vine_process *p );
 void vine_watcher_remove_process( struct vine_watcher *w, struct vine_process *p );
 int vine_watcher_check( struct vine_watcher *w );
-int vine_watcher_send_changes(struct vine_watcher *w, struct link_queue *queue);
+int vine_watcher_send_changes(struct vine_watcher *w, struct link_queue *lq);
 
 #endif

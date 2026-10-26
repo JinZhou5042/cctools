@@ -13,20 +13,16 @@ See the file COPYING for details.
 #include <string.h>
 #include <unistd.h>
 
-/* Bytes of a file read per chunk, the size up to which consecutive small pushes share one entry, and the size up to
- * which entries that reach the head together are copied into one write. */
+/* Size of a file chunk, of merged small pushes, and of a gathered write. */
 #define LINK_QUEUE_CHUNK (64 * 1024)
 
-/* The kinds of queue entries. */
 typedef enum {
 	ENTRY_DATA,	/* Bytes copied into the entry. */
-	ENTRY_FILE,	/* A byte range of a file, opened when the entry reaches the head. */
-	ENTRY_FD,	/* A byte range of a file that was open when the entry was queued. */
+	ENTRY_FILE,	/* A byte range of a file, given by path and opened at the head, or given open. */
 	ENTRY_PRODUCER, /* A function that pushes the data ahead of the entry when it reaches the head. */
 } entry_kind_t;
 
-/* One entry of the queue. A data entry holds its bytes. A file entry holds the range still to read, and its current
- * chunk in data while it is at the head. A producer entry holds its function and argument. */
+/* A data entry holds its bytes, a file entry its range and current chunk, and a producer entry its function. */
 struct link_queue_entry {
 	entry_kind_t kind;
 	char *data;		       /* Bytes to write: all of a data entry, or the current chunk of a file. */
@@ -34,7 +30,7 @@ struct link_queue_entry {
 	size_t capacity;	       /* Bytes allocated for data. */
 	size_t offset;		       /* Bytes of data already written. */
 	char *path;		       /* File of a file entry, or NULL. */
-	int fd;			       /* Descriptor of the file of a file entry while it is at the head, or of an fd entry. */
+	int fd;			       /* Descriptor of a file entry: open from the push, or from when its path reaches the head. */
 	int64_t file_offset;	       /* Offset in the file of the next chunk to read. */
 	int64_t file_left;	       /* Bytes of the range not yet read into a chunk. */
 	link_queue_producer_t produce; /* Function of a producer entry. */
@@ -44,8 +40,7 @@ struct link_queue_entry {
 	struct link_queue_entry *next; /* The entry after this one, or NULL at the tail. */
 };
 
-/* The queue is a singly linked list of entries, written from the head. While a producer at the head runs, pushes go
- * to a list of their own, which then goes ahead of the producer. */
+/* A list of entries written from the head. A running producer's pushes go to the made list, then ahead of it. */
 struct link_queue {
 	struct link *link;		    /* Link written to, owned by the caller. */
 	struct link_queue_entry *head;	    /* Next entry to write, or NULL when the queue is empty. */
@@ -62,12 +57,12 @@ struct link_queue {
 
 struct link_queue *link_queue_create(struct link *link)
 {
-	struct link_queue *q = calloc(1, sizeof(*q));
-	if (!q) {
+	struct link_queue *lq = calloc(1, sizeof(*lq));
+	if (!lq) {
 		return NULL;
 	}
-	q->link = link;
-	return q;
+	lq->link = link;
+	return lq;
 }
 
 static void entry_delete(struct link_queue_entry *e)
@@ -92,28 +87,28 @@ static void delete_list(struct link_queue_entry *e)
 	}
 }
 
-static void drop_entries(struct link_queue *q)
+static void drop_entries(struct link_queue *lq)
 {
-	delete_list(q->head);
-	delete_list(q->made_head);
-	q->head = q->tail = NULL;
-	q->made_head = q->made_tail = NULL;
+	delete_list(lq->head);
+	delete_list(lq->made_head);
+	lq->head = lq->tail = NULL;
+	lq->made_head = lq->made_tail = NULL;
 }
 
-void link_queue_delete(struct link_queue *q)
+void link_queue_delete(struct link_queue *lq)
 {
-	if (!q) {
+	if (!lq) {
 		return;
 	}
-	drop_entries(q);
-	free(q->spare);
-	free(q);
+	drop_entries(lq);
+	free(lq->spare);
+	free(lq);
 }
 
-static void fail(struct link_queue *q)
+static void fail(struct link_queue *lq)
 {
-	q->failed = 1;
-	drop_entries(q);
+	lq->failed = 1;
+	drop_entries(lq);
 }
 
 static struct link_queue_entry *entry_create(entry_kind_t kind)
@@ -127,65 +122,61 @@ static struct link_queue_entry *entry_create(entry_kind_t kind)
 	return e;
 }
 
-/* Check whether a queue takes a push now. */
-static int accepts(struct link_queue *q)
+static int accepts(struct link_queue *lq)
 {
-	return !q->failed && (!q->sealed || q->producing);
+	return !lq->failed && (!lq->sealed || lq->producing);
 }
 
-/* Return the last entry that a push may join: the tail, or the last entry of the running producer. */
-static struct link_queue_entry *last_entry(struct link_queue *q)
+static struct link_queue_entry *last_entry(struct link_queue *lq)
 {
-	return q->producing ? q->made_tail : q->tail;
+	return lq->producing ? lq->made_tail : lq->tail;
 }
 
-/* Delete an entry that was written or copied, keeping the bytes of a data entry of at most LINK_QUEUE_CHUNK as the
- * queue's spare. The messages queued to a link between two writes usually fill one data entry, which then needs no
- * allocation: growing a new one from 256 bytes reallocated it about three times per batch of messages. */
-static void entry_retire(struct link_queue *q, struct link_queue_entry *e)
+/* Delete an entry, keeping a small data buffer as the spare for the next one, which saves allocations per batch of
+ * messages. */
+static void entry_retire(struct link_queue *lq, struct link_queue_entry *e)
 {
-	if (!q->spare && e->kind == ENTRY_DATA && e->data && e->capacity <= LINK_QUEUE_CHUNK) {
-		q->spare = e->data;
-		q->spare_capacity = e->capacity;
+	if (!lq->spare && e->kind == ENTRY_DATA && e->data && e->capacity <= LINK_QUEUE_CHUNK) {
+		lq->spare = e->data;
+		lq->spare_capacity = e->capacity;
 		e->data = NULL;
 	}
 	entry_delete(e);
 }
 
-/* Give an entry without bytes the queue's spare, if any. */
-static void take_spare(struct link_queue *q, struct link_queue_entry *e)
+static void take_spare(struct link_queue *lq, struct link_queue_entry *e)
 {
-	if (q->spare && !e->data) {
-		e->data = q->spare;
-		e->capacity = q->spare_capacity;
-		q->spare = NULL;
-		q->spare_capacity = 0;
+	if (lq->spare && !e->data) {
+		e->data = lq->spare;
+		e->capacity = lq->spare_capacity;
+		lq->spare = NULL;
+		lq->spare_capacity = 0;
 	}
 }
 
-static void append(struct link_queue *q, struct link_queue_entry *e)
+static void append(struct link_queue *lq, struct link_queue_entry *e)
 {
-	if (q->producing) {
-		if (!q->made_head) {
-			q->made_head = e;
+	if (lq->producing) {
+		if (!lq->made_head) {
+			lq->made_head = e;
 		} else {
-			q->made_tail->next = e;
+			lq->made_tail->next = e;
 		}
-		q->made_tail = e;
+		lq->made_tail = e;
 		return;
 	}
-	if (!q->head) {
-		q->head = e;
-		q->last_progress = timestamp_get();
+	if (!lq->head) {
+		lq->head = e;
+		lq->last_progress = timestamp_get();
 	} else {
-		q->tail->next = e;
+		lq->tail->next = e;
 	}
-	q->tail = e;
+	lq->tail = e;
 }
 
-int link_queue_push(struct link_queue *q, const char *data, size_t length)
+int link_queue_push(struct link_queue *lq, const char *data, size_t length)
 {
-	if (!accepts(q)) {
+	if (!accepts(lq)) {
 		return 0;
 	}
 	if (length == 0) {
@@ -193,17 +184,17 @@ int link_queue_push(struct link_queue *q, const char *data, size_t length)
 	}
 
 	/* Small consecutive pushes, such as the lines of a message, share an entry that no write has touched yet. */
-	struct link_queue_entry *e = last_entry(q);
+	struct link_queue_entry *e = last_entry(lq);
 	if (!e || e->kind != ENTRY_DATA || e->started || e->length + length > LINK_QUEUE_CHUNK) {
 		e = entry_create(ENTRY_DATA);
 		if (!e) {
-			fail(q);
+			fail(lq);
 			return 0;
 		}
-		append(q, e);
+		append(lq, e);
 	}
 
-	take_spare(q, e);
+	take_spare(lq, e);
 	if (e->length + length > e->capacity) {
 		size_t capacity = e->capacity ? e->capacity : 256;
 		while (capacity < e->length + length) {
@@ -211,7 +202,7 @@ int link_queue_push(struct link_queue *q, const char *data, size_t length)
 		}
 		char *data_grown = realloc(e->data, capacity);
 		if (!data_grown) {
-			fail(q);
+			fail(lq);
 			return 0;
 		}
 		e->data = data_grown;
@@ -222,9 +213,9 @@ int link_queue_push(struct link_queue *q, const char *data, size_t length)
 	return 1;
 }
 
-int link_queue_push_file(struct link_queue *q, const char *path, int64_t offset, int64_t length)
+int link_queue_push_file(struct link_queue *lq, const char *path, int64_t offset, int64_t length)
 {
-	if (!accepts(q)) {
+	if (!accepts(lq)) {
 		return 0;
 	}
 	if (length <= 0) {
@@ -233,44 +224,44 @@ int link_queue_push_file(struct link_queue *q, const char *path, int64_t offset,
 
 	struct link_queue_entry *e = entry_create(ENTRY_FILE);
 	if (!e) {
-		fail(q);
+		fail(lq);
 		return 0;
 	}
 	e->path = strdup(path);
 	if (!e->path) {
 		entry_delete(e);
-		fail(q);
+		fail(lq);
 		return 0;
 	}
 	e->file_offset = offset;
 	e->file_left = length;
-	append(q, e);
+	append(lq, e);
 	return 1;
 }
 
-int link_queue_push_fd(struct link_queue *q, int fd, int64_t offset, int64_t length)
+int link_queue_push_fd(struct link_queue *lq, int fd, int64_t offset, int64_t length)
 {
-	if (!accepts(q) || length <= 0) {
+	if (!accepts(lq) || length <= 0) {
 		close(fd);
-		return accepts(q);
+		return accepts(lq);
 	}
 
-	struct link_queue_entry *e = entry_create(ENTRY_FD);
+	struct link_queue_entry *e = entry_create(ENTRY_FILE);
 	if (!e) {
 		close(fd);
-		fail(q);
+		fail(lq);
 		return 0;
 	}
 	e->fd = fd;
 	e->file_offset = offset;
 	e->file_left = length;
-	append(q, e);
+	append(lq, e);
 	return 1;
 }
 
-int link_queue_push_producer(struct link_queue *q, link_queue_producer_t produce, void (*release)(void *arg), void *arg)
+int link_queue_push_producer(struct link_queue *lq, link_queue_producer_t produce, void (*release)(void *arg), void *arg)
 {
-	if (!accepts(q)) {
+	if (!accepts(lq)) {
 		if (release) {
 			release(arg);
 		}
@@ -282,23 +273,22 @@ int link_queue_push_producer(struct link_queue *q, link_queue_producer_t produce
 		if (release) {
 			release(arg);
 		}
-		fail(q);
+		fail(lq);
 		return 0;
 	}
 	e->produce = produce;
 	e->release = release;
 	e->arg = arg;
-	append(q, e);
+	append(lq, e);
 	return 1;
 }
 
-/* Name the file of a file or fd entry in messages. */
 static const char *entry_name(struct link_queue_entry *e)
 {
 	return e->path ? e->path : "an open file";
 }
 
-/* Read length bytes at an offset of an open file into data. Return zero if the file cannot be read or ends early. */
+/* Return zero if the file cannot be read or ends early. */
 static int read_range(int fd, const char *name, char *data, size_t length, int64_t offset)
 {
 	size_t got = 0;
@@ -316,7 +306,6 @@ static int read_range(int fd, const char *name, char *data, size_t length, int64
 	return 1;
 }
 
-/* Open the file of a file entry, unless it is open already. Return zero on failure. */
 static int entry_open(struct link_queue_entry *e)
 {
 	if (e->fd >= 0) {
@@ -330,7 +319,6 @@ static int entry_open(struct link_queue_entry *e)
 	return 1;
 }
 
-/* Read the next chunk of a file or fd entry into its data. Return zero if the file cannot be read or ends early. */
 static int read_chunk(struct link_queue_entry *e)
 {
 	if (!entry_open(e)) {
@@ -356,13 +344,11 @@ static int read_chunk(struct link_queue_entry *e)
 	return 1;
 }
 
-/* Return the number of bytes of an entry that no write has touched. */
 static size_t entry_size(struct link_queue_entry *e)
 {
 	return e->kind == ENTRY_DATA ? e->length : (size_t)e->file_left;
 }
 
-/* Copy the bytes of an entry that no write has touched into data. Return zero if a file cannot be read in full. */
 static int entry_copy(struct link_queue_entry *e, char *data)
 {
 	if (e->kind == ENTRY_DATA) {
@@ -372,14 +358,11 @@ static int entry_copy(struct link_queue_entry *e, char *data)
 	return entry_open(e) && read_range(e->fd, entry_name(e), data, e->file_left, e->file_offset);
 }
 
-/* Replace the untouched entries at the head that fit in one chunk by one data entry with a copy of their bytes, so that
- * entries that pushes could not merge, such as small files between the lines of messages, leave in one write instead
- * of one each. A producer ends the run, because its data does not exist yet. A single entry is left as it is, so its
- * bytes are not copied for nothing. The copy lives only while it is at the head, so a queue holds at most one. Return
- * zero if a file cannot be read in full. */
-static int gather_head(struct link_queue *q)
+/* Copy the untouched entries at the head that fit in one chunk into one data entry, so small files between message
+ * lines leave in one write. A producer ends the run. */
+static int gather_head(struct link_queue *lq)
 {
-	struct link_queue_entry *end = q->head;
+	struct link_queue_entry *end = lq->head;
 	size_t total = 0;
 	int count = 0;
 	while (end && !end->started && end->kind != ENTRY_PRODUCER && total + entry_size(end) <= LINK_QUEUE_CHUNK) {
@@ -395,8 +378,8 @@ static int gather_head(struct link_queue *q)
 	if (!gathered) {
 		return 0;
 	}
-	if (q->spare && q->spare_capacity >= total) {
-		take_spare(q, gathered);
+	if (lq->spare && lq->spare_capacity >= total) {
+		take_spare(lq, gathered);
 	} else {
 		gathered->data = malloc(total);
 		if (!gathered->data) {
@@ -405,48 +388,47 @@ static int gather_head(struct link_queue *q)
 		}
 		gathered->capacity = total;
 	}
-	while (q->head != end) {
-		struct link_queue_entry *e = q->head;
+	while (lq->head != end) {
+		struct link_queue_entry *e = lq->head;
 		if (!entry_copy(e, gathered->data + gathered->length)) {
 			entry_delete(gathered);
 			return 0;
 		}
 		gathered->length += entry_size(e);
-		q->head = e->next;
-		entry_retire(q, e);
+		lq->head = e->next;
+		entry_retire(lq, e);
 	}
 	gathered->next = end;
-	q->head = gathered;
+	lq->head = gathered;
 	if (!end) {
-		q->tail = gathered;
+		lq->tail = gathered;
 	}
 	return 1;
 }
 
-/* Remove the head entry. */
-static void pop_head(struct link_queue *q)
+static void pop_head(struct link_queue *lq)
 {
-	struct link_queue_entry *e = q->head;
-	q->head = e->next;
-	if (!q->head) {
-		q->tail = NULL;
+	struct link_queue_entry *e = lq->head;
+	lq->head = e->next;
+	if (!lq->head) {
+		lq->tail = NULL;
 	}
-	entry_retire(q, e);
+	entry_retire(lq, e);
 }
 
 /* Run the producers at the head until the head holds data or the queue is empty. Return zero if a producer failed. */
-static int produce_head(struct link_queue *q)
+static int produce_head(struct link_queue *lq)
 {
-	while (q->head && q->head->kind == ENTRY_PRODUCER) {
-		struct link_queue_entry *p = q->head;
-		q->producing = 1;
-		int result = p->produce(q, p->arg);
-		q->producing = 0;
+	while (lq->head && lq->head->kind == ENTRY_PRODUCER) {
+		struct link_queue_entry *p = lq->head;
+		lq->producing = 1;
+		int result = p->produce(lq, p->arg);
+		lq->producing = 0;
 
-		struct link_queue_entry *made = q->made_head;
-		struct link_queue_entry *made_tail = q->made_tail;
-		q->made_head = q->made_tail = NULL;
-		if (q->failed) {
+		struct link_queue_entry *made = lq->made_head;
+		struct link_queue_entry *made_tail = lq->made_tail;
+		lq->made_head = lq->made_tail = NULL;
+		if (lq->failed) {
 			delete_list(made);
 			return 0;
 		}
@@ -455,18 +437,18 @@ static int produce_head(struct link_queue *q)
 				debug(D_NOTICE, "a producer of a link queue reported more data but pushed none");
 			}
 			delete_list(made);
-			fail(q);
+			fail(lq);
 			return 0;
 		}
 		if (result == 0) {
-			pop_head(q);
+			pop_head(lq);
 		}
 		if (made) {
-			made_tail->next = q->head;
-			if (!q->head) {
-				q->tail = made_tail;
+			made_tail->next = lq->head;
+			if (!lq->head) {
+				lq->tail = made_tail;
 			}
-			q->head = made;
+			lq->head = made;
 		}
 	}
 	return 1;
@@ -477,35 +459,35 @@ static int entry_done(struct link_queue_entry *e)
 	return e->offset == e->length && e->file_left == 0;
 }
 
-/* Write from the head entry once. Return the bytes written, zero if a write without waiting found no room or a
- * producer left the queue empty, or -1 if the queue failed. Set full when the link took less than it was offered. */
-static ssize_t write_head(struct link_queue *q, time_t stoptime, int *full)
+/* Write from the head entry once. Return the bytes written, zero if there was no room or nothing to write, or -1 if
+ * the queue failed. Set full when the link took less than offered. */
+static ssize_t write_head(struct link_queue *lq, time_t stoptime, int *full)
 {
-	if (!produce_head(q)) {
+	if (!produce_head(lq)) {
 		return -1;
 	}
-	if (!q->head) {
+	if (!lq->head) {
 		return 0;
 	}
-	if (!q->head->started && !gather_head(q)) {
-		fail(q);
+	if (!lq->head->started && !gather_head(lq)) {
+		fail(lq);
 		return -1;
 	}
-	struct link_queue_entry *e = q->head;
+	struct link_queue_entry *e = lq->head;
 	if (e->offset == e->length && !read_chunk(e)) {
-		fail(q);
+		fail(lq);
 		return -1;
 	}
 
 	e->started = 1;
 	size_t offered = e->length - e->offset;
-	ssize_t n = link_write(q->link, e->data + e->offset, offered, stoptime);
+	ssize_t n = link_write(lq->link, e->data + e->offset, offered, stoptime);
 	if (n > 0) {
 		*full = (size_t)n < offered;
 		e->offset += n;
-		q->last_progress = timestamp_get();
+		lq->last_progress = timestamp_get();
 		if (entry_done(e)) {
-			pop_head(q);
+			pop_head(lq);
 		}
 		return n;
 	}
@@ -515,66 +497,66 @@ static ssize_t write_head(struct link_queue *q, time_t stoptime, int *full)
 		*full = 1;
 		return 0;
 	}
-	fail(q);
+	fail(lq);
 	return -1;
 }
 
-int link_queue_send(struct link_queue *q, timestamp_t deadline)
+int link_queue_send(struct link_queue *lq, timestamp_t deadline)
 {
-	while (!q->failed && q->head) {
+	while (!lq->failed && lq->head) {
 		int full = 0;
-		if (write_head(q, LINK_NOWAIT, &full) < 0 || full || timestamp_get() >= deadline) {
+		if (write_head(lq, LINK_NOWAIT, &full) < 0 || full || timestamp_get() >= deadline) {
 			break;
 		}
 	}
-	return !q->failed;
+	return !lq->failed;
 }
 
-int link_queue_flush(struct link_queue *q, time_t stoptime)
+int link_queue_flush(struct link_queue *lq, time_t stoptime)
 {
-	while (!q->failed && q->head) {
+	while (!lq->failed && lq->head) {
 		int full = 0;
-		ssize_t n = write_head(q, stoptime, &full);
-		if (n < 0 || (n == 0 && q->head)) {
-			fail(q);
+		ssize_t n = write_head(lq, stoptime, &full);
+		if (n < 0 || (n == 0 && lq->head)) {
+			fail(lq);
 			return 0;
 		}
 	}
-	return !q->failed;
+	return !lq->failed;
 }
 
-int link_queue_finish(struct link_queue *q, time_t stoptime)
+int link_queue_finish(struct link_queue *lq, time_t stoptime)
 {
-	struct link_queue_entry *e = q->head;
-	while (!q->failed && e && q->head == e && e->started) {
+	struct link_queue_entry *e = lq->head;
+	while (!lq->failed && e && lq->head == e && e->started) {
 		int full = 0;
-		if (write_head(q, stoptime, &full) <= 0) {
-			fail(q);
+		if (write_head(lq, stoptime, &full) <= 0) {
+			fail(lq);
 			return 0;
 		}
 	}
-	return !q->failed;
+	return !lq->failed;
 }
 
-int link_queue_empty(struct link_queue *q)
+int link_queue_empty(struct link_queue *lq)
 {
-	return q->head == NULL;
+	return lq->head == NULL;
 }
 
-void link_queue_seal(struct link_queue *q)
+void link_queue_seal(struct link_queue *lq)
 {
-	q->sealed = 1;
+	lq->sealed = 1;
 }
 
-int link_queue_failed(struct link_queue *q)
+int link_queue_failed(struct link_queue *lq)
 {
-	return q->failed;
+	return lq->failed;
 }
 
-int link_queue_stalled(struct link_queue *q, int seconds)
+int link_queue_stalled(struct link_queue *lq, int seconds)
 {
-	if (seconds <= 0 || !q->head) {
+	if (seconds <= 0 || !lq->head) {
 		return 0;
 	}
-	return timestamp_get() - q->last_progress >= (timestamp_t)seconds * 1000000;
+	return timestamp_get() - lq->last_progress >= (timestamp_t)seconds * 1000000;
 }
