@@ -536,7 +536,9 @@ int link_writer_send_sync(struct link_writer *lw, timestamp_t deadline, int idle
 	while (!lw->failed && lw->head) {
 		int full = 0;
 		ssize_t n = write_head(lw, next_stoptime(deadline, idle), &full);
-		if (n < 0 || (n == 0 && lw->head)) {
+		/* A write that took only part of its entry ended at its stoptime or on an error, so a peer that stops in the
+		 * middle of an entry fails the writer after one idle period, not that write's and the next one's. */
+		if (n < 0 || (n == 0 && lw->head) || (full && idle > 0)) {
 			fail(lw);
 			return 0;
 		}
