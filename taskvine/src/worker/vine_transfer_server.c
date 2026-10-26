@@ -56,12 +56,12 @@ static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
 	if (link_readline(lnk, line, sizeof(line), time(0) + command_timeout)) {
 		if (sscanf(line, "get %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			struct link_queue *lq = link_queue_create(lnk);
-			if (lq) {
-				if (vine_transfer_put_any(lq, cache, filename, VINE_TRANSFER_MODE_ANY)) {
-					link_queue_flush(lq, timestamp_get() + transfer_timeout * 1000000LL);
+			struct link_writer *lw = link_writer_create(lnk);
+			if (lw) {
+				if (vine_transfer_put_any(lw, cache, filename, VINE_TRANSFER_MODE_ANY)) {
+					link_writer_send_sync(lw, timestamp_get() + transfer_timeout * 1000000LL, 0);
 				}
-				link_queue_delete(lq);
+				link_writer_delete(lw);
 			}
 		} else {
 			debug(D_VINE, "invalid peer transfer message: %s\n", line);

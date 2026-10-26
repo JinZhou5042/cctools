@@ -9,7 +9,7 @@ See the file COPYING for details.
 
 #include "vine_cache.h"
 #include "link.h"
-#include "link_queue.h"
+#include "link_writer.h"
 
 typedef enum {
 	VINE_TRANSFER_MODE_ANY,
@@ -19,7 +19,7 @@ typedef enum {
 /* Queue a cached file or directory to be sent. A directory is walked as the queue writes it. Return 0 if the queue
  * refused it. */
 
-int vine_transfer_put_any(struct link_queue *lq, struct vine_cache *cache, const char *filename, vine_transfer_mode_t mode);
+int vine_transfer_put_any(struct link_writer *lw, struct vine_cache *cache, const char *filename, vine_transfer_mode_t mode);
 
 /* Receive a named file/dir from the connection to a local transfer path. */
 

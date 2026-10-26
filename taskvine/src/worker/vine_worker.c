@@ -41,7 +41,7 @@ See the file COPYING for details.
 #include "jx_parse.h"
 #include "jx_print.h"
 #include "link.h"
-#include "link_queue.h"
+#include "link_writer.h"
 #include "link_auth.h"
 #include "list.h"
 #include "load_average.h"
@@ -197,7 +197,7 @@ extern int vine_hack_do_not_compute_cached_name;
 
 /* Everything sent to the manager, written only as the link takes it, so the worker and a manager that writes to it at
  * the same time never wait for each other. */
-static struct link_queue *manager_lq = NULL;
+static struct link_writer *manager_lw = NULL;
 
 /* Longest time one call writes, so a large file does not hold the main loop. */
 #define MANAGER_SEND_SLICE 1000000
@@ -206,14 +206,14 @@ static struct link_queue *manager_lq = NULL;
  * at once and a round's messages leave in few writes. Return zero if the queue failed. */
 static int send_queued_messages(void)
 {
-	return link_queue_send(manager_lq, timestamp_get() + MANAGER_SEND_SLICE);
+	return link_writer_send_async(manager_lw, timestamp_get() + MANAGER_SEND_SLICE);
 }
 
 /* Queue a printf-formatted message to the current manager. */
 
 __attribute__((format(printf, 1, 2))) void send_message(const char *fmt, ...)
 {
-	if (!manager_lq) {
+	if (!manager_lw) {
 		return;
 	}
 
@@ -231,7 +231,7 @@ __attribute__((format(printf, 1, 2))) void send_message(const char *fmt, ...)
 	va_end(va);
 
 	debug(D_VINE, "tx: %s", message);
-	link_queue_push(manager_lq, message, length);
+	link_writer_push(manager_lw, message, length);
 	free(message);
 }
 
@@ -279,7 +279,7 @@ void send_complete_tasks(struct link *l)
 
 static void report_changes(void)
 {
-	vine_watcher_send_changes(watcher, manager_lq);
+	vine_watcher_send_changes(watcher, manager_lw);
 	send_message("end\n");
 
 	results_to_be_sent_msg = 0;
@@ -1227,8 +1227,8 @@ static int do_release()
 
 static void close_manager_link(struct link *manager)
 {
-	link_queue_delete(manager_lq);
-	manager_lq = NULL;
+	link_writer_delete(manager_lw);
+	manager_lw = NULL;
 	link_close(manager);
 }
 
@@ -1239,7 +1239,7 @@ static void disconnect_manager(struct link *manager)
 	debug(D_VINE, "disconnecting from manager %s:%d", current_manager_address->addr, current_manager_address->port);
 
 	/* Final messages such as info vacating. */
-	link_queue_flush(manager_lq, timestamp_get() + options->active_timeout * 1000000LL);
+	link_writer_send_sync(manager_lw, timestamp_get() + options->active_timeout * 1000000LL, 0);
 	close_manager_link(manager);
 
 	debug(D_VINE, "killing all outstanding tasks");
@@ -1272,7 +1272,7 @@ static void send_stdout(int64_t task_id)
 	}
 
 	send_message("stdout %" SCNd64 " %lld\n", task_id, (long long)p->output_length);
-	link_queue_push_fd(manager_lq, output_file, 0, p->output_length);
+	link_writer_push_fd(manager_lw, output_file, 0, p->output_length);
 }
 
 /* Handle the next incoming message from the currently connected manager. */
@@ -1292,7 +1292,7 @@ static int handle_manager(struct link *manager)
 	int cache_level;
 
 	/* A request may wait for data from the manager, which itself waits for the rest of a push it has begun reading. */
-	if (!link_queue_finish(manager_lq, timestamp_get() + options->active_timeout * 1000000LL)) {
+	if (!link_writer_send_partial(manager_lw, timestamp_get() + options->active_timeout * 1000000LL)) {
 		return 0;
 	}
 
@@ -1325,10 +1325,10 @@ static int handle_manager(struct link *manager)
 			r = do_unlink(manager, filename);
 		} else if (sscanf(line, "getfile %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = vine_transfer_put_any(manager_lq, cache_manager, filename, VINE_TRANSFER_MODE_FILE_ONLY);
+			r = vine_transfer_put_any(manager_lw, cache_manager, filename, VINE_TRANSFER_MODE_FILE_ONLY);
 		} else if (sscanf(line, "get %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = vine_transfer_put_any(manager_lq, cache_manager, filename, VINE_TRANSFER_MODE_ANY);
+			r = vine_transfer_put_any(manager_lw, cache_manager, filename, VINE_TRANSFER_MODE_ANY);
 		} else if (sscanf(line, "kill %" SCNd64, &task_id) == 1) {
 			if (task_id >= 0) {
 				r = do_kill(task_id);
@@ -1742,7 +1742,7 @@ static void vine_worker_serve_manager(struct link *manager)
 			break;
 		}
 
-		int writing = !link_queue_empty(manager_lq);
+		int writing = !link_writer_empty(manager_lw);
 		int manager_activity = link_usleep_mask(manager, wait_msec * 1000, &mask, 1, writing);
 		if (manager_activity < 0)
 			break;
@@ -1886,8 +1886,8 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 
 	link_tune(manager, LINK_TUNE_INTERACTIVE);
 
-	manager_lq = link_queue_create(manager);
-	if (!manager_lq) {
+	manager_lw = link_writer_create(manager);
+	if (!manager_lw) {
 		fprintf(stderr, "vine_worker: cannot allocate memory for the manager connection\n");
 		link_close(manager);
 		return 0;
@@ -1913,7 +1913,7 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 		char line[VINE_LINE_MAX];
 		debug(D_VINE, "verifying manager's project name");
 		send_message("name\n");
-		if (!link_queue_flush(manager_lq, options->idle_stoptime * 1000000LL) || !recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
+		if (!link_writer_send_sync(manager_lw, options->idle_stoptime * 1000000LL, 0) || !recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
 			debug(D_VINE, "no response from manager while verifying name");
 			close_manager_link(manager);
 			return 0;

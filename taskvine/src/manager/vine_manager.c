@@ -51,7 +51,7 @@ See the file COPYING for details.
 #include "jx_print.h"
 #include "link.h"
 #include "link_auth.h"
-#include "link_queue.h"
+#include "link_writer.h"
 #include "list.h"
 #include "load_average.h"
 #include "macros.h"
@@ -279,14 +279,14 @@ static char *link_to_hash_key(struct link *link)
 /* The link of a removed worker whose sealed queue still holds a final message, such as exit or release. */
 struct departing_link {
 	struct link *link;
-	struct link_queue *lq;
+	struct link_writer *lw;
 	time_t draining; /* When the queue was written and the write side shut down, or zero while the queue is written. */
 	int poll_index;	 /* Entry of the link in the poll table in the current step. */
 };
 
 static void departing_link_delete(struct departing_link *d)
 {
-	link_queue_delete(d->lq);
+	link_writer_delete(d->lw);
 	link_close(d->link);
 	free(d);
 }
@@ -322,7 +322,7 @@ static void watch_worker_queue(struct vine_manager *q, struct vine_worker_info *
 	if (w->sending || w->pending_removal) {
 		return;
 	}
-	if (link_queue_empty(w->lq) && !link_queue_failed(w->lq)) {
+	if (link_writer_empty(w->lw) && !link_writer_failed(w->lw)) {
 		return;
 	}
 	w->sending = list_cursor_create(q->sending_workers);
@@ -341,22 +341,22 @@ static void unwatch_worker_queue(struct vine_worker_info *w)
 }
 
 /* Write what a link takes now, within the send slice. Return zero if the queue failed. */
-static int write_queue(struct link_queue *lq)
+static int write_queue(struct link_writer *lw)
 {
-	return link_queue_send(lq, timestamp_get() + VINE_MANAGER_SEND_SLICE);
+	return link_writer_send_async(lw, timestamp_get() + VINE_MANAGER_SEND_SLICE);
 }
 
 /* Write a queue whose link has room. Return -1 if it failed or took no data for the minimum transfer timeout, 1 if it
  * is empty, or 0 while data waits. */
-static int advance_queue(struct vine_manager *q, struct link_queue *lq, int revents)
+static int advance_queue(struct vine_manager *q, struct link_writer *lw, int revents)
 {
 	if (revents & LINK_WRITE) {
-		write_queue(lq);
+		write_queue(lw);
 	}
-	if (link_queue_failed(lq) || link_queue_stalled(lq, q->minimum_transfer_timeout)) {
+	if (link_writer_failed(lw) || link_writer_stalled(lw, q->minimum_transfer_timeout)) {
 		return -1;
 	}
-	return link_queue_empty(lq);
+	return link_writer_empty(lw);
 }
 
 /* A push into an empty queue writes at once what the link takes. Later data waits for the poll. */
@@ -365,7 +365,7 @@ static int queue_to_worker(struct vine_manager *q, struct vine_worker_info *w, i
 	int result = 0;
 	if (!queued) {
 		result = -1;
-	} else if (was_empty && !write_queue(w->lq)) {
+	} else if (was_empty && !write_queue(w->lw)) {
 		result = -1;
 	}
 	watch_worker_queue(q, w);
@@ -374,14 +374,14 @@ static int queue_to_worker(struct vine_manager *q, struct vine_worker_info *w, i
 
 int vine_manager_send_data(struct vine_manager *q, struct vine_worker_info *w, const char *data, size_t length)
 {
-	int was_empty = link_queue_empty(w->lq);
-	return queue_to_worker(q, w, was_empty, link_queue_push(w->lq, data, length));
+	int was_empty = link_writer_empty(w->lw);
+	return queue_to_worker(q, w, was_empty, link_writer_push(w->lw, data, length));
 }
 
 int vine_manager_send_file(struct vine_manager *q, struct vine_worker_info *w, const char *path, int64_t offset, int64_t length)
 {
-	int was_empty = link_queue_empty(w->lq);
-	return queue_to_worker(q, w, was_empty, link_queue_push_file(w->lq, path, offset, length));
+	int was_empty = link_writer_empty(w->lw);
+	return queue_to_worker(q, w, was_empty, link_writer_push_file(w->lw, path, offset, length));
 }
 
 __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager *q, struct vine_worker_info *w, const char *fmt, ...)
@@ -415,7 +415,7 @@ __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager 
 /* Write everything queued for a client before the manager writes to its link directly, as for status answers. */
 static int flush_worker_queue(struct vine_manager *q, struct vine_worker_info *w)
 {
-	int result = link_queue_flush(w->lq, timestamp_get() + q->long_timeout * 1000000LL);
+	int result = link_writer_send_sync(w->lw, timestamp_get() + q->long_timeout * 1000000LL, 0);
 	watch_worker_queue(q, w);
 	return result;
 }
@@ -1301,16 +1301,16 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	vine_txn_log_write_worker(q, w, 1, reason);
 
-	link_queue_send(w->lq, 0);
+	link_writer_send_async(w->lw, 0);
 
 	/* An exit or release keeps the link until its sealed queue is written, so the worker reads the final message. Any
 	 * other removal shuts the write side down, so the queue fails and refuses what cleanup sends. */
-	int departing = reason == VINE_WORKER_DISCONNECT_EXPLICIT && !link_queue_failed(w->lq);
+	int departing = reason == VINE_WORKER_DISCONNECT_EXPLICIT && !link_writer_failed(w->lw);
 	if (departing) {
-		link_queue_seal(w->lq);
+		link_writer_seal(w->lw);
 	} else {
 		shutdown(link_fd(w->link), SHUT_WR);
-		link_queue_send(w->lq, 0);
+		link_writer_send_async(w->lw, 0);
 	}
 
 	hash_table_remove(q->worker_table, w->hashkey);
@@ -1330,12 +1330,12 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 	if (departing) {
 		struct departing_link *d = xxmalloc(sizeof(*d));
 		d->link = w->link;
-		d->lq = w->lq;
+		d->lw = w->lw;
 		d->draining = 0;
 		d->poll_index = 0;
 		list_push_tail(q->departing_links, d);
 		w->link = NULL;
-		w->lq = NULL;
+		w->lw = NULL;
 	}
 
 	vine_worker_delete(w);
@@ -4019,7 +4019,7 @@ static void ask_for_workers_updates(struct vine_manager *q)
 			}
 
 			/* A check would wait behind queued data, and the queue's progress already shows the worker is alive. */
-			if (!link_queue_empty(w->lq)) {
+			if (!link_writer_empty(w->lw)) {
 				continue;
 			}
 
@@ -4753,7 +4753,7 @@ void vine_delete(struct vine_manager *q)
 	struct list *written = list_create();
 	struct departing_link *d;
 	while ((d = list_pop_head(q->departing_links))) {
-		if (!d->draining && !link_queue_flush(d->lq, timestamp_get() + 1000000)) {
+		if (!d->draining && !link_writer_send_sync(d->lw, timestamp_get() + 1000000, 0)) {
 			departing_link_delete(d);
 		} else {
 			shutdown(link_fd(d->link), SHUT_WR);
@@ -5453,11 +5453,11 @@ static int send_to_workers(struct vine_manager *q)
 		/* Move on first: removing the worker drops its entry. */
 		list_next(cursor);
 
-		int state = advance_queue(q, w->lq, q->poll_table[w->poll_index].revents);
+		int state = advance_queue(q, w->lw, q->poll_table[w->poll_index].revents);
 		if (state > 0) {
 			unwatch_worker_queue(w);
 		} else if (state < 0) {
-			debug(D_VINE, "Removing worker %s (%s): %s", w->hostname, w->addrport, link_queue_failed(w->lq) ? "its link failed" : "it took no data");
+			debug(D_VINE, "Removing worker %s (%s): %s", w->hostname, w->addrport, link_writer_failed(w->lw) ? "its link failed" : "it took no data");
 			handle_worker_failure(q, w);
 			failed++;
 		}
@@ -5479,7 +5479,7 @@ static void send_to_departing_links(struct vine_manager *q)
 		int ready = q->poll_table[d->poll_index].revents;
 		d->poll_index = 0;
 		if (!d->draining) {
-			int state = advance_queue(q, d->lq, ready);
+			int state = advance_queue(q, d->lw, ready);
 			if (state < 0) {
 				departing_link_delete(d);
 				continue;
