@@ -1933,12 +1933,20 @@ class Executor:
 
     def _advance(self):
         """Run queued calls, do clean-up work, advance the run for about a second, and publish what happened. Return
-        False when the run stopped. Only the background thread calls this. Queued calls run for at most
+        False when the Executor closed. Only the background thread calls this. Queued calls run for at most
         COMMAND_SECONDS before the run advances one step, so tasks already submitted start while a caller keeps
         submitting more, and clean-up runs after them for the rest of COMMAND_SECONDS, and at least CLEANUP_SECONDS."""
         deadline = time.monotonic() + COMMAND_SECONDS
         monotonic = time.monotonic
         lock = self._lock
+        if self._run_error is not None:
+            # The run stopped as a whole, so queued calls cannot run, and their callers raise its error. The Manager
+            # keeps running until close, so status requests, keepalives, and Workers are still answered.
+            with lock:
+                self._commands.clear()
+                self._wake_pending = False
+            capi.vine_graph_executor_wait(self._executor, 1)
+            return not self._closed
         pending = False
         while not self._closed:
             # Calls are taken in batches, so the lock is taken once per batch instead of once per call.
@@ -2011,7 +2019,7 @@ class Executor:
             progress = self._progress_locked() if self._display is not None else None
         if progress is not None:
             self._display.update(progress)
-        return error is None
+        return True
 
     def _publish_finished(self):
         """Publish the tasks that completed or failed since the last call, and let go of tasks that will not run
@@ -2634,10 +2642,11 @@ def _drive(executor_reference):
             if not executor._advance():
                 return
         except Exception as error:
+            # The run stops as a whole, and the next steps only keep the Manager running until close.
             with executor._lock:
-                executor._run_error = f"{error}"
+                if executor._run_error is None:
+                    executor._run_error = f"{error}"
                 executor._changed.notify_all()
-            return
         del executor
 
 

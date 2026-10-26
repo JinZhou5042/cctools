@@ -146,6 +146,7 @@ struct vine_graph_executor {
 	struct list *holds;   // owned holds in the order they started
 
 	char *error; // why the run failed as a whole, or NULL
+	int tasks_cancelled; // the tasks of a run that failed as a whole were cancelled
 };
 
 /*************************************************************/
@@ -2001,6 +2002,21 @@ static void vine_graph_executor_compact_tables(struct vine_graph_executor *e)
 vine_graph_status_t vine_graph_executor_wait(struct vine_graph_executor *e, int timeout)
 {
 	if (!e) {
+		return VINE_GRAPH_FAILED;
+	}
+	if (e->error) {
+		/* The run stopped as a whole, and none of its tasks can complete, so they are cancelled once. The Manager
+		 * still runs until the timeout or a wake, so status requests, keepalives, and Workers are answered until the
+		 * frontend deletes the executor. */
+		if (!e->tasks_cancelled) {
+			vine_graph_executor_cancel_tasks(e);
+			e->tasks_cancelled = 1;
+		}
+		struct vine_task *task = vine_wait(e->manager, MAX(timeout, 0));
+		while (task) {
+			vine_graph_executor_release_returned(task);
+			task = vine_wait(e->manager, 0);
+		}
 		return VINE_GRAPH_FAILED;
 	}
 	time_t stoptime = time(NULL) + MAX(timeout, 0);
