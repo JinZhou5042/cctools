@@ -2025,6 +2025,14 @@ for the manager.
 
 Some steps remain unbounded by design: hard-linking a directory input into a sandbox (file_link_recursive) and single
 system calls.
+
+Whole-message rule: the loop handles a message of the manager only once its first line is whole in the link's buffer
+(link_buffer_has_line), so a manager that stops in the middle of a line never holds the loop. Such a line is judged
+like a silent manager: after T without a byte (framework on) or after the idle timeout (off, the old bound of that
+read), the worker disconnects. Declared exceptions: the rest of a message whose first line announces more, that is the
+lines of a task up to its end line (task, mini_task) and the data of a put, are read as they arrive with blocking
+reads, each bounded by the active timeout (3600 s) off and by T without progress on (the link's idle timeout). These
+bodies may be larger than the link's buffer, so they cannot wait whole in it.
 */
 #define ROUND_BUDGET USECOND
 
@@ -2055,6 +2063,10 @@ static void vine_worker_serve_manager(struct link *manager)
 
 	/* Non-zero when the last round left work that continues in the next round, which then does not wait. */
 	int work_remains = 0;
+
+	/* What link_buffer_has_line() last said of the manager's link: minus one while only the start of a line is
+	 * buffered, which then waits in the buffer for the rest. */
+	int line = 0;
 
 	round_window_reset(&round_report);
 	round_window_reset(&round_summary);
@@ -2120,12 +2132,24 @@ static void vine_worker_serve_manager(struct link *manager)
 		round_timer_start(&timer);
 
 		/* Handle the messages already in the link's buffer until the budget expires, as the manager does, so that a
-		 * long task, such as one with thousands of inputs, is read at once rather than one line per round. */
+		 * long task, such as one with thousands of inputs, is read at once rather than one line per round. A message
+		 * is handled only once its first line is whole in the buffer, so the loop never waits for the rest of a line
+		 * (whole-message rule, see "Timeouts" above ROUND_BUDGET). */
 		int ok = 1;
 		if (manager_activity) {
-			do {
-				ok &= handle_manager(manager);
-			} while (ok && !abort_flag && !link_buffer_empty(manager) && !budget_expired(&round));
+			line = link_buffer_has_line(manager);
+		}
+		while (ok && !abort_flag && line == 1) {
+			ok &= handle_manager(manager);
+			line = 0;
+			if (budget_expired(&round)) {
+				break;
+			}
+			line = link_buffer_has_line(manager);
+		}
+		if (ok && line == -1 && timestamp_monotonic() - link_last_read(manager) >= (timestamp_t)vine_worker_options_timeout(options, options->idle_timeout) * USECOND) {
+			debug(D_NOTICE, "the manager sent part of a message and nothing more for %d s, disconnecting", vine_worker_options_timeout(options, options->idle_timeout));
+			break;
 		}
 
 		round_timer_step(&timer, "manager-messages");

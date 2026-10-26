@@ -368,6 +368,16 @@ int link_nonblocking(struct link *link, int onoff);
 */
 int link_buffer_empty(struct link *link);
 
+/** Check whether a whole line is buffered, reading what arrived without waiting. A loop that must not block calls it
+before it reads a message line, and reads only when it returns one. When only the start of a line is buffered, the
+link's polls and @ref link_buffer_empty treat the buffer as empty until the next read, so a poll waits for the rest
+of the line instead of returning at once.
+@param link The link to examine.
+@return One if a line ends in the buffer, or if the next read must happen now: the buffer is full, the stream ended,
+or the link failed. Zero if nothing is buffered. Minus one if the buffer holds only the start of a line.
+*/
+int link_buffer_has_line(struct link *link);
+
 /** Return the local address of the link in text format.
 @param link The link to examine.
 @param addr Pointer to a string of at least @ref LINK_ADDRESS_MAX bytes, which will be filled with a text representation of the local IP address.

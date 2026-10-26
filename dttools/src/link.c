@@ -90,6 +90,10 @@ struct link {
 	int idle_expired;
 	/* Time of timestamp_monotonic() at which a read last took bytes from the link, or at which it was created. */
 	timestamp_t last_read;
+	/* Set by link_buffer_has_line() when the buffer holds only the start of a line and nothing more could be read.
+	 * Polls and link_buffer_empty() then treat the buffer as empty, so a wait sleeps until more data arrives. Any read
+	 * clears it. */
+	int line_waits;
 
 #ifdef HAS_OPENSSL
 	SSL_CTX *ctx;
@@ -145,6 +149,7 @@ struct link_poll_set {
 };
 
 static void poll_set_note_buffer(struct link *link);
+static ssize_t read_aux(struct link *link, char *data, size_t count, time_t stoptime);
 static int poll_set_grow(struct link_poll_set *set);
 
 static int link_send_window = 65536;
@@ -260,6 +265,9 @@ int link_nonblocking(struct link *link, int onoff)
  * neither the buffer nor a poll of the socket shows it. */
 static int link_has_buffered_data(struct link *link)
 {
+	if (link->line_waits) {
+		return 0;
+	}
 	if (link->buffer_length > 0) {
 		return 1;
 	}
@@ -274,6 +282,54 @@ static int link_has_buffered_data(struct link *link)
 int link_buffer_empty(struct link *link)
 {
 	return link_has_buffered_data(link) ? 0 : 1;
+}
+
+/* A read that may not wait reports nothing to read as one of these. */
+static int nothing_to_read(int e)
+{
+	return e == ETIMEDOUT || errno_is_temporary(e);
+}
+
+int link_buffer_has_line(struct link *link)
+{
+	link->line_waits = 0;
+	if (link->buffer_length > 0 && memchr(link->buffer_start, '\n', link->buffer_length)) {
+		return 1;
+	}
+
+	/* Move the start of the line to the front of the buffer, and add what arrived without waiting. */
+	if (link->buffer_start != link->buffer && link->buffer_length > 0) {
+		memmove(link->buffer, link->buffer_start, link->buffer_length);
+	}
+	link->buffer_start = link->buffer;
+	size_t scanned = link->buffer_length;
+	while (link->buffer_length < sizeof(link->buffer)) {
+		ssize_t chunk = read_aux(link, link->buffer + link->buffer_length, sizeof(link->buffer) - link->buffer_length, LINK_NOWAIT);
+		if (chunk > 0) {
+			link->read += chunk;
+			link->last_read = timestamp_monotonic();
+			link->buffer_length += chunk;
+			if (memchr(link->buffer + scanned, '\n', link->buffer_length - scanned)) {
+				poll_set_note_buffer(link);
+				return 1;
+			}
+			scanned = link->buffer_length;
+		} else if (chunk == 0 || !nothing_to_read(errno)) {
+			/* The end of the stream or an error: the caller's read reports it. */
+			return 1;
+		} else {
+			break;
+		}
+	}
+	if (link->buffer_length == sizeof(link->buffer)) {
+		/* A line longer than the buffer is read as it arrives. */
+		return 1;
+	}
+	if (link->buffer_length == 0) {
+		return 0;
+	}
+	link->line_waits = 1;
+	return -1;
 }
 
 int errno_is_temporary(int e)
@@ -462,6 +518,7 @@ static struct link *link_create()
 	link->idle_timeout = 0;
 	link->idle_expired = 0;
 	link->last_read = timestamp_monotonic();
+	link->line_waits = 0;
 
 #ifdef HAS_OPENSSL
 	link->ctx = 0;
@@ -1078,6 +1135,7 @@ static ssize_t fill_buffer(struct link *link, time_t stoptime)
 /* link_read blocks until all the requested data is available */
 ssize_t link_read(struct link *link, char *data, size_t count, time_t stoptime)
 {
+	link->line_waits = 0;
 	ssize_t total = 0;
 	ssize_t chunk = 0;
 
@@ -1143,6 +1201,7 @@ ssize_t link_read(struct link *link, char *data, size_t count, time_t stoptime)
 
 ssize_t link_read_avail(struct link *link, char *data, size_t count, time_t stoptime)
 {
+	link->line_waits = 0;
 	ssize_t total = 0;
 	ssize_t chunk = 0;
 
@@ -1197,6 +1256,7 @@ ssize_t link_read_avail(struct link *link, char *data, size_t count, time_t stop
 
 int link_readline(struct link *link, char *line, size_t length, time_t stoptime)
 {
+	link->line_waits = 0;
 	while (1) {
 		while (length > 0 && link->buffer_length > 0) {
 			*line = *link->buffer_start;
