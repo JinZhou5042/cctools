@@ -22,6 +22,7 @@ See the file COPYING for details.
 #include "full_io.h"
 #include "hash_table.h"
 #include "link.h"
+#include "link_writer.h"
 #include "list.h"
 #include "macros.h"
 #include "path.h"
@@ -52,6 +53,9 @@ See the file COPYING for details.
 extern struct vine_cache *cache_manager;
 extern struct xpu_tracker *core_tracker;
 extern struct xpu_tracker *gpu_tracker;
+
+/* Library processes whose writers hold data, which the main loop polls for room in their pipes. */
+static struct list *sending_libraries = NULL;
 
 /*
 Give the letter code used for the process sandbox dir.
@@ -126,6 +130,10 @@ void vine_process_delete(struct vine_process *p)
 		free(p->output_file_name);
 	}
 
+	if (p->library_sending) {
+		list_remove(sending_libraries, p);
+	}
+	link_writer_delete(p->library_writer);
 	if (p->library_read_link)
 		link_close(p->library_read_link);
 	if (p->library_write_link)
@@ -262,10 +270,65 @@ int vine_process_execute_and_wait(struct vine_process *p)
  * @param p 	The relevant vine_process structure encapsulating a function call.
  * @return 		1 if the message is successfully sent to the library, 0 otherwise. */
 
+/* Queue a message to a library as its length on a line and then its bytes, and write what its pipe takes. Return zero
+ * if the library cannot be written to. */
+static int library_send(struct vine_process *library, const char *message)
+{
+	struct link_writer *lw = library->library_writer;
+	if (!lw) {
+		return 0;
+	}
+	char *line = string_format("%zu\n%s", strlen(message), message);
+	int queued = link_writer_push(lw, line, strlen(line));
+	free(line);
+	if (!queued || !link_writer_send_async(lw, timestamp_monotonic())) {
+		return 0;
+	}
+	if (!link_writer_empty(lw) && !library->library_sending) {
+		if (!sending_libraries) {
+			sending_libraries = list_create();
+		}
+		list_push_tail(sending_libraries, library);
+		library->library_sending = 1;
+	}
+	return 1;
+}
+
+int vine_process_libraries_sending(void)
+{
+	return sending_libraries ? list_size(sending_libraries) : 0;
+}
+
+void vine_process_libraries_poll(struct link_info *waits)
+{
+	struct vine_process *library;
+	int i = 0;
+	LIST_ITERATE(sending_libraries, library)
+	{
+		waits[i++] = (struct link_info){library->library_write_link, LINK_WRITE, 0};
+	}
+}
+
+void vine_process_libraries_send(timestamp_t deadline)
+{
+	int count = vine_process_libraries_sending();
+	for (int i = 0; i < count; i++) {
+		struct vine_process *library = list_pop_head(sending_libraries);
+		library->library_sending = 0;
+		if (!link_writer_send_async(library->library_writer, deadline)) {
+			debug(D_VINE, "failed to write to library task %d pid %d, killing it", library->task->task_id, library->pid);
+			vine_process_kill(library);
+		} else if (!link_writer_empty(library->library_writer)) {
+			list_push_tail(sending_libraries, library);
+			library->library_sending = 1;
+		}
+	}
+}
+
 int vine_process_invoke_function(struct vine_process *p)
 {
 	char *buffer = string_format("%d %s %s %s", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name);
-	ssize_t result = link_printf(p->library_process->library_write_link, time(0) + options->active_timeout, "%ld\n%s", strlen(buffer), buffer);
+	int result = library_send(p->library_process, buffer);
 
 	// conservatively assume that the function starts executing as soon as we send it to the library.
 	// XXX Alternatively, the library could report when the function started.
@@ -273,7 +336,7 @@ int vine_process_invoke_function(struct vine_process *p)
 
 	free(buffer);
 
-	if (result < 0) {
+	if (!result) {
 		debug(D_VINE, "failed to communicate with library '%s' task %d", p->task->needs_library, p->library_process->pid);
 		return 0;
 	} else {
@@ -290,9 +353,9 @@ int vine_process_invoke_function(struct vine_process *p)
 int vine_process_cancel_function(struct vine_process *p)
 {
 	char *buffer = string_format("cancel %d", p->task->task_id);
-	ssize_t result = link_printf(p->library_process->library_write_link, time(0) + options->active_timeout, "%ld\n%s", strlen(buffer), buffer);
+	int result = library_send(p->library_process, buffer);
 	free(buffer);
-	return result >= 0;
+	return result;
 }
 
 /*
@@ -360,6 +423,13 @@ int vine_process_execute(struct vine_process *p)
 
 			p->library_read_link = link_attach_to_fd(pipe_out[0]);
 			p->library_write_link = link_attach_to_fd(pipe_in[1]);
+
+			/* The worker writes to the library only as its pipe takes data. */
+			fcntl(pipe_in[1], F_SETFL, fcntl(pipe_in[1], F_GETFL) | O_NONBLOCK);
+			p->library_writer = link_writer_create(p->library_write_link);
+			if (!p->library_writer) {
+				debug(D_VINE, "cannot allocate a writer for library task %d", p->task->task_id);
+			}
 
 			/* Close the ends of the pipes that the parent process won't use. */
 			close(pipe_in[0]);

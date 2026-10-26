@@ -82,7 +82,7 @@ SOURCES = \
 	jx_function.c \
 	link.c \
 	link_auth.c \
-	link_queue.c \
+	link_writer.c \
 	list.c \
 	load_average.c \
 	md5.c \
@@ -172,7 +172,7 @@ HEADERS_PUBLIC = \
 	jx.h \
 	jx_match.h \
 	link.h \
-	link_queue.h \
+	link_writer.h \
 	list.h \
 	load_average.h \
 	md5.h \

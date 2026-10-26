@@ -37,9 +37,9 @@ pid_t transfer_server_pid = 0;
 /* Specific port for the transfer server to listen on.  Zero means choose any available. */
 int vine_transfer_server_port = 0;
 
-/* Answer one get request on an authenticated connection. */
+/* Answer one get request on an authenticated connection, through its writer. */
 
-static void vine_transfer_serve_request(struct link *lnk, struct vine_cache *cache, time_t command_stoptime)
+static void vine_transfer_serve_request(struct link *lnk, struct link_writer *lw, struct vine_cache *cache, time_t command_stoptime)
 {
 	char line[VINE_LINE_MAX];
 	char filename_encoded[VINE_LINE_MAX];
@@ -48,12 +48,8 @@ static void vine_transfer_serve_request(struct link *lnk, struct vine_cache *cac
 	if (link_readline(lnk, line, sizeof(line), command_stoptime)) {
 		if (sscanf(line, "get %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			struct link_queue *lq = link_queue_create(lnk);
-			if (lq) {
-				if (vine_transfer_put_any(lq, cache, filename, VINE_TRANSFER_MODE_ANY)) {
-					link_queue_flush(lq, timestamp_get() + transfer_timeout * 1000000LL);
-				}
-				link_queue_delete(lq);
+			if (vine_transfer_put_any(lw, cache, filename, VINE_TRANSFER_MODE_ANY)) {
+				link_writer_send_sync(lw, timestamp_monotonic() + transfer_timeout * 1000000LL, 0);
 			}
 		} else {
 			debug(D_VINE, "invalid peer transfer message: %s\n", line);
@@ -74,7 +70,11 @@ static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
 		}
 	}
 
-	vine_transfer_serve_request(lnk, cache, time(0) + command_timeout);
+	struct link_writer *lw = link_writer_create(lnk);
+	if (lw) {
+		vine_transfer_serve_request(lnk, lw, cache, time(0) + command_timeout);
+		link_writer_delete(lw);
+	}
 }
 
 static void vine_transfer_process(struct vine_cache *cache, pid_t worker_pid)
@@ -191,11 +191,17 @@ int vine_transfer_server_connect_back(struct vine_cache *cache, struct link *man
 			close(link_fd(manager));
 			change_process_title("vine_worker [connect back]");
 			struct link *lnk = link_connect(ip, port, time(0) + VINE_CONNECT_BACK_CONNECT_SECONDS);
-			if (lnk) {
-				if ((!options->password || link_auth_password(lnk, options->password, time(0) + command_timeout)) &&
-						link_printf(lnk, time(0) + command_timeout, "connect-back %" PRIu64 "\n", token) >= 0) {
-					vine_transfer_serve_request(lnk, cache, time(0) + VINE_CONNECT_BACK_REQUEST_SECONDS);
+			struct link_writer *lw = lnk ? link_writer_create(lnk) : NULL;
+			if (lw) {
+				char line[VINE_LINE_MAX];
+				int length = snprintf(line, sizeof(line), "connect-back %" PRIu64 "\n", token);
+				if ((!options->password || link_auth_password(lnk, options->password, time(0) + command_timeout)) && link_writer_push(lw, line, length) &&
+						link_writer_send_sync(lw, timestamp_monotonic() + command_timeout * 1000000LL, 0)) {
+					vine_transfer_serve_request(lnk, lw, cache, time(0) + VINE_CONNECT_BACK_REQUEST_SECONDS);
 				}
+				link_writer_delete(lw);
+			}
+			if (lnk) {
 				link_close(lnk);
 			} else {
 				debug(D_VINE, "connect back: could not connect to %s:%d: %s", ip, port, strerror(errno));

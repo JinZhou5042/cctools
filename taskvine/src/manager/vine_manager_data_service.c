@@ -10,7 +10,7 @@
 #include "itable.h"
 #include "link.h"
 #include "link_auth.h"
-#include "link_queue.h"
+#include "link_writer.h"
 #include "list.h"
 #include "set.h"
 #include "macros.h"
@@ -133,8 +133,8 @@ struct vault_entry {
 	struct vine_file *file;		    /* Hold a reference to the file whose data the entry holds. */
 	int64_t size;			    /* Bytes counted in vault_used: the received bytes of a checkpoint, zero for a declared file. */
 	int small;			    /* Set for a checkpoint that came inline: a regular file of at most VINE_DATA_INLINE_BYTES. */
-	struct link_queue_shared *data;	    /* Hold the bytes of a checkpoint held in memory, which queues share, or NULL. */
-	struct link_queue_shared *on_disk;  /* Hold a small checkpoint on disk as queues send it, from its first send, or NULL. */
+	struct link_writer_shared *data;	    /* Hold the bytes of a checkpoint held in memory, which queues share, or NULL. */
+	struct link_writer_shared *on_disk;  /* Hold a small checkpoint on disk as queues send it, from its first send, or NULL. */
 	int mode;			    /* Permission bits of a small checkpoint. */
 	struct transfer_job *spill;	    /* The job writing the bytes to disk, or NULL. */
 	struct vault_entry *older;	    /* Neighbors in the list of entries held in memory and not being written. */
@@ -170,7 +170,7 @@ struct transfer_job {
 	int timeout;					   /* Seconds the transfer may go without progress, from the Manager at admission. */
 	struct inline_request *request;			   /* The request whose reply this receive waits for, while it waits. */
 	char *data;					   /* Own the data of an inline reply to write, or borrow those of spilled. */
-	struct link_queue_shared *spilled;		   /* Hold the bytes of an entry that a spill writes to disk. */
+	struct link_writer_shared *spilled;		   /* Hold the bytes of an entry that a spill writes to disk. */
 	int64_t data_length;				   /* Bytes of data. */
 	int data_mode;					   /* Permission bits of the received file. */
 	int spill;					   /* Set for a job that writes an entry held in memory to disk. No slot. */
@@ -216,8 +216,8 @@ static void vault_entry_delete(struct vault_entry *entry)
 		entry->file->vault_entry = NULL;
 	}
 	vine_file_delete(entry->file);
-	link_queue_shared_release(entry->data);
-	link_queue_shared_release(entry->on_disk);
+	link_writer_shared_release(entry->data);
+	link_writer_shared_release(entry->on_disk);
 	free(entry->shared_path);
 	free(entry);
 }
@@ -237,7 +237,7 @@ static void job_delete(struct transfer_job *job)
 	free(job->shared_path);
 	free(job->transfer_id);
 	if (job->spilled) {
-		link_queue_shared_release(job->spilled);
+		link_writer_shared_release(job->spilled);
 	} else {
 		free(job->data);
 	}
@@ -956,7 +956,7 @@ static void memory_list_remove(struct vine_manager_data_service *ds, struct vaul
 /* Return the bytes of an entry held in memory, or NULL. */
 static const char *memory_bytes(struct vault_entry *entry)
 {
-	return entry->data ? link_queue_shared_bytes(entry->data) : NULL;
+	return entry->data ? link_writer_shared_bytes(entry->data) : NULL;
 }
 
 /* Forget the bytes of an entry held in memory, whose data is now on disk at the given path, or no longer needed when
@@ -979,10 +979,10 @@ static void memory_release(struct vine_manager_data_service *ds, struct vault_en
 	} else {
 		memory_list_remove(ds, entry);
 	}
-	if (path && link_queue_shared_unload(entry->data, path)) {
+	if (path && link_writer_shared_unload(entry->data, path)) {
 		entry->on_disk = entry->data;
 	} else {
-		link_queue_shared_release(entry->data);
+		link_writer_shared_release(entry->data);
 	}
 	entry->data = NULL;
 	ds->memory_used -= entry->size;
@@ -1008,8 +1008,8 @@ static void memory_spill(struct vine_manager_data_service *ds)
 			return;
 		}
 		/* The job holds the bytes with its own reference, so they outlive a removal of the entry during the write. */
-		job->spilled = link_queue_shared_hold(entry->data);
-		job->data = (char *)link_queue_shared_bytes(entry->data);
+		job->spilled = link_writer_shared_hold(entry->data);
+		job->data = (char *)link_writer_shared_bytes(entry->data);
 		job->data_length = entry->size;
 		job->data_mode = entry->mode;
 		job_track(ds, job);
@@ -1071,10 +1071,10 @@ static void finish_receive(struct vine_manager *manager, struct transfer_job *jo
 	if (published && job->shared_path && !link_shared_copy(ds, job)) {
 		published = 0;
 	}
-	struct link_queue_shared *held = NULL;
+	struct link_writer_shared *held = NULL;
 	if (published && job->held) {
 		/* The data of an inline reply was not written: the entry holds it. A receive that cannot keep it fails. */
-		held = link_queue_shared_create(job->data, job->data_length);
+		held = link_writer_shared_create(job->data, job->data_length);
 		if (held) {
 			job->data = NULL;
 		} else {
@@ -1105,7 +1105,7 @@ static void finish_receive(struct vine_manager *manager, struct transfer_job *jo
 		queue_removal(ds, job->shared_path);
 		job->shared_path = NULL;
 	}
-	link_queue_shared_release(held);
+	link_writer_shared_release(held);
 	/* A receive withdrawn by vault removal, such as the pruning of its file, is cancelled, not failed. */
 	log_receive_end(ds, job, published ? "complete" : (job->removed ? "cancelled" : "failed"), in_memory);
 	if (job->transfer_id) {
@@ -1877,7 +1877,7 @@ void vine_manager_data_service_vault_remove(struct vine_manager_data_service *ds
 	 * job above. Worker queues that still hold the data of a small entry on disk get it in memory first, one file of
 	 * at most VINE_DATA_INLINE_BYTES, because they read the vault path only when the data reaches their head. */
 	struct vault_entry *held = file->vault_entry ? hash_table_remove(ds->vault_table, file->cached_name) : NULL;
-	if (held && held->on_disk && !link_queue_shared_load(held->on_disk)) {
+	if (held && held->on_disk && !link_writer_shared_load(held->on_disk)) {
 		debug(D_NOTICE, "could not read vault entry %s for the sends that wait for it", file->cached_name);
 	}
 	if ((held && (!held->data || held->spill)) || retrieving) {
@@ -1965,7 +1965,7 @@ int vine_manager_data_service_vault_small_file(struct vine_manager *manager, str
 	return entry && entry->small;
 }
 
-struct link_queue_shared *vine_manager_data_service_vault_shared(struct vine_manager *manager, struct vine_file *file, int64_t *length, int *mode)
+struct link_writer_shared *vine_manager_data_service_vault_shared(struct vine_manager *manager, struct vine_file *file, int64_t *length, int *mode)
 {
 	if (!vine_manager_data_service_vault_small_file(manager, file)) {
 		return NULL;
@@ -1973,7 +1973,7 @@ struct link_queue_shared *vine_manager_data_service_vault_shared(struct vine_man
 	struct vault_entry *entry = file->vault_entry;
 	if (!entry->data && !entry->on_disk) {
 		char *path = string_format("%s/%s", manager->ds->vault_directory, file->cached_name);
-		entry->on_disk = link_queue_shared_create_file(path, entry->size);
+		entry->on_disk = link_writer_shared_create_file(path, entry->size);
 		free(path);
 		if (!entry->on_disk) {
 			return NULL;

@@ -298,8 +298,8 @@ int vine_manager_send_file(struct vine_manager *q, struct vine_worker_info *w, c
 
 /* Queue a reference to shared data for a remote worker, so data sent to many workers is held once. Return 0, or -1 if
  * the worker's link has failed. */
-struct link_queue_shared;
-int vine_manager_send_shared(struct vine_manager *q, struct vine_worker_info *w, struct link_queue_shared *s);
+struct link_writer_shared;
+int vine_manager_send_shared(struct vine_manager *q, struct vine_worker_info *w, struct link_writer_shared *s);
 
 /* Receive a line-oriented message from a remote worker, after writing everything queued for it. */
 vine_msg_code_t vine_manager_recv( struct vine_manager *q, struct vine_worker_info *w, char *line, int length );
