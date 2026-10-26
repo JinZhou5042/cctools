@@ -13,6 +13,8 @@ See the file COPYING for details.
 #include "domain_name.h"
 #include "hash_table.h"
 #include "link.h"
+#include "link_queue.h"
+#include "list.h"
 #include "itable.h"
 
 typedef enum {
@@ -27,6 +29,9 @@ struct vine_worker_info {
 
 	/* Connection to the worker or other client. */
 	struct link *link;
+	struct link_queue *queue;    // Everything sent to the worker, written as its link takes it.
+	struct list_cursor *sending; // Entry in the manager's sending_workers while the queue holds data or failed.
+	int poll_index;		     // Entry of the link in the manager's poll table in the current step.
 
 	/* Static properties reported by worker when it connects. */
 	char *hostname;

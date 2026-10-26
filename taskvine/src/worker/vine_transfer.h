@@ -9,15 +9,17 @@ See the file COPYING for details.
 
 #include "vine_cache.h"
 #include "link.h"
+#include "link_queue.h"
 
 typedef enum {
 	VINE_TRANSFER_MODE_ANY,
 	VINE_TRANSFER_MODE_FILE_ONLY
 } vine_transfer_mode_t;
 
-/* Send any cached file/dir along the connection to a remote party. */
+/* Queue any cached file/dir to be sent to a remote party. A directory is walked as the queue writes it, so the queue
+ * holds no more than one entry of it at a time. Return 1 if it was queued, or 0 if the queue refused it. */
 
-int vine_transfer_put_any( struct link *lnk, struct vine_cache *cache, const char *filename, vine_transfer_mode_t mode, time_t stoptime );
+int vine_transfer_put_any(struct link_queue *queue, struct vine_cache *cache, const char *filename, vine_transfer_mode_t mode);
 
 /* Receive a named file/dir from the connection to a local transfer path. */
 
