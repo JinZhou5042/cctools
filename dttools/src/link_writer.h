@@ -19,6 +19,8 @@ synchronous exchange reads and handles the peer's messages while it writes its r
 finishes any partly written push (@ref link_writer_send_partial) before it reads the next request. A link where only
 one side sends data, such as a transfer or a pipe to a library, may use @ref link_writer_send_sync freely.
 <p>
+Deadlines and progress are times of @ref timestamp_monotonic, so a change of the time of day moves neither.
+<p>
 An entry is copied data, a byte range of a file read in chunks at the head, or a producer that makes its data when it
 reaches the head. Small entries that reach the head together leave in one write. A writer that fails drops everything
 and refuses new data, and the owner should close the link.
@@ -92,7 +94,7 @@ int link_writer_push_producer(struct link_writer *lw, link_writer_producer_t pro
 
 /** Write without waiting until the writer is empty, the link is full, or the deadline passes, with at least one write.
 @param lw The writer.
-@param deadline Microseconds since the epoch after which no write starts.
+@param deadline The time of @ref timestamp_monotonic after which no write starts.
 @return Zero if the writer has failed, else one.
 */
 int link_writer_send_async(struct link_writer *lw, timestamp_t deadline);
@@ -100,7 +102,7 @@ int link_writer_send_async(struct link_writer *lw, timestamp_t deadline);
 /** Write everything, waiting as needed. Each write gets a new stoptime of idle seconds, so a large file never fails
 while it moves, and a peer that takes nothing for that long fails the writer.
 @param lw The writer.
-@param deadline Microseconds since the epoch at which to give up, or zero for none.
+@param deadline The time of @ref timestamp_monotonic at which to give up, or zero for none.
 @param idle Seconds that a write may wait without progress, or zero for no limit.
 @return One if the writer is empty, zero if it has failed.
 */
@@ -111,7 +113,7 @@ a push, such as before waiting for a peer that may be reading it. Whole pushes t
 message pushed in parts, such as a header and a file, is finished only to the end of the part being written, which
 suffices for messages a peer reads at any time, because those are pushed whole.
 @param lw The writer.
-@param deadline Microseconds since the epoch at which to give up.
+@param deadline The time of @ref timestamp_monotonic at which to give up.
 @return One if no push is partly written, zero if the writer has failed.
 */
 int link_writer_send_partial(struct link_writer *lw, timestamp_t deadline);
@@ -134,7 +136,7 @@ int link_writer_failed(struct link_writer *lw);
 /** Report when the writer last made progress, so the owner judges its peer with its own threshold, together with what
 it reads from the peer.
 @param lw The writer.
-@return Microseconds since the epoch at which the writer last wrote a byte or became non-empty.
+@return The time of @ref timestamp_monotonic at which the writer last wrote a byte or became non-empty.
 */
 timestamp_t link_writer_last_progress(struct link_writer *lw);
 

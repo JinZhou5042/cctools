@@ -167,7 +167,7 @@ static void append(struct link_writer *lw, struct link_writer_entry *e)
 	}
 	if (!lw->head) {
 		lw->head = e;
-		lw->last_progress = timestamp_get();
+		lw->last_progress = timestamp_monotonic();
 	} else {
 		lw->tail->next = e;
 	}
@@ -485,7 +485,7 @@ static ssize_t write_head(struct link_writer *lw, time_t stoptime, int *full)
 	if (n > 0) {
 		*full = (size_t)n < offered;
 		e->offset += n;
-		lw->last_progress = timestamp_get();
+		lw->last_progress = timestamp_monotonic();
 		if (entry_done(e)) {
 			pop_head(lw);
 		}
@@ -505,17 +505,20 @@ int link_writer_send_async(struct link_writer *lw, timestamp_t deadline)
 {
 	while (!lw->failed && lw->head) {
 		int full = 0;
-		if (write_head(lw, LINK_NOWAIT, &full) < 0 || full || timestamp_get() >= deadline) {
+		if (write_head(lw, LINK_NOWAIT, &full) < 0 || full || timestamp_monotonic() >= deadline) {
 			break;
 		}
 	}
 	return !lw->failed;
 }
 
-/* The stoptime of link_write for a deadline, rounded up so the deadline is never shortened. */
+/* The stoptime of link_write for a deadline of timestamp_monotonic(), from the time that remains, rounded up so the
+ * deadline is never shortened. A deadline that passed gives the current time, so a write takes only what fits now. */
 static time_t stoptime_of(timestamp_t deadline)
 {
-	return (time_t)((deadline + 999999) / 1000000);
+	timestamp_t now = timestamp_monotonic();
+	timestamp_t left = deadline > now ? deadline - now : 0;
+	return time(NULL) + (time_t)((left + 999999) / 1000000);
 }
 
 /* The stoptime of the next write: the deadline, or idle seconds from now if sooner, or never for neither. */

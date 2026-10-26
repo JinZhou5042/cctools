@@ -59,7 +59,7 @@ static void vine_transfer_handler(struct link *lnk, struct vine_cache *cache)
 			struct link_writer *lw = link_writer_create(lnk);
 			if (lw) {
 				if (vine_transfer_put_any(lw, cache, filename, VINE_TRANSFER_MODE_ANY)) {
-					link_writer_send_sync(lw, timestamp_get() + transfer_timeout * 1000000LL, 0);
+					link_writer_send_sync(lw, timestamp_monotonic() + transfer_timeout * 1000000LL, 0);
 				}
 				link_writer_delete(lw);
 			}

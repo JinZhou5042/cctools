@@ -311,7 +311,7 @@ int vine_transfer_request_any(struct link *lnk, const char *request_path, const 
 		return 0;
 	}
 	char *request = string_format("get %s\n", request_path);
-	int sent = link_writer_push(lw, request, strlen(request)) && link_writer_send_sync(lw, (timestamp_t)stoptime * 1000000, 0);
+	int sent = link_writer_push(lw, request, strlen(request)) && link_writer_send_sync(lw, timestamp_monotonic() + (stoptime > time(0) ? (timestamp_t)(stoptime - time(0)) * 1000000 : 0), 0);
 	free(request);
 	link_writer_delete(lw);
 	if (!sent) {

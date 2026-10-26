@@ -343,7 +343,7 @@ static void unwatch_worker_queue(struct vine_worker_info *w)
 /* Write what a link takes now, within the send slice. Return zero if the queue failed. */
 static int write_queue(struct link_writer *lw)
 {
-	return link_writer_send_async(lw, timestamp_get() + VINE_MANAGER_SEND_SLICE);
+	return link_writer_send_async(lw, timestamp_monotonic() + VINE_MANAGER_SEND_SLICE);
 }
 
 /* Write a queue whose link has room. Return -1 if it failed or took no data for the minimum transfer timeout, 1 if it
@@ -354,7 +354,7 @@ static int advance_queue(struct vine_manager *q, struct link_writer *lw, int rev
 		write_queue(lw);
 	}
 	int stalled = !link_writer_empty(lw) && q->minimum_transfer_timeout > 0 &&
-		      timestamp_get() - link_writer_last_progress(lw) >= (timestamp_t)q->minimum_transfer_timeout * 1000000;
+		      timestamp_monotonic() - link_writer_last_progress(lw) >= (timestamp_t)q->minimum_transfer_timeout * 1000000;
 	if (link_writer_failed(lw) || stalled) {
 		return -1;
 	}
@@ -417,7 +417,7 @@ __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager 
 /* Write everything queued for a client before the manager writes to its link directly, as for status answers. */
 static int flush_worker_queue(struct vine_manager *q, struct vine_worker_info *w)
 {
-	int result = link_writer_send_sync(w->lw, timestamp_get() + q->long_timeout * 1000000LL, 0);
+	int result = link_writer_send_sync(w->lw, timestamp_monotonic() + q->long_timeout * 1000000LL, 0);
 	watch_worker_queue(q, w);
 	return result;
 }
@@ -4755,7 +4755,7 @@ void vine_delete(struct vine_manager *q)
 	struct list *written = list_create();
 	struct departing_link *d;
 	while ((d = list_pop_head(q->departing_links))) {
-		if (!d->draining && !link_writer_send_sync(d->lw, timestamp_get() + 1000000, 0)) {
+		if (!d->draining && !link_writer_send_sync(d->lw, timestamp_monotonic() + 1000000, 0)) {
 			departing_link_delete(d);
 		} else {
 			shutdown(link_fd(d->link), SHUT_WR);

@@ -103,8 +103,8 @@ int   vine_process_libraries_sending( void );
 /* Fill one entry per library whose writer holds data, waiting for room in its pipe. */
 void  vine_process_libraries_poll( struct link_info *waits );
 
-/* Write to the libraries whose writers hold data, without waiting, and kill a library whose pipe failed, which then
- * ends as any library that exits. */
+/* Write to the libraries whose writers hold data, without waiting, until a deadline of timestamp_monotonic(), and kill
+ * a library whose pipe failed, which then ends as any library that exits. */
 void  vine_process_libraries_send( timestamp_t deadline );
 
 void  vine_process_compute_disk_needed( struct vine_process *p );

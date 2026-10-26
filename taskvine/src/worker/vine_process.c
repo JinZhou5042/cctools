@@ -272,7 +272,7 @@ static int library_send(struct vine_process *library, const char *message)
 	char *line = string_format("%zu\n%s", strlen(message), message);
 	int queued = link_writer_push(lw, line, strlen(line));
 	free(line);
-	if (!queued || !link_writer_send_async(lw, timestamp_get())) {
+	if (!queued || !link_writer_send_async(lw, timestamp_monotonic())) {
 		return 0;
 	}
 	if (!link_writer_empty(lw) && !library->library_sending) {

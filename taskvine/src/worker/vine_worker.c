@@ -206,7 +206,7 @@ static struct link_writer *manager_lw = NULL;
  * at once and a round's messages leave in few writes. Return zero if the queue failed. */
 static int send_queued_messages(void)
 {
-	return link_writer_send_async(manager_lw, timestamp_get() + MANAGER_SEND_SLICE);
+	return link_writer_send_async(manager_lw, timestamp_monotonic() + MANAGER_SEND_SLICE);
 }
 
 /* Wait for the manager link and for room in the pipes of libraries whose writers hold data, with the signals of mask
@@ -1255,7 +1255,7 @@ static void disconnect_manager(struct link *manager)
 	debug(D_VINE, "disconnecting from manager %s:%d", current_manager_address->addr, current_manager_address->port);
 
 	/* Final messages such as info vacating. */
-	link_writer_send_sync(manager_lw, timestamp_get() + options->active_timeout * 1000000LL, 0);
+	link_writer_send_sync(manager_lw, timestamp_monotonic() + options->active_timeout * 1000000LL, 0);
 	close_manager_link(manager);
 
 	debug(D_VINE, "killing all outstanding tasks");
@@ -1308,7 +1308,7 @@ static int handle_manager(struct link *manager)
 	int cache_level;
 
 	/* A request may wait for data from the manager, which itself waits for the rest of a push it has begun reading. */
-	if (!link_writer_send_partial(manager_lw, timestamp_get() + options->active_timeout * 1000000LL)) {
+	if (!link_writer_send_partial(manager_lw, timestamp_monotonic() + options->active_timeout * 1000000LL)) {
 		return 0;
 	}
 
@@ -1772,7 +1772,7 @@ static void vine_worker_serve_manager(struct link *manager)
 				manager_activity = link_usleep_mask(manager, 0, 0, 1, 0) > 0;
 			}
 		}
-		vine_process_libraries_send(timestamp_get() + MANAGER_SEND_SLICE);
+		vine_process_libraries_send(timestamp_monotonic() + MANAGER_SEND_SLICE);
 
 		int ok = 1;
 		if (manager_activity) {
@@ -1935,7 +1935,7 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 		char line[VINE_LINE_MAX];
 		debug(D_VINE, "verifying manager's project name");
 		send_message("name\n");
-		if (!link_writer_send_sync(manager_lw, options->idle_stoptime * 1000000LL, 0) || !recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
+		if (!link_writer_send_sync(manager_lw, timestamp_monotonic() + (options->idle_stoptime > time(0) ? (timestamp_t)(options->idle_stoptime - time(0)) * 1000000 : 0), 0) || !recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
 			debug(D_VINE, "no response from manager while verifying name");
 			close_manager_link(manager);
 			return 0;
