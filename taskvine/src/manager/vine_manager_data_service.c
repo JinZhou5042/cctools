@@ -21,6 +21,7 @@
 #include "vine_cached_name.h"
 #include "vine_current_transfers.h"
 #include "vine_transfer_receive.h"
+#include "vine_transfer_send.h"
 #include "unlink_recursive.h"
 
 #include <dirent.h>
@@ -395,28 +396,21 @@ static void job_untrack(struct vine_manager_data_service *ds, struct transfer_jo
 	job->next_file_job = NULL;
 }
 
-/* Move file data between a link and a file in pieces, each with a new deadline, so a transfer fails when no data moves
- * for timeout seconds, and a large file that keeps moving is never cut off. */
-static int64_t stream_in_pieces(int64_t (*stream)(struct link *, int, int64_t, time_t), struct link *link, int fd, int64_t length, int timeout)
-{
-	int64_t actual = 0;
-	while (actual < length) {
-		int64_t piece = stream(link, fd, MIN(length - actual, 1 << 16), time(NULL) + timeout);
-		if (piece <= 0) {
-			break;
-		}
-		actual += piece;
-	}
-	return actual;
-}
-
 /* Receive a file or a directory with the Worker transfer protocol into a temporary directory beside the destination,
  * and rename only a complete item of the requested name into the vault, so a failed transfer never publishes. */
 static int receive_file(struct transfer_job *job)
 {
 	char encoded[VINE_DATA_LINE_MAX];
 	url_encode(job->name, encoded, sizeof(encoded));
-	if (link_printf(job->link, time(NULL) + job->timeout, "get %s\n", encoded) < 0) {
+	struct link_writer *lw = link_writer_create(job->link);
+	if (!lw) {
+		return 0;
+	}
+	char *request = string_format("get %s\n", encoded);
+	int sent = link_writer_push(lw, request, strlen(request)) && link_writer_send_sync(lw, 0, job->timeout);
+	free(request);
+	link_writer_delete(lw);
+	if (!sent) {
 		return 0;
 	}
 	char *temporary = string_format("%s.XXXXXX", job->path);
@@ -480,46 +474,26 @@ static int write_data(struct transfer_job *job)
 	return valid;
 }
 
-/* Send a vault entry with the Worker transfer protocol: a file, or a directory followed by its entries and "end". Like
- * the Worker, follow symlinks, so a declared file is sent as the file it links to. A missing or unreadable item is
- * reported as an error, which fails the receiver. Each line and each piece of file data gets a new deadline. */
-static int send_entry(struct transfer_job *job, const char *path, const char *name)
+/* Send a vault entry with the Worker transfer protocol (vine_transfer_send.c), as a Worker sends a cached file, so a
+ * declared file is sent as the file it links to. An entry that cannot be sent is reported as an error, which fails the
+ * receiver. The writer fails when no data moves for the transfer timeout, however large the entry. */
+static int send_entry(struct transfer_job *job, const char *path)
 {
-	struct stat info;
-	char encoded[VINE_DATA_LINE_MAX];
-	url_encode(name, encoded, sizeof(encoded));
-	int fd = open(path, O_RDONLY | O_CLOEXEC);
-	if (fd < 0 && name == job->name && (errno == ENOENT || errno == ESTALE)) {
+	struct link_writer *lw = link_writer_create(job->link);
+	if (!lw) {
+		return 0;
+	}
+	int result = vine_transfer_queue_item(lw, path, job->name, VINE_TRANSFER_MODE_ANY);
+	if (result == ENOENT || result == ESTALE) {
 		/* The entry itself is gone, such as a copy deleted from the shared directory outside the vault. */
 		job->missing = 1;
 	}
-	DIR *dir = NULL;
-	int valid = fd >= 0 && fstat(fd, &info) == 0 && (S_ISREG(info.st_mode) || (S_ISDIR(info.st_mode) && (dir = fdopendir(fd))));
-	if (!valid) {
-		if (fd >= 0) {
-			close(fd);
-		}
-		link_printf(job->link, time(NULL) + job->timeout, "error %s %d\n", encoded, ENOENT);
-		return 0;
+	if (result > 0) {
+		vine_transfer_queue_error(lw, job->name, result);
 	}
-	if (!dir) {
-		valid = link_printf(job->link, time(NULL) + job->timeout, "file %s %" PRId64 " %o %ld\n", encoded, (int64_t)info.st_size, info.st_mode & 0777, (long)info.st_mtime) >= 0 &&
-			stream_in_pieces(link_stream_from_fd, job->link, fd, info.st_size, job->timeout) == info.st_size;
-		close(fd);
-		return valid;
-	}
-	valid = link_printf(job->link, time(NULL) + job->timeout, "dir %s %o %ld\n", encoded, info.st_mode & 0777, (long)info.st_mtime) >= 0;
-	struct dirent *entry;
-	while (valid && (entry = readdir(dir))) {
-		if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) {
-			continue;
-		}
-		char *child = string_format("%s/%s", path, entry->d_name);
-		valid = send_entry(job, child, entry->d_name);
-		free(child);
-	}
-	closedir(dir);
-	return valid && link_printf(job->link, time(NULL) + job->timeout, "end\n") >= 0;
+	int valid = link_writer_send_sync(lw, 0, job->timeout) && result == 0;
+	link_writer_delete(lw);
+	return valid;
 }
 
 /* Return a finished job to the Manager thread. Called with the lock held. */
@@ -604,7 +578,7 @@ static int serve_request(struct transfer_job *job)
 	}
 	int valid_name = job->name[0] && !strchr(job->name, '/') && strcmp(job->name, ".") && strcmp(job->name, "..");
 	char *path = valid_name ? string_format("%s/%s", ds->vault_directory, job->name) : NULL;
-	valid = send_entry(job, path ? path : "", job->name);
+	valid = send_entry(job, path ? path : "");
 	free(path);
 	return valid;
 }
