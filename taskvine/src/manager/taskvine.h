@@ -1525,9 +1525,11 @@ This allows for tasks to wait at a worker rather than the manager. (default = 1.
  - "disconnect-slow-workers-factor" Set the multiplier of the average task time at which point to disconnect;
 deactivated if less than 1. (default=0)
  - "keepalive-interval" Set the minimum number of seconds to wait before sending new keepalive checks to workers.
-(default=300)
+(default=120, or T/2 with a response time, see response-timeout)
  - "keepalive-timeout" Set the minimum number of seconds to wait for a keepalive response from worker before marking it
-as dead. (default=30)
+as dead. (default=900, or T with a response time, see response-timeout)
+ - "response-timeout" The response time X in seconds of a worker that has not declared its own (vine_worker
+--response-timeout). If positive, a worker that makes no progress for T = 2X is removed. (default=0, off)
  - "short-timeout" Set the minimum timeout when sending a brief message to a single worker. (default=5s)
  - "monitor-interval" Maximum number of seconds between resource monitor measurements. If less than 1, use default (5s).
 (default=5)

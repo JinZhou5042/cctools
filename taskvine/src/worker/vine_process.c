@@ -325,6 +325,9 @@ void vine_process_libraries_send(timestamp_t deadline)
 		if (!link_writer_send_async(library->library_writer, deadline)) {
 			debug(D_VINE, "failed to write to library task %d pid %d, killing it", library->task->task_id, library->pid);
 			vine_process_kill(library);
+		} else if (vine_worker_made_no_progress(library->library_writer, library->library_read_link)) {
+			debug(D_NOTICE, "library task %d pid %d took and sent nothing for %d s, killing it", library->task->task_id, library->pid, vine_worker_options_timeout(options, 0));
+			vine_process_kill(library);
 		} else if (!link_writer_empty(library->library_writer)) {
 			list_push_tail(sending_libraries, library);
 			library->library_sending = 1;
@@ -433,6 +436,14 @@ int vine_process_execute(struct vine_process *p)
 
 			/* The worker writes to the library only as its pipe takes data. */
 			fcntl(pipe_in[1], F_SETFL, fcntl(pipe_in[1], F_GETFL) | O_NONBLOCK);
+
+			/* With the timeout framework on, the worker reads the library's pipe without blocking too, so the read
+			 * of a message the library began fails when the library makes no progress. The worker reads it in its
+			 * main loop, which must answer the manager within X, so the limit is X rather than T. */
+			if (options->response_timeout > 0) {
+				fcntl(pipe_out[0], F_SETFL, fcntl(pipe_out[0], F_GETFL) | O_NONBLOCK);
+				link_set_idle_timeout(p->library_read_link, options->response_timeout);
+			}
 			p->library_writer = link_writer_create(p->library_write_link);
 			if (!p->library_writer) {
 				debug(D_VINE, "cannot allocate a writer for library task %d", p->task->task_id);

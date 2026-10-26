@@ -9,10 +9,15 @@
 
 #include "timestamp.h"
 #include "link.h"
+#include "link_writer.h"
 
 void vine_worker_send_cache_update( struct link *manager, const char *cachename, struct vine_cache_file *f );
 void vine_worker_send_cache_invalid( struct link *manager, const char *cachename, const char *message );
 void vine_worker_send_cache_copied( struct link *manager, uint64_t token, int64_t size, int error );
+
+/* Return non-zero when the timeout framework is on and the party that lw writes to and link reads from made no
+ * progress for T while lw holds data. */
+int vine_worker_made_no_progress( struct link_writer *lw, struct link *link );
 
 extern struct vine_workspace *workspace;
 extern struct vine_worker_options *options;

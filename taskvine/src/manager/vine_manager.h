@@ -247,13 +247,14 @@ struct vine_manager {
 
 	/* Various performance knobs that can be tuned. */
 	int short_timeout;            /* Timeout in seconds to send/recv a brief message from worker */
+	int response_timeout;         /* Response time X in seconds of a worker that declared none, or zero: see "Timeouts". */
 	int long_timeout;             /* Timeout if in the middle of an incomplete message. */
 	int minimum_transfer_timeout; /* Minimum number of seconds to allow for a manager<-> worker file transfer. */
 	int transfer_outlier_factor;  /* Factor to consider a given transfer time to be an outlier justifying cancellation. */
 	int default_transfer_rate;    /* Assumed data transfer rate for computing timeouts, prior to collecting observations. */
 	int process_pending_check;    /* Enables check for waiting processes in main loop via @ref process_pending */
-	int keepalive_interval;	      /* Time between keepalive request transmissions. */
-	int keepalive_timeout;	      /* Keepalive response must be received within this time, otherwise worker disconnected. */
+	int keepalive_interval;	      /* Time between keepalive request transmissions. Negative: the default, see "Timeouts". */
+	int keepalive_timeout;	      /* Keepalive response must be received within this time, otherwise worker disconnected. Negative: the default. */
 	int hungry_minimum;           /* Minimum number of waiting tasks to consider queue not hungry. */
 	int hungry_minimum_factor;    /* queue is hungry if number of waiting tasks is less than hungry_minimum_factor * number of connected workers. */
 	int wait_for_workers;         /* Wait for these many workers to connect before dispatching tasks at start of execution. */
@@ -344,6 +345,12 @@ vine_msg_code_t vine_manager_recv( struct vine_manager *q, struct vine_worker_in
 
 /* Compute the expected wait time for a transfer of length bytes. */
 int vine_manager_transfer_time( struct vine_manager *q, struct vine_worker_info *w, int64_t length );
+
+/* Return T = 2X in seconds, the time without progress after which the manager judges a worker failed, where X is the
+ * response time that w declared, else the manager's response-timeout (for any worker when w is NULL). Return otherwise
+ * when neither is set: the timeout framework is then off and the caller keeps its own timeout, see "Timeouts" in
+ * vine_manager.c. */
+int vine_manager_worker_timeout( struct vine_manager *q, struct vine_worker_info *w, int otherwise );
 
 /* Various functions to compute expected properties of tasks. */
 const struct rmsummary *vine_manager_task_resources_min(struct vine_manager *q, struct vine_task *t);

@@ -805,6 +805,11 @@ static void report_worker_ready(struct link *manager)
 	}
 	send_message("info worker-end-time %" PRId64 "\n", (int64_t)DIV_INT_ROUND_UP(options->end_time, USECOND));
 
+	if (options->response_timeout > 0) {
+		/* Declare the response time X, which turns the timeout framework on at the manager for this worker. */
+		send_message("info response-timeout %d\n", options->response_timeout);
+	}
+
 	if (options->factory_name) {
 		send_message("info from-factory %s\n", options->factory_name);
 	}
@@ -1871,15 +1876,19 @@ static int check_library_startup(struct vine_process *p)
 	char buffer_len[VINE_LINE_MAX];
 	int length = 0;
 
+	/* The library began its message. With the timeout framework on, its pipe does not block, so the rest of the
+	 * message is read within X in total, the response time of this worker's main loop (see vine_process_execute()). */
+	time_t stoptime = options->response_timeout > 0 ? time(0) + options->response_timeout : LINK_NOWAIT;
+
 	/* Read a line that gives the length of the response message. */
-	if (!link_readline(p->library_read_link, buffer_len, VINE_LINE_MAX, LINK_NOWAIT)) {
+	if (!link_readline(p->library_read_link, buffer_len, VINE_LINE_MAX, stoptime)) {
 		return 0;
 	}
 	sscanf(buffer_len, "%d", &length);
 
 	/* Now read that length of message and null-terminate it. */
 	char buffer[length + 1];
-	if (link_read(p->library_read_link, buffer, length, LINK_NOWAIT) <= 0) {
+	if (link_read(p->library_read_link, buffer, length, stoptime) <= 0) {
 		return 0;
 	}
 	buffer[length] = 0;
@@ -1992,6 +2001,23 @@ system calls.
 */
 #define ROUND_BUDGET USECOND
 
+/*
+With the timeout framework on (--response-timeout), judge another party, the manager or a library, by the progress on
+its link while this worker waits on it, that is, while the writer to it holds data: the party has failed when neither
+a byte written to it nor a byte read from it moved for T. This is the worker's one judgment of a party by progress;
+blocking reads and writes on its links fail after T without progress by the links' idle timeouts. Off, nothing is
+judged here.
+*/
+int vine_worker_made_no_progress(struct link_writer *lw, struct link *link)
+{
+	int timeout = vine_worker_options_timeout(options, 0);
+	if (!timeout || !lw || link_writer_empty(lw)) {
+		return 0;
+	}
+	timestamp_t progress = MAX(link_writer_last_progress(lw), link_last_read(link));
+	return timestamp_monotonic() - progress >= (timestamp_t)timeout * USECOND;
+}
+
 /* Start working for the (newly connected) manager on this given link. */
 
 static void vine_worker_serve_manager(struct link *manager)
@@ -2060,6 +2086,7 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		struct budget round;
 		budget_start(&round, ROUND_BUDGET);
+		timestamp_t round_start = timestamp_monotonic();
 
 		/* Handle the messages already in the link's buffer until the budget expires, as the manager does, so that a
 		 * long task, such as one with thousands of inputs, is read at once rather than one line per round. */
@@ -2073,6 +2100,10 @@ static void vine_worker_serve_manager(struct link *manager)
 		/* Replies leave at once. */
 		if (!link_writer_send_async(manager_lw, round.end)) {
 			debug(D_VINE, "failed to send to the manager");
+			break;
+		}
+		if (vine_worker_made_no_progress(manager_lw, manager)) {
+			debug(D_NOTICE, "the manager took and sent nothing for %d s, disconnecting", vine_worker_options_timeout(options, 0));
 			break;
 		}
 		vine_process_libraries_send(round.end);
@@ -2161,6 +2192,12 @@ static void vine_worker_serve_manager(struct link *manager)
 		if (list_size(procs_waiting) > 0 || itable_size(procs_table) > 0 || itable_size(procs_complete) > 0) {
 			reset_idle_timer();
 		}
+
+		/* A round longer than X breaks the response time that this worker declared to the manager. */
+		timestamp_t round_length = timestamp_monotonic() - round_start;
+		if (options->response_timeout > 0 && round_length > (timestamp_t)options->response_timeout * USECOND) {
+			debug(D_NOTICE, "a round of the main loop took %.3f s, longer than the response time %d s", round_length / 1e6, options->response_timeout);
+		}
 	}
 }
 
@@ -2191,6 +2228,10 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 		fprintf(stderr, "couldn't connect to %s:%d: %s\n", current_manager_address->addr, port, strerror(errno));
 		return 0;
 	}
+
+	/* With the timeout framework on, every wait on the manager fails when it makes no progress for T, within the
+	 * stoptime of each call, from the TLS handshake on. */
+	link_set_idle_timeout(manager, vine_worker_options_timeout(options, 0));
 
 	if (options->ssl_requested && !use_ssl) {
 		fprintf(stderr, "vine_worker: --ssl was given, but manager %s:%d is not using ssl.\n", host, port);

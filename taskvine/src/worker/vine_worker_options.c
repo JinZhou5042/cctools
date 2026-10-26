@@ -32,6 +32,7 @@ struct vine_worker_options *vine_worker_options_create()
 	self->idle_timeout = 900;
 	self->connect_timeout = 900;
 	self->active_timeout = 3600;
+	self->response_timeout = 0;
 
 	self->init_backoff_interval = 1;
 	self->max_backoff_interval = 8;
@@ -60,6 +61,11 @@ struct vine_worker_options *vine_worker_options_create()
 	self->reported_transfer_host = 0;
 
 	return self;
+}
+
+int vine_worker_options_timeout(struct vine_worker_options *self, int otherwise)
+{
+	return self->response_timeout > 0 ? 2 * self->response_timeout : otherwise;
 }
 
 void vine_worker_options_delete(struct vine_worker_options *self)
@@ -103,6 +109,7 @@ void vine_worker_options_show_help(const char *cmd, struct vine_worker_options *
 	printf(" %-30s Set both --idle-timeout and --connect-timeout.\n", "-t,--timeout=<time>");
 	printf(" %-30s Disconnect after this time if manager sends no work. (default=%ds)\n", "   --idle-timeout=<time>", options->idle_timeout);
 	printf(" %-30s Abort after this time if no managers are available. (default=%ds)\n", "   --connect-timeout=<time>", options->idle_timeout);
+	printf(" %-30s Response time X, declared to the manager: a link fails after 2X without progress. (default=off)\n", "   --response-timeout=<time>");
 	printf(" %-30s Exit if parent process dies.\n", "--parent-death");
 	printf(" %-30s Set TCP window size.\n", "-w,--tcp-window-size=<size>");
 	printf(" %-30s Set initial value for backoff interval when worker fails to connect\n", "-i,--min-backoff=<time>");
@@ -177,6 +184,7 @@ enum {
 	LONG_OPT_MAX_TRANSFER_PROCS,
 	LONG_OPT_TASK_WRAPPER,
 	LONG_OPT_CONNECT_BACK,
+	LONG_OPT_RESPONSE_TIMEOUT,
 };
 
 static const struct option long_options[] = {{"advertise", no_argument, 0, 'a'},
@@ -190,6 +198,7 @@ static const struct option long_options[] = {{"advertise", no_argument, 0, 'a'},
 		{"timeout", required_argument, 0, 't'},
 		{"idle-timeout", required_argument, 0, LONG_OPT_OPTIONS_IDLE_TIMEOUT},
 		{"connect-timeout", required_argument, 0, LONG_OPT_CONNECT_TIMEOUT},
+		{"response-timeout", required_argument, 0, LONG_OPT_RESPONSE_TIMEOUT},
 		{"tcp-window-size", required_argument, 0, 'w'},
 		{"min-backoff", required_argument, 0, 'i'},
 		{"max-backoff", required_argument, 0, 'b'},
@@ -327,6 +336,9 @@ void vine_worker_options_get(struct vine_worker_options *options, int argc, char
 			break;
 		case LONG_OPT_CONNECT_TIMEOUT:
 			options->connect_timeout = string_time_parse(optarg);
+			break;
+		case LONG_OPT_RESPONSE_TIMEOUT:
+			options->response_timeout = MAX(0, string_time_parse(optarg));
 			break;
 		case 'o':
 			debug_config_file(optarg);
