@@ -303,6 +303,9 @@ void vine_process_libraries_poll(struct link_info *waits)
 {
 	struct vine_process *library;
 	int i = 0;
+	if (!sending_libraries) {
+		return;
+	}
 	LIST_ITERATE(sending_libraries, library)
 	{
 		waits[i++] = (struct link_info){library->library_write_link, LINK_WRITE, 0};

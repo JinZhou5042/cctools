@@ -5676,7 +5676,11 @@ static int send_to_workers(struct vine_manager *q)
 		if (state > 0) {
 			unwatch_worker_queue(q, w);
 		} else if (state < 0) {
-			debug(D_VINE, "Removing worker %s (%s): %s", w->hostname, w->addrport, link_writer_failed(w->lw) ? "its link failed" : "it took no data");
+			if (link_writer_failed(w->lw)) {
+				debug(D_VINE, "Removing worker %s (%s): its link failed", w->hostname, w->addrport);
+			} else {
+				debug(D_VINE, "Removing worker %s (%s): took no data for %d s", w->hostname, w->addrport, q->minimum_transfer_timeout);
+			}
 			q->stats->workers_lost++;
 			vine_manager_remove_worker(q, w, VINE_WORKER_DISCONNECT_FAILURE);
 			removed++;

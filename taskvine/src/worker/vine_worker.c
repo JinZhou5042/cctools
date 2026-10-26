@@ -101,6 +101,7 @@ static struct list *procs_waiting = NULL;
 /* Everything sent to the manager, written only as the link takes it, so the worker and a manager that writes to it at
  * the same time never wait for each other. */
 static struct link_writer *manager_lw = NULL;
+static struct link *manager_link = NULL; /* The link that manager_lw writes to. */
 
 /* Processes that do_kill() signalled and dropped before they exited, indexed by pid. Their tasks are gone, so only
  * their exit status remains to be collected, which the main loop does without waiting and a disconnect does waiting. */
@@ -376,6 +377,12 @@ static int report_changes(struct link *manager)
 
 int recv_message(struct link *l, char *line, int length, time_t stoptime)
 {
+	/* The manager reads the rest of a message it has begun and writes nothing meanwhile, so a message that the link
+	 * took only in part goes out before the worker may wait for the rest of a manager message. Every blocking read of
+	 * a manager message starts with a line read here. */
+	if (l == manager_link && manager_lw && !link_writer_send_partial(manager_lw, timestamp_monotonic() + options->active_timeout * 1000000LL)) {
+		return 0;
+	}
 	int result = link_readline(l, line, length, stoptime);
 	if (result)
 		debug(D_VINE, "rx: %s", line);
@@ -1486,6 +1493,7 @@ static void close_manager_link(struct link *manager)
 {
 	link_writer_delete(manager_lw);
 	manager_lw = NULL;
+	manager_link = NULL;
 	link_close(manager);
 }
 
@@ -1553,12 +1561,6 @@ static int handle_manager(struct link *manager)
 	int cache_level;
 
 	if (recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
-		/* Handling a message may read more from the manager synchronously, which waits for the manager. The manager
-		 * reads the rest of a message it has begun and writes nothing to this worker meanwhile, so the rest of a
-		 * message that the link took only in part goes out first. */
-		if (!link_writer_send_partial(manager_lw, timestamp_monotonic() + options->active_timeout * 1000000LL)) {
-			return 0;
-		}
 		if (sscanf(line, "task %" SCNd64, &task_id) == 1) {
 			r = do_task(manager, task_id, time(0) + options->active_timeout);
 		} else if (sscanf(line, "connect-back %" SCNu64, &token) == 1) {
@@ -2207,6 +2209,7 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	link_tune(manager, LINK_TUNE_INTERACTIVE);
 
 	manager_lw = link_writer_create(manager);
+	manager_link = manager;
 	if (!manager_lw) {
 		fprintf(stderr, "vine_worker: cannot allocate memory for the manager connection\n");
 		link_close(manager);
