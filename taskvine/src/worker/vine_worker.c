@@ -1974,6 +1974,25 @@ static void check_libraries_ready(struct link *manager)
 static int wake_pipe[2] = {-1, -1};
 static struct link *wake_link = NULL;
 
+/* Close both ends of the wake pipe at exit. The write end is marked closed first, so a signal that arrives meanwhile
+ * fails its write instead of writing to a descriptor that was reused. */
+static void close_wake_pipe()
+{
+	int write_end = wake_pipe[1];
+	wake_pipe[1] = -1;
+	if (write_end >= 0) {
+		close(write_end);
+	}
+	/* The link owns the read end and closes it. */
+	if (wake_link) {
+		link_close(wake_link);
+		wake_link = NULL;
+	} else if (wake_pipe[0] >= 0) {
+		close(wake_pipe[0]);
+	}
+	wake_pipe[0] = -1;
+}
+
 static void wake_main_loop(void)
 {
 	int saved_errno = errno;
@@ -2721,6 +2740,8 @@ int main(int argc, char *argv[])
 	vine_worker_serve_managers();
 
 	/* Clean up data structures to satisfy valgrind at process exit. */
+
+	close_wake_pipe();
 
 	vine_workspace_delete(workspace);
 	workspace = 0;
