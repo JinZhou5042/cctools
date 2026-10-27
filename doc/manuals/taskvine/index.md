@@ -2872,13 +2872,19 @@ progress within X, and the manager removes a worker that makes no progress for T
 link, every file sent to it, and every transfer of the manager's data port fails after T without data moving, however
 large the data, and a worker that sends nothing gets a keepalive check after T/2 and is removed when it has not answered
 for T. A worker with a response time judges the manager, its peers, its libraries, and its downloads by the same T.
+A worker that declares its own response time also opens a second connection to the manager's port, its probe link,
+set up as the first one is (TLS and password), which carries only the keepalive checks and their answers. A check
+there never waits behind tasks or files queued for the worker, and the worker answers it within a round of its main
+loop, so a worker on a busy or slow link is not removed while it takes data, and a stopped worker is removed within T
+of its first unanswered check.
 These guarantees have these limits:
 
 - Operations keep their own timeouts as outer limits, so a slow transfer that keeps making progress lasts as long as
   its data takes.
 - The TLS handshake and the password check of a new connection run on the manager's thread and may hold it for up to
   T, or `short-timeout` without a response time.
-- The network must drain the buffers on the path within X/2, or a keepalive check waiting behind them arrives late.
+- For a worker without a probe link (one that declares no response time of its own), the network must drain the
+  buffers on the path within X/2, or a keepalive check waiting behind them arrives late.
 
 === "Python"
     ```python
