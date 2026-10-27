@@ -175,23 +175,17 @@ round of its main loop and answers in the round that reads it. Losing the probe 
 same removal as the control link. The control link keeps its own judgment of a queue that makes no progress
 (link_made_no_progress()). A worker that declares no X opens no probe link, and its checks stay on the control link.
 
-The timeout on the probe link, from Proposition 15 of the theory (timeout/theory.md, section 6.1) with tolerance k = 1:
-
-	T = X^_W + 4 d + epsilon_M + 2 J_M,  X^_W = ((R_W + 3) L_W + 2 theta_W) / rho_W  (Lemma NF(c)).
-
-- R_W = ceil(p_W / eta) = 1: nothing lies ahead of a check, since the manager sends the next check only after the
-  answer, so the check itself is the only piece the worker reads, p_W = 1.
-- The "+ 3" of Lemma NF(c) is R_W + 1 rounds to read the check and answer it in that round, plus 2 rounds when the
-  answer finds the link toward the manager full. The answer is about 100 bytes on a link that holds nothing else, so
-  it is written in the round that reads the check, and the reply phase is empty: X^_W = (R_W + 1) L_W = 2 L_W.
-- L_W <= X: X is the round bound that the worker declares (it reports every longer round), measured in wall-clock
-  time, so theta_W and rho_W are inside it, and so are the two crossings of the path, 2 d.
-- epsilon_M = 0 and J_M does not enter: silence is timed from the moment the check was handed to the link, and
-  before declaring, the manager reads what reached the probe link (probe_worker()), so an answer that waited for the
-  manager, during a long step of its own or behind other links, counts.
-So T = (R_W + 1) X = 2X on the probe link. Decision (2026-10-26): keep T = 2X, which on the probe link is the
-derived floor of Proposition 15 instead of a heuristic, because no larger term remains; on the control link the
-same 2X stays a heuristic, since there R_W counts the pieces of everything queued ahead of a check.
+The timeout on the probe link (timeout/theory.md, section 6.1). The X that a worker declares bounds the wall-clock
+time of one of its rounds plus one crossing of the path. Nothing lies ahead of a check, since the manager sends the
+next one only after the answer, so the worker reads it in the round in progress when it arrives or in the next, and
+answers in the round that reads it, on a link that holds nothing else. The answer therefore reaches the manager
+within two rounds and two crossings of the check's handover: at most 2X. The check is written when it is handed
+over, and the manager reads the probe link before it declares (probe_worker()), so neither its notice delay nor its
+service interval enters. T = 2X is the accuracy floor on the probe link (tolerance 1) while the worker keeps its
+declared X. The worker's blocking reads of put bodies can break that bound, which is why a moving control queue
+suspends the judgment (probe_worker()). A stopped worker is removed within about 1.5 T with the interval T/2, and
+later while its control queue still moves. On the control link the same 2X is a heuristic, since everything queued
+ahead of a check delays its answer.
 */
 #define VINE_PROBE_ROUNDS 2
 
