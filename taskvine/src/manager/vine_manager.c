@@ -182,9 +182,9 @@ answers in the round that reads it, on a link that holds nothing else. The answe
 within two rounds and two crossings of the check's handover: at most 2X. The check is written when it is handed
 over, and the manager reads the probe link before it declares (probe_worker()), so neither its notice delay nor its
 service interval enters. T = 2X is the accuracy floor on the probe link (tolerance 1) while the worker keeps its
-declared X. The worker's blocking reads of put bodies can break that bound, which is why a moving control queue
-suspends the judgment (probe_worker()). A stopped worker is removed within about 1.5 T with the interval T/2, and
-later while its control queue still moves. On the control link the same 2X is a heuristic, since everything queued
+declared X. The worker's blocking reads of put bodies can break that bound, which is why evidence on the control link
+restarts the judgment (probe_worker()). A stopped worker is removed within about 1.5 T with the interval T/2, and
+later while its control link still moves data. On the control link the same 2X is a heuristic, since everything queued
 ahead of a check delays its answer.
 */
 #define VINE_PROBE_ROUNDS 2
@@ -233,10 +233,17 @@ unanswered for T. Unless set, the interval and the timeout are T/2 and T of the 
 worker has failed.
 
 A worker reads the body of a put, and the lines of a task, with blocking reads (the exceptions above ROUND_BUDGET in
-vine_worker.c), so while it reads a large file from its control link it answers no check. Bytes that it takes from
-its control link are evidence too, so a worker whose control queue moved within T is not judged by the probe link,
-and a queue that stops moving is judged by link_made_no_progress() after the same T. One judgment remains per worker:
-no evidence on either link for T.
+vine_worker.c), so while it reads a large file from its control link it answers no check. The probe link and the
+control link are links of the same worker, and evidence on either ends the wait (the timeout detector of
+timeout/theory.md, Definition 1.20: noticed evidence restarts the judgment). The evidence is the answer on the probe
+link, a byte read from the control link, and a write of the control queue (link_writer_last_progress()). A worker is
+removed when none of them happened for T after the check was handed over: the judgment starts at the latest of the
+check and the last evidence. Suspending the judgment only while the control queue held data was wrong: the queue
+empties while the last of a put is still in both kernel buffers, and the check then dated from before the put, so a
+worker whose put took longer than T was removed at the next check while it read the rest. What remains after the
+manager's last write is what the kernel buffers hold, which a healthy worker reads, finishing its round and answering
+within T at the rates the deployment assumes. A queue that stops moving is still judged by link_made_no_progress()
+after the same T.
 */
 static int probe_worker(struct vine_manager *q, struct vine_worker_info *w)
 {
@@ -269,10 +276,11 @@ static int probe_worker(struct vine_manager *q, struct vine_worker_info *w)
 		if (!read_probe_link(q, w)) {
 			return 0;
 		}
-		if (w->probe_sent && !link_writer_empty(w->lw) && !link_made_no_progress(q, w->lw, w->link, timeout)) {
+		if (!w->probe_sent) {
 			return 1;
 		}
-		if (w->probe_sent) {
+		timestamp_t evidence = MAX(w->probe_sent, MAX(link_writer_last_progress(w->lw), link_last_read(w->link)));
+		if (now - evidence >= (timestamp_t)timeout * 1000000) {
 			debug(D_VINE, "Removing worker %s (%s): hasn't answered a check on its probe link for more than %d s", w->hostname, w->addrport, timeout);
 			return 0;
 		}
