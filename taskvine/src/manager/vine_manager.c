@@ -76,7 +76,6 @@ See the file COPYING for details.
 #include <float.h>
 #include <math.h>
 #ifdef __GLIBC__
-#include <malloc.h>
 #endif
 #include <stdarg.h>
 #include <stddef.h>
@@ -4261,9 +4260,6 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->task_info_list = list_create();
 
 	q->time_last_compaction = 0;
-	q->compacted_since_trim = 0;
-	q->tables_peak_since_trim = 0;
-	q->tables_held_last = 0;
 
 	q->time_last_wait = 0;
 	q->time_last_log_stats = 0;
@@ -5441,51 +5437,31 @@ struct vine_task *find_task_to_return(struct vine_manager *q, const char *tag, i
 	return NULL;
 }
 
-/* Removed table entries that the compactions must free before the heap is trimmed. Below it, a trim would return too
- * little to pay for its pass over the free chunks. */
-#define VINE_TRIM_MIN_ENTRIES 65536
-
-/* Free the removed entries of the tables that grow with tasks, files, and transfers, and return freed memory to the
- * operating system once a large part of the tables was removed. dttools tables keep removed entries until a later
- * insert or walk compacts them, and after an application deletes most of its tasks and files no insert may come, so
- * those entries pinned the freed pages around them and the process kept its peak memory.
+/* Free the removed entries of the tables that grow with tasks, files, and transfers, so the memory around them can be
+ * reused. dttools tables keep removed entries until a later insert or walk compacts them, and after an application
+ * deletes most of its tasks and files no insert may come, so those entries pinned the freed memory around them.
  * A compaction must not run while a walk of its table is in progress, or while a caller holds a key pointer of a
  * removed entry. This runs at the top of a step of vine_wait(), outside every walk and every operation of the manager,
  * and the application cannot be inside a walk of a manager table. Compaction costs O(removed entries), amortized O(1)
- * per removal. The heap is trimmed only once the tasks and files held fell to half of their peak since the last trim
- * and stopped falling: a run that only replaces its tasks reuses its free memory, and trimming it would make the
- * manager fault the same pages in again, and a deletion that takes several seconds is trimmed once, at its end. */
+ * per removal, plus a bounded part of each resize in progress.
+ * The heap is not trimmed: malloc_trim() walks every free chunk of every arena under the arena's lock, about 10-30 ms
+ * per million chunks and over a second for an 8 GB heap, and from another thread it holds the manager's allocations for
+ * as long. Freed memory stays with the allocator, which reuses it for later tasks and files. */
 static void compact_tables(struct vine_manager *q)
 {
-	int64_t freed = 0;
-	freed += itable_compact(q->tasks);
-	freed += itable_compact(q->running_table);
-	freed += hash_table_compact(q->file_table);
-	freed += hash_table_compact(q->file_worker_table);
-	freed += hash_table_compact(q->current_transfer_table);
+	itable_compact(q->tasks);
+	itable_compact(q->running_table);
+	hash_table_compact(q->file_table);
+	hash_table_compact(q->file_worker_table);
+	hash_table_compact(q->current_transfer_table);
 
 	char *key;
 	struct vine_worker_info *w;
 	int iteration;
 	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
 	{
-		freed += hash_table_compact(w->current_files);
-		freed += itable_compact(w->current_tasks);
-	}
-
-	q->compacted_since_trim += freed;
-	int64_t held = itable_size(q->tasks) + hash_table_size(q->file_table);
-	q->tables_peak_since_trim = MAX(q->tables_peak_since_trim, held);
-	int shrinking = held < q->tables_held_last;
-	q->tables_held_last = held;
-	if (q->compacted_since_trim >= VINE_TRIM_MIN_ENTRIES && held <= q->tables_peak_since_trim / 2 && !shrinking) {
-#ifdef __GLIBC__
-		timestamp_t start = timestamp_get();
-		malloc_trim(0);
-		debug(D_VINE, "freed %" PRId64 " removed table entries and trimmed the heap in %.3f s", q->compacted_since_trim, (timestamp_get() - start) / 1e6);
-#endif
-		q->compacted_since_trim = 0;
-		q->tables_peak_since_trim = held;
+		hash_table_compact(w->current_files);
+		itable_compact(w->current_tasks);
 	}
 }
 
