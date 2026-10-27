@@ -185,7 +185,7 @@ struct transfer_job {
 	int shareable;		   /* Set for a receive of a file large enough to copy, counted in shareable_receives unless copied. */
 	struct copy_request *copy; /* The copy that this receive waits for, while it waits. */
 	char *shared_path;	   /* Own the path of a complete copy in the shared directory until publication links it. */
-	int missing;		   /* Set for a request whose vault entry did not exist when it was opened. */
+	char *lost_copy;	   /* Own the shared-directory copy that a request found gone, confirmed by its executor. */
 };
 
 /* A request sent to a Worker over its control connection for the data of a small file. The Worker answers each request
@@ -236,6 +236,7 @@ static void job_delete(struct transfer_job *job)
 	free(job->ip);
 	free(job->path);
 	free(job->shared_path);
+	free(job->lost_copy);
 	free(job->transfer_id);
 	if (job->spilled) {
 		link_writer_shared_release(job->spilled);
@@ -474,6 +475,26 @@ static int write_data(struct transfer_job *job)
 	return valid;
 }
 
+/* Return the copy in the shared directory that the vault entry at path links to, if that copy is gone, or NULL. An
+ * executor calls it, because the copy lives on a shared file system whose stat() may block for as long as its server
+ * does not answer. The Manager thread then only compares the path with the entry's copy, so a copy published again
+ * under the same cache name, which has a path of its own, is never taken for the lost one. */
+static char *find_lost_copy(const char *path)
+{
+	char target[PATH_MAX];
+	ssize_t length = readlink(path, target, sizeof(target) - 1);
+	if (length <= 0) {
+		/* The entry is not a link to a copy, or it was removed meanwhile. */
+		return NULL;
+	}
+	target[length] = 0;
+	struct stat info;
+	if (stat(target, &info) == 0 || (errno != ENOENT && errno != ESTALE)) {
+		return NULL;
+	}
+	return strdup(target);
+}
+
 /* Send a vault entry with the Worker transfer protocol (vine_transfer_send.c), as a Worker sends a cached file, so a
  * declared file is sent as the file it links to. An entry that cannot be sent is reported as an error, which fails the
  * receiver. The writer fails when no data moves for the transfer timeout, however large the entry. */
@@ -486,7 +507,7 @@ static int send_entry(struct transfer_job *job, const char *path)
 	int result = vine_transfer_queue_item(lw, path, job->name, VINE_TRANSFER_MODE_ANY);
 	if (result == ENOENT || result == ESTALE) {
 		/* The entry itself is gone, such as a copy deleted from the shared directory outside the vault. */
-		job->missing = 1;
+		job->lost_copy = find_lost_copy(path);
 	}
 	if (result > 0) {
 		vine_transfer_queue_error(lw, job->name, result);
@@ -1094,15 +1115,15 @@ static void finish_receive(struct vine_manager *manager, struct transfer_job *jo
 	}
 }
 
-/* A Worker asked for a vault entry that was gone. A copy in the shared directory, which others than the vault may
- * delete, is no longer a copy of the file: the entry is removed, so the Manager recreates the file for the tasks that
- * read it, and the receive's caller learns that the vault lost it. Other entries are the vault's own, and stay. */
-static void lose_entry(struct vine_manager *manager, const char *name)
+/* A Worker asked for a vault entry whose copy in the shared directory, which others than the vault may delete, its
+ * executor found gone (find_lost_copy()). The entry is no longer a copy of the file: it is removed, so the Manager
+ * recreates the file for the tasks that read it, and the receive's caller learns that the vault lost it. The Manager
+ * thread makes no system call on the shared directory here. Other entries are the vault's own, and stay. */
+static void lose_entry(struct vine_manager *manager, const char *name, const char *lost_copy)
 {
 	struct vine_manager_data_service *ds = manager->ds;
 	struct vault_entry *entry = hash_table_lookup(ds->vault_table, name);
-	struct stat info;
-	if (!entry || !entry->shared_path || stat(entry->shared_path, &info) == 0 || (errno != ENOENT && errno != ESTALE)) {
+	if (!entry || !entry->shared_path || strcmp(entry->shared_path, lost_copy)) {
 		return;
 	}
 	debug(D_NOTICE | D_VINE, "vault entry %s lost: its copy %s is gone", name, entry->shared_path);
@@ -1134,8 +1155,8 @@ void vine_manager_data_service_handle(struct vine_manager *manager)
 			finish_spill(ds, job);
 		} else if (job->file) {
 			finish_receive(manager, job);
-		} else if (job->missing && job->name) {
-			lose_entry(manager, job->name);
+		} else if (job->lost_copy && job->name) {
+			lose_entry(manager, job->name, job->lost_copy);
 		}
 		job_delete(job);
 	}
