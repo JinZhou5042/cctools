@@ -1981,9 +1981,8 @@ static void vine_graph_executor_update_progress_bar(struct vine_graph_executor *
 	progress_bar_set_part_total(e->progress_bar, e->recovery_part, e->manager->stats->tasks_recovery);
 }
 
-/* Free the removed entries of the tables that grow with nodes and files, so the memory of removed nodes can return to
- * the operating system when the Manager trims its heap in the wait that follows (see compact_tables() in
- * vine_manager.c). Without it, a table that only shrinks after a Graph is dropped keeps every removed entry. This runs
+/* Free the removed entries of the tables that grow with nodes and files, so the memory of removed nodes can be reused
+ * (see compact_tables() in vine_manager.c). Without it, a table that only shrinks after a Graph is dropped keeps every removed entry. This runs
  * between the steps of a wait, outside every walk of these tables, and costs amortized O(1) per removal. */
 static void vine_graph_executor_compact_tables(struct vine_graph_executor *e)
 {
