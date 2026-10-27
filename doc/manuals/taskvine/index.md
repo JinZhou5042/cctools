@@ -2875,8 +2875,9 @@ for T. A worker with a response time judges the manager, its peers, its librarie
 A worker that declares its own response time also opens a second connection to the manager's port, its probe link,
 set up as the first one is (TLS and password), which carries only the keepalive checks and their answers. A check
 there never waits behind tasks or files queued for the worker, and the worker answers it within a round of its main
-loop, so a worker on a busy or slow link is not removed while it takes data, and a stopped worker is removed within T
-of its first unanswered check.
+loop, also while it receives a large file or task on its first connection, which it reads in pieces as the data
+arrives. A worker on a busy or slow link is therefore not removed while it takes data, and a stopped worker is removed
+within T of its first unanswered check, however much the manager keeps sending it.
 These guarantees have these limits:
 
 - Operations keep their own timeouts as outer limits, so a slow transfer that keeps making progress lasts as long as
@@ -2885,13 +2886,6 @@ These guarantees have these limits:
   T, or `short-timeout` without a response time.
 - For a worker without a probe link (one that declares no response time of its own), the network must drain the
   buffers on the path within X/2, or a keepalive check waiting behind them arrives late.
-- A worker with a probe link answers no check while it reads a file or a task sent on its first connection. The
-  manager counts data written on that connection as evidence of the worker only beyond what the buffers on the path
-  can hold without the worker reading, B = the manager's send buffer plus twice its receive buffer, which stands in
-  for the worker's, so a stopped worker is removed in time however much the manager keeps sending it. The network
-  must therefore carry the last 2B bytes of a file to the worker within T. A worker or a proxy whose receive buffer
-  is larger than the manager's can delay the removal of a stopped worker; setting `TCP_WINDOW_SIZE` (or `-w` of the
-  worker) fixes both ends.
 
 === "Python"
     ```python

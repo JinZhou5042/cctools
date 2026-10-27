@@ -24,10 +24,6 @@ typedef enum {
 
 struct vine_transfer_pair;
 
-/* Samples of the control queue's written bytes that a worker with a probe link keeps, spaced at least T/16 apart, so
- * they reach back max(T, 16 passes of one second). */
-#define VINE_PROBE_SAMPLES 16
-
 struct vine_worker_info {
 	/* Type of connection: unknown, worker, status client. */
 	vine_worker_type_t type;
@@ -77,17 +73,6 @@ struct vine_worker_info {
 	struct link_writer *probe_lw;
 	timestamp_t probe_sent;
 	timestamp_t probe_answer;
-
-	/* Writes of the control queue as evidence for the probe judgment (see probe_worker() in vine_manager.c).
-	 * probe_samples holds the bytes the queue had written (link_writer_bytes_written()) at the times of recent
-	 * passes, newest at probe_sample_next - 1, and probe_slack is what the buffers on the control link can hold
-	 * without the worker reading: the manager's send buffer plus twice the receive buffer. */
-	struct vine_probe_sample {
-		timestamp_t time;
-		uint64_t bytes;
-	} probe_samples[VINE_PROBE_SAMPLES];
-	int probe_sample_next;
-	uint64_t probe_slack;
 
 	/* The worker id under which this connection waits in the manager's probe_rendezvous for its other half, or null:
 	 * a worker that declared X waits for its probe link, and a probe link that arrived first waits for its worker. */
