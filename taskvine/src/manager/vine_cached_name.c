@@ -101,6 +101,13 @@ information, that the file should not be cached. That is, generating a cachename
 worker side.
 */
 
+/* Seconds that curl may take to connect to the server of a URL, and to fetch its headers through every redirect. The
+ * declaration of a URL waits for them on the manager's thread, so a server that accepts the connection and never
+ * answers would otherwise hold the manager forever. A URL whose headers do not arrive in time gets a cache name from
+ * the URL alone, as one whose server cannot be reached does. */
+#define VINE_URL_HEADERS_CONNECT_TIMEOUT 5
+#define VINE_URL_HEADERS_TIMEOUT 15
+
 typedef enum {
 	VINE_FOUND_NONE,
 	VINE_FOUND_LAST_MODIFIED,
@@ -143,7 +150,7 @@ static vine_url_cache_t get_url_properties(const char *url, char *tag)
 
 	/* Otherwise, proceed to use curl to get the headers. */
 
-	char *command = string_format("curl -IL --verbose --stderr /dev/stdout \"%s\"", url);
+	char *command = string_format("curl -IL --connect-timeout %d --max-time %d --verbose --stderr /dev/stdout \"%s\"", VINE_URL_HEADERS_CONNECT_TIMEOUT, VINE_URL_HEADERS_TIMEOUT, url);
 
 	FILE *stream = popen(command, "r");
 
