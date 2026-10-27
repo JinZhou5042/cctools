@@ -196,4 +196,12 @@ it reads from the peer.
 */
 timestamp_t link_writer_last_progress(struct link_writer *lw);
 
+/** Report how many bytes the link took from the writer since it was created. The count never decreases. A write that
+the local kernel accepts proves nothing about the peer by itself: the owner compares the bytes written since its last
+evidence of the peer with the bytes the buffers on the path can hold.
+@param lw The writer.
+@return The bytes written so far.
+*/
+uint64_t link_writer_bytes_written(struct link_writer *lw);
+
 #endif

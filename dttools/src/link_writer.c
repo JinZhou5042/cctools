@@ -63,6 +63,7 @@ struct link_writer {
 	struct link_writer_entry *made_tail; /* Last entry pushed by the running producer, or NULL. */
 	int producing;			    /* A producer runs, so pushes go to the made list, even into a sealed writer. */
 	timestamp_t last_progress;	    /* When the writer last wrote a byte, or became non-empty. */
+	uint64_t bytes_written;		    /* Bytes the link took from the writer since it was created. */
 	int failed;			    /* A write, file read, or producer failed, so the writer drops everything. */
 	int sealed;			    /* The writer refuses new data, and writes what it holds. */
 	char *spare;			    /* Bytes of the last data entry written, kept for the next one, or NULL. */
@@ -652,6 +653,7 @@ static ssize_t write_head(struct link_writer *lw, time_t stoptime, int *full)
 	if (n > 0) {
 		*full = (size_t)n < offered;
 		e->offset += n;
+		lw->bytes_written += n;
 		lw->last_progress = timestamp_monotonic();
 		if (entry_done(e)) {
 			pop_head(lw);
@@ -745,4 +747,9 @@ int link_writer_failed(struct link_writer *lw)
 timestamp_t link_writer_last_progress(struct link_writer *lw)
 {
 	return lw->last_progress;
+}
+
+uint64_t link_writer_bytes_written(struct link_writer *lw)
+{
+	return lw->bytes_written;
 }
