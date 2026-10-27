@@ -14,6 +14,7 @@ See the file COPYING for details.
 #include "vine_file.h"
 #include "vine_file_replica.h"
 #include "vine_file_replica_table.h"
+#include "vine_manager_catalog.h"
 #include "vine_manager_factory.h"
 #include "vine_manager_get.h"
 #include "vine_manager_put.h"
@@ -1552,67 +1553,60 @@ int vine_manager_transfer_time(struct vine_manager *q, struct vine_worker_info *
 	return timeout;
 }
 
-/* Read from the catalog if fetch_factory is enabled. */
-
-static void update_read_catalog(struct vine_manager *q)
+/* Apply the answer of the last factory query that the catalog updater completed, if one came. */
+static void apply_factory_answer(struct vine_manager *q)
 {
-	time_t stoptime = time(0) + 5; // Short timeout for query
-
-	if (q->fetch_factory) {
-		vine_manager_factory_update_all(q, stoptime);
+	struct list *names, *records;
+	if (q->catalog && vine_manager_catalog_take_factories(q->catalog, &names, &records)) {
+		vine_manager_factory_apply(q, names, records);
 	}
 }
 
 /*
-Send an update to the catalog describing the state of this manager.
+Send an update to the catalog describing the state of this manager, and query it for the factories that feed it, as
+needed. The manager builds the update and hands it to its catalog updater, whose thread looks up the catalog servers,
+connects, sends, and queries, so the manager never waits for a server, a name lookup, or a fork of its process.
 */
-
-static void update_write_catalog(struct vine_manager *q)
-{
-	// Only write if we have a name.
-	if (!q->name)
-		return;
-
-	// Generate the manager status in an jx, and print it to a buffer.
-
-	struct jx *j = manager_to_jx(q);
-	char *str = jx_print_string(j);
-
-	// Send the buffer.
-	debug(D_VINE, "Advertising manager status to the catalog server(s) at %s ...", q->catalog_hosts);
-	if (!catalog_query_send_update(q->catalog_hosts, str, CATALOG_UPDATE_BACKGROUND | CATALOG_UPDATE_CONDITIONAL)) {
-
-		// If the send failed b/c the buffer is too big, send the lean version instead.
-		struct jx *lj = manager_lean_to_jx(q);
-		char *lstr = jx_print_string(lj);
-		catalog_query_send_update(q->catalog_hosts, lstr, CATALOG_UPDATE_BACKGROUND);
-		free(lstr);
-		jx_delete(lj);
-	}
-
-	// Clean up.
-	free(str);
-	jx_delete(j);
-}
-
-/* Send and receive updates from the catalog server as needed. */
-
 static void update_catalog(struct vine_manager *q, int force_update)
 {
+	apply_factory_answer(q);
+
 	// Only update every last_update_time seconds.
 	if (!force_update && (time(0) - q->catalog_last_update_time) < q->update_interval)
+		return;
+
+	q->catalog_last_update_time = time(0);
+
+	// Only write if we have a name.
+	if (!q->name)
 		return;
 
 	// If host and port are not set, pick defaults.
 	if (!q->catalog_hosts)
 		q->catalog_hosts = xxstrdup(CATALOG_HOST);
 
-	// Update the catalog.
-	update_write_catalog(q);
+	if (!q->catalog) {
+		q->catalog = vine_manager_catalog_create();
+		if (!q->catalog) {
+			return;
+		}
+	}
 
-	update_read_catalog(q);
+	// Generate the manager status, and the lean version sent instead when the first is too big.
+	struct jx *j = manager_to_jx(q);
+	struct jx *lj = manager_lean_to_jx(q);
+	char *str = jx_print_string(j);
+	char *lstr = jx_print_string(lj);
+	jx_delete(j);
+	jx_delete(lj);
 
-	q->catalog_last_update_time = time(0);
+	char *factory_filter = 0;
+	struct list *factory_names = 0;
+	if (q->fetch_factory) {
+		factory_filter = vine_manager_factory_query(q, &factory_names);
+	}
+
+	vine_manager_catalog_post(q->catalog, q->catalog_hosts, str, lstr, factory_filter, factory_names);
 }
 
 void vine_update_catalog(struct vine_manager *m)
@@ -3043,16 +3037,13 @@ static struct jx *manager_to_jx(struct vine_manager *q)
 	vine_get_stats(q, &info);
 
 	// Add special properties expected by the catalog server
-	char owner[USERNAME_MAX];
-	username_get(owner);
-
 	jx_insert_string(j, "type", "vine_manager");
 	if (q->name)
 		jx_insert_string(j, "project", q->name);
 	jx_insert_integer(j, "starttime",
 			(q->stats->time_when_started / 1000000)); // catalog expects time_t not timestamp_t
 	jx_insert_string(j, "working_dir", q->workingdir);
-	jx_insert_string(j, "owner", owner);
+	jx_insert_string(j, "owner", q->owner);
 	jx_insert_string(j, "version", CCTOOLS_VERSION);
 	jx_insert_integer(j, "port", vine_port(q));
 	jx_insert_integer(j, "priority", q->priority);
@@ -3209,9 +3200,7 @@ static struct jx *manager_lean_to_jx(struct vine_manager *q)
 #endif
 	jx_insert_boolean(j, "ssl", use_ssl);
 
-	char owner[USERNAME_MAX];
-	username_get(owner);
-	jx_insert_string(j, "owner", owner);
+	jx_insert_string(j, "owner", q->owner);
 
 	if (q->name)
 		jx_insert_string(j, "project", q->name);
@@ -5409,6 +5398,13 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	round_window_reset(&q->round_summary);
 
 	q->catalog_hosts = 0;
+	q->catalog = 0;
+
+	/* The owner goes into every status report and catalog update. Looking it up may ask a name service, so it is
+	 * looked up once. */
+	char owner[USERNAME_MAX];
+	username_get(owner);
+	q->owner = xxstrdup(owner);
 
 	/* Negative keepalive settings mean the defaults, which follow T while the timeout framework is on. */
 	q->keepalive_interval = -1;
@@ -5785,6 +5781,11 @@ void vine_delete(struct vine_manager *q)
 	if (q->name) {
 		update_catalog(q, 1);
 	}
+	/* The updater sends the last update in its own thread, which may outlive the manager if a catalog server does not
+	 * take it within the short timeout. */
+	vine_manager_catalog_delete(q->catalog, q->short_timeout);
+	q->catalog = 0;
+	free(q->owner);
 
 	/* we call this function here before any of the structures are freed. */
 	vine_disable_monitoring(q);

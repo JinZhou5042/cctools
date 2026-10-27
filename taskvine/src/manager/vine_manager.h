@@ -87,6 +87,8 @@ struct vine_manager {
 	int   port;          /* Port number on which this manager is listening for connections. */
 	int   priority;      /* Priority of this manager relative to other managers with the same name. */
 	char *catalog_hosts; /* List of catalogs to which this manager reports. */
+	struct vine_manager_catalog *catalog; /* Thread that sends catalog updates and factory queries, once one is sent. */
+	char *owner;         /* Name of the user running the manager, looked up once. */
 	char *manager_preferred_connection; /* Recommended method for connecting to this manager.  @ref vine_set_manager_preferred_connection */
 	char  workingdir[PATH_MAX];         /* Current working dir, for reporting to the catalog server. */
 	char *uuid;          /* Unique identifier of manager when reported to catalog. */

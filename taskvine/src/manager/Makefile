@@ -7,6 +7,7 @@ SOURCES = \
 	vine_manager_get.c \
 	vine_manager_put.c \
 	vine_manager_factory.c \
+	vine_manager_catalog.c \
 	vine_manager_summarize.c \
 	vine_schedule.c \
 	vine_worker_info.c \
