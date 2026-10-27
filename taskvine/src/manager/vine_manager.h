@@ -29,6 +29,7 @@ typedef enum {
 	VINE_APP_FAILURE,
 	VINE_MGR_FAILURE,
 	VINE_END_OF_LIST,
+	VINE_LINK_MOVED, /* The connection became the probe link of another worker, and its own entry was deleted. */
 } vine_result_code_t;
 
 /*
@@ -40,7 +41,8 @@ typedef enum {
 	VINE_MSG_PROCESSED = 0,        /* Message was processed and connection is still good. */
 	VINE_MSG_PROCESSED_DISCONNECT, /* Message was processed and disconnect now expected. */
 	VINE_MSG_NOT_PROCESSED,        /* Message was not processed, waiting to be consumed. */
-	VINE_MSG_FAILURE               /* Message not received, connection failure. */
+	VINE_MSG_FAILURE,              /* Message not received, connection failure. */
+	VINE_MSG_PROCESSED_MOVED       /* Message was processed and the connection now belongs to another worker. */
 } vine_msg_code_t;
 
 /* The current resource monitoring configuration of the manager. */
@@ -147,6 +149,7 @@ struct vine_manager {
 	/* Primary data structures for tracking worker state. */
 
 	struct hash_table *worker_table;     /* Maps link -> vine_worker_info */
+	struct hash_table *probe_rendezvous; /* Maps a worker id to the half of a probe link pair that arrived first, see "Probe link" in vine_manager.c. */
 	struct list *zombie_workers;         /* Workers marked for removal. They are not in worker_table, and are removed in disconnect_failed_workers. */
 	struct hash_table *worker_blocklist; /* Maps hostname -> vine_blocklist_info */
 	struct hash_table *factory_table;    /* Maps factory_name -> vine_factory_info */

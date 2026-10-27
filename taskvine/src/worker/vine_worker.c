@@ -104,6 +104,10 @@ static struct list *procs_waiting = NULL;
 static struct link_writer *manager_lw = NULL;
 static struct link *manager_link = NULL; /* The link that manager_lw writes to. */
 
+/* The probe link to the manager and its writer, open while the worker declares X (see open_probe_link()), else null. */
+static struct link *probe_link = NULL;
+static struct link_writer *probe_lw = NULL;
+
 /* Processes that do_kill() signalled and dropped before they exited, indexed by pid. Their tasks are gone, so only
  * their exit status remains to be collected, which the main loop does without waiting and a disconnect does waiting. */
 static struct itable *procs_killed = NULL;
@@ -686,14 +690,24 @@ With the timeout framework on, each answer to a check also reports the rounds si
 sees the worker's response time X as it is: info round-stats <rounds> <longest round> <its slowest step> <that step>
 <window>, durations in microseconds. A manager that does not know the field ignores it.
 */
-static void send_round_stats(void)
+static void send_round_stats(struct link_writer *lw)
 {
 	if (options->response_timeout <= 0) {
 		return;
 	}
 	struct round_window *w = &round_report;
-	send_message("info round-stats %" PRId64 " %" PRIu64 " %s %" PRIu64 " %" PRIu64 "\n", w->rounds, (uint64_t)w->longest, w->step, (uint64_t)w->step_time, (uint64_t)round_window_length(w));
+	char line[VINE_LINE_MAX];
+	int length = snprintf(line, sizeof(line), "info round-stats %" PRId64 " %" PRIu64 " %s %" PRIu64 " %" PRIu64 "\n", w->rounds, (uint64_t)w->longest, w->step, (uint64_t)w->step_time, (uint64_t)round_window_length(w));
 	round_window_reset(w);
+	if (length <= 0 || length >= (int)sizeof(line)) {
+		return;
+	}
+	if (lw == probe_lw) {
+		debug(D_VINE, "tx probe: %.*s", length - 1, line);
+		link_writer_push(lw, line, length);
+	} else {
+		send_message_data(line, length, NULL, 0);
+	}
 }
 
 static int send_keepalive(struct link *manager, int force_resources)
@@ -1521,7 +1535,19 @@ static int do_release()
 	return 0;
 }
 
-/* Close the link to the manager and drop what its queue still holds. */
+/* Close the probe link and drop what its queue still holds. */
+
+static void close_probe_link(void)
+{
+	link_writer_delete(probe_lw);
+	probe_lw = NULL;
+	if (probe_link) {
+		link_close(probe_link);
+	}
+	probe_link = NULL;
+}
+
+/* Close the link to the manager and drop what its queue still holds, and the probe link with it. */
 
 static void close_manager_link(struct link *manager)
 {
@@ -1529,6 +1555,45 @@ static void close_manager_link(struct link *manager)
 	manager_lw = NULL;
 	manager_link = NULL;
 	link_close(manager);
+	close_probe_link();
+}
+
+/* The most lines that one round reads from the probe link. The manager sends one check at a time. */
+#define PROBE_LINES 8
+
+/*
+Answer the manager's checks on the probe link in this round: info round-stats (with the framework on) and alive go out
+on the probe link at once, and the resource update that a check on the control link also brings goes on the control
+link. Lines are read only when whole in the buffer, so the round never waits for the manager. A probe link that fails
+or carries anything else is closed, and the worker goes on: the manager judges the loss of its half, and the control
+link the rest.
+*/
+static void serve_probe_link(struct link *manager, struct budget *round)
+{
+	int lines = 0;
+	while (lines < PROBE_LINES && link_buffer_has_line(probe_link) == 1) {
+		char line[VINE_LINE_MAX];
+		if (link_readline(probe_link, line, sizeof(line), LINK_NOWAIT) <= 0) {
+			debug(D_VINE, "the probe link to the manager closed");
+			close_probe_link();
+			return;
+		}
+		lines++;
+		debug(D_VINE, "rx probe: %s", line);
+		if (strcmp(line, "check")) {
+			debug(D_NOTICE, "unexpected message on the probe link to the manager: %s", line);
+			close_probe_link();
+			return;
+		}
+		send_round_stats(probe_lw);
+		debug(D_VINE, "tx probe: alive");
+		link_writer_push(probe_lw, "alive\n", 6);
+		send_resource_update(manager);
+	}
+	if (!link_writer_empty(probe_lw) && !link_writer_send_async(probe_lw, round->end)) {
+		debug(D_VINE, "failed to answer on the probe link to the manager");
+		close_probe_link();
+	}
 }
 
 /* Handle an unexpected disconnection by the current manager, and clean up everything. */
@@ -1656,7 +1721,7 @@ static int handle_manager(struct link *manager)
 			abort_flag = 1;
 			r = 1;
 		} else if (!strncmp(line, "check", 6)) {
-			send_round_stats();
+			send_round_stats(manager_lw);
 			r = send_keepalive(manager, 0);
 		} else if (!strncmp(line, "auth", 4)) {
 			fprintf(stderr, "vine_worker: this manager requires a password. (use the -P option)\n");
@@ -2162,11 +2227,17 @@ static void vine_worker_serve_manager(struct link *manager)
 		/* Queued messages also wait for the manager to make room for them, and calls queued to libraries for room in
 		 * their pipes. */
 		int manager_events = LINK_READ | (link_writer_empty(manager_lw) ? 0 : LINK_WRITE);
-		struct link_info waits[2 + vine_process_libraries_sending()];
+		struct link_info waits[3 + vine_process_libraries_sending()];
 		int nwaits = 0;
 		waits[nwaits++] = (struct link_info){manager, manager_events, 0};
 		if (wake_link) {
 			waits[nwaits++] = (struct link_info){wake_link, LINK_READ, 0};
+		}
+		/* The probe link is read in every round that it has input. */
+		int probe_index = -1;
+		if (probe_link) {
+			probe_index = nwaits;
+			waits[nwaits++] = (struct link_info){probe_link, LINK_READ | (link_writer_empty(probe_lw) ? 0 : LINK_WRITE), 0};
 		}
 		vine_process_libraries_poll(waits + nwaits);
 		nwaits += vine_process_libraries_sending();
@@ -2181,6 +2252,12 @@ static void vine_worker_serve_manager(struct link *manager)
 		budget_start(&round, ROUND_BUDGET);
 		struct round_timer timer;
 		round_timer_start(&timer);
+
+		/* Checks first: an answer never waits behind the manager's messages or the round's other work. */
+		if (probe_link && ((probe_index >= 0 && ready > 0 && waits[probe_index].revents) || !link_buffer_empty(probe_link) || !link_writer_empty(probe_lw))) {
+			serve_probe_link(manager, &round);
+		}
+		round_timer_step(&timer, "probe");
 
 		/* Handle the messages already in the link's buffer until the budget expires, as the manager does, so that a
 		 * long task, such as one with thousands of inputs, is read at once rather than one line per round. A message
@@ -2327,6 +2404,61 @@ static void vine_worker_serve_manager(struct link *manager)
 	}
 }
 
+/*
+Open the probe link of a worker that declares its response time X (see "Probe link" in vine_manager.c): a second
+connection to the manager's port, set up as the control link is (TLS, password), whose first line names this worker,
+probe <worker-id>. It carries only the manager's checks and the answers to them, so a check never waits behind other
+data, and the main loop reads it in every round. Setting it up waits like the control link's handshake, before the
+main loop starts. If it cannot be opened, the checks stay on the control link.
+*/
+static void open_probe_link(int port, const char *host, int use_ssl)
+{
+	struct link *link = link_connect(current_manager_address->addr, port, options->idle_stoptime);
+	if (!link) {
+		debug(D_NOTICE, "could not open the probe link to %s:%d: %s; checks stay on the control link", current_manager_address->addr, port, strerror(errno));
+		return;
+	}
+	link_set_idle_timeout(link, vine_worker_options_timeout(options, 0));
+
+	if (options->ssl_requested || use_ssl) {
+		const char *sni_host = options->tls_sni ? options->tls_sni : host;
+		if (link_ssl_wrap_connect(link, sni_host) < 1) {
+			debug(D_NOTICE, "could not set up ssl on the probe link; checks stay on the control link");
+			link_close(link);
+			return;
+		}
+	}
+
+	link_tune(link, LINK_TUNE_INTERACTIVE);
+
+	if (options->password && !link_auth_password(link, options->password, options->idle_stoptime)) {
+		debug(D_NOTICE, "the manager refused the password on the probe link; checks stay on the control link");
+		link_close(link);
+		return;
+	}
+
+	struct link_writer *lw = link_writer_create(link);
+	if (!lw) {
+		link_close(link);
+		return;
+	}
+	char line[VINE_LINE_MAX];
+	int length = snprintf(line, sizeof(line), "probe %s\n", worker_id);
+	debug(D_VINE, "tx probe: probe %s", worker_id);
+	link_writer_push(lw, line, length);
+	timestamp_t deadline = timestamp_monotonic() + (options->idle_stoptime > time(0) ? (timestamp_t)(options->idle_stoptime - time(0)) * 1000000 : 0);
+	if (!link_writer_send_sync(lw, deadline, 0)) {
+		debug(D_NOTICE, "could not identify the probe link to the manager; checks stay on the control link");
+		link_writer_delete(lw);
+		link_close(link);
+		return;
+	}
+
+	probe_link = link;
+	probe_lw = lw;
+	debug(D_VINE, "opened the probe link to the manager");
+}
+
 /* Attempt to connect, authenticate, and work with the manager at this specific host and port. */
 
 static int vine_worker_serve_manager_by_hostport(const char *host, int port, const char *verify_project, int use_ssl)
@@ -2434,6 +2566,10 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	measure_worker_resources();
 
 	report_worker_ready(manager);
+
+	if (options->response_timeout > 0) {
+		open_probe_link(port, host, use_ssl);
+	}
 
 	vine_worker_serve_manager(manager);
 

@@ -69,6 +69,11 @@ void vine_worker_delete(struct vine_worker_info *w)
 	link_writer_delete(w->lw);
 	if (w->link)
 		link_close(w->link);
+	link_writer_delete(w->probe_lw);
+	if (w->probe_link) {
+		link_close(w->probe_link);
+	}
+	free(w->probe_key);
 
 	free(w->hostname);
 	free(w->os);

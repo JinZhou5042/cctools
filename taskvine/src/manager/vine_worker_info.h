@@ -65,6 +65,19 @@ struct vine_worker_info {
 	 * worker failed when it makes no progress for T = 2X, see vine_manager_worker_timeout(). */
 	int  response_timeout;
 
+	/* The probe link of a worker that declared X (see "Probe link" in vine_manager.c): a second connection that
+	 * carries only the manager's checks and the worker's answers, so nothing lies ahead of a check. probe_lw writes
+	 * the checks. probe_sent is when the outstanding check was handed to probe_lw, zero when none is outstanding, and
+	 * probe_answer when the last answer arrived. All are null or zero while the worker has no probe link. */
+	struct link *probe_link;
+	struct link_writer *probe_lw;
+	timestamp_t probe_sent;
+	timestamp_t probe_answer;
+
+	/* The worker id under which this connection waits in the manager's probe_rendezvous for its other half, or null:
+	 * a worker that declared X waits for its probe link, and a probe link that arrived first waits for its worker. */
+	char *probe_key;
+
 	/* Scratch space of vine_schedule_task_to_worker(): bytes of the task's inputs cached on this worker, and whether it
 	 * holds the task's first input without a transfer source, valid only while schedule_stamp equals the manager's
 	 * schedule_stamp. */

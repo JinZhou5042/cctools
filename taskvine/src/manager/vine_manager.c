@@ -115,13 +115,15 @@ makes no progress for T = 2X (vine_manager_worker_timeout()):
 - while the manager waits on it, with data queued for it or in a synchronous exchange, it fails when neither a byte
   written to it nor a byte read from it moved for T (worker_made_no_progress(), the one judgment by T);
 - a worker that sends nothing gets a keepalive check after T/2 and is removed when it has not answered for T, unless
-  keepalive-interval and keepalive-timeout are set;
+  keepalive-interval and keepalive-timeout are set; a worker that declared X gets its checks on its probe link (see
+  "Probe link" below), where nothing waits ahead of them;
 - a data service transfer from or to it fails after T without progress, and a connect-back waits at most 2T;
 - the TLS handshake and the password check of a new connection share a deadline of T.
 
 Declared limits: the manager's own steps work under VINE_ROUND_BUDGET, except the synchronous exchanges listed above
-vine_manager_recv(), so a worker's X must exceed the longest of those as the worker sees them; and the network must
-drain the buffers on the path within X/2, or a keepalive check that waits behind them arrives late.
+vine_manager_recv(), so a worker's X must exceed the longest of those as the worker sees them; and, for a worker
+without a probe link, the network must drain the buffers on the path within X/2, or a keepalive check that waits
+behind them arrives late.
 */
 
 int vine_manager_worker_timeout(struct vine_manager *q, struct vine_worker_info *w, int otherwise)
@@ -153,6 +155,219 @@ static int link_made_no_progress(struct vine_manager *q, struct link_writer *lw,
 static int worker_made_no_progress(struct vine_manager *q, struct vine_worker_info *w)
 {
 	return link_made_no_progress(q, w->lw, w->link, vine_manager_worker_timeout(q, w, 0));
+}
+
+static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_info *w, char *line);
+static void unwatch_worker_queue(struct vine_manager *q, struct vine_worker_info *w);
+
+/*
+Probe link. With the timeout framework on, a check on the control link waits behind everything queued ahead of it:
+the manager's queue, both kernel buffers, task descriptions, and inline files of up to 64 KiB, so its answer may take
+as long as the worker takes to read all of that however healthy the worker is: Lemma NF(c) bounds it by about 345 s
+(about 815 s on buffers of 10 MB), and T = 2X there is a heuristic. A worker
+that declares X (--response-timeout) therefore opens a second connection to the manager's port once it has sent its
+greeting, authenticated as the control link is (TLS and password), whose first line is probe <worker-id>. The
+manager pairs it with the worker of that id in probe_rendezvous, whichever half arrives first, and from then on sends
+its keepalive checks there. The probe link carries only check from the manager and the answers info round-stats and
+alive from the worker; any other line is a protocol error that removes the worker. The manager sends a check only
+after the last one was answered, so at most one check lies ahead of a check, and the worker reads the link in every
+round of its main loop and answers in the round that reads it. Losing the probe link removes the worker, through the
+same removal as the control link. The control link keeps its own judgment of a queue that makes no progress
+(link_made_no_progress()). A worker that declares no X opens no probe link, and its checks stay on the control link.
+
+The timeout on the probe link, from Proposition 15 of the theory (timeout/theory.md, section 6.1) with tolerance k = 1:
+
+	T = X^_W + 4 d + epsilon_M + 2 J_M,  X^_W = ((R_W + 3) L_W + 2 theta_W) / rho_W  (Lemma NF(c)).
+
+- R_W = ceil(p_W / eta) = 1: nothing lies ahead of a check, since the manager sends the next check only after the
+  answer, so the check itself is the only piece the worker reads, p_W = 1.
+- The "+ 3" of Lemma NF(c) is R_W + 1 rounds to read the check and answer it in that round, plus 2 rounds when the
+  answer finds the link toward the manager full. The answer is about 100 bytes on a link that holds nothing else, so
+  it is written in the round that reads the check, and the reply phase is empty: X^_W = (R_W + 1) L_W = 2 L_W.
+- L_W <= X: X is the round bound that the worker declares (it reports every longer round), measured in wall-clock
+  time, so theta_W and rho_W are inside it, and so are the two crossings of the path, 2 d.
+- epsilon_M = 0 and J_M does not enter: silence is timed from the moment the check was handed to the link, and
+  before declaring, the manager reads what reached the probe link (probe_worker()), so an answer that waited for the
+  manager, during a long step of its own or behind other links, counts.
+So T = (R_W + 1) X = 2X on the probe link. Decision (2026-10-26): keep T = 2X, which on the probe link is the
+derived floor of Proposition 15 instead of a heuristic, because no larger term remains; on the control link the
+same 2X stays a heuristic, since there R_W counts the pieces of everything queued ahead of a check.
+*/
+#define VINE_PROBE_ROUNDS 2
+
+static int vine_manager_probe_timeout(struct vine_manager *q, struct vine_worker_info *w)
+{
+	int x = (w && w->response_timeout > 0) ? w->response_timeout : q->response_timeout;
+	return x > 0 ? VINE_PROBE_ROUNDS * x : 0;
+}
+
+/* The most lines that one read of a probe link handles. An answer is two lines, so more is left for the next step. */
+#define VINE_PROBE_LINES 8
+
+/*
+Read the whole lines that reached a worker's probe link without waiting. Returns zero when the link failed or carried
+something other than an answer, which the caller handles: this never removes the worker, so it is safe inside an
+iteration of worker_table.
+*/
+static int read_probe_link(struct vine_manager *q, struct vine_worker_info *w)
+{
+	char line[VINE_LINE_MAX];
+	int lines = 0;
+	while (lines < VINE_PROBE_LINES && link_buffer_has_line(w->probe_link) == 1) {
+		if (link_readline(w->probe_link, line, sizeof(line), LINK_NOWAIT) <= 0) {
+			debug(D_VINE, "worker %s (%s) lost its probe link", w->hostname, w->addrport);
+			return 0;
+		}
+		lines++;
+		debug(D_VINE, "rx probe from %s (%s): %s", w->hostname, w->addrport, line);
+		if (!strcmp(line, "alive")) {
+			w->probe_sent = 0;
+			w->probe_answer = timestamp_monotonic();
+		} else if (string_prefix_is(line, "info round-stats ")) {
+			handle_info(q, w, line);
+		} else {
+			debug(D_VINE, "worker %s (%s) sent an unexpected message on its probe link: %s", w->hostname, w->addrport, line);
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/*
+Keepalives on the probe link: a check after the interval without one outstanding, and removal when a check stays
+unanswered for T. Unless set, the interval and the timeout are T/2 and T of the probe link. Returns zero when the
+worker has failed.
+
+A worker reads the body of a put, and the lines of a task, with blocking reads (the exceptions above ROUND_BUDGET in
+vine_worker.c), so while it reads a large file from its control link it answers no check. Bytes that it takes from
+its control link are evidence too, so a worker whose control queue moved within T is not judged by the probe link,
+and a queue that stops moving is judged by link_made_no_progress() after the same T. One judgment remains per worker:
+no evidence on either link for T.
+*/
+static int probe_worker(struct vine_manager *q, struct vine_worker_info *w)
+{
+	int timeout = q->keepalive_timeout >= 0 ? q->keepalive_timeout : vine_manager_probe_timeout(q, w);
+	int interval = q->keepalive_interval >= 0 ? q->keepalive_interval : timeout / 2;
+	if (interval <= 0) {
+		return 1;
+	}
+	timestamp_t now = timestamp_monotonic();
+	if (!w->probe_sent) {
+		if (now - w->probe_answer >= (timestamp_t)interval * 1000000) {
+			link_writer_push(w->probe_lw, "check\n", 6);
+			if (!link_writer_send_async(w->probe_lw, 0)) {
+				debug(D_VINE, "Failed to send a check on the probe link of worker %s (%s).", w->hostname, w->addrport);
+				return 0;
+			}
+			debug(D_VINE, "Sent a check on the probe link of worker %s (%s)", w->hostname, w->addrport);
+			w->probe_sent = now;
+		}
+		return 1;
+	}
+	/* A check of a few bytes on an otherwise empty link leaves at once; this only finishes a write that a full
+	 * socket took in part. */
+	if (!link_writer_empty(w->probe_lw) && !link_writer_send_async(w->probe_lw, 0)) {
+		return 0;
+	}
+	if (now - w->probe_sent >= (timestamp_t)timeout * 1000000) {
+		/* An answer that reached the link but was not read yet counts, even after a long step of the manager's
+		 * own: read it before declaring. */
+		if (!read_probe_link(q, w)) {
+			return 0;
+		}
+		if (w->probe_sent && !link_writer_empty(w->lw) && !link_made_no_progress(q, w->lw, w->link, timeout)) {
+			return 1;
+		}
+		if (w->probe_sent) {
+			debug(D_VINE, "Removing worker %s (%s): hasn't answered a check on its probe link for more than %d s", w->hostname, w->addrport, timeout);
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/* Forget the probe link half that a connection left waiting under its worker id. */
+static void probe_unregister(struct vine_manager *q, struct vine_worker_info *w)
+{
+	if (!w->probe_key) {
+		return;
+	}
+	if (hash_table_lookup(q->probe_rendezvous, w->probe_key) == w) {
+		hash_table_remove(q->probe_rendezvous, w->probe_key);
+	}
+	free(w->probe_key);
+	w->probe_key = NULL;
+}
+
+/*
+Make the connection temp the probe link of worker w, and delete temp's own entry. temp has not identified as a worker,
+so it holds no tasks, files, or transfers, and nothing but worker_table, the capacity index, the poll set, and the
+rendezvous refers to it. Its queue is dropped: nothing may be queued on a probe link but checks.
+*/
+static void probe_attach(struct vine_manager *q, struct vine_worker_info *w, struct vine_worker_info *temp)
+{
+	probe_unregister(q, w);
+	probe_unregister(q, temp);
+	unwatch_worker_queue(q, temp);
+	hash_table_remove(q->worker_table, temp->hashkey);
+	vine_schedule_capacity_index_remove(q, temp);
+
+	w->probe_link = temp->link;
+	temp->link = NULL;
+	link_poll_set_add(q->poll_set, w->probe_link, LINK_READ, w);
+	link_set_idle_timeout(w->probe_link, vine_manager_probe_timeout(q, w));
+	w->probe_sent = 0;
+	w->probe_answer = timestamp_monotonic();
+
+	debug(D_VINE, "worker %s (%s) opened its probe link from %s", w->hostname, w->addrport, temp->addrport);
+	vine_worker_delete(temp);
+}
+
+/* A worker that declared X waits for its probe link, or takes the one that arrived first. */
+static void probe_register(struct vine_manager *q, struct vine_worker_info *w)
+{
+	if (w->response_timeout <= 0 || !w->workerid || w->probe_link || w->probe_key || w->type != VINE_WORKER_TYPE_WORKER) {
+		return;
+	}
+	struct vine_worker_info *temp = hash_table_lookup(q->probe_rendezvous, w->workerid);
+	if (!temp) {
+		w->probe_key = xxstrdup(w->workerid);
+		hash_table_insert(q->probe_rendezvous, w->probe_key, w);
+	} else if (temp->type == VINE_WORKER_TYPE_UNKNOWN) {
+		w->probe_lw = link_writer_create(temp->link);
+		if (w->probe_lw) {
+			probe_attach(q, w, temp);
+		}
+	}
+}
+
+/*
+The first line of a connection that is the probe link of a worker: probe <worker-id>. Pair it with its worker, or
+leave it waiting until the worker declares X. A connection that waits too long is removed like any connection that
+never identified (ask_for_workers_updates()).
+*/
+static vine_msg_code_t handle_probe_hello(struct vine_manager *q, struct vine_worker_info *temp, const char *line)
+{
+	char id[VINE_LINE_MAX];
+	if (temp->type != VINE_WORKER_TYPE_UNKNOWN || temp->probe_key || sscanf(line, "probe %s", id) != 1) {
+		return VINE_MSG_FAILURE;
+	}
+	struct vine_worker_info *w = hash_table_lookup(q->probe_rendezvous, id);
+	if (!w) {
+		temp->probe_key = xxstrdup(id);
+		hash_table_insert(q->probe_rendezvous, temp->probe_key, temp);
+		debug(D_VINE, "probe link %s waits for worker %s", temp->addrport, id);
+		return VINE_MSG_PROCESSED;
+	}
+	if (w->type != VINE_WORKER_TYPE_WORKER) {
+		return VINE_MSG_FAILURE;
+	}
+	w->probe_lw = link_writer_create(temp->link);
+	if (!w->probe_lw) {
+		return VINE_MSG_FAILURE;
+	}
+	probe_attach(q, w, temp);
+	return VINE_MSG_PROCESSED_MOVED;
 }
 
 /* Length of the budget for the work of one step of vine_wait(). */
@@ -664,6 +879,7 @@ static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_in
 		/* The worker declares its response time X, which turns the timeout framework on for it, see "Timeouts". */
 		w->response_timeout = MAX(0, atoi(value));
 		link_set_idle_timeout(w->link, vine_manager_worker_timeout(q, w, 0));
+		probe_register(q, w);
 	} else if (string_prefix_is(field, "round-stats")) {
 		/* With the timeout framework on, the worker reports the rounds of its main loop since its last answer to a
 		 * check: their number, the longest (its measured X), that round's slowest step and its length, and the
@@ -1163,6 +1379,9 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		result = handle_name(q, w, line);
 	} else if (string_prefix_is(line, "info")) {
 		result = handle_info(q, w, line);
+	} else if (string_prefix_is(line, "probe ")) {
+		/* Deletes w when it pairs the connection with its worker. */
+		result = handle_probe_hello(q, w, line);
 	} else if (string_prefix_is(line, "cache-invalid")) {
 		result = handle_cache_invalid(q, w, line);
 	} else if (string_prefix_is(line, "cache-copied ") || string_prefix_is(line, "cache-copy-error ")) {
@@ -1694,6 +1913,7 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	hash_table_remove(q->worker_table, w->hashkey);
 	vine_schedule_capacity_index_remove(q, w);
+	probe_unregister(q, w);
 	hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
 	hash_table_remove(q->workers_idle_disconnecting, w->hashkey);
 
@@ -1744,9 +1964,13 @@ void vine_manager_mark_worker_for_removal(struct vine_manager *q, struct vine_wo
 	w->pending_removal = reason;
 	hash_table_remove(q->worker_table, w->hashkey);
 	vine_schedule_capacity_index_remove(q, w);
+	probe_unregister(q, w);
 	/* Like every link outside worker_table, its link is no longer polled or written in later steps. */
 	unwatch_worker_queue(q, w);
 	link_poll_set_remove(q->poll_set, w->link);
+	if (w->probe_link) {
+		link_poll_set_remove(q->poll_set, w->probe_link);
+	}
 	list_push_tail(q->zombie_workers, w);
 }
 
@@ -3305,6 +3529,10 @@ static vine_result_code_t handle_worker(struct vine_manager *q, struct vine_work
 		return VINE_SUCCESS;
 		break;
 
+	case VINE_MSG_PROCESSED_MOVED:
+		/* The connection is now the probe link of its worker, and w is gone. */
+		return VINE_LINK_MOVED;
+
 	case VINE_MSG_PROCESSED_DISCONNECT:
 		// A status query was received and processed, so disconnect.
 		/* The client reads its whole answer before the link closes. */
@@ -4520,6 +4748,7 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 			case VINE_APP_FAILURE: /* failed to dispatch, commit put the task back in the right place. */
 			case VINE_WORKER_FAILURE:
 			case VINE_END_OF_LIST: /* shouldn't happen */
+			case VINE_LINK_MOVED:  /* shouldn't happen */
 				/* Task already removed above */
 				break;
 			case VINE_MGR_FAILURE:
@@ -4684,6 +4913,14 @@ static void ask_for_workers_updates(struct vine_manager *q)
 		int timeout = vine_manager_worker_timeout(q, w, 0);
 		int keepalive_interval = q->keepalive_interval >= 0 ? q->keepalive_interval : (timeout ? timeout / 2 : VINE_DEFAULT_KEEPALIVE_INTERVAL);
 		int keepalive_timeout = q->keepalive_timeout >= 0 ? q->keepalive_timeout : (timeout ? timeout : VINE_DEFAULT_KEEPALIVE_TIMEOUT);
+
+		/* A worker with a probe link is checked there, whatever its control link holds. */
+		if (w->probe_link) {
+			if (!probe_worker(q, w)) {
+				list_push_tail(failed, w);
+			}
+			continue;
+		}
 
 		if (keepalive_interval > 0) {
 
@@ -5124,6 +5361,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->library_templates = hash_table_create(0, 0);
 
 	q->worker_table = hash_table_create(0, 0);
+	q->probe_rendezvous = hash_table_create(0, 0);
 	q->zombie_workers = list_create();
 	q->file_worker_table = hash_table_create(0, 0);
 	q->temp_files_to_replicate = priority_queue_create(0);
@@ -5566,6 +5804,7 @@ void vine_delete(struct vine_manager *q)
 	vine_schedule_delete_blocked_sources(q);
 	hash_table_clear(q->worker_table, (void *)vine_worker_delete);
 	hash_table_delete(q->worker_table);
+	hash_table_delete(q->probe_rendezvous);
 	list_delete(q->zombie_workers);
 
 	hash_table_clear(q->file_worker_table, (void *)set_delete);
@@ -6457,10 +6696,23 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 		}
 		handled++;
 
+		/* Answers on a probe link are read whole, without waiting. */
+		if (link == w->probe_link) {
+			if (!read_probe_link(q, w)) {
+				q->stats->workers_lost++;
+				handle_worker_failure(q, w);
+				workers_failed++;
+			}
+			continue;
+		}
+
 		/* Act on the next input message, until there is no more buffered data. */
 		do {
-			if (handle_worker(q, w) == VINE_WORKER_FAILURE) {
+			vine_result_code_t r = handle_worker(q, w);
+			if (r == VINE_WORKER_FAILURE) {
 				workers_failed++;
+				break;
+			} else if (r == VINE_LINK_MOVED) {
 				break;
 			}
 		} while (!link_buffer_empty(link) && !budget_expired(&q->round));
