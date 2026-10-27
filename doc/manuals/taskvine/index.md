@@ -2885,6 +2885,9 @@ These guarantees have these limits:
   T, or `short-timeout` without a response time.
 - For a worker without a probe link (one that declares no response time of its own), the network must drain the
   buffers on the path within X/2, or a keepalive check waiting behind them arrives late.
+- A worker with a probe link answers no check while it reads a file sent on its first connection. The manager counts
+  the data it moves on that connection as evidence too, so the network must drain the buffers on the path within T
+  after the manager wrote the last of a file.
 
 === "Python"
     ```python
