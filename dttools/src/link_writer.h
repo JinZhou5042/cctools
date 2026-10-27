@@ -16,7 +16,8 @@ A partly written entry stays at the head, so the stream stays intact and in orde
 <p>
 On a link where both sides send unprompted, two writers that wait for each other deadlock. The side that starts a
 synchronous exchange reads and handles the peer's messages while it writes its request, and the side that answers
-finishes any partly written push (@ref link_writer_send_partial) before it reads the next request. A link where only
+never waits to read while one of its pushes is partly written: it either reads only what has arrived and keeps writing
+in every round, or finishes the push (@ref link_writer_send_partial) before a read that waits. A link where only
 one side sends data, such as a transfer or a pipe to a library, may use @ref link_writer_send_sync freely.
 <p>
 Deadlines and progress are times of @ref timestamp_monotonic, so a change of the time of day moves neither.
