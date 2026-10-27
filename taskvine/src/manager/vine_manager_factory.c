@@ -147,59 +147,73 @@ static void vine_manager_factory_update(struct vine_manager *q, struct jx *j)
 }
 
 /*
-Query the catalog to discover what factories are feeding this manager,
-and update all of the factory info to correspond.
+Build the query that discovers which factories are feeding this manager, for the catalog updater, which runs it in a
+thread of its own.
 */
 
-void vine_manager_factory_update_all(struct vine_manager *q, time_t stoptime)
+char *vine_manager_factory_query(struct vine_manager *q, struct list **names)
 {
-	struct catalog_query *cq;
-	struct jx *jexpr = NULL;
-	struct jx *j;
 	int iteration;
-
-	// Iterate through factory_table to create a query filter.
 	int first_name = 1;
 	buffer_t filter;
 	buffer_init(&filter);
 	char *factory_name = NULL;
 	struct vine_factory_info *f = NULL;
+	*names = list_create();
 	buffer_putfstring(&filter, "type == \"vine_factory\" && (");
 
 	HASH_TABLE_ITERATE(q->factory_table, iteration, factory_name, f)
 	{
 		buffer_putfstring(&filter, "%sfactory_name == \"%s\"", first_name ? "" : " || ", factory_name);
+		list_push_tail(*names, xxstrdup(factory_name));
 		first_name = 0;
-		f->seen_at_catalog = 0;
 	}
 	buffer_putfstring(&filter, ")");
-	jexpr = jx_parse_string(buffer_tolstring(&filter, NULL));
+	char *text = xxstrdup(buffer_tolstring(&filter, NULL));
 	buffer_free(&filter);
+	return text;
+}
 
-	// Query the catalog server
-	debug(D_VINE, "Retrieving factory info from catalog server(s) at %s ...", q->catalog_hosts);
-	if ((cq = catalog_query_create(q->catalog_hosts, jexpr, stoptime))) {
-		// Update the table
-		while ((j = catalog_query_read(cq, stoptime))) {
+/*
+Update all of the factory info to correspond to the answer of a query, and forget the queried factories that the
+catalog no longer lists and that no worker came from.
+*/
+
+void vine_manager_factory_apply(struct vine_manager *q, struct list *names, struct list *records)
+{
+	char *name;
+	struct vine_factory_info *f;
+
+	if (!records) {
+		// No factory was marked as seen, so do not consider them outdated.
+		debug(D_VINE, "Failed to retrieve factory info from catalog server(s) at %s.", q->catalog_hosts);
+	} else {
+		LIST_ITERATE(names, name)
+		{
+			if ((f = hash_table_lookup(q->factory_table, name))) {
+				f->seen_at_catalog = 0;
+			}
+		}
+
+		struct jx *j;
+		while ((j = list_pop_head(records))) {
 			vine_manager_factory_update(q, j);
 			jx_delete(j);
 		}
-		catalog_query_delete(cq);
-	} else {
-		// No factory was marked as seen, so do not consider them outdated.
-		debug(D_VINE, "Failed to retrieve factory info from catalog server(s) at %s.", q->catalog_hosts);
-		jx_delete(jexpr);
-		return;
-	}
+		list_delete(records);
 
-	// Remove outdated factories
-	struct list *outdated_factories = list_create();
-	HASH_TABLE_ITERATE(q->factory_table, iteration, factory_name, f)
-	{
-		if (!f->seen_at_catalog && f->connected_workers < 1) {
-			list_push_tail(outdated_factories, f);
+		// Remove outdated factories, which also leave the table, so no worker refers to a freed record.
+		LIST_ITERATE(names, name)
+		{
+			f = hash_table_lookup(q->factory_table, name);
+			if (f && !f->seen_at_catalog && f->connected_workers < 1) {
+				vine_factory_info_remove(q, name);
+			}
 		}
 	}
-	list_clear(outdated_factories, (void *)vine_factory_info_delete);
-	list_delete(outdated_factories);
+
+	list_clear(names, free);
+	list_delete(names);
 }
+
+/* vim: set noexpandtab tabstop=8: */
