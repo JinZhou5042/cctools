@@ -11,6 +11,7 @@ See the file COPYING for details.
 #include "vine_protocol.h"
 
 #include "debug.h"
+#include "full_io.h"
 #include "host_disk_info.h"
 #include "macros.h"
 #include "stringtools.h"
@@ -277,4 +278,275 @@ static int vine_transfer_get_dir_internal(struct link *lnk, const char *dirname,
 	}
 
 	return 0;
+}
+
+/*
+The receive in pieces (vine_transfer_receiver_continue()). It walks the same protocol as vine_transfer_get_item(), but
+keeps its position between calls instead of on the stack: the directory that receives the next header and how many
+directories are open, and the file or symlink whose contents are arriving with the bytes still missing.
+*/
+
+struct vine_transfer_receiver {
+	char *dir;        /* The directory that receives the next header: dirname, then each directory open inside it. */
+	int depth;        /* The directories open inside dirname: dir is dirname when zero. */
+	int started;      /* Non-zero once the header of the requested item was read, which alone is logged. */
+	char *name;       /* The name of the requested item when it is a directory, for the line logged when it ends. */
+	int fd;           /* The file whose contents are arriving, or -1. */
+	char *target;     /* The target of the symlink whose body is arriving, or NULL. */
+	char *path;       /* The path of that file or symlink. */
+	int item_mode;    /* The mode of that file. */
+	int64_t length;   /* The bytes of its contents or target. */
+	int64_t received; /* The bytes of them received so far. */
+	int64_t entries;  /* The items received inside the requested directory. */
+	int64_t size;     /* The bytes of the files and symlinks received. */
+	int mode;         /* The mode of the requested item. */
+	int mtime;        /* The mtime of the requested item. */
+};
+
+struct vine_transfer_receiver *vine_transfer_receiver_create(const char *dirname)
+{
+	struct vine_transfer_receiver *r = calloc(1, sizeof(*r));
+	if (!r) {
+		return NULL;
+	}
+	r->dir = strdup(dirname);
+	if (!r->dir) {
+		free(r);
+		return NULL;
+	}
+	r->fd = -1;
+	return r;
+}
+
+void vine_transfer_receiver_delete(struct vine_transfer_receiver *r)
+{
+	if (!r) {
+		return;
+	}
+	if (r->fd >= 0) {
+		close(r->fd);
+	}
+	free(r->target);
+	free(r->path);
+	free(r->name);
+	free(r->dir);
+	free(r);
+}
+
+int64_t vine_transfer_receiver_size(const struct vine_transfer_receiver *r)
+{
+	return r->size;
+}
+
+int vine_transfer_receiver_mode(const struct vine_transfer_receiver *r)
+{
+	return r->mode;
+}
+
+int vine_transfer_receiver_mtime(const struct vine_transfer_receiver *r)
+{
+	return r->mtime;
+}
+
+/* An item ended: the requested one, or one more inside it. Returns non-zero when it was the requested item. */
+static int receiver_item_done(struct vine_transfer_receiver *r)
+{
+	if (r->depth == 0) {
+		return 1;
+	}
+	r->entries++;
+	return 0;
+}
+
+/* Close the file or create the symlink whose contents have all arrived. Returns zero on failure. */
+static int receiver_finish_contents(struct vine_transfer_receiver *r)
+{
+	int ok = 1;
+	if (r->fd >= 0) {
+		/* The open descriptor sets the mode without resolving the path again. */
+		fchmod(r->fd, r->item_mode);
+		if (close(r->fd) < 0) {
+			debug(D_VINE, "Failed to close file - %s (%s)\n", r->path, strerror(errno));
+			ok = 0;
+		}
+		r->fd = -1;
+	} else {
+		r->target[r->length] = 0;
+		if (symlink(r->target, r->path) < 0) {
+			debug(D_VINE, "could not create symlink %s: %s", r->path, strerror(errno));
+			ok = 0;
+		}
+		free(r->target);
+		r->target = NULL;
+	}
+	free(r->path);
+	r->path = NULL;
+	return ok;
+}
+
+/* Read one piece of at most 64 KB of the contents of the current file or symlink without waiting. Returns PENDING when
+ * nothing has arrived, FAILED on failure, and COMPLETE after a piece. */
+static vine_transfer_receive_status_t receiver_read_contents(struct vine_transfer_receiver *r, struct link *lnk)
+{
+	char buffer[1 << 16];
+	char *data = r->target ? r->target + r->received : buffer;
+	size_t wanted = (size_t)MIN(r->length - r->received, (int64_t)sizeof(buffer));
+
+	ssize_t n = link_read_avail(lnk, data, wanted, LINK_NOWAIT);
+	if (n < 0 && (errno == ETIMEDOUT || errno_is_temporary(errno))) {
+		return VINE_TRANSFER_RECEIVE_PENDING;
+	}
+	if (n <= 0) {
+		debug(D_VINE, "Failed to put file - %s (%s)\n", r->path, n == 0 ? "end of stream" : strerror(errno));
+		return VINE_TRANSFER_RECEIVE_FAILED;
+	}
+	if (!r->target && full_write(r->fd, buffer, n) != n) {
+		debug(D_VINE, "Failed to put file - %s (%s)\n", r->path, strerror(errno));
+		return VINE_TRANSFER_RECEIVE_FAILED;
+	}
+	r->received += n;
+	return VINE_TRANSFER_RECEIVE_COMPLETE;
+}
+
+/* Handle one whole header line. Returns COMPLETE when the requested item ended, PENDING when more follows, and FAILED
+ * or REFUSED otherwise. */
+static vine_transfer_receive_status_t receiver_header(struct vine_transfer_receiver *r, const char *line)
+{
+	char name_encoded[VINE_LINE_MAX];
+	char name[VINE_LINE_MAX];
+	int64_t size;
+	int mode, mtime, errornum;
+
+	if (sscanf(line, "file %s %" SCNd64 " %o %d", name_encoded, &size, &mode, &mtime) == 4 && size >= 0) {
+		url_decode(name_encoded, name, sizeof(name));
+		/* Only use the normal mode bits. */
+		mode &= 0777;
+		if (r->depth == 0) {
+			r->mode = mode;
+			r->mtime = mtime;
+		}
+		r->path = string_format("%s/%s", r->dir, name);
+		if (!check_disk_space_for_filesize(".", size, 0)) {
+			debug(D_VINE, "Could not put file %s, not enough disk space (%" PRId64 " bytes needed)\n", r->path, size);
+			return VINE_TRANSFER_RECEIVE_FAILED;
+		}
+		r->fd = open(r->path, O_WRONLY | O_CREAT | O_TRUNC, 0700);
+		if (r->fd < 0) {
+			debug(D_VINE, "Could not open %s for writing. (%s)\n", r->path, strerror(errno));
+			return VINE_TRANSFER_RECEIVE_FAILED;
+		}
+		r->item_mode = mode;
+		r->length = size;
+		r->received = 0;
+		r->size += size;
+		return VINE_TRANSFER_RECEIVE_PENDING;
+	} else if (sscanf(line, "symlink %s %" SCNd64, name_encoded, &size) == 2 && size >= 0) {
+		url_decode(name_encoded, name, sizeof(name));
+		/* The symlink doesn't really have an inherent mtime or mode. */
+		if (r->depth == 0) {
+			r->mode = 0777;
+			r->mtime = 0;
+		}
+		/* The body holds the target without a terminating null. */
+		r->target = malloc(size + 1);
+		if (!r->target) {
+			return VINE_TRANSFER_RECEIVE_FAILED;
+		}
+		r->path = string_format("%s/%s", r->dir, name);
+		r->length = size;
+		r->received = 0;
+		r->size += size;
+		return VINE_TRANSFER_RECEIVE_PENDING;
+	} else if (sscanf(line, "dir %s %o %d", name_encoded, &mode, &mtime) == 3) {
+		url_decode(name_encoded, name, sizeof(name));
+		/* Only use the normal mode bits. */
+		mode &= 0777;
+		char *subname = string_format("%s/%s", r->dir, name);
+		if (mkdir(subname, mode) < 0) {
+			debug(D_VINE, "unable to create %s: %s", subname, strerror(errno));
+			free(subname);
+			return VINE_TRANSFER_RECEIVE_FAILED;
+		}
+		if (r->depth == 0) {
+			r->mode = mode;
+			r->mtime = mtime;
+			r->name = strdup(name);
+		}
+		free(r->dir);
+		r->dir = subname;
+		r->depth++;
+		return VINE_TRANSFER_RECEIVE_PENDING;
+	} else if (sscanf(line, "error %s %d", name_encoded, &errornum) == 2) {
+		url_decode(name_encoded, name, sizeof(name));
+		debug(D_VINE, "Received error from peer for '%s': %s", name, strerror(errornum));
+		/* The sender answered and cannot send this item, so the transfer cannot succeed from it. */
+		return VINE_TRANSFER_RECEIVE_REFUSED;
+	} else if (!strcmp(line, "end") && r->depth > 0) {
+		/* The open directory ends: the next header goes to its parent. */
+		*strrchr(r->dir, '/') = 0;
+		r->depth--;
+		return receiver_item_done(r) ? VINE_TRANSFER_RECEIVE_COMPLETE : VINE_TRANSFER_RECEIVE_PENDING;
+	} else {
+		debug(D_VINE, "Received invalid line from peer: %.100s", line);
+		return VINE_TRANSFER_RECEIVE_FAILED;
+	}
+}
+
+vine_transfer_receive_status_t vine_transfer_receiver_continue(struct vine_transfer_receiver *r, struct link *lnk, const struct budget *b)
+{
+	vine_transfer_receive_status_t status = VINE_TRANSFER_RECEIVE_PENDING;
+	int pieces = 0;
+
+	while (pieces == 0 || !budget_expired(b)) {
+		pieces++;
+		if (r->fd < 0 && !r->target) {
+			/* A header is read only once it is whole, so a sender that stops in the middle of one never holds the
+			 * caller. */
+			if (link_buffer_has_line(lnk) != 1) {
+				break;
+			}
+			char line[VINE_LINE_MAX];
+			if (!link_readline(lnk, line, sizeof(line), LINK_NOWAIT)) {
+				debug(D_VINE, "Failed to receive a header: %s", strerror(errno));
+				status = VINE_TRANSFER_RECEIVE_FAILED;
+				break;
+			}
+			if (!r->started) {
+				debug(D_VINE, "rx: %s", line);
+				r->started = 1;
+			}
+			status = receiver_header(r, line);
+			if (status != VINE_TRANSFER_RECEIVE_PENDING) {
+				break;
+			}
+			if (r->fd < 0 && !r->target) {
+				continue;
+			}
+		} else {
+			status = receiver_read_contents(r, lnk);
+			if (status != VINE_TRANSFER_RECEIVE_COMPLETE) {
+				break;
+			}
+			status = VINE_TRANSFER_RECEIVE_PENDING;
+		}
+
+		/* Contents that are complete, also empty ones, are finished at once: nothing more arrives for them, so a
+		 * caller that waits for input would wait for nothing. */
+		if (r->received < r->length) {
+			continue;
+		}
+		if (!receiver_finish_contents(r)) {
+			status = VINE_TRANSFER_RECEIVE_FAILED;
+			break;
+		}
+		if (receiver_item_done(r)) {
+			status = VINE_TRANSFER_RECEIVE_COMPLETE;
+			break;
+		}
+	}
+
+	if (r->name && status != VINE_TRANSFER_RECEIVE_PENDING) {
+		debug(D_VINE, "rx: %s directory %s: %" PRId64 " entries, %" PRId64 " bytes", status == VINE_TRANSFER_RECEIVE_COMPLETE ? "received" : "failed to receive", r->name, r->entries, r->size);
+	}
+	return status;
 }

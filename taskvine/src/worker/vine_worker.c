@@ -15,6 +15,7 @@ See the file COPYING for details.
 #include "vine_resources.h"
 #include "vine_sandbox.h"
 #include "vine_transfer.h"
+#include "vine_transfer_receive.h"
 #include "vine_transfer_server.h"
 #include "vine_watcher.h"
 #include "vine_worker_options.h"
@@ -381,16 +382,15 @@ static int report_changes(struct link *manager)
 	return 1;
 }
 
-/* Receive a single-line message from the current manager. */
+/*
+Receive a single-line message from the current manager. The main loop calls it only for a line that is whole in the
+link's buffer, so it never waits there: the worker makes no blocking read of a manager message once it serves the
+manager (see "Whole-message rule" above ROUND_BUDGET), and a message of its own that the link took only in part
+continues in the next round instead of before a read (the deadlock rule of link_writer.h).
+*/
 
 int recv_message(struct link *l, char *line, int length, time_t stoptime)
 {
-	/* The manager reads the rest of a message it has begun and writes nothing meanwhile, so a message that the link
-	 * took only in part goes out before the worker may wait for the rest of a manager message. Every blocking read of
-	 * a manager message starts with a line read here. */
-	if (l == manager_link && manager_lw && !link_writer_send_partial(manager_lw, timestamp_monotonic() + options->active_timeout * 1000000LL)) {
-		return 0;
-	}
 	int result = link_readline(l, line, length, stoptime);
 	if (result)
 		debug(D_VINE, "rx: %s", line);
@@ -1163,14 +1163,115 @@ static void normalize_resources(struct vine_process *p)
 }
 
 /*
-Handle an incoming task message from the manager.
-Generate a vine_process wrapped around a vine_task,
-and deposit it into the waiting list.
+A message of the manager whose body follows its first line: the lines of a task or a mini task up to their end line,
+with the bodies that cmd and env lines announce, or the item of a put. The main loop reads the body in pieces as it
+arrives, within the budget of each round (see "Whole-message rule" above ROUND_BUDGET), so a large file or task never
+keeps the worker from answering. The protocol is in order and the manager's messages are read one at a time, so at
+most one body is in progress, and the messages after it wait in the link until it completes.
 */
+struct manager_body {
+	struct vine_task *task;                  /* The task or mini task whose lines are arriving, or NULL for a put. */
+	int mini_task;                           /* Non-zero when task is a mini task, which produces cache_name. */
+	char *data;                              /* The body of a cmd or env line that is arriving, or NULL. */
+	int data_is_env;                         /* Non-zero when data is the body of an env line. */
+	int64_t data_length;                     /* The bytes of data that the line announced. */
+	int64_t data_received;                   /* The bytes of data received so far. */
+	struct vine_transfer_receiver *receiver; /* The receive of the item of a put, or NULL for a task. */
+	char *transfer_path;                     /* Where a put arrives before it enters the cache. */
+	char *cache_name;                        /* The cache name of a put or of the file that a mini task produces. */
+	char *source;                            /* The file in the mini task's sandbox that becomes cache_name. */
+	vine_cache_level_t cache_level;          /* The cache level of a put or mini task. */
+	int mode;                                /* The mode of the file of a mini task. */
+	int64_t size;                            /* The size the manager gave for the file of a mini task. */
+	timestamp_t start;                       /* When the put started, for the cache's transfer time. */
+};
 
-static struct vine_task *do_task_body(struct link *manager, int task_id, time_t stoptime)
+/* The message whose body is in progress, or NULL. */
+static struct manager_body *manager_body = NULL;
+
+static void manager_body_delete(struct manager_body *b)
 {
-	char line[VINE_LINE_MAX];
+	if (!b) {
+		return;
+	}
+	if (b->task) {
+		vine_task_delete(b->task);
+	}
+	vine_transfer_receiver_delete(b->receiver);
+	free(b->data);
+	free(b->transfer_path);
+	free(b->cache_name);
+	free(b->source);
+	free(b);
+}
+
+/* Drop a body that will not complete, with what a put had written. */
+static void abandon_manager_body(void)
+{
+	if (!manager_body) {
+		return;
+	}
+	if (manager_body->transfer_path) {
+		/* Close the file before it goes to the trash. */
+		vine_transfer_receiver_delete(manager_body->receiver);
+		manager_body->receiver = NULL;
+		trash_move(manager_body->transfer_path);
+	}
+	manager_body_delete(manager_body);
+	manager_body = NULL;
+}
+
+/* Start reading the lines of a task, or of a mini task that produces cache_name from source. Returns zero when out of
+ * memory. */
+static int start_task_body(int64_t task_id, const char *cache_name, const char *source, vine_cache_level_t cache_level, int64_t size, int mode)
+{
+	struct manager_body *b = calloc(1, sizeof(*b));
+	if (!b) {
+		return 0;
+	}
+	b->task = vine_task_create(0);
+	b->task->task_id = task_id;
+	if (cache_name) {
+		b->mini_task = 1;
+		b->cache_name = xxstrdup(cache_name);
+		b->source = xxstrdup(source);
+		b->cache_level = cache_level;
+		b->size = size;
+		b->mode = mode;
+	}
+	manager_body = b;
+	return 1;
+}
+
+/*
+Handle a request to put a file by receiving the file stream into a temporary transfer path, and then (if successful)
+add the file to the cache manager. Returns zero when out of memory.
+*/
+static int start_put(const char *cache_name, vine_cache_level_t cache_level)
+{
+	struct manager_body *b = calloc(1, sizeof(*b));
+	if (!b) {
+		return 0;
+	}
+	char *transfer_dir = vine_cache_transfer_path(cache_manager, ".");
+	b->receiver = vine_transfer_receiver_create(transfer_dir);
+	free(transfer_dir);
+	if (!b->receiver) {
+		free(b);
+		return 0;
+	}
+	b->transfer_path = vine_cache_transfer_path(cache_manager, cache_name);
+	b->cache_name = xxstrdup(cache_name);
+	b->cache_level = cache_level;
+	b->start = timestamp_get();
+	manager_body = b;
+	return 1;
+}
+
+/* Handle one line of a task. Returns 1 for a line that may be followed by more, 2 for the end line, and 0 for an
+ * invalid line. A cmd or env line leaves its body in b->data, which arrives next. */
+static int task_body_line(struct manager_body *b, const char *line)
+{
 	char localname[VINE_LINE_MAX];
 	char taskname[VINE_LINE_MAX];
 	char taskname_encoded[VINE_LINE_MAX];
@@ -1178,93 +1279,100 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 	char category[VINE_LINE_MAX];
 	int flags, length, groupid;
 	int64_t n;
-
 	timestamp_t nt;
+	struct vine_task *task = b->task;
 
-	struct vine_task *task = vine_task_create(0);
-	task->task_id = task_id;
-
-	while (recv_message(manager, line, sizeof(line), stoptime)) {
-		if (!strcmp(line, "end")) {
-			break;
-		} else if (sscanf(line, "category %s", category)) {
-			vine_task_set_category(task, category);
-		} else if (sscanf(line, "cmd %d", &length) == 1) {
-			char *cmd = malloc(length + 1);
-			link_read(manager, cmd, length, stoptime);
-			cmd[length] = 0;
-			vine_task_set_command(task, cmd);
-			debug(D_VINE, "rx: %s", cmd);
-			free(cmd);
-		} else if (sscanf(line, "needs_library %s", library_name) == 1) {
-			vine_task_set_library_required(task, library_name);
-		} else if (sscanf(line, "provides_library %s", library_name) == 1) {
-			vine_task_set_library_provided(task, library_name);
-		} else if (sscanf(line, "function_slots %" PRId64, &n) == 1) {
-			/* Set the number of slots requested by the user. */
-			task->function_slots_requested = n;
-			/* Also set the total number determined by the manager. */
-			task->function_slots_total = n;
-		} else if (sscanf(line, "func_exec_mode %" PRId64, &n) == 1) {
-			vine_task_func_exec_mode_t func_exec_mode = n;
-			if (func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_INVALID) {
-				debug(D_VINE | D_NOTICE, "invalid func_exec_mode from manager: %s", line);
-				vine_task_delete(task);
-				return 0;
-			}
-			task->func_exec_mode = func_exec_mode;
-		} else if (sscanf(line, "infile %s %s %d", localname, taskname_encoded, &flags)) {
-			url_decode(taskname_encoded, taskname, VINE_LINE_MAX);
-			vine_hack_do_not_compute_cached_name = 1;
-			vine_task_add_input_file(task, localname, taskname, flags);
-		} else if (sscanf(line, "outfile %s %s %d", localname, taskname_encoded, &flags)) {
-			url_decode(taskname_encoded, taskname, VINE_LINE_MAX);
-			vine_hack_do_not_compute_cached_name = 1;
-			vine_task_add_output_file(task, localname, taskname, flags);
-		} else if (sscanf(line, "cores %" PRId64, &n)) {
-			vine_task_set_cores(task, n);
-		} else if (sscanf(line, "memory %" PRId64, &n)) {
-			vine_task_set_memory(task, n);
-		} else if (sscanf(line, "disk %" PRId64, &n)) {
-			vine_task_set_disk(task, n);
-		} else if (sscanf(line, "gpus %" PRId64, &n)) {
-			vine_task_set_gpus(task, n);
-		} else if (sscanf(line, "groupid %d", &groupid)) {
-			task->group_id = groupid;
-		} else if (sscanf(line, "wall_time %" PRIu64, &nt)) {
-			vine_task_set_time_max(task, nt);
-		} else if (sscanf(line, "end_time %" PRIu64, &nt)) {
-			vine_task_set_time_end(task, nt * USECOND); // end_time needs it usecs
-		} else if (sscanf(line, "env %d", &length) == 1) {
-			char *env = malloc(length + 2); /* +2 for \n and \0 */
-			link_read(manager, env, length + 1, stoptime);
-			env[length] = 0; /* replace \n with \0 */
-			char *value = strchr(env, '=');
-			if (value) {
-				*value = 0;
-				value++;
-				vine_task_set_env_var(task, env, value);
-			}
-			free(env);
-		} else {
-			debug(D_VINE | D_NOTICE, "invalid command from manager: %s", line);
-			vine_task_delete(task);
+	if (!strcmp(line, "end")) {
+		return 2;
+	} else if (sscanf(line, "category %s", category)) {
+		vine_task_set_category(task, category);
+	} else if (sscanf(line, "cmd %d", &length) == 1 && length >= 0) {
+		b->data = malloc(length + 1);
+		if (!b->data) {
 			return 0;
 		}
+		b->data_is_env = 0;
+		b->data_length = length;
+		b->data_received = 0;
+	} else if (sscanf(line, "needs_library %s", library_name) == 1) {
+		vine_task_set_library_required(task, library_name);
+	} else if (sscanf(line, "provides_library %s", library_name) == 1) {
+		vine_task_set_library_provided(task, library_name);
+	} else if (sscanf(line, "function_slots %" PRId64, &n) == 1) {
+		/* Set the number of slots requested by the user. */
+		task->function_slots_requested = n;
+		/* Also set the total number determined by the manager. */
+		task->function_slots_total = n;
+	} else if (sscanf(line, "func_exec_mode %" PRId64, &n) == 1) {
+		vine_task_func_exec_mode_t func_exec_mode = n;
+		if (func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_INVALID) {
+			debug(D_VINE | D_NOTICE, "invalid func_exec_mode from manager: %s", line);
+			return 0;
+		}
+		task->func_exec_mode = func_exec_mode;
+	} else if (sscanf(line, "infile %s %s %d", localname, taskname_encoded, &flags)) {
+		url_decode(taskname_encoded, taskname, VINE_LINE_MAX);
+		vine_hack_do_not_compute_cached_name = 1;
+		vine_task_add_input_file(task, localname, taskname, flags);
+	} else if (sscanf(line, "outfile %s %s %d", localname, taskname_encoded, &flags)) {
+		url_decode(taskname_encoded, taskname, VINE_LINE_MAX);
+		vine_hack_do_not_compute_cached_name = 1;
+		vine_task_add_output_file(task, localname, taskname, flags);
+	} else if (sscanf(line, "cores %" PRId64, &n)) {
+		vine_task_set_cores(task, n);
+	} else if (sscanf(line, "memory %" PRId64, &n)) {
+		vine_task_set_memory(task, n);
+	} else if (sscanf(line, "disk %" PRId64, &n)) {
+		vine_task_set_disk(task, n);
+	} else if (sscanf(line, "gpus %" PRId64, &n)) {
+		vine_task_set_gpus(task, n);
+	} else if (sscanf(line, "groupid %d", &groupid)) {
+		task->group_id = groupid;
+	} else if (sscanf(line, "wall_time %" PRIu64, &nt)) {
+		vine_task_set_time_max(task, nt);
+	} else if (sscanf(line, "end_time %" PRIu64, &nt)) {
+		vine_task_set_time_end(task, nt * USECOND); // end_time needs it usecs
+	} else if (sscanf(line, "env %d", &length) == 1 && length >= 0) {
+		/* The body ends with a newline. */
+		b->data = malloc(length + 2);
+		if (!b->data) {
+			return 0;
+		}
+		b->data_is_env = 1;
+		b->data_length = length + 1;
+		b->data_received = 0;
+	} else {
+		debug(D_VINE | D_NOTICE, "invalid command from manager: %s", line);
+		return 0;
 	}
-
-	return task;
+	return 1;
 }
 
-/* Handle the receipt of a task description and add it to the proper data structures. */
-
-static int do_task(struct link *manager, int task_id, time_t stoptime)
+/* Apply the body of a cmd or env line that has all arrived. */
+static void task_body_data(struct manager_body *b)
 {
-	struct vine_task *task = do_task_body(manager, task_id, stoptime);
-	if (!task)
-		return 0;
+	if (b->data_is_env) {
+		b->data[b->data_length - 1] = 0; /* replace \n with \0 */
+		char *value = strchr(b->data, '=');
+		if (value) {
+			*value = 0;
+			value++;
+			vine_task_set_env_var(b->task, b->data, value);
+		}
+	} else {
+		b->data[b->data_length] = 0;
+		vine_task_set_command(b->task, b->data);
+		debug(D_VINE, "rx: %s", b->data);
+	}
+	free(b->data);
+	b->data = NULL;
+}
 
-	last_task_received = task->task_id;
+/* Handle a task whose lines have all arrived by adding it to the proper data structures. Returns zero on failure. */
+static int finish_task(struct vine_task *task)
+{
+	int64_t task_id = task->task_id;
+	last_task_received = task_id;
 
 	vine_process_type_t type = VINE_PROCESS_TYPE_STANDARD;
 
@@ -1277,8 +1385,9 @@ static int do_task(struct link *manager, int task_id, time_t stoptime)
 	}
 
 	struct vine_process *p = vine_process_create(task, type);
-	if (!p)
+	if (!p) {
 		return 0;
+	}
 
 	itable_insert(procs_table, task_id, p);
 
@@ -1290,37 +1399,91 @@ static int do_task(struct link *manager, int task_id, time_t stoptime)
 	return 1;
 }
 
-/*
-Handle a request to put a file by receiving the file stream
-into a temporary transfer path, and then (if successful)
-add the file to the cache manager.
-*/
-
-static int do_put(struct link *manager, const char *cachename, vine_cache_level_t cache_level, int64_t expected_size)
+/* Read what has arrived of the lines of a task, while the budget lasts and at least one piece. Returns zero when the
+ * task is invalid, 2 when it is complete, and 1 while more is to come. */
+static int continue_task_body(struct link *manager, struct manager_body *b, const struct budget *round)
 {
-	int64_t actual_size = 0;
-	int mode = 0;
-	int mtime = 0;
+	int pieces = 0;
+	while (pieces == 0 || !budget_expired(round)) {
+		pieces++;
+		if (b->data) {
+			/* At most 64 KB per piece, so a large command that keeps arriving still yields to the budget. */
+			int64_t wanted = MIN(b->data_length - b->data_received, 1 << 16);
+			ssize_t n = wanted > 0 ? link_read_avail(manager, b->data + b->data_received, wanted, LINK_NOWAIT) : 0;
+			if (n < 0 && (errno == ETIMEDOUT || errno_is_temporary(errno))) {
+				return 1;
+			}
+			if (wanted > 0 && n <= 0) {
+				debug(D_VINE, "failed to read the body of a task line from the manager");
+				return 0;
+			}
+			b->data_received += n;
+			if (b->data_received == b->data_length) {
+				task_body_data(b);
+			}
+			continue;
+		}
+		if (link_buffer_has_line(manager) != 1) {
+			return 1;
+		}
+		char line[VINE_LINE_MAX];
+		if (!recv_message(manager, line, sizeof(line), LINK_NOWAIT)) {
+			debug(D_VINE, "failed to read a task line from the manager");
+			return 0;
+		}
+		int r = task_body_line(b, line);
+		if (r != 1) {
+			return r;
+		}
+	}
+	return 1;
+}
 
-	char *transfer_dir = vine_cache_transfer_path(cache_manager, ".");
-	char *transfer_path = vine_cache_transfer_path(cache_manager, cachename);
+/*
+Continue the message whose body is in progress with what has arrived, while the budget lasts and at least one piece.
+Once the body is complete, its message is handled and manager_body is NULL. Returns zero when the message failed, which
+disconnects the manager as a failed message always did.
+*/
+static int continue_manager_body(struct link *manager, const struct budget *round)
+{
+	struct manager_body *b = manager_body;
+	int r = 1;
 
-	timestamp_t start = timestamp_get();
-	char *error_message = NULL;
-	int r = vine_transfer_get_any(manager, transfer_dir, &actual_size, &mode, &mtime, options->active_timeout, &error_message) == 1;
-	timestamp_t stop = timestamp_get();
-
-	/* XXX actual_size should equal expected size, but only for a simple file, not a dir. */
-
-	if (r) {
-		vine_cache_add_file(cache_manager, cachename, transfer_path, cache_level, mode, actual_size, mtime, start, stop - start, manager);
+	if (b->receiver) {
+		vine_transfer_receive_status_t status = vine_transfer_receiver_continue(b->receiver, manager, round);
+		if (status == VINE_TRANSFER_RECEIVE_PENDING) {
+			return 1;
+		}
+		/* The cache records the bytes that arrived, which for a directory differ from the size the manager gave. */
+		if (status == VINE_TRANSFER_RECEIVE_COMPLETE) {
+			timestamp_t stop = timestamp_get();
+			struct vine_transfer_receiver *receiver = b->receiver;
+			vine_cache_add_file(cache_manager, b->cache_name, b->transfer_path, b->cache_level, vine_transfer_receiver_mode(receiver), vine_transfer_receiver_size(receiver), vine_transfer_receiver_mtime(receiver), b->start, stop - b->start, manager);
+		} else {
+			vine_transfer_receiver_delete(b->receiver);
+			b->receiver = NULL;
+			trash_move(b->transfer_path);
+			r = 0;
+		}
+		reset_idle_timer();
 	} else {
-		trash_move(transfer_path);
+		r = continue_task_body(manager, b, round);
+		if (r == 1) {
+			return 1;
+		}
+		if (r == 2) {
+			struct vine_task *task = b->task;
+			b->task = NULL;
+			if (b->mini_task) {
+				r = vine_cache_add_mini_task(cache_manager, b->cache_name, b->source, task, b->cache_level, b->mode, b->size);
+			} else {
+				r = finish_task(task);
+			}
+		}
 	}
 
-	free(transfer_path);
-	free(transfer_dir);
-
+	manager_body_delete(b);
+	manager_body = NULL;
 	return r;
 }
 
@@ -1340,22 +1503,6 @@ Accept a url specification and transfer immediately.
 static int do_put_url_now(const char *cache_name, vine_cache_level_t cache_level, int64_t size, int mode, const char *source)
 {
 	return vine_cache_add_transfer(cache_manager, cache_name, source, cache_level, mode, size, VINE_CACHE_FLAGS_NOW);
-}
-
-/*
-Accept a mini_task that is executed on demand.
-We will then extract the file "source" from the sandbox in order to produce "cache_name".
-*/
-
-static int do_put_mini_task(struct link *manager, time_t stoptime, const char *cache_name, vine_cache_level_t cache_level, int64_t size, int mode, const char *source)
-{
-	mini_task_id++;
-
-	struct vine_task *mini_task = do_task_body(manager, mini_task_id, stoptime);
-	if (!mini_task)
-		return 0;
-
-	return vine_cache_add_mini_task(cache_manager, cache_name, source, mini_task, cache_level, mode, size);
 }
 
 /*
@@ -1551,6 +1698,7 @@ static void close_probe_link(void)
 
 static void close_manager_link(struct link *manager)
 {
+	abandon_manager_body();
 	link_writer_delete(manager_lw);
 	manager_lw = NULL;
 	manager_link = NULL;
@@ -1661,7 +1809,7 @@ static int handle_manager(struct link *manager)
 
 	if (recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
 		if (sscanf(line, "task %" SCNd64, &task_id) == 1) {
-			r = do_task(manager, task_id, time(0) + options->active_timeout);
+			r = start_task_body(task_id, NULL, NULL, 0, 0, 0);
 		} else if (sscanf(line, "connect-back %" SCNu64, &token) == 1) {
 			/* A failure only fails this receive, which the manager retries. */
 			vine_transfer_server_connect_back(cache_manager, manager, token);
@@ -1673,7 +1821,7 @@ static int handle_manager(struct link *manager)
 				vine_cache_set_manager_transfer(cache_manager, manager_ip, (int)length);
 		} else if (sscanf(line, "put %s %d %" SCNd64, filename_encoded, &cache_level, &length) == 3) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = do_put(manager, filename, cache_level, length);
+			r = start_put(filename, cache_level);
 			reset_idle_timer();
 		} else if (sscanf(line, "puturl %s %s %d %" SCNd64 " %o %s", source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id) == 6) {
 			url_decode(filename_encoded, filename, sizeof(filename));
@@ -1690,7 +1838,8 @@ static int handle_manager(struct link *manager)
 		} else if (sscanf(line, "mini_task %s %s %d %" SCNd64 " %o", source_encoded, filename_encoded, &cache_level, &length, &mode) == 5) {
 			url_decode(source_encoded, source, sizeof(source));
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = do_put_mini_task(manager, time(0) + options->active_timeout, filename, cache_level, length, mode, source);
+			mini_task_id++;
+			r = start_task_body(mini_task_id, filename, source, cache_level, length, mode);
 			reset_idle_timer();
 		} else if (sscanf(line, "unlink %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
@@ -2145,10 +2294,13 @@ system calls.
 Whole-message rule: the loop handles a message of the manager only once its first line is whole in the link's buffer
 (link_buffer_has_line), so a manager that stops in the middle of a line never holds the loop. Such a line is judged
 like a silent manager: after T without a byte (framework on) or after the idle timeout (off, the old bound of that
-read), the worker disconnects. Declared exceptions: the rest of a message whose first line announces more, that is the
-lines of a task up to its end line (task, mini_task) and the data of a put, are read as they arrive with blocking
-reads, each bounded by the active timeout (3600 s) off and by T without progress on (the link's idle timeout). These
-bodies may be larger than the link's buffer, so they cannot wait whole in it.
+read), the worker disconnects. The rest of a message whose first line announces more, the lines of a task up to its
+end line (task, mini_task) and the item of a put, may be larger than the link's buffer, so it cannot wait whole there:
+it is read in pieces of at most 64 KB as it arrives, within the budget of each round, into its destination (the
+cache's transfer path for a put, the task for a task), and the message completes in a later round (manager_body). The
+messages after it wait in the link until then. A body that makes no progress is judged as a part of a line is, after T
+(on) or the active timeout (off, the old bound of its blocking reads). The worker therefore never waits for the manager
+in this loop, and the probe link, served first, is answered in every round, also in the middle of a large put.
 */
 #define ROUND_BUDGET USECOND
 
@@ -2261,23 +2413,33 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		/* Handle the messages already in the link's buffer until the budget expires, as the manager does, so that a
 		 * long task, such as one with thousands of inputs, is read at once rather than one line per round. A message
-		 * is handled only once its first line is whole in the buffer, so the loop never waits for the rest of a line
-		 * (whole-message rule, see "Timeouts" above ROUND_BUDGET). */
+		 * is handled only once its first line is whole in the buffer, and its body, if any, is read as it arrives, so
+		 * the loop never waits for the manager (whole-message rule, see "Timeouts" above ROUND_BUDGET). */
 		int ok = 1;
-		if (manager_activity) {
-			line = link_buffer_has_line(manager);
-		}
-		while (ok && !abort_flag && line == 1) {
-			ok &= handle_manager(manager);
-			line = 0;
+		while (ok && !abort_flag && manager_activity) {
+			if (manager_body) {
+				ok = continue_manager_body(manager, &round);
+				if (manager_body) {
+					break;
+				}
+			} else {
+				line = link_buffer_has_line(manager);
+				if (line != 1) {
+					break;
+				}
+				ok = handle_manager(manager);
+				line = 0;
+			}
 			if (budget_expired(&round)) {
 				break;
 			}
-			line = link_buffer_has_line(manager);
 		}
-		if (ok && line == -1 && timestamp_monotonic() - link_last_read(manager) >= (timestamp_t)vine_worker_options_timeout(options, options->idle_timeout) * USECOND) {
-			debug(D_NOTICE, "the manager sent part of a message and nothing more for %d s, disconnecting", vine_worker_options_timeout(options, options->idle_timeout));
-			break;
+		if (ok && (manager_body || line == -1)) {
+			int timeout = vine_worker_options_timeout(options, manager_body ? options->active_timeout : options->idle_timeout);
+			if (timestamp_monotonic() - link_last_read(manager) >= (timestamp_t)timeout * USECOND) {
+				debug(D_NOTICE, "the manager sent part of a message and nothing more for %d s, disconnecting", timeout);
+				break;
+			}
 		}
 
 		round_timer_step(&timer, "manager-messages");
