@@ -105,9 +105,11 @@ struct link {
 };
 
 /* The lists of a poll set that a link can be in: links with events that were not taken yet, in the order in which
- * they became ready, and links whose input buffer may hold data that the next wait must report. */
+ * they became ready, urgent links (link_poll_set_urgent()) apart from the others, and links whose input buffer may hold
+ * data that the next wait must report. */
 enum poll_list_kind {
 	POLL_READY,
+	POLL_URGENT,
 	POLL_CHECK,
 	POLL_LISTS
 };
@@ -132,6 +134,7 @@ struct link_poll_entry {
 	int events;  /* The events of interest. */
 	int revents; /* The events found by a wait and not taken yet. */
 	int index;   /* The position of the link in set->links. */
+	int urgent;  /* Whether the link's events are reported ahead of every other link's, in POLL_URGENT. */
 	struct poll_node node[POLL_LISTS];
 };
 
@@ -1800,12 +1803,18 @@ static void poll_set_note_buffer(struct link *link)
 	}
 }
 
+/* The list of ready links that a link joins when it has events. */
+static enum poll_list_kind poll_ready_kind(struct link *link)
+{
+	return link->poll->urgent ? POLL_URGENT : POLL_READY;
+}
+
 /* Record events found for a link, which keeps its place among the ready links or takes the last one. */
 static void poll_set_mark(struct link_poll_set *set, struct link *link, int revents)
 {
 	if (revents) {
 		link->poll->revents |= revents;
-		poll_list_push(set, POLL_READY, link);
+		poll_list_push(set, poll_ready_kind(link), link);
 	}
 }
 
@@ -1971,7 +1980,26 @@ int link_poll_set_modify(struct link_poll_set *set, struct link *link, int event
 		entry->revents &= ~LINK_WRITE;
 	}
 	if (!entry->revents) {
-		poll_list_remove(set, POLL_READY, link);
+		poll_list_remove(set, poll_ready_kind(link), link);
+	}
+	return 1;
+}
+
+int link_poll_set_urgent(struct link_poll_set *set, struct link *link, int urgent)
+{
+	struct link_poll_entry *entry = link->poll;
+	if (!entry || entry->set != set) {
+		return 0;
+	}
+	urgent = !!urgent;
+	if (entry->urgent == urgent) {
+		return 1;
+	}
+	int ready = entry->node[poll_ready_kind(link)].member;
+	poll_list_remove(set, poll_ready_kind(link), link);
+	entry->urgent = urgent;
+	if (ready) {
+		poll_list_push(set, poll_ready_kind(link), link);
 	}
 	return 1;
 }
@@ -2005,9 +2033,11 @@ int link_poll_set_wait(struct link_poll_set *set, int msec)
 	/* Links that were not taken keep their place, and their events are confirmed below: by their sockets, or by data
 	 * in their buffers, which may be what made them ready and which their sockets no longer show. */
 	struct link *link;
-	for (link = set->list[POLL_READY].head; link; link = link->poll->node[POLL_READY].next) {
-		link->poll->revents = 0;
-		poll_list_push(set, POLL_CHECK, link);
+	for (int kind = POLL_READY; kind <= POLL_URGENT; kind++) {
+		for (link = set->list[kind].head; link; link = link->poll->node[kind].next) {
+			link->poll->revents = 0;
+			poll_list_push(set, POLL_CHECK, link);
+		}
 	}
 
 	/* Links that a read left with data in their buffer are readable without a look at their sockets. */
@@ -2045,12 +2075,14 @@ int link_poll_set_wait(struct link_poll_set *set, int msec)
 	/* Drop links whose events were not confirmed, and count the rest. */
 	int ready = 0;
 	struct link *next;
-	for (link = set->list[POLL_READY].head; link; link = next) {
-		next = link->poll->node[POLL_READY].next;
-		if (link->poll->revents) {
-			ready++;
-		} else {
-			poll_list_remove(set, POLL_READY, link);
+	for (int kind = POLL_READY; kind <= POLL_URGENT; kind++) {
+		for (link = set->list[kind].head; link; link = next) {
+			next = link->poll->node[kind].next;
+			if (link->poll->revents) {
+				ready++;
+			} else {
+				poll_list_remove(set, kind, link);
+			}
 		}
 	}
 
@@ -2060,9 +2092,10 @@ int link_poll_set_wait(struct link_poll_set *set, int msec)
 	return ready;
 }
 
-struct link *link_poll_set_next(struct link_poll_set *set, int *revents, void **data)
+/* Take the events of the first link of one list of ready links. */
+static struct link *poll_set_next_of(struct link_poll_set *set, enum poll_list_kind kind, int *revents, void **data)
 {
-	struct link *link = poll_list_pop(set, POLL_READY);
+	struct link *link = poll_list_pop(set, kind);
 	if (!link) {
 		return NULL;
 	}
@@ -2076,6 +2109,17 @@ struct link *link_poll_set_next(struct link_poll_set *set, int *revents, void **
 	return link;
 }
 
+struct link *link_poll_set_next(struct link_poll_set *set, int *revents, void **data)
+{
+	struct link *link = poll_set_next_of(set, POLL_URGENT, revents, data);
+	return link ? link : poll_set_next_of(set, POLL_READY, revents, data);
+}
+
+struct link *link_poll_set_next_urgent(struct link_poll_set *set, int *revents, void **data)
+{
+	return poll_set_next_of(set, POLL_URGENT, revents, data);
+}
+
 int link_poll_set_take(struct link_poll_set *set, struct link *link, int events)
 {
 	struct link_poll_entry *entry = link->poll;
@@ -2085,7 +2129,7 @@ int link_poll_set_take(struct link_poll_set *set, struct link *link, int events)
 	int taken = entry->revents & events;
 	entry->revents &= ~events;
 	if (!entry->revents) {
-		poll_list_remove(set, POLL_READY, link);
+		poll_list_remove(set, poll_ready_kind(link), link);
 	}
 	if (taken & LINK_READ) {
 		poll_set_note_buffer(link);

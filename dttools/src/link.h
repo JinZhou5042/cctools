@@ -450,7 +450,9 @@ A wait reports the events of a link until the caller takes them with @ref link_p
 @ref link_poll_set_take. Links whose events were not taken keep their place ahead of newly ready links, so a caller
 that stops early serves every ready link in turn. A wait confirms the events of such links again and drops those that
 are no longer ready. A link whose input buffer holds data is reported readable even when its socket has nothing, as
-@ref link_poll does: this covers data that any read of the link left in its buffer.
+@ref link_poll does: this covers data that any read of the link left in its buffer. An urgent link
+(@ref link_poll_set_urgent) is reported ahead of every link that is not, whenever it became ready, so a caller can serve
+a few links that carry checks before the rest of its work (@ref link_poll_set_next_urgent).
 <p>
 Closing a link removes it from its set. A set and its links belong to one thread. A link is in at most one set.
 */
@@ -496,13 +498,31 @@ void link_poll_set_remove(struct link_poll_set *set, struct link *link);
 */
 int link_poll_set_wait(struct link_poll_set *set, int msec);
 
-/** Take the events of the next ready link, in the order in which links became ready.
+/** Take the events of the next ready link: urgent links first, then the others, each in the order in which they
+became ready.
 @param set The poll set.
 @param revents Filled with the events of the link.
 @param data Filled with the data given to @ref link_poll_set_add, if not null.
 @return The next ready link, or null when no link is ready.
 */
 struct link *link_poll_set_next(struct link_poll_set *set, int *revents, void **data);
+
+/** Take the events of the next ready urgent link, leaving every other link for @ref link_poll_set_next.
+@param set The poll set.
+@param revents Filled with the events of the link.
+@param data Filled with the data given to @ref link_poll_set_add, if not null.
+@return The next ready urgent link, or null when no urgent link is ready.
+*/
+struct link *link_poll_set_next_urgent(struct link_poll_set *set, int *revents, void **data);
+
+/** Mark a link of a poll set urgent, or not: the events of an urgent link are reported ahead of those of every link
+that is not, in the order in which urgent links became ready.
+@param set The poll set.
+@param link A link in the set.
+@param urgent Non-zero to make the link urgent, zero to make it ordinary.
+@return One on success, zero if the link is not in the set.
+*/
+int link_poll_set_urgent(struct link_poll_set *set, struct link *link, int urgent);
 
 /** Take some events of one link, leaving its other events for @ref link_poll_set_next.
 @param set The poll set.
