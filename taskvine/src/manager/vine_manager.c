@@ -3499,6 +3499,15 @@ static vine_result_code_t handle_worker(struct vine_manager *q, struct vine_work
 		return VINE_SUCCESS;
 	}
 
+	/* Whole-line rule, as in the worker's main loop: a message is handled only once its first line is whole in the
+	 * buffer (link_buffer_has_line()), so a worker or a path that stops in the middle of a line never holds the step.
+	 * Before, the read of that line waited up to T (long-timeout off) on the manager's thread, which no other worker
+	 * was served during. A worker that sends part of a line and nothing more is judged as a silent one is, by its
+	 * probe link or its keepalives. The rest of a multi-line message is still read synchronously. */
+	if (link_buffer_has_line(w->link) != 1) {
+		return VINE_SUCCESS;
+	}
+
 	vine_msg_code_t mcode;
 	mcode = vine_manager_recv_no_retry(q, w, line, sizeof(line));
 
