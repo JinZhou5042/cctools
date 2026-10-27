@@ -2885,9 +2885,13 @@ These guarantees have these limits:
   T, or `short-timeout` without a response time.
 - For a worker without a probe link (one that declares no response time of its own), the network must drain the
   buffers on the path within X/2, or a keepalive check waiting behind them arrives late.
-- A worker with a probe link answers no check while it reads a file sent on its first connection. The manager counts
-  the data it moves on that connection as evidence too, so the network must drain the buffers on the path within T
-  after the manager wrote the last of a file.
+- A worker with a probe link answers no check while it reads a file or a task sent on its first connection. The
+  manager counts data written on that connection as evidence of the worker only beyond what the buffers on the path
+  can hold without the worker reading, B = the manager's send buffer plus twice its receive buffer, which stands in
+  for the worker's, so a stopped worker is removed in time however much the manager keeps sending it. The network
+  must therefore carry the last 2B bytes of a file to the worker within T. A worker or a proxy whose receive buffer
+  is larger than the manager's can delay the removal of a stopped worker; setting `TCP_WINDOW_SIZE` (or `-w` of the
+  worker) fixes both ends.
 
 === "Python"
     ```python

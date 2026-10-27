@@ -182,10 +182,10 @@ answers in the round that reads it, on a link that holds nothing else. The answe
 within two rounds and two crossings of the check's handover: at most 2X. The check is written when it is handed
 over, and the manager reads the probe link before it declares (probe_worker()), so neither its notice delay nor its
 service interval enters. T = 2X is the accuracy floor on the probe link (tolerance 1) while the worker keeps its
-declared X. The worker's blocking reads of put bodies can break that bound, which is why evidence on the control link
-restarts the judgment (probe_worker()). A stopped worker is removed within about 1.5 T with the interval T/2, and
-later while its control link still moves data. On the control link the same 2X is a heuristic, since everything queued
-ahead of a check delays its answer.
+declared X. The worker's blocking reads of put bodies and task lines can break that bound, which is why evidence on
+the control link restarts the judgment (probe_worker()). A stopped worker is removed within about 1.5 T with the
+interval T/2, whatever the manager keeps sending it, because writes count only beyond what the buffers can hold. On
+the control link the same 2X is a heuristic, since everything queued ahead of a check delays its answer.
 */
 #define VINE_PROBE_ROUNDS 2
 
@@ -227,24 +227,90 @@ static int read_probe_link(struct vine_manager *q, struct vine_worker_info *w)
 	return 1;
 }
 
+/* What the buffers of a control link hold without the peer reading: the send buffer plus twice the receive buffer,
+ * the manager's own standing in for the worker's, which the manager cannot see. */
+static uint64_t probe_slack(struct link *link)
+{
+	int send = 0;
+	int receive = 0;
+	socklen_t length = sizeof(send);
+	if (getsockopt(link_fd(link), SOL_SOCKET, SO_SNDBUF, &send, &length) < 0) {
+		send = 0;
+	}
+	length = sizeof(receive);
+	if (getsockopt(link_fd(link), SOL_SOCKET, SO_RCVBUF, &receive, &length) < 0) {
+		receive = 0;
+	}
+	return (uint64_t)MAX(send, 0) + 2 * (uint64_t)MAX(receive, 0);
+}
+
+/* Record the bytes the control queue has written by now, when they changed and the newest sample is at least T/16
+ * old, so the samples reach back max(T, VINE_PROBE_SAMPLES passes). */
+static void probe_sample(struct vine_worker_info *w, timestamp_t now, int timeout)
+{
+	struct vine_probe_sample *newest = &w->probe_samples[(w->probe_sample_next + VINE_PROBE_SAMPLES - 1) % VINE_PROBE_SAMPLES];
+	uint64_t written = link_writer_bytes_written(w->lw);
+	if (newest->time && (written == newest->bytes || now - newest->time < (timestamp_t)timeout * 1000000 / VINE_PROBE_SAMPLES)) {
+		return;
+	}
+	w->probe_samples[w->probe_sample_next] = (struct vine_probe_sample){now, written};
+	w->probe_sample_next = (w->probe_sample_next + 1) % VINE_PROBE_SAMPLES;
+}
+
+/* The latest sampled time since which the control queue wrote more than the slack, or zero. O(VINE_PROBE_SAMPLES). */
+static timestamp_t probe_write_evidence(struct vine_worker_info *w)
+{
+	uint64_t written = link_writer_bytes_written(w->lw);
+	for (int i = 1; i <= VINE_PROBE_SAMPLES; i++) {
+		struct vine_probe_sample *sample = &w->probe_samples[(w->probe_sample_next + VINE_PROBE_SAMPLES - i) % VINE_PROBE_SAMPLES];
+		if (!sample->time) {
+			break;
+		}
+		if (written - sample->bytes > w->probe_slack) {
+			uint64_t slack = probe_slack(w->link);
+			if (slack > w->probe_slack) {
+				debug(D_VINE, "worker %s (%s): control link slack grew from %" PRIu64 " to %" PRIu64 " bytes", w->hostname, w->addrport, w->probe_slack, slack);
+				w->probe_slack = slack;
+			}
+			if (written - sample->bytes > w->probe_slack) {
+				return sample->time;
+			}
+		}
+	}
+	return 0;
+}
+
 /*
 Keepalives on the probe link: a check after the interval without one outstanding, and removal when a check stays
 unanswered for T. Unless set, the interval and the timeout are T/2 and T of the probe link. Returns zero when the
 worker has failed.
 
 A worker reads the body of a put, and the lines of a task, with blocking reads (the exceptions above ROUND_BUDGET in
-vine_worker.c), so while it reads a large file from its control link it answers no check. The probe link and the
-control link are links of the same worker, and evidence on either ends the wait (the timeout detector of
-timeout/theory.md, Definition 1.20: noticed evidence restarts the judgment). The evidence is the answer on the probe
-link, a byte read from the control link, and a write of the control queue (link_writer_last_progress()). A worker is
-removed when none of them happened for T after the check was handed over: the judgment starts at the latest of the
-check and the last evidence. Suspending the judgment only while the control queue held data was wrong: the queue
-empties while the last of a put is still in both kernel buffers, and the check then dated from before the put, so a
-worker whose put took longer than T was removed at the next check while it read the rest. What remains after the
-manager's last write is what the kernel buffers hold, which a healthy worker reads, finishing its round and answering
-within T at the rates the deployment assumes. A queue that stops moving is still judged by link_made_no_progress()
-after the same T.
+vine_worker.c), so while it reads a large file or task from its control link it answers no check. The probe link and
+the control link are links of the same worker, and evidence on either ends the wait (the timeout detector of
+timeout/theory.md, Definition 1.20: noticed evidence restarts the judgment). A worker is removed when it showed no
+evidence for T after the check was handed over: the judgment starts at the latest of the check and the last evidence.
+
+The evidence is the answer on the probe link, a byte read from the control link, and writes of the control queue
+counted with slack. A write proves nothing by itself: the manager's kernel accepts bytes into its send buffer s_W
+and the worker's receive window R while the worker is stopped, and a push into an empty queue writes at once. Bytes
+written prove that the worker read once more than s_W + 2R went in (Lemma K of timeout/theory-appendix.md: the bytes
+read, acknowledged, and below the right edge of the window differ by at most 2R after the reader stops). The evidence
+time is therefore the latest sampled time t' such that the queue wrote more than that slack since t'
+(probe_write_evidence()), which proves a read after t', and a stopped worker is removed within T plus the check
+interval of its stop, whatever the manager keeps sending it. probe_slack measures s_W and R with getsockopt() on the
+control link when the probe link is attached, and again before it counts the bytes, because autotuning grows both.
+The manager cannot see the worker's receive buffer, so its own receive buffer stands in for R. That is exact when
+TCP_WINDOW_SIZE or -w fixes both ends. An autotuned worker buffer, or a proxy's buffer on the path, larger than
+the stand-in can make bytes that the worker never read count as evidence.
+
+What remains is that a healthy worker reading a put must make its evidence visible within T: from t', it reads the
+slack written since then and what the buffers held at the manager's last write, at most twice the slack, and then
+finishes its round and answers. A put whose last 2 (s_W + 2R) bytes take longer than T to arrive, through a slow path
+or a slow worker, removes a healthy worker (manual). A queue that stops moving is still judged by
+link_made_no_progress() after the same T.
 */
+
 static int probe_worker(struct vine_manager *q, struct vine_worker_info *w)
 {
 	int timeout = q->keepalive_timeout >= 0 ? q->keepalive_timeout : vine_manager_probe_timeout(q, w);
@@ -253,6 +319,7 @@ static int probe_worker(struct vine_manager *q, struct vine_worker_info *w)
 		return 1;
 	}
 	timestamp_t now = timestamp_monotonic();
+	probe_sample(w, now, timeout);
 	if (!w->probe_sent) {
 		if (now - w->probe_answer >= (timestamp_t)interval * 1000000) {
 			link_writer_push(w->probe_lw, "check\n", 6);
@@ -279,7 +346,7 @@ static int probe_worker(struct vine_manager *q, struct vine_worker_info *w)
 		if (!w->probe_sent) {
 			return 1;
 		}
-		timestamp_t evidence = MAX(w->probe_sent, MAX(link_writer_last_progress(w->lw), link_last_read(w->link)));
+		timestamp_t evidence = MAX(w->probe_sent, MAX(link_last_read(w->link), probe_write_evidence(w)));
 		if (now - evidence >= (timestamp_t)timeout * 1000000) {
 			debug(D_VINE, "Removing worker %s (%s): hasn't answered a check on its probe link for more than %d s", w->hostname, w->addrport, timeout);
 			return 0;
@@ -320,8 +387,11 @@ static void probe_attach(struct vine_manager *q, struct vine_worker_info *w, str
 	link_set_idle_timeout(w->probe_link, vine_manager_probe_timeout(q, w));
 	w->probe_sent = 0;
 	w->probe_answer = timestamp_monotonic();
+	memset(w->probe_samples, 0, sizeof(w->probe_samples));
+	w->probe_sample_next = 0;
+	w->probe_slack = probe_slack(w->link);
 
-	debug(D_VINE, "worker %s (%s) opened its probe link from %s", w->hostname, w->addrport, temp->addrport);
+	debug(D_VINE, "worker %s (%s) opened its probe link from %s, control link slack %" PRIu64 " bytes", w->hostname, w->addrport, temp->addrport, w->probe_slack);
 	vine_worker_delete(temp);
 }
 
