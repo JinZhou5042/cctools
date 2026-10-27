@@ -1010,6 +1010,8 @@ class Manager(object):
     # - "proportional-whole-tasks" Round up resource proportions such that only an integer number of tasks could be fit in the worker. The default is to use proportions.
     # - "ramp-down-heuristic" If set to 1 and there are more workers than tasks waiting, then tasks are allocated all the free resources of a worker large enough to run them. If monitoring watchdog is not enabled, then this heuristic has no effect. (default=0)
     # - "response-timeout" The response time X in seconds of a worker that has not declared its own (vine_worker --response-timeout). If positive, a worker that makes no progress for T = 2X is removed. (default=0, off)
+    # - "manager-response-timeout" The manager's own response time X_M in seconds, sent to workers with a probe link, which then leave the manager when a check on the probe link stays unanswered for 2 X_M. (default=0, off)
+    # - "queue-stall-timeout" Seconds that the control queue of a worker judged by its probe link may take no data before the worker is removed. (default=0, meaning T + 372 s)
     # - "resource-submit-multiplier" Treat each worker as having ({cores,memory,gpus} * multiplier) when submitting tasks. This allows for tasks to wait at a worker rather than the manager. (default = 1.0)
     # - "short-timeout" Set the minimum timeout when sending a brief message to a single worker. (default=5s)
     # - "transfer-outlier-factor" Transfer that are this many times slower than the average will be terminated.  (default=10x)

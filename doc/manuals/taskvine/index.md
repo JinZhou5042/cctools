@@ -2843,12 +2843,14 @@ change.
 | keepalive-timeout | Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. | 900, or T with a response time (see below) |
 | load-from-shared-filesystem | If set to 1, workers can load in data to their caches from the shared filesystem | 0 |
 | long-timeout | Set the minimum timeout in seconds when sending a large message to a single worker. | 3600 |
+| manager-response-timeout | The manager's own response time X_M in seconds, which it sends to workers with a probe link. Such a worker checks the manager on the probe link and leaves it when a check stays unanswered for 2 X_M (see below). 0 leaves workers to judge the manager by their first connection. | 0 |
 | max-retrievals | Sets the max number of tasks to retrieve per manager wait(). If less than 1, the manager prefers to retrieve all completed tasks before dispatching new tasks to workers. | 1 |
 | min-transfer-timeout | Set the minimum number of seconds to wait for files to be transferred to or from a worker. | 10 |
 | monitor-interval        | Maximum number of seconds between resource monitor measurements. If less than 1, use default. | 5 |
 | perf-log-interval | Minimum number of seconds between performance log entries. Each entry takes a pass over every worker. | 1 |
 | prefer-dispatch | If 1, try to dispatch tasks even if there are retrieved tasks ready to be reportedas done. | 0 |
 | proportional-whole-tasks | Round up resource proportions such that only an integer number of tasks could be fit in the worker. The default is to use proportions. (See [task resources.](#task-resources) | 1 |
+| queue-stall-timeout | Seconds that the queue on the first connection of a worker judged by its probe link may take no data before the worker is removed, and that such a worker waits for a manager whose queue stalls. 0 means T + 372 s (see below). | 0 |
 | ramp-down-heuristic     | If set to 1 and there are more workers than tasks waiting, then tasks are allocated all the free resources of a worker large enough to run them. If monitoring watchdog is not enabled, then this heuristic has no effect. | 0 |
 | response-timeout | The response time X in seconds of a worker that has not declared its own (`--response-timeout`). If positive, a worker that makes no progress for T = 2X is removed (see below). 0 leaves the timeouts above in effect. | 0 |
 | resource-submit-multiplier | Assume that workers have `resource x resources-submit-multiplier` available.<br> This overcommits resources at the worker, causing tasks to be sent to workers that cannot be immediately executed.<br>The extra tasks wait at the worker until resources become available. | 1 |
@@ -2877,7 +2879,19 @@ set up as the first one is (TLS and password), which carries only the keepalive 
 there never waits behind tasks or files queued for the worker, and the worker answers it within a round of its main
 loop, also while it receives a large file or task on its first connection, which it reads in pieces as the data
 arrives. A worker on a busy or slow link is therefore not removed while it takes data, and a stopped worker is removed
-within T of its first unanswered check, however much the manager keeps sending it.
+within T of its first unanswered check, however much the manager keeps sending it. While its probe link answers, the
+worker is not removed because its first connection takes no data: that connection may wait for the network to show the
+room the worker made, which can take minutes after a lost acknowledgment, so such a stall removes the worker only after
+`queue-stall-timeout`, by default T + 372 s.
+
+The probe link also lets a worker judge the manager. When the manager declares its own response time X_M
+(`manager-response-timeout`), it sends X_M to each worker on its probe link, reads probe links first in every step, and
+answers the worker's checks there at once. Such a worker sends a check when it has heard nothing from the manager on
+either connection for X_M, and leaves the manager when the check stays unanswered for 2 X_M with nothing heard on either
+connection, so a stopped manager is detected within about 3 X_M, while a manager whose first connection is full but
+which still answers is never left before `queue-stall-timeout`. X_M must cover the longest step of the manager's wait
+as the workers see it, including a crossing of the network. Without X_M a worker judges the manager by its first
+connection alone.
 These guarantees have these limits:
 
 - Operations keep their own timeouts as outer limits, so a slow transfer that keeps making progress lasts as long as

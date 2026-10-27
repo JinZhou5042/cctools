@@ -1530,6 +1530,10 @@ deactivated if less than 1. (default=0)
 as dead. (default=900, or T with a response time, see response-timeout)
  - "response-timeout" The response time X in seconds of a worker that has not declared its own (vine_worker
 --response-timeout). If positive, a worker that makes no progress for T = 2X is removed. (default=0, off)
+ - "manager-response-timeout" The manager's own response time X_M in seconds, sent to workers with a probe link,
+which then leave the manager when a check on the probe link stays unanswered for 2 X_M. (default=0, off)
+ - "queue-stall-timeout" Seconds that the control queue of a worker judged by its probe link may take no data before the
+worker is removed. (default=0, meaning T + 372 s)
  - "short-timeout" Set the minimum timeout when sending a brief message to a single worker. (default=5s)
  - "monitor-interval" Maximum number of seconds between resource monitor measurements. If less than 1, use default (5s).
 (default=5)

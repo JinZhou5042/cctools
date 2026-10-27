@@ -109,6 +109,13 @@ static struct link *manager_link = NULL; /* The link that manager_lw writes to. 
 static struct link *probe_link = NULL;
 static struct link_writer *probe_lw = NULL;
 
+/* The manager's own response time X_M and the bound of a stalled control queue, in seconds, as the manager declared
+ * them on the probe link (response-timeout), or zero: the worker then judges the manager by its probe link (see
+ * probe_manager()). manager_check_sent is when the outstanding check of the manager was handed to probe_lw, or zero. */
+static int manager_response_timeout = 0;
+static int manager_stall_timeout = 0;
+static timestamp_t manager_check_sent = 0;
+
 /* Processes that do_kill() signalled and dropped before they exited, indexed by pid. Their tasks are gone, so only
  * their exit status remains to be collected, which the main loop does without waiting and a disconnect does waiting. */
 static struct itable *procs_killed = NULL;
@@ -1692,6 +1699,9 @@ static void close_probe_link(void)
 		link_close(probe_link);
 	}
 	probe_link = NULL;
+	manager_response_timeout = 0;
+	manager_stall_timeout = 0;
+	manager_check_sent = 0;
 }
 
 /* Close the link to the manager and drop what its queue still holds, and the probe link with it. */
@@ -1709,12 +1719,17 @@ static void close_manager_link(struct link *manager)
 /* The most lines that one round reads from the probe link. The manager sends one check at a time. */
 #define PROBE_LINES 8
 
+/* The timeout of a check of the manager is this many times X_M, as the manager's timeout of a check of a worker is
+ * VINE_PROBE_ROUNDS times the worker's X (vine_manager.c). */
+#define MANAGER_PROBE_ROUNDS 2
+
 /*
 Answer the manager's checks on the probe link in this round: info round-stats (with the framework on) and alive go out
 on the probe link at once, and the resource update that a check on the control link also brings goes on the control
-link. Lines are read only when whole in the buffer, so the round never waits for the manager. A probe link that fails
-or carries anything else is closed, and the worker goes on: the manager judges the loss of its half, and the control
-link the rest.
+link. The same link brings the manager's answers to the worker's own checks (alive) and its declaration of X_M
+(response-timeout <X_M> <stall bound>). Lines are read only when whole in the buffer, so the round never waits for the
+manager. A probe link that fails or carries anything else is closed, and the worker goes on: the manager judges the
+loss of its half, and the control link the rest.
 */
 static void serve_probe_link(struct link *manager, struct budget *round)
 {
@@ -1728,7 +1743,16 @@ static void serve_probe_link(struct link *manager, struct budget *round)
 		}
 		lines++;
 		debug(D_VINE, "rx probe: %s", line);
-		if (strcmp(line, "check")) {
+		int x, bound;
+		if (!strcmp(line, "alive")) {
+			manager_check_sent = 0;
+			continue;
+		} else if (sscanf(line, "response-timeout %d %d", &x, &bound) == 2) {
+			manager_response_timeout = MAX(0, x);
+			manager_stall_timeout = MAX(0, bound);
+			manager_check_sent = 0;
+			continue;
+		} else if (strcmp(line, "check")) {
 			debug(D_NOTICE, "unexpected message on the probe link to the manager: %s", line);
 			close_probe_link();
 			return;
@@ -1742,6 +1766,95 @@ static void serve_probe_link(struct link *manager, struct budget *round)
 		debug(D_VINE, "failed to answer on the probe link to the manager");
 		close_probe_link();
 	}
+}
+
+/* The timeout T_M of a check of the manager on the probe link, or zero while the manager declared no X_M. */
+static int manager_probe_timeout(void)
+{
+	return (probe_link && manager_response_timeout > 0) ? MANAGER_PROBE_ROUNDS * manager_response_timeout : 0;
+}
+
+/* When the worker last read a byte of the manager on either link. */
+static timestamp_t manager_last_heard(struct link *manager)
+{
+	return probe_link ? MAX(link_last_read(manager), link_last_read(probe_link)) : link_last_read(manager);
+}
+
+/*
+Judge the manager by the probe link, as the manager judges the worker (see "Workers judge the manager" in
+vine_manager.c), once the manager declared X_M. A check goes out on the probe link when nothing came from the manager
+on either link for T_M / 2, one at a time, and any byte of the manager on either link ends it. When a check stays
+unanswered for T_M with nothing read since, the worker reads the probe link once more, so an answer that waited for
+this round counts, and then leaves the manager. Returns zero when it does. The time of the next action of this
+judgment bounds the wait of the main loop (manager_probe_wait()), so the worker notices it within a round.
+*/
+static int probe_manager(struct link *manager, struct budget *round)
+{
+	int timeout = manager_probe_timeout();
+	if (!timeout) {
+		return 1;
+	}
+	timestamp_t now = timestamp_monotonic();
+	timestamp_t heard = manager_last_heard(manager);
+	if (manager_check_sent && heard >= manager_check_sent) {
+		manager_check_sent = 0;
+	}
+	if (!manager_check_sent) {
+		if (now - heard >= (timestamp_t)timeout * USECOND / 2) {
+			debug(D_VINE, "tx probe: check");
+			link_writer_push(probe_lw, "check\n", 6);
+			if (!link_writer_send_async(probe_lw, round->end)) {
+				debug(D_VINE, "failed to send a check on the probe link to the manager");
+				close_probe_link();
+				return 1;
+			}
+			manager_check_sent = now;
+		}
+		return 1;
+	}
+	if (now - manager_check_sent < (timestamp_t)timeout * USECOND) {
+		return 1;
+	}
+	serve_probe_link(manager, round);
+	if (!probe_link || !manager_check_sent || manager_last_heard(manager) >= manager_check_sent) {
+		manager_check_sent = 0;
+		return 1;
+	}
+	debug(D_NOTICE, "the manager answered no check on the probe link and sent nothing on either link for %d s (X_M %d s), disconnecting", timeout, manager_response_timeout);
+	return 0;
+}
+
+/* The longest wait in milliseconds of the main loop before probe_manager() has something to do, or the given wait. */
+static int manager_probe_wait(struct link *manager, int msec)
+{
+	int timeout = manager_probe_timeout();
+	if (!timeout) {
+		return msec;
+	}
+	timestamp_t next = manager_check_sent ? manager_check_sent + (timestamp_t)timeout * USECOND : manager_last_heard(manager) + (timestamp_t)timeout * USECOND / 2;
+	timestamp_t now = timestamp_monotonic();
+	int until = next > now ? (int)((next - now + 999) / 1000) : 0;
+	return msec < 0 ? until : MIN(msec, until);
+}
+
+/*
+The control queue to the manager has taken and sent no data for its bound. With the probe link judging the manager,
+the bound is the stall bound that the manager declared, much longer than T, because the answers on the probe link show
+that the manager's loop runs and the queue then waits only for room that the manager's kernel has not shown yet (see
+vine_manager_queue_stall_timeout() in vine_manager.c). Otherwise it is T of the worker (vine_worker_made_no_progress()).
+*/
+int vine_worker_made_no_progress(struct link_writer *lw, struct link *link);
+
+static int manager_queue_stalled(struct link *manager)
+{
+	if (!manager_probe_timeout()) {
+		return vine_worker_made_no_progress(manager_lw, manager);
+	}
+	if (!manager_stall_timeout || link_writer_empty(manager_lw)) {
+		return 0;
+	}
+	timestamp_t progress = MAX(link_writer_last_progress(manager_lw), link_last_read(manager));
+	return timestamp_monotonic() - progress >= (timestamp_t)manager_stall_timeout * USECOND;
 }
 
 /* Handle an unexpected disconnection by the current manager, and clean up everything. */
@@ -2369,6 +2482,7 @@ static void vine_worker_serve_manager(struct link *manager)
 		if (work_remains) {
 			wait_msec = 0;
 		}
+		wait_msec = manager_probe_wait(manager, wait_msec);
 
 		/* Before the poll, because a read may wait for a manager that waits for these messages. */
 		if (!link_writer_send_async(manager_lw, timestamp_monotonic() + ROUND_BUDGET)) {
@@ -2409,6 +2523,9 @@ static void vine_worker_serve_manager(struct link *manager)
 		if (probe_link && ((probe_index >= 0 && ready > 0 && waits[probe_index].revents) || !link_buffer_empty(probe_link) || !link_writer_empty(probe_lw))) {
 			serve_probe_link(manager, &round);
 		}
+		if (!probe_manager(manager, &round)) {
+			break;
+		}
 		round_timer_step(&timer, "probe");
 
 		/* Handle the messages already in the link's buffer until the budget expires, as the manager does, so that a
@@ -2435,7 +2552,12 @@ static void vine_worker_serve_manager(struct link *manager)
 			}
 		}
 		if (ok && (manager_body || line == -1)) {
+			/* While the probe link judges the manager, a message stalled on the control link waits for the stall
+			 * bound, as a stalled queue does (manager_queue_stalled()). */
 			int timeout = vine_worker_options_timeout(options, manager_body ? options->active_timeout : options->idle_timeout);
+			if (manager_probe_timeout() && manager_stall_timeout) {
+				timeout = manager_stall_timeout;
+			}
 			if (timestamp_monotonic() - link_last_read(manager) >= (timestamp_t)timeout * USECOND) {
 				debug(D_NOTICE, "the manager sent part of a message and nothing more for %d s, disconnecting", timeout);
 				break;
@@ -2449,8 +2571,9 @@ static void vine_worker_serve_manager(struct link *manager)
 			debug(D_VINE, "failed to send to the manager");
 			break;
 		}
-		if (vine_worker_made_no_progress(manager_lw, manager)) {
-			debug(D_NOTICE, "the manager took and sent nothing for %d s, disconnecting", vine_worker_options_timeout(options, 0));
+		if (manager_queue_stalled(manager)) {
+			int stall = manager_probe_timeout() ? manager_stall_timeout : vine_worker_options_timeout(options, 0);
+			debug(D_NOTICE, "the manager took and sent nothing on the control link for %d s, disconnecting", stall);
 			break;
 		}
 		vine_process_libraries_send(round.end);

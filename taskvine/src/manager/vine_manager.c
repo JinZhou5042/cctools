@@ -116,7 +116,8 @@ makes no progress for T = 2X (vine_manager_worker_timeout()):
   written to it nor a byte read from it moved for T (worker_made_no_progress(), the one judgment by T);
 - a worker that sends nothing gets a keepalive check after T/2 and is removed when it has not answered for T, unless
   keepalive-interval and keepalive-timeout are set; a worker that declared X gets its checks on its probe link (see
-  "Probe link" below), where nothing waits ahead of them;
+  "Probe link" below), where nothing waits ahead of them, and its control queue is judged after a stall bound much
+  longer than T while the probe link answers (vine_manager_queue_stall_timeout());
 - a data service transfer from or to it fails after T without progress, and a connect-back waits at most 2T;
 - the TLS handshake and the password check of a new connection share a deadline of T.
 
@@ -173,7 +174,10 @@ alive from the worker; any other line is a protocol error that removes the worke
 after the last one was answered, so at most one check lies ahead of a check, and the worker reads the link in every
 round of its main loop and answers in the round that reads it. Losing the probe link removes the worker, through the
 same removal as the control link. The control link keeps its own judgment of a queue that makes no progress
-(link_made_no_progress()). A worker that declares no X opens no probe link, and its checks stay on the control link.
+(link_made_no_progress()), after the stall bound below instead of T while the probe link judges the worker. A worker
+that declares no X opens no probe link, and its checks stay on the control link. The same link carries the worker's
+checks of the manager the other way (see "Workers judge the manager" below): the manager declares its own X_M there
+(response-timeout), the worker sends check, and the manager answers alive.
 
 The timeout on the probe link (timeout/theory.md, section 6.1). The X that a worker declares bounds the wall-clock
 time of one of its rounds plus one crossing of the path. Nothing lies ahead of a check, since the manager sends the
@@ -195,6 +199,82 @@ static int vine_manager_probe_timeout(struct vine_manager *q, struct vine_worker
 	int x = (w && w->response_timeout > 0) ? w->response_timeout : q->response_timeout;
 	return x > 0 ? VINE_PROBE_ROUNDS * x : 0;
 }
+
+/*
+The control queue of a worker judged by its probe link. The answers on the probe link show that the worker's loop
+runs, and that loop reads its control link in every round. A queue on the control link that takes no data meanwhile
+therefore waits only for room that the worker's reads made and that the worker's kernel has not yet shown the manager's,
+which takes up to d_L = o_max + RTO_cap + 4d + d_a after a lost window update (timeout/theory-appendix.md, Lemma W).
+A judgment by room is accurate only from the accuracy floor of the room constructions (Theorem A.8(b) and (e)): c_W =
+3d + d_a + 3 d_L + epsilon_W + 4 J_W above the time the party takes to make the room, which the probe's T bounds here,
+since the worker reads everything that arrived within a round. With the numbers of Appendix E.4 (o_max = 0, RTO_cap =
+TCP_RTO_MAX = 120 s, d = 0.2 s, d_a = d + 0.2 s, epsilon_W and J_W of 1.5 s each), d_L is about 121 s and c_W about
+372 s. A stalled control queue of such a worker is therefore judged after T + VINE_QUEUE_STALL_SLACK, not after T:
+at T = 4 s the judgment after T was a judgment by room about 90 times below its accuracy floor, which a full socket on a
+lossy path or a slow proxy could fail. A worker whose probe link is silent is removed by probe_worker() after T, so a
+stopped worker is removed as fast as before. The tuning queue-stall-timeout sets the bound instead. Synchronous
+exchanges (flush_worker_queue_reading()) keep T, because the manager's own loop waits in them, and a worker without a
+probe link keeps T too.
+*/
+#define VINE_QUEUE_STALL_SLACK 372
+
+static int vine_manager_queue_stall_timeout(struct vine_manager *q, int timeout)
+{
+	return q->queue_stall_timeout > 0 ? q->queue_stall_timeout : timeout + VINE_QUEUE_STALL_SLACK;
+}
+
+/* The interval and the timeout of the checks on a worker's probe link: T/2 and T unless keepalives are set. */
+static int probe_check_timeout(struct vine_manager *q, struct vine_worker_info *w)
+{
+	return q->keepalive_timeout >= 0 ? q->keepalive_timeout : vine_manager_probe_timeout(q, w);
+}
+
+static int probe_check_interval(struct vine_manager *q, struct vine_worker_info *w)
+{
+	return q->keepalive_interval >= 0 ? q->keepalive_interval : probe_check_timeout(q, w) / 2;
+}
+
+/* Whether the checks on the probe link judge the worker, so that its control queue gets the stall bound. */
+static int probe_judges_worker(struct vine_manager *q, struct vine_worker_info *w)
+{
+	return w->probe_link && probe_check_interval(q, w) > 0 && probe_check_timeout(q, w) > 0;
+}
+
+/* The timeout of the control queue of a worker: the stall bound when its probe link judges it, else T or zero. */
+static int worker_queue_timeout(struct vine_manager *q, struct vine_worker_info *w)
+{
+	int timeout = vine_manager_worker_timeout(q, w, 0);
+	if (timeout && probe_judges_worker(q, w)) {
+		return vine_manager_queue_stall_timeout(q, timeout);
+	}
+	return timeout;
+}
+
+/*
+Tell a worker on its probe link the manager's own response time X_M and the bound of a stalled control queue, both in
+seconds: response-timeout <X_M> <bound>, with zeros while the manager declares no X_M. A worker that knows X_M judges
+the manager as the manager judges it (see "Workers judge the manager" below). Returns zero if the probe link failed.
+*/
+static int probe_declare(struct vine_manager *q, struct vine_worker_info *w)
+{
+	int x = q->manager_response_timeout;
+	int bound = x > 0 ? vine_manager_queue_stall_timeout(q, VINE_PROBE_ROUNDS * x) : 0;
+	char line[64];
+	int length = snprintf(line, sizeof(line), "response-timeout %d %d\n", x, bound);
+	debug(D_VINE, "tx probe to %s (%s): %.*s", w->hostname, w->addrport, length - 1, line);
+	link_writer_push(w->probe_lw, line, length);
+	return link_writer_send_async(w->probe_lw, 0);
+}
+
+/*
+Workers judge the manager. A worker that knows X_M (manager-response-timeout, sent at the pairing of the probe link
+and whenever it changes) sends check on its probe link when it has heard nothing from the manager on either link for
+T_M / 2, T_M = VINE_PROBE_ROUNDS X_M, and leaves the manager when that check stays unanswered for T_M with nothing read
+on either link since it was sent. The manager reads urgent links first in each step (probe links are urgent in the
+poll set, poll_active_workers()) and answers alive at once, so X_M must bound one step of vine_wait() as a worker sees
+it, VINE_ROUND_BUDGET and the synchronous exchanges included, plus one crossing. Without X_M a worker keeps the old
+judgment of its control queue.
+*/
 
 /* The most lines that one read of a probe link handles. An answer is two lines, so more is left for the next step. */
 #define VINE_PROBE_LINES 8
@@ -218,6 +298,13 @@ static int read_probe_link(struct vine_manager *q, struct vine_worker_info *w)
 		if (!strcmp(line, "alive")) {
 			w->probe_sent = 0;
 			w->probe_answer = timestamp_monotonic();
+		} else if (!strcmp(line, "check")) {
+			/* The worker judges the manager: answer within this step, on a link that holds only answers. */
+			debug(D_VINE, "tx probe to %s (%s): alive", w->hostname, w->addrport);
+			link_writer_push(w->probe_lw, "alive\n", 6);
+			if (!link_writer_send_async(w->probe_lw, 0)) {
+				return 0;
+			}
 		} else if (string_prefix_is(line, "info round-stats ")) {
 			handle_info(q, w, line);
 		} else {
@@ -237,13 +324,13 @@ The judgment counts only the answers on the probe link, the probe channel of tim
 worker never waits for the manager in its main loop and serves the probe link first in every round, so a healthy
 worker answers within 2X however much the manager sends it on the control link, and nothing written there can delay
 the removal of a stopped worker. A queue on the control link that stops moving is still judged by
-link_made_no_progress() after the same T.
+link_made_no_progress(), after the stall bound (vine_manager_queue_stall_timeout()).
 */
 
 static int probe_worker(struct vine_manager *q, struct vine_worker_info *w)
 {
-	int timeout = q->keepalive_timeout >= 0 ? q->keepalive_timeout : vine_manager_probe_timeout(q, w);
-	int interval = q->keepalive_interval >= 0 ? q->keepalive_interval : timeout / 2;
+	int timeout = probe_check_timeout(q, w);
+	int interval = probe_check_interval(q, w);
 	if (interval <= 0) {
 		return 1;
 	}
@@ -308,12 +395,16 @@ static void probe_attach(struct vine_manager *q, struct vine_worker_info *w, str
 	w->probe_link = temp->link;
 	temp->link = NULL;
 	link_poll_set_add(q->poll_set, w->probe_link, LINK_READ, w);
+	/* Checks of the worker are read first in every step. */
+	link_poll_set_urgent(q->poll_set, w->probe_link, 1);
 	link_set_idle_timeout(w->probe_link, vine_manager_probe_timeout(q, w));
 	w->probe_sent = 0;
 	w->probe_answer = timestamp_monotonic();
 
 	debug(D_VINE, "worker %s (%s) opened its probe link from %s", w->hostname, w->addrport, temp->addrport);
 	vine_worker_delete(temp);
+	/* A failure shows when the next check is sent or read, which removes the worker outside this handler. */
+	probe_declare(q, w);
 }
 
 /* A worker that declared X waits for its probe link, or takes the one that arrived first. */
@@ -5414,6 +5505,8 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->keepalive_interval = -1;
 	q->keepalive_timeout = -1;
 	q->response_timeout = 0;
+	q->manager_response_timeout = 0;
+	q->queue_stall_timeout = 0;
 
 	q->monitor_mode = VINE_MON_DISABLED;
 
@@ -6536,12 +6629,15 @@ static int send_to_workers(struct vine_manager *q)
 		/* Move on first: removing the worker drops its entry. */
 		list_next(cursor);
 
-		int state = advance_queue(q, w->lw, w->link, vine_manager_worker_timeout(q, w, 0), link_poll_set_take(q->poll_set, w->link, LINK_WRITE));
+		int state = advance_queue(q, w->lw, w->link, worker_queue_timeout(q, w), link_poll_set_take(q->poll_set, w->link, LINK_WRITE));
 		if (state > 0) {
 			unwatch_worker_queue(q, w);
 		} else if (state < 0) {
 			if (link_writer_failed(w->lw)) {
 				debug(D_VINE, "Removing worker %s (%s): its link failed", w->hostname, w->addrport);
+			} else if (probe_judges_worker(q, w) && vine_manager_worker_timeout(q, w, 0)) {
+				int stall = worker_queue_timeout(q, w);
+				debug(D_VINE, "Removing worker %s (%s): its control queue took and sent no data for %d s, though it answers on its probe link", w->hostname, w->addrport, stall);
 			} else {
 				int timeout = vine_manager_worker_timeout(q, w, 0);
 				debug(D_VINE, "Removing worker %s (%s): took %sno data for %d s", w->hostname, w->addrport, timeout ? "and sent " : "", timeout ? timeout : q->minimum_transfer_timeout);
@@ -6665,9 +6761,24 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 
 	BEGIN_ACCUM_TIME(q, time_status_msgs);
 
+	/* Probe links first, whatever else is ready, so a worker's check is answered within this step and its answers
+	 * to the manager's checks are read before any other work (see "Workers judge the manager"). Only probe links
+	 * are urgent, and each read takes a few lines. */
+	int workers_failed = 0;
+	struct link *link;
+	struct vine_worker_info *w;
+	int revents;
+	while ((link = link_poll_set_next_urgent(q->poll_set, &revents, (void **)&w))) {
+		if (w && (revents & LINK_READ) && link == w->probe_link && !read_probe_link(q, w)) {
+			q->stats->workers_lost++;
+			handle_worker_failure(q, w);
+			workers_failed++;
+		}
+	}
+
 	q->connections_waiting = link_poll_set_take(q->poll_set, q->manager_link, LINK_READ);
 
-	int workers_failed = send_to_workers(q);
+	workers_failed += send_to_workers(q);
 	send_to_departing_links(q);
 	vine_manager_round_step(q, "send-to-workers");
 
@@ -6686,9 +6797,6 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 	 * handles them in every step, so their events only end the wait. A worker that is not reached keeps its place
 	 * for the next step. */
 	int handled = 0;
-	struct link *link;
-	struct vine_worker_info *w;
-	int revents;
 	while ((handled == 0 || !budget_expired(&q->round)) && (link = link_poll_set_next(q->poll_set, &revents, (void **)&w))) {
 		if (!w || !(revents & LINK_READ)) {
 			continue;
@@ -7607,7 +7715,8 @@ static const char *const vine_tune_names[] = {
 	"keepalive-interval", "keepalive-timeout", "long-timeout", "max-retrievals", "min-transfer-timeout",
 	"monitor-interval", "prefer-dispatch", "force-proportional-resources", "proportional-resources",
 	"force-proportional-resources-whole-tasks", "proportional-whole-tasks", "ramp-down-heuristic",
-	"resource-submit-multiplier", "asynchrony-multiplier", "response-timeout", "short-timeout", "temp-replica-count",
+	"resource-submit-multiplier", "asynchrony-multiplier", "response-timeout", "manager-response-timeout",
+	"queue-stall-timeout", "short-timeout", "temp-replica-count",
 	"transfer-outlier-factor", "transfer-replica-per-cycle", "transfer-temps-recovery",
 	"transient-error-interval", "wait-for-workers", "max-workers", "worker-retrievals",
 	"file-source-max-transfers", "worker-source-max-transfers", "worker-source-max-checkpoints", "vault-disk-limit",
@@ -7707,6 +7816,23 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 		HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
 		{
 			link_set_idle_timeout(w->link, vine_manager_worker_timeout(q, w, 0));
+		}
+
+	} else if (!strcmp(name, "manager-response-timeout") || !strcmp(name, "queue-stall-timeout")) {
+		/* Workers with a probe link learn the manager's X_M and its stall bound at once (probe_declare()). */
+		if (!strcmp(name, "manager-response-timeout")) {
+			q->manager_response_timeout = MAX(0, (int)value);
+		} else {
+			q->queue_stall_timeout = MAX(0, (int)value);
+		}
+		char *key;
+		int iteration;
+		struct vine_worker_info *w;
+		HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+		{
+			if (w->probe_link) {
+				probe_declare(q, w);
+			}
 		}
 
 	} else if (!strcmp(name, "short-timeout")) {

@@ -254,6 +254,8 @@ struct vine_manager {
 	/* Various performance knobs that can be tuned. */
 	int short_timeout;            /* Timeout in seconds to send/recv a brief message from worker */
 	int response_timeout;         /* Response time X in seconds of a worker that declared none, or zero: see "Timeouts". */
+	int manager_response_timeout; /* The manager's own response time X_M in seconds, which workers with a probe link judge it by, or zero: see "Probe link". */
+	int queue_stall_timeout;      /* Seconds a control queue of a worker judged by its probe link may take no data, or zero for T + VINE_QUEUE_STALL_SLACK. */
 	int long_timeout;             /* Timeout if in the middle of an incomplete message. */
 	int minimum_transfer_timeout; /* Minimum number of seconds to allow for a manager<-> worker file transfer. */
 	int transfer_outlier_factor;  /* Factor to consider a given transfer time to be an outlier justifying cancellation. */
