@@ -4303,6 +4303,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->perf_log_interval = VINE_PERF_LOG_INTERVAL;
 
 	q->temp_replica_count = 1;
+	q->temp_replica_distinct_hosts = 0;
 	q->clean_redundant_replicas = 0;
 	q->shift_disk_load = 0;
 	q->transfer_temps_recovery = 0;
@@ -6118,6 +6119,9 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "temp-replica-count")) {
 		q->temp_replica_count = MAX(1, (int)value);
+
+	} else if (!strcmp(name, "temp-replica-distinct-hosts")) {
+		q->temp_replica_distinct_hosts = !!((int)value);
 
 	} else if (!strcmp(name, "transfer-outlier-factor")) {
 		q->transfer_outlier_factor = value;
