@@ -5548,6 +5548,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->perf_log_interval = VINE_PERF_LOG_INTERVAL;
 
 	q->temp_replica_count = 1;
+	q->temp_replica_distinct_hosts = 0;
 	q->clean_redundant_replicas = 0;
 	q->shift_disk_load = 0;
 	q->transfer_temps_recovery = 0;
@@ -7716,7 +7717,7 @@ static const char *const vine_tune_names[] = {
 	"monitor-interval", "prefer-dispatch", "force-proportional-resources", "proportional-resources",
 	"force-proportional-resources-whole-tasks", "proportional-whole-tasks", "ramp-down-heuristic",
 	"resource-submit-multiplier", "asynchrony-multiplier", "response-timeout", "manager-response-timeout",
-	"queue-stall-timeout", "short-timeout", "temp-replica-count",
+	"queue-stall-timeout", "short-timeout", "temp-replica-count", "temp-replica-distinct-hosts",
 	"transfer-outlier-factor", "transfer-replica-per-cycle", "transfer-temps-recovery",
 	"transient-error-interval", "wait-for-workers", "max-workers", "worker-retrievals",
 	"file-source-max-transfers", "worker-source-max-transfers", "worker-source-max-checkpoints", "vault-disk-limit",
@@ -7840,6 +7841,9 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "temp-replica-count")) {
 		q->temp_replica_count = MAX(1, (int)value);
+
+	} else if (!strcmp(name, "temp-replica-distinct-hosts")) {
+		q->temp_replica_distinct_hosts = !!((int)value);
 
 	} else if (!strcmp(name, "transfer-outlier-factor")) {
 		q->transfer_outlier_factor = value;

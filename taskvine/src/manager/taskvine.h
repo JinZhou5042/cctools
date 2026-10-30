@@ -1552,6 +1552,8 @@ loop (wait_retrieve_many mode). (default=0)
 a times series, if this feature is enabled. See @ref vine_enable_monitoring.
  - "update_interval"  Seconds between updates to the catalog. (default=60)
  - "temp-replica-count" Degree of replication across workers for remote temp files (default=0)
+ - "temp-replica-distinct-hosts" If set to 1, place each replica of a temp file on a host that holds no replica of it
+when such a worker exists, since the workers of one host are often lost together. (default=0)
  - "transient-error-interval" Time to wait in seconds after a resource failure before attempting to use it again
 (default=15)
  - "resource_management_interval" Seconds between measurement of manager local resources. (default=30)

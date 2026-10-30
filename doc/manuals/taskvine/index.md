@@ -2858,6 +2858,7 @@ change.
 | shift-disk-load | Proactively shift temporary files away from the most disk-heavy worker to those with more available disk. | 0 |
 | short-timeout | Set the minimum timeout in seconds when sending a brief message to a single worker. | 5 |
 | temp-replica-count    | Number of temp file replicas created across workers | 0 |
+| temp-replica-distinct-hosts | Place each temp file replica on a host that holds no replica of the file when such a worker exists, since the workers of one host are often lost together. | 0 |
 | transfer-outlier-factor | Transfer that are this many times slower than the average will be terminated. | 10 |
 | transfer-replica-per-cycle | Number of replicas to schedule per file per iteration. | 1 |
 | transfer-temps-recovery | If 1, try to replicate temp files to reach threshold on worker removal. | 0 |

@@ -1,4 +1,7 @@
 #include "vine_temp.h"
+
+#include <string.h>
+
 #include "vine_current_transfers.h"
 #include "vine_file.h"
 #include "vine_worker_info.h"
@@ -120,10 +123,35 @@ static struct vine_worker_info *get_best_source_worker(struct vine_manager *q, s
 }
 
 /**
+Check whether a worker runs on a host that holds a replica of a temp file, or receives one.
+Replicas being deleted do not count. The cost is the number of the file's replicas.
+*/
+static int host_holds_replica(struct set *holders, struct vine_file *f, struct vine_worker_info *w)
+{
+	struct vine_worker_info *holder;
+	int iteration;
+	SET_ITERATE(holders, iteration, holder)
+	{
+		if (strcmp(holder->hostname, w->hostname)) {
+			continue;
+		}
+		struct vine_file_replica *replica = vine_file_replica_table_lookup(holder, f->cached_name);
+		if (replica && (replica->state == VINE_FILE_REPLICA_STATE_CREATING || replica->state == VINE_FILE_REPLICA_STATE_READY)) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+/**
 Select a destination worker that can accept a new replica. Workers must be
 active, not currently hosting the file, and have sufficient free cache space.
 Those with more available disk space are prioritized to reduce pressure on
 heavily utilized workers.
+With temp-replica-distinct-hosts, a worker on a host that holds no replica of
+the file is preferred, because the workers of one host are often lost together.
+Any eligible worker is chosen when every host holds one.
 */
 static struct vine_worker_info *get_best_dest_worker(struct vine_manager *q, struct vine_file *f)
 {
@@ -132,6 +160,13 @@ static struct vine_worker_info *get_best_dest_worker(struct vine_manager *q, str
 	}
 
 	struct vine_worker_info *best_dest_worker = NULL;
+
+	/* The best worker on a host without a replica, considered only when replicas must spread across hosts. */
+	struct vine_worker_info *best_other_host_worker = NULL;
+	struct set *holders = NULL;
+	if (q->temp_replica_distinct_hosts) {
+		holders = hash_table_lookup(q->file_worker_table, f->cached_name);
+	}
 
 	char *key;
 	struct vine_worker_info *w;
@@ -159,6 +194,14 @@ static struct vine_worker_info *get_best_dest_worker(struct vine_manager *q, str
 		if (!best_dest_worker || worker_get_available_disk(w) > worker_get_available_disk(best_dest_worker)) {
 			best_dest_worker = w;
 		}
+		/* the same preference among workers on hosts that hold no replica of the file */
+		if (holders && (!best_other_host_worker || worker_get_available_disk(w) > worker_get_available_disk(best_other_host_worker)) && !host_holds_replica(holders, f, w)) {
+			best_other_host_worker = w;
+		}
+	}
+
+	if (best_other_host_worker) {
+		return best_other_host_worker;
 	}
 
 	return best_dest_worker;
