@@ -515,6 +515,7 @@ static vine_msg_code_t handle_manager_status(struct vine_manager *q, struct vine
 static vine_msg_code_t handle_resources(struct vine_manager *q, struct vine_worker_info *w, time_t stoptime);
 static vine_msg_code_t handle_feature(struct vine_manager *q, struct vine_worker_info *w, const char *line);
 static void handle_library_update(struct vine_manager *q, struct vine_worker_info *w, const char *line);
+static vine_msg_code_t handle_lost(struct vine_manager *q, struct vine_worker_info *w, const char *line);
 static void log_manager_start_timezone();
 
 static struct jx *manager_to_jx(struct vine_manager *q);
@@ -1435,6 +1436,20 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		return VINE_MSG_PROCESSED;
 	}
 
+	/* A losing worker's reports of its earlier files are dropped, see vine_lose_worker(). The error message of a
+	 * cache-invalid follows it. */
+	if (string_prefix_is(line, "lost ")) {
+		return handle_lost(q, w, line);
+	} else if (w->losing && (string_prefix_is(line, "cache-update") || string_prefix_is(line, "cache-invalid"))) {
+		debug(D_VINE, "dropped a stale message from %s (%s), which is losing its state", w->hostname, w->addrport);
+		int message_length;
+		if (string_prefix_is(line, "cache-invalid") &&
+				(sscanf(line, "cache-invalid %*s %d", &message_length) != 1 || link_soak(w->link, message_length, stoptime) != message_length)) {
+			return VINE_MSG_FAILURE;
+		}
+		return VINE_MSG_PROCESSED;
+	}
+
 	char path[length];
 
 	// Check for status updates that can be consumed here, the most frequent first.
@@ -1777,39 +1792,6 @@ int vine_manager_release_random_worker(struct vine_manager *q)
 	return removed;
 }
 
-/* Lose a worker as a failed connection would: mark it for removal with a failure, so nothing more is sent to it, and
- * the next step of vine_wait() removes it and closes its connection. The worker is found first and marked after the
- * walk over worker_table. */
-int vine_lose_worker(struct vine_manager *q, const char *worker_id)
-{
-	if (!q || !worker_id) {
-		return -1;
-	}
-
-	char *key;
-	struct vine_worker_info *w;
-	struct vine_worker_info *found = NULL;
-	int iteration;
-
-	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
-	{
-		if (w->type == VINE_WORKER_TYPE_WORKER && w->workerid && !strcmp(w->workerid, worker_id)) {
-			found = w;
-			break;
-		}
-	}
-
-	if (!found) {
-		return -1;
-	}
-
-	debug(D_VINE | D_NOTICE, "Losing worker %s (%s) on request", found->hostname, found->addrport);
-	q->stats->workers_lost++;
-	vine_manager_mark_worker_for_removal(q, found, VINE_WORKER_DISCONNECT_FAILURE);
-
-	return 0;
-}
-
 /*
 This function enforces a target worker eviction rate (1 every X seconds).
 If the observed eviction interval is shorter than the desired one, we randomly evict one worker
@@ -1983,6 +1965,24 @@ static void recall_worker_lost_temp_files(struct vine_manager *q, struct vine_wo
 	}
 }
 
+/* Forget the tasks, files, and transfers of a worker as its loss does: its tasks return to the ready queue, and its
+ * replicas and transfers are forgotten. Used when the worker is removed and when its state is lost on request. */
+
+static void forget_worker_state(struct vine_manager *q, struct vine_worker_info *w, vine_worker_disconnect_reason_t reason)
+{
+	/* Workers that receive files from this one would wait for the peer transfer timeout, so they abandon them now. */
+	vine_current_transfers_abandon_source(q, w);
+	vine_schedule_quarantine_remove_worker(q, w);
+
+	hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
+
+	if (q->transfer_temps_recovery) {
+		recall_worker_lost_temp_files(q, w);
+	}
+
+	cleanup_worker(q, w, reason);
+}
+
 /* Remove a worker from this master by removing all remote state, all local state, and disconnecting. */
 
 void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info *w, vine_worker_disconnect_reason_t reason)
@@ -2017,21 +2017,12 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	vine_manager_data_service_remove_worker(q->ds, w);
 
-	/* Workers that receive files from this one would wait for the peer transfer timeout, so they abandon them now. */
-	vine_current_transfers_abandon_source(q, w);
-	vine_schedule_quarantine_remove_worker(q, w);
-
 	hash_table_remove(q->worker_table, w->hashkey);
 	vine_schedule_capacity_index_remove(q, w);
 	probe_unregister(q, w);
-	hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
 	hash_table_remove(q->workers_idle_disconnecting, w->hashkey);
 
-	if (q->transfer_temps_recovery) {
-		recall_worker_lost_temp_files(q, w);
-	}
-
-	cleanup_worker(q, w, reason);
+	forget_worker_state(q, w, reason);
 	vine_current_transfers_detach_host(q, w);
 
 	vine_manager_factory_worker_leave(q, w);
@@ -2057,6 +2048,75 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 	find_max_worker(q);
 
 	debug(D_VINE, "%d workers connected in total now", count_workers(q, VINE_WORKER_TYPE_WORKER));
+}
+
+/*
+Lose the state of a worker on request, as its loss would, while it stays connected.
+
+The manager forgets the worker's tasks, replicas, and transfers at once, as vine_manager_remove_worker() does, and
+sends "lose <n>", where n counts the losses of this worker. The worker kills its tasks and libraries, ends the
+transfers that it serves, removes its cached files of workflow level or less and every file not yet ready, and
+answers "lost <n>", followed by a cache-update for each file that it keeps.
+
+Until "lost <n>" arrives the worker is losing: it takes no task and no transfer, so the manager records nothing new on
+it. The link is ordered, so whatever the worker sent before "lost <n>" describes state from before the loss: a
+cache-update or cache-invalid is dropped, and a completion names a task that the worker no longer holds and is
+discarded as any unknown completion is. Whatever follows "lost <n>" describes only the empty worker. A loss requested
+while the worker is still losing sends a new number, and only the answer to the latest one ends the loss.
+*/
+
+int vine_lose_worker(struct vine_manager *q, const char *worker_id)
+{
+	if (!q || !worker_id) {
+		return -1;
+	}
+
+	char *key;
+	struct vine_worker_info *w;
+	struct vine_worker_info *found = NULL;
+	int iteration;
+
+	/* The worker is found first and its state lost after the walk over worker_table. */
+	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+	{
+		if (w->type == VINE_WORKER_TYPE_WORKER && w->workerid && !strcmp(w->workerid, worker_id)) {
+			found = w;
+			break;
+		}
+	}
+
+	if (!found || found->pending_removal) {
+		return -1;
+	}
+
+	w = found;
+	debug(D_VINE | D_NOTICE, "Losing the state of worker %s (%s) on request", w->hostname, w->addrport);
+	q->stats->workers_lost++;
+
+	w->lose_sequence++;
+	w->losing = 1;
+	forget_worker_state(q, w, VINE_WORKER_DISCONNECT_FAILURE);
+	vine_manager_send(q, w, "lose %" PRId64 "\n", w->lose_sequence);
+
+	return 0;
+}
+
+/* The worker answered a loss of its state: the answer to the latest loss ends it. */
+
+static vine_msg_code_t handle_lost(struct vine_manager *q, struct vine_worker_info *w, const char *line)
+{
+	int64_t sequence;
+	if (sscanf(line, "lost %" SCNd64, &sequence) != 1) {
+		return VINE_MSG_FAILURE;
+	}
+
+	if (w->losing && sequence == w->lose_sequence) {
+		debug(D_VINE, "worker %s (%s) lost its state", w->hostname, w->addrport);
+		w->losing = 0;
+		count_worker_resources(q, w);
+	}
+
+	return VINE_MSG_PROCESSED;
 }
 
 /* Mark a worker for removal. The worker is taken out of worker_table, so it is not used for anything,

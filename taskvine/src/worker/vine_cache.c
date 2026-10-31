@@ -190,6 +190,29 @@ void vine_cache_prune(struct vine_cache *c, vine_cache_level_t level)
 }
 
 /*
+Remove the files that a worker loses with the state of its manager's session: every file of workflow level or less,
+and every file of a higher level that is not ready, whose transfer is killed. Ready files of a higher level stay.
+*/
+
+void vine_cache_lose(struct vine_cache *c)
+{
+	char *cachename;
+	char **cachenames = hash_table_keys_array(c->table);
+	if (!cachenames) {
+		return;
+	}
+
+	for (int i = 0; (cachename = cachenames[i]); i++) {
+		struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
+		if (f->cache_level <= VINE_CACHE_LEVEL_WORKFLOW || f->status != VINE_CACHE_STATUS_READY) {
+			vine_cache_remove(c, cachename, 0);
+		}
+	}
+
+	hash_table_free_keys_array(cachenames);
+}
+
+/*
 Kill off any process associated with this file object, without waiting for it to exit.
 The file fails as if its transfer had failed: the manager is told, and the partial data goes to the trash.
 The process is reaped later by vine_cache_check_xfer_files or vine_cache_delete.

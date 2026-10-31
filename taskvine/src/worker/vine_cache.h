@@ -53,6 +53,7 @@ void vine_cache_delete( struct vine_cache *c );
 void vine_cache_load( struct vine_cache *c );
 void vine_cache_scan( struct vine_cache *c, struct link *manager );
 void vine_cache_prune( struct vine_cache *c, vine_cache_level_t level );
+void vine_cache_lose( struct vine_cache *c );
 
 char *vine_cache_data_path( struct vine_cache *c, const char *cachename );
 char *vine_cache_meta_path( struct vine_cache *c, const char *cachename );

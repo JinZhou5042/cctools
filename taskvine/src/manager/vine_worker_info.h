@@ -99,6 +99,9 @@ struct vine_worker_info {
 	int  pending_removal;                   // if not 0, the vine_worker_disconnect_reason_t with which the worker will be removed
 	                                        // by disconnect_failed_workers. Such a worker is not in worker_table, but may still be
 	                                        // reachable from tasks and replica sets, which should skip it.
+	int64_t lose_sequence;                  // number of the last loss of the worker's state, see vine_lose_worker()
+	int  losing;                            // if 1, the worker has not yet answered "lose <lose_sequence>" with "lost": it takes
+	                                        // no task or transfer, and its messages about earlier state are dropped.
 	int  alarm_slow_worker;                 // if 1, no task has finished since a slow running task triggered a disconnection.
 	                                        // 0 otherwise. A 2nd task triggering disconnection will cause the worker to disconnect
 	int64_t     end_time;                   // epoch time (in seconds) at which the worker terminates

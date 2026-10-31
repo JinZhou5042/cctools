@@ -196,12 +196,6 @@ static int sigchld_received_flag = 0;
 /* True if manager sent explicit message to release worker from its service. */
 static int released_by_manager = 0;
 
-/* Time at which the worker last connected to a manager. */
-static time_t manager_connect_time = 0;
-
-/* Least time between two connections to a manager after an unexpected disconnection, in seconds. */
-#define VINE_WORKER_RECONNECT_INTERVAL 5
-
 /***************************************************************/
 /*       Accumulated Statistics Tracked by Worker              */
 /***************************************************************/
@@ -1883,12 +1877,7 @@ static void disconnect_manager(struct link *manager)
 	} else if (abort_flag) {
 		// Bail out quickly
 	} else {
-		/* Wait until the interval since the connection started has passed, so a manager that drops the worker at
-		 * once cannot make it reconnect in a fast loop, while a worker that served longer reconnects at once. */
-		time_t remaining = manager_connect_time + VINE_WORKER_RECONNECT_INTERVAL - time(0);
-		if (remaining > 0) {
-			sleep(remaining);
-		}
+		sleep(5);
 	}
 }
 
@@ -1912,6 +1901,33 @@ static void send_stdout(int64_t task_id)
 	send_message("stdout %" SCNd64 " %lld\n", task_id, (long long)p->output_length);
 	/* The queue owns the descriptor and reads the output as the link takes it. */
 	link_writer_push_fd(manager_lw, output_file, 0, p->output_length);
+}
+
+/*
+Lose the state of the manager's session on its request, as a worker that loses its manager does, while it stays
+connected: kill the tasks and libraries, end the transfers that the transfer server serves, and remove the cached files
+of workflow level or less and every file not yet ready. The answer "lost <sequence>" tells the manager that whatever
+follows describes only the empty worker, and the files kept are then reported again. See vine_lose_worker().
+*/
+
+static int do_lose(struct link *manager, int64_t sequence)
+{
+	debug(D_VINE, "losing the state of this session (%" PRId64 ")", sequence);
+
+	kill_all_tasks();
+
+	if (!vine_transfer_server_restart(cache_manager, manager)) {
+		debug(D_VINE, "could not restart the transfer server");
+		return 0;
+	}
+
+	vine_cache_lose(cache_manager);
+	hash_table_clear(current_transfers, free);
+
+	send_message("lost %" PRId64 "\n", sequence);
+	vine_cache_scan(cache_manager, manager);
+
+	return 1;
 }
 
 /* Handle the next incoming message from the currently connected manager. */
@@ -1988,6 +2004,8 @@ static int handle_manager(struct link *manager)
 				kill_all_tasks();
 				r = 1;
 			}
+		} else if (sscanf(line, "lose %" SCNd64, &length) == 1) {
+			r = do_lose(manager, length);
 		} else if (!strncmp(line, "release", 8)) {
 			r = do_release();
 		} else if (!strncmp(line, "exit", 5)) {
@@ -2818,7 +2836,6 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	int local_port;
 	link_address_local(manager, local_addr, &local_port);
 
-	manager_connect_time = time(0);
 	printf("connected to manager %s:%d via local address %s:%d\n", host, port, local_addr, local_port);
 	debug(D_VINE, "connected to manager %s:%d via local address %s:%d", host, port, local_addr, local_port);
 

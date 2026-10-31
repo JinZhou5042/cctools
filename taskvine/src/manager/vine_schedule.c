@@ -314,10 +314,11 @@ static int check_worker_is_available(struct vine_manager *q, struct vine_worker_
 		return 0;
 	}
 
-	/* Don't send tasks to this worker if it is in draining mode (no more tasks), or it is going to be removed. */
+	/* Don't send tasks to this worker if it is in draining mode (no more tasks), if it is going to be removed, or while it
+	 * loses its state (see vine_lose_worker()). */
 	/* Probably we don't need to check pending_removal here as the worker shouldn't be in worker's table
 	 * anyway, but just in case that changes in the future. */
-	if (w->draining || w->pending_removal) {
+	if (w->draining || w->pending_removal || w->losing) {
 		return 0;
 	}
 
@@ -837,7 +838,7 @@ void vine_schedule_capacity_index_update_all(struct vine_manager *q)
 static int worker_is_candidate(struct vine_manager *q, struct vine_worker_info *w, uint64_t stamp, struct vine_file *unsourced, int64_t input_size)
 {
 	/* briefly skip uninitialized workers, more detailed checks are performed in @check_worker_against_task */
-	if (!w || !w->resources || w->type != VINE_WORKER_TYPE_WORKER || w->draining) {
+	if (!w || !w->resources || w->type != VINE_WORKER_TYPE_WORKER || w->draining || w->losing) {
 		return 0;
 	}
 
