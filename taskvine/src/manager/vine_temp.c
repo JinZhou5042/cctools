@@ -34,7 +34,7 @@ static int worker_can_peer_transfer(struct vine_worker_info *w)
 	if (!w->transfer_port_active) {
 		return 0;
 	}
-	if (w->draining || w->pending_removal) {
+	if (w->draining || w->pending_removal || w->losing) {
 		return 0;
 	}
 	if (!w->resources) {

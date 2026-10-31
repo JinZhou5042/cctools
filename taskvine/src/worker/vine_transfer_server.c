@@ -106,8 +106,8 @@ static void vine_transfer_process(struct vine_cache *cache, pid_t worker_pid)
 			pid_t p = fork();
 			if (p == 0) {
 #if defined(CCTOOLS_OPSYS_LINUX)
-				/* A transfer ends with the server, so a worker that stops the server, as when it leaves a
-				 * manager, sends nothing more from the cache it cleans. */
+				/* A transfer ends with the server, so a worker that stops or restarts the server, as when it leaves a
+				 * manager or loses its state, sends nothing more from the cache it cleans. */
 				prctl(PR_SET_PDEATHSIG, SIGKILL);
 #endif
 				if (getppid() != server_pid) {
@@ -134,14 +134,10 @@ static void vine_transfer_process(struct vine_cache *cache, pid_t worker_pid)
 	}
 }
 
-int vine_transfer_server_start(struct vine_cache *cache, int port_min, int port_max)
+/* Fork the server process, which accepts connections on transfer_link. */
+
+static int start_server_process(struct vine_cache *cache)
 {
-	transfer_link = link_serve_range(port_min, port_max);
-
-	if (!transfer_link) {
-		return 0;
-	}
-
 	pid_t worker_pid = getpid();
 	transfer_server_pid = fork();
 	if (transfer_server_pid == 0) {
@@ -156,11 +152,46 @@ int vine_transfer_server_start(struct vine_cache *cache, int port_min, int port_
 		debug(D_VINE, "started transfer server pid %d listening on %s:%d", transfer_server_pid, addr, port);
 		// in parent, keep going
 	} else {
+		transfer_server_pid = 0;
 		link_close(transfer_link);
 		transfer_link = NULL;
 		return 0;
 	}
 	return 1;
+}
+
+/* Kill the server process, whose children, the transfers in progress, die with it. */
+
+static void stop_server_process()
+{
+	int status;
+	if (transfer_server_pid > 0) {
+		kill(transfer_server_pid, SIGKILL);
+		waitpid(transfer_server_pid, &status, 0);
+		transfer_server_pid = 0;
+	}
+}
+
+int vine_transfer_server_start(struct vine_cache *cache, int port_min, int port_max)
+{
+	transfer_link = link_serve_range(port_min, port_max);
+
+	if (!transfer_link) {
+		return 0;
+	}
+
+	return start_server_process(cache);
+}
+
+int vine_transfer_server_restart(struct vine_cache *cache)
+{
+	if (!transfer_link) {
+		return 1;
+	}
+
+	debug(D_VINE, "restarting transfer server pid %d", transfer_server_pid);
+	stop_server_process();
+	return start_server_process(cache);
 }
 
 int vine_transfer_server_running()
@@ -173,17 +204,11 @@ void vine_transfer_server_stop()
 	if (!transfer_link) {
 		return;
 	}
-	int status;
-
 	debug(D_VINE, "stopping transfer server pid %d", transfer_server_pid);
 
 	link_close(transfer_link);
 	transfer_link = NULL;
-	if (transfer_server_pid > 0) {
-		kill(transfer_server_pid, SIGKILL);
-		waitpid(transfer_server_pid, &status, 0);
-		transfer_server_pid = 0;
-	}
+	stop_server_process();
 }
 
 void vine_transfer_server_address(char *addr, int *port)

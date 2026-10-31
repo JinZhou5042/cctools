@@ -1335,6 +1335,33 @@ void send_stdout(struct link *l, int64_t task_id)
 	return;
 }
 
+/*
+Lose the state of the manager's session on its request, as a worker that loses its manager does, while it stays
+connected: kill the tasks and libraries, end the transfers that the transfer server serves, and remove the cached files
+of workflow level or less and every file not yet ready. The answer "lost <sequence>" tells the manager that whatever
+follows describes only the empty worker, and the files kept are then reported again. See vine_lose_worker().
+*/
+
+static int do_lose(struct link *manager, int64_t sequence)
+{
+	debug(D_VINE, "losing the state of this session (%" PRId64 ")", sequence);
+
+	kill_all_tasks();
+
+	if (!vine_transfer_server_restart(cache_manager)) {
+		debug(D_VINE, "could not restart the transfer server");
+		return 0;
+	}
+
+	vine_cache_lose(cache_manager);
+	hash_table_clear(current_transfers, free);
+
+	send_message(manager, "lost %" PRId64 "\n", sequence);
+	vine_cache_scan(cache_manager, manager);
+
+	return 1;
+}
+
 /* Handle the next incoming message from the currently connected manager. */
 
 static int handle_manager(struct link *manager)
@@ -1391,6 +1418,8 @@ static int handle_manager(struct link *manager)
 				kill_all_tasks();
 				r = 1;
 			}
+		} else if (sscanf(line, "lose %" SCNd64, &length) == 1) {
+			r = do_lose(manager, length);
 		} else if (!strncmp(line, "release", 8)) {
 			r = do_release();
 		} else if (!strncmp(line, "exit", 5)) {

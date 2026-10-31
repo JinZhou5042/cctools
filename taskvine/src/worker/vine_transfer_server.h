@@ -19,6 +19,9 @@ See the file COPYING for details.
 /* Returns 1 on success, 0 on failure (e.g. cannot bind port). */
 int vine_transfer_server_start( struct vine_cache *cache, int port_min, int port_max );
 void vine_transfer_server_stop();
+/* Stop the transfers in progress, by restarting the server on the same port. Returns 1 on success, or when no server
+ * runs, and 0 when the server could not be started again. */
+int vine_transfer_server_restart( struct vine_cache *cache );
 int vine_transfer_server_running();
 void vine_transfer_server_address( char *addr, int *port );
 
