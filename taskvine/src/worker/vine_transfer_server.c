@@ -18,9 +18,14 @@ See the file COPYING for details.
 
 #include <errno.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#if defined(CCTOOLS_OPSYS_LINUX)
+#include <sys/prctl.h>
+#endif
 
 /* The initial timeout to wait for a command is short, to avoid unnecessary hangs */
 static int command_timeout = 5;
@@ -114,8 +119,17 @@ static void vine_transfer_process(struct vine_cache *cache, pid_t worker_pid)
 		struct link *lnk = link_accept(transfer_link, time(0) + 10);
 
 		if (lnk) {
+			pid_t server_pid = getpid();
 			pid_t p = fork();
 			if (p == 0) {
+#if defined(CCTOOLS_OPSYS_LINUX)
+				/* A transfer ends with the server, so a worker that stops the server, as when it leaves a
+				 * manager, sends nothing more from the cache it cleans. */
+				prctl(PR_SET_PDEATHSIG, SIGKILL);
+#endif
+				if (getppid() != server_pid) {
+					_exit(0);
+				}
 				vine_transfer_handler(lnk, cache);
 				link_close(lnk);
 				_exit(0);

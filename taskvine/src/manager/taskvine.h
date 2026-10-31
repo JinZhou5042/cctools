@@ -1068,6 +1068,18 @@ This is a testing support hook, not a normal manager control operation.
 */
 int vine_manager_release_random_worker(struct vine_manager *m);
 
+/** Lose a worker as if its connection failed, for failure-injection experiments.
+The manager sends nothing more to the worker and, at the next step of @ref vine_wait, removes it as a failed one and
+closes its connection: its running tasks return to the ready queue, its file replicas are forgotten, and transfers to
+or from it fail. The worker kills its tasks, removes its cached files of workflow level or less, and connects again as
+a new worker. Call it from the thread that calls @ref vine_wait.
+@param m A manager object.
+@param worker_id The id of a connected worker, as reported in the "workerid" field of @ref vine_get_status with
+"workers".
+@return 0 if the worker was lost, -1 if no connected worker has that id.
+*/
+int vine_lose_worker(struct vine_manager *m, const char *worker_id);
+
 /** Wait for a task to complete.
 This call will block until either a task has completed, the timeout has expired, or the manager is empty.
 If a task has completed, the corresponding task object will be returned by this function.
