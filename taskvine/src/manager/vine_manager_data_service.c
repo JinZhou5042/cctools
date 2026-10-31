@@ -1918,7 +1918,7 @@ int vine_manager_data_service_compact(struct vine_manager_data_service *ds)
 	return freed;
 }
 
-void vine_manager_data_service_remove_worker(struct vine_manager_data_service *ds, struct vine_worker_info *w)
+void vine_manager_data_service_lose_worker(struct vine_manager_data_service *ds, struct vine_worker_info *w)
 {
 	if (!ds || !w) {
 		return;
@@ -1936,7 +1936,15 @@ void vine_manager_data_service_remove_worker(struct vine_manager_data_service *d
 		}
 		job = next;
 	}
-	/* Receives that waited for replies of this Worker were cancelled above, so its requests hold only data. */
+}
+
+void vine_manager_data_service_remove_worker(struct vine_manager_data_service *ds, struct vine_worker_info *w)
+{
+	if (!ds || !w) {
+		return;
+	}
+	vine_manager_data_service_lose_worker(ds, w);
+	/* Receives that waited for replies of this Worker were cancelled, so its requests hold only data. */
 	struct list *requests = itable_remove(ds->inline_requests, (uintptr_t)w);
 	if (requests) {
 		list_clear(requests, (void *)inline_request_delete);

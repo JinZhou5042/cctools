@@ -15,6 +15,7 @@ See the file COPYING for details.
 #include "vine_transfer.h"
 
 #include "address.h"
+#include "budget.h"
 #include "copy_stream.h"
 #include "debug.h"
 #include "domain_name_cache.h"
@@ -74,6 +75,8 @@ struct vine_cache {
 	int max_transfer_procs;
 	char manager_ip[LINK_ADDRESS_MAX]; /* This holds the control connection peer address inherited by download processes. */
 	int manager_transfer_port; /* This holds the Manager-supplied port and is zero until configured. */
+	char **lose_names;	   /* Names of the files when a loss of the session's state began (vine_cache_lose_start()). */
+	int lose_cursor;	   /* The next of lose_names to look at, while the loss removes files. */
 };
 
 static void vine_cache_check_outputs(struct vine_cache *c, struct vine_cache_file *f, const char *cachename, struct link *manager);
@@ -90,6 +93,8 @@ struct vine_cache *vine_cache_create(const char *cache_dir, int max_procs)
 	c->processing_transfers = hash_table_create(0, 0);
 	c->killed_transfers = itable_create(0);
 	c->copies = itable_create(0);
+	c->lose_names = NULL;
+	c->lose_cursor = 0;
 	c->cache_dir = strdup(cache_dir);
 	c->max_transfer_procs = max_procs;
 	c->manager_ip[0] = 0;
@@ -190,26 +195,74 @@ void vine_cache_prune(struct vine_cache *c, vine_cache_level_t level)
 }
 
 /*
-Remove the files that a worker loses with the state of its manager's session: every file of workflow level or less,
-and every file of a higher level that is not ready, whose transfer is killed. Ready files of a higher level stay.
+Begin to remove the files that a worker loses with the state of its manager's session (vine_cache_lose_continue()).
+The copies in progress are killed and answered as cancelled, so the manager hears of each before the loss ends. Every
+transfer in progress or pending is killed and its file removed at once, so none starts or completes later.
 */
 
-void vine_cache_lose(struct vine_cache *c)
+void vine_cache_lose_start(struct vine_cache *c, struct link *manager)
+{
+	uint64_t pid;
+	struct vine_cache_copy *copy;
+	int iteration;
+	ITABLE_ITERATE(c->copies, iteration, pid, copy)
+	{
+		kill((pid_t)pid, SIGKILL);
+		/* Reaped with the killed transfers, without an answer. */
+		itable_insert(c->killed_transfers, pid, (void *)(uintptr_t)pid);
+		vine_worker_send_cache_copied(manager, copy->token, 0, ECANCELED);
+		free(copy);
+	}
+	itable_clear(c->copies, 0);
+
+	struct list *transfers = list_create();
+	char *cachename;
+	void *dummy;
+	HASH_TABLE_ITERATE(c->processing_transfers, iteration, cachename, dummy)
+	{
+		list_push_tail(transfers, xxstrdup(cachename));
+	}
+	HASH_TABLE_ITERATE(c->pending_transfers, iteration, cachename, dummy)
+	{
+		list_push_tail(transfers, xxstrdup(cachename));
+	}
+	while ((cachename = list_pop_head(transfers))) {
+		vine_cache_remove(c, cachename, 0);
+		free(cachename);
+	}
+	list_delete(transfers);
+
+	if (c->lose_names) {
+		hash_table_free_keys_array(c->lose_names);
+	}
+	c->lose_names = hash_table_keys_array(c->table);
+	c->lose_cursor = 0;
+}
+
+/*
+Remove more of the files that the loss begun by vine_cache_lose_start() removes, until the budget expires: every file
+of workflow level or less, and every file of a higher level that is not ready. Ready files of a higher level stay.
+Returns 1 once every such file is removed.
+*/
+
+int vine_cache_lose_continue(struct vine_cache *c, const struct budget *b)
 {
 	char *cachename;
-	char **cachenames = hash_table_keys_array(c->table);
-	if (!cachenames) {
-		return;
-	}
-
-	for (int i = 0; (cachename = cachenames[i]); i++) {
+	while (c->lose_names && (cachename = c->lose_names[c->lose_cursor])) {
+		c->lose_cursor++;
 		struct vine_cache_file *f = hash_table_lookup(c->table, cachename);
-		if (f->cache_level <= VINE_CACHE_LEVEL_WORKFLOW || f->status != VINE_CACHE_STATUS_READY) {
+		if (f && (f->cache_level <= VINE_CACHE_LEVEL_WORKFLOW || f->status != VINE_CACHE_STATUS_READY)) {
 			vine_cache_remove(c, cachename, 0);
+			if (budget_expired(b)) {
+				return 0;
+			}
 		}
 	}
-
-	hash_table_free_keys_array(cachenames);
+	if (c->lose_names) {
+		hash_table_free_keys_array(c->lose_names);
+		c->lose_names = NULL;
+	}
+	return 1;
 }
 
 /*
@@ -337,6 +390,10 @@ void vine_cache_delete(struct vine_cache *c)
 
 	hash_table_delete(c->pending_transfers);
 	hash_table_delete(c->processing_transfers);
+
+	if (c->lose_names) {
+		hash_table_free_keys_array(c->lose_names);
+	}
 
 	hash_table_clear(c->table, (void *)vine_cache_file_delete);
 	hash_table_delete(c->table);

@@ -1903,11 +1903,16 @@ static void send_stdout(int64_t task_id)
 	link_writer_push_fd(manager_lw, output_file, 0, p->output_length);
 }
 
+/* The number of the loss of the session's state in progress, which "lost" answers once its files are removed, or zero
+ * when no loss is in progress. */
+static int64_t lose_sequence = 0;
+
 /*
 Lose the state of the manager's session on its request, as a worker that loses its manager does, while it stays
-connected: kill the tasks and libraries, end the transfers that the transfer server serves, and remove the cached files
-of workflow level or less and every file not yet ready. The answer "lost <sequence>" tells the manager that whatever
-follows describes only the empty worker, and the files kept are then reported again. See vine_lose_worker().
+connected: kill the tasks and libraries, end the transfers that the transfer server serves, kill the transfers and
+copies in progress, and remove the cached files of workflow level or less and every file not yet ready. The kills
+never wait, and the files are removed in budgeted pieces (continue_lose()). A loss that comes while another is in
+progress replaces it. See vine_lose_worker().
 */
 
 static int do_lose(struct link *manager, int64_t sequence)
@@ -1921,13 +1926,24 @@ static int do_lose(struct link *manager, int64_t sequence)
 		return 0;
 	}
 
-	vine_cache_lose(cache_manager);
+	vine_cache_lose_start(cache_manager, manager);
 	hash_table_clear(current_transfers, free);
-
-	send_message("lost %" PRId64 "\n", sequence);
-	vine_cache_scan(cache_manager, manager);
+	lose_sequence = sequence;
 
 	return 1;
+}
+
+/* Remove more files of the loss in progress. Once all are removed, the answer "lost <sequence>" tells the manager that
+ * whatever follows describes only the empty worker, and the files kept are reported again. */
+
+static void continue_lose(struct link *manager, const struct budget *b)
+{
+	if (!lose_sequence || !vine_cache_lose_continue(cache_manager, b)) {
+		return;
+	}
+	send_message("lost %" PRId64 "\n", lose_sequence);
+	vine_cache_scan(cache_manager, manager);
+	lose_sequence = 0;
 }
 
 /* Handle the next incoming message from the currently connected manager. */
@@ -2617,6 +2633,9 @@ static void vine_worker_serve_manager(struct link *manager)
 		continue_stageout(manager, &round);
 		round_timer_step(&timer, "stage-out");
 
+		continue_lose(manager, &round);
+		round_timer_step(&timer, "lose");
+
 		ok &= vine_cache_check_xfer_files(cache_manager, manager);
 		round_timer_step(&timer, "finished-transfers");
 
@@ -2697,7 +2716,7 @@ static void vine_worker_serve_manager(struct link *manager)
 			break;
 		}
 
-		work_remains = !link_buffer_empty(manager) || list_size(procs_stageout) > 0 || disk_measurement_active || !trash_done;
+		work_remains = !link_buffer_empty(manager) || list_size(procs_stageout) > 0 || lose_sequence || disk_measurement_active || !trash_done;
 
 		// Reset options->idle_stoptime if something interesting is happening at this worker.
 		if (list_size(procs_waiting) > 0 || itable_size(procs_table) > 0 || itable_size(procs_complete) > 0) {
@@ -2893,6 +2912,7 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 
 	last_task_received = 0;
 	results_to_be_sent_msg = 0;
+	lose_sequence = 0;
 
 	disconnect_manager(manager);
 	printf("disconnected from manager %s:%d\n", host, port);

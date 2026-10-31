@@ -2061,8 +2061,10 @@ answers "lost <n>", followed by a cache-update for each file that it keeps.
 Until "lost <n>" arrives the worker is losing: it takes no task and no transfer, so the manager records nothing new on
 it. The link is ordered, so whatever the worker sent before "lost <n>" describes state from before the loss: a
 cache-update or cache-invalid is dropped, and a completion names a task that the worker no longer holds and is
-discarded as any unknown completion is. Whatever follows "lost <n>" describes only the empty worker. A loss requested
-while the worker is still losing sends a new number, and only the answer to the latest one ends the loss.
+discarded as any unknown completion is. Receives from the worker into the vault are cancelled and reported as for a
+removed worker, and the worker answers its inline requests and copies before "lost <n>", so their answers are read
+as usual. Whatever follows "lost <n>" describes only the empty worker. A loss requested while the worker is still
+losing sends a new number, and only the answer to the latest one ends the loss.
 */
 
 int vine_lose_worker(struct vine_manager *q, const char *worker_id)
@@ -2095,6 +2097,7 @@ int vine_lose_worker(struct vine_manager *q, const char *worker_id)
 
 	w->lose_sequence++;
 	w->losing = 1;
+	vine_manager_data_service_lose_worker(q->ds, w);
 	forget_worker_state(q, w, VINE_WORKER_DISCONNECT_FAILURE);
 	vine_manager_send(q, w, "lose %" PRId64 "\n", w->lose_sequence);
 
@@ -2114,6 +2117,8 @@ static vine_msg_code_t handle_lost(struct vine_manager *q, struct vine_worker_in
 		debug(D_VINE, "worker %s (%s) lost its state", w->hostname, w->addrport);
 		w->losing = 0;
 		count_worker_resources(q, w);
+		/* The worker takes tasks again, as a worker that connects does. */
+		vine_schedule_wake_all(q);
 	}
 
 	return VINE_MSG_PROCESSED;

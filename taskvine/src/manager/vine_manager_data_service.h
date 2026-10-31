@@ -100,6 +100,10 @@ struct vine_file *vine_manager_data_service_declare_file(struct vine_manager *ma
  * Only a connected receive is joined. Open sends retain their descriptors. */
 void vine_manager_data_service_vault_remove(struct vine_manager_data_service *ds, struct vine_file *file);
 
+/* Cancel every receive from a Worker that loses its state but stays connected (vine_lose_worker()). Each reports
+ * failure at once. Its inline and copy requests stay, because the Worker answers them before it answers the loss. */
+void vine_manager_data_service_lose_worker(struct vine_manager_data_service *ds, struct vine_worker_info *w);
+
 /* Cancel every receive from a Worker that is being removed. Each reports failure at once, so its file is tried again
  * from another source or recreated, instead of waiting on a connection that may never answer. */
 void vine_manager_data_service_remove_worker(struct vine_manager_data_service *ds, struct vine_worker_info *w);
