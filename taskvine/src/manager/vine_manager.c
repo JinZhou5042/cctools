@@ -1064,6 +1064,39 @@ int vine_manager_release_random_worker(struct vine_manager *q)
 	return removed;
 }
 
+/* Lose a worker as a failed connection would: mark it for removal with a failure, so nothing more is sent to it, and
+ * the next step of vine_wait() removes it and closes its connection. The worker is found first and marked after the
+ * walk over worker_table. */
+int vine_lose_worker(struct vine_manager *q, const char *worker_id)
+{
+	if (!q || !worker_id) {
+		return -1;
+	}
+
+	char *key;
+	struct vine_worker_info *w;
+	struct vine_worker_info *found = NULL;
+	int iteration;
+
+	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+	{
+		if (w->type == VINE_WORKER_TYPE_WORKER && w->workerid && !strcmp(w->workerid, worker_id)) {
+			found = w;
+			break;
+		}
+	}
+
+	if (!found) {
+		return -1;
+	}
+
+	debug(D_VINE | D_NOTICE, "Losing worker %s (%s) on request", found->hostname, found->addrport);
+	q->stats->workers_lost++;
+	vine_manager_mark_worker_for_removal(q, found, VINE_WORKER_DISCONNECT_FAILURE);
+
+	return 0;
+}
+
 /*
 This function enforces a target worker eviction rate (1 every X seconds).
 If the observed eviction interval is shorter than the desired one, we randomly evict one worker

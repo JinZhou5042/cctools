@@ -898,6 +898,20 @@ class Manager(object):
         return cvine.vine_workers_shutdown(self._taskvine, n)
 
     ##
+    # Lose a worker as if its connection failed, for failure-injection experiments.
+    #
+    # The manager sends nothing more to the worker and, at the next step of @ref wait, removes it as a failed one and
+    # closes its connection: its running tasks return to the ready queue, its file replicas are forgotten, and
+    # transfers to or from it fail. The worker drops its tasks and cached files of workflow level or less, and
+    # connects again as a new worker.
+    #
+    # @param self       Reference to the current manager object.
+    # @param worker_id  The id of a connected worker, the "workerid" field of its entry in status("workers").
+    # @return True if the worker was lost, False if no connected worker has that id.
+    def lose_worker(self, worker_id):
+        return cvine.vine_lose_worker(self._taskvine, worker_id) == 0
+
+    ##
     # Block workers running on host from working for the manager.
     #
     # @param self   Reference to the current manager object.
