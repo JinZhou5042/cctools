@@ -166,6 +166,12 @@ static int sigchld_received_flag = 0;
 /* True if manager sent explicit message to release worker from its service. */
 static int released_by_manager = 0;
 
+/* Time at which the worker last connected to a manager. */
+static time_t manager_connect_time = 0;
+
+/* Least time between two connections to a manager after an unexpected disconnection, in seconds. */
+#define VINE_WORKER_RECONNECT_INTERVAL 5
+
 /***************************************************************/
 /*       Accumulated Statistics Tracked by Worker              */
 /***************************************************************/
@@ -1305,7 +1311,12 @@ static void disconnect_manager(struct link *manager)
 	} else if (abort_flag) {
 		// Bail out quickly
 	} else {
-		sleep(5);
+		/* Wait until the interval since the connection started has passed, so a manager that drops the worker at
+		 * once cannot make it reconnect in a fast loop, while a worker that served longer reconnects at once. */
+		time_t remaining = manager_connect_time + VINE_WORKER_RECONNECT_INTERVAL - time(0);
+		if (remaining > 0) {
+			sleep(remaining);
+		}
 	}
 }
 
@@ -1932,6 +1943,7 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	int local_port;
 	link_address_local(manager, local_addr, &local_port);
 
+	manager_connect_time = time(0);
 	printf("connected to manager %s:%d via local address %s:%d\n", host, port, local_addr, local_port);
 	debug(D_VINE, "connected to manager %s:%d via local address %s:%d", host, port, local_addr, local_port);
 
