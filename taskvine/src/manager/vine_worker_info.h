@@ -170,7 +170,7 @@ struct vine_worker_info {
 	struct vine_transfer_pair *incoming_transfers;
 	struct vine_transfer_pair *outgoing_transfers;
 
-	/* Quarantine of tasks charged a lost worker (see vine_schedule.h): the id of the quarantined task that runs here,
+	/* Quarantine of tasks charged two lost workers (see vine_schedule.h): the id of the quarantined task that runs here,
 	 * so the worker takes no other task, and the id of the quarantined task for which the worker takes no new task
 	 * until it runs nothing, or zero. */
 	int quarantine_task_id;

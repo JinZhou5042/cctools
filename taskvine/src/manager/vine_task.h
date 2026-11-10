@@ -100,8 +100,8 @@ struct vine_task {
 	timestamp_t time_unexplained_losses[2]; /**< When workers running this task were last lost in a way that no task
 				       explained, the latest first, or zero. */
 	int worker_losses_excused;  /**< The number of unexpected losses of workers that were excused for this task. */
-	int worker_loss_charged;	  /**< Set once an unexpected loss of a worker counted as one of this task's tries. The
-				       task is then quarantined: it runs only on a worker that runs nothing else (see vine_schedule.h). */
+	int worker_losses_charged;  /**< The number of unexpected losses of workers that counted as tries of this task. After
+				       the second the task is quarantined: it runs only on a worker that runs nothing else (see vine_schedule.h). */
 	struct vine_worker_info *quarantine_worker; /**< If quarantined and no worker was free, the worker that takes no new task
 				       until it is free for this one, or null. */
 	int function_slots_total;   /**< If a library, the total number of function slots usable. */
