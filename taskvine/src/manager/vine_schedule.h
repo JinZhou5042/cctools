@@ -30,10 +30,9 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
  * runs only on a worker that runs no other task, and that worker takes no other task while it runs. The first charged
  * loss is a plain retry: an isolated loss charges every task of its worker, and quarantining them all would leave as
  * many workers running one task each, which costs more than the loss. A task that kills its workers takes one more
- * worker before it is isolated. The losses of a
- * task that kills its workers are then its own, and a task that only shared a worker with it runs alone and
- * completes. When no worker is free, the task reserves one, which takes no new task until its tasks end, so a
- * quarantined task never waits for a worker to become free by chance. The reservation ends when the task is
+ * worker before it is isolated, and its later losses are then its own, while a task that shared a worker with it runs
+ * alone and completes. When no worker is free, the task reserves one, which takes no new task until its tasks end, so
+ * a quarantined task never waits for a worker to become free by chance. The reservation ends when the task is
  * committed to a worker, when it leaves the ready state, or when its worker is removed. */
 void vine_schedule_quarantine_commit(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
 void vine_schedule_quarantine_reap(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
