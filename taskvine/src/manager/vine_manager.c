@@ -1162,7 +1162,9 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w, v
 	 * being charged, and it returns once it is out of retries instead of taking every worker in turn. Losses during a
 	 * mass loss or a cascade of external removals are excused and give the try back, as forsaken tasks do, and the
 	 * tasks they excuse stay uncharged, so their later losses still count as evidence while the cascade continues. A
-	 * task is excused at most max_retries + 1 losses, so it loses at most 2 * (max_retries + 1) workers. */
+	 * task is excused at most max_retries + 1 losses, so it loses at most 2 * (max_retries + 1) workers. A task charged
+	 * once is quarantined only after a second charged loss (see vine_schedule.h), but it already explains the loss of
+	 * any worker that holds it: it is the suspect, so that loss excuses no other task, as before. */
 	timestamp_t now = timestamp_get();
 	int unexpected = reason == VINE_WORKER_DISCONNECT_FAILURE;
 	int unexplained = 0;
@@ -1171,7 +1173,7 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w, v
 		if (t->type == VINE_TASK_TYPE_LIBRARY) {
 			continue;
 		}
-		if (t->worker_loss_charged) {
+		if (t->worker_losses_charged) {
 			unexplained = 0;
 			break;
 		}
@@ -1201,7 +1203,7 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w, v
 				t->try_count -= 1;
 				t->worker_losses_excused += 1;
 			} else {
-				t->worker_loss_charged = 1;
+				t->worker_losses_charged += 1;
 				if (t->max_retries > 0 && t->try_count > t->max_retries) {
 					vine_task_set_result(t, VINE_RESULT_MAX_RETRIES);
 					new_state = VINE_TASK_RETRIEVED;

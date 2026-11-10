@@ -250,7 +250,13 @@ static int worker_reserved_for_other(struct vine_manager *q, struct vine_worker_
 	return 0;
 }
 
-/* Return true if worker w may take task t under the quarantine of tasks charged a lost worker. */
+/* Return true if task t is quarantined, that is, it was charged a second unexpected loss of a worker. */
+static int task_is_quarantined(struct vine_task *t)
+{
+	return t->worker_losses_charged >= 2;
+}
+
+/* Return true if worker w may take task t under the quarantine of tasks charged two lost workers. */
 static int check_worker_quarantine(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
 {
 	if (t->type == VINE_TASK_TYPE_LIBRARY) {
@@ -259,7 +265,7 @@ static int check_worker_quarantine(struct vine_manager *q, struct vine_worker_in
 	if (w->quarantine_task_id || worker_reserved_for_other(q, w, t)) {
 		return 0;
 	}
-	if (t->worker_loss_charged && worker_runs_tasks(w)) {
+	if (task_is_quarantined(t) && worker_runs_tasks(w)) {
 		return 0;
 	}
 	return 1;
@@ -448,7 +454,7 @@ static void quarantine_reserve(struct vine_manager *q, struct vine_task *t)
 
 void vine_schedule_quarantine_commit(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
 {
-	if (t->type == VINE_TASK_TYPE_LIBRARY || !t->worker_loss_charged) {
+	if (t->type == VINE_TASK_TYPE_LIBRARY || !task_is_quarantined(t)) {
 		return;
 	}
 	vine_schedule_quarantine_release(t);
@@ -604,7 +610,7 @@ struct vine_worker_info *vine_schedule_task_to_worker(struct vine_manager *q, st
 
 	priority_queue_delete(workers);
 
-	if (!best_worker && t->worker_loss_charged && !t->quarantine_worker) {
+	if (!best_worker && task_is_quarantined(t) && !t->quarantine_worker) {
 		quarantine_reserve(q, t);
 	}
 
