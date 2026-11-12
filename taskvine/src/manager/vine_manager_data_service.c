@@ -115,9 +115,9 @@ struct vine_manager_data_service {
 	uint64_t next_token;		/* Token of the next receive from a Worker that connects back. Never zero. */
 	time_t next_expiry;		/* Earliest time to look for receives whose Worker did not connect back. */
 	struct itable *inline_requests; /* Maps source Worker -> list of inline_request, in the order they were sent. */
-	struct list *removals;		/* Paths to delete: removed directory entries, renamed out of the vault's names, and copies in the shared directory. */
+	struct list *removals;		/* Paths to delete: removed entries, renamed out of the vault's names, and copies in the shared directory. */
 	int removing;			/* Set while an executor deletes the paths in removals. */
-	uint64_t next_removal;		/* Number that makes the name of the next renamed directory entry unique. */
+	uint64_t next_removal;		/* Number that makes the name of the next renamed entry unique. */
 	char *shared_directory;		/* Own the vault's directory on a file system that every Worker mounts, or NULL. */
 	int64_t shared_min_bytes;	/* Smallest checkpoint that its Worker copies to the shared directory. */
 	unsigned copies_active;		/* Copies to the shared directory that are not cancelled, each holding a copy slot. */
@@ -1057,7 +1057,7 @@ static int link_shared_copy(struct vine_manager_data_service *ds, struct transfe
 
 /* Release a finished receive: return its reservation, publish its file, and report the result.
  * Success means the file was renamed into the vault before any cancellation, or that the data of an inline reply is
- * held in memory. A removed receive, whose name vault removal already unlinked, never publishes. */
+ * held in memory. A removed receive, whose name vault removal already freed, never publishes. */
 static void finish_receive(struct vine_manager *manager, struct transfer_job *job)
 {
 	struct vine_manager_data_service *ds = manager->ds;
@@ -1785,7 +1785,7 @@ struct vine_file *vine_manager_data_service_declare_file(struct vine_manager *ma
 	return file;
 }
 
-/* Delete the directory entries that vault removal renamed, one after another, on one executor. */
+/* Delete the entries that vault removal renamed and the copies it queued, one after another, on one executor. */
 static void delete_removed_entries(void *argument)
 {
 	struct vine_manager_data_service *ds = argument;
@@ -1820,21 +1820,20 @@ static void queue_removal(struct vine_manager_data_service *ds, char *path)
 	}
 }
 
-/* Remove the item at a vault path without waiting for the deletion of a directory. A file or a link is unlinked at
- * once. A directory, which may hold many entries, is renamed to a name that no cache name takes, so the name is free
- * for a new entry at once, and an executor deletes it. */
+/* Remove the item at a vault path without waiting for its deletion. The item is renamed to a name that no cache name
+ * takes, so the name is free for a new entry at once, and an executor deletes it. The Manager thread never unlinks an
+ * item itself: unlink() of a file waits for the pages of the file that the kernel is writing to disk, which a file
+ * received moments ago often has, and a directory may hold many entries. The rename changes only the directory. */
 static void remove_entry_path(struct vine_manager_data_service *ds, const char *path)
 {
-	if (unlink(path) == 0 || errno == ENOENT) {
-		return;
-	}
-	if (errno != EISDIR && errno != EPERM) {
-		debug(D_VINE, "could not remove vault entry %s: %s", path, strerror(errno));
-		return;
-	}
 	char *removed = string_format("%s.removed.%" PRIu64, path, ds->next_removal++);
+	if (!removed) {
+		return;
+	}
 	if (rename(path, removed) != 0) {
-		debug(D_VINE, "could not remove vault entry %s: %s", path, strerror(errno));
+		if (errno != ENOENT) {
+			debug(D_VINE, "could not remove vault entry %s: %s", path, strerror(errno));
+		}
 		free(removed);
 		return;
 	}
@@ -1881,7 +1880,7 @@ void vine_manager_data_service_vault_remove(struct vine_manager_data_service *ds
 		free(path);
 	}
 	if (held) {
-		/* The vault name of a copy in the shared directory is a link, unlinked above, and the copy is deleted off the
+		/* The vault name of a copy in the shared directory is a link, renamed above, and the copy is deleted off the
 		 * Manager thread, because a network file system may be slow to answer. */
 		queue_removal(ds, held->shared_path);
 		held->shared_path = NULL;
