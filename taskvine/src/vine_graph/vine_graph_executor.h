@@ -28,12 +28,13 @@
  * failed node that still exist. The run as a whole fails only when the executor itself cannot continue, such as when
  * TaskVine removes the library after it keeps failing to start on workers.
  *
- * Runner contract. Every node except a command node (vine_graph_executor_set_command()) runs as a call of one
- * function in one TaskVine library that the frontend installs before the run and removes after it. Node tasks carry no
- * infile, so the library calls the function without arguments. Everything a node needs, including a description of what to run, is a file the frontend mounts in the
- * node's sandbox. A node succeeds when its function returns and every output file it declares exists. A function that
- * fails must exit its task process with a non-zero status. Its standard output then becomes the node's error message.
- * The executor never reads file contents, so their formats belong to the frontend and its runner.
+ * Runner contract. Every node except a command node (vine_graph_executor_set_command()) runs as a call of one function
+ * in one TaskVine library that the frontend installs before the run and removes after it. Node tasks carry no infile,
+ * so the library calls the function without arguments. Everything a node needs, including a description of what to run,
+ * is a file the frontend mounts in the node's sandbox. A node succeeds when its function returns and every output file
+ * it declares exists. A function that fails must exit its task process with a non-zero status. Its standard output then
+ * becomes the node's error message. The executor never reads file contents, so their formats belong to the frontend and
+ * its runner.
  *
  * Strings. Strings passed in are copied. Strings returned are owned by the executor and stay valid until it is
  * deleted, unless documented otherwise. */

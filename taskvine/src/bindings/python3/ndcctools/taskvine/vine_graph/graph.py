@@ -68,8 +68,9 @@ class File(_Symbol):
 
 
 class Hoisted(_Symbol):
-    """An object that the library on each Worker loads once, named by the hoist argument of Graph.run(). A task that takes vg.Hoisted(name) as an argument receives that object. Every task gets its own copy, so
-    changes a task makes to it stay within that task."""
+    """An object that the library on each Worker loads once, named by the hoist argument of Graph.run(). A task that
+    takes vg.Hoisted(name) as an argument receives that object. Every task gets its own copy, so changes a task makes
+    to it stay within that task."""
 
     __slots__ = ("name",)
 
@@ -439,7 +440,6 @@ def replace_symbols(value, replace, known=()):
             parent[4](key, out)
         else:
             parent[4](out)
-
 
 
 # Task states. Only the thread of a run changes them while it runs, and never while a rule runs.

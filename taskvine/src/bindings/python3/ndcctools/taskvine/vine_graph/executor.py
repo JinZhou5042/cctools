@@ -217,7 +217,6 @@ class _Lock(_thread.RLock):
             raise
 
 
-
 class _Call:
     """A queued call into C whose caller waits for its outcome."""
 
@@ -339,6 +338,8 @@ class _Pickler:
 
 # Held while a local run executes a task, which changes the working directory of the process, and while a relative path
 # is resolved.
+
+
 _LOCAL_TASKS = _Lock()
 _graph_module._working_directory_lock = _LOCAL_TASKS
 
@@ -1616,9 +1617,10 @@ class LocalExecutor(_Runner):
         return {"makespan": self._seconds, "recovery_tasks": 0, "durability": None}
 
 
-
 # Settings of Graph.run() that choose its runner. A later run of the same Graph keeps the runner of its first run, so it
 # takes them only unchanged.
+
+
 _RUNNER_SETTINGS = ("local", "port", "name", "output_dir", "library_modules", "library_files", "hoist", "edata_cache")
 
 
@@ -2140,6 +2142,7 @@ def _serialize_hoisted(hoist):
         hoisted[name] = cloudpickle.dumps(value)
     return hoisted
 
+
 _MAIN_THREAD = threading.main_thread().ident
 _INTERRUPT = (signal.SIGINT,)
 
@@ -2196,6 +2199,7 @@ def _drive(executor_reference):
                 executor._changed.notify_all()
         del executor
 
+
 def _in_notebook():
     """Return True inside a Jupyter kernel."""
     try:
@@ -2203,6 +2207,7 @@ def _in_notebook():
     except ImportError:
         return False
     return type(get_ipython()).__name__ == "ZMQInteractiveShell"
+
 
 def _remove_files(root):
     """Remove the files under a run-info template directory, keeping its directories."""
@@ -2212,4 +2217,3 @@ def _remove_files(root):
                 os.remove(os.path.join(directory, name))
             except FileNotFoundError:
                 pass
-
