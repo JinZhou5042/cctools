@@ -24,20 +24,63 @@ from .dask_common import (
     resolve_graph_key_if_task,
 )
 from .dask_task_spec import DaskTaskSpecConverter
-from ..graph import Graph, _Ref
+from ..graph import Graph, _FileRef, _Ref, replace_symbols
 
 
 def from_dask(dsk, expand_subgraphs=False):
-    """Convert a Dask graph, a dictionary of Dask collections or task specifications, into a Graph whose keys are the
-    Dask keys."""
+    """Convert a Dask graph, a dictionary of Dask collections or task specifications, into a Graph whose task keys are
+    the Dask keys."""
+    tasks = _DaskConverter(dsk, expand_subgraphs).tasks
     graph = Graph()
-    for key, (func, args, kwargs) in _DaskConverter(dsk, expand_subgraphs).tasks.items():
+    # A Graph takes each task after the tasks it reads, and a Dask graph lists them in any order.
+    for key in _upstream_first(tasks):
+        func, args, kwargs = tasks[key]
         graph._add(key, func, args, kwargs)
-    for key, parents in graph._parents.items():
-        for graph_id, parent in parents:
-            if graph_id is None and parent not in graph._tasks:
-                raise ValueError(f"task {key!r} reads {parent!r}, which is not in the Dask graph")
     return graph
+
+
+def _references(value):
+    """Return the keys of the tasks whose results or files a converted task expression reads."""
+    keys = []
+
+    def collect(symbol):
+        if isinstance(symbol, (_Ref, _FileRef)):
+            keys.append(symbol.key)
+        return symbol
+
+    replace_symbols(value, collect)
+    return keys
+
+
+def _upstream_first(tasks):
+    """Return the keys of converted tasks so that every task comes after the tasks it reads."""
+    order = []
+    state = {}  # key -> 1 while its parents are visited, 2 once it is in order
+    for root in tasks:
+        if root in state:
+            continue
+        stack = [(root, None)]
+        while stack:
+            key, parents = stack[-1]
+            if parents is None:
+                state[key] = 1
+                func, args, kwargs = tasks[key]
+                parents = iter(_references((args, kwargs)))
+                stack[-1] = (key, parents)
+            for parent in parents:
+                if parent not in tasks:
+                    raise ValueError(f"task {key!r} reads {parent!r}, which is not in the Dask graph")
+                seen = state.get(parent)
+                if seen == 1:
+                    raise ValueError(f"the Dask graph has a cycle through {parent!r}")
+                if seen is None:
+                    stack.append((parent, None))
+                    break
+            else:
+                stack.pop()
+                state[key] = 2
+                order.append(key)
+    return order
 
 
 class _DaskConverter:

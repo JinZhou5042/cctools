@@ -4,18 +4,21 @@
 
 """Build task graphs and run them on TaskVine.
 
-A Graph describes tasks and the data they pass to each other, and can be pickled and shared. An Executor runs tasks
-on TaskVine Workers and returns a Future for each submitted task:
+A Graph holds tasks, Python calls or shell commands, and rules that add tasks as others complete. run() executes it
+and returns the results of the tasks that no task reads:
 
     import ndcctools.taskvine.vine_graph as vg
 
-    graph = vg.Graph()
-    total = graph.add(sum, [graph.add(abs, -1), graph.add(abs, -2)])
-    with vg.Executor(port=9123) as executor:
-        print(executor.run(graph, [total])[total])
+    g = vg.Graph()
+    total = g.add(sum, [g.add(abs, -1), g.add(abs, -2)])
+
+    @g.on(abs)
+    def report(task):
+        print(task, task.result)
+
+    print(g.run(port=9123)[total])
 """
 
-from .graph import Command, File, Graph, Hoisted, Node, NodeFile
-from .executor import Capacity, Executor, Future, Progress, TaskError
+from .graph import Command, File, Graph, Hoisted, Task, TaskError, TaskFile
 
-__all__ = ["Graph", "Node", "NodeFile", "File", "Command", "Hoisted", "Executor", "Future", "Progress", "Capacity", "TaskError"]
+__all__ = ["Graph", "Task", "TaskFile", "File", "Command", "Hoisted", "TaskError"]

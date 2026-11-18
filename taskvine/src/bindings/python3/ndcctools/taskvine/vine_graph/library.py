@@ -2,11 +2,11 @@
 # This software is distributed under the GNU General Public License.
 # See the file COPYING for details.
 
-"""The TaskVine library that runs the tasks of an Executor on Workers, and the formats both sides share.
+"""The TaskVine library that runs the Python tasks of a Graph on Workers, and the formats both sides share.
 
 This module is what a Worker's library process runs: prepare() when it starts, and run_node(), the library's only
-function, which every task calls without arguments. The Executor installs the library (install.py) and reads what tasks
-write with the functions here, so the manifest, result, selection, and failure formats live in one place.
+function, which every Python task calls without arguments. The runner of a Graph installs the library (install.py) and
+reads what tasks write with the functions here, so the manifest, result, selection, and failure formats live in one place.
 
 The task sandbox holds a manifest at MANIFEST with the function and the arguments of the task, small ones serialized
 inside it, larger ones as staged files named by sandbox path, and references to results and files as they are, and the
@@ -286,6 +286,16 @@ def load_result(path):
         return cloudpickle.load(stream)["Result"]
 
 
+# Bytes of standard output that a command task keeps as its result (graph.COMMAND_RESULT_LIMIT).
+TEXT_RESULT_LIMIT = 1 << 20
+
+
+def load_text_result(path):
+    """Read the result of a command task: the text it wrote to standard output, at most TEXT_RESULT_LIMIT bytes."""
+    with open(path, "rb") as stream:
+        return stream.read(TEXT_RESULT_LIMIT).decode("utf-8", "replace")
+
+
 def save_selection(path, result, steps):
     """Write what steps select from a task result: the selected value, or the exception that the selection or its
     serialization raises, which load_selection() raises in the task that reads it. The selection never fails the
@@ -478,7 +488,12 @@ def _run_node():
                 objects[entry] = _load_file(entry, "e", _load_pickle)
         return objects[entry]
 
+    texts = manifest.get("texts", ())
+
     def load_task_result(task):
+        # The result of a command task is the text of its standard output.
+        if texts and task in texts:
+            return load_text_result(manifest["inputs"][task])
         return _load_file(manifest["inputs"][task], "r", load_result)
 
     def load_selected(task, steps):

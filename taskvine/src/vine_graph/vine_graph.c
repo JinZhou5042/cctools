@@ -19,6 +19,7 @@ struct vine_graph *vine_graph_create(void)
 	g->nodes = itable_create(0);
 	g->files = itable_create(0);
 	g->producers = itable_create(0);
+	g->commands = itable_create(0);
 	g->last_node_id = 0;
 	g->last_file_id = 0;
 	return g;
@@ -134,6 +135,26 @@ struct vine_graph_mount *vine_graph_find_output(const struct vine_graph *g, stru
 	return itable_lookup(g->producers, (uint64_t)(uintptr_t)file);
 }
 
+int vine_graph_set_command(struct vine_graph *g, uint64_t node_id, const char *command)
+{
+	struct vine_graph_node *node = vine_graph_get_node(g, node_id);
+	if (!node || node->submitted || !command) {
+		return -1;
+	}
+	char *copy = strdup(command);
+	if (!copy) {
+		return -1;
+	}
+	free(itable_remove(g->commands, node_id));
+	itable_insert(g->commands, node_id, copy);
+	return 0;
+}
+
+const char *vine_graph_get_command(const struct vine_graph *g, const struct vine_graph_node *node)
+{
+	return itable_lookup(g->commands, node->node_id);
+}
+
 struct vine_graph_node *vine_graph_get_producer(const struct vine_graph *g, struct vine_file *file)
 {
 	struct vine_graph_mount *mount = vine_graph_find_output(g, file);
@@ -238,6 +259,7 @@ void vine_graph_remove_node(struct vine_graph *g, struct vine_graph_node *node)
 		itable_remove(g->producers, (uint64_t)(uintptr_t)mount->file);
 	}
 	itable_remove(g->nodes, node->node_id);
+	free(itable_remove(g->commands, node->node_id));
 	/* Every child was removed before the node, so every entry of its children array points to a removed child. */
 	vine_graph_node_drop_removed_children(node);
 	vine_graph_node_clear(node);
@@ -270,5 +292,13 @@ void vine_graph_delete(struct vine_graph *g)
 	itable_delete(g->nodes);
 	itable_delete(g->files);
 	itable_delete(g->producers);
+	uint64_t command_node_id;
+	char *command;
+	int command_iteration;
+	ITABLE_ITERATE(g->commands, command_iteration, command_node_id, command)
+	{
+		free(command);
+	}
+	itable_delete(g->commands);
 	free(g);
 }

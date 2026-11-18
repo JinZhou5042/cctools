@@ -2,8 +2,9 @@
 # This software is distributed under the GNU General Public License.
 # See the file COPYING for details.
 
-"""A task graph describes what to run, independent of where it runs. It holds no runtime state, so it can be pickled,
-shared, and run by any Executor any number of times."""
+"""A Graph holds tasks, the data they pass to each other, and the rules that add tasks as others complete. run()
+executes it on TaskVine Workers, or in this process, and a later run() continues it without recomputing what
+completed."""
 
 import collections
 import collections.abc
@@ -11,9 +12,8 @@ import copy
 import dataclasses
 import itertools
 import os
-import uuid
-
-from .command import run_command
+import string
+import threading
 
 
 class _Symbol:
@@ -26,17 +26,23 @@ class _Symbol:
         """Return the lightweight reference stored in task arguments in place of this symbol."""
         raise NotImplementedError
 
-    def _file(self):
-        """Return the File or NodeFile this symbol stands for, or None when it stands for a task result."""
-        return None
 
-    def _is_file(self):
-        return self._file() is not None
+# The lock that a local run holds while a task changes the working directory of the process, which the executor module
+# installs, so that a relative path given in another thread meanwhile resolves against the caller's directory.
+_working_directory_lock = None
+
+
+def _absolute(path):
+    """Return the absolute path of a path, resolved while no local task changed the working directory."""
+    lock = _working_directory_lock
+    if lock is None:
+        return os.path.abspath(path)
+    with lock:
+        return os.path.abspath(path)
 
 
 class File(_Symbol):
-    """A file on the local filesystem that tasks read. A task receives the path of its copy in the task sandbox, and
-    a File given to Executor.submit() as a target returns its own path."""
+    """A file on the local filesystem that tasks read. A task receives the path of its copy in the task sandbox."""
 
     __slots__ = ("path",)
 
@@ -46,12 +52,9 @@ class File(_Symbol):
             raise TypeError("a File path must be a string or path-like object")
         if "\0" in path:
             raise ValueError("a File path contains a null byte")
-        self.path = os.path.abspath(path)
+        self.path = _absolute(path)
 
     def _as_ref(self):
-        return self
-
-    def _file(self):
         return self
 
     def __eq__(self, other):
@@ -64,94 +67,8 @@ class File(_Symbol):
         return f"File({self.path!r})"
 
 
-class Command:
-    """A command line to run as a task, given to Graph.add() or Executor.submit() in place of a function.
-
-    command is a string, which runs in a shell, or a list of strings, which runs as a program and its arguments.
-
-    inputs maps each path the command reads in its sandbox to where its content comes from: a local path or File, a
-    file another task writes (node.file(path)), or another task, whose result must be text or bytes. A list of
-    local paths, Files, and task files gives each one under its own file name.
-
-    outputs lists the paths the command writes, each then given by node.file(path).
-
-    The result of the task is the standard output of the command, as text. A command that exits with a non-zero
-    status fails its task with a subprocess.CalledProcessError, which carries the status and both output streams."""
-
-    __slots__ = ("command", "inputs", "outputs")
-
-    def __init__(self, command, inputs=(), outputs=()):
-        if isinstance(command, (list, tuple)):
-            command = list(command)
-            if not command or not all(isinstance(word, str) for word in command):
-                raise TypeError("a command list must hold the program and its arguments as strings")
-        elif not isinstance(command, str):
-            raise TypeError("a command must be a string or a list of strings")
-        elif not command.strip():
-            raise ValueError("a command must not be empty")
-        if isinstance(inputs, (str, os.PathLike, _Symbol)):
-            inputs = (inputs,)
-        if not isinstance(inputs, collections.abc.Mapping):
-            inputs = {_input_name(source): source for source in inputs}
-        if isinstance(outputs, (str, os.PathLike)):
-            outputs = (outputs,)
-        self.command = command
-        self.inputs = {_sandbox_path(name, "an input"): _input_source(name, source) for name, source in inputs.items()}
-        self.outputs = tuple(_sandbox_path(path, "an output") for path in outputs)
-
-    def _call(self):
-        """Return the function and arguments of the task that runs this command."""
-        files = {name: source for name, source in self.inputs.items() if source._is_file()}
-        results = {name: source for name, source in self.inputs.items() if not source._is_file()}
-        return run_command, (self.command, files, results)
-
-    def __repr__(self):
-        return f"Command({self.command!r})"
-
-
-def _input_source(name, source):
-    """Return the symbol a command input stands for: a local path becomes its File."""
-    if isinstance(source, (str, os.PathLike)):
-        return File(source)
-    if isinstance(source, _Symbol) and not isinstance(source, Hoisted):
-        return source
-    raise TypeError(f"the command input {name!r} must be a local path, a File, a file of a task, or a task")
-
-
-def _input_name(source):
-    """Return the sandbox path of a command input given without one: the file name of a local file, and the path of
-    a task file."""
-    if isinstance(source, (str, os.PathLike)):
-        source = File(source)
-    target = source._file() if isinstance(source, _Symbol) else None
-    if target is None:
-        raise TypeError("only files can be command inputs without a name; use inputs={path: task} for a task result")
-    return os.path.basename(target.path) if isinstance(target, File) else target.path
-
-
-def _task_name(func, args):
-    """Return the name that messages give a task: the name of its function, or its command."""
-    if func is run_command:
-        return f"Command({args[0]!r})"
-    return getattr(func, "__name__", None) or type(func).__name__
-
-
-def _sandbox_path(path, what):
-    """Return the normalized form of a relative path inside a task sandbox, or raise for any other path."""
-    path = os.fspath(path)
-    if not isinstance(path, str):
-        raise TypeError(f"{what} path must be a string or path-like object")
-    if "\0" in path:
-        raise ValueError(f"{what} path contains a null byte")
-    normalized = os.path.normpath(path)
-    if not path or normalized in ("", ".") or os.path.isabs(path) or normalized == ".." or normalized.startswith("../"):
-        raise ValueError(f"{what} path must be a non-empty relative path inside the task sandbox")
-    return normalized
-
-
 class Hoisted(_Symbol):
-    """An object that the Executor loads once into the library on each Worker, named by the hoist argument of the
-    Executor. A task that takes vg.Hoisted(name) as an argument receives that object. Every task gets its own copy, so
+    """An object that the library on each Worker loads once, named by the hoist argument of Graph.run(). A task that takes vg.Hoisted(name) as an argument receives that object. Every task gets its own copy, so
     changes a task makes to it stay within that task."""
 
     __slots__ = ("name",)
@@ -195,59 +112,6 @@ class _Selectable(_Symbol):
         if not isinstance(name, str):
             raise TypeError("an attribute name must be a string")
         return _Selection(self, (_Attribute(name),))
-
-
-class Node(_Selectable):
-    """A task in a Graph. Pass a Node as an argument of another task to give it this task's result."""
-
-    __slots__ = ("graph", "key")
-
-    def __init__(self, graph, key):
-        self.graph = graph
-        self.key = key
-
-    def file(self, path):
-        """Declare a file this task writes at path in its sandbox, and return it. Declaring the same path again
-        returns the same file."""
-        return self.graph._add_output(self.key, path)
-
-    def _as_ref(self):
-        return _Ref(self.graph._id, self.key)
-
-    def __eq__(self, other):
-        return isinstance(other, Node) and other.graph is self.graph and other.key == self.key
-
-    def __hash__(self):
-        return hash((Node, id(self.graph), self.key))
-
-    def __repr__(self):
-        task = self.graph._tasks.get(self.key)
-        return f"Node({self.key!r}, {_task_name(*task[:2]) if task else 'NoneType'})"
-
-
-class NodeFile(_Symbol):
-    """A file that a task writes in its sandbox. Pass it to another task to give it the file's path there."""
-
-    __slots__ = ("node", "path")
-
-    def __init__(self, node, path):
-        self.node = node
-        self.path = path
-
-    def _as_ref(self):
-        return _FileRef(self.node.graph._id, self.node.key, self.path)
-
-    def _file(self):
-        return self
-
-    def __eq__(self, other):
-        return isinstance(other, NodeFile) and other.node == self.node and other.path == self.path
-
-    def __hash__(self):
-        return hash((NodeFile, self.node, self.path))
-
-    def __repr__(self):
-        return f"{self.node!r}.file({self.path!r})"
 
 
 class _Selection(_Selectable):
@@ -347,7 +211,7 @@ def _children(value):
     if kind is dict:
         return [item for pair in value.items() for item in pair]
     if isinstance(value, Graph):
-        # A Graph passed as an argument is data. The references it holds are to its own tasks, not ones the task reads.
+        # A Graph passed as an argument is data, and the tasks it holds are not ones the task reads.
         return ()
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         # A field may be unset, such as one with init=False that the object never assigned.
@@ -577,111 +441,521 @@ def replace_symbols(value, replace, known=()):
             parent[4](out)
 
 
-class Graph:
-    """Tasks and the data they pass to each other. Graph.add() records a call without running it, and its Node
-    stands for the call's result. A Graph is a description: an Executor runs it, and it may be pickled and shared.
-    A copy, such as an unpickled Graph, is a Graph of its own, which an Executor runs independently of the original."""
+
+# Task states. Only the thread of a run changes them while it runs, and never while a rule runs.
+_NEW = 0  # not started: never submitted, or returned to not-started by a stopped run
+_RUNNING = 1  # submitted and not finished
+_COMPLETED = 2
+_FAILED = 3
+_CANCELLED = 4
+
+# Bytes of standard output that a command task keeps as its result.
+COMMAND_RESULT_LIMIT = 1 << 20
+# Bytes of a file that TaskFile.content reads at most.
+CONTENT_LIMIT = 16 << 20
+
+
+class TaskError(RuntimeError):
+    """A task failed, or it could not run because a task it reads failed. task is the Task, and source the Task whose
+    own failure explains it, which is task itself when it failed on its own.
+
+    reason says why the source failed:
+
+    - "function": its function raised an exception, or its command exited with an error status
+    - "signal": its function was killed by a signal
+    - "workers": Workers kept disconnecting while they ran it, as when it exceeds their memory or crashes them
+    - "input": a file it reads is missing at the Manager
+    - "retries": more of its attempts failed for other reasons than the setting max-retries allows
+    - "submit": it could not be submitted, as when an argument cannot be serialized
+    - "result": it completed, but its result cannot be loaded in this process or sent by its Worker
+
+    exception is the exception that the function of the source raised, loaded in this process with the source's
+    traceback as a note, or None. exit_code is the exit status of the source's command when it exited with an error
+    status, and None otherwise; the message then ends with the end of its standard error."""
+
+    def __init__(self, message, task, source, reason=None, exception=None, exit_code=None):
+        super().__init__(message)
+        self.task = task
+        self.source = source
+        self.reason = reason
+        self.exception = exception
+        self.exit_code = exit_code
+
+
+class Command:
+    """A shell command line that tasks run, as a function is for Python tasks: g.add(command, **values) adds a task
+    that runs it in its sandbox, and a Command selects its tasks in Graph.on() and Graph.find() as a function does.
+
+    Placeholders such as {name} take the values given by name, shell-quoted: a File, or a file a task writes
+    (task.file(name)), becomes its path in the sandbox, a Task becomes str() of its result, and any other value str()
+    of the value. Every placeholder needs a value, and every value a placeholder. Write {{ and }} for braces. The text a
+    command writes to standard output, at most 1 MiB, is its result, the files it writes that other tasks read are its
+    outputs, and an exit status other than zero fails it, with the end of its standard error in its TaskError. cores
+    is the number of cores it uses on a Worker, where a Python task uses one."""
+
+    __slots__ = ("_template", "_cores", "_fields", "__weakref__")
+
+    def __init__(self, template, cores=1):
+        if not isinstance(template, str) or not template.strip():
+            raise TypeError("a Command takes a command line as a non-empty string")
+        if "\0" in template:
+            raise ValueError("a command line contains a null byte")
+        if type(cores) is not int or cores < 1:
+            raise ValueError("cores must be a positive integer")
+        fields = {}
+        try:
+            parsed = list(string.Formatter().parse(template))
+        except ValueError as error:
+            raise ValueError(f"invalid command line {template!r}: {error}") from None
+        for _, field, spec, conversion in parsed:
+            if field is None:
+                continue
+            if not field.isidentifier() or spec or conversion:
+                raise ValueError(f"a placeholder of a command line is a name in braces such as {{name}}, not {{{field}}}")
+            fields[field] = None
+        self._template = template
+        self._cores = cores
+        self._fields = tuple(fields)
+
+    @property
+    def template(self):
+        return self._template
+
+    @property
+    def cores(self):
+        return self._cores
+
+    def __repr__(self):
+        return f"Command({self._template!r}, cores={self._cores})"
+
+
+class TaskFile(_Symbol):
+    """A file that a task writes in its sandbox, which other tasks read when it is passed to them. Asking for a file
+    of a task before the task runs declares it, and the task fails when it does not write it."""
+
+    __slots__ = ("task", "name")
+
+    def __init__(self, task, name):
+        self.task = task
+        self.name = name
+
+    def _as_ref(self):
+        return _FileRef(None, self.task.key, self.name)
+
+    @property
+    def exists(self):
+        """Whether the task wrote the file: it completed, and the file was declared before it ran."""
+        task = self.task
+        return task._state == _COMPLETED and task._record is not None and self.name in task._record.outputs
+
+    @property
+    def content(self):
+        """The bytes of the file, fetched when asked for. A file above 16 MiB raises ValueError: pass it to a task, or
+        read TaskFile.path."""
+        return self.task._graph._file(self, "content")
+
+    @property
+    def text(self):
+        """The content of the file, decoded as UTF-8."""
+        return self.content.decode("utf-8")
+
+    @property
+    def path(self):
+        """A local path of the file, fetched to the output directory of the run when asked for. It stays there after
+        the Graph is gone."""
+        return self.task._graph._file(self, "path")
+
+    def __eq__(self, other):
+        return isinstance(other, TaskFile) and other.task is self.task and other.name == self.name
+
+    def __hash__(self):
+        return hash((TaskFile, id(self.task), self.name))
+
+    def __repr__(self):
+        return f"{self.task!r}.file({self.name!r})"
+
+
+def _readers_of(task):
+    """Return the readers of a task as a sequence."""
+    readers = task._readers
+    if readers is None:
+        return ()
+    if isinstance(readers, list):
+        return readers
+    return (readers,)
+
+
+class Task(_Selectable):
+    """A task of a Graph: a call of a function, or a run of a Command, with its arguments. Pass it as an argument of
+    another task to give that task its result, select from it with task[key] or task.attr(name), and name a file it
+    writes with task.file(name). Its attributes are read-only, and Graph.run() changes its state."""
+
+    __slots__ = ("_graph", "key", "_index", "_func", "_args", "_kwargs", "_parents", "_results", "_reads", "_hoisted",
+                 "_selections", "_outputs", "_readers", "_rules", "_state", "_error", "_record", "_rule_pending",
+                 "__weakref__")
+
+    def __init__(self, graph, key, func):
+        self._graph = graph
+        self.key = key  # the task's key in its Graph: its number, or its Dask key in a Graph from adaptors.from_dask()
+        self._index = 0  # insertion order in the Graph
+        self._func = func
+        self._args = ()  # arguments, with every symbol replaced by its reference
+        self._kwargs = _NO_KWARGS
+        self._parents = ()  # Tasks whose results or files it reads, in first-use order
+        self._results = None  # Tasks whose results it reads, in first-use order, or None
+        self._reads = None  # Files and _FileRefs it reads, or None
+        self._hoisted = None  # names of hoisted objects it reads, or None
+        # {(None, key): (selection_key(steps), steps)} of each task result it reads at exactly one place, through a
+        # selection, or None. Such a task needs only the selected value, which its producer may write to a file.
+        self._selections = None
+        self._outputs = None  # {sandbox path: TaskFile} of the files it writes, or None
+        # Tasks of the Graph that read it, in the order they were added: None, the one reader, or a list of several,
+        # since most tasks have one reader and a list for it would take more memory than the task. See _readers_of().
+        self._readers = None
+        self._rules = None  # rules registered for this task alone, or None
+        self._state = _NEW
+        self._error = None  # the failure entry of a failed task
+        self._record = None  # the runner's record of its latest submission
+        self._rule_pending = False  # its rules are due once it completes
+
+    @property
+    def func(self):
+        """The function or Command the task runs."""
+        return self._func
+
+    @property
+    def args(self):
+        """The positional arguments, with the Tasks, selections, and files they hold."""
+        return self._graph._restore(self._args)
+
+    @property
+    def kwargs(self):
+        """The keyword arguments, with the Tasks, selections, and files they hold."""
+        return dict(self._graph._restore(self._kwargs))
+
+    @property
+    def done(self):
+        """Whether the task completed."""
+        return self._state == _COMPLETED
+
+    @property
+    def failed(self):
+        """Whether the task failed, or could not run because a task it reads failed."""
+        return self._state == _FAILED
+
+    @property
+    def cancelled(self):
+        """Whether Graph.cancel() cancelled the task, or a task it reads."""
+        return self._state == _CANCELLED
+
+    @property
+    def result(self):
+        """The result of a completed task, fetched when asked for: what its function returned, or the text its command
+        wrote to standard output. A failed task raises its TaskError, and any other task RuntimeError."""
+        return self._graph._result(self)
+
+    @property
+    def error(self):
+        """The TaskError of a failed task, or None."""
+        if self._state != _FAILED:
+            return None
+        from .executor import task_error
+
+        return task_error(self._graph, self)
+
+    @property
+    def readers(self):
+        """The tasks of the Graph that read this task's result or files, in the order they were added."""
+        return list(_readers_of(self))
+
+    def file(self, name):
+        """Return the file this task writes at name, a relative path in its sandbox. Asking for the same name again
+        returns the same file."""
+        name = os.fspath(name)
+        if not isinstance(name, str):
+            raise TypeError("a file name must be a string or path-like object")
+        if "\0" in name:
+            raise ValueError("a file name contains a null byte")
+        normalized = os.path.normpath(name)
+        if not name or normalized in ("", ".") or os.path.isabs(name) or normalized == ".." or normalized.startswith("../"):
+            raise ValueError("a file name must be a non-empty relative path inside the task sandbox")
+        outputs = self._outputs
+        if outputs is None:
+            outputs = self._outputs = {}
+        file = outputs.get(normalized)
+        if file is None:
+            file = outputs[normalized] = TaskFile(self, normalized)
+        return file
+
+    def _as_ref(self):
+        return _Ref(None, self.key)
+
+    def __repr__(self):
+        from .executor import _label
+
+        return _label(self)
+
+
+class _Rule:
+    """A function that Graph.on() registered, called with each selected task that completes."""
+
+    __slots__ = ("function", "index")
+
+    def __init__(self, function, index):
+        self.function = function
+        self.index = index
+
+
+class _FunctionIndex:
+    """Values listed by function or Command: by the function itself, which tells bound methods of one object apart from
+    others, or by its id when it cannot be hashed."""
+
+    __slots__ = ("hashed", "unhashed")
 
     def __init__(self):
-        # Identifies this Graph object while it exists. A Graph refers to its own tasks with graph id None, so the id
-        # is not part of its state and every copy gets a new one.
-        self._id = uuid.uuid4().hex
+        self.hashed = {}
+        self.unhashed = {}  # id -> (function, values)
+
+    def get(self, func):
+        try:
+            return self.hashed.get(func)
+        except TypeError:
+            entry = self.unhashed.get(id(func))
+            return None if entry is None else entry[1]
+
+    def add(self, func, value):
+        try:
+            values = self.hashed.get(func)
+            if values is None:
+                values = self.hashed[func] = []
+        except TypeError:
+            entry = self.unhashed.get(id(func))
+            if entry is None:
+                entry = self.unhashed[id(func)] = (func, [])
+            values = entry[1]
+        # A value added for two selectors that stand for one function, such as two bound methods, is listed once.
+        if not values or values[-1] is not value:
+            values.append(value)
+
+
+class Graph:
+    """Tasks, the data they pass to each other, and rules that add tasks as others complete.
+
+    add() adds a task and returns its Task. on() registers a rule, which run() calls with each selected task that
+    completes, one at a time and in completion order, in the thread that called run(). While a rule runs, task states
+    do not change, and the rule may add tasks, which run after it returns, cancel tasks, or stop the run. find()
+    returns the selected tasks. run() blocks until no task runs and no rule is due, and returns the results of the
+    completed sinks, the tasks that no task reads. Running the Graph again runs only what did not finish: completed
+    tasks keep their results while the Graph lives, and a stopped run continues."""
+
+    def __init__(self):
+        self._tasks = {}  # key -> Task, in insertion order
         self._next_key = 1
-        self._tasks = {}  # key -> (function, args, kwargs), with symbols replaced by references
-        # key -> (graph id, key) of every task whose result or file it reads, in first-use order. The graph id is None
-        # for a task of this graph. This table and the next two hold only tasks that read something, because most calls
-        # submitted in bulk read nothing.
-        self._parents = {}
-        self._results = {}  # key -> (graph id, key) of every task whose result it reads, in first-use order
-        self._children = collections.defaultdict(set)  # key -> keys in this graph that read its result or files
-        self._reads = {}  # key -> File and _FileRef objects the task reads, in first-use order
-        self._outputs = collections.defaultdict(dict)  # key -> sandbox path -> NodeFile it writes
-        self._hoisted = {}  # key -> names of the hoisted objects the task reads, for tasks that read any
-        # key -> {(graph id, key): (selection_key(steps), steps)} for each task result that the task reads at exactly
-        # one place in its arguments, through a selection, for tasks that read any. Such a task needs only the selected
-        # value, and an Executor may have the producer write that value to a file of its own.
-        self._selections = {}
+        self._by_func = _FunctionIndex()  # function or Command -> its Tasks, in insertion order
+        self._rule_index = _FunctionIndex()  # function or Command -> rules that select its tasks
+        self._rule_count = 0
         # id -> [object, tasks]: argument objects without symbols, scanned once while tasks hold them. An object passed
-        # again is assumed unchanged, as an Executor already assumes when it serializes it once.
+        # again is assumed unchanged.
         self._plain = {}
-        # key -> ((None, key), _Ref(None, key)): the task and the reference that arguments of tasks of this Graph store
-        # for the whole result of task key. References never change, so every reader shares them, which spares an
-        # allocation for each place a task reads a result.
+        # key -> ((None, key) task, _Ref(None, key)) that arguments of tasks store for the whole result of task key,
+        # shared by every reader.
         self._shared_refs = {}
+        self._run = None  # the _Run of the run in progress
+        self._runner = None  # the runner of the first run, which later runs reuse
+        self._settings = None  # the settings that chose the runner
+        # Completed tasks whose rules are due, in completion order. A stopped run leaves those it did not call for the
+        # next run.
+        self._due = collections.deque()
+
+    def __repr__(self):
+        return f"Graph({len(self._tasks)} tasks)"
 
     def __getstate__(self):
-        state = dict(self.__dict__)
-        del state["_id"]
-        del state["_plain"]
-        del state["_shared_refs"]
-        return state
+        raise TypeError("a Graph holds rules and the state of its runs, and cannot be pickled")
 
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self._id = uuid.uuid4().hex
-        self._plain = {}
-        self._shared_refs = {}
+    # The user interface.
 
     def add(self, func, /, *args, **kwargs):
-        """Add a call of func with these arguments and return its Node. Nodes, their selections and files, and
-        File objects may appear anywhere inside the arguments. A Command in place of func adds a task that runs
-        its command line."""
+        """Add a task that calls func with these arguments, or runs a Command with values for its placeholders, and
+        return its Task. Tasks, their selections and files, and Files may appear anywhere inside the arguments of a
+        function. During a run, only a rule may add tasks, and they run once it returns."""
+        self._check_change("add")
         while self._next_key in self._tasks:
             self._next_key += 1
         key = self._next_key
         self._next_key += 1
         return self._add(key, func, args, kwargs)
 
-    def node(self, key):
-        """Return the Node of the task with this key, such as a Dask key of a graph from adaptors.from_dask()."""
-        if key not in self._tasks:
-            raise KeyError(f"no task with key {key!r}")
-        return Node(self, key)
+    def on(self, *selectors):
+        """Register the decorated function as a rule: rule(task) is called with each selected task that completes. A
+        selector is a function or Command, which selects its tasks, including those added later, or a Task. A task that
+        failed or was cancelled calls no rule, and a rule that raises fails the run."""
+        if not selectors:
+            raise TypeError("on() takes at least one function, Command, or Task")
+        for selector in selectors:
+            self._check_selector(selector)
+        if self._run is not None:
+            self._check_change("on")
 
-    def sinks(self):
-        """Return the Nodes that no other task in this graph reads."""
-        # The keys are copied in one built-in call, so another thread may add tasks meanwhile, as one may while an
-        # Executor runs this Graph.
-        return [Node(self, key) for key in list(self._tasks) if not self._children.get(key)]
+        def register(function):
+            if not callable(function):
+                raise TypeError("a rule must be callable")
+            self._rule_count += 1
+            rule = _Rule(function, self._rule_count)
+            for selector in {id(selector): selector for selector in selectors}.values():
+                if isinstance(selector, Task):
+                    if selector._rules is None:
+                        selector._rules = []
+                    selector._rules.append(rule)
+                    tasks = (selector,)
+                else:
+                    self._rule_index.add(selector, rule)
+                    tasks = self._by_func.get(selector) or ()
+                # Running tasks that a rule now selects call it when they complete.
+                for task in tasks:
+                    if task._state == _RUNNING:
+                        task._rule_pending = True
+            return function
 
-    def __iter__(self):
-        """Iterate over the Nodes of the tasks the Graph holds when iteration starts, so the loop may add tasks."""
-        return (Node(self, key) for key in list(self._tasks))
+        return register
 
-    def __len__(self):
-        return len(self._tasks)
+    def find(self, *selectors):
+        """Return the selected tasks, in the order they were added: the tasks of each function or Command, and each
+        Task given, or every task when none is given. The list is a snapshot. During a run, only a rule may call it."""
+        run = self._run
+        if run is not None and not (run.in_rule and threading.current_thread() is run.thread):
+            raise RuntimeError("during a run, only a rule may call find()")
+        if not selectors:
+            return list(self._tasks.values())
+        found = []
+        for selector in selectors:
+            self._check_selector(selector)
+            if isinstance(selector, Task):
+                found.append((selector,))
+            else:
+                found.append(self._by_func.get(selector) or ())
+        if len(found) == 1:
+            return list(found[0])
+        union = {id(task): task for tasks in found for task in tasks}
+        return sorted(union.values(), key=_INDEX)
 
-    def __contains__(self, node):
-        return isinstance(node, Node) and node.graph is self and node.key in self._tasks
+    def cancel(self, *tasks):
+        """Cancel tasks that did not finish, and the tasks that read them: those not started never run, and running
+        ones are stopped. Completed tasks stay completed, and cancelled tasks stay cancelled in later runs. Only a rule
+        may cancel tasks."""
+        run = self._check_change("cancel", rule_only=True)
+        for task in tasks:
+            if not isinstance(task, Task) or task._graph is not self:
+                raise TypeError("cancel() takes Tasks of this Graph")
+        run.cancel(tasks)
 
-    def __repr__(self):
-        return f"Graph({len(self._tasks)} tasks)"
+    def stop(self):
+        """End the run once the rule that calls this returns: no further rule is called, running tasks are stopped, and
+        run() returns. Tasks that did not finish go back to not started, so a later run() continues them. Only a rule
+        may stop the run."""
+        run = self._check_change("stop", rule_only=True)
+        run.stop_requested = True
+
+    def run(self, *, local=False, progress=True, hoist=None, edata_cache=0, port=None, name=None, params=None,
+            library_modules=(), library_files=None, output_dir="./outputs", **manager_options):
+        """Run the tasks that did not finish, and the tasks that rules add, until no task runs and no rule is due, and
+        return {sink: result} of the completed tasks that no task reads. A failure raises the TaskError of a task that
+        failed on its own, after the other tasks finished, and a rule that raises fails the run with an error that
+        names the rule and the task.
+
+        Python tasks run in a TaskVine library on Workers that connect to port, or to the Manager named name through the
+        catalog, and commands as standard TaskVine tasks. local=True runs every task in this process instead, one at a
+        time, with the same semantics. progress draws a progress bar. hoist maps names to objects that the library on
+        each Worker loads once, which a task takes as vg.Hoisted(name). edata_cache is a budget in bytes of function
+        and argument objects of the first run that the library loads when it starts. params holds settings of the graph
+        executor and TaskVine Manager tuning, which each run applies, and other keyword arguments go to the TaskVine
+        Manager. A Graph keeps the runner of its first run, so later runs take the same settings."""
+        from .executor import run_graph
+
+        if port is None:
+            from .executor import cvine
+
+            port = cvine.VINE_DEFAULT_PORT
+        settings = {"port": port, "name": name, "output_dir": output_dir, "library_modules": tuple(library_modules),
+                    "library_files": library_files, "hoist": hoist, "edata_cache": edata_cache}
+        if local:
+            # A local run has no Manager, so only what it uses chooses its runner.
+            settings = {"output_dir": output_dir, "hoist": hoist}
+            manager_options = {}
+        return run_graph(self, local, progress, params, settings, manager_options)
 
     # Construction.
 
-    def _add(self, key, func, args, kwargs, foreign=False, on_symbol=None):
-        """Record a task under key and return its Node. See _record()."""
-        self._record(key, func, args, kwargs, foreign, on_symbol)
-        return Node(self, key)
+    def _check_change(self, what, rule_only=False):
+        """Raise unless the Graph may change now: outside a run, or inside a rule in the run's thread. Return the run."""
+        run = self._run
+        if run is None:
+            if rule_only:
+                raise RuntimeError(f"{what}() may be called only inside a rule during a run")
+            return None
+        if not run.in_rule or threading.current_thread() is not run.thread:
+            raise RuntimeError(f"during a run, only a rule may call {what}()")
+        return run
 
-    def _record(self, key, func, args, kwargs, foreign=False, on_symbol=None):
-        """Record a task under key. A graph built by an Executor passes foreign=True, so its tasks may read results of
-        other graphs and Futures, and on_symbol to see each symbol. A user graph reads only its own tasks."""
-        if isinstance(func, Command):
-            if args or kwargs:
-                raise TypeError("a Command takes no arguments; give its files as inputs")
-            function, arguments = func._call()
-            self._record(key, function, arguments, {}, foreign, on_symbol)
-            for path in func.outputs:
-                self._add_output(key, path)
-            return
-        if not callable(func):
-            raise TypeError("a task needs a callable followed by its arguments")
+    def _check_selector(self, selector):
+        if isinstance(selector, Task):
+            if selector._graph is not self:
+                raise ValueError("a Task of another Graph cannot select tasks of this Graph")
+        elif isinstance(selector, _Symbol) or not (callable(selector) or isinstance(selector, Command)):
+            raise TypeError("a selector is a function, a Command, or a Task")
+
+    def _add(self, key, func, args, kwargs):
+        """Record a task under key and return it."""
+        command = isinstance(func, Command)
+        if command:
+            if args:
+                raise TypeError("a Command takes its values by name, as g.add(command, name=value)")
+            missing = [name for name in func._fields if name not in kwargs]
+            extra = [name for name in kwargs if name not in func._fields]
+            if missing or extra:
+                problems = []
+                if missing:
+                    problems.append(f"no value for {', '.join(missing)}")
+                if extra:
+                    problems.append(f"no placeholder for {', '.join(extra)}")
+                raise TypeError(f"{func!r}: {'; '.join(problems)}")
+        elif isinstance(func, _Symbol) or not callable(func):
+            raise TypeError("a task needs a function or a Command followed by its arguments")
         if key in self._tasks:
             raise ValueError(f"a task with key {key!r} already exists")
-        # Arguments of leaf types, the common case of calls submitted in bulk, hold no symbol and need no scan. Tasks
-        # without keyword arguments share one empty dictionary, which nothing changes, since the garbage collector
-        # tracks every dictionary.
+        task = Task(self, key, func)
+        self._record_arguments(task, args, kwargs)
+        task._index = len(self._tasks)
+        self._tasks[key] = task
+        self._by_func.add(func, task)
+        for parent in task._parents:
+            readers = parent._readers
+            if readers is None:
+                parent._readers = task
+            elif isinstance(readers, list):
+                readers.append(task)
+            else:
+                parent._readers = [readers, task]
+        run = self._run
+        if run is not None:
+            run.added.append(task)
+            run.task_added()
+        return task
+
+    def _record_arguments(self, task, args, kwargs):
+        """Store the arguments of a task with every symbol replaced by its reference, and what it reads."""
+        if isinstance(task._func, Command):
+            for name, value in kwargs.items():
+                if isinstance(value, _Selection):
+                    raise TypeError(f"the value of {{{name}}} is a selection, which a command cannot read; read it in "
+                                    f"a Python task and pass that task")
+                if isinstance(value, Hoisted):
+                    raise TypeError(f"the value of {{{name}}} is a hoisted object, which only Python tasks take")
+                if not isinstance(value, _Symbol) and _scanner()(value):
+                    raise TypeError(f"the value of {{{name}}} holds tasks or files inside, which a command cannot read; "
+                                    f"pass each as a value of its own")
+        # Arguments of leaf types, the common case of calls added in bulk, hold no symbol and need no scan. Tasks
+        # without keyword arguments share one empty dictionary.
         leaf = _LEAF_TYPE_SET
         for value in args:
             if type(value) not in leaf:
@@ -691,144 +965,172 @@ class Graph:
                 if type(value) not in leaf:
                     break
             else:
-                self._tasks[key] = (func, tuple(args), dict(kwargs) if kwargs else _NO_KWARGS)
+                task._args = tuple(args)
+                task._kwargs = dict(kwargs) if kwargs else _NO_KWARGS
                 return
-        parents = {}  # (graph id, key) -> None, as an ordered set
-        results = {}  # (graph id, key) of tasks whose result it reads -> None, as an ordered set
+        parents = {}  # Task -> None, as an ordered set
+        results = {}  # Tasks whose result it reads -> None, as an ordered set
         reads = {}  # identity of each file read -> its File or _FileRef
         hoisted = {}  # names of hoisted objects -> None, as an ordered set
-        places = {}  # (graph id, key) of each task result read -> steps of the first place it is read at
-        repeated = set()  # (graph id, key) of each task result read at more than one place
+        places = {}  # Task of each result read -> steps of the first place it is read at
+        repeated = set()  # Tasks whose result is read at more than one place
         shared_refs = self._shared_refs
+        tasks = self._tasks
 
-        def read_result(task, steps):
+        def read_result(parent, steps):
             # Replacement visits a container once however often the arguments hold it, and a symbol at each place, as
-            # the library does when it runs the task, so repeated holds the results that the task receives, or a
-            # selection of, at more than one place.
-            if task in places:
-                repeated.add(task)
+            # the library does when it runs the task, so repeated holds the results read at more than one place.
+            if parent in places:
+                repeated.add(parent)
             else:
-                parents.setdefault(task, None)
-                results[task] = None
-                places[task] = steps
+                parents.setdefault(parent, None)
+                results[parent] = None
+                places[parent] = steps
 
-        def read_whole_result(key):
-            # The whole result of a task of this Graph, the most common argument, takes the shared reference. This is
-            # read_result() without its call, because a task may read many results.
-            entry = shared_refs.get(key)
-            if entry is None:
-                entry = shared_refs[key] = ((None, key), _Ref(None, key))
-            task = entry[0]
-            if task in places:
-                repeated.add(task)
-            else:
-                parents.setdefault(task, None)
-                results[task] = None
-                places[task] = ()
-            return entry[1]
+        def parent_of(symbol_key):
+            parent = tasks.get(symbol_key)
+            if parent is None:
+                raise ValueError(f"a task reads task {symbol_key!r}, which is not in this Graph")
+            return parent
 
         def replace(symbol):
-            if on_symbol is not None:
-                on_symbol(symbol)
-            if type(symbol) is Node and symbol.graph is self:
-                return read_whole_result(symbol.key)
-            # A Graph describes work independent of any run, so it takes Nodes and never Futures.
-            if not foreign and hasattr(symbol.source if isinstance(symbol, _Selection) else symbol, "_executor"):
-                raise TypeError("a Graph cannot hold a Future; use Executor.submit() for tasks built from Futures")
-            ref = symbol._as_ref()
-            if isinstance(ref, Hoisted):
-                hoisted.setdefault(ref.name, None)
+            kind = type(symbol)
+            if kind is Task:
+                if symbol._graph is not self:
+                    raise ValueError("a task reads a Task of another Graph")
+                read_result(symbol, ())
+                entry = shared_refs.get(symbol.key)
+                if entry is None:
+                    entry = shared_refs[symbol.key] = ((None, symbol.key), _Ref(None, symbol.key))
+                return entry[1]
+            if kind is Hoisted:
+                hoisted.setdefault(symbol.name, None)
+                return symbol
+            if kind is File:
+                reads.setdefault(symbol, symbol)
+                return symbol
+            if kind is TaskFile:
+                parent = symbol.task
+                if parent._graph is not self:
+                    raise ValueError("a task reads a file of a Task of another Graph")
+                if parent._state != _NEW and (parent._record is None or symbol.name not in parent._record.outputs):
+                    raise ValueError(f"the file {symbol.name!r} of {parent!r} was asked for after the task ran; ask for "
+                                     f"its files before it runs, as when it is added")
+                parents.setdefault(parent, None)
+                ref = _FileRef(None, parent.key, symbol.name)
+                reads.setdefault((parent.key, symbol.name), ref)
                 return ref
-            if isinstance(ref, File):
-                reads.setdefault(ref, ref)
+            if kind is _FileRef:
+                # A reference that an adaptor built, to a task of this Graph.
+                parent = parent_of(symbol.key)
+                parent.file(symbol.path)
+                parents.setdefault(parent, None)
+                ref = _FileRef(None, parent.key, symbol.path)
+                reads.setdefault((parent.key, symbol.path), ref)
                 return ref
-            graph_id = None if ref.graph_id in (None, self._id) else ref.graph_id
-            if graph_id is not None and not foreign:
-                raise ValueError("a task reads a Node of another Graph")
-            if isinstance(ref, _FileRef):
-                parents.setdefault((graph_id, ref.key), None)
-                ref = _FileRef(graph_id, ref.key, ref.path)
-                reads.setdefault((graph_id, ref.key, ref.path), ref)
-                return ref
-            if graph_id is None and not ref.steps:
-                return read_whole_result(ref.key)
-            read_result((graph_id, ref.key), ref.steps)
-            return _Ref(graph_id, ref.key, ref.steps)
+            if isinstance(symbol, _Selection) or kind is _Ref:
+                source = symbol._as_ref() if isinstance(symbol, _Selection) else symbol
+                if isinstance(symbol, _Selection) and isinstance(symbol.source, Task) and symbol.source._graph is not self:
+                    raise ValueError("a task reads a Task of another Graph")
+                parent = parent_of(source.key)
+                read_result(parent, source.steps)
+                if not source.steps:
+                    entry = shared_refs.get(parent.key)
+                    if entry is None:
+                        entry = shared_refs[parent.key] = ((None, parent.key), _Ref(None, parent.key))
+                    return entry[1]
+                return _Ref(None, parent.key, source.steps)
+            raise TypeError(f"{symbol!r} cannot be a task argument")
 
         # Replacing all arguments at once keeps an object passed as several arguments one object.
         originals = (*args, *kwargs.values())
         args, kwargs = replace_symbols((tuple(args), dict(kwargs)), replace, self._plain)
-        self._tasks[key] = (func, args, kwargs)
+        task._args = args
+        task._kwargs = kwargs if kwargs else _NO_KWARGS
         # An argument that replacement kept as it is holds no symbol, so later tasks that pass it skip the scan.
         for original, stored in zip(originals, (*args, *kwargs.values())):
             if stored is original and original is not None and not isinstance(original, _LEAF_TYPES):
                 self._plain.setdefault(id(original), [original, 0])[1] += 1
         if parents:
-            self._parents[key] = tuple(parents)
+            task._parents = tuple(parents)
         if results:
-            self._results[key] = tuple(results)
+            task._results = tuple(results)
         if reads:
-            self._reads[key] = tuple(reads.values())
+            task._reads = tuple(reads.values())
         if hoisted:
-            self._hoisted[key] = tuple(hoisted)
-        selections = {parent: (selection_key(steps), steps) for parent, steps in places.items()
+            task._hoisted = tuple(hoisted)
+        selections = {(None, parent.key): (selection_key(steps), steps) for parent, steps in places.items()
                       if steps and parent not in repeated}
         if selections:
-            self._selections[key] = selections
-        for graph_id, parent in parents:
-            if graph_id is None:
-                self._children[parent].add(key)
+            task._selections = selections
 
-    def _drop_arguments(self, key):
-        """Keep only the function of a call that an Executor submitted to Workers, whose manifest holds its arguments,
-        so the call does not hold them for as long as its Future lives. Arguments that later calls may pass again
-        without a new scan (_plain) stay. Only an Executor's own Graph does this: a user Graph may be run again."""
-        func, args, kwargs = self._tasks[key]
-        plain = self._plain
-        for value in (*args, *kwargs.values()):
-            entry = plain.get(id(value))
-            if entry is not None and entry[0] is value:
-                return
-        # Calls submitted in bulk pass one function, so a call shares the record of the call before it when it can,
-        # and millions of calls that their Futures hold cost the garbage collector no record each.
-        previous = self._tasks.get(key - 1) if type(key) is int else None
-        if previous is not None and previous[0] is func and not previous[1] and previous[2] is _NO_KWARGS:
-            self._tasks[key] = previous
-        else:
-            self._tasks[key] = (func, (), _NO_KWARGS)
+    def _restore(self, value):
+        """Return arguments with their references replaced by the Tasks, selections, and files they stand for."""
+        tasks = self._tasks
 
-    def _forget_plain(self, args, kwargs):
-        for value in (*args, *kwargs.values()):
-            entry = self._plain.get(id(value))
-            if entry is not None and entry[0] is value:
-                entry[1] -= 1
-                if not entry[1]:
-                    del self._plain[id(value)]
+        def restore(ref):
+            if type(ref) is _Ref:
+                task = tasks[ref.key]
+                return _Selection(task, ref.steps) if ref.steps else task
+            if type(ref) is _FileRef:
+                return tasks[ref.key].file(ref.path)
+            return ref
 
-    def _remove(self, key):
-        """Forget a task that nothing can ask for again, with what it recorded. Only an Executor's own Graph does this,
-        for calls whose Futures are gone."""
-        _, args, kwargs = self._tasks.pop(key)
-        # A call whose Future the Executor held keeps no arguments (_drop_arguments()), and most calls read nothing,
-        # so the tables below are usually empty, and the call of a Future that the program drops looks up none of them.
-        if args or kwargs:
-            self._forget_plain(args, kwargs)
-        if self._parents:
-            for graph_id, parent in self._parents.pop(key, ()):
-                if graph_id is None and parent in self._children:
-                    self._children[parent].discard(key)
-                    if not self._children[parent]:
-                        del self._children[parent]
-        for table in (self._results, self._reads, self._children, self._outputs, self._hoisted, self._selections,
-                      self._shared_refs):
-            if table:
-                table.pop(key, None)
+        return replace_symbols(value, restore)
 
-    def _add_output(self, key, path):
-        if key not in self._tasks:
-            raise KeyError(f"no task with key {key!r}")
-        normalized = _sandbox_path(path, "an output")
-        outputs = self._outputs[key]
-        if normalized not in outputs:
-            outputs[normalized] = NodeFile(Node(self, key), normalized)
-        return outputs[normalized]
+    # Rules.
+
+    def _has_rules(self, task):
+        return task._rules is not None or self._rule_index.get(task._func) is not None
+
+    def _rules_of(self, task):
+        """Return the rules that select a task, each once, in the order they were registered."""
+        by_func = self._rule_index.get(task._func) or ()
+        if task._rules is None:
+            return list(by_func)
+        if not by_func:
+            return list(task._rules)
+        return sorted({id(rule): rule for rule in (*by_func, *task._rules)}.values(), key=_INDEX_OF_RULE)
+
+    # Results.
+
+    def _completed_record(self, task):
+        if task._state == _FAILED:
+            raise task.error
+        if task._state != _COMPLETED:
+            state = "was cancelled" if task._state == _CANCELLED else "did not complete"
+            raise RuntimeError(f"{task!r} {state}, so it has no result")
+        runner = self._runner
+        if runner is None or runner.closed:
+            raise RuntimeError(f"the runner of the Graph of {task!r} was closed, so its result is gone")
+        return runner, task._record
+
+    def _result(self, task):
+        runner, record = self._completed_record(task)
+        try:
+            return runner.result(record)
+        except TaskError as error:
+            error.task = error.source = task
+            raise
+
+    def _file(self, file, what):
+        task = file.task
+        if task._state == _COMPLETED and file.name not in task._record.outputs:
+            raise ValueError(f"the file {file.name!r} of {task!r} was asked for after the task ran; ask for its files "
+                             f"before it runs, as when it is added")
+        runner, record = self._completed_record(task)
+        try:
+            if what == "path":
+                return runner.file_path(record, file.name)
+            return runner.file_bytes(record, file.name, CONTENT_LIMIT)
+        except TaskError as error:
+            error.task = error.source = task
+            raise
+
+
+def _INDEX(task):
+    return task._index
+
+
+def _INDEX_OF_RULE(rule):
+    return rule.index
