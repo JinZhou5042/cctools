@@ -5,8 +5,9 @@
 """Build task graphs and run them on TaskVine.
 
 A Graph holds tasks, Python calls or shell commands, and rules that add tasks as others complete. An Executor is where
-tasks run: run() executes a Graph and returns the results of the tasks that no task reads, and submit() starts one
-task at once and returns its Task, whose result() waits for it:
+tasks run: run() executes a Graph and returns the results of its sinks, the tasks that no task reads, and submit()
+starts one task at once and returns its Task, whose result() waits for it. task.result() returns the result of any
+other task, and results are read before the Executor closes:
 
     import ndcctools.taskvine.vine_graph as vg
 
@@ -27,6 +28,11 @@ task at once and returns its Task, whose result() waits for it:
 from .graph import Command, File, Graph, Shared, Task, TaskError, TaskFile
 
 __all__ = ["Graph", "Task", "TaskFile", "File", "Command", "Shared", "Executor", "TaskError"]
+
+
+def __dir__():
+    # Executor is loaded on first use, so it is listed here before that.
+    return sorted(set(globals()) | set(__all__))
 
 
 def __getattr__(name):

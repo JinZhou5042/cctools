@@ -12,6 +12,7 @@ import copy
 import dataclasses
 import itertools
 import os
+import shutil
 import string
 import threading
 import weakref
@@ -98,6 +99,29 @@ class _Attribute:
     """A selection step that reads an attribute, as opposed to an item."""
 
     name: str
+
+
+class _NoSuchItem(LookupError):
+    """An item selection, task[key], from a result that has no such item: the result has no items at all, and no
+    attribute of that name either, which an item selects from an object without items. The task that reads the
+    selection raises it, and the Executor names the two tasks in the message of its TaskError. task is the (graph id,
+    key) of the task whose result was selected from, step the text of the key, kind the type of the value, and error
+    the class of what the value raised for the key, such as KeyError, or None for a value without items."""
+
+    def __init__(self, step, kind, error=None):
+        super().__init__(step, kind, error)
+        self.task = None
+        self.step = step
+        self.kind = kind
+        self.error = error
+
+    def __str__(self):
+        return f"[{self.step}] selects from {_a(self.kind)}, which has no such item"
+
+
+def _a(noun):
+    """Return a noun with its indefinite article."""
+    return f"{'an' if noun[:1].lower() in 'aeiou' else 'a'} {noun}"
 
 
 class _Selectable(_Symbol):
@@ -450,6 +474,9 @@ _COMPLETED = 2
 _FAILED = 3
 _CANCELLED = 4
 
+# The value of a Task whose result was not returned yet.
+_UNREAD = object()
+
 # Bytes of standard output that a command task keeps as its result.
 COMMAND_RESULT_LIMIT = 1 << 20
 # Bytes of a file that TaskFile.content reads at most.
@@ -462,7 +489,8 @@ class TaskError(RuntimeError):
 
     reason says why the source failed:
 
-    - "function": its function raised an exception, or its command exited with an error status
+    - "function": its function raised an exception
+    - "command": its command exited with an error status, or did not write a file it declared
     - "signal": its function was killed by a signal
     - "workers": Workers kept disconnecting while they ran it, as when it exceeds their memory or crashes them
     - "input": a file it reads is missing at the Manager
@@ -483,6 +511,19 @@ class TaskError(RuntimeError):
         self.exit_code = exit_code
 
 
+def _sandbox_name(name):
+    """Return the normalized form of the name of a file that a task writes, a relative path in its sandbox."""
+    name = os.fspath(name)
+    if not isinstance(name, str):
+        raise TypeError("a file name must be a string or path-like object")
+    if "\0" in name:
+        raise ValueError("a file name contains a null byte")
+    normalized = os.path.normpath(name)
+    if not name or normalized in ("", ".") or os.path.isabs(name) or normalized == ".." or normalized.startswith("../"):
+        raise ValueError("a file name must be a non-empty relative path inside the task sandbox")
+    return normalized
+
+
 class Command:
     """A shell command line that tasks run, as a function is for Python tasks: g.add(command, **values) or
     executor.submit(command, **values) makes a task that runs it in its sandbox, and a Command selects its tasks in
@@ -495,17 +536,17 @@ class Command:
     the end of its standard error in its TaskError. cores is the number of cores it uses on a Worker, where a Python
     task uses one.
 
-    Output files. A file that the command writes in its sandbox is kept only when it was declared: ask for it with
-    task.file(name) before the task starts, where name is the relative path the command writes, the same text its
-    placeholder gets. A declared file is a required output, so a command that does not write it fails. Pass the
-    TaskFile to other tasks, or read it once the task completed with its path, content, or text, whether or not a task
-    reads it. A task of a Graph starts when Executor.run() runs the Graph, so its files are declared after Graph.add().
-    A task that Executor.submit() returns has started already and has no files: put a command whose files matter in a
-    Graph."""
+    Output files. A file that the command writes in its sandbox is kept only when it was declared. outputs lists the
+    files that every task of the command writes, as relative paths in the sandbox, and declares them for each task,
+    whether Graph.add() or Executor.submit() makes it. task.file(name) then names such a file: pass it to other tasks,
+    or read it once the task completed with its path, content, text, or save(), whether or not a task reads it. A
+    declared file is a required output, so a command that does not write it fails. A file whose name differs from task
+    to task is declared by asking for it with task.file(name) before the task starts, which only a task of a Graph
+    allows, since a submitted task has started already."""
 
-    __slots__ = ("_template", "_cores", "_fields", "__weakref__")
+    __slots__ = ("_template", "_cores", "_fields", "_outputs", "__weakref__")
 
-    def __init__(self, template, cores=1):
+    def __init__(self, template, cores=1, outputs=()):
         if not isinstance(template, str) or not template.strip():
             raise TypeError("a Command takes a command line as a non-empty string")
         if "\0" in template:
@@ -523,9 +564,13 @@ class Command:
             if not field.isidentifier() or spec or conversion:
                 raise ValueError(f"a placeholder of a command line is a name in braces such as {{name}}, not {{{field}}}")
             fields[field] = None
+        if isinstance(outputs, (str, bytes, os.PathLike)):
+            raise TypeError("outputs takes a list of file names, such as outputs=[\"out.txt\"]")
         self._template = template
         self._cores = cores
         self._fields = tuple(fields)
+        # Normalized, each once, in the order given.
+        self._outputs = tuple(dict.fromkeys(_sandbox_name(name) for name in outputs))
 
     @property
     def template(self):
@@ -535,20 +580,30 @@ class Command:
     def cores(self):
         return self._cores
 
+    @property
+    def outputs(self):
+        """The files that every task of the command writes, as relative paths in the sandbox."""
+        return self._outputs
+
     def __repr__(self):
-        return f"Command({self._template!r}, cores={self._cores})"
+        outputs = f", outputs={list(self._outputs)!r}" if self._outputs else ""
+        return f"Command({self._template!r}, cores={self._cores}{outputs})"
 
 
 class TaskFile(_Symbol):
     """A file that a task writes in its sandbox, which other tasks read when it is passed to them. Asking for a file
-    of a task before the task starts declares it, and the task fails when it does not write it. Once the task completed,
-    path, content, and text read the file, whether or not a task reads it."""
+    of a task before the task starts declares it, as Command(outputs=...) does for every task of a command, and the
+    task fails when it does not write it. Once the task completed, path, content, text, and save() read the file,
+    whether or not a task reads it. They read through the open Executor, and a path or content that was returned once
+    stays readable after it closed."""
 
-    __slots__ = ("task", "name")
+    __slots__ = ("task", "name", "_path", "_content")
 
     def __init__(self, task, name):
         self.task = task
         self.name = name
+        self._path = None  # the local path that path returned
+        self._content = None  # the bytes that content returned
 
     def _as_ref(self):
         return _FileRef(None, self.task.key, self.name)
@@ -563,7 +618,10 @@ class TaskFile(_Symbol):
     def content(self):
         """The bytes of the file, fetched when asked for. A file above 16 MiB raises ValueError: pass it to a task, or
         read TaskFile.path."""
-        return self.task._graph._bound(self.task)._file(self, "content")
+        content = self._content
+        if content is None:
+            content = self._content = self.task._graph._bound(self.task)._file(self, "content")
+        return content
 
     @property
     def text(self):
@@ -573,8 +631,34 @@ class TaskFile(_Symbol):
     @property
     def path(self):
         """A local path of the file, fetched to the output directory of the Executor when asked for. It stays there
-        after the Executor closed."""
-        return self.task._graph._bound(self.task)._file(self, "path")
+        after the Executor closed. save() puts the file at a path of the caller's choice."""
+        path = self._path
+        # A with block that raised removed the paths it had returned.
+        if path is None or not os.path.lexists(path):
+            path = self._path = self.task._graph._bound(self.task)._file(self, "path")
+        return path
+
+    def save(self, path):
+        """Put the file at path, a local path of the caller's choice, and return it as an absolute path. Directories
+        on the way are made, and a file already there is replaced. The file is linked where the file system allows
+        it and copied otherwise, so write a changed version to another path instead of changing it in place while the
+        Executor is open. After the Executor closed, a file whose path or content was read before can still be
+        saved."""
+        path = os.fspath(path)
+        if not isinstance(path, str) or not path:
+            raise TypeError("save() takes a local path as a non-empty string or path-like object")
+        destination = _absolute(path)
+        executor = self.task._graph._executor
+        if executor is None or executor._runner.closed:
+            # What was read before the Executor closed is what is left of the file.
+            if self._path is not None and os.path.lexists(self._path):
+                _place(self._path, destination)
+                return destination
+            if self._content is not None:
+                _place(self._content, destination)
+                return destination
+        self.task._graph._bound(self.task)._file(self, "save", destination)
+        return destination
 
     def __eq__(self, other):
         return isinstance(other, TaskFile) and other.task is self.task and other.name == self.name
@@ -584,6 +668,41 @@ class TaskFile(_Symbol):
 
     def __repr__(self):
         return f"{self.task!r}.file({self.name!r})"
+
+
+def _link_or_copy(source, destination):
+    """Hard-link source to destination, or copy it where links fail, such as across file systems."""
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copyfile(source, destination)
+
+
+def _place(source, destination):
+    """Put a file that a task wrote at destination, replacing a file there: source is its bytes, or a local path, which
+    is linked where the file system allows it and copied otherwise. A directory is copied to a destination that does
+    not exist yet."""
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    if type(source) is not bytes and os.path.isdir(source):
+        shutil.copytree(source, destination, symlinks=True, copy_function=_link_or_copy)
+        return
+    # The file appears at destination whole, under a name of this thread first.
+    temporary = f"{destination}.vine-graph-{os.getpid()}-{threading.get_ident()}"
+    try:
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
+        if type(source) is bytes:
+            with open(temporary, "wb") as stream:
+                stream.write(source)
+        else:
+            _link_or_copy(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        # A rename onto another link to the same file leaves the name, and so does a failure.
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def _readers_of(task):
@@ -622,11 +741,12 @@ class Task(_Selectable):
     name a file it writes with task.file(name).
 
     result() returns its result, done(), failed(), and cancelled() tell how far it is, and cancel() cancels it. A Task
-    keeps the Tasks it reads, which args and kwargs return."""
+    keeps the Tasks it reads, which args and kwargs return, and the result that result() returned, which stays readable
+    after the Executor closed."""
 
     __slots__ = ("_graph", "key", "_index", "_func", "_args", "_kwargs", "_parents", "_results", "_reads", "_shared",
                  "_selections", "_outputs", "_readers", "_rules", "_state", "_error", "_record", "_rule_pending",
-                 "__weakref__")
+                 "_value", "__weakref__")
 
     def __init__(self, graph, key, func):
         self._graph = graph
@@ -655,6 +775,7 @@ class Task(_Selectable):
         self._error = None
         self._record = None  # the Executor's record of its latest submission
         self._rule_pending = False  # its rules are due once it completes
+        self._value = _UNREAD  # the result, once the Executor returned it
 
     def __del__(self):
         # A submitted task that nothing refers to anymore can be read by nobody, so its Executor lets it go. This only
@@ -696,8 +817,15 @@ class Task(_Selectable):
 
         A task of a Graph has a result once an Executor ran the Graph. Before that, and while it did not finish, as in
         a rule that asks for a task that is still running, RuntimeError is raised, because only Executor.run() waits
-        for the tasks of a Graph. A result that the Executor released meanwhile is computed again."""
-        return self._graph._bound(self)._result(self, timeout)
+        for the tasks of a Graph. A result that the Executor released meanwhile is computed again.
+
+        Results are read through the open Executor. The Task keeps a result that was returned once, by result() or by
+        Executor.run(), and returns the same object again, also after the Executor closed. A result that was never
+        read before the Executor closed is gone, and RuntimeError says so."""
+        value = self._value
+        if value is _UNREAD:
+            value = self._graph._bound(self)._result(self, timeout)
+        return value
 
     def done(self):
         """Return whether the task finished: it completed, failed, or was cancelled."""
@@ -719,22 +847,16 @@ class Task(_Selectable):
 
     def cancel(self):
         """Cancel the task unless it finished, and the tasks that read it: those not started never run, and running
-        ones are stopped. A completed task stays completed, and a cancelled task stays cancelled. A task of a Graph is
-        cancelled by a rule, during a run, and a submitted task at any time."""
-        self._graph._cancel(self)
+        ones are stopped. Return True when this call cancelled the task, and False when it had finished: a completed
+        task stays completed, a failed task failed, and a cancelled task cancelled. A task of a Graph is cancelled by a
+        rule, during a run, and a submitted task at any time."""
+        return self._graph._cancel(self)
 
     def file(self, name):
         """Return the file this task writes at name, a relative path in its sandbox. Asking for the same name again
-        returns the same file. A file is declared by asking for it before the task starts, so a submitted task, which
-        started already, has none."""
-        name = os.fspath(name)
-        if not isinstance(name, str):
-            raise TypeError("a file name must be a string or path-like object")
-        if "\0" in name:
-            raise ValueError("a file name contains a null byte")
-        normalized = os.path.normpath(name)
-        if not name or normalized in ("", ".") or os.path.isabs(name) or normalized == ".." or normalized.startswith("../"):
-            raise ValueError("a file name must be a non-empty relative path inside the task sandbox")
+        returns the same file. A file is declared by asking for it before the task starts, or by the outputs of its
+        Command, so a submitted task, which started already, has the files of its Command and no others."""
+        normalized = _sandbox_name(name)
         outputs = self._outputs
         if outputs is None:
             outputs = self._outputs = {}
@@ -748,6 +870,13 @@ class Task(_Selectable):
 
     def __repr__(self):
         return _label(self)
+
+
+def _undeclared(task, name):
+    """Return the message for a file of a task that was not declared before the task started."""
+    return (f"the file {name!r} of {task!r} was asked for after the task started, so it was not kept; ask for the files "
+            f"of a task before it starts, as when it is added to its Graph, or list the files that a command writes in "
+            f"Command(outputs=...)")
 
 
 def _label(task):
@@ -971,6 +1100,9 @@ class Graph:
             raise ValueError(f"a task with key {key!r} already exists")
         task = Task(self, key, func)
         self._record_arguments(task, args, kwargs)
+        if command and func._outputs:
+            # The files of a Command are declared for each of its tasks before the task can start.
+            task._outputs = {name: TaskFile(task, name) for name in func._outputs}
         self._insert(task)
         return task
 
@@ -1081,8 +1213,7 @@ class Graph:
                 parent = symbol.task
                 self._check_parent(parent, "a file of a Task")
                 if parent._state != _NEW and (parent._record is None or symbol.name not in parent._record.outputs):
-                    raise ValueError(f"the file {symbol.name!r} of {parent!r} was asked for after the task started; "
-                                     f"ask for its files before it starts, as when it is added to its Graph")
+                    raise ValueError(_undeclared(parent, symbol.name))
                 return read_file(parent, symbol.name)
             if kind is _FileRef:
                 # A reference that an adaptor built, to a task of this Graph.
@@ -1155,7 +1286,9 @@ class Graph:
 
     def _cancel(self, task):
         run = self._check_change("cancel", rule_only=True)
+        unfinished = task._state < _COMPLETED
         run.cancel((task,))
+        return unfinished
 
 
 class _Calls(Graph):
@@ -1179,7 +1312,8 @@ class _Calls(Graph):
     def _bound(self, task):
         executor = self._owner()
         if executor is None:
-            raise RuntimeError(f"the Executor that started {task!r} is gone")
+            raise RuntimeError(f"The Executor that ran {task!r} is gone, and its results with it. Read results before "
+                               f"close() or the end of the with block.")
         return executor
 
     def _insert(self, task):
@@ -1217,7 +1351,7 @@ class _Calls(Graph):
             executor._poll()
 
     def _cancel(self, task):
-        self._bound(task)._cancel_call(task)
+        return self._bound(task)._cancel_call(task)
 
 
 def _INDEX(task):

@@ -39,6 +39,7 @@ import hashlib
 import importlib
 import os
 import shutil
+import socket
 import sys
 import tempfile
 import time
@@ -49,7 +50,7 @@ import cloudpickle
 
 from .. import utils as library_utils
 
-from .graph import File, Shared, _Attribute, _Ref, _Symbol, replace_symbols
+from .graph import File, Shared, _Attribute, _NoSuchItem, _Ref, _Symbol, replace_symbols
 
 # Sandbox path of the manifest that describes the task.
 MANIFEST = "vine-graph-node.pkl"
@@ -95,10 +96,42 @@ def runtime_identity():
     return {"python": "%d.%d" % sys.version_info[:2], "cloudpickle": cloudpickle.__version__, "vine_graph library": code}
 
 
+# A library process that could not prepare itself still starts, and each task it is given fails with a report that
+# starts with this mark, followed by the name of the host and the traceback of the failure. The Manager sees the output
+# of a task but not that of a library, so this is how the reason reaches the user, and the Executor stops the run for
+# it (executor._Workers._publish_finished()).
+START_FAILURE_MARK = "vine-graph-library-could-not-start "
+# The report of the failure that kept this library process from preparing itself, or None.
+_start_failure = None
+
+
 def prepare(module_names, shared_path, edata_path=None, manager_identity=None):
-    """Prepare this library process when it starts: check that this Worker can run the Manager's tasks, import the
-    modules, then load the shared objects and the cached edata, which may need them. Freezing what was loaded keeps
-    the garbage collector from touching that memory, so forked tasks share it instead of copying it."""
+    """Prepare this library process when it starts (_prepare()). A failure, such as a module that this Worker cannot
+    import, is kept for the tasks to report instead of ending the process, because TaskVine would start the library
+    again and again without telling the Manager why it failed."""
+    global _start_failure
+    try:
+        _prepare(module_names, shared_path, edata_path, manager_identity)
+    except Exception as error:
+        _start_failure = f"{START_FAILURE_MARK}{socket.gethostname()}\n{format_user_traceback(error, __file__)}"
+        # The library's own output keeps the failure too, for a Manager that watches library logs.
+        sys.stdout.write(_start_failure)
+        sys.stdout.flush()
+
+
+def start_failure(message):
+    """Return (host, traceback) of the library start-up failure that the output of a failed task reports, or None."""
+    start = message.find(START_FAILURE_MARK)
+    if start < 0:
+        return None
+    host, _, report = message[start + len(START_FAILURE_MARK):].partition("\n")
+    return host, report.rstrip()
+
+
+def _prepare(module_names, shared_path, edata_path, manager_identity):
+    """Check that this Worker can run the Manager's tasks, import the modules, then load the shared objects and the
+    cached edata, which may need them. Freezing what was loaded keeps the garbage collector from touching that memory,
+    so forked tasks share it instead of copying it."""
     if manager_identity is not None:
         identity = runtime_identity()
         mismatched = [f"{key} {identity.get(key)} on this Worker but {value} on the Manager"
@@ -357,14 +390,20 @@ def file_identity(ref):
 def _select(value, steps):
     """Apply selection steps to a value: an attribute step reads the attribute, and an item step reads value[step],
     or, for an object that does not support items, such as a plain class instance or a dataclass, the attribute named
-    step."""
+    step. A value that has no such item, or neither items nor such an attribute, raises _NoSuchItem."""
     for step in steps:
         if isinstance(step, _Attribute):
             value = getattr(value, step.name)
         elif hasattr(type(value), "__getitem__"):
-            value = value[step]
+            try:
+                value = value[step]
+            except (LookupError, TypeError) as error:
+                raise _NoSuchItem(repr(step), type(value).__name__, type(error)) from None
         else:
-            value = getattr(value, step)
+            try:
+                value = getattr(value, step)
+            except (AttributeError, TypeError):
+                raise _NoSuchItem(repr(step), type(value).__name__) from None
     return value
 
 
@@ -390,11 +429,16 @@ def run_task(func, args, kwargs, load_task_result, file_path, load_shared_object
             return shared[ref.name]
         if isinstance(ref, _Ref):
             task = (ref.graph_id, ref.key)
-            if task in read_once:
-                return load_selected(task, ref.steps)
-            if task not in results:
-                results[task] = load_task_result(task)
-            return _select(results[task], ref.steps)
+            try:
+                if task in read_once:
+                    return load_selected(task, ref.steps)
+                if task not in results:
+                    results[task] = load_task_result(task)
+                return _select(results[task], ref.steps)
+            except _NoSuchItem as error:
+                # The Executor names the task whose result has no such item.
+                error.task = task
+                raise
         return file_path(file_identity(ref))
 
     # Replacing all arguments at once keeps an object passed as several arguments one object. An object that holds no
@@ -455,7 +499,12 @@ def load_failure(message):
 
 
 def run_node():
-    """Run the task described by the sandbox manifest and return its result for the library to write."""
+    """Run the task described by the sandbox manifest and return its result for the library to write. In a library
+    that could not prepare itself, report why instead."""
+    if _start_failure is not None:
+        sys.stdout.write(_start_failure)
+        sys.stdout.flush()
+        os._exit(1)
     try:
         return _run_node()
     except BaseException as error:
