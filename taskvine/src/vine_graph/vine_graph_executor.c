@@ -114,6 +114,7 @@ struct vine_graph_executor {
 
 	vine_graph_priority_mode_t priority_mode; // order of ready nodes
 	int max_retries;			  // failed attempts allowed per node before it fails
+	int release_outputs;			  // release-outputs: 1 lets the release rule prune outputs, 0 keeps them all
 	int show_progress_bar;			  // draw a progress bar while the run advances
 	double progress_bar_update_interval_sec;
 
@@ -229,6 +230,7 @@ struct vine_graph_executor *vine_graph_executor_create(struct vine_manager *mana
 	e->checkpoint_lost = list_create();
 	e->priority_mode = VINE_GRAPH_PRIORITY_LARGEST_INPUT_FIRST;
 	e->max_retries = 5;
+	e->release_outputs = 1;
 	e->show_progress_bar = 1;
 	e->progress_bar_update_interval_sec = 0.1;
 	e->time_first_task_dispatched = UINT64_MAX;
@@ -418,6 +420,13 @@ static const char *vine_graph_executor_apply_setting(struct vine_graph_executor 
 		return NULL;
 	} else if (strcmp(name, "max-retries") == 0) {
 		return vine_graph_parse_count(value, &e->max_retries);
+	} else if (strcmp(name, "release-outputs") == 0) {
+		int release = 0;
+		if (vine_graph_parse_count(value, &release) || release > 1) {
+			return "use 1 to release outputs once their readers are durable, or 0 to keep every output";
+		}
+		e->release_outputs = release;
+		return NULL;
 	} else if (strcmp(name, "progress-bar") == 0) {
 		return vine_graph_parse_count(value, &e->show_progress_bar);
 	} else if (strcmp(name, "progress-bar-update-interval-sec") == 0) {
@@ -541,6 +550,19 @@ int vine_graph_executor_add_inputs(struct vine_graph_executor *e, uint64_t node_
 	return 0;
 }
 
+int vine_graph_executor_set_command(struct vine_graph_executor *e, uint64_t node_id, const char *command, int cores)
+{
+	struct vine_graph_node *node = e ? vine_graph_get_node(e->graph, node_id) : NULL;
+	if (!node || node->submitted || !command || cores < 1) {
+		return -1;
+	}
+	if (vine_graph_set_command(e->graph, node_id, command) != 0) {
+		return -1;
+	}
+	node->cores = cores;
+	return 0;
+}
+
 int vine_graph_executor_add_input_buffer(struct vine_graph_executor *e, uint64_t node_id, const char *buffer, size_t size, const char *task_path)
 {
 	struct vine_graph_node *node = e && buffer && task_path ? vine_graph_get_node(e->graph, node_id) : NULL;
@@ -635,8 +657,8 @@ static uint64_t vine_graph_executor_next_report(struct list *reports)
 
 static void vine_graph_executor_checkpoint_complete(void *argument, struct vine_file *file, int success);
 
-/* Submit a new task for a node. The task runs the node function with the shared arguments and every mount. A node
- * that reads an output of a failed parent that exists nowhere fails instead, because its task would wait forever.
+/* Submit a new task for a node. The task runs the node function in the library, or the node's command as a standard
+ * task with the cores it requests, with every mount. A node that reads an output of a failed parent that exists nowhere fails instead, because its task would wait forever.
  * Return zero, or -1 after failing the node. */
 static int vine_graph_executor_submit_task(struct vine_graph_executor *e, struct vine_graph_node *node)
 {
@@ -645,12 +667,17 @@ static int vine_graph_executor_submit_task(struct vine_graph_executor *e, struct
 		vine_graph_executor_fail_node(e, node, failed_parent->failure_source_id, VINE_GRAPH_FAILURE_NONE, NULL);
 		return -1;
 	}
-	struct vine_task *task = vine_task_create(e->function_name);
+	const char *command = vine_graph_get_command(e->graph, node);
+	struct vine_task *task = vine_task_create(command ? command : e->function_name);
 	if (!task) {
 		vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_SUBMIT, xxstrdup("could not create its task"));
 		return -1;
 	}
-	vine_task_set_library_required(task, e->library_name);
+	if (command) {
+		vine_task_set_cores(task, node->cores);
+	} else {
+		vine_task_set_library_required(task, e->library_name);
+	}
 	/* The Manager moves a task whose worker is lost to another worker, so a task that makes its worker exit would
 	 * take every worker in turn. With retries set, it returns once more workers were lost under it than the node may
 	 * fail, counting only losses that no loss of other workers explains, so a mass loss of workers fails no node. */
@@ -1060,7 +1087,7 @@ static int vine_graph_executor_try_release(struct vine_graph_executor *e, struct
 	if (node->released || !node->completed) {
 		return 0;
 	}
-	if (node->pinned_outputs > 0 || node->kept) {
+	if (!e->release_outputs || node->pinned_outputs > 0 || node->kept) {
 		return 0;
 	}
 	if (!vine_graph_executor_children_durable(e, node)) {
@@ -1468,7 +1495,7 @@ static struct vine_file *vine_graph_executor_find_lost_input(struct vine_graph_n
 	return NULL;
 }
 
-/* Return non-zero when the node function ran and exited with an error, such as an exception. Its outputs are then
+/* Return non-zero when the node function or command ran and exited with an error, such as an exception. Its outputs are then
  * missing only because of that error, and its standard output may be longer than the Manager keeps. */
 static int vine_graph_task_function_failed(struct vine_task *task)
 {
@@ -1498,8 +1525,15 @@ static void vine_graph_executor_handle_failure(struct vine_graph_executor *e, st
 {
 	if (vine_graph_task_function_failed(task)) {
 		const char *output = vine_task_get_stdout(task);
-		/* A function call reports the status that waitpid() returned for its process. */
 		int status = vine_task_get_exit_code(task);
+		if (vine_graph_get_command(e->graph, node)) {
+			/* A command reports its exit status, and its standard output, which keeps only its standard error,
+			 * since the command line sends its standard output to its result file. */
+			node->exit_code = status;
+			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_FUNCTION, string_format("its command exited with status %d:\n%s", status, output ? output : ""));
+			return;
+		}
+		/* A function call reports the status that waitpid() returned for its process. */
 		if (WIFSIGNALED(status)) {
 			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_SIGNAL, string_format("its function was killed by signal %d (%s):\n%s", WTERMSIG(status), strsignal(WTERMSIG(status)), output ? output : ""));
 		} else {
@@ -1818,9 +1852,7 @@ static void vine_graph_executor_fetch_list(struct vine_graph_executor *e, struct
  * replica is received into the vault with priority over checkpoints and beyond the vault limit, and its receive
  * reports back. A completed node whose output exists nowhere is run again to restore it, unless a recovery task is
  * already recreating it, and the restoring task queues the fetch again. The work of a round depends on the free slots,
- * not on how many fetches are pending. Decided on 2026-10-22: with every output of 1,600 x 64 MiB pinned on the
- * cluster, the 400 results of 51 bytes that the caller waited for were fetched behind the large ones, up to 10 minutes
- * after their tasks completed. */
+ * not on how many fetches are pending. Small files come first so that they never wait behind large ones. */
 static void vine_graph_executor_process_fetches(struct vine_graph_executor *e)
 {
 	vine_graph_executor_fetch_list(e, e->fetch_small);
@@ -1989,6 +2021,7 @@ static void vine_graph_executor_compact_tables(struct vine_graph_executor *e)
 	itable_compact(e->graph->nodes);
 	itable_compact(e->graph->files);
 	itable_compact(e->graph->producers);
+	itable_compact(e->graph->commands);
 	itable_compact(e->task_id_to_node);
 	itable_compact(e->vault_paths);
 	set_compact(e->checkpoint_pending);
@@ -2182,6 +2215,13 @@ vine_graph_failure_t vine_graph_executor_get_node_failure(const struct vine_grap
 	struct vine_graph_node *node = e ? vine_graph_get_node(e->graph, node_id) : NULL;
 	struct vine_graph_node *source = node && node->failed ? vine_graph_get_node(e->graph, node->failure_source_id) : NULL;
 	return source ? source->failure : VINE_GRAPH_FAILURE_NONE;
+}
+
+int vine_graph_executor_get_node_exit_code(const struct vine_graph_executor *e, uint64_t node_id)
+{
+	struct vine_graph_node *node = e ? vine_graph_get_node(e->graph, node_id) : NULL;
+	struct vine_graph_node *source = node && node->failed ? vine_graph_get_node(e->graph, node->failure_source_id) : NULL;
+	return source && vine_graph_get_command(e->graph, source) && source->failure == VINE_GRAPH_FAILURE_FUNCTION ? source->exit_code : -1;
 }
 
 const char *vine_graph_executor_get_error(const struct vine_graph_executor *e)

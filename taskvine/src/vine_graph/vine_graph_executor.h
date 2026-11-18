@@ -28,9 +28,9 @@
  * failed node that still exist. The run as a whole fails only when the executor itself cannot continue, such as when
  * TaskVine removes the library after it keeps failing to start on workers.
  *
- * Runner contract. Every node runs as a call of one function in one TaskVine library that the frontend installs
- * before the run and removes after it. Node tasks carry no infile, so the library calls the function without
- * arguments. Everything a node needs, including a description of what to run, is a file the frontend mounts in the
+ * Runner contract. Every node except a command node (vine_graph_executor_set_command()) runs as a call of one
+ * function in one TaskVine library that the frontend installs before the run and removes after it. Node tasks carry no
+ * infile, so the library calls the function without arguments. Everything a node needs, including a description of what to run, is a file the frontend mounts in the
  * node's sandbox. A node succeeds when its function returns and every output file it declares exists. A function that
  * fails must exit its task process with a non-zero status. Its standard output then becomes the node's error message.
  * The executor never reads file contents, so their formats belong to the frontend and its runner.
@@ -102,6 +102,9 @@ void vine_graph_executor_delete(struct vine_graph_executor *e);
  * vine_graph_executor_check_setting explains.
  * task-priority-mode     Order of ready nodes: largest-input-first (default), depth-first, or fifo.
  * max-retries            Failed attempts allowed per node for infrastructure failures (default 5).
+ * release-outputs        1 (default) prunes a node's outputs once every reader is durable (the release rule), and 0
+ *                        keeps every output of the run, as for a frontend that may add readers of any node later.
+ *                        Unlike a pin, it does not anchor outputs off the checkpoint cut.
  * progress-bar           Draw a progress bar on standard output: 1 (default) or 0.
  * progress-bar-update-interval-sec  Seconds between progress bar updates (default 0.1).
  * checkpoint-cut         Anchoring of large outputs: auto (default) anchors every output while the vault keeps up,
@@ -156,6 +159,13 @@ int vine_graph_executor_add_inputs(struct vine_graph_executor *e, uint64_t node_
  * equal data. The node owns it: it has no file id, and the executor undeclares it when it removes the node, so the
  * frontend keeps no record of it. Return zero, or -1 for an unknown or submitted node or a failed declaration. */
 int vine_graph_executor_add_input_buffer(struct vine_graph_executor *e, uint64_t node_id, const char *buffer, size_t size, const char *task_path);
+
+/* Make a node not yet submitted run a shell command line instead of the library function: its task is a standard
+ * TaskVine task that runs command in its sandbox, with its mounts, and requests cores cores. The node succeeds when the
+ * command exits with status zero and every output it declares exists, and fails when it exits with another status,
+ * with its standard output as the error message. Return zero, or -1 for an unknown or submitted node, a NULL command,
+ * or fewer than one core. */
+int vine_graph_executor_set_command(struct vine_graph_executor *e, uint64_t node_id, const char *command, int cores);
 
 /* Submit a node whose files are mounted. It runs once every node whose output it reads has completed, and it fails at
  * once when it reads an output of a failed node that exists nowhere. Return zero, or -1 for an unknown or submitted
@@ -240,6 +250,10 @@ const char *vine_graph_executor_get_node_error(const struct vine_graph_executor 
 /* Return the kind of failure of the failure source of a failed node, or VINE_GRAPH_FAILURE_NONE when the node did not
  * fail. */
 vine_graph_failure_t vine_graph_executor_get_node_failure(const struct vine_graph_executor *e, uint64_t node_id);
+
+/* Return the exit status of the command whose failure made a command node, or a node that depends on it, fail, or -1
+ * when the failure source is not a command that exited with an error status. */
+int vine_graph_executor_get_node_exit_code(const struct vine_graph_executor *e, uint64_t node_id);
 
 /* Return why the run failed as a whole, or NULL. */
 const char *vine_graph_executor_get_error(const struct vine_graph_executor *e);

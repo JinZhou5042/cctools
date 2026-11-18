@@ -5,6 +5,7 @@
 #include "int_sizes.h"
 #include "vine_graph.h"
 #include "vine_graph_executor.h"
+#include "progress_bar.h"
 %}
 
 %include "stdint.i"
@@ -97,3 +98,6 @@
 }
 
 %include "vine_graph_executor.h"
+
+/* The dttools progress bar, which the frontend draws for a run of a graph in Workers and in local runs alike. */
+%include "progress_bar.h"

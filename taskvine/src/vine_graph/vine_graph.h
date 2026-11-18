@@ -32,9 +32,8 @@ struct vine_graph_mount {
 	char task_path[];	      // path inside the task sandbox
 };
 
-/* Pointers that a node keeps in the order they were added: its mounts, parents, or children. A dttools list cost a
- * header, a cursor, and 64 bytes for each entry, a large part of what a node held while the frontend kept it. Most
- * arrays hold one pointer, such as the output of a node or its manifest, which stays in the array itself, so such an
+/* Pointers that a node keeps in the order they were added: its mounts, parents, or children. Most arrays hold one
+ * pointer, such as the output of a node or its manifest, which stays in the array itself, so such an
  * array costs no allocation to fill or to free. The array must therefore stay where it is while it holds pointers. */
 struct vine_graph_array {
 	void **items; // the pointers: NULL while empty, &first while one fits there, else an owned allocation
@@ -48,6 +47,7 @@ struct vine_graph_node {
 	uint64_t node_id;	// dense id assigned by the graph, starting from one
 	struct vine_task *task; // latest attempt until the Manager returns it, then NULL
 	int task_id;		// Manager id of the latest attempt, or zero before the first submission
+	int cores;		// cores the task of a command node requests, unused for a function call
 
 	struct vine_graph_array inputs;	  // owned mounts the task reads
 	struct vine_graph_array outputs;  // owned mounts the task writes
@@ -72,6 +72,7 @@ struct vine_graph_node {
 	int durable_children;	    // executor's release check: every child before this index was durable when checked
 	int exposed;		    // outputs the executor counts as exposed: completed, neither anchored nor released
 	int readers;		    // submitted children that have not finished, before which large checkpoints wait
+	int exit_code;		    // exit status of the command of a failed command node, set only on a failure source
 	uint64_t execution_time_us; // latest successful execution time on a Worker
 
 	uint64_t failure_source_id; // the node whose own failure made this one fail
@@ -89,6 +90,8 @@ struct vine_graph {
 	struct itable *files;	  // file id -> declared vine_file, borrowed until the executor undeclares it
 	uint64_t last_file_id;	  // id given to the latest recorded file
 	struct itable *producers; // address of an output's vine_file -> borrowed output mount, whose node is the producer
+	struct itable *commands;  // node id -> owned shell command line of a command node, kept apart from the nodes
+				  // because most nodes are function calls, for which a pointer in each would cost memory
 };
 
 /* Create an empty graph. Return NULL on allocation failure. */
@@ -117,6 +120,14 @@ int vine_graph_add_mount(struct vine_graph *g, uint64_t node_id, uint64_t file_i
  * The node owns the declaration, which the executor undeclares when it removes the node, so the file needs no id. The
  * mount takes a reference of its own. Return zero, or -1 for an unknown or submitted node. */
 int vine_graph_add_owned_input(struct vine_graph *g, uint64_t node_id, struct vine_file *file, const char *task_path);
+
+/* Make an unsubmitted node a command node, which runs a shell command line as a standard task instead of a function
+ * call. The graph keeps a copy of the command until it removes the node. Return zero, or -1 for an unknown or
+ * submitted node. */
+int vine_graph_set_command(struct vine_graph *g, uint64_t node_id, const char *command);
+
+/* Return the command line of a command node, or NULL for a function call. */
+const char *vine_graph_get_command(const struct vine_graph *g, const struct vine_graph_node *node);
 
 /* Return the node that writes a file, or NULL for a file no node writes. An output is found by the address of its
  * vine_file, the one that the graph records for it. */
