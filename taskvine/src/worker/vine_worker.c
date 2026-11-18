@@ -643,6 +643,15 @@ static void report_worker_ready(struct link *manager)
 }
 
 /*
+Return the number of library slots a function task occupies, which the manager sends as its function_slots line.
+*/
+
+static int function_slots_needed(struct vine_task *t)
+{
+	return MAX(1, t->function_slots_total);
+}
+
+/*
 Start executing the given process on the local host,
 accounting for the resources as necessary.
 Should maintain parallel structure to reap_process() above.
@@ -687,9 +696,9 @@ static int start_process(struct vine_process *p, struct link *manager)
 			sigchld_received_flag = 1;
 		}
 
-		/* If this process represents a function, update the number running. */
+		/* If this process represents a function, occupy its slots of the library. */
 		if (t->needs_library) {
-			p->library_process->functions_running++;
+			p->library_process->function_slots_inuse += function_slots_needed(t);
 		}
 	} else {
 		fatal("unable to start task_id %d!", p->task->task_id);
@@ -723,7 +732,7 @@ static void reap_process(struct vine_process *p, struct link *manager)
 	}
 
 	if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
-		p->library_process->functions_running--;
+		p->library_process->function_slots_inuse -= function_slots_needed(p->task);
 	}
 
 	itable_remove(procs_running, p->task->task_id);
@@ -1455,10 +1464,10 @@ static int task_resources_fit_eventually(struct vine_task *t)
 }
 
 /*
-Find a suitable library process that can provide a slot to run this library right NOW.
+Find a suitable library process that has enough free slots to run this function right NOW.
 */
 
-static struct vine_process *find_running_library_for_function(const char *library_name)
+static struct vine_process *find_running_library_for_function(const char *library_name, int slots)
 {
 	uint64_t task_id;
 	struct vine_process *p;
@@ -1467,7 +1476,7 @@ static struct vine_process *find_running_library_for_function(const char *librar
 	ITABLE_ITERATE(procs_running, iteration, task_id, p)
 	{
 		if (p->task->provides_library && !strcmp(p->task->provides_library, library_name)) {
-			if (p->library_ready && p->functions_running < p->task->function_slots_total) {
+			if (p->library_ready && p->function_slots_inuse + slots <= p->task->function_slots_total) {
 				return p;
 			}
 		}
@@ -1487,7 +1496,7 @@ static int process_ready_to_run_now(struct vine_process *p, struct vine_cache *c
 
 	if (p->task->needs_library) {
 		/* Here is where we attach a function to a specific library. */
-		p->library_process = find_running_library_for_function(p->task->needs_library);
+		p->library_process = find_running_library_for_function(p->task->needs_library, function_slots_needed(p->task));
 		if (!p->library_process)
 			return 0;
 	}

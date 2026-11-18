@@ -96,8 +96,8 @@ struct vine_task {
 	int exhausted_attempts;     /**< Number of times the task failed given exhausted resources. */
 	int forsaken_attempts;      /**< Number of times the task was submitted to a worker but failed to start execution. */
 	int workers_slow;           /**< Number of times this task has been terminated for running too long. */
-	int function_slots_total;   /**< If a library, the total number of function slots usable. */
-	int function_slots_inuse;   /**< If a library, the number of functions currently running. */
+	int function_slots_total;   /**< If a library, the total number of function slots usable. If a function call, the number of slots of its library it occupies while dispatched (see @ref vine_task_function_call_slots). */
+	int function_slots_inuse;   /**< If a library, the number of its slots occupied by running function calls. */
 		
 	/***** Results of task once it has reached completion. *****/
 
@@ -163,6 +163,9 @@ void vine_task_reset( struct vine_task *t );
 
 /* Soft-reset a not-yet-completed task so that it can be attempted on a different worker. */
 void vine_task_clean( struct vine_task *t );
+
+/* Return the number of library slots a function call occupies: its own core request, or one when it requests no cores. */
+int vine_task_function_call_slots(const struct vine_task *t);
 
 int  vine_task_set_result(struct vine_task *t, vine_result_t new_result);
 void vine_task_set_resources(struct vine_task *t, const struct rmsummary *rm);

@@ -1566,6 +1566,31 @@ static int fetch_outputs_from_worker(struct vine_manager *q, struct vine_worker_
 }
 
 /*
+Return true if a function call needs more slots than every instance of its library can have. That holds when the
+library's slots do not depend on the worker (direct mode, requested slots, or requested cores) and are fewer than the
+call's core request. Such a call could never run, so it returns as VINE_RESULT_MISSING_LIBRARY: no library that can
+serve it exists. A library whose slots follow the size of each worker is reported by
+vine_schedule_check_for_large_tasks() instead, since a larger worker may still connect.
+*/
+
+static int function_call_exceeds_library(struct vine_manager *q, struct vine_task *t)
+{
+	int slots = vine_task_function_call_slots(t);
+	if (slots <= 1) {
+		return 0;
+	}
+
+	struct vine_task *library = hash_table_lookup(q->library_templates, t->needs_library);
+	int library_slots = vine_manager_library_slots(library, NULL);
+	if (library_slots < 1 || slots <= library_slots) {
+		return 0;
+	}
+
+	notice(D_VINE, "function call %d needs %d slots, but every instance of library %s has %d slots", t->task_id, slots, t->needs_library, library_slots);
+	return 1;
+}
+
+/*
 Retrieve task that cannot run for unfixable policy reasons,
 such as exceeded the absolute end time, no library task available, etc.
 This is done in a separate iteration outside of scheduling
@@ -1584,6 +1609,8 @@ static int retrieve_ready_task(struct vine_manager *q, struct vine_task *t, doub
 		result = VINE_RESULT_MAX_END_TIME;
 	} else if (t->needs_library && !hash_table_lookup(q->library_templates, t->needs_library)) {
 		debug(D_VINE, "task %d does not match any submitted library named \"%s\"", t->task_id, t->needs_library);
+		result = VINE_RESULT_MISSING_LIBRARY;
+	} else if (t->needs_library && function_call_exceeds_library(q, t)) {
 		result = VINE_RESULT_MISSING_LIBRARY;
 	}
 	if (q->fixed_location_in_queue && t->has_fixed_locations) {
@@ -2977,6 +3004,27 @@ struct rmsummary *vine_manager_choose_resources_for_task(struct vine_manager *q,
 }
 
 /*
+Return the number of function slots a library instance gets when it runs with the given resources: one in direct mode,
+else the slots the user requested, else one per core. With no resources, return the number it gets on every worker,
+or zero when that depends on the worker.
+*/
+
+int vine_manager_library_slots(struct vine_task *t, const struct rmsummary *limits)
+{
+	if (t->func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_DIRECT) {
+		return 1;
+	} else if (t->function_slots_requested > 0) {
+		return t->function_slots_requested;
+	} else if (limits) {
+		return limits->cores;
+	} else if (t->resources_requested->cores > 0) {
+		/* The library's own core request overrides the resources chosen for it on any worker. */
+		return t->resources_requested->cores;
+	}
+	return 0;
+}
+
+/*
 Start one task on a given worker by specializing the task to the worker,
 sending the appropriate input files, and then sending the details of the task.
 Note that the "infile" and "outfile" components of the task refer to
@@ -2993,13 +3041,7 @@ static vine_result_code_t start_one_task(struct vine_manager *q, struct vine_wor
 	*/
 
 	if (t->provides_library) {
-		if (t->func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_DIRECT) {
-			t->function_slots_total = 1;
-		} else if (t->function_slots_requested <= 0) {
-			t->function_slots_total = limits->cores;
-		} else {
-			t->function_slots_total = t->function_slots_requested;
-		}
+		t->function_slots_total = vine_manager_library_slots(t, limits);
 	}
 
 	char *command_line;
@@ -3166,8 +3208,11 @@ static vine_result_code_t commit_task_to_worker(struct vine_manager *q, struct v
 
 	/* If this is a function needing a library, dispatch the library. */
 	if (t->needs_library) {
+		/* The call occupies this many slots of its library instance until it is reaped. */
+		t->function_slots_total = vine_task_function_call_slots(t);
+
 		/* Consider whether the library task is already on that machine. */
-		t->library_task = vine_schedule_find_library(q, w, t->needs_library);
+		t->library_task = vine_schedule_find_library(q, w, t->needs_library, t->function_slots_total);
 		if (!t->library_task) {
 			/* Otherwise send the library to the worker. */
 			/* Note that this call will re-enter commit_task_to_worker. */
@@ -3195,7 +3240,7 @@ static vine_result_code_t commit_task_to_worker(struct vine_manager *q, struct v
 		 * and decrement it when the function task completes. */
 		vine_task_addref(t->library_task);
 		/* If start_one_task_fails, this will be decremented in handle_failure below. */
-		t->library_task->function_slots_inuse++;
+		t->library_task->function_slots_inuse += t->function_slots_total;
 	}
 	/* If this is a library task, bookkeep it on the worker's side */
 	if (t->provides_library) {
@@ -3396,7 +3441,7 @@ static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_inf
 	/* if t is a function task, t->library_task should not be invalidated, and we decrement the reference count of the library task.
 	 * if t->library_task is NULL or it had been released before, then something is going wrong. */
 	if (t->needs_library && t->library_task) {
-		t->library_task->function_slots_inuse = MAX(0, t->library_task->function_slots_inuse - 1);
+		t->library_task->function_slots_inuse = MAX(0, t->library_task->function_slots_inuse - t->function_slots_total);
 		vine_task_delete(t->library_task);
 		t->library_task = NULL;
 	}

@@ -56,8 +56,9 @@ struct vine_process {
 	struct link *library_read_link;
 	struct link *library_write_link;
 
-	/* If this is a library process, the number of functions it is currently running. */
-	int functions_running;
+	/* If this is a library process, the number of its slots occupied by running functions. A function occupies the
+	 * number of slots given by its function_slots line, or one without it. */
+	int function_slots_inuse;
 	
 	/* If this is a library process, whether the library is ready to execute functions. */
 	int library_ready;

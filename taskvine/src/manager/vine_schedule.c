@@ -188,6 +188,15 @@ static int check_worker_have_committable_resources(struct vine_manager *q, struc
 	return 0;
 }
 
+/* Return true if an instance of the library template started on this worker would have at least slots slots. */
+static int library_has_slots_on_worker(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *library, int slots)
+{
+	struct rmsummary *l = vine_manager_choose_resources_for_task(q, w, library);
+	int library_slots = vine_manager_library_slots(library, l);
+	rmsummary_delete(l);
+	return library_slots >= slots;
+}
+
 /* Check if this task is compatible with this given worker by considering
  * resources availability, features, blocklist, and all other relevant factors.
  * Used by all scheduling methods for basic compatibility.
@@ -294,13 +303,17 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 	/* Finally check to see if a function task has the needed library task */
 
 	if (t->needs_library) {
-		struct vine_task *library = vine_schedule_find_library(q, w, t->needs_library);
+		int slots = vine_task_function_call_slots(t);
+		struct vine_task *library = vine_schedule_find_library(q, w, t->needs_library, slots);
 		if (library) {
-			/* The worker already has the library with a free slot. */
+			/* The worker already has the library with enough free slots. */
 		} else {
 			library = vine_manager_find_library_template(q, t->needs_library);
 			if (library) {
-				if (check_worker_against_task(q, w, library)) {
+				if (slots > 1 && !library_has_slots_on_worker(q, w, library, slots)) {
+					/* A new instance of the library would have too few slots for this call. */
+					return 0;
+				} else if (check_worker_against_task(q, w, library)) {
 					/* The library would fit this worker if it was sent. */
 				} else {
 					/* The library would not fit the worker. */
@@ -315,17 +328,17 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 	return 1;
 }
 
-/* Find a library task running on a specific worker that has an available slot.
+/* Find a library task running on a specific worker that has at least slots free slots.
  * @return pointer to the library task if there's one, 0 otherwise. */
 
-struct vine_task *vine_schedule_find_library(struct vine_manager *q, struct vine_worker_info *w, const char *library_name)
+struct vine_task *vine_schedule_find_library(struct vine_manager *q, struct vine_worker_info *w, const char *library_name, int slots)
 {
 	uint64_t task_id;
 	struct vine_task *library_task;
 	int iteration;
 	ITABLE_ITERATE(w->current_libraries, iteration, task_id, library_task)
 	{
-		if (!strcmp(library_task->provides_library, library_name) && (library_task->function_slots_inuse < library_task->function_slots_total)) {
+		if (!strcmp(library_task->provides_library, library_name) && (library_task->function_slots_inuse + slots <= library_task->function_slots_total)) {
 			return library_task;
 		}
 	}
@@ -553,6 +566,52 @@ static vine_resource_bitmask_t is_task_larger_than_any_worker(struct vine_manage
 }
 
 /*
+Return true if a function call needs more slots than any instance of its library has, or would have if started, on
+each connected worker. Like is_task_larger_than_any_worker(), a worker that has not reported its resources counts as
+one that fits, and with no workers nothing is reported.
+*/
+
+static int is_function_call_larger_than_any_library(struct vine_manager *q, struct vine_task *t)
+{
+	int slots = vine_task_function_call_slots(t);
+	if (slots <= 1) {
+		return 0;
+	}
+
+	/* A call without its library fails as VINE_RESULT_MISSING_LIBRARY. */
+	struct vine_task *library_template = vine_manager_find_library_template(q, t->needs_library);
+	if (!library_template) {
+		return 0;
+	}
+
+	char *key;
+	struct vine_worker_info *w;
+	int iteration;
+	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+	{
+		if (w->resources->tag < 0) {
+			return 0;
+		}
+
+		uint64_t task_id;
+		struct vine_task *library;
+		int library_iteration;
+		ITABLE_ITERATE(w->current_libraries, library_iteration, task_id, library)
+		{
+			if (!strcmp(library->provides_library, t->needs_library) && library->function_slots_total >= slots) {
+				return 0;
+			}
+		}
+
+		if (library_has_slots_on_worker(q, w, library_template, slots)) {
+			return 0;
+		}
+	}
+
+	return hash_table_size(q->worker_table) > 0;
+}
+
+/*
 Determine if there exists a ready task that cannot be satisfied
 by *any* connected worker, even if all other tasks finish.
 If so, then display a suitable message to the user.
@@ -566,6 +625,8 @@ void vine_schedule_check_for_large_tasks(struct vine_manager *q)
 	int unfit_mem = 0;
 	int unfit_disk = 0;
 	int unfit_gpu = 0;
+	int unfit_slots = 0;
+	int largest_unfit_slots = 0;
 
 	struct rmsummary *largest_unfit_task = rmsummary_create(-1);
 
@@ -575,6 +636,15 @@ void vine_schedule_check_for_large_tasks(struct vine_manager *q)
 		// advance cursor to the next task first,
 		// in case there are continues, etc. below.
 		skip_list_next(cur);
+
+		/* A function call uses no resources of its own, only slots of a library instance. */
+		if (t->needs_library) {
+			if (is_function_call_larger_than_any_library(q, t)) {
+				unfit_slots++;
+				largest_unfit_slots = MAX(largest_unfit_slots, vine_task_function_call_slots(t));
+			}
+			continue;
+		}
 
 		// check each task against the queue of connected workers
 		vine_resource_bitmask_t bit_set = is_task_larger_than_any_worker(q, t);
@@ -597,7 +667,7 @@ void vine_schedule_check_for_large_tasks(struct vine_manager *q)
 	}
 	skip_list_cursor_delete(cur);
 
-	if (unfit_core || unfit_mem || unfit_disk || unfit_gpu) {
+	if (unfit_core || unfit_mem || unfit_disk || unfit_gpu || unfit_slots) {
 		notice(D_VINE, "There are tasks that cannot fit any currently connected worker:\n");
 	}
 
@@ -615,6 +685,10 @@ void vine_schedule_check_for_large_tasks(struct vine_manager *q)
 
 	if (unfit_gpu) {
 		notice(D_VINE, "    %d waiting task(s) need more than %s", unfit_gpu, rmsummary_resource_to_str("gpus", largest_unfit_task->gpus, 1));
+	}
+
+	if (unfit_slots) {
+		notice(D_VINE, "    %d waiting function call(s) need up to %d slots, more than any instance of their library has on a connected worker", unfit_slots, largest_unfit_slots);
 	}
 
 	rmsummary_delete(largest_unfit_task);

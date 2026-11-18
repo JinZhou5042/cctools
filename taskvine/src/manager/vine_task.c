@@ -371,6 +371,14 @@ void vine_task_set_disk(struct vine_task *t, int64_t disk)
 	}
 }
 
+int vine_task_function_call_slots(const struct vine_task *t)
+{
+	if (t->resources_requested->cores >= 1) {
+		return (int)ceil(t->resources_requested->cores);
+	}
+	return 1;
+}
+
 void vine_task_set_cores(struct vine_task *t, int cores)
 {
 	if (cores < 0) {

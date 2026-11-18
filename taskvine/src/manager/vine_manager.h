@@ -284,6 +284,9 @@ void vine_manager_enable_process_shortcut(struct vine_manager *q);
 
 struct rmsummary *vine_manager_choose_resources_for_task( struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t );
 
+/* Return the number of function slots a library instance gets with the given resources, or, with none, on every worker (zero when that depends on the worker). */
+int vine_manager_library_slots(struct vine_task *library, const struct rmsummary *limits);
+
 int64_t overcommitted_resource_total(struct vine_manager *q, int64_t total);
 
 /* Internal: Shut down a specific worker. */

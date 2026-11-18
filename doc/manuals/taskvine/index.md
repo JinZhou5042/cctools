@@ -1653,9 +1653,21 @@ and when it is returned, the result is present as `t.output`:
         print(t.output)
     ```
 
-Note that both library tasks and function invocations consume
-resources at the worker, and the number of running tasks will be
-constrained by the available resources in the same way as normal tasks.
+Note that a library task consumes resources at the worker like a
+normal task, and its function invocations run inside the slots of the
+library rather than in resources of their own.  A function invocation
+occupies one slot by default.  An invocation that requests cores with
+`set_cores(k)` occupies `k` slots of its library instance, and runs only
+on an instance with at least `k` free slots, so a library with 4 slots
+runs four 1-core invocations, two 2-core invocations, or one 4-core
+invocation at a time.  Memory and disk requests of an invocation do not
+affect its placement.  An invocation that requests more cores than the
+library has slots never runs: if the slots of the library do not depend
+on the worker (direct execution mode, `set_function_slots`, or `set_cores`
+on the library task), it is returned with the result
+`VINE_RESULT_MISSING_LIBRARY`.  Otherwise it waits for a worker large
+enough, and the manager periodically reports it as a task that cannot fit
+any connected worker.
 
 ### Stateful Serverless Computing
 A function typically sets up its states (e.g., load modules/packages, build internal models or states) before executing its computation. With advanced serverless computing in TaskVine, you can set up a shared state between function invocations so the cost of setting up states doesn't have to be paid for every invocation, but instead is paid once and shared many times. TaskVine supports this technique as demonstrated via the below example.
