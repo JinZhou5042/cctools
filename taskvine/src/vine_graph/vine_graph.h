@@ -32,9 +32,8 @@ struct vine_graph_mount {
 	char task_path[];	      // path inside the task sandbox
 };
 
-/* Pointers that a node keeps in the order they were added: its mounts, parents, or children. A dttools list cost a
- * header, a cursor, and 64 bytes for each entry, a large part of what a node held while the frontend kept it. Most
- * arrays hold one pointer, such as the output of a node or its manifest, which stays in the array itself, so such an
+/* Pointers that a node keeps in the order they were added: its mounts, parents, or children. Most arrays hold one
+ * pointer, such as the output of a node or its manifest, which stays in the array itself, so such an
  * array costs no allocation to fill or to free. The array must therefore stay where it is while it holds pointers. */
 struct vine_graph_array {
 	void **items; // the pointers: NULL while empty, &first while one fits there, else an owned allocation

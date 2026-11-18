@@ -1818,9 +1818,7 @@ static void vine_graph_executor_fetch_list(struct vine_graph_executor *e, struct
  * replica is received into the vault with priority over checkpoints and beyond the vault limit, and its receive
  * reports back. A completed node whose output exists nowhere is run again to restore it, unless a recovery task is
  * already recreating it, and the restoring task queues the fetch again. The work of a round depends on the free slots,
- * not on how many fetches are pending. Decided on 2026-10-22: with every output of 1,600 x 64 MiB pinned on the
- * cluster, the 400 results of 51 bytes that the caller waited for were fetched behind the large ones, up to 10 minutes
- * after their tasks completed. */
+ * not on how many fetches are pending. Small files come first so that they never wait behind large ones. */
 static void vine_graph_executor_process_fetches(struct vine_graph_executor *e)
 {
 	vine_graph_executor_fetch_list(e, e->fetch_small);
