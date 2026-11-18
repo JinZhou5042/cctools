@@ -4,7 +4,7 @@
 
 """Install the library of an Executor on its Manager, from the process that runs the Executor.
 
-installed() declares the library that library.py defines, with the modules, files, hoisted objects, and cached edata
+installed() declares the library that library.py defines, with the modules, files, shared objects, and cached edata
 it loads when it starts, and removes the library and the code the Manager generated for it when the Executor closes.
 """
 
@@ -16,7 +16,7 @@ import uuid
 
 import cloudpickle
 
-from .library import EDATA_CACHE, HOISTED, prepare, run_node, runtime_identity
+from .library import EDATA_CACHE, SHARED, prepare, run_node, runtime_identity
 
 
 def unique_name():
@@ -26,15 +26,15 @@ def unique_name():
 
 
 @contextlib.contextmanager
-def installed(manager, name, modules=(), files=None, hoisted=None, edata_cache=None):
+def installed(manager, name, modules=(), files=None, shared=None, edata_cache=None):
     """Install the library named name on a Manager, yield the name of the function every task calls, and remove the
     library with its files on exit. When the library starts, it imports modules, given as module objects or names,
-    and loads hoisted and edata_cache, local paths of files written by save_objects(). files maps local paths to names
+    and loads shared and edata_cache, local paths of files written by save_objects(). files maps local paths to names
     in the library sandbox."""
     module_names = [module_name(module) for module in modules]
     files = dict(files or {})
-    if hoisted:
-        files[hoisted] = HOISTED
+    if shared:
+        files[shared] = SHARED
     if edata_cache:
         files[edata_cache] = EDATA_CACHE
     for local in files:
@@ -44,7 +44,7 @@ def installed(manager, name, modules=(), files=None, hoisted=None, edata_cache=N
     installed_library = False
     generated = None
     try:
-        context = [prepare, [module_names, HOISTED if hoisted else None, EDATA_CACHE if edata_cache else None,
+        context = [prepare, [module_names, SHARED if shared else None, EDATA_CACHE if edata_cache else None,
                              runtime_identity()], {}]
         try:
             library = manager.create_library_from_functions(name, run_node, add_env=False, library_context_info=context)

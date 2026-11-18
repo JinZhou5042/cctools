@@ -2,16 +2,18 @@
 # This software is distributed under the GNU General Public License.
 # See the file COPYING for details.
 
-"""Run the tasks of a Graph. Graph.run() makes one runner for its Graph and keeps it between runs: an Executor owns
-a TaskVine Manager, the C graph executor, and the library that runs Python tasks on Workers, and a LocalExecutor runs
-tasks in this process. _Run is one call of Graph.run(): it submits tasks, applies what finished, calls rules one at a
-time in completion order, and ends when nothing runs and no rule is due.
+"""Run tasks on TaskVine Workers, or in this process. An Executor runs Graphs (run()) and starts single tasks at once
+(submit()). It works through one runner: _Workers owns a TaskVine Manager, the C graph executor, and the library that
+runs Python tasks on Workers, and _Local runs tasks in this process. _Run is one call of Executor.run(): it submits
+tasks, applies what finished, calls rules one at a time in completion order, and ends when nothing runs and no rule is
+due.
 
-A background thread owns the C executor: it is the only thread that calls into C after the Executor starts, apart
-from vine_graph_executor_wake(), which ends the thread's wait in C when a call is queued for it. The run's thread
-stages a submission and queues the C calls for the background thread. The background thread runs queued calls,
-advances the run, and publishes what finished and which fetched results became readable. The run's thread applies
-what was published only between rules, so a rule sees task states that do not change while it runs."""
+A background thread owns the C executor: it is the only thread that calls into C after the runner starts, apart from
+vine_graph_executor_wake(), which ends the thread's wait in C when a call is queued for it. The thread that submits a
+task stages it and queues the C calls for the background thread. The background thread runs queued calls, advances the
+run, and publishes what finished and which fetched results became readable. What was published is applied to the Tasks
+under the Executor's lock, by the thread of a run between rules, so a rule sees task states that do not change while it
+runs, or by a thread that asks for a submitted task."""
 
 import atexit
 import collections
@@ -58,12 +60,12 @@ from . import vine_graph_capi as capi  # noqa: E402
 # generated wrapper around each.
 _capi = capi._vine_graph_capi
 from .graph import (  # noqa: E402
-    _LEAF_TYPE_SET, COMMAND_RESULT_LIMIT, Command, File, Hoisted, TaskError, _FileRef, _Ref, _readers_of,
-    _NEW, _RUNNING, _COMPLETED, _FAILED, _CANCELLED,
+    _LEAF_TYPE_SET, COMMAND_RESULT_LIMIT, CONTENT_LIMIT, Command, File, Graph, Shared, TaskError, _Calls, _FileRef,
+    _Ref, _label, _name_task, _readers_of, _NEW, _RUNNING, _COMPLETED, _FAILED, _CANCELLED,
 )
 from . import graph as _graph_module, install, library  # noqa: E402
 
-# Manager tuning that suits graph execution. Graph.run(params=...) overrides it.
+# Manager tuning that suits graph execution. The params of an Executor override it.
 MANAGER_TUNING = {
     "worker-source-max-transfers": 100,
     "max-retrievals": -1,
@@ -86,9 +88,9 @@ EXECUTOR_TUNING = {
     # Failed attempts allowed per task for infrastructure failures. A function that raises fails its task at once.
     "max-retries": 5,
     "progress-bar": 0,
-    # A Graph keeps every result while it lives, because a rule or a later run may add a reader of any task, which must
-    # not recompute it. Pins would also anchor every output off the checkpoint cut, so the release rule is off instead.
-    "release-outputs": 0,
+    # 1 releases a result once every task that reads it is durable, which the results that can still be asked for
+    # without being computed again are pinned against (Executor._start()). 0 keeps every result.
+    "release-outputs": 1,
     # auto anchors every output in the vault while it keeps up, and only the outputs on the boundaries of bands of
     # generations while large outputs complete faster than it anchors them. 0 anchors every output, k fixes the band.
     "checkpoint-cut": "auto",
@@ -102,8 +104,18 @@ EXECUTOR_TUNING = {
 # that the Workers holding them write, besides those it receives itself (Manager tuning vault-shared-min-bytes).
 EXECUTOR_SETTINGS = frozenset(EXECUTOR_TUNING) | {"shared-directory"}
 
-# The entry of every task that completed, which the records share. A failure is (_FAILED, source key, message, reason,
-# exit code), and only a source holds its message, reason, and exit code.
+# The setting of the Executor itself: a budget in bytes of function and argument objects of the first submission that
+# the library on each Worker loads when it starts, so tasks do not fetch their files. Zero, the default, caches none.
+EDATA_CACHE = "edata-cache"
+
+# Why a result is pinned, as bits of _Record.keep: no task that was submitted reads it yet, its rules are due, or its
+# task wrote a file that no task reads. While any holds, the release rule leaves the result alone.
+_SINK = 1
+_RULE = 2
+_FINAL = 4
+
+# The entry of every task that completed, which the records share. A failure is (_FAILED, record of the source,
+# message, reason, exit code), and only a source holds its message, reason, and exit code.
 _COMPLETED_ENTRY = (_COMPLETED, None, None, None, None)
 # TaskError.reason of each kind of failure that C reports
 _FAILURE_REASONS = {
@@ -120,7 +132,7 @@ _FAILURE_REASONS = {
 COMMAND_SECONDS = 0.05
 
 # Seconds per step that the background thread spends at least on clean-up after the queued calls: freeing staged files
-# and removing the C nodes of tasks that a stopped run abandoned.
+# and removing the C nodes of tasks that were let go.
 CLEANUP_SECONDS = 0.01
 
 # A line that the library runtime logs to a function call's standard output (stdout_timed_message()): its progress,
@@ -145,11 +157,11 @@ INLINE_LIMIT = 4096
 # for each task, so a mutable argument changed between runs reaches later tasks.
 _SHARED_INLINE_TYPES = (types.FunctionType, type)
 
-# Arguments that stand for data the task reads: references to task results and files, Files, and hoisted objects. The
+# Arguments that stand for data the task reads: references to task results and files, Files, and shared objects. The
 # manifest holds them inside its own serialization instead of serializing each on its own. A reference to a whole
 # result, the most common argument, is held as its task (None, key), a tuple that the pickler writes without calling
 # cloudpickle's reducer.
-_REFERENCE_TYPES = (_Ref, _FileRef, File, Hoisted)
+_REFERENCE_TYPES = (_Ref, _FileRef, File, Shared)
 
 # Immutable values that the manifest holds as they are, inside its own serialization, instead of each being serialized
 # on its own: numbers, None, and strings (bytes are serialized, so that the library tells an object it loads from a value
@@ -166,7 +178,7 @@ _STR_RESULT = 'import sys, cloudpickle; sys.stdout.write(str(cloudpickle.load(op
 # The C library, whose standard output the progress bar writes to.
 _libc = ctypes.CDLL(None)
 
-# Runners that hold a Manager. Running a Graph on the port of an open one, as rerunning a notebook cell does, closes
+# Runners that hold a Manager. A new Executor on the port of an open one, as rerunning a notebook cell makes, closes
 # the open one first, and every runner still open is closed before the interpreter tears its modules down.
 _open_executors = weakref.WeakSet()
 
@@ -347,17 +359,18 @@ _graph_module._working_directory_lock = _LOCAL_TASKS
 class _Record:
     """What a runner records about one submission of a task: one object for each submission instead of an entry in
     each of a dozen tables, which the C node id leads to. A task that a stopped run returns to not-started gets a new
-    record when it runs again, and its old record is abandoned.
+    record when it runs again, and its old record is let go.
 
-    The run's thread sets the fields when it submits the task, and the background thread sets node and result. finished
-    is published under the runner's lock."""
+    The thread that submits the task sets the fields, and the background thread sets node, result, the C file ids, pin,
+    and kept. finished is published under the runner's lock."""
 
-    __slots__ = ("key", "number", "func", "command", "outputs", "staged", "node", "result", "finished", "abandoned",
-                 "stopping", "held")
+    __slots__ = ("graph", "key", "number", "func", "command", "outputs", "staged", "node", "result", "files",
+                 "selections", "selection_files", "finished", "abandoned", "stopping", "held", "keep", "pin", "kept")
 
-    def __init__(self, key):
+    def __init__(self, graph, key):
+        self.graph = graph  # weak reference to the task's Graph, which leads to the Task by key
         self.key = key  # the task's key in its Graph
-        self.number = 0  # the number that names the task's files in sandboxes
+        self.number = 0  # the number that names the task's files in sandboxes, and its data in the runner's tables
         self.func = None  # the task's function or Command, which names it in messages (label)
         self.command = False  # the task runs a Command, whose result is the text of its standard output
         self.outputs = ()  # sandbox paths of the files the task declared when it was submitted
@@ -366,15 +379,35 @@ class _Record:
         self.staged = None
         self.node = 0  # C node id, set by the background thread
         self.result = 0  # C file id of the task result
+        self.files = None  # {sandbox path: C file id} of the files the task declared, or None
+        # {selection key: (steps, sandbox path)} of the selections of its result that the task writes to files of their
+        # own, or None, and {selection key: C file id} of those files
+        self.selections = None
+        self.selection_files = None
         self.finished = None  # the entry of the task once it finished, published by the background thread
-        self.abandoned = False  # a stopped run returned the task to not-started, so this record no longer counts
+        self.abandoned = False  # the runner let the record go, so nothing about it counts anymore
         self.stopping = False  # a stopped run cancelled the task, which then returns to not-started
         self.held = False  # the result is pinned and fetched for reading
+        self.keep = 0  # why the result is pinned against release (_SINK, _RULE, _FINAL), set by the submitting side
+        self.pin = 0  # pins that the record holds on its result in C
+        self.kept = False  # C keeps the node, which ran again after its outputs were released
 
     @property
     def label(self):
         """How messages name the task. It is built when needed, since only messages use it."""
         return _name_task(self.key, self.func)
+
+
+def _task_of(record):
+    """Return the Task of a record, or None when the task or its Graph was collected."""
+    graph = record.graph()
+    return None if graph is None else graph._tasks.get(record.key)
+
+
+def _references(task):
+    """Return {(graph id, key): Task} of the tasks a task reads, by the references that its arguments hold."""
+    graph = task._graph
+    return {(graph._graph_id(parent), parent.key): parent for parent in task._parents}
 
 
 class _Submission(list):
@@ -396,7 +429,7 @@ class _Runner:
     """What both runners share: the records of submitted tasks and how sandboxes name files."""
 
     def _new_record(self, task):
-        record = _Record(task.key)
+        record = _Record(task._graph._ref, task.key)
         self._last_number += 1
         record.number = self._last_number
         record.func = task._func
@@ -421,7 +454,8 @@ class _Runner:
 
     def _command_line(self, task, python):
         """Return the shell command line of a Command task and what it mounts: (sandbox path of each result it reads,
-        record), and (file identity, sandbox path) of each file. Placeholders take the shell-quoted path of a file in
+        record), and (file identity, sandbox path, record of the task that writes it or None) of each file.
+        Placeholders take the shell-quoted path of a file in
         the sandbox, the text of a task result, which the shell reads into a variable first, and str() of any other
         value. The command's standard output goes to the result file, which keeps at most COMMAND_RESULT_LIMIT bytes,
         and a command that exits with status zero fails when it did not write a file that other tasks read."""
@@ -430,12 +464,12 @@ class _Runner:
         values = {}
         results = []
         files = []
+        parents = _references(task) if task._parents else None
         for name in command._fields:
             value = task._kwargs[name]
             kind = type(value)
             if kind is _Ref:
-                parent = task._graph._tasks[value.key]
-                record = parent._record
+                record = parents[(value.graph_id, value.key)]._record
                 path = f"vine-graph-result-{record.number}"
                 variable = f"vine_graph_value_{len(prelude) + 1}"
                 if record.command:
@@ -448,7 +482,8 @@ class _Runner:
             elif kind is File or kind is _FileRef:
                 identity = library.file_identity(value)
                 path = self._file_task_path(identity)
-                files.append((identity, path))
+                source = parents[(value.graph_id, value.key)]._record if kind is _FileRef else None
+                files.append((identity, path, source))
                 values[name] = shlex.quote(path)
             else:
                 values[name] = shlex.quote(str(value))
@@ -466,45 +501,41 @@ class _Runner:
         return line, results, files
 
 
-class Executor(_Runner):
-    """The runner of a Graph on TaskVine Workers that connect to port, or to the Manager named name through the catalog.
+class _Workers(_Runner):
+    """The runner of an Executor on TaskVine Workers that connect to port, or to the Manager named name through the
+    catalog.
 
     It owns a Manager, the C graph executor, and the library that runs Python tasks on each Worker, which prepares
-    itself once when it starts: it imports library_modules, loads hoist, a dictionary from names to objects that tasks
-    take as vg.Hoisted(name), and, within edata_cache bytes, the smallest function and argument objects of the first
-    run, so tasks do not fetch their files. library_files maps local paths to names in the library sandbox. Command
-    tasks run as standard TaskVine tasks with the cores they request. output_dir holds the directory of the file paths
-    that TaskFile.path returns, which stay after close, and other keyword arguments go to the TaskVine Manager."""
+    itself once when it starts: it imports library_modules, loads shared, a dictionary from names to objects that tasks
+    take as vg.Shared(name), and, within edata_cache bytes, the smallest function and argument objects of the first
+    submission, so tasks do not fetch their files. library_files maps local paths to names in the library sandbox.
+    Command tasks run as standard TaskVine tasks with the cores they request. output_dir holds the directory of the
+    file paths that TaskFile.path returns, which stay after close, and other keyword arguments go to the TaskVine
+    Manager."""
 
-    def __init__(self, graph, port=cvine.VINE_DEFAULT_PORT, name=None, *, output_dir="./outputs", library_modules=(),
-                 library_files=None, hoist=None, edata_cache=0, **manager_options):
+    def __init__(self, port=cvine.VINE_DEFAULT_PORT, name=None, *, output_dir="./outputs", library_modules=(),
+                 library_files=None, shared=None, edata_cache=0, **manager_options):
         self._closed = False
         self._manager = None
         self._executor = None  # opaque C executor handle
         self._resources = ExitStack()
-        # The runner holds its Graph weakly, so the Graph's collection closes it (weakref.finalize in _Run).
-        self._graph = weakref.ref(graph)
-        self._hoisted = _serialize_hoisted(hoist)
+        self._shared = _serialize_shared(shared)
         library_modules = [install.module_name(module) for module in library_modules]
-        if not isinstance(edata_cache, int) or edata_cache < 0:
-            raise ValueError("edata_cache takes a number of bytes, zero or more")
         self._edata_cache = edata_cache
-        # Until the first run decides the cached edata, the library waits to be installed, and calls into C that the
-        # run queues meanwhile are held, so no task reaches C before the library caches its edata.
+        # Until the first submission decides the cached edata, the library waits to be installed, and calls into C that
+        # are queued meanwhile are held, so no task reaches C before the library caches its edata.
         self._library_pending = bool(edata_cache)
         self._held = None
         self._cached_edata = frozenset()  # sandbox names of staged objects that the library loads
         self._last_number = 0
         self._file_numbers = {}  # file identity -> number that names the file in sandboxes
-        # key -> {selection key: (steps, sandbox path)} of the selections of its result that the task writes to files of
-        # its own, for tasks that write any
-        self._selection_outputs = {}
         self._keep_paths = set()
+        # Records of tasks that nothing can ask for anymore: submitted tasks that were collected, and the tasks of
+        # collected Graphs. Any thread appends, and the background thread lets them go.
+        self._dropped = collections.deque()
 
         # State the background thread owns: the C ids of submitted tasks and files.
         self._records = {}  # C node id -> _Record
-        self._selection_files = {}  # key -> {selection key: C file id of the selection file}
-        self._output_files = {}  # (key, sandbox path) -> C file id of a file the task writes
         self._input_files = {}  # absolute path of a File -> C file id
         self._edata_files = {}  # sandbox name of a staged object -> C file id
 
@@ -521,15 +552,17 @@ class Executor(_Runner):
         self._deferred = collections.deque()
         # Whether a caller woke the background thread's wait in C since the thread last found no queued call.
         self._wake_pending = False
-        self._events = []  # (record, entry) of tasks that finished, published for the run's thread
+        self._events = []  # (record, entry) of tasks that finished, published for the Executor
+        self._unfinished = 0  # tasks queued or submitted that did not finish
         # data key -> readable local path of a held output, or its bytes when the Manager holds them in memory. A data
-        # key is a task key for its result, and (key, sandbox path) for a file it writes.
+        # key is the number of a record for its result, and (number, sandbox path) for a file its task writes.
         self._paths = {}
         # data keys of held outputs that their Workers cannot send, such as a directory that holds an entry its Worker
         # cannot read, published by the background thread until the next fetch of the key
         self._unsendable = set()
-        self._fetches = {}  # C file id -> data key of a fetch not yet reported readable; background thread only
-        self._held_files = set()  # data keys (key, sandbox path) of held files
+        # C file id -> (data key, record) of a fetch not yet reported readable; background thread only
+        self._fetches = {}
+        self._held_files = set()  # data keys (number, sandbox path) of held files
         # Serialized objects, shared by identity across tasks: id(object) -> (object, sandbox name, local path) for a
         # staged file, or (object, id(object), bytes) for a function or class small enough to travel inside manifests.
         # Holding the object keeps its id from being reused. An entry lives while a task that holds it may still run.
@@ -554,8 +587,8 @@ class Executor(_Runner):
             self._run_dir = tempfile.mkdtemp(prefix="vine-graph-run-", dir=self._output_root)
             self._close_executor_on(port)
             self._start(port, name, library_modules, library_files, manager_options)
-            # Workers load the hoisted objects from the library's file, so this process keeps only their names.
-            self._hoisted = dict.fromkeys(self._hoisted)
+            # Workers load the shared objects from the library's file, so this process keeps only their names.
+            self._shared = dict.fromkeys(self._shared)
             _open_executors.add(self)
             self._driver = threading.Thread(target=_drive, args=(weakref.ref(self),), name="vine-graph-executor",
                                             daemon=True)
@@ -571,7 +604,7 @@ class Executor(_Runner):
             return
         for other in list(_open_executors):
             if not other._closed and other.port == port:
-                print(f"vine_graph: closing the open runner of another Graph on port {port}", file=sys.stderr)
+                print(f"vine_graph: closing the open Executor on port {port}", file=sys.stderr)
                 other.close()
 
     def _start(self, port, name, library_modules, library_files, manager_options):
@@ -582,12 +615,12 @@ class Executor(_Runner):
         self._manager = Manager(port=port, name=name, **manager_options)
         for setting, value in MANAGER_TUNING.items():
             self._tune_manager(setting, value)
-        hoisted_path = None
-        if self._hoisted:
-            hoisted_path = os.path.join(self._run_dir, library.HOISTED)
-            install.save_objects(hoisted_path, self._hoisted)
+        shared_path = None
+        if self._shared:
+            shared_path = os.path.join(self._run_dir, library.SHARED)
+            install.save_objects(shared_path, self._shared)
         self._library_name = install.unique_name()
-        self._library_options = (library_modules, library_files, hoisted_path)
+        self._library_options = (library_modules, library_files, shared_path)
         if not self._library_pending:
             self._install_library(None)
         self._executor = capi.vine_graph_executor_create(self._manager._taskvine, self._library_name,
@@ -601,14 +634,15 @@ class Executor(_Runner):
 
     def _install_library(self, edata_path):
         """Install the library, which loads the cached edata at edata_path, if any, when it starts on a Worker."""
-        modules, files, hoisted_path = self._library_options
+        modules, files, shared_path = self._library_options
         self._resources.enter_context(
-            install.installed(self._manager, self._library_name, modules, files, hoisted_path, edata_path))
+            install.installed(self._manager, self._library_name, modules, files, shared_path, edata_path))
 
     @contextlib.contextmanager
     def first_submission(self):
-        """Around the submissions of the first run of a runner that caches edata, hold the calls into C that they queue.
-        Afterwards, install the library with the smallest objects that they staged, then release the calls."""
+        """Around the first submissions of a runner that caches edata, those of the first run() or submit(), hold the
+        calls into C that they queue. Afterwards, install the library with the smallest objects that they staged, then
+        release the calls."""
         if not self._library_pending or self._held is not None:
             yield
             return
@@ -667,6 +701,10 @@ class Executor(_Runner):
         """Cancel unfinished tasks and release the Manager, the library, and every task result. File paths that
         TaskFile.path returned stay in output_dir. Closing a closed runner does nothing."""
         self._close(failed=False)
+
+    def discard(self):
+        """Close, and remove the run directory with the file paths that TaskFile.path returned."""
+        self._close(failed=True)
 
     def _close(self, failed):
         with self._lock:
@@ -727,6 +765,8 @@ class Executor(_Runner):
         Manager tuning, such as vault-disk-limit. An unknown name or invalid value raises ValueError."""
         _check_params(params)
         for setting, value in params.items():
+            if setting == EDATA_CACHE:
+                continue
             if setting in EXECUTOR_SETTINGS:
                 self._call(lambda setting=setting, value=value: self._tune_executor(setting, value))
             else:
@@ -741,30 +781,18 @@ class Executor(_Runner):
         if capi.vine_graph_executor_tune(self._executor, setting, str(value)) != 0:
             raise ValueError(f"invalid value {value!r} for {setting}")
 
-    def check_task(self, task):
-        """Raise the error that keeps a task from running here, such as a hoisted object this runner does not hold."""
-        for name in task._hoisted or ():
-            if name not in self._hoisted:
-                raise KeyError(f"no hoisted object named {name!r}; give it to Graph.run(hoist={{...}})")
-        for ref in task._reads or ():
-            if isinstance(ref, File):
-                _check_input_file(ref.path)
+    # Submission, in the thread that submits.
 
-    # Submission, in the run's thread.
-
-    def submit(self, task):
-        """Stage one task and queue its submission for the background thread, and return its record. Its result stays
-        while the runner does (release-outputs 0, see _Run). A staging error, such as an argument that
+    def submit(self, task, keep):
+        """Stage one task and queue its submission for the background thread, and return its record. keep says why its
+        result is pinned from the start (_SINK, _RULE, _FINAL), or is zero. A staging error, such as an argument that
         cannot be serialized, raises before anything is queued."""
         self._check_open()
-        self.check_task(task)
+        _check_task(task, self._shared)
         record = self._new_record(task)
+        record.keep = keep
         if not record.command and task._readers:
-            selections = _selections_read_from(task)
-            if selections:
-                self._selection_outputs[task.key] = selections
-            else:
-                self._selection_outputs.pop(task.key, None)
+            record.selections = _selections_read_from(task) or None
         names = []
         submitted = False
         try:
@@ -778,6 +806,7 @@ class Executor(_Runner):
                     # The flag and the call that queues the task are next to each other, so a task is never queued
                     # without its record or recorded without being queued.
                     self._queued += 1
+                    self._unfinished += 1
                     submitted = True
                     (self._commands if self._held is None else self._held).append(command)
                     self._wake_locked()
@@ -794,7 +823,6 @@ class Executor(_Runner):
         """Stage the arguments and manifest of a task, or build its command line, and return what the background
         thread declares and mounts. The sandbox name of every staged file the task holds is added to names."""
         graph = task._graph
-        key = task.key
         if record.command:
             line, results, files = self._command_line(task, "python3")
             result_records = [parent for _, parent in results]
@@ -803,9 +831,14 @@ class Executor(_Runner):
                     (line, task._func.cores))
         func, args, kwargs = task._func, task._args, task._kwargs
         files = {}
-        for ref in task._reads or ():
-            identity = library.file_identity(ref)
-            files[identity] = self._file_task_path(identity)
+        mounts = []  # (file identity, sandbox path, record of the task that writes the file or None)
+        if task._reads:
+            parents = _references(task)
+            for ref in task._reads:
+                identity = library.file_identity(ref)
+                files[identity] = path = self._file_task_path(identity)
+                source = parents[(ref.graph_id, ref.key)]._record if type(ref) is _FileRef else None
+                mounts.append((identity, path, source))
         inline = []
         entries = {}  # id of an object -> its manifest entry
         edata = []  # (sandbox name, local path) of each staged file the task mounts
@@ -822,7 +855,7 @@ class Executor(_Runner):
             kind = type(value)
             if kind in _LEAF_TYPE_SET:
                 return False
-            if kind in _REFERENCE_TYPES:
+            if kind in _REFERENCE_TYPES or plain is None:
                 return True
             entry = plain.get(id(value))
             return entry is None or entry[0] is not value
@@ -832,26 +865,27 @@ class Executor(_Runner):
         # A result that the task reads at exactly one place, through a selection, is selected, and the task mounts the
         # producer's file of that selection when the producer writes one, instead of the whole result.
         selected = {}
-        selections_read = []  # (producer key, sandbox path, selection key of the producer's selection file)
+        selections_read = []  # (producer's record, sandbox path, selection key of the producer's selection file)
         read_once = task._selections
-        texts = []  # (None, key) of the Command tasks whose results the task reads, which are text
+        texts = []  # (graph id, key) of the Command tasks whose results the task reads, which are text
         result_records, result_paths, inputs = [], [], {}
+        graph_id = graph._graph_id
         for parent in task._results or ():
-            ref = (None, parent.key)
+            ref = (graph_id(parent), parent.key)
             source = parent._record
             if source.command:
                 texts.append(ref)
             if read_once and ref in read_once:
                 chain = read_once[ref][0]
-                if chain is not None and chain in self._selection_outputs.get(parent.key, ()):
+                if chain is not None and source.selections and chain in source.selections:
                     selected[ref] = f"vine-graph-selection-{source.number}"
-                    selections_read.append((parent.key, selected[ref], chain))
+                    selections_read.append((source, selected[ref], chain))
                     continue
                 selected[ref] = None
             inputs[ref] = path = f"vine-graph-result-{source.number}"
             result_records.append(source)
             result_paths.append(path)
-        selections = self._selection_outputs.get(key)
+        selections = record.selections
         manifest = {
             "objects": inline,
             "callable": stage(func, entries, names, inline, edata),
@@ -871,7 +905,7 @@ class Executor(_Runner):
             result_records,
             result_paths,
             selections_read or (),
-            list(files.items()) if files else (),
+            mounts,
             edata or (),
             self._pickler.dumps(manifest),
             None,
@@ -946,8 +980,16 @@ class Executor(_Runner):
         self._enqueue(functools.partial(self._cancel_nodes, list(records)))
 
     def abandon(self, records):
-        """Let go of the C nodes of tasks that a stopped run returned to not-started, and of what they staged."""
+        """Let go of the records of tasks that a stopped run returned to not-started."""
         self._enqueue(functools.partial(self._abandon_nodes, list(records)))
+
+    def pin(self, record):
+        """Pin a result against release (_Record.keep) after its task was submitted."""
+        self._enqueue(functools.partial(self._pin, record))
+
+    def unpin(self, record):
+        """Take back the pin that kept a result from release (_Record.keep), once nothing keeps it anymore."""
+        self._enqueue(functools.partial(self._unpin, record))
 
     def _enqueue(self, command):
         """Queue a call into C for the background thread. A wake that the background thread has not answered yet covers
@@ -983,7 +1025,7 @@ class Executor(_Runner):
 
     def _check_open(self):
         if self._closed:
-            raise RuntimeError("the runner of this Graph was closed, as when another Graph ran on its port")
+            raise RuntimeError("the Executor was closed, as when another Executor took its port")
 
     # Calls into C, in the background thread.
 
@@ -999,21 +1041,26 @@ class Executor(_Runner):
         record.node = node
         self._records[node] = record
         record.result = self._add_output(node, library.RESULT)
+        if record.keep:
+            # A result that may be asked for later is pinned before its task can complete and be released.
+            if _capi.vine_graph_executor_pin_file(executor, record.result) != 0:
+                raise RuntimeError(f"failed to pin the result of task {key!r}")
+            record.pin = 1
         if selections:
-            self._selection_files[key] = {chain: self._add_output(node, path) for chain, path in selections}
-        for path in outputs:
-            self._output_files[(key, path)] = self._add_output(node, path)
+            record.selection_files = {chain: self._add_output(node, path) for chain, path in selections}
+        if outputs:
+            record.files = {path: self._add_output(node, path) for path in outputs}
         if result_records or selections_read:
             mounts = list(zip(map(_RESULT_FILE, result_records), result_paths))
-            mounts.extend((self._selection_files[parent][chain], name) for parent, name, chain in selections_read)
+            mounts.extend((parent.selection_files[chain], name) for parent, name, chain in selections_read)
             self._check(capi.vine_graph_executor_add_inputs(executor, node, mounts), f"failed to mount the inputs of task {key!r}")
-        for identity, name in files:
-            if identity[0] == "input":
+        for identity, name, source in files:
+            if source is None:
                 if identity[1] not in self._input_files:
                     self._input_files[identity[1]] = self._declare_file(self._link_input(identity[1]))
                 file = self._input_files[identity[1]]
             else:
-                file = self._output_files[(identity[2], identity[3])]
+                file = source.files[identity[3]]
             self._add_input(node, file, name)
         if command is not None:
             if capi.vine_graph_executor_set_command(executor, node, command[0], command[1]) != 0:
@@ -1042,15 +1089,48 @@ class Executor(_Runner):
         self._publish_finished()
 
     def _abandon_nodes(self, records):
-        drop = _capi.vine_graph_executor_drop_node
         with self._lock:
             for record in records:
-                record.abandoned = True
-                if record.staged is not None:
-                    names, record.staged = record.staged, None
-                    self._drop_staged(names if type(names) is tuple else (names,))
-                if record.node:
-                    drop(self._executor, record.node)
+                self._let_go(record)
+
+    def _pin(self, record):
+        if record.node and not record.abandoned:
+            if _capi.vine_graph_executor_pin_file(self._executor, record.result) == 0:
+                record.pin += 1
+
+    def _unpin(self, record):
+        if record.pin > 0 and not record.abandoned:
+            record.pin -= 1
+            _capi.vine_graph_executor_unpin_file(self._executor, record.result)
+
+    def _let_go(self, record):
+        """Let go of a record that nothing can ask for anymore: take back its pins, free what its task staged, and drop
+        its C node, which C removes once its task finished and its outputs were released. Called with the lock held,
+        after every call queued before the record was let go ran."""
+        if record.abandoned:
+            return
+        record.abandoned = True
+        executor = self._executor
+        if record.staged is not None:
+            names, record.staged = record.staged, None
+            self._drop_staged(names if type(names) is tuple else (names,))
+        paths = self._paths
+        paths.pop(record.number, None)
+        for path in record.outputs:
+            key = (record.number, path)
+            paths.pop(key, None)
+            if key in self._held_files:
+                self._held_files.discard(key)
+                if record.files:
+                    _capi.vine_graph_executor_unpin_file(executor, record.files[path])
+        if record.node:
+            while record.pin > 0:
+                record.pin -= 1
+                _capi.vine_graph_executor_unpin_file(executor, record.result)
+            if record.kept:
+                record.kept = False
+                _capi.vine_graph_executor_unkeep_node(executor, record.node)
+            _capi.vine_graph_executor_drop_node(executor, record.node)
 
     def _add_output(self, node, task_path):
         file = capi.vine_graph_executor_add_output(self._executor, node, task_path)
@@ -1074,16 +1154,17 @@ class Executor(_Runner):
 
     def _hold(self, held):
         """Pin the data of a data key for reading and fetch it: a record for its result, or (record, sandbox path) for a
-        file it writes. The pin lasts while the runner does."""
+        file it writes. The pin lasts while the record does."""
         if type(held) is _Record:
             record = held
             file = record.result
-            key = record.key
+            key = record.number
+            record.pin += 1
         else:
             record, path = held
-            key = (record.key, path)
-            file = self._output_files[key]
-        self._fetches[file] = key
+            key = (record.number, path)
+            file = record.files[path]
+        self._fetches[file] = (key, record)
         if self._unsendable and key in self._unsendable:
             with self._lock:
                 self._unsendable.discard(key)
@@ -1109,7 +1190,7 @@ class Executor(_Runner):
                 continue
             identity, path = self._edata_names.pop(name)
             del self._edata[identity]
-            self._deferred.append((self._queued, Executor._free_staged, (name, path)))
+            self._deferred.append((self._queued, _Workers._free_staged, (name, path)))
 
     def _free_staged(self, staged):
         name, path = staged
@@ -1122,13 +1203,22 @@ class Executor(_Runner):
             pass
 
     def _clean_up(self, deadline):
-        """Do clean-up work until the deadline: queued work whose calls ran, and the removal of abandoned C nodes.
-        Return True when work is left."""
+        """Do clean-up work until the deadline: queued work whose calls ran, and the removal of dropped C nodes. Return
+        True when work is left."""
         executor = self._executor
         capi.vine_graph_executor_hold_sends(executor)
         try:
             monotonic = time.monotonic
             deferred = self._deferred
+            dropped = self._dropped
+            if dropped:
+                # A record is let go once every call queued so far ran, among them the submissions of the tasks that
+                # read its task, which were queued while the task still existed.
+                with self._lock:
+                    queued = self._queued
+                    let_go = _Workers._let_go
+                    while dropped:
+                        deferred.append((queued, let_go, dropped.popleft()))
             while True:
                 with self._lock:
                     ran = self._ran
@@ -1199,8 +1289,8 @@ class Executor(_Runner):
         fetched = None
         fetches = self._fetches
         while file := capi.vine_graph_executor_next_fetched(self._executor):
-            key = fetches.pop(file, None)
-            if not key:
+            key, record = fetches.pop(file, (None, None))
+            if record is None or record.abandoned:
                 continue
             # A small result is read from the Manager's memory, so its vault entry is never written to disk.
             data = capi.vine_graph_executor_get_local_data(self._executor, file)
@@ -1211,8 +1301,8 @@ class Executor(_Runner):
                 fetched[key] = path
         unsendable = []
         while file := capi.vine_graph_executor_next_fetch_failed(self._executor):
-            key = fetches.pop(file, None)
-            if key:
+            key, record = fetches.pop(file, (None, None))
+            if record is not None and not record.abandoned:
                 unsendable.append(key)
         with lock:
             if fetched:
@@ -1238,33 +1328,55 @@ class Executor(_Runner):
             if record is None:
                 continue
             if get_node_state(executor, node) == capi.VINE_GRAPH_NODE_FAILED:
-                source = records.get(capi.vine_graph_executor_get_failure_source(executor, node))
-                source_key = record.key if source is None else source.key
+                source = records.get(capi.vine_graph_executor_get_failure_source(executor, node)) or record
                 if source is record:
                     exit_code = capi.vine_graph_executor_get_node_exit_code(executor, node)
-                    entry = (_FAILED, source_key, capi.vine_graph_executor_get_node_error(executor, node),
+                    entry = (_FAILED, record, capi.vine_graph_executor_get_node_error(executor, node),
                              _FAILURE_REASONS.get(capi.vine_graph_executor_get_node_failure(executor, node)),
                              None if exit_code < 0 else exit_code)
                 else:
                     # A dependent names its source and the source's reason, and reads the message from the source.
-                    entry = (_FAILED, source_key, None,
+                    entry = (_FAILED, source, None,
                              _FAILURE_REASONS.get(capi.vine_graph_executor_get_node_failure(executor, node)), None)
             else:
                 entry = _COMPLETED_ENTRY
             finished.append((record, entry))
-        # Releases matter only to frontends that let tasks go, and a Graph keeps its tasks, so they are only drained.
+        # A released node stays until its record is let go, so releases are only drained. A node that ran again after
+        # its release is kept by C until its record is let go.
         while capi.vine_graph_executor_next_released(executor):
             pass
-        while capi.vine_graph_executor_next_kept(executor):
-            pass
+        while node := capi.vine_graph_executor_next_kept(executor):
+            record = records.get(node)
+            if record is not None:
+                record.kept = True
         if finished:
             with self._lock:
                 for record, entry in finished:
+                    if record.finished is None:
+                        self._unfinished -= 1
                     record.finished = entry
                 self._events.extend(finished)
                 self._changed.notify_all()
 
-    # Published state, read by the run's thread.
+    # Published state, read by the threads that use the Executor.
+
+    def wait_events(self, timeout):
+        """Wait up to timeout seconds until a task finished whose event was not taken yet, or the runner stopped."""
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            while not self._events and not self._closed and self._run_error is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                self._changed.wait(min(remaining, 0.5))
+
+    def pending(self):
+        """Whether asking for events again could make progress on its own, which only a local runner does."""
+        return False
+
+    def drain(self):
+        """Wait until every task that was submitted finished."""
+        self._wait_until(lambda: self._unfinished <= 0, None, "tasks did not finish")
 
     def take_events(self, timeout=0):
         """Return the (record, entry) of tasks that finished since the last call, waiting up to timeout seconds for
@@ -1290,7 +1402,7 @@ class Executor(_Runner):
             record.held = True
             self._enqueue(functools.partial(self._hold, record))
             return
-        key = (record.key, path)
+        key = (record.number, path)
         if key in self._held_files:
             return
         self._held_files.add(key)
@@ -1300,7 +1412,7 @@ class Executor(_Runner):
         """Wait until a held output is readable at the Manager, and return its path, or its bytes when the Manager holds
         them in memory. A timeout in seconds that expires first raises TimeoutError."""
         self.hold(record, path)
-        key = record.key if path is None else (record.key, path)
+        key = record.number if path is None else (record.number, path)
         # A completed task whose lost output had to be recreated fails when a task it reads failed and that task's
         # output exists nowhere, and C reports it again, as failed.
         self._wait_until(lambda: key in self._paths or key in self._unsendable or _lost(record),
@@ -1310,23 +1422,16 @@ class Executor(_Runner):
         if fetched is not None:
             return fetched
         if _lost(record):
-            graph = self._graph()
-            task = source = None
-            source_label = f"Task({record.finished[1]!r})"
-            if graph is not None:
-                task = graph._tasks.get(record.key)
-                source = graph._tasks.get(record.finished[1])
-                if source is not None:
-                    source_label = _label(source)
+            source = record.finished[1]
             raise TaskError(f"task {record.label} completed, but its output was lost, and it cannot be recreated because "
-                            f"task {source_label} failed", task, source, record.finished[3])
+                            f"task {source.label} failed", _task_of(record), _task_of(source), record.finished[3])
         output = "result" if path is None else f"output file {path!r}"
         raise TaskError(f"task {record.label} completed, but its Worker cannot send its {output}, which is or holds a "
                         f"file that the Worker cannot read, or is a FIFO, socket, or device", None, None, "result")
 
-    def result(self, record):
+    def result(self, record, timeout=None):
         """Return the result of a completed task, fetched to the Manager once."""
-        return _load_result(record, self.fetched(record))
+        return _load_result(record, self.fetched(record, None, timeout))
 
     def file_bytes(self, record, path, limit):
         """Return the bytes of a file that a completed task wrote, or raise ValueError above limit bytes."""
@@ -1346,7 +1451,8 @@ class Executor(_Runner):
 
     def file_path(self, record, path):
         """Return a local path of a file that a completed task wrote, linked or copied out of the Manager's vault."""
-        identity = ("output", None, record.key, path)
+        # The number of the record tells the file apart from those of the other Graphs that the Executor runs.
+        identity = ("fetched", record.number, path)
         local = os.path.join(self._run_dir, self._file_task_path(identity))
         if not os.path.exists(local):
             fetched = self.fetched(record, path)
@@ -1411,22 +1517,22 @@ class Executor(_Runner):
         return str(path)
 
 
-class LocalExecutor(_Runner):
-    """The runner of a Graph in this process, for debugging without TaskVine. It runs one task at a time when the run
-    asks for the next event, in the order the tasks were submitted, so a task runs after the tasks it reads. Each task
+class _Local(_Runner):
+    """The runner of an Executor in this process, for debugging without TaskVine. It runs one task at a time when it is
+    asked for the next event, in the order the tasks were submitted, so a task runs after the tasks it reads. Each task
     runs in a sandbox directory of its own, and its function and arguments are serialized as on Workers, so it gets
     copies of them. Commands run with /bin/sh in the sandbox, which holds links to the files and results they read."""
 
-    def __init__(self, graph, *, output_dir="./outputs", hoist=None, **ignored):
+    def __init__(self, *, output_dir="./outputs", shared=None):
         self._closed = False
-        self._graph = weakref.ref(graph)
-        self._hoisted = _serialize_hoisted(hoist)
+        self._shared = _serialize_shared(shared)
         self._last_number = 0
         self._file_numbers = {}
-        self._queue = collections.deque()  # records of submitted tasks that did not run yet, in submission order
+        self._queue = collections.deque()  # (record, Task) of submitted tasks that did not run yet, in submission order
         self._events = []
-        self._local_paths = {}  # (key, sandbox path) -> local path of a file a task wrote
-        self._results = {}  # key -> local path of a task's result file
+        self._dropped = collections.deque()  # records of tasks that nothing can ask for anymore
+        self._local_paths = {}  # (number of a record, sandbox path) -> local path of a file its task wrote
+        self._results = {}  # number of a record -> local path of its task's result file
         self._seconds = 0.0
         self._keep_paths = set()
         self._pickler = _Pickler()
@@ -1439,11 +1545,20 @@ class LocalExecutor(_Runner):
     def closed(self):
         return self._closed
 
+    port = None
+    name = None
+
     def close(self):
+        self._close(not self._keep_paths)
+
+    def discard(self):
+        self._close(True)
+
+    def _close(self, remove_all):
         if self._closed:
             return
         self._closed = True
-        _remove_run_data(self._run_dir, self._keep_paths, not self._keep_paths)
+        _remove_run_data(self._run_dir, self._keep_paths, remove_all)
         if self._created_output_root:
             # Removes it only when empty, and it may be gone already, such as a temporary directory removed at exit.
             try:
@@ -1452,64 +1567,90 @@ class LocalExecutor(_Runner):
                 pass
 
     def set_params(self, params):
-        """Check settings as a Worker run does. A local run has no Manager, so it applies none of them."""
-        for setting, value in params.items():
-            if setting in EXECUTOR_SETTINGS:
-                problem = capi.vine_graph_executor_check_setting(setting, str(value))
-                if problem:
-                    raise ValueError(f"invalid value {value!r} for {setting}: {problem}")
-            else:
-                _manager_setting(setting, value)
-
-    def check_task(self, task):
-        for name in task._hoisted or ():
-            if name not in self._hoisted:
-                raise KeyError(f"no hoisted object named {name!r}; give it to Graph.run(hoist={{...}})")
-        for ref in task._reads or ():
-            if isinstance(ref, File):
-                _check_input_file(ref.path)
+        """Check settings as a runner on Workers does. A local runner has no Manager, so it applies none of them."""
+        _check_params(params)
 
     def first_submission(self):
         return contextlib.nullcontext()
 
-    def submit(self, task):
+    def submit(self, task, keep):
         if self._closed:
-            raise RuntimeError("the runner of this Graph was closed")
-        self.check_task(task)
+            raise RuntimeError("the Executor was closed")
+        _check_task(task, self._shared)
         record = self._new_record(task)
-        # The function and its arguments are serialized as a Worker run serializes them, so one that cannot be
+        # The function and its arguments are serialized as a runner on Workers serializes them, so one that cannot be
         # serialized fails alike.
         if not record.command:
             self._pickler.dumps(task._func)
             self._pickler.dumps((task._args, task._kwargs))
-        self._queue.append(record)
+        self._queue.append((record, task))
         return record
 
     def cancel(self, records):
         """Report submitted tasks that did not run as cancelled, which keeps them from running."""
         for record in records:
             if record.finished is None:
-                record.finished = (_FAILED, record.key, "it was cancelled", "cancelled", None)
+                record.finished = (_FAILED, record, "it was cancelled", "cancelled", None)
                 self._events.append((record, record.finished))
 
     def abandon(self, records):
         for record in records:
-            record.abandoned = True
+            self._forget(record)
+
+    def pin(self, record):
+        """A local runner keeps every result while its record exists."""
+
+    def unpin(self, record):
+        """A local runner keeps every result while its record exists."""
+
+    def hold(self, record, path=None):
+        """A local runner reads results where its tasks wrote them."""
+
+    def _forget(self, record):
+        """Let go of a record that nothing can ask for anymore, and remove what its task wrote unless a path of it was
+        given out."""
+        if record.abandoned:
+            return
+        record.abandoned = True
+        result = self._results.pop(record.number, None)
+        paths = [self._local_paths.pop((record.number, path), None) for path in record.outputs]
+        if result is None or any(path in self._keep_paths for path in paths):
+            return
+        if not record.command:
+            try:
+                os.unlink(result)
+            except OSError:
+                pass
+        shutil.rmtree(os.path.join(self._run_dir, ".tasks", f"task-{record.number}"), ignore_errors=True)
+
+    def wait_events(self, timeout):
+        """A local runner makes progress only when it is asked for events."""
+
+    def pending(self):
+        return bool(self._queue)
+
+    def drain(self):
+        """Run every task that was submitted and did not run."""
+        while self._queue:
+            self.take_events()
 
     def take_events(self, timeout=0):
         """Return what finished, running the next submitted task when nothing else did."""
+        if self._closed:
+            raise RuntimeError("the Executor was closed")
+        dropped = self._dropped
+        while dropped:
+            self._forget(dropped.popleft())
         if not self._events:
             while self._queue:
-                record = self._queue.popleft()
+                record, task = self._queue.popleft()
                 if record.finished is None and not record.abandoned:
-                    self._run(record)
+                    self._run(record, task)
                     break
         events, self._events = self._events, []
         return events
 
-    def _run(self, record):
-        graph = self._graph()
-        task = graph._tasks[record.key]
+    def _run(self, record, task):
         for parent in task._parents:
             entry = parent._record.finished if parent._record is not None else None
             if entry is not None and entry[0] == _FAILED:
@@ -1535,69 +1676,68 @@ class LocalExecutor(_Runner):
     def _run_function(self, task, record, task_dir):
         func, args, kwargs = task._func, task._args, task._kwargs
         serialized = self._pickler.dumps((args, kwargs))
-        graph = task._graph
-        texts = {parent.key for parent in task._results or () if parent._record.command}
+        sources = {ref: parent._record for ref, parent in _references(task).items()} if task._parents else {}
 
         def load_parent(ref):
-            path = self._results[ref[1]]
-            return _read_text(path) if ref[1] in texts else library.load_result(path)
+            source = sources[ref]
+            path = self._results[source.number]
+            return _read_text(path) if source.command else library.load_result(path)
 
         def file_path(identity):
             if identity[0] == "input":
                 return identity[1]
-            return self._local_paths[(identity[2], identity[3])]
+            return self._local_paths[(sources[(identity[1], identity[2])].number, identity[3])]
 
-        # The working directory belongs to the process, so local tasks of every Graph and thread run one at a time.
+        # The working directory belongs to the process, so local tasks of every Executor and thread run one at a time.
         with _LOCAL_TASKS:
             previous_cwd = os.getcwd()
             os.chdir(task_dir)
             try:
                 args, kwargs = cloudpickle.loads(serialized)
                 output = library.run_task(func, args, kwargs, load_parent, file_path,
-                                          lambda name: cloudpickle.loads(self._hoisted[name]), task._selections or ())
+                                          lambda name: cloudpickle.loads(self._shared[name]), task._selections or ())
                 for task_path in record.outputs:
                     local_path = os.path.abspath(os.path.join(task_dir, task_path))
                     if not os.path.exists(local_path):
                         raise FileNotFoundError(f"task {record.label} did not write its output file {task_path!r}")
-                    self._local_paths[(record.key, task_path)] = local_path
+                    self._local_paths[(record.number, task_path)] = local_path
                 result_path = os.path.join(self._run_dir, f"result-{record.number}")
                 library.save_result(result_path, output)
-                self._results[record.key] = result_path
+                self._results[record.number] = result_path
                 return _COMPLETED_ENTRY
             except KeyboardInterrupt:
                 raise
             except BaseException as error:
                 # As on a Worker, anything else the function raises, including an exit, fails the task.
-                return (_FAILED, record.key, library.failure_report(error, __file__, library.__file__), "function", None)
+                return (_FAILED, record, library.failure_report(error, __file__, library.__file__), "function", None)
             finally:
                 os.chdir(previous_cwd)
-                del graph
 
     def _run_command(self, task, record, task_dir):
         line, results, files = self._command_line(task, shlex.quote(sys.executable))
         for path, parent in results:
-            os.symlink(self._results[parent.key], os.path.join(task_dir, path))
-        for identity, path in files:
-            source = identity[1] if identity[0] == "input" else self._local_paths[(identity[2], identity[3])]
-            os.symlink(source, os.path.join(task_dir, path))
+            os.symlink(self._results[parent.number], os.path.join(task_dir, path))
+        for identity, path, source in files:
+            local = identity[1] if source is None else self._local_paths[(source.number, identity[3])]
+            os.symlink(local, os.path.join(task_dir, path))
         # A Worker tells a command the cores it requested in CORES.
         process = subprocess.run(["/bin/sh", "-c", line], cwd=task_dir, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                  env=dict(os.environ, CORES=str(task._func.cores)))
         if process.returncode != 0:
             error = process.stderr.decode("utf-8", "replace")
-            return (_FAILED, record.key, f"its command exited with status {process.returncode}:\n{error}", "function",
+            return (_FAILED, record, f"its command exited with status {process.returncode}:\n{error}", "function",
                     process.returncode)
         for task_path in record.outputs:
-            self._local_paths[(record.key, task_path)] = os.path.abspath(os.path.join(task_dir, task_path))
-        self._results[record.key] = os.path.join(task_dir, library.RESULT)
+            self._local_paths[(record.number, task_path)] = os.path.abspath(os.path.join(task_dir, task_path))
+        self._results[record.number] = os.path.join(task_dir, library.RESULT)
         return _COMPLETED_ENTRY
 
-    def result(self, record):
-        return _load_result(record, self._results[record.key])
+    def result(self, record, timeout=None):
+        return _load_result(record, self._results[record.number])
 
     def file_bytes(self, record, path, limit):
-        local = self._local_paths[(record.key, path)]
+        local = self._local_paths[(record.number, path)]
         if os.path.isdir(local):
             raise IsADirectoryError(errno.EISDIR, "the task wrote a directory, which has no content", path)
         if os.path.getsize(local) > limit:
@@ -1606,7 +1746,7 @@ class LocalExecutor(_Runner):
             return stream.read()
 
     def file_path(self, record, path):
-        local = self._local_paths[(record.key, path)]
+        local = self._local_paths[(record.number, path)]
         self._keep_paths.add(local)
         return local
 
@@ -1617,73 +1757,405 @@ class LocalExecutor(_Runner):
         return {"makespan": self._seconds, "recovery_tasks": 0, "durability": None}
 
 
-# Settings of Graph.run() that choose its runner. A later run of the same Graph keeps the runner of its first run, so it
-# takes them only unchanged.
+# What Executor.capacity() returns.
+Capacity = collections.namedtuple("Capacity", ("workers", "cores"))
 
 
-_RUNNER_SETTINGS = ("local", "port", "name", "output_dir", "library_modules", "library_files", "hoist", "edata_cache")
+class Executor:
+    """Where tasks run: TaskVine Workers that connect to port, or to the Manager named name through the catalog, or,
+    with local=True, this process, one task at a time and with the same semantics, for debugging without Workers.
 
+    run(graph) runs a Graph and returns the results of its sinks. submit(func, *args) starts one task at once and
+    returns its Task, whose result() waits for it, for programs that look at a result and then decide what to run. One
+    Executor runs any number of Graphs and submitted tasks on its Workers. Use it in a with statement, or close() it:
 
-def _same_setting(first, second):
-    if first is second:
-        return True
-    try:
-        return bool(first == second)
-    except Exception:
-        return False
+        with vg.Executor(port=9123) as executor:
+            results = executor.run(graph)
+            task = executor.submit(load, "more.root")
+            if task.result() > 0:
+                executor.submit(fit, task)
 
+    Python tasks run in a TaskVine library on the Workers, and commands as standard TaskVine tasks. The library imports
+    library_modules when it starts and loads shared, a dictionary from names to objects that tasks take as
+    vg.Shared(name). library_files maps local paths to names in the library sandbox. progress draws a progress bar
+    while a Graph runs. output_dir holds the directory of the file paths that TaskFile.path returns, which stay after
+    the Executor closed. params holds settings by name, applied once: those of the graph executor (EXECUTOR_SETTINGS),
+    edata-cache, a budget in bytes of function and argument objects of the first submission that the library loads
+    when it starts, and every other name as TaskVine Manager tuning. Other keyword arguments go to the TaskVine Manager.
 
-def run_graph(graph, local, progress, params, settings, manager_options):
-    """Run a Graph until nothing runs and no rule is due, and return {sink: result} of its completed sinks."""
-    if graph._run is not None:
-        raise RuntimeError("the Graph is already running; a rule may add tasks, cancel them, or stop the run")
-    settings = dict(settings, local=bool(local), **{f"manager:{key}": value for key, value in manager_options.items()})
-    # A bad setting raises before a first run starts a Manager for it.
-    _check_params(params or {})
-    runner = graph._runner
-    if runner is not None and runner.closed and not any(task._record is not None for task in graph._tasks.values()):
-        # A runner closed before any task was submitted held nothing, so a new one may take other settings.
-        runner = graph._runner = None
-    if runner is not None:
-        first = graph._settings
-        for name in set(first) | set(settings):
-            if not _same_setting(first.get(name), settings.get(name)):
-                raise ValueError(f"a Graph runs where its first run did, and {name.split(':')[-1]} differs; build a "
-                                 f"new Graph for other settings")
-        if runner.closed:
-            raise RuntimeError("the runner of this Graph was closed, as when another Graph ran on its port, so the "
-                               "results of its completed tasks are gone; build a new Graph to run them again")
-    else:
-        options = {name: settings[name] for name in _RUNNER_SETTINGS if name != "local" and name in settings}
+    Results. The result of a task that can still be asked for without a new task is kept: a sink of a Graph, a
+    submitted task that no submitted task reads yet, and every result or file that was read here. Other results are
+    released once the tasks that read them are safe, and one of them that is asked for after all, by result(), by a
+    file, or by a task added or submitted later, is computed again, which the caller does not see. A submitted task is
+    let go when nothing refers to its Task anymore, and the tasks of a Graph when the Graph is collected."""
+
+    def __init__(self, port=cvine.VINE_DEFAULT_PORT, name=None, *, local=False, progress=True, shared=None, params=None,
+                 library_modules=(), library_files=None, output_dir="./outputs", **manager_options):
+        self._runner = None
+        params = dict(params or {})
+        # A bad setting raises before a Manager starts for it.
+        _check_params(params)
+        edata_cache = params.pop(EDATA_CACHE, 0)
+        self._progress = bool(progress)
+        self._local = bool(local)
+        # Held while what finished is applied to Tasks and while a rule runs, so task states change in one thread at a
+        # time and never under a rule.
+        self._lock = _Lock()
+        self._run = None  # the _Run in progress
+        self._last_call = 0  # the key of the last submitted task
         if local:
-            runner = LocalExecutor(graph, **options)
+            # A local runner has no Manager, so it takes only what it uses.
+            runner = _Local(output_dir=output_dir, shared=shared)
         else:
-            runner = Executor(graph, **options, **manager_options)
-        graph._runner = runner
-        graph._settings = settings
-        # The Graph keeps its runner between runs, and its collection closes the runner, which holds the Graph weakly.
-        weakref.finalize(graph, runner.close)
-    runner.set_params(params or {})
-    run = _Run(graph, runner, progress)
-    graph._run = run
-    try:
-        return run.execute()
-    finally:
-        graph._run = None
+            runner = _Workers(port, name, output_dir=output_dir, library_modules=library_modules,
+                              library_files=library_files, shared=shared, edata_cache=edata_cache, **manager_options)
+        try:
+            runner.set_params(params)
+        except BaseException:
+            runner.discard()
+            raise
+        self._calls = _Calls(self, runner._dropped)
+        self._runner = runner
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        runner = self._runner
+        if exc_type is not None:
+            # A block that raised discards its results.
+            runner.discard()
+            return
+        try:
+            # Submitted tasks that still run finish first, as the tasks of a Graph do before run() returns.
+            if not runner.closed:
+                try:
+                    with self._lock:
+                        runner.drain()
+                        self._apply(runner.take_events())
+                except RuntimeError:
+                    pass
+        finally:
+            runner.close()
+
+    def __del__(self):
+        runner = self._runner
+        if runner is not None:
+            try:
+                runner.close()
+            except Exception:
+                pass
+
+    def __repr__(self):
+        runner = self._runner
+        if runner.closed:
+            return "Executor(closed)"
+        return "Executor(local)" if self._local else f"Executor(port={runner.port})"
+
+    def close(self):
+        """Cancel the tasks that did not finish and release the Workers and every task result. File paths that
+        TaskFile.path returned stay in output_dir. Leaving a with block without an exception first waits for the
+        submitted tasks that still run, and leaving it with one discards those file paths too. Closing a closed
+        Executor does nothing."""
+        self._runner.close()
+
+    @property
+    def port(self):
+        """The port Workers connect to, or None for a local or closed Executor."""
+        return self._runner.port
+
+    @property
+    def name(self):
+        """The name of the Manager in the catalog, or None."""
+        return self._runner.name
+
+    def capacity(self):
+        """Return the Workers connected and their cores, as a tuple with the fields workers and cores, read about once
+        a second. A local Executor has one of each."""
+        self._check_open()
+        return Capacity(*self._runner.capacity())
+
+    def _check_open(self):
+        if self._runner.closed:
+            raise RuntimeError("the Executor was closed, as when another Executor took its port")
+
+    # Graphs.
+
+    def run(self, graph):
+        """Run the tasks of a Graph that did not finish, and the tasks that its rules add, until no task runs and no
+        rule is due, and return {sink: result} of the completed tasks that no task reads. A failure raises the
+        TaskError of a task that failed on its own, after the other tasks finished, and a rule that raises fails the
+        run with an error that names the rule and the task. A Graph runs on one Executor, which holds its results, any
+        number of times, and an Executor runs one Graph at a time."""
+        if not isinstance(graph, Graph) or isinstance(graph, _Calls):
+            raise TypeError("run() takes a Graph")
+        self._check_open()
+        if graph._run is not None:
+            raise RuntimeError("the Graph is already running; a rule may add tasks, cancel them, or stop the run")
+        if self._run is not None:
+            raise RuntimeError("the Executor is already running a Graph, and runs one at a time; submit() starts "
+                               "single tasks meanwhile")
+        bound = graph._executor
+        if bound is not self:
+            if bound is not None and graph._records:
+                if bound._runner.closed:
+                    raise RuntimeError("the Executor that ran this Graph was closed, so the results of its completed "
+                                       "tasks are gone; build a new Graph to run them again")
+                raise ValueError("this Graph ran on another Executor, which holds the results of its tasks; a Graph "
+                                 "runs on one Executor")
+            # The Executor lets the records of the Graph go when the Graph is collected. The call holds the list of
+            # the records and the runner's queue, not the Graph.
+            graph._records = []
+            graph._executor = self
+            weakref.finalize(graph, self._runner._dropped.extend, graph._records).atexit = False
+        run = _Run(self, graph, self._progress)
+        graph._run = self._run = run
+        try:
+            return run.execute()
+        finally:
+            graph._run = self._run = None
+
+    # Single tasks.
+
+    def submit(self, func, /, *args, **kwargs):
+        """Start a task that calls func with these arguments, or runs a Command with values for its placeholders, and
+        return its Task at once. Files, and Tasks that this Executor started or ran, with their selections and files,
+        may appear anywhere inside the arguments of a function. task.result() waits for the task and returns its
+        result. A task that cannot start, as when an argument cannot be serialized, fails, and its result() raises."""
+        self._check_open()
+        with self._lock:
+            self._last_call += 1
+            task = self._calls._add(self._last_call, func, args, kwargs)
+            with self._runner.first_submission():
+                self._start(task, None)
+            if self._local and not self._in_rule():
+                # A local task runs when it is submitted, after the submitted tasks that waited for a rule to return.
+                while task._state == _RUNNING and self._runner.pending():
+                    self._apply(self._runner.take_events())
+        return task
+
+    def _in_rule(self):
+        """Whether the calling thread is inside a rule, where task states must not change."""
+        run = self._run
+        return run is not None and run.in_rule and threading.current_thread() is run.thread
+
+    def _start(self, task, run):
+        """Submit a task after the tasks it reads, and record why its result is kept. A task whose parent failed or was
+        cancelled fails or is cancelled at once without running, and so does one that cannot be submitted. Called with
+        the lock held."""
+        if task._state != _NEW:
+            return
+        parent = next((parent for parent in task._parents if parent._state >= _FAILED), None)
+        if parent is not None:
+            if parent._state == _CANCELLED:
+                task._state = _CANCELLED
+            else:
+                task._state = _FAILED
+                task._error = (_FAILED, parent._error[1] or parent, None, parent._error[3], None)
+                if run is not None:
+                    run.failed.append(task)
+            if run is not None:
+                run.count_finished()
+            return
+        graph = task._graph
+        rules = run is not None and graph._has_rules(task)
+        # A result that may be asked for without a new task is pinned from the start: nothing reads it yet, a rule gets
+        # its task, or its task writes a file that no task reads. Any other result is left to the release rule, and is
+        # computed again when it is asked for after all.
+        keep = 0 if task._readers else _SINK
+        if rules:
+            keep |= _RULE
+        if task._outputs and _writes_unread_file(task):
+            keep |= _FINAL
+        try:
+            record = self._runner.submit(task, keep)
+        except KeyboardInterrupt:
+            raise
+        except Exception as error:
+            # The task cannot run, such as when an argument cannot be serialized, and its readers fail with it.
+            message = "".join(traceback.format_exception_only(error)).strip()
+            task._state = _FAILED
+            task._error = (_FAILED, None, f"it could not be submitted: {message}", "submit", None)
+            if run is not None:
+                run.failed.append(task)
+                run.count_finished()
+            return
+        task._record = record
+        task._state = _RUNNING
+        task._rule_pending = rules
+        if run is not None:
+            graph._records.append(record)
+            run.running.add(task)
+        # A task that now has a reader is no sink anymore, and the release rule waits for its reader.
+        for parent in task._parents:
+            source = parent._record
+            if source is not None and source.keep & _SINK:
+                source.keep &= ~_SINK
+                if not source.keep:
+                    self._runner.unpin(source)
+
+    def _rules_ran(self, task):
+        """Take back the pin that kept the result of a task for its rules, unless the task is still a sink."""
+        record = task._record
+        if record is None or not record.keep & _RULE:
+            return
+        keep = record.keep & ~_RULE
+        if not keep and not any(reader._record is not None for reader in _readers_of(task)):
+            keep = _SINK
+        record.keep = keep
+        if not keep:
+            self._runner.unpin(record)
+
+    # What finished.
+
+    def _apply(self, events):
+        """Apply what finished to the Tasks: set their states, tell the run of their Graph, and queue the rules of
+        those that completed. Called with the lock held, and never inside a rule."""
+        calls = self._calls
+        for record, entry in events:
+            if record.abandoned:
+                continue
+            graph = record.graph()
+            if graph is None:
+                continue
+            task = graph._tasks.get(record.key)
+            if task is None or task._record is not record or task._state != _RUNNING:
+                # A task that was cancelled stays cancelled whatever its submission did.
+                continue
+            run = graph._run
+            if run is not None:
+                run.running.discard(task)
+            if entry[0] == _FAILED and entry[3] == "cancelled":
+                if graph is calls:
+                    # A submitted task that reads a cancelled task is cancelled with it.
+                    task._state = _CANCELLED
+                    continue
+                # A task of a Graph that was cancelled ignores its events, so this is the cancel of a stop that an
+                # interrupt cut short, of the task or of a task it reads: it starts again.
+                self._reset([task])
+                if run is not None:
+                    run.resubmit = True
+                continue
+            if entry[0] == _COMPLETED:
+                task._state = _COMPLETED
+                if task._rule_pending:
+                    graph._due.append(task)
+            else:
+                source = entry[1]
+                task._state = _FAILED
+                task._error = (_FAILED, None if source is record else _task_of(source), entry[2], entry[3], entry[4])
+                if run is not None:
+                    run.failed.append(task)
+            if run is not None:
+                run.count_finished()
+
+    def _reset(self, tasks):
+        """Return stopped tasks to not-started and let go of their submissions."""
+        records = []
+        for task in tasks:
+            records.append(task._record)
+            task._state = _NEW
+            task._record = None
+            task._rule_pending = False
+        if records:
+            self._runner.abandon(records)
+
+    def _poll(self):
+        """Apply what finished, without waiting, for a caller that asks how far a submitted task is."""
+        if self._runner.closed or self._in_rule():
+            return
+        try:
+            with self._lock:
+                self._apply(self._runner.take_events())
+        except RuntimeError:
+            # A run that stopped as a whole finishes nothing more, which result() reports.
+            pass
+
+    def _wait(self, task, deadline):
+        """Wait until a submitted task finished, applying what finishes meanwhile."""
+        if self._in_rule():
+            raise RuntimeError(f"{task!r} is still running, and a rule cannot wait for a task: task states do not "
+                               f"change while a rule runs")
+        runner = self._runner
+        while True:
+            with self._lock:
+                self._apply(runner.take_events())
+            if task._state != _RUNNING:
+                return
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError(f"{task!r} did not finish in time")
+            runner.wait_events(0.5 if remaining is None else min(remaining, 0.5))
+
+    def _cancel_call(self, task):
+        """Cancel a submitted task that did not finish. C cancels the submitted tasks that read it, which report it."""
+        self._poll()
+        with self._lock:
+            if task._state == _RUNNING:
+                task._state = _CANCELLED
+                self._runner.cancel([task._record])
+
+    # Results.
+
+    def _completed_record(self, task, deadline):
+        """Return the record of a completed task, waiting for a submitted task that still runs, or raise why the task
+        has no result."""
+        if task._state == _RUNNING and task._graph is self._calls:
+            self._wait(task, deadline)
+        if task._state == _FAILED:
+            raise task_error(task)
+        if task._state != _COMPLETED:
+            if task._state == _CANCELLED:
+                raise RuntimeError(f"{task!r} was cancelled, so it has no result")
+            raise RuntimeError(f"{task!r} did not complete, so it has no result; Executor.run() runs its Graph")
+        self._check_open()
+        return task._record
+
+    def _result(self, task, timeout):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        record = self._completed_record(task, deadline)
+        try:
+            return self._runner.result(record, None if deadline is None else max(deadline - time.monotonic(), 0))
+        except TaskError as error:
+            if error.task is None:
+                error.task = error.source = task
+            raise
+
+    def _file(self, file, what):
+        task = file.task
+        record = self._completed_record(task, None)
+        if file.name not in record.outputs:
+            raise ValueError(f"the file {file.name!r} of {task!r} was asked for after the task started; ask for its "
+                             f"files before it starts, as when it is added to its Graph")
+        try:
+            if what == "path":
+                return self._runner.file_path(record, file.name)
+            return self._runner.file_bytes(record, file.name, CONTENT_LIMIT)
+        except TaskError as error:
+            if error.task is None:
+                error.task = error.source = task
+            raise
+
+
+def _writes_unread_file(task):
+    """Return whether a task declared a file that no task of its Graph reads, which only the caller can ask for."""
+    read = set()
+    key = task.key
+    for reader in _readers_of(task):
+        for ref in reader._reads or ():
+            if type(ref) is _FileRef and ref.graph_id is None and ref.key == key:
+                read.add(ref.path)
+    return len(read) < len(task._outputs)
 
 
 class _Run:
-    """One call of Graph.run(). Its thread submits tasks, applies what finished, and calls rules, and only rules called
-    in that thread may add tasks, cancel them, or stop the run.
+    """One call of Executor.run(). Its thread submits the tasks of its Graph, applies what finished, and calls rules,
+    and only rules called in that thread may add tasks, cancel them, or stop the run."""
 
-    Results. A Graph keeps the result of every completed task while it lives, because a rule or a later run may add a
-    reader of any task, which must not recompute it. The C executor runs with release-outputs 0, so its release rule
-    frees nothing, and the checkpoint cut still decides which large outputs the vault anchors. A result is pinned only
-    once it is read (hold())."""
-
-    def __init__(self, graph, runner, progress):
+    def __init__(self, executor, graph, progress):
+        self.executor = executor
+        self.runner = executor._runner
         self.graph = graph
-        self.runner = runner
         self.thread = threading.current_thread()
         self.in_rule = False
         self.added = []  # tasks that the current rule added, submitted once it returns
@@ -1711,7 +2183,7 @@ class _Run:
         if self.finished:
             capi.progress_bar_update_part(self.bar, self.part, self.finished)
 
-    def _count_finished(self, count=1):
+    def count_finished(self, count=1):
         self.finished += count
         if self.bar is not None:
             capi.progress_bar_update_part(self.bar, self.part, count)
@@ -1733,49 +2205,58 @@ class _Run:
 
     def execute(self):
         graph = self.graph
+        executor = self.executor
+        runner = self.runner
+        lock = executor._lock
         self._start_bar()
         interrupted = None
         try:
-            # An interrupt inside the stop of an earlier run may have left tasks running. The stop finishes first, so
-            # no new task reads a task whose cancel is on its way, and tasks it did not reach are waited for.
-            stale = []
-            for task in graph._tasks.values():
-                if task._state == _RUNNING:
-                    if task._record is None:
-                        task._state = _NEW
-                    elif task._record.stopping:
-                        stale.append(task)
-                    else:
-                        self.running.add(task)
-            if stale:
-                waiting, self.running = self.running, set(stale)
-                self._stop()
-                self.running = waiting
-            with self.runner.first_submission():
-                self._submit([task for task in graph._tasks.values() if task._state == _NEW])
+            with lock:
+                # An interrupt inside the stop of an earlier run may have left tasks running. The stop finishes first,
+                # so no new task reads a task whose cancel is on its way, and tasks it did not reach are waited for.
+                stale = []
+                for task in graph._tasks.values():
+                    if task._state == _RUNNING:
+                        if task._record is None:
+                            task._state = _NEW
+                        elif task._record.stopping:
+                            stale.append(task)
+                        else:
+                            self.running.add(task)
+                if stale:
+                    waiting, self.running = self.running, set(stale)
+                    self._stop()
+                    self.running = waiting
+                with runner.first_submission():
+                    self._submit([task for task in graph._tasks.values() if task._state == _NEW])
             due = graph._due
             while True:
-                # A local run executes a task when asked for events, so a stop is noticed first.
-                if self.stop_requested:
-                    break
-                self._apply(self.runner.take_events())
-                if self.resubmit:
-                    # Tasks that a cancel of an interrupted stop reached start again, after the tasks they read.
-                    self.resubmit = False
-                    self._submit([task for task in graph._tasks.values() if task._state == _NEW])
-                if due:
-                    self._call_rules(due.popleft())
-                    continue
-                if not self.running:
-                    break
-                self._apply(self.runner.take_events(0.5))
+                with lock:
+                    # A local runner executes a task when asked for events, so a stop is noticed first.
+                    if self.stop_requested:
+                        break
+                    executor._apply(runner.take_events())
+                    if self.resubmit:
+                        # Tasks that a cancel of an interrupted stop reached start again, after the tasks they read.
+                        self.resubmit = False
+                        self._submit([task for task in graph._tasks.values() if task._state == _NEW])
+                    if due:
+                        self._call_rules(due.popleft())
+                        continue
+                    if not self.running:
+                        break
+                    if runner.pending():
+                        continue
+                # Other threads apply what finishes for the tasks they submitted while this one waits.
+                runner.wait_events(0.5)
         except KeyboardInterrupt as error:
             interrupted = error
         finally:
             try:
                 if self.running:
                     # A stop, a rule that raised, or an interrupt returns unfinished tasks to not-started.
-                    self._stop()
+                    with lock:
+                        self._stop()
             finally:
                 self._finish_bar()
         if interrupted is not None:
@@ -1788,79 +2269,17 @@ class _Run:
         # returns its results.
         failed = self.failed
         if failed:
-            source = next((task for task in failed if task._error[1] == task.key), failed[0])
-            raise source.error
+            raise task_error(next((task for task in failed if task._error[1] is None), failed[0]))
         sinks = [task for task in graph._tasks.values() if task._state == _COMPLETED and not task._readers]
-        if isinstance(self.runner, Executor):
-            for task in sinks:
-                self.runner.hold(task._record)
-        return {task: task.result for task in sinks}
+        for task in sinks:
+            runner.hold(task._record)
+        return {task: executor._result(task, None) for task in sinks}
 
     def _submit(self, tasks):
-        """Submit tasks in the order given, each after the tasks it reads. A task whose parent failed or was cancelled
-        fails or is cancelled at once without running."""
-        runner = self.runner
+        """Submit tasks in the order given, each after the tasks it reads."""
+        start = self.executor._start
         for task in tasks:
-            if task._state != _NEW:
-                continue
-            parent = next((parent for parent in task._parents if parent._state >= _FAILED), None)
-            if parent is not None:
-                if parent._state == _CANCELLED:
-                    self._cancel_new(task)
-                else:
-                    self._fail_new(task, (_FAILED, parent._error[1], None, parent._error[3], None))
-                continue
-            try:
-                record = runner.submit(task)
-            except KeyboardInterrupt:
-                raise
-            except Exception as error:
-                # The task cannot run, such as when an argument cannot be serialized, and its readers fail with it.
-                message = "".join(traceback.format_exception_only(error)).strip()
-                self._fail_new(task, (_FAILED, task.key, f"it could not be submitted: {message}", "submit", None))
-                continue
-            task._record = record
-            task._state = _RUNNING
-            task._rule_pending = self.graph._has_rules(task)
-            self.running.add(task)
-
-    def _fail_new(self, task, entry):
-        task._state = _FAILED
-        task._error = entry
-        self.failed.append(task)
-        self._count_finished()
-
-    def _cancel_new(self, task):
-        task._state = _CANCELLED
-        self._count_finished()
-
-    def _apply(self, events):
-        """Apply what finished: set the states of the tasks, and queue the rules of those that completed."""
-        graph = self.graph
-        for record, entry in events:
-            if record.abandoned:
-                continue
-            task = graph._tasks.get(record.key)
-            if task is None or task._record is not record or task._state != _RUNNING:
-                # A task that the user cancelled stays cancelled whatever its submission did.
-                continue
-            self.running.discard(task)
-            if entry[0] == _FAILED and entry[3] == "cancelled":
-                # A task the user cancelled ignores its events, so this is the cancel of a stop that an interrupt cut
-                # short, of the task or of a task it reads: it starts again.
-                self._reset([task])
-                self.resubmit = True
-                continue
-            if entry[0] == _COMPLETED:
-                task._state = _COMPLETED
-                self._count_finished()
-                if task._rule_pending:
-                    graph._due.append(task)
-            else:
-                task._state = _FAILED
-                task._error = entry
-                self.failed.append(task)
-                self._count_finished()
+            start(task, self)
 
     def _call_rules(self, task):
         graph = self.graph
@@ -1885,6 +2304,7 @@ class _Run:
                     break
         finally:
             task._rule_pending = False
+            self.executor._rules_ran(task)
 
     # Changes that rules make.
 
@@ -1895,28 +2315,37 @@ class _Run:
         while stack:
             task = stack.pop()
             if task._state == _NEW:
-                self._cancel_new(task)
+                task._state = _CANCELLED
             elif task._state == _RUNNING:
                 task._state = _CANCELLED
                 self.running.discard(task)
                 cancelled.append(task._record)
-                self._count_finished()
             else:
                 continue
+            self.count_finished()
             stack.extend(_readers_of(task))
         if cancelled:
             self.runner.cancel(cancelled)
 
     def _stop(self):
         """Cancel the running tasks and return them to not-started, so a later run continues them. Tasks that
-        completed or failed before the cancel arrived keep that outcome."""
+        completed or failed before the cancel arrived keep that outcome. Called with the lock held."""
         records = []
+        runner = self.runner
         for task in self.running:
             task._record.stopping = True
             records.append(task._record)
-        self.runner.cancel(records)
+            # A cancelled reader no longer holds back the release of what it read, and the run that continues reads it
+            # again, so the completed tasks that a stopped task reads are sinks until it is submitted again.
+            for parent in task._parents:
+                source = parent._record
+                if parent._state == _COMPLETED and source is not None and not source.keep & _SINK:
+                    if not source.keep:
+                        runner.pin(source)
+                    source.keep |= _SINK
+        runner.cancel(records)
         stopping = set(self.running)
-        graph = self.graph
+        executor = self.executor
         reset = []
         while stopping:
             try:
@@ -1929,35 +2358,22 @@ class _Run:
                         reset.append(task)
                 break
             for record, entry in events:
-                if record.abandoned:
-                    continue
-                task = graph._tasks.get(record.key)
-                if task is None or task._record is not record or task._state != _RUNNING:
-                    continue
-                stopping.discard(task)
-                if record.stopping and entry[0] == _FAILED and entry[3] == "cancelled":
-                    reset.append(task)
-                else:
-                    self._apply(((record, entry),))
+                task = None if record.abandoned else _task_of(record)
+                if task is not None and task in stopping and task._record is record and task._state == _RUNNING:
+                    stopping.discard(task)
+                    if record.stopping and entry[0] == _FAILED and entry[3] == "cancelled":
+                        reset.append(task)
+                        continue
+                # Anything else finished on its own, among it the tasks of other Graphs and submitted tasks.
+                executor._apply(((record, entry),))
         self.running.clear()
-        self._reset(reset)
-
-    def _reset(self, tasks):
-        """Return stopped tasks to not-started and let go of their submissions."""
-        records = []
-        for task in tasks:
-            records.append(task._record)
-            task._state = _NEW
-            task._record = None
-            task._rule_pending = False
-        if records:
-            self.runner.abandon(records)
+        executor._reset(reset)
 
 
-def task_error(graph, task):
+def task_error(task):
     """Return the TaskError of a failed task, which names the task whose own failure explains it."""
     entry = task._error
-    source = graph._tasks.get(entry[1], task)
+    source = entry[1] or task
     source_entry = source._error if source._error is not None else entry
     message, reason, exit_code = source_entry[2], source_entry[3], source_entry[4]
     message, exception = library.load_failure(message or "")
@@ -1987,20 +2403,6 @@ def _lost(record):
     """Return whether C reported a submitted task as failed, such as a completed one whose output cannot be recreated."""
     finished = record.finished
     return finished is not None and finished[0] == _FAILED
-
-
-def _label(task):
-    """Return how messages name a task: its key and the name of its function, or the start of its command."""
-    return _name_task(task.key, task._func)
-
-
-def _name_task(key, func):
-    if isinstance(func, Command):
-        words = func.template.split()
-        name = words[0] if words else "command"
-    else:
-        name = getattr(func, "__name__", None) or type(func).__name__
-    return f"Task({key!r}, {name})"
 
 
 def _read_text(path):
@@ -2078,10 +2480,23 @@ def _selections_read_from(task):
     return selections
 
 
+def _check_task(task, shared):
+    """Raise the error that keeps a task from running, such as a shared object that its Executor does not hold."""
+    for name in task._shared or ():
+        if name not in shared:
+            raise KeyError(f"no shared object named {name!r}; give it to the Executor as shared={{...}}")
+    for ref in task._reads or ():
+        if isinstance(ref, File):
+            _check_input_file(ref.path)
+
+
 def _check_params(params):
-    """Raise ValueError for a setting of Graph.run() that set_params() would refuse."""
+    """Raise ValueError for a setting that an Executor would refuse."""
     for setting, value in params.items():
-        if setting in EXECUTOR_SETTINGS:
+        if setting == EDATA_CACHE:
+            if type(value) is not int or value < 0:
+                raise ValueError(f"invalid value {value!r} for {setting}: it takes a number of bytes, zero or more")
+        elif setting in EXECUTOR_SETTINGS:
             problem = capi.vine_graph_executor_check_setting(setting, str(value))
             if problem:
                 raise ValueError(f"invalid value {value!r} for {setting}: {problem}")
@@ -2128,19 +2543,19 @@ def _link_or_copy(source, destination):
         shutil.copyfile(source, destination)
 
 
-def _serialize_hoisted(hoist):
-    """Serialize each hoisted object on its own and return {name: bytes}, so an unpicklable object or a bad name fails
+def _serialize_shared(shared):
+    """Serialize each shared object on its own and return {name: bytes}, so an unpicklable object or a bad name fails
     the Executor before it starts."""
-    if hoist is None:
+    if shared is None:
         return {}
-    if not isinstance(hoist, dict):
-        raise TypeError("hoist takes a dictionary from names to objects")
-    hoisted = {}
-    for name, value in hoist.items():
+    if not isinstance(shared, dict):
+        raise TypeError("shared takes a dictionary from names to objects")
+    serialized = {}
+    for name, value in shared.items():
         if not isinstance(name, str) or not name:
-            raise TypeError("a hoisted object is named by a non-empty string")
-        hoisted[name] = cloudpickle.dumps(value)
-    return hoisted
+            raise TypeError("a shared object is named by a non-empty string")
+        serialized[name] = cloudpickle.dumps(value)
+    return serialized
 
 
 _MAIN_THREAD = threading.main_thread().ident

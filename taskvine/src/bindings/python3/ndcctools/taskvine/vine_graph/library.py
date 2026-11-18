@@ -5,8 +5,9 @@
 """The TaskVine library that runs the Python tasks of a Graph on Workers, and the formats both sides share.
 
 This module is what a Worker's library process runs: prepare() when it starts, and run_node(), the library's only
-function, which every Python task calls without arguments. The runner of a Graph installs the library (install.py) and
-reads what tasks write with the functions here, so the manifest, result, selection, and failure formats live in one place.
+function, which every Python task calls without arguments. The Executor installs the library (install.py) and
+reads what tasks write with the functions here, so the manifest, result, selection, and failure formats live in one
+place.
 
 The task sandbox holds a manifest at MANIFEST with the function and the arguments of the task, small ones serialized
 inside it, larger ones as staged files named by sandbox path, and references to results and files as they are, and the
@@ -20,7 +21,7 @@ The manifest of the task that produces the result may list selections, which run
 own with save_selection(), and a task that reads one of them mounts only that file instead of the whole result.
 
 The library prepares itself once when it starts, in its own process: it imports the modules it was given, then loads
-the hoisted objects from one file, HOISTED, which maps each name to the object serialized on its own, and the cached
+the shared objects from one file, SHARED, which maps each name to the object serialized on its own, and the cached
 edata from another, EDATA_CACHE, which maps sandbox names of staged objects to their serialized bytes. Every task it
 forks inherits all of them, so tasks neither import those modules nor load those objects again, and a task reads a
 cached object instead of the file that its manifest names.
@@ -48,19 +49,19 @@ import cloudpickle
 
 from .. import utils as library_utils
 
-from .graph import File, Hoisted, _Attribute, _Ref, _Symbol, replace_symbols
+from .graph import File, Shared, _Attribute, _Ref, _Symbol, replace_symbols
 
 # Sandbox path of the manifest that describes the task.
 MANIFEST = "vine-graph-node.pkl"
 # Sandbox path where the TaskVine library writes the result of a function call.
 RESULT = "outfile"
-# Library sandbox path of the hoisted objects.
-HOISTED = "vine-graph-hoisted.pkl"
+# Library sandbox path of the shared objects.
+SHARED = "vine-graph-shared.pkl"
 # Library sandbox path of the cached edata.
 EDATA_CACHE = "vine-graph-edata-cache.pkl"
 
-# The hoisted objects of this library process, by name, which forked tasks inherit.
-_hoisted = {}
+# The shared objects of this library process, by name, which forked tasks inherit.
+_shared = {}
 # The cached edata of this library process, by the sandbox name of its staged file, which forked tasks inherit.
 _edata = {}
 
@@ -94,9 +95,9 @@ def runtime_identity():
     return {"python": "%d.%d" % sys.version_info[:2], "cloudpickle": cloudpickle.__version__, "vine_graph library": code}
 
 
-def prepare(module_names, hoisted_path, edata_path=None, manager_identity=None):
+def prepare(module_names, shared_path, edata_path=None, manager_identity=None):
     """Prepare this library process when it starts: check that this Worker can run the Manager's tasks, import the
-    modules, then load the hoisted objects and the cached edata, which may need them. Freezing what was loaded keeps
+    modules, then load the shared objects and the cached edata, which may need them. Freezing what was loaded keeps
     the garbage collector from touching that memory, so forked tasks share it instead of copying it."""
     if manager_identity is not None:
         identity = runtime_identity()
@@ -106,7 +107,7 @@ def prepare(module_names, hoisted_path, edata_path=None, manager_identity=None):
             raise RuntimeError("this Worker's environment does not match the Manager's: " + "; ".join(mismatched))
     for name in module_names:
         importlib.import_module(name)
-    for path, objects in ((hoisted_path, _hoisted), (edata_path, _edata)):
+    for path, objects in ((shared_path, _shared), (edata_path, _edata)):
         if path:
             with open(path, "rb") as stream:
                 blobs = cloudpickle.load(stream)
@@ -367,26 +368,26 @@ def _select(value, steps):
     return value
 
 
-def run_task(func, args, kwargs, load_task_result, file_path, load_hoisted_object, read_once=(), load_selected=None,
+def run_task(func, args, kwargs, load_task_result, file_path, load_shared_object, read_once=(), load_selected=None,
              scan=None):
     """Call func after replacing each reference in its arguments: a task result with load_task_result((graph id,
-    key)), a file with file_path(file_identity(file)), and a hoisted object with load_hoisted_object(name). Other
-    arguments reach func unchanged. A result or hoisted object read twice is one object. A task in read_once is read at
+    key)), a file with file_path(file_identity(file)), and a shared object with load_shared_object(name). Other
+    arguments reach func unchanged. A result or shared object read twice is one object. A task in read_once is read at
     exactly one place, through a selection, and load_selected(task, steps) returns the selected value, by default
     selected from load_task_result(task), so the whole result does not stay in memory while func runs. scan, the
     positions and keywords of the arguments that may hold references, limits the search to them, and None searches
     every argument."""
     results = {}
-    hoisted = {}
+    shared = {}
     if load_selected is None:
         def load_selected(task, steps):
             return _select(load_task_result(task), steps)
 
     def replace(ref):
-        if isinstance(ref, Hoisted):
-            if ref.name not in hoisted:
-                hoisted[ref.name] = load_hoisted_object(ref.name)
-            return hoisted[ref.name]
+        if isinstance(ref, Shared):
+            if ref.name not in shared:
+                shared[ref.name] = load_shared_object(ref.name)
+            return shared[ref.name]
         if isinstance(ref, _Ref):
             task = (ref.graph_id, ref.key)
             if task in read_once:
@@ -512,7 +513,7 @@ def _run_node():
     files = manifest["files"]
     try:
         output = run_task(function, args, kwargs, load_task_result,
-                          lambda identity: os.path.join(sandbox, files[identity]), _hoisted.__getitem__,
+                          lambda identity: os.path.join(sandbox, files[identity]), _shared.__getitem__,
                           manifest["selected"], load_selected, manifest.get("scan"))
     finally:
         os.chdir(sandbox)
