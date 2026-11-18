@@ -13,6 +13,8 @@ import itertools
 import os
 import uuid
 
+from .command import run_command
+
 
 class _Symbol:
     """Base of the objects that stand for data a task reads: task results, selections from them, and files. Task
@@ -23,6 +25,13 @@ class _Symbol:
     def _as_ref(self):
         """Return the lightweight reference stored in task arguments in place of this symbol."""
         raise NotImplementedError
+
+    def _file(self):
+        """Return the File or NodeFile this symbol stands for, or None when it stands for a task result."""
+        return None
+
+    def _is_file(self):
+        return self._file() is not None
 
 
 class File(_Symbol):
@@ -42,6 +51,9 @@ class File(_Symbol):
     def _as_ref(self):
         return self
 
+    def _file(self):
+        return self
+
     def __eq__(self, other):
         return isinstance(other, File) and other.path == self.path
 
@@ -50,6 +62,91 @@ class File(_Symbol):
 
     def __repr__(self):
         return f"File({self.path!r})"
+
+
+class Command:
+    """A command line to run as a task, given to Graph.add() or Executor.submit() in place of a function.
+
+    command is a string, which runs in a shell, or a list of strings, which runs as a program and its arguments.
+
+    inputs maps each path the command reads in its sandbox to where its content comes from: a local path or File, a
+    file another task writes (node.file(path)), or another task, whose result must be text or bytes. A list of
+    local paths, Files, and task files gives each one under its own file name.
+
+    outputs lists the paths the command writes, each then given by node.file(path).
+
+    The result of the task is the standard output of the command, as text. A command that exits with a non-zero
+    status fails its task with a subprocess.CalledProcessError, which carries the status and both output streams."""
+
+    __slots__ = ("command", "inputs", "outputs")
+
+    def __init__(self, command, inputs=(), outputs=()):
+        if isinstance(command, (list, tuple)):
+            command = list(command)
+            if not command or not all(isinstance(word, str) for word in command):
+                raise TypeError("a command list must hold the program and its arguments as strings")
+        elif not isinstance(command, str):
+            raise TypeError("a command must be a string or a list of strings")
+        elif not command.strip():
+            raise ValueError("a command must not be empty")
+        if isinstance(inputs, (str, os.PathLike, _Symbol)):
+            inputs = (inputs,)
+        if not isinstance(inputs, collections.abc.Mapping):
+            inputs = {_input_name(source): source for source in inputs}
+        if isinstance(outputs, (str, os.PathLike)):
+            outputs = (outputs,)
+        self.command = command
+        self.inputs = {_sandbox_path(name, "an input"): _input_source(name, source) for name, source in inputs.items()}
+        self.outputs = tuple(_sandbox_path(path, "an output") for path in outputs)
+
+    def _call(self):
+        """Return the function and arguments of the task that runs this command."""
+        files = {name: source for name, source in self.inputs.items() if source._is_file()}
+        results = {name: source for name, source in self.inputs.items() if not source._is_file()}
+        return run_command, (self.command, files, results)
+
+    def __repr__(self):
+        return f"Command({self.command!r})"
+
+
+def _input_source(name, source):
+    """Return the symbol a command input stands for: a local path becomes its File."""
+    if isinstance(source, (str, os.PathLike)):
+        return File(source)
+    if isinstance(source, _Symbol) and not isinstance(source, Hoisted):
+        return source
+    raise TypeError(f"the command input {name!r} must be a local path, a File, a file of a task, or a task")
+
+
+def _input_name(source):
+    """Return the sandbox path of a command input given without one: the file name of a local file, and the path of
+    a task file."""
+    if isinstance(source, (str, os.PathLike)):
+        source = File(source)
+    target = source._file() if isinstance(source, _Symbol) else None
+    if target is None:
+        raise TypeError("only files can be command inputs without a name; use inputs={path: task} for a task result")
+    return os.path.basename(target.path) if isinstance(target, File) else target.path
+
+
+def _task_name(func, args):
+    """Return the name that messages give a task: the name of its function, or its command."""
+    if func is run_command:
+        return f"Command({args[0]!r})"
+    return getattr(func, "__name__", None) or type(func).__name__
+
+
+def _sandbox_path(path, what):
+    """Return the normalized form of a relative path inside a task sandbox, or raise for any other path."""
+    path = os.fspath(path)
+    if not isinstance(path, str):
+        raise TypeError(f"{what} path must be a string or path-like object")
+    if "\0" in path:
+        raise ValueError(f"{what} path contains a null byte")
+    normalized = os.path.normpath(path)
+    if not path or normalized in ("", ".") or os.path.isabs(path) or normalized == ".." or normalized.startswith("../"):
+        raise ValueError(f"{what} path must be a non-empty relative path inside the task sandbox")
+    return normalized
 
 
 class Hoisted(_Symbol):
@@ -124,8 +221,8 @@ class Node(_Selectable):
         return hash((Node, id(self.graph), self.key))
 
     def __repr__(self):
-        func = self.graph._tasks[self.key][0] if self.key in self.graph._tasks else None
-        return f"Node({self.key!r}, {getattr(func, '__name__', type(func).__name__)})"
+        task = self.graph._tasks.get(self.key)
+        return f"Node({self.key!r}, {_task_name(*task[:2]) if task else 'NoneType'})"
 
 
 class NodeFile(_Symbol):
@@ -139,6 +236,9 @@ class NodeFile(_Symbol):
 
     def _as_ref(self):
         return _FileRef(self.node.graph._id, self.node.key, self.path)
+
+    def _file(self):
+        return self
 
     def __eq__(self, other):
         return isinstance(other, NodeFile) and other.node == self.node and other.path == self.path
@@ -524,7 +624,8 @@ class Graph:
 
     def add(self, func, /, *args, **kwargs):
         """Add a call of func with these arguments and return its Node. Nodes, their selections and files, and
-        File objects may appear anywhere inside the arguments."""
+        File objects may appear anywhere inside the arguments. A Command in place of func adds a task that runs
+        its command line."""
         while self._next_key in self._tasks:
             self._next_key += 1
         key = self._next_key
@@ -566,6 +667,14 @@ class Graph:
     def _record(self, key, func, args, kwargs, foreign=False, on_symbol=None):
         """Record a task under key. A graph built by an Executor passes foreign=True, so its tasks may read results of
         other graphs and Futures, and on_symbol to see each symbol. A user graph reads only its own tasks."""
+        if isinstance(func, Command):
+            if args or kwargs:
+                raise TypeError("a Command takes no arguments; give its files as inputs")
+            function, arguments = func._call()
+            self._record(key, function, arguments, {}, foreign, on_symbol)
+            for path in func.outputs:
+                self._add_output(key, path)
+            return
         if not callable(func):
             raise TypeError("a task needs a callable followed by its arguments")
         if key in self._tasks:
@@ -718,14 +827,7 @@ class Graph:
     def _add_output(self, key, path):
         if key not in self._tasks:
             raise KeyError(f"no task with key {key!r}")
-        path = os.fspath(path)
-        if not isinstance(path, str):
-            raise TypeError("an output path must be a string or path-like object")
-        if "\0" in path:
-            raise ValueError("an output path contains a null byte")
-        normalized = os.path.normpath(path)
-        if not path or normalized in ("", ".") or os.path.isabs(path) or normalized == ".." or normalized.startswith("../"):
-            raise ValueError("an output path must be a non-empty relative path inside the task sandbox")
+        normalized = _sandbox_path(path, "an output")
         outputs = self._outputs[key]
         if normalized not in outputs:
             outputs[normalized] = NodeFile(Node(self, key), normalized)

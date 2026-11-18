@@ -57,7 +57,7 @@ from . import vine_graph_capi as capi  # noqa: E402
 # The C functions themselves, which the background thread calls for every task without the Python function of the
 # generated wrapper around each.
 _capi = capi._vine_graph_capi
-from .graph import _LEAF_TYPE_SET, File, Graph, Hoisted, Node, NodeFile, _FileRef, _Ref, _Selectable, _Symbol  # noqa: E402
+from .graph import _LEAF_TYPE_SET, Command, File, Graph, Hoisted, Node, NodeFile, _FileRef, _Ref, _Selectable, _Symbol, _sandbox_path, _task_name  # noqa: E402
 from . import install, library  # noqa: E402
 
 # Manager tuning that suits graph execution. set_params() overrides it.
@@ -137,23 +137,20 @@ REMOVAL_BATCH = 128
 INLINE_LIMIT = 4096
 
 # Small objects whose serialization tasks share by identity, like staged files: functions and classes, which many tasks
-# pass and cloudpickle serializes by value when they are defined in __main__ (about 30 us for a small function). Every
+# pass and cloudpickle serializes by value when they are defined in __main__. Every
 # other small object is serialized for each task, so a mutable argument changed between submissions reaches later
 # tasks. A function or class is serialized when the first task that holds it is submitted.
 _SHARED_INLINE_TYPES = (types.FunctionType, type)
 
 # Arguments that stand for data the task reads: references to task results and files, Files, and hoisted objects. The
-# manifest holds them inside its own serialization instead of serializing each on its own, which cost about 15 us per
-# argument, most of the caller's time per edge of a graph whose tasks pass many results. A reference to a whole result,
-# the most common argument, is held as its task (graph id, key), a tuple that the pickler writes without calling
-# Python, where a reference object costs a call of cloudpickle's reducer and a lookup of its dispatch table.
+# manifest holds them inside its own serialization instead of serializing each on its own. A reference to a whole
+# result, the most common argument, is held as its task (graph id, key), a tuple that the pickler writes without
+# calling cloudpickle's reducer.
 _REFERENCE_TYPES = (_Ref, _FileRef, File, Hoisted)
 
 # Immutable values that the manifest holds as they are, inside its own serialization, instead of each being serialized
 # on its own: numbers, None, and strings (bytes are serialized, so that the library tells an object it loads from a value
-# it takes as it is). A task's numbers and short strings usually differ in every task, and staging each cost a lock, a
-# pickle of its own, and a copy, about a fifth of the caller's time per task with two such arguments. Being immutable,
-# they need no identity and no copy per task.
+# it takes as it is). Being immutable, they need no identity and no copy per task.
 _LITERAL_TYPES = frozenset((int, float, bool, complex, type(None), str))
 
 # Bytes of the longest file name, without its directory, that Linux file systems take (NAME_MAX).
@@ -279,6 +276,9 @@ class Future(_Selectable):
             return Node(self._executor._dynamic, target[1])
         return target
 
+    def _file(self):
+        return self._target if isinstance(self._target, (File, NodeFile)) else None
+
     def done(self):
         """Return True once the task completed or failed."""
         return self._executor._finished_state(self._task) is not None
@@ -306,7 +306,8 @@ class Future(_Selectable):
     def add_done_callback(self, fn):
         """Call fn(future) once the task completes or fails, or at once in this thread when it has finished already or
         the Executor is closed. Other calls run in a thread of the Executor, one at a time and in the order the tasks
-        finished, so a callback should not wait long. A callback that raises is logged and ignored."""
+        finished, so a callback should not wait long. close() waits for the callbacks of tasks that finished, which
+        may still read results. A callback that raises is logged and ignored."""
         self._executor._add_done_callback(self, fn)
 
     @property
@@ -326,6 +327,19 @@ class Future(_Selectable):
     def attr(self, name):
         self._check_selectable()
         return super().attr(name)
+
+    def file(self, path):
+        """Return the file that the task of this Future writes at path in its sandbox, to give to other tasks or to
+        submit(). The task must have declared the file before it was submitted, as an output of its Command or with
+        node.file(path)."""
+        node = self.target
+        if not isinstance(node, Node):
+            raise TypeError("only a task writes files, and this Future stands for a file")
+        normalized = _sandbox_path(path, "an output")
+        if normalized not in self._executor._declared_outputs.get(self._task, ()):
+            raise ValueError(f"the task of this Future declared no file {normalized!r}: name it in the outputs of a "
+                             "Command, or with node.file() before the task is submitted")
+        return node.file(normalized)
 
     def _check_selectable(self):
         if not isinstance(self.target, Node):
@@ -414,8 +428,6 @@ class _Task:
     """What an Executor records about one submitted task, from its submission until it forgets the task: one object
     for each task instead of an entry in each of a dozen tables keyed by (graph id, key). A task's clean-up then looks
     up nothing by its key, because the Futures of its result hold this object, and its C node id leads to it.
-    Lookups of tuple keys in tables of a million tasks were most of the background thread's Python time per dropped
-    Future: each hashes the tuple and misses the processor cache two or three times (BUGS.md).
 
     The caller's thread sets number, label, and staged when it submits the task, the last under the Executor's lock,
     and the background thread sets the rest. finished is published under the lock."""
@@ -507,13 +519,10 @@ class _Pickler:
     given to it, and dumps() returns bytes. Each dump starts and ends with an empty memo, so a Pickler keeps no object
     alive. Other threads, and a dump nested in another, use a Pickler of their own.
 
-    A Pickler's memo table keeps the capacity of its largest dump, and clearing it touches every slot: after a
-    manifest with 200,000 references, each later dump of a small object took 2.5 ms instead of 1.5 us. A Pickler
+    A Pickler's memo table keeps the capacity of its largest dump, and clearing it touches every slot, so a Pickler
     whose dump wrote more than LARGE_DUMP bytes is replaced by a new one. The bound is in bytes because the memo's size
     cannot be read cheaply, and a memoized object writes at least about 4 bytes, so a dump of up to 4 KB leaves at most
-    about 1,000 entries, whose clearing costs later dumps about as much as a new Pickler (4 us). A bound of 256 KB let a
-    210 KB dump of 30,000 small tuples, as some scenario of a long-lived Executor writes, make every later manifest
-    take 300 us instead of 1.6 us: in a marathon the caller spent 76% of its time clearing memos (BUGS.md)."""
+    about 1,000 entries, whose clearing costs later dumps about as much as a new Pickler."""
 
     LARGE_DUMP = 1 << 12
 
@@ -724,6 +733,7 @@ class Executor:
         # _callbacks_due when it finishes, for the callback thread to run in order
         self._callbacks = {}
         self._callbacks_due = collections.deque()
+        self._callbacks_running = False  # the callback thread took callbacks that it has not finished yet
         self._callback_thread = None
         # Capacity that the background thread reads once a second, from the first call of capacity() on
         self._capacity = None
@@ -863,7 +873,7 @@ class Executor:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self._close(failed=exc_type is not None)
+        self._close(failed=exc_type is not None, finish_callbacks=exc_type is None)
 
     def __del__(self):
         try:
@@ -874,9 +884,20 @@ class Executor:
     def close(self):
         """Cancel unfinished tasks and release the Manager, the library, and every task result. File results that
         result() returned stay in output_dir. Closing a closed Executor does nothing."""
-        self._close(failed=False)
+        self._close(failed=False, finish_callbacks=True)
 
-    def _close(self, failed):
+    def _finish_callbacks(self):
+        """Wait until the callbacks of tasks that finished have run, so that they still read results. A callback that
+        closes the Executor does not wait for itself."""
+        if threading.current_thread() is self._callback_thread:
+            return
+        with self._lock:
+            while not self._closed and (self._callbacks_due or self._callbacks_running):
+                self._changed.wait(0.5)
+
+    def _close(self, failed, finish_callbacks=False):
+        if finish_callbacks:
+            self._finish_callbacks()
         # A submission in another thread completes first, and later ones find the Executor closed.
         with self._submitting, self._lock:
             if self._closed:
@@ -1001,7 +1022,7 @@ class Executor:
         """Submit a task and return its Future. submit(func, *args, **kwargs) runs a call, whose arguments may hold
         Futures and Nodes. submit(node) runs a Graph task after every task it reads, submit(node.file(path)) stands
         for that file, and submit(File(path)) for a local file. Submitting a task again returns a new Future for
-        it, and a task whose result was already released runs again."""
+        it, and a task whose result was already released runs again. submit(Command(...)) runs a command line."""
         if self._closed:
             raise RuntimeError("the Executor is closed")
         if isinstance(func, (Node, NodeFile, File)):
@@ -1010,7 +1031,7 @@ class Executor:
             return self._submit_targets((func,))[0]
         if isinstance(func, _Symbol):
             raise TypeError("submit() takes a callable, a Node, a NodeFile, or a File")
-        if not callable(func):
+        if not callable(func) and not isinstance(func, Command):
             raise TypeError("submit() takes a callable followed by its arguments")
         with self._submitting:
             self._check_open()
@@ -1218,8 +1239,7 @@ class Executor:
             self._submitted += 1
             # Messages name the task by its key and the name of its function, which are recorded now because the task
             # may outlive its Graph. The message is formatted only when a task fails (_label()).
-            func = graph._tasks[key][0]
-            record.label = getattr(func, "__name__", None) or type(func).__name__
+            record.label = _task_name(*graph._tasks[key][:2])
             outputs = graph._outputs.get(key)
             if outputs:
                 self._declared_outputs[task] = tuple(outputs)
@@ -2186,10 +2206,12 @@ class Executor:
         _run_callback(future, fn)
 
     def run(self, graph, targets=None):
-        """Run the targets of a Graph, and every task they read, and return {target: result}. Targets are Nodes,
-        NodeFiles, or Files, and default to the tasks no other task reads. A failure raises the TaskError of a task
-        that failed on its own, in preference to the tasks that could not run because of it."""
-        targets = graph.sinks() if targets is None else list(targets)
+        """Run the targets of a Graph, and every task they read, and return {target: result}, or the result alone
+        for a single target given without a list. Targets are Nodes, NodeFiles, or Files, and default to the tasks
+        no other task reads. A failure raises the TaskError of a task that failed on its own, in preference to the
+        tasks that could not run because of it."""
+        single = isinstance(targets, (Node, NodeFile, File))
+        targets = graph.sinks() if targets is None else [targets] if single else list(targets)
         self._check_open()
         # One call submits every task that the targets need, so a task read by another target's task stays, and the
         # Future of each target holds its data from the call that submits its task. Anything else goes to submit(),
@@ -2205,6 +2227,8 @@ class Executor:
         errors = [error for error in (future.exception() for future in futures) if error is not None]
         if errors:
             raise next((error for error in errors if error.task == error.source), errors[0])
+        if single:
+            return futures[0].result()
         return {target: future.result() for target, future in zip(targets, futures)}
 
     def progress(self):
@@ -2603,17 +2627,15 @@ def _block_interrupts():
     """Hold back SIGINT while a short change of Executor state completes, so an interrupt never leaves a task queued but
     unrecorded, and return the call that restores the signal mask, which delivers a held interrupt. Other threads keep
     their mask, since only the main thread receives KeyboardInterrupt. The built-in function takes and returns signal
-    numbers: signal.pthread_sigmask() converts the returned set to enum members in Python, which cost about 15% of the
-    caller's time per submission.
+    numbers, while signal.pthread_sigmask() converts the returned set to enum members in Python.
 
     Python raises an interrupt when a Python function starts and after a built-in function returns. An interrupt that
     is already pending is raised right after SIGINT is blocked, before the caller has the call that restores the mask,
     so the mask is restored here. The returned call is a built-in partial, which a caller makes in a finally block
     without starting a Python function that an interrupt could stop first. It is made before SIGINT is blocked, so
-    nothing that could raise runs between blocking and returning: creating it afterwards let an interrupt raised when
-    `functools.partial()` returned, which another thread had received, leave the mask blocked (2026-10-18, the second
-    interrupts scenario of one Executor received none). Otherwise the main thread would block SIGINT for good, and so
-    would every thread it starts later."""
+    nothing that could raise runs between blocking and returning. Otherwise an interrupt raised when
+    `functools.partial()` returned could leave the main thread blocking SIGINT for good, and so every thread it starts
+    later."""
     if threading.get_ident() != _MAIN_THREAD:
         return _KEEP_INTERRUPTS
     restore = functools.partial(_signal.pthread_sigmask, _signal.SIG_SETMASK, _signal.pthread_sigmask(_signal.SIG_BLOCK, ()))
@@ -2665,10 +2687,19 @@ def _call_back(executor_reference):
                 executor._changed.wait(0.5)
             due = executor._callbacks_due
             executor._callbacks_due = collections.deque()
+            executor._callbacks_running = bool(due)
         del executor
+        if not due:
+            continue
         for future, fn in due:
             _run_callback(future, fn)
-        del due
+        del due, future, fn
+        executor = executor_reference()
+        if executor is not None:
+            with executor._lock:
+                executor._callbacks_running = False
+                executor._changed.notify_all()
+            del executor
 
 
 def _run_callback(future, fn):
