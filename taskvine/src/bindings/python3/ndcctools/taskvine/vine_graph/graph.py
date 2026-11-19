@@ -767,8 +767,8 @@ def _task_outputs(func, kwargs):
 
 
 class Command:
-    """A shell command line that tasks run, as a Function is for Python tasks: g.add(command, **values) or
-    executor.submit(command, **values) makes a task that runs it in its sandbox.
+    """A shell command line and the values of its placeholders, which g.add(command, **settings) makes a task of that
+    runs it in its sandbox: g.add(vg.Command("sort {f} > {out}", f=vg.File("a.txt"), out="b.txt"), outputs=["b.txt"]).
 
     Placeholders such as {name} take the values given by name, shell-quoted: a File, or a file a task writes
     (task.file(name)), becomes its path in the sandbox, a Task becomes str() of its result without trailing newlines,
@@ -776,100 +776,50 @@ class Command:
     adds nothing. For a repeated flag, pass [w for v in vcfs for w in ("-I", v)]. Every placeholder needs a value, and
     every value a placeholder. Write {{ and }} for braces. The text a command writes to standard output, at most 1 MiB,
     is its result, and an exit status other than zero fails it, with the end of its standard error in its TaskError.
-    Never write to an input file.
+    Never write to an input file. The settings of its task, such as cores and outputs, are given to Graph.add(), whose
+    outputs may name placeholders, filled unquoted from these values."""
 
-    Resources. cores is the number of cores it uses on a Worker, where a Python task uses one. memory (MB) and gpus are
-    requests, not limits. A task waits for a Worker that can grant them, and sees MEMORY, GPUS, and CUDA_VISIBLE_DEVICES
-    for what it got. A task without gpus sees CUDA_VISIBLE_DEVICES empty. A task that requested memory and exits with
-    status 137, as when the kernel kills it for want of memory, fails with reason "resources". A task whose requests
-    exceed the largest connected Worker waits for a larger Worker, and the Executor prints a notice once for each kind
-    of request.
+    __slots__ = ("_template", "_placeholders", "_values", "_options", "_fields", "_outputs", "_render", "_name",
+                 "_cache", "__weakref__")
 
-    Output files. A file that the command writes in its sandbox is kept only when it was declared. outputs lists the
-    files that every task of the command writes, as relative paths in the sandbox, and declares them for each task,
-    whether Graph.add() or Executor.submit() makes it. Placeholders may appear in outputs, where their value, a str or
-    int, is inserted unquoted, so outputs=["{sample}.bam"] names a file of each task. task.file(name) then names such a
-    file: pass it to other tasks, or read it once the task completed with its path, content, text, or save(), whether or
-    not a task reads it. A declared file is a required output, so a command that does not write it fails. A file can
-    also be declared by asking for it with task.file(name) before the task is submitted, which only a task of a Graph
-    allows, since Executor.submit() submits its task at once.
-
-    Retries and time limits. time_limit (seconds) stops a task that runs longer, which then fails with reason
-    "timeout". retries=k tries a task up to k more times after failures of the task itself, and retry_on narrows which,
-    as an except clause does: each failure is seen as an exception, the function's own exception, CalledProcessError
-    for a command's exit status other than zero, TimeoutError for "timeout", and MemoryError for "resources", and is
-    retried when it is an instance of a class of retry_on, Exception by default. The last failure is the task's
-    TaskError, whose message lists the earlier ones. Losses of Workers and other failures of the infrastructure are
-    retried apart from these (Executor params max-retries).
-
-    cache=True keeps the results and files of its tasks in the store of the Executor (Executor(store=path)), and a
-    later task of the same function, arguments, and input files takes them from there instead of running.
-
-    name labels its tasks in errors, notices, and repr; it changes nothing else."""
-
-    __slots__ = ("_template", "_options", "_fields", "_outputs", "_render", "_name", "_cache", "__weakref__")
-
-    def __init__(self, template, *, cores=1, memory=None, gpus=0, time_limit=None, retries=0, retry_on=Exception,
-                 outputs=(), name=None, cache=False):
+    def __init__(self, template, /, **fields):
         if not isinstance(template, str) or not template.strip():
             raise TypeError("a Command takes a command line as a non-empty string")
         if "\0" in template:
             raise ValueError("a command line contains a null byte")
-        self._options = _options(cores, memory, gpus, time_limit, retries, retry_on)
-        self._cache = _check_cache(cache)
-        fields = _fields_of(template, "command line")
-        self._name = _check_label(name)
-        self._outputs, self._render = _parse_outputs(outputs)
         self._template = template
-        # The placeholders of the command line, followed by those only its outputs name.
-        self._fields = tuple(dict.fromkeys(fields + (self._render[1] if self._render else ())))
+        self._placeholders = _fields_of(template, "command line")
+        self._values = fields
+        _default_settings(self)
+        self._fields = self._placeholders
 
     @property
     def template(self):
         return self._template
+
+    @property
+    def fields(self):
+        """The values of the placeholders, as given."""
+        return dict(self._values)
 
     def __repr__(self):
         return f"Command({self._template!r}, cores={self._options.cores}{_repr_extra(self, False)})"
 
 
 class Function:
-    """A Python function that tasks call with several cores of a Worker, or with files they write, as a Command runs a
-    command line with them: g.add(Function(func, cores=4), *args) or executor.submit(Function(func, cores=4), *args)
-    makes a task that calls func with these arguments. Every Python task is a Function: g.add() and submit() take no
-    bare function. cores=1 uses one core.
+    """A Python function and the arguments to call it with, which g.add(function, **settings) makes a task of:
+    g.add(vg.Function(train, data, 1, lr=0.1), cores=4, retries=2). Every keyword argument goes to func, and every
+    setting of the task goes to Graph.add(). Every Python task is a Function: Graph.add() takes no bare function."""
 
-    A Worker runs the calls of an Executor in one library with a slot per core, and a call of cores=k occupies k slots,
-    so a Worker of 8 cores runs eight calls of one core, four of two, or two of four at a time. The library limits the
-    native thread pools (OpenMP, BLAS) loaded in the call's process to k threads. A task that asks for more cores than
-    the largest connected Worker has waits for a larger Worker, as Workers join a pool over time, and the Executor
-    prints a notice once for each size. An Executor with local=True runs every call in its own process and ignores
-    cores.
+    __slots__ = ("_func", "_args", "_kwargs", "_options", "_name", "_outputs", "_render", "_cache", "__weakref__")
 
-    outputs lists files that every call writes in its working directory, which is the task sandbox, as relative paths,
-    as Command(outputs=...) does, with placeholders filled from keyword arguments of the call. task.file(name) names
-    them for other tasks and for reading, and a call that does not write one fails with reason "function". Never write
-    to an input file.
-
-    memory (MB) is a request, not a limit: a call holds that memory of its Worker while it runs and sees it as MEMORY.
-    gpus=k runs each task as a standard TaskVine task on a Worker with k GPUs instead of a call of the library, which
-    holds no GPUs: the task starts Python, imports library_modules, and loads the shared objects first, which a call of
-    the library does once per Worker, so it suits tasks that run long compared with that. It sees the GPUs it got in
-    CUDA_VISIBLE_DEVICES, and its library_files in its sandbox under their library names. A task without gpus sees
-    CUDA_VISIBLE_DEVICES empty.
-
-    time_limit, retries, retry_on, cache, and name work as they do for a Command."""
-
-    __slots__ = ("_func", "_options", "_name", "_outputs", "_render", "_cache", "__weakref__")
-
-    def __init__(self, func, *, cores=1, memory=None, gpus=0, time_limit=None, retries=0, retry_on=Exception, name=None,
-                 outputs=(), cache=False):
+    def __init__(self, func, /, *args, **kwargs):
         if isinstance(func, (Command, Function, _Symbol)) or not callable(func):
-            raise TypeError("a Function takes a function, such as Function(func, cores=2)")
-        self._options = _options(cores, memory, gpus, time_limit, retries, retry_on)
-        self._cache = _check_cache(cache)
-        self._name = _check_label(name)
-        self._outputs, self._render = _parse_outputs(outputs)
+            raise TypeError("a Function takes a function and its arguments, such as Function(train, data, lr=0.1)")
         self._func = func
+        self._args = args
+        self._kwargs = kwargs
+        _default_settings(self)
 
     @property
     def func(self):
@@ -878,6 +828,44 @@ class Function:
     def __repr__(self):
         func = getattr(self._func, "__name__", None) or type(self._func).__name__
         return f"Function({func}, cores={self._options.cores}{_repr_extra(self, True)})"
+
+
+def _default_settings(spec):
+    """Give a Function or Command the settings of a task that Graph.add() was given none for."""
+    spec._options = _DEFAULT_OPTIONS
+    spec._cache = False
+    spec._name = None
+    spec._outputs = ()
+    spec._render = None
+
+
+def _bind(spec, cores, memory, gpus, time_limit, retries, retry_on, outputs, cache, name):
+    """Return (what the task runs, its positional arguments, its keyword arguments) for a Function or Command and the
+    settings of Graph.add(). What the task runs is a copy that holds the settings and no arguments, so the arguments
+    live only in the task, as references to the tasks they read."""
+    bound = object.__new__(type(spec))
+    if (cores == 1 and memory is None and gpus == 0 and time_limit is None and retries == 0
+            and retry_on is Exception):
+        bound._options = _DEFAULT_OPTIONS
+    else:
+        bound._options = _options(cores, memory, gpus, time_limit, retries, retry_on)
+    bound._cache = _check_cache(cache)
+    bound._name = _check_label(name)
+    bound._outputs, bound._render = _parse_outputs(outputs) if outputs else ((), None)
+    if type(spec) is Function:
+        bound._func = spec._func
+        bound._args = ()
+        bound._kwargs = {}
+        return bound, spec._args, spec._kwargs
+    bound._template = spec._template
+    bound._placeholders = spec._placeholders
+    bound._values = {}
+    # The placeholders of the command line, followed by those only its outputs name.
+    if bound._render:
+        bound._fields = tuple(dict.fromkeys(spec._placeholders + bound._render[1]))
+    else:
+        bound._fields = spec._placeholders
+    return bound, (), spec._values
 
 
 def _repr_extra(func, retries_first):
@@ -944,7 +932,7 @@ def _check_task_kind(func, method):
 
 class TaskFile(_Symbol):
     """A file that a task writes in its sandbox, which other tasks read when it is passed to them. Asking for a file
-    of a task before the task is submitted declares it, as Command(outputs=...) does for every task of a command, and
+    of a task before the task is submitted declares it, as g.add(..., outputs=...) does, and
     the task fails when it does not write it. Once the task completed, path, content, text, and save() read the file,
     whether or not a task reads it. They read through the open Executor, and a path or content that was returned once
     stays readable after it closed."""
@@ -1140,7 +1128,8 @@ class Task(_Selectable):
 
     @property
     def func(self):
-        """The function, Function, or Command the task runs."""
+        """The Function or Command the task runs, with the settings it was added with (cores, memory, gpus, outputs,
+        time_limit, retries, retry_on, cache, name), and without its arguments, which args and kwargs give."""
         return self._func
 
     @property
@@ -1224,8 +1213,8 @@ class Task(_Selectable):
 def _undeclared(task, name):
     """Return the message for a file of a task that was not declared before the task was submitted."""
     return (f"the file {name!r} of {task!r} was asked for after the task was submitted, so it was not kept; ask for "
-            f"the files of a task before its Graph is submitted, or list the files that a command writes in "
-            f"Command(outputs=...)")
+            f"the files of a task before its Graph is submitted, or list the files that the task writes "
+            f"in g.add(..., outputs=...)")
 
 
 def _label(task):
@@ -1335,23 +1324,46 @@ class Graph:
     def __getstate__(self):
         raise TypeError("a Graph holds the state of its tasks, and cannot be pickled")
 
-    def add(self, func, /, *args, **kwargs):
-        """Add a task that calls a Function with these arguments, or runs a Command with values for its placeholders, and return its Task, which becomes live when an Executor takes the Graph. Tasks of this
-        Graph and live tasks of its Executor, their selections and files, and Files may appear anywhere inside the
-        arguments of a function."""
+    def add(self, spec, /, *extra, cores=1, memory=None, gpus=0, time_limit=None, retries=0, retry_on=Exception,
+            outputs=(), cache=False, name=None):
+        """Add a task that calls a Function or runs a Command, with these settings, and return its Task, which becomes
+        live when an Executor takes the Graph. Tasks of this Graph and live tasks of its Executor, their selections and
+        files, and Files may appear anywhere inside the arguments of a Function.
+
+        cores is the number of cores the task uses on a Worker. memory (MB) and gpus are requests, not limits: a task
+        waits for a Worker that can grant them, and sees CORES, MEMORY, GPUS, and CUDA_VISIBLE_DEVICES for what it got.
+        A Python task with gpus runs as a standard TaskVine task instead of a call of the library. A task that asks for
+        more than the largest connected Worker has waits for a larger Worker, with a notice once for each size.
+
+        outputs lists the files that the task writes in its sandbox, as relative paths, with placeholders filled
+        unquoted from the keyword arguments of a Function or the values of a Command. task.file(name) names them for
+        other tasks and for reading, and a task that does not write one fails.
+
+        time_limit (seconds) stops a task that runs longer, which fails with reason "timeout". retries=k tries a task up
+        to k more times after failures of the task itself that are instances of retry_on (Exception by default): the
+        function's own exception, CalledProcessError for a command's exit status, TimeoutError for "timeout", and
+        MemoryError for "resources". cache=True keeps its results and files in the store of the Executor
+        (Executor(store=path)) for later tasks of the same function, arguments, and input files. name labels the task
+        in errors, notices, and repr."""
+        _check_task_kind(spec, "g.add()")
+        if extra:
+            raise TypeError("g.add() takes one Function or Command; pass the arguments inside it, as in "
+                            "g.add(vg.Function(f, x, y))")
         while self._next_key in self._tasks:
             self._next_key += 1
         key = self._next_key
         self._next_key += 1
-        return self._add(key, func, args, kwargs)
+        return self._add(key, spec, (cores, memory, gpus, time_limit, retries, retry_on, outputs, cache, name))
 
-    def _add(self, key, func, args, kwargs, method="g.add()"):
-        """Record a task of a Function or Command under key and return it."""
-        _check_task_kind(func, method)
-        command = isinstance(func, Command)
+    def _add(self, key, spec, settings=None, method="g.add()"):
+        """Record a task of a Function or Command and its settings, as Graph.add() takes them, under key and return
+        it."""
+        _check_task_kind(spec, method)
+        if settings is None:
+            settings = (1, None, 0, None, 0, Exception, (), False, None)
+        func, args, kwargs = _bind(spec, *settings)
+        command = type(func) is Command
         if command:
-            if args:
-                raise TypeError("a Command takes its values by name, as in add(command, name=value)")
             missing = [name for name in func._fields if name not in kwargs]
             extra = [name for name in kwargs if name not in func._fields]
             if missing or extra:
@@ -1360,7 +1372,7 @@ class Graph:
                     problems.append(f"no value for {', '.join(missing)}")
                 if extra:
                     problems.append(f"no placeholder for {', '.join(extra)}")
-                raise TypeError(f"{func!r}: {'; '.join(problems)}")
+                raise TypeError(f"{spec!r}: {'; '.join(problems)}")
         if key in self._tasks:
             raise ValueError(f"a task with key {key!r} already exists")
         outputs = _task_outputs(func, kwargs) if func._outputs else ()

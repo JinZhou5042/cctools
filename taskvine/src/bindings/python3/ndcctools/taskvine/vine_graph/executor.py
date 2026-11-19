@@ -20,7 +20,7 @@ import weakref
 from . import library, store as _store_module
 from .graph import (
     CONTENT_LIMIT, CancelledError, Command, Graph, Task, TaskError, _CANCELLED, _COMPLETED, _Calls, _FAILED, _FileRef,
-    _NEW, _NoSuchItem, _RUNNING, _UNREAD, _a, _label, _readers_of, _undeclared,
+    _NEW, _NoSuchItem, _RUNNING, _UNREAD, _a, _check_task_kind, _label, _readers_of, _undeclared,
 )
 from .local import _Local
 from .runner import (
@@ -109,7 +109,7 @@ class Executor:
     """Where tasks run: TaskVine Workers that connect to port, or to the Manager named name through the catalog, or,
     with local=True, this process, one task at a time in the order they were submitted, for debugging without Workers.
 
-    submit(vg.Function(func), *args) starts one task at once and returns its Task. submit(graph) makes the tasks of a
+    submit(vg.Function(func, *args)) starts one task at once and returns its Task. submit(graph) makes the tasks of a
     Graph live and returns at once, and run(graph) does so, waits for them, and returns the results of the Graph's sinks. From then on
     every Task behaves alike, whatever made it: result() waits for it, and cancel() cancels it. A task that reads a Task
     starts once its input exists, so work whose dependencies are known is submitted up front, and a decision that
@@ -120,9 +120,9 @@ class Executor:
 
         with vg.Executor(port=9123) as executor:
             results = executor.run(graph)
-            task = executor.submit(vg.Function(load), "more.root")
+            task = executor.submit(vg.Function(load, "more.root"))
             if task.result() > 0:
-                executor.submit(vg.Function(fit), task)
+                executor.submit(vg.Function(fit, task), cores=4)
 
     Python tasks run in a TaskVine library on the Workers, and commands as standard TaskVine tasks. The library imports
     library_modules when it starts and loads shared, a dictionary from names to objects that tasks take as
@@ -253,9 +253,9 @@ class Executor:
 
     # Submission.
 
-    def submit(self, func, /, *args, **kwargs):
-        """Start a task that calls a Function with these arguments, or runs a Command with values for its placeholders,
-        and return its Task at once. Files and live Tasks of this Executor, with their selections
+    def submit(self, func, /, *extra, cores=1, memory=None, gpus=0, time_limit=None, retries=0, retry_on=Exception,
+               outputs=(), cache=False, name=None):
+        """Start a task that calls a Function or runs a Command, with the settings that Graph.add() takes, and return its Task at once. Files and live Tasks of this Executor, with their selections
         and files, may appear anywhere inside the arguments of a function. A task that cannot start, as when an
         argument cannot be serialized, fails, and its result() raises.
 
@@ -263,14 +263,20 @@ class Executor:
         the Graph at once. Tasks added to the Graph later become live at its next submit() or run(). A Graph belongs to
         the first Executor that takes it."""
         if isinstance(func, Graph):
-            if args or kwargs:
+            if extra:
                 raise TypeError("submit(graph) takes the Graph alone; Graph.add() adds tasks to it")
             self._submit_graph(func)
             return func
+        _check_task_kind(func, "submit()")
+        if extra:
+            raise TypeError("submit() takes one Function or Command; pass the arguments inside it, as in "
+                            "submit(vg.Function(f, x, y))")
         self._check_open()
-        self._check_cache(func)
+        if cache and self._store is None:
+            raise ValueError(f"{func!r} has cache=True, which needs a store: vg.Executor(store=path)")
+        settings = (cores, memory, gpus, time_limit, retries, retry_on, outputs, cache, name)
         with self._lock:
-            task = self._calls._add(self._last_task + 1, func, args, kwargs, "submit()")
+            task = self._calls._add(self._last_task + 1, func, settings, "submit()")
             with self._runner.first_submission():
                 self._start(task)
         return task

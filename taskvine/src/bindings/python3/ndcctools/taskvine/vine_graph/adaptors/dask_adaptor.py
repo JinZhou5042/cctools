@@ -35,7 +35,7 @@ def from_dask(dsk, expand_subgraphs=False):
     # A Graph takes each task after the tasks it reads, and a Dask graph lists them in any order.
     for key in _upstream_first(tasks):
         func, args, kwargs = tasks[key]
-        graph._add(key, func if isinstance(func, Function) else Function(func), args, kwargs)
+        graph._add(key, Function(func._func if isinstance(func, Function) else func, *args, **kwargs))
     return graph
 
 
