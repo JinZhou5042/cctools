@@ -73,7 +73,7 @@ struct vine_file {
 	 * undeclared, costs no lookup by name. */
 	int vault_jobs;
 
-	/* When a checkpoint of this file over a connection or to the shared directory first found the host of every Worker
+	/* When a checkpoint of this file over a connection first found the host of every Worker
 	 * that holds it sending files, or zero. The checkpoint then waits for those transfers only, not for ones that start
 	 * later, so readers of other files never hold it back for good (see find_checkpoint_source()). */
 	timestamp_t checkpoint_deferred;
