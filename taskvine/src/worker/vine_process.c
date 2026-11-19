@@ -103,7 +103,7 @@ struct vine_process *vine_process_create(struct vine_task *task, vine_process_ty
 	p->output_file_name = string_format("%s/.taskvine.stdout", p->sandbox);
 	p->output_length = 0;
 
-	p->functions_running = 0;
+	p->function_slots_inuse = 0;
 	p->library_ready = 0;
 
 	/* The workspace exists, so the sandbox and its tmp directory normally take one mkdir each. Otherwise create_dir
@@ -271,10 +271,6 @@ int vine_process_execute_and_wait(struct vine_process *p)
 	}
 }
 
-/* Send a message containing details of a function call to the relevant library to execute it.
- * @param p 	The relevant vine_process structure encapsulating a function call.
- * @return 		1 if the message is successfully sent to the library, 0 otherwise. */
-
 /* Queue a message to a library as its length on a line and then its bytes, and write what its pipe takes. Return zero
  * if the library cannot be written to. */
 static int library_send(struct vine_process *library, const char *message)
@@ -336,9 +332,19 @@ void vine_process_libraries_send(timestamp_t deadline)
 	}
 }
 
+/* Send a message containing details of a function call to the relevant library to execute it. A call that occupies
+ * k > 1 slots of its library ends the message with k, from which the library sets the call's thread limit.
+ * @param p 	The relevant vine_process structure encapsulating a function call.
+ * @return 		1 if the message is successfully sent to the library, 0 otherwise. */
+
 int vine_process_invoke_function(struct vine_process *p)
 {
-	char *buffer = string_format("%d %s %s %s", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name);
+	char *buffer;
+	if (p->task->function_slots_total > 1) {
+		buffer = string_format("%d %s %s %s %d", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name, p->task->function_slots_total);
+	} else {
+		buffer = string_format("%d %s %s %s", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name);
+	}
 	int result = library_send(p->library_process, buffer);
 
 	// conservatively assume that the function starts executing as soon as we send it to the library.

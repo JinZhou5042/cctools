@@ -595,6 +595,11 @@ vine_result_code_t vine_manager_put_task(
 
 	if (t->needs_library) {
 		put_string_line(&description, "needs_library", t->needs_library);
+		/* A call that occupies more than one slot of its library says so. Its cores line stays zero, since the library
+		 * already holds the cores. Without the line the worker assumes one slot. */
+		if (t->function_slots_total > 1) {
+			put_integer_line(&description, "function_slots", t->function_slots_total);
+		}
 	}
 
 	if (t->provides_library) {

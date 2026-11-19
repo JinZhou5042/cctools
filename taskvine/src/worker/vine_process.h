@@ -66,8 +66,9 @@ struct vine_process {
 	/* If this is a library process, whether its writer holds data and it is in the list that the main loop polls. */
 	int library_sending;
 
-	/* If this is a library process, the number of functions it is currently running. */
-	int functions_running;
+	/* If this is a library process, the number of its slots occupied by running functions. A function occupies the
+	 * number of slots given by its function_slots line, or one without it. */
+	int function_slots_inuse;
 	
 	/* If this is a library process, whether the library is ready to execute functions. */
 	int library_ready;

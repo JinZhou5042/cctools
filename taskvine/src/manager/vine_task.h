@@ -104,8 +104,8 @@ struct vine_task {
 				       the second the task is quarantined: it runs only on a worker that runs nothing else (see vine_schedule.h). */
 	struct vine_worker_info *quarantine_worker; /**< If quarantined and no worker was free, the worker that takes no new task
 				       until it is free for this one, or null. */
-	int function_slots_total;   /**< If a library, the total number of function slots usable. */
-	int function_slots_inuse;   /**< If a library, the number of functions currently running. */
+	int function_slots_total;   /**< If a library, the total number of function slots usable. If a function call, the number of slots of its library it occupies while dispatched (see @ref vine_task_function_call_slots). */
+	int function_slots_inuse;   /**< If a library, the number of its slots occupied by running function calls. */
 	int library_retired;        /**< If a library instance, set when its library is removed while functions run. It
 				       takes no new functions and ends when the last one ends. */
 	int library_ran_function;   /**< If a library instance, set when a function call it ran completed, which shows
@@ -185,6 +185,9 @@ void vine_task_reset( struct vine_task *t );
 
 /* Soft-reset a not-yet-completed task so that it can be attempted on a different worker. */
 void vine_task_clean( struct vine_task *t );
+
+/* Return the number of library slots a function call occupies: its own core request, or one when it requests no cores. */
+int vine_task_function_call_slots(const struct vine_task *t);
 
 int  vine_task_set_result(struct vine_task *t, vine_result_t new_result);
 void vine_task_set_resources(struct vine_task *t, const struct rmsummary *rm);

@@ -112,18 +112,18 @@ def sigchld_handler(signum, frame):
     os.write(w, b"a")
 
 
-# Number of modules loaded when the native thread pools were last limited.
-limited_module_count = -1
+# The number of modules loaded and the limit when the native thread pools were last limited.
+limited_state = None
 
 
 # Limit the native thread pools (BLAS, OpenMP) of the libraries loaded so far, which forked functions inherit.
 # Limiting them costs about 0.7 ms, which every function call paid in the library's only thread, so it runs again only
-# after modules were imported, which may have loaded another such library.
+# after modules were imported, which may have loaded another such library, or for another limit.
 def limit_thread_pools(thread_limit):
-    global limited_module_count
-    if len(sys.modules) != limited_module_count:
+    global limited_state
+    if (len(sys.modules), thread_limit) != limited_state:
         threadpool_limits(limits=thread_limit)
-        limited_module_count = len(sys.modules)
+        limited_state = (len(sys.modules), thread_limit)
 
 
 # Load the arguments of a function call from its infile. A function call without an infile takes no arguments.
@@ -159,7 +159,17 @@ def read_message(in_pipe_fd):
     return str(data, encoding="utf-8")
 
 
-# Start the function of an invocation, and dump result to `outfile`.
+# Split an invocation into the function id, name, sandbox, stdout file, and the number of library slots the call
+# occupies, which the worker writes at the end only when it is above one.
+def parse_invocation(line):
+    fields = line.split(" ", maxsplit=4)
+    function_id, function_name, function_sandbox, function_stdout_filename = fields[:4]
+    function_slots = int(fields[4]) if len(fields) > 4 else 1
+    return function_id, function_name, function_sandbox, function_stdout_filename, function_slots
+
+
+# Start the function of an invocation, and dump result to `outfile`. thread_limit is the thread limit of a call that
+# occupies one slot of the library, and a call that occupies k slots runs with k times that limit.
 def start_function(line, thread_limit=1):
     global spare_wanted
     try:
@@ -167,10 +177,11 @@ def start_function(line, thread_limit=1):
             function_id,
             function_name,
             function_sandbox,
-            function_stdout_filename
-        ) = line.split(" ", maxsplit=3)
+            function_stdout_filename,
+            function_slots,
+        ) = parse_invocation(line)
     except Exception as e:
-        stdout_timed_message(f"error: not enough values to unpack from {line} (expected 4 items), exception: {e}")
+        stdout_timed_message(f"error: not enough values to unpack from {line} (expected 4 or 5 items), exception: {e}")
         exit(1)
 
     try:
@@ -192,8 +203,9 @@ def start_function(line, thread_limit=1):
             pid_to_stdout[p] = os.path.join(function_sandbox, function_stdout_filename)
             return p, function_id
 
-    limit_thread_pools(thread_limit)
+    call_thread_limit = thread_limit * function_slots
     if exec_method == "direct":
+        limit_thread_pools(call_thread_limit)
         library_sandbox = os.getcwd()
         try:
             os.chdir(function_sandbox)
@@ -232,9 +244,11 @@ def start_function(line, thread_limit=1):
         except Exception:
             stdout_timed_message(f"TASK {function_id} error: can't load the arguments from {arg_infile}")
             return -1, function_id
+        # forked calls inherit the limit of one slot, and a call of more slots sets its own in its process.
+        limit_thread_pools(thread_limit)
         p = os.fork()
         if p == 0:
-            run_function(function_id, function_name, function_sandbox, function_stdout_filename, event)
+            run_function(function_id, function_name, function_sandbox, function_stdout_filename, event, call_thread_limit)
         elif p < 0:
             stdout_timed_message(f"TASK {function_id} error: unable to fork to execute {function_name}")
             return -1, function_id
@@ -249,13 +263,16 @@ def start_function(line, thread_limit=1):
 
 
 # Run a function call in a forked process, which reports its exit status on the report pipe and exits. The arguments
-# are loaded from the call's infile when event is None.
-def run_function(function_id, function_name, function_sandbox, function_stdout_filename, event):
+# are loaded from the call's infile when event is None. The call's thread pools are limited to thread_limit, which
+# costs nothing when the process inherited that limit.
+def run_function(function_id, function_name, function_sandbox, function_stdout_filename, event, thread_limit):
     exit_status = 1
     # sys.modules keeps the order of imports, so the modules this call imports follow the ones it inherited.
     inherited_modules = len(sys.modules)
 
     try:
+        limit_thread_pools(thread_limit)
+
         # only the library holds the invocation pipe of the spare, which then sees its end when the library exits.
         if spare:
             os.close(spare[1])
@@ -343,7 +360,8 @@ def rehearse_call():
 
 # Fork the spare process, which waits for the invocation of the next call and runs it, so that call does not wait for
 # the fork. The spare reads the invocation until the library closes the pipe, and exits without running anything when
-# the pipe ends empty because the library discarded it or exited.
+# the pipe ends empty because the library discarded it or exited. The spare is forked with the thread limit of one
+# slot, and a call of k slots raises it to k times that when it starts.
 def fork_spare(thread_limit):
     global spare
     limit_thread_pools(thread_limit)
@@ -365,8 +383,8 @@ def fork_spare(thread_limit):
             if not chunks:
                 exit_status = 0
             else:
-                function_id, function_name, function_sandbox, function_stdout_filename = b"".join(chunks).decode().split(" ", maxsplit=3)
-                run_function(int(function_id), function_name, function_sandbox, function_stdout_filename, None)
+                function_id, function_name, function_sandbox, function_stdout_filename, function_slots = parse_invocation(b"".join(chunks).decode())
+                run_function(int(function_id), function_name, function_sandbox, function_stdout_filename, None, thread_limit * function_slots)
         finally:
             os._exit(exit_status)
     os.close(read_fd)
