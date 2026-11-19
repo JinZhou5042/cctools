@@ -18,6 +18,7 @@ import atexit
 import collections
 import contextlib
 import ctypes
+import dataclasses
 import errno
 import functools
 import importlib
@@ -60,9 +61,10 @@ from . import vine_graph_capi as capi  # noqa: E402
 # generated wrapper around each.
 _capi = capi._vine_graph_capi
 from .graph import (  # noqa: E402
-    _LEAF_TYPE_SET, COMMAND_RESULT_LIMIT, CONTENT_LIMIT, Command, File, Function, Graph, Shared, Task, TaskError,
-    _Calls, _callable, _FileRef, _NoSuchItem, _Ref, _a, _label, _link_or_copy, _name_task, _place, _readers_of,
-    _undeclared, _NEW, _RUNNING, _COMPLETED, _FAILED, _CANCELLED, _UNREAD,
+    _LEAF_TYPE_SET, COMMAND_RESULT_LIMIT, CONTENT_LIMIT, CancelledError, Command, File, Function, Graph, Shared, Task,
+    TaskError, _Calls, _callable, _clashes_with_output, _DEFAULT_OPTIONS, _FileRef, _NoSuchItem, _Ref, _a, _label,
+    _link_or_copy, _name_task, _place, _readers_of, _undeclared, reserved_name, _NEW, _RUNNING, _COMPLETED, _FAILED,
+    _CANCELLED, _UNREAD,
 )
 from . import graph as _graph_module, install, library  # noqa: E402
 
@@ -130,6 +132,7 @@ _FAILURE_REASONS = {
     capi.VINE_GRAPH_FAILURE_RETRIES: "retries",
     capi.VINE_GRAPH_FAILURE_CANCELLED: "cancelled",
     capi.VINE_GRAPH_FAILURE_SUBMIT: "submit",
+    capi.VINE_GRAPH_FAILURE_RESOURCES: "resources",
 }
 
 # Seconds the background thread spends on queued calls before it advances the run one step.
@@ -490,14 +493,13 @@ class _Runner:
                 self._run_dir = tempfile.mkdtemp(prefix="vine-graph-run-", dir=self._output_root)
             return self._run_dir
 
-    def _file_task_path(self, identity):
-        """Return the sandbox name of a file a task reads: a number of its own followed by the end of its name, which
-        holds its extension, as much of it as fits in the longest file name a file system takes."""
+    def _file_task_path(self, identity, name):
+        """Return a numbered name of a file: a number of its own followed by the end of its name, which holds its
+        extension, as much of it as fits in the longest file name a file system takes."""
         if identity not in self._file_numbers:
             self._last_number += 1
             self._file_numbers[identity] = self._last_number
         prefix = f"vine-graph-file-{self._file_numbers[identity]}-"
-        name = os.path.basename(identity[-1])
         excess = len(os.fsencode(prefix + name)) - _NAME_MAX
         start = 0
         while excess > 0:
@@ -505,41 +507,100 @@ class _Runner:
             start += 1
         return prefix + name[start:]
 
+    def _file_task_paths(self, task, identities):
+        """Return {file identity: sandbox name} of the files a task reads, given by identity. A File with a name takes
+        it. Any other file takes its own name, its basename, when no other input of the task has that name and the name
+        is not reserved for the runtime, not a file the task writes, and does not start with "-", so a tool that looks
+        for an index file next to its data, such as x.bam.bai next to x.bam, finds it. Every other file, every member of
+        a group of files with one name included, takes a numbered name, so the outcome does not depend on the order of
+        the arguments. A name that a File was given and that the task writes raises ValueError."""
+        outputs = task._outputs or ()
+        chosen = []
+        counts = {}
+        for identity in identities:
+            if identity[0] == "input":
+                explicit = identity[2] is not None
+                name = identity[2] if explicit else os.path.basename(identity[1])
+            else:
+                explicit = False
+                name = os.path.basename(identity[3])
+            chosen.append((identity, name, explicit))
+            counts[name] = counts.get(name, 0) + 1
+        names = {}
+        for identity, name, explicit in chosen:
+            if explicit:
+                if counts[name] > 1 and any(other[2] and other[1] == name and other[0] != identity for other in chosen):
+                    raise ValueError(f"{task!r} reads two files named {name!r}")
+                if _clashes_with_output(name, outputs):
+                    raise ValueError(f"{task!r} reads the file {identity[1]} under the name {name!r} of a file it "
+                                     f"writes")
+                names[identity] = name
+            elif not name or counts[name] > 1 or name.startswith("-") or reserved_name(name) or \
+                    (outputs and _clashes_with_output(name, outputs)):
+                names[identity] = self._file_task_path(identity, name)
+            else:
+                names[identity] = name
+        return names
+
     def _command_line(self, task, python):
         """Return the shell command line of a Command task and what it mounts: (sandbox path of each result it reads,
         record), and (file identity, sandbox path, record of the task that writes it or None) of each file.
-        Placeholders take the shell-quoted path of a file in
-        the sandbox, the text of a task result, which the shell reads into a variable first, and str() of any other
-        value. The command's standard output goes to the result file, which keeps at most COMMAND_RESULT_LIMIT bytes,
-        and a command that exits with status zero fails when it did not write a file that other tasks read."""
+        Placeholders take the shell-quoted path of a file in the sandbox, the text of a task result, which the shell
+        reads into a variable first, without its trailing newlines, and str() of any other value. A list or tuple
+        renders each element so, separated by spaces. The command's standard output goes to the result file, which
+        keeps at most COMMAND_RESULT_LIMIT bytes, and a command that exits with status zero fails when it did not write
+        a file it declared."""
         command = task._func
-        prelude = []
-        values = {}
-        results = []
-        files = []
+        kwargs = task._kwargs
+        fields = command._fields
         parents = _references(task) if task._parents else None
-        for name in command._fields:
-            value = task._kwargs[name]
+        # The names of the files depend on all the files of the task, so they are found first.
+        identities = {}
+        for name in fields:
+            value = kwargs[name]
+            for element in (value if type(value) is list or type(value) is tuple else (value,)):
+                kind = type(element)
+                if kind is File or kind is _FileRef:
+                    identities.setdefault(library.file_identity(element), None)
+        names = self._file_task_paths(task, identities) if identities else None
+        prelude = []
+        variables = {}  # number of a record whose result the task reads -> the shell variable of its text
+        results = {}  # sandbox path of a result the task reads -> its record
+        files = {}  # identity -> (identity, sandbox path, record of the task that writes it or None)
+
+        def render(value):
             kind = type(value)
             if kind is _Ref:
                 record = parents[(value.graph_id, value.key)]._record
-                path = f"vine-graph-result-{record.number}"
-                variable = f"vine_graph_value_{len(prelude) + 1}"
-                if record.command:
-                    read = f"cat {path}"
-                else:
-                    read = f"{python} -c {shlex.quote(_STR_RESULT)} {path}"
-                prelude.append(f"{variable}=$({read}) || {{ echo {shlex.quote(f'vine_graph: could not read the result of task {record.label}')} >&2; exit 1; }}")
-                results.append((path, record))
-                values[name] = f'"${variable}"'
-            elif kind is File or kind is _FileRef:
+                variable = variables.get(record.number)
+                if variable is None:
+                    path = f"vine-graph-result-{record.number}"
+                    variable = variables[record.number] = f"vine_graph_value_{len(prelude) + 1}"
+                    if record.command:
+                        read = f"cat {path}"
+                    else:
+                        read = f"{python} -c {shlex.quote(_STR_RESULT)} {path}"
+                    prelude.append(f"{variable}=$({read}) || {{ echo {shlex.quote(f'vine_graph: could not read the result of task {record.label}')} >&2; exit 1; }}")
+                    results[path] = record
+                return f'"${variable}"'
+            if kind is File or kind is _FileRef:
                 identity = library.file_identity(value)
-                path = self._file_task_path(identity)
-                source = parents[(value.graph_id, value.key)]._record if kind is _FileRef else None
-                files.append((identity, path, source))
-                values[name] = shlex.quote(path)
+                path = names[identity]
+                if identity not in files:
+                    source = parents[(value.graph_id, value.key)]._record if kind is _FileRef else None
+                    files[identity] = (identity, path, source)
+                return shlex.quote(path)
+            return shlex.quote(str(value))
+
+        values = {}
+        for name in fields:
+            value = kwargs[name]
+            if type(value) is list or type(value) is tuple:
+                values[name] = " ".join(render(element) for element in value)
             else:
-                values[name] = shlex.quote(str(value))
+                values[name] = render(value)
+        results = list(results.items())
+        files = list(files.values())
         checks = "".join(f'if [ ! -e {shlex.quote(path)} ]; then echo {shlex.quote(f"vine_graph: the command did not write its output {path}")} >&2; vine_graph_status=1; fi\n'
                          for path in (task._outputs or ()))
         line = "\n".join(prelude + [
@@ -562,12 +623,13 @@ class _Workers(_Runner):
     itself once when it starts: it imports library_modules, loads shared, a dictionary from names to objects that tasks
     take as vg.Shared(name), and, within edata_cache bytes, the smallest function and argument objects of the first
     submission, so tasks do not fetch their files. library_files maps local paths to names in the library sandbox.
-    Command tasks run as standard TaskVine tasks with the cores they request, and a call of a Function with several
-    cores occupies as many slots of the library. output_dir holds the directory of the file paths that TaskFile.path
-    returns, which stay after close, and other keyword arguments go to the TaskVine Manager."""
+    Command tasks run as standard TaskVine tasks with what they request, and a call of a Function with several cores
+    occupies as many slots of the library. output_dir holds the directory of the file paths that TaskFile.path returns,
+    which stay after close. ssl, staging_path, run_info_path, and run_info_template go to the TaskVine Manager."""
 
     def __init__(self, port=cvine.VINE_DEFAULT_PORT, name=None, *, output_dir="./outputs", library_modules=(),
-                 library_files=None, shared=None, edata_cache=0, **manager_options):
+                 library_files=None, shared=None, edata_cache=0, ssl=None, staging_path=None,
+                 run_info_path="vine-run-info", run_info_template=None):
         self._closed = False
         self._manager = None
         self._executor = None  # opaque C executor handle
@@ -627,8 +689,10 @@ class _Workers(_Runner):
         self._run_error = None  # why the run stopped as a whole
         self._capacity = None
         self._capacity_read = 0.0
-        # Cores of the tasks that waited for a larger Worker, each printed once (_notice_unfit())
+        # Options of the tasks that waited for a larger Worker, each printed once (_notice_unfit())
         self._unfit_sizes = set()
+        # _Options -> the id of its profile in the C executor, one per distinct value; background thread only
+        self._profiles = {}
         self._driver = None
         self._driver_ident = None
         self._pickler = _Pickler()
@@ -642,7 +706,8 @@ class _Workers(_Runner):
         self._edata_dir = None
         try:
             self._close_executor_on(port)
-            self._start(port, name, library_modules, library_files, manager_options)
+            self._start(port, name, library_modules, library_files, ssl, staging_path, run_info_path,
+                        run_info_template)
             # Workers load the shared objects from the library's file, so this process keeps only their names.
             self._shared = dict.fromkeys(self._shared)
             _open_executors.add(self)
@@ -664,12 +729,11 @@ class _Workers(_Runner):
                 other._closed_for_port = port
                 other.close()
 
-    def _start(self, port, name, library_modules, library_files, manager_options):
-        run_info_path = manager_options.get("run_info_path")
-        run_info_template = manager_options.get("run_info_template")
+    def _start(self, port, name, library_modules, library_files, ssl, staging_path, run_info_path, run_info_template):
         if run_info_path and run_info_template:
             _remove_files(os.path.join(run_info_path, run_info_template))
-        self._manager = Manager(port=port, name=name, **manager_options)
+        self._manager = Manager(port=port, name=name, ssl=ssl, staging_path=staging_path, run_info_path=run_info_path,
+                                run_info_template=run_info_template)
         for setting, value in MANAGER_TUNING.items():
             self._tune_manager(setting, value)
         self._work_dir = self._resources.enter_context(
@@ -885,16 +949,16 @@ class _Workers(_Runner):
             line, results, files = self._command_line(task, "python3")
             result_records = [parent for _, parent in results]
             result_paths = [path for path, _ in results]
-            return (record, record.outputs, (), result_records, result_paths, (), files, (), None,
-                    (line, task._func.cores))
+            return (record, record.outputs, (), result_records, result_paths, (), files, (), None, line)
         func, args, kwargs = _callable(task._func), task._args, task._kwargs
         files = {}
         mounts = []  # (file identity, sandbox path, record of the task that writes the file or None)
         if task._reads:
             parents = _references(task)
-            for ref in task._reads:
-                identity = library.file_identity(ref)
-                files[identity] = path = self._file_task_path(identity)
+            identities = {library.file_identity(ref): ref for ref in task._reads}
+            sandbox_names = self._file_task_paths(task, identities)
+            for identity, ref in identities.items():
+                files[identity] = path = sandbox_names[identity]
                 source = parents[(ref.graph_id, ref.key)]._record if type(ref) is _FileRef else None
                 mounts.append((identity, path, source))
         inline = []
@@ -955,6 +1019,8 @@ class _Workers(_Runner):
             "selections": list(selections.values()) if selections else [],
             "files": files,
             "texts": texts,
+            # The files that the function writes, which the library checks for after the call.
+            "outputs": record.outputs,
         }
         return (
             record,
@@ -1112,13 +1178,16 @@ class _Workers(_Runner):
             else:
                 file = source.files[identity[3]]
             self._add_input(node, file, name)
+        kind = type(record.func)
+        if kind is Function or kind is Command:
+            options = record.func._options
+            if options is not _DEFAULT_OPTIONS:
+                if _capi.vine_graph_executor_set_profile(executor, node, self._profile(options)) != 0:
+                    raise RuntimeError(f"failed to set what task {key!r} requests")
         if command is not None:
-            if capi.vine_graph_executor_set_command(executor, node, command[0], command[1]) != 0:
+            if capi.vine_graph_executor_set_command(executor, node, command) != 0:
                 raise RuntimeError(f"failed to set the command of task {key!r}")
         else:
-            if type(record.func) is Function and record.func.cores > 1:
-                if capi.vine_graph_executor_set_cores(executor, node, record.func.cores) != 0:
-                    raise RuntimeError(f"failed to set the cores of task {key!r}")
             # The library holds the cached objects, so tasks neither mount nor fetch their files.
             for name, path in edata:
                 if name not in self._cached_edata:
@@ -1132,6 +1201,20 @@ class _Workers(_Runner):
                 raise RuntimeError(f"failed to declare the manifest of task {key!r}")
         if capi.vine_graph_executor_submit_node(executor, node) != 0:
             raise RuntimeError(f"failed to submit task {key!r}")
+
+    def _profile(self, options):
+        """Return the id of the C profile of options, which the first task of a distinct value adds."""
+        profile = self._profiles.get(options)
+        if profile is None:
+            spec = capi.vine_graph_profile()
+            spec.cores = options.cores
+            spec.memory = options.memory or 0
+            spec.gpus = options.gpus
+            profile = capi.vine_graph_executor_add_profile(self._executor, spec)
+            if profile < 0:
+                raise RuntimeError(f"failed to add the profile {options!r}")
+            self._profiles[options] = profile
+        return profile
 
     def _cancel_nodes(self, records):
         cancel = _capi.vine_graph_executor_cancel_node
@@ -1427,15 +1510,27 @@ class _Workers(_Runner):
                 self._changed.notify_all()
 
     def _notice_unfit(self, record):
-        """Print once for each size that a task waits because it requests more cores than the largest connected Worker
-        has, which a larger Worker that joins the pool later can run."""
-        cores = record.func.cores
-        if cores in self._unfit_sizes:
+        """Print once for each kind of request that a task waits because it requests more cores, memory, or GPUs than
+        the largest connected Worker has, naming what does not fit, which a larger Worker that joins the pool later can
+        run."""
+        options = record.func._options
+        if options in self._unfit_sizes:
             return
-        self._unfit_sizes.add(cores)
-        largest = capi.vine_graph_executor_get_capacity(self._executor).largest
-        print(f"vine_graph: {record.label} requests {cores} cores; the largest connected Worker has {largest}; it waits "
-              f"for a larger Worker", file=sys.stderr, flush=True)
+        self._unfit_sizes.add(options)
+        capacity = capi.vine_graph_executor_get_capacity(self._executor)
+        parts = []
+        if options.cores > capacity.largest:
+            parts.append(f"requests {options.cores} cores; the largest connected Worker has {capacity.largest}")
+        if options.memory is not None and options.memory > capacity.largest_memory:
+            parts.append(f"requests {options.memory} MB of memory; the largest connected Worker has "
+                         f"{capacity.largest_memory} MB")
+        if options.gpus > capacity.largest_gpus:
+            parts.append(f"requests {options.gpus} GPUs; the largest connected Worker has {capacity.largest_gpus}")
+        if not parts:
+            # A larger Worker connected since C looked.
+            parts.append("requests more than the largest connected Worker had")
+        print(f"vine_graph: {record.label} {'; '.join(parts)}; it waits for a larger Worker", file=sys.stderr,
+              flush=True)
 
     def _with_library_log(self, error):
         """Return the error of a library that TaskVine removed because it kept dying, followed by the end of the log of
@@ -1559,7 +1654,7 @@ class _Workers(_Runner):
         """Return a local path of a file that a completed task wrote, linked or copied out of the Manager's vault."""
         # The number of the record tells the file apart from those of the other Graphs that the Executor runs.
         identity = ("fetched", record.number, path)
-        local = os.path.join(self._output_directory(), self._file_task_path(identity))
+        local = os.path.join(self._output_directory(), self._file_task_path(identity, os.path.basename(path)))
         if not os.path.exists(local):
             fetched = self.fetched(record, path)
             if isinstance(fetched, bytes):
@@ -1578,7 +1673,8 @@ class _Workers(_Runner):
         _place(self.fetched(record, path), destination)
 
     def capacity(self):
-        """Return (Workers, cores) connected, which the background thread reads about once a second."""
+        """Return (Workers, cores, MB of memory, GPUs) connected, which the background thread reads about once a
+        second."""
         with self._lock:
             capacity = self._capacity
         if capacity is None:
@@ -1590,7 +1686,7 @@ class _Workers(_Runner):
     def _read_capacity(self):
         capacity = capi.vine_graph_executor_get_capacity(self._executor)
         self._capacity_read = time.monotonic()
-        return (capacity.workers, capacity.cores)
+        return (capacity.workers, capacity.cores, capacity.memory, capacity.gpus)
 
     def stats(self):
         """Return the makespan in seconds, the number of recovery tasks, and how far durability lags behind
@@ -1708,6 +1804,9 @@ class _Local(_Runner):
         if not record.command:
             self._pickler.dumps(_callable(task._func))
             self._pickler.dumps((task._args, task._kwargs))
+        # The names of its files are checked as a runner on Workers checks them.
+        if task._reads:
+            self._file_task_paths(task, {library.file_identity(ref): None for ref in task._reads})
         restore_interrupts = _block_interrupts()
         try:
             with self._lock:
@@ -1819,7 +1918,13 @@ class _Local(_Runner):
 
         def file_path(identity):
             if identity[0] == "input":
-                return identity[1]
+                if identity[2] is None:
+                    return identity[1]
+                # A File with a name is reached under that name, as in a Worker's sandbox.
+                link = os.path.join(task_dir, identity[2])
+                if not os.path.lexists(link):
+                    os.symlink(identity[1], link)
+                return link
             return self._local_paths[(sources[(identity[1], identity[2])].number, identity[3])]
 
         with _LOCAL_TASKS:
@@ -1831,8 +1936,8 @@ class _Local(_Runner):
                                           lambda name: cloudpickle.loads(self._shared[name]), task._selections or ())
                 for task_path in record.outputs:
                     local_path = os.path.abspath(os.path.join(task_dir, task_path))
-                    if not os.path.exists(local_path):
-                        raise FileNotFoundError(f"task {record.label} did not write its output file {task_path!r}")
+                    if not os.path.lexists(local_path):
+                        raise FileNotFoundError(f"the function did not write its output {task_path!r}")
                     self._local_paths[(record.number, task_path)] = local_path
                 result_path = os.path.join(self._run_dir, f"result-{record.number}")
                 library.save_result(result_path, output)
@@ -1851,10 +1956,16 @@ class _Local(_Runner):
         for identity, path, source in files:
             local = identity[1] if source is None else self._local_paths[(source.number, identity[3])]
             os.symlink(local, os.path.join(task_dir, path))
-        # A Worker tells a command the cores it requested in CORES.
+        # A Worker tells a command the cores and memory it requested in CORES and MEMORY, and a command that requested
+        # no GPUs sees none.
+        options = task._func._options
+        env = dict(os.environ, CORES=str(options.cores))
+        if options.memory is not None:
+            env["MEMORY"] = str(options.memory)
+        if not options.gpus:
+            env["CUDA_VISIBLE_DEVICES"] = ""
         process = subprocess.run(["/bin/sh", "-c", line], cwd=task_dir, stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                 env=dict(os.environ, CORES=str(task._func.cores)))
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
         if process.returncode != 0:
             error = process.stderr.decode("utf-8", "replace")
             return (_FAILED, record, f"its command exited with status {process.returncode}:\n{error}", "command",
@@ -1917,7 +2028,7 @@ class _Local(_Runner):
         _place(self._local_paths[(record.number, path)], destination)
 
     def capacity(self):
-        return (1, 1)
+        return (1, 1, None, None)
 
     def stats(self):
         return {"makespan": self._seconds, "recovery_tasks": 0, "durability": None}
@@ -1981,10 +2092,26 @@ class _ProgressBar:
         _libc.fflush(None)
 
 
-# What Executor.capacity() returns.
-Capacity = collections.namedtuple("Capacity", ("workers", "cores"))
-# What Executor.progress() returns.
-Progress = collections.namedtuple("Progress", ("total", "completed", "failed", "waiting"))
+@dataclasses.dataclass(frozen=True, slots=True)
+class Capacity:
+    """The Workers connected to an Executor and their resources: Workers, cores, MB of memory, and GPUs, the last two
+    None for a local Executor. Fields may be added; read them by name."""
+
+    workers: int
+    cores: int
+    memory: int
+    gpus: int
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Progress:
+    """How many tasks this Executor made live and how they ended. Fields may be added; read them by name."""
+
+    total: int
+    completed: int
+    failed: int
+    cancelled: int
+    waiting: int
 
 
 class _Watch:
@@ -2025,13 +2152,14 @@ class Executor:
     Python tasks run in a TaskVine library on the Workers, and commands as standard TaskVine tasks. The library imports
     library_modules when it starts and loads shared, a dictionary from names to objects that tasks take as
     vg.Shared(name). library_files maps local paths to names in the library sandbox, where the library and its tasks
-    import them as modules. progress draws a progress bar while run() waits, when standard output is a terminal.
+    import them as modules. progress_bar draws a progress bar while run() waits, when standard output is a terminal.
     output_dir holds the directory of the file paths that TaskFile.path returns, which stay after the Executor closed,
     and is made when the first is asked for. params is the escape hatch to TaskVine tuning: settings by name, applied
     once, whose names follow TaskVine and may change with it. They are those of the graph executor (EXECUTOR_SETTINGS),
     edata-cache, a budget in bytes of function and argument objects of the first submission that the library loads
-    when it starts, and every other name as TaskVine Manager tuning. Other keyword arguments go to the TaskVine
-    Manager.
+    when it starts, and every other name as TaskVine Manager tuning. ssl, staging_path, run_info_path and
+    run_info_template are passed to the TaskVine Manager. Every other Manager setting is a TaskVine tuning name in
+    params. All arguments are keyword-only.
 
     Results. The result of a task that can still be asked for without a new task is kept: a sink of a Graph, a
     submitted task that no submitted task reads yet, and every result or file that was read here. Other results are
@@ -2039,14 +2167,15 @@ class Executor:
     file, or by a task added or submitted later, is computed again, which the caller does not see. A submitted task is
     let go when nothing refers to its Task anymore, and the tasks of a Graph when the Graph is collected."""
 
-    def __init__(self, port=cvine.VINE_DEFAULT_PORT, name=None, *, local=False, progress=True, shared=None, params=None,
-                 library_modules=(), library_files=None, output_dir="./outputs", **manager_options):
+    def __init__(self, *, port=cvine.VINE_DEFAULT_PORT, name=None, local=False, progress_bar=True, shared=None,
+                 params=None, library_modules=(), library_files=None, output_dir="./outputs", ssl=None,
+                 staging_path=None, run_info_path="vine-run-info", run_info_template=None):
         self._runner = None
         params = dict(params or {})
         # A bad setting raises before a Manager starts for it.
         _check_params(params)
         edata_cache = params.pop(EDATA_CACHE, 0)
-        self._progress = bool(progress)
+        self._progress_bar = bool(progress_bar)
         self._local = bool(local)
         # Held while task states change, which happens in the thread that holds it.
         self._lock = _Lock()
@@ -2063,7 +2192,9 @@ class Executor:
             runner = _Local(output_dir=output_dir, shared=shared)
         else:
             runner = _Workers(port, name, output_dir=output_dir, library_modules=library_modules,
-                              library_files=library_files, shared=shared, edata_cache=edata_cache, **manager_options)
+                              library_files=library_files, shared=shared, edata_cache=edata_cache, ssl=ssl,
+                              staging_path=staging_path, run_info_path=run_info_path,
+                              run_info_template=run_info_template)
         try:
             runner.set_params(params)
         except BaseException:
@@ -2092,6 +2223,9 @@ class Executor:
                     pass
         finally:
             runner.close()
+
+    # A call with a positional argument or an unknown keyword raises before __init__ sets it.
+    _runner = None
 
     def __del__(self):
         runner = self._runner
@@ -2125,17 +2259,18 @@ class Executor:
         return self._runner.name
 
     def capacity(self):
-        """Return the Workers connected and their cores, as a tuple with the fields workers and cores, read about once
-        a second. A local Executor has one of each."""
+        """Return the Workers connected and their resources as a Capacity with the fields workers, cores, memory (MB),
+        and gpus, read about once a second. A local Executor has one Worker of one core, and None for memory and
+        gpus."""
         self._check_open()
         return Capacity(*self._runner.capacity())
 
     def progress(self):
-        """Return how far the tasks are that this Executor made live, as a tuple with the fields total, completed,
-        failed, and waiting, the tasks that did not finish yet. Cancelled tasks count in total only."""
+        """Return how far the tasks are that this Executor made live, as a Progress with the fields total, completed,
+        failed, cancelled, and waiting, the tasks that did not finish yet."""
         self._poll()
-        total, completed, failed = self._started, self._completed, self._failed
-        return Progress(total, completed, failed, max(total - completed - failed - self._cancelled, 0))
+        total, completed, failed, cancelled = self._started, self._completed, self._failed, self._cancelled
+        return Progress(total, completed, failed, cancelled, max(total - completed - failed - cancelled, 0))
 
     def _check_open(self):
         self._runner._check_open()
@@ -2366,7 +2501,7 @@ class Executor:
                 with self._lock:
                     self._apply(runner.take_events())
                     unfinished = graph._unfinished
-                if unfinished and bar is None and self._progress and _stdout_is_terminal():
+                if unfinished and bar is None and self._progress_bar and _stdout_is_terminal():
                     bar = _ProgressBar(len(graph._tasks), len(graph._tasks) - unfinished)
                 elif bar is not None:
                     bar.show(len(graph._tasks), len(graph._tasks) - unfinished)
@@ -2451,7 +2586,7 @@ class Executor:
         if task._state == _FAILED:
             raise task_error(task)
         if task._state == _CANCELLED:
-            raise RuntimeError(f"{task!r} was cancelled, so it has no result")
+            raise CancelledError(f"{task!r} was cancelled, so it has no result")
         if runner.closed:
             cause = runner.closed_because()
             raise RuntimeError(f"The Executor that ran {task!r} is closed{cause}, so its {what} is gone. Read results "
@@ -2693,12 +2828,9 @@ def _manager_setting(setting, value):
 
 
 def _check_input_file(path):
-    """Raise an error that says why a File cannot be read by tasks: it does not exist or is not a regular file."""
-    if os.path.isfile(path):
-        return
-    if os.path.isdir(path):
-        raise IsADirectoryError(errno.EISDIR, "a File must be a regular file, not a directory", path)
-    raise FileNotFoundError(errno.ENOENT, "a File must name an existing regular file", path)
+    """Raise an error that says why a File cannot be read by tasks: it does not exist."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(errno.ENOENT, "a File must name an existing file or directory", path)
 
 
 def _durability(durability):

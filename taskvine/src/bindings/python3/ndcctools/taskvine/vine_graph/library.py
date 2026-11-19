@@ -381,9 +381,10 @@ def _portable_error(error):
 
 
 def file_identity(ref):
-    """Return the key under which a manifest lists the path of a File or of a task's output file."""
+    """Return the key under which a manifest lists the path of a File, with the name it was given, or of a task's output
+    file."""
     if isinstance(ref, File):
-        return ("input", ref.path)
+        return ("input", ref.path, ref.name)
     return ("output", ref.graph_id, ref.key, ref.path)
 
 
@@ -568,6 +569,11 @@ def _run_node():
         os.chdir(sandbox)
     del function, args, kwargs
     objects.clear()
+    # A declared file that the function did not write fails the task as the function's own error, as in a local
+    # Executor, instead of an attempt that TaskVine retries.
+    for path in manifest.get("outputs", ()):
+        if not os.path.lexists(os.path.join(sandbox, path)):
+            raise FileNotFoundError(f"the function did not write its output {path!r}")
     for steps, path in manifest["selections"]:
         save_selection(path, output, steps)
     return output

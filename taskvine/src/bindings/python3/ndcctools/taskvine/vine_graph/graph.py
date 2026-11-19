@@ -12,6 +12,7 @@ import copy
 import dataclasses
 import itertools
 import os
+import re
 import shutil
 import string
 import threading
@@ -44,30 +45,56 @@ def _absolute(path):
         return os.path.abspath(path)
 
 
+# Names that the runtime owns in a task sandbox: the library protocol (infile, outfile), the Worker (.taskvine.*), the
+# resource monitor (cctools-monitor*), and vine_graph itself (vine-graph-*). An input never takes one of them.
+RESERVED_NAMES = frozenset({"infile", "outfile", ".", ".."})
+RESERVED_PREFIXES = (".taskvine.", "vine-graph-", "cctools-monitor")
+
+
+def reserved_name(name):
+    """Return whether a name in a task sandbox belongs to the runtime."""
+    return name in RESERVED_NAMES or name.startswith(RESERVED_PREFIXES)
+
+
 class File(_Symbol):
-    """A file on the local filesystem that tasks read. A task receives the path of its copy in the task sandbox."""
+    """A file or directory on the local filesystem that tasks read. A task receives the path of its copy in the task
+    sandbox, named like the file when no other input of the task has that name, or name when given, as for a tool that
+    reads a fixed name such as File("run7.yaml", name="config.yaml"). A File may be a directory, which the task receives
+    with its tree. Never write to an input: a task gets a link to the copy that other tasks on its Worker share, or to
+    the file itself in a local Executor."""
 
-    __slots__ = ("path",)
+    __slots__ = ("path", "name")
 
-    def __init__(self, path):
+    def __init__(self, path, name=None):
         path = os.fspath(path)
         if not isinstance(path, str):
             raise TypeError("a File path must be a string or path-like object")
         if "\0" in path:
             raise ValueError("a File path contains a null byte")
+        if name is not None:
+            name = os.fspath(name)
+            if not isinstance(name, str):
+                raise TypeError("a File name must be a string or path-like object")
+            if "/" in name or _sandbox_name(name) != name:
+                raise ValueError(f"a File name is one file name without a directory, not {name!r}")
+            if reserved_name(name):
+                raise ValueError(f"the name {name!r} is reserved for the runtime in a task sandbox; choose another")
         self.path = _absolute(path)
+        self.name = name
 
     def _as_ref(self):
         return self
 
     def __eq__(self, other):
-        return isinstance(other, File) and other.path == self.path
+        return isinstance(other, File) and other.path == self.path and other.name == self.name
 
     def __hash__(self):
-        return hash((File, self.path))
+        return hash((File, self.path, self.name))
 
     def __repr__(self):
-        return f"File({self.path!r})"
+        if self.name is None:
+            return f"File({self.path!r})"
+        return f"File({self.path!r}, name={self.name!r})"
 
 
 class Shared(_Symbol):
@@ -484,6 +511,10 @@ COMMAND_RESULT_LIMIT = 1 << 20
 CONTENT_LIMIT = 16 << 20
 
 
+class CancelledError(RuntimeError):
+    """Raised by result() of a task that was cancelled, and by reading its files. It is a RuntimeError, as before."""
+
+
 class TaskError(RuntimeError):
     """A task failed, or it could not run because a task it reads failed. task is the Task, and source the Task whose
     own failure explains it, which is task itself when it failed on its own.
@@ -493,15 +524,20 @@ class TaskError(RuntimeError):
     - "function": its function raised an exception
     - "command": its command exited with an error status, or did not write a file it declared
     - "signal": its function was killed by a signal
+    - "resources": it used more than it requested, as a command that requested memory and exited with status 137, the
+      status of a shell whose command was killed by SIGKILL, as the kernel does to a process that runs out of memory
     - "workers": Workers kept disconnecting while they ran it, as when it exceeds their memory or crashes them
     - "input": a file it reads is missing at the Manager
     - "retries": more of its attempts failed for other reasons than the setting max-retries allows
     - "submit": it could not be submitted, as when an argument cannot be serialized
     - "result": it completed, but its result cannot be loaded in this process or sent by its Worker
 
+    Reasons may grow: compare with these strings, and treat others as failures.
+
     exception is the exception that the function of the source raised, loaded in this process with the source's
     traceback as a note, or None. exit_code is the exit status of the source's command when it exited with an error
-    status, and None otherwise; the message then ends with the end of its standard error."""
+    status, and None otherwise, also when it failed as "resources"; the message then ends with the end of its standard
+    error."""
 
     def __init__(self, message, task, source, reason=None, exception=None, exit_code=None):
         super().__init__(message)
@@ -525,55 +561,176 @@ def _sandbox_name(name):
     return normalized
 
 
+class _Options:
+    """What a task requests of its Worker: cores, memory in MB or None, and GPUs. Equal options are one object
+    (_intern_options()), so the tasks of many Functions and Commands share one, and the Executor turns each into one
+    profile of the C executor. A record is frozen, and unpickling one interns it again."""
+
+    __slots__ = ("cores", "memory", "gpus")
+
+    def __setattr__(self, name, value):
+        raise AttributeError("task options are frozen")
+
+    def __reduce__(self):
+        return (_intern_options, (self.cores, self.memory, self.gpus))
+
+    def __eq__(self, other):
+        return type(other) is _Options and (self.cores, self.memory, self.gpus) == (other.cores, other.memory,
+                                                                                    other.gpus)
+
+    def __hash__(self):
+        return hash((self.cores, self.memory, self.gpus))
+
+    def __repr__(self):
+        return f"_Options(cores={self.cores}, memory={self.memory}, gpus={self.gpus})"
+
+
+# (cores, memory, gpus) -> the one _Options of these values. It holds one record per distinct value that a program
+# spells, not one per task.
+_OPTIONS = {}
+
+
+def _intern_options(cores, memory, gpus):
+    """Return the one _Options of these values."""
+    key = (cores, memory, gpus)
+    options = _OPTIONS.get(key)
+    if options is None:
+        options = object.__new__(_Options)
+        object.__setattr__(options, "cores", cores)
+        object.__setattr__(options, "memory", memory)
+        object.__setattr__(options, "gpus", gpus)
+        options = _OPTIONS.setdefault(key, options)
+    return options
+
+
+# The options of a plain function: one core.
+_DEFAULT_OPTIONS = _intern_options(1, None, 0)
+
+
+def _options(cores, memory=None, gpus=0):
+    """Check what a task requests and return its interned options."""
+    if type(cores) is not int or cores < 1:
+        raise ValueError("cores must be a positive integer")
+    if memory is not None and (type(memory) is not int or memory < 1):
+        raise ValueError("memory is in MB and must be a positive integer")
+    if type(gpus) is not int or gpus < 0:
+        raise ValueError("gpus must be a non-negative integer")
+    return _intern_options(cores, memory, gpus)
+
+
+# What name= takes: a label of one word, as TaskVine categories are.
+_LABEL = re.compile(r"[A-Za-z0-9_.+-]{1,64}")
+
+
+def _check_label(name):
+    """Return name, a label of tasks, or raise for one that is not 1 to 64 letters, digits, or _.+-."""
+    if name is not None and (not isinstance(name, str) or not _LABEL.fullmatch(name)):
+        raise ValueError("name must be 1 to 64 letters, digits, or _.+-")
+    return name
+
+
+def _fields_of(template, what):
+    """Return the names of the placeholders of a template, each once, in order. A placeholder is a name in braces, and
+    {{ and }} stand for braces."""
+    fields = {}
+    try:
+        parsed = list(string.Formatter().parse(template))
+    except ValueError as error:
+        raise ValueError(f"invalid {what} {template!r}: {error}") from None
+    for _, field, spec, conversion in parsed:
+        if field is None:
+            continue
+        if not field.isidentifier() or spec or conversion:
+            raise ValueError(f"a placeholder of {_a(what)} is a name in braces such as {{name}}, not {{{field}}}")
+        fields[field] = None
+    return tuple(fields)
+
+
+def _parse_outputs(outputs):
+    """Return (outputs, render) for the outputs of a Function or Command: the names of the files that its tasks write,
+    each once, normalized when they have no placeholder and as given otherwise, and None when none has a placeholder,
+    or else (templates, names of their placeholders), from which _task_outputs() names the files of each task."""
+    if isinstance(outputs, (str, bytes, os.PathLike)):
+        raise TypeError("outputs takes a list of file names, such as outputs=[\"out.txt\"]")
+    shown = {}  # what outputs returns -> the template
+    fields = {}
+    for template in outputs:
+        template = os.fspath(template)
+        if not isinstance(template, str):
+            raise TypeError("a file name must be a string or path-like object")
+        own = _fields_of(template, "file name")
+        if own:
+            fields.update(dict.fromkeys(own))
+            shown.setdefault(template, template)
+        else:
+            shown.setdefault(_sandbox_name(template.format()), template)
+    if not fields:
+        return tuple(shown), None
+    return tuple(shown), (tuple(shown.values()), tuple(fields))
+
+
+def _task_outputs(func, kwargs):
+    """Return the sandbox paths of the files that a task of a Function or Command writes, with the placeholders of its
+    outputs filled from its keyword arguments, unquoted."""
+    render = func._render
+    if render is None:
+        return func._outputs
+    templates, fields = render
+    values = {}
+    for field in fields:
+        if field not in kwargs:
+            raise TypeError(f"{func!r}: no value for {field}, which outputs names")
+        value = kwargs[field]
+        if type(value) is bool or not isinstance(value, (str, int)):
+            raise TypeError(f"{field} names a file in outputs, so its value must be a str or int")
+        values[field] = value
+    return tuple(dict.fromkeys(_sandbox_name(template.format_map(values)) for template in templates))
+
+
 class Command:
     """A shell command line that tasks run, as a function is for Python tasks: g.add(command, **values) or
     executor.submit(command, **values) makes a task that runs it in its sandbox.
 
     Placeholders such as {name} take the values given by name, shell-quoted: a File, or a file a task writes
-    (task.file(name)), becomes its path in the sandbox, a Task becomes str() of its result, and any other value str()
-    of the value. Every placeholder needs a value, and every value a placeholder. Write {{ and }} for braces. The text a
-    command writes to standard output, at most 1 MiB, is its result, and an exit status other than zero fails it, with
-    the end of its standard error in its TaskError. cores is the number of cores it uses on a Worker, where a Python
-    task uses one.
+    (task.file(name)), becomes its path in the sandbox, a Task becomes str() of its result without trailing newlines,
+    and any other value str() of the value. A list or tuple renders each element, separated by spaces, and an empty one
+    adds nothing. For a repeated flag, pass [w for v in vcfs for w in ("-I", v)]. Every placeholder needs a value, and
+    every value a placeholder. Write {{ and }} for braces. The text a command writes to standard output, at most 1 MiB,
+    is its result, and an exit status other than zero fails it, with the end of its standard error in its TaskError.
+    Never write to an input file.
+
+    Resources. cores is the number of cores it uses on a Worker, where a Python task uses one. memory (MB) and gpus are
+    requests, not limits. A task waits for a Worker that can grant them, and sees MEMORY, GPUS, and CUDA_VISIBLE_DEVICES
+    for what it got. A task without gpus sees CUDA_VISIBLE_DEVICES empty. A task that requested memory and exits with
+    status 137, as when the kernel kills it for want of memory, fails with reason "resources". A task whose requests
+    exceed the largest connected Worker waits for a larger Worker, and the Executor prints a notice once for each kind
+    of request.
 
     Output files. A file that the command writes in its sandbox is kept only when it was declared. outputs lists the
     files that every task of the command writes, as relative paths in the sandbox, and declares them for each task,
-    whether Graph.add() or Executor.submit() makes it. task.file(name) then names such a file: pass it to other tasks,
-    or read it once the task completed with its path, content, text, or save(), whether or not a task reads it. A
-    declared file is a required output, so a command that does not write it fails. A file whose name differs from task
-    to task is declared by asking for it with task.file(name) before the task is submitted, which only a task of a
-    Graph allows, since Executor.submit() submits its task at once.
+    whether Graph.add() or Executor.submit() makes it. Placeholders may appear in outputs, where their value, a str or
+    int, is inserted unquoted, so outputs=["{sample}.bam"] names a file of each task. task.file(name) then names such a
+    file: pass it to other tasks, or read it once the task completed with its path, content, text, or save(), whether or
+    not a task reads it. A declared file is a required output, so a command that does not write it fails. A file can
+    also be declared by asking for it with task.file(name) before the task is submitted, which only a task of a Graph
+    allows, since Executor.submit() submits its task at once.
 
-    A task whose cores exceed those of the largest connected Worker waits for a larger Worker, and the Executor prints
-    a notice once for each size."""
+    name labels its tasks in errors, notices, and repr; it changes nothing else."""
 
-    __slots__ = ("_template", "_cores", "_fields", "_outputs", "__weakref__")
+    __slots__ = ("_template", "_options", "_fields", "_outputs", "_render", "_name", "__weakref__")
 
-    def __init__(self, template, cores=1, outputs=()):
+    def __init__(self, template, *, cores=1, memory=None, gpus=0, outputs=(), name=None):
         if not isinstance(template, str) or not template.strip():
             raise TypeError("a Command takes a command line as a non-empty string")
         if "\0" in template:
             raise ValueError("a command line contains a null byte")
-        if type(cores) is not int or cores < 1:
-            raise ValueError("cores must be a positive integer")
-        fields = {}
-        try:
-            parsed = list(string.Formatter().parse(template))
-        except ValueError as error:
-            raise ValueError(f"invalid command line {template!r}: {error}") from None
-        for _, field, spec, conversion in parsed:
-            if field is None:
-                continue
-            if not field.isidentifier() or spec or conversion:
-                raise ValueError(f"a placeholder of a command line is a name in braces such as {{name}}, not {{{field}}}")
-            fields[field] = None
-        if isinstance(outputs, (str, bytes, os.PathLike)):
-            raise TypeError("outputs takes a list of file names, such as outputs=[\"out.txt\"]")
+        self._options = _options(cores, memory, gpus)
+        fields = _fields_of(template, "command line")
+        self._name = _check_label(name)
+        self._outputs, self._render = _parse_outputs(outputs)
         self._template = template
-        self._cores = cores
-        self._fields = tuple(fields)
-        # Normalized, each once, in the order given.
-        self._outputs = tuple(dict.fromkeys(_sandbox_name(name) for name in outputs))
+        # The placeholders of the command line, followed by those only its outputs name.
+        self._fields = tuple(dict.fromkeys(fields + (self._render[1] if self._render else ())))
 
     @property
     def template(self):
@@ -581,40 +738,71 @@ class Command:
 
     @property
     def cores(self):
-        return self._cores
+        return self._options.cores
+
+    @property
+    def memory(self):
+        """The MB of memory its tasks request, or None."""
+        return self._options.memory
+
+    @property
+    def gpus(self):
+        return self._options.gpus
 
     @property
     def outputs(self):
-        """The files that every task of the command writes, as relative paths in the sandbox."""
+        """The files that every task of the command writes, as relative paths in the sandbox, and templates for those
+        whose names have placeholders."""
         return self._outputs
 
+    @property
+    def name(self):
+        """The label of its tasks, or None."""
+        return self._name
+
     def __repr__(self):
-        outputs = f", outputs={list(self._outputs)!r}" if self._outputs else ""
-        return f"Command({self._template!r}, cores={self._cores}{outputs})"
+        options = self._options
+        extra = ""
+        if options.memory is not None:
+            extra += f", memory={options.memory}"
+        if options.gpus:
+            extra += f", gpus={options.gpus}"
+        if self._outputs:
+            extra += f", outputs={list(self._outputs)!r}"
+        if self._name is not None:
+            extra += f", name={self._name!r}"
+        return f"Command({self._template!r}, cores={options.cores}{extra})"
 
 
 class Function:
-    """A Python function that tasks call with several cores of a Worker, as a Command runs a command line with them:
-    g.add(Function(func, cores=4), *args) or executor.submit(Function(func, cores=4), *args) makes a task that calls
-    func with these arguments, and a Function is used in their place wherever a function is. A plain function, or
-    cores=1, uses one core.
+    """A Python function that tasks call with several cores of a Worker, or with files they write, as a Command runs a
+    command line with them: g.add(Function(func, cores=4), *args) or executor.submit(Function(func, cores=4), *args)
+    makes a task that calls func with these arguments, and a Function is used in their place wherever a function is. A
+    plain function, or cores=1, uses one core.
 
     A Worker runs the calls of an Executor in one library with a slot per core, and a call of cores=k occupies k slots,
     so a Worker of 8 cores runs eight calls of one core, four of two, or two of four at a time. The library limits the
     native thread pools (OpenMP, BLAS) loaded in the call's process to k threads. A task that asks for more cores than
     the largest connected Worker has waits for a larger Worker, as Workers join a pool over time, and the Executor
     prints a notice once for each size. An Executor with local=True runs every call in its own process and ignores
-    cores."""
+    cores.
 
-    __slots__ = ("_func", "_cores", "__weakref__")
+    outputs lists files that every call writes in its working directory, which is the task sandbox, as relative paths,
+    as Command(outputs=...) does, with placeholders filled from keyword arguments of the call. task.file(name) names
+    them for other tasks and for reading, and a call that does not write one fails with reason "function". Never write
+    to an input file.
 
-    def __init__(self, func, cores=1):
+    name labels its tasks in errors, notices, and repr; it changes nothing else."""
+
+    __slots__ = ("_func", "_options", "_name", "_outputs", "_render", "__weakref__")
+
+    def __init__(self, func, *, cores=1, name=None, outputs=()):
         if isinstance(func, (Command, Function, _Symbol)) or not callable(func):
             raise TypeError("a Function takes a function, such as Function(func, cores=2)")
-        if type(cores) is not int or cores < 1:
-            raise ValueError("cores must be a positive integer")
+        self._options = _options(cores)
+        self._name = _check_label(name)
+        self._outputs, self._render = _parse_outputs(outputs)
         self._func = func
-        self._cores = cores
 
     @property
     def func(self):
@@ -622,11 +810,27 @@ class Function:
 
     @property
     def cores(self):
-        return self._cores
+        return self._options.cores
+
+    @property
+    def outputs(self):
+        """The files that every call writes in its sandbox, as relative paths, and templates for those whose names have
+        placeholders."""
+        return self._outputs
+
+    @property
+    def name(self):
+        """The label of its tasks, or None."""
+        return self._name
 
     def __repr__(self):
-        name = getattr(self._func, "__name__", None) or type(self._func).__name__
-        return f"Function({name}, cores={self._cores})"
+        func = getattr(self._func, "__name__", None) or type(self._func).__name__
+        extra = ""
+        if self._outputs:
+            extra += f", outputs={list(self._outputs)!r}"
+        if self._name is not None:
+            extra += f", name={self._name!r}"
+        return f"Function({func}, cores={self._options.cores}{extra})"
 
 
 def _callable(func):
@@ -854,8 +1058,8 @@ class Task(_Selectable):
     def result(self, timeout=None):
         """Return the result of the task: what its function returned, or the text its command wrote to standard
         output. A task that is still running is waited for, at most timeout seconds when one is given, after which
-        TimeoutError is raised. A failed task raises its TaskError, and a cancelled task, or one that has not been
-        submitted, RuntimeError. A result that the Executor released meanwhile is computed again.
+        TimeoutError is raised. A failed task raises its TaskError, a cancelled task CancelledError, and one that has
+        not been submitted RuntimeError. A result that the Executor released meanwhile is computed again.
 
         Results are read through the open Executor. The Task keeps a result that was returned once, by result() or by
         Executor.run(), and returns the same object again, also after the Executor closed. A result that was never
@@ -895,7 +1099,8 @@ class Task(_Selectable):
     def file(self, name):
         """Return the file this task writes at name, a relative path in its sandbox. Asking for the same name again
         returns the same file. A file is declared by asking for it before the task is submitted, or by the outputs of
-        its Command, so a task that Executor.submit() started has the files of its Command and no others."""
+        its Function or Command, so a task that Executor.submit() started has the files of its Function or Command and
+        no others."""
         normalized = _sandbox_name(name)
         outputs = self._outputs
         if outputs is None:
@@ -929,13 +1134,50 @@ def _label(task):
 
 
 def _name_task(number, func, suffix=""):
-    if isinstance(func, Command):
+    kind = type(func)
+    if (kind is Command or kind is Function) and func._name is not None:
+        name = func._name
+    elif kind is Command:
         words = func.template.split()
         name = words[0] if words else "command"
     else:
         func = _callable(func)
         name = getattr(func, "__name__", None) or type(func).__name__
     return f"Task({number!r}, {name}{suffix})"
+
+
+def _check_command_value(name, value):
+    """Raise for a value of a placeholder that a command cannot read."""
+    if isinstance(value, _Selection):
+        raise TypeError(f"the value of {{{name}}} is a selection, which a command cannot read; read it in a Python task "
+                        f"and pass that task")
+    if isinstance(value, Shared):
+        raise TypeError(f"the value of {{{name}}} is a shared object, which only Python tasks take")
+    if not isinstance(value, _Symbol) and _scanner()(value):
+        raise TypeError(f"the value of {{{name}}} holds tasks or files inside, which a command cannot read; pass each "
+                        f"as a value of its own")
+
+
+def _check_input_names(task, outputs):
+    """Raise ValueError for a File that a task reads under a name that the task also gives another File it reads, or
+    a file it writes."""
+    named = {}
+    for ref in task._reads:
+        if type(ref) is not File or ref.name is None:
+            continue
+        other = named.setdefault(ref.name, ref)
+        if other is not ref:
+            raise ValueError(f"{task!r} reads two files named {ref.name!r}: {other.path} and {ref.path}")
+        if _clashes_with_output(ref.name, outputs):
+            raise ValueError(f"{task!r} reads {ref!r} under the name of a file it writes")
+
+
+def _clashes_with_output(name, outputs):
+    """Return whether a sandbox name is one of outputs or a directory of one."""
+    for output in outputs:
+        if output == name or output.startswith(name + "/"):
+            return True
+    return False
 
 
 # Numbers that tell Graphs apart in the references of tasks that read tasks of another Graph.
@@ -1019,11 +1261,14 @@ class Graph:
             raise TypeError("a task needs a function or a Command followed by its arguments")
         if key in self._tasks:
             raise ValueError(f"a task with key {key!r} already exists")
+        outputs = _task_outputs(func, kwargs) if (command or type(func) is Function) and func._outputs else ()
         task = Task(self, key, func)
         self._record_arguments(task, args, kwargs)
-        if command and func._outputs:
-            # The files of a Command are declared for each of its tasks before the task can start.
-            task._outputs = {name: TaskFile(task, name) for name in func._outputs}
+        if outputs:
+            # The files of a Function or Command are declared for each of its tasks before the task can start.
+            task._outputs = {name: TaskFile(task, name) for name in outputs}
+        if task._reads:
+            _check_input_names(task, outputs)
         self._insert(task)
         return task
 
@@ -1077,14 +1322,16 @@ class Graph:
         """Store the arguments of a task with every symbol replaced by its reference, and what it reads."""
         if isinstance(task._func, Command):
             for name, value in kwargs.items():
-                if isinstance(value, _Selection):
-                    raise TypeError(f"the value of {{{name}}} is a selection, which a command cannot read; read it in "
-                                    f"a Python task and pass that task")
-                if isinstance(value, Shared):
-                    raise TypeError(f"the value of {{{name}}} is a shared object, which only Python tasks take")
-                if not isinstance(value, _Symbol) and _scanner()(value):
-                    raise TypeError(f"the value of {{{name}}} holds tasks or files inside, which a command cannot read; "
-                                    f"pass each as a value of its own")
+                if isinstance(value, (set, frozenset)):
+                    raise TypeError(f"the value of {{{name}}} is a set, which has no order; pass sorted(...)")
+                if type(value) is list or type(value) is tuple:
+                    for element in value:
+                        if isinstance(element, (list, tuple, set, frozenset, dict)):
+                            raise TypeError(f"the value of {{{name}}} is a list that holds a container; a list "
+                                            f"renders each of its elements, which are single values")
+                        _check_command_value(name, element)
+                else:
+                    _check_command_value(name, value)
         # Arguments of leaf types, the common case of calls added in bulk, hold no symbol and need no scan. Tasks
         # without keyword arguments share one empty dictionary.
         leaf = _LEAF_TYPE_SET

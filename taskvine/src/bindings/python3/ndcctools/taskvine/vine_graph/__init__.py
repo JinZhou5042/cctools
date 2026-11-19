@@ -5,7 +5,8 @@
 """Build task graphs and run them on TaskVine.
 
 A Graph holds tasks, Python calls or shell commands, and the data they pass to each other. A task uses one core of a
-Worker, and vg.Function(func, cores=k) and vg.Command(line, cores=k) make tasks that use k. An Executor is where tasks
+Worker, and vg.Function(func, cores=k) and vg.Command(line, cores=k) make tasks that use k; a Command also requests
+memory and gpus. An Executor is where tasks
 run: submit(func, *args) starts one task at once and returns its Task, submit(graph) makes the tasks of a Graph live,
 and run(graph) also waits for them and returns the results of its sinks, the tasks that no task reads. From then on a
 Task behaves alike whatever made it: result() waits for it and returns its result. A task that reads a Task starts once
@@ -23,9 +24,10 @@ Executor closes:
         print(executor.submit(sum, [total, *more]).result())
 """
 
-from .graph import Command, File, Function, Graph, Shared, Task, TaskError, TaskFile
+from .graph import CancelledError, Command, File, Function, Graph, Shared, Task, TaskError, TaskFile
 
-__all__ = ["Graph", "Task", "TaskFile", "File", "Command", "Function", "Shared", "Executor", "TaskError"]
+__all__ = ["Graph", "Task", "TaskFile", "File", "Command", "Function", "Shared", "Executor", "TaskError",
+           "CancelledError"]
 
 
 def __dir__():

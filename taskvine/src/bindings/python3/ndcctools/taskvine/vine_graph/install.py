@@ -58,6 +58,9 @@ def installed(manager, name, modules=(), files=None, shared=None, edata_cache=No
         for local, remote in files.items():
             inputs.append(manager.declare_file(local, cache=True, peer_transfer=True))
             library.add_input(inputs[-1], remote)
+        # A task sees only the GPUs it requested, and calls request none, so the library process and the calls it
+        # forks see CUDA_VISIBLE_DEVICES empty.
+        library.set_env_var("CUDA_VISIBLE_DEVICES", "")
         # Without a resource request, each instance takes its whole Worker with one function slot per core.
         manager.install_library(library)
         installed_library = True

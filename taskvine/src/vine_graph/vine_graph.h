@@ -47,7 +47,7 @@ struct vine_graph_node {
 	uint64_t node_id;	// dense id assigned by the graph, starting from one
 	struct vine_task *task; // latest attempt until the Manager returns it, then NULL
 	int task_id;		// Manager id of the latest attempt, or zero before the first submission
-	int cores;		// cores the task requests, or zero for a function call of one core
+	uint32_t profile;	// the executor's profile of what the task requests, 0 for the default of one core
 
 	struct vine_graph_array inputs;	  // owned mounts the task reads
 	struct vine_graph_array outputs;  // owned mounts the task writes
@@ -63,7 +63,7 @@ struct vine_graph_node {
 	unsigned kept : 1;	// ran again after its release, and kept until the frontend lets it go (never released meanwhile)
 	unsigned removed : 1;	// removed from the graph, so only the entries counted in refs still hold the structure
 	unsigned reading : 1;	// submitted and not finished, so counted in each parent's readers
-	unsigned unfit : 1;	// waited for more cores than the largest Worker had at the last check
+	unsigned unfit : 1;	// waited for more than the largest Worker had at the last check
 	unsigned noticed : 1;	// reported once by vine_graph_executor_next_unfit()
 
 	int remaining_parents;	    // parents not completed yet

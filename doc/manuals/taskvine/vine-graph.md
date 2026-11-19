@@ -143,6 +143,16 @@ assert results[consumer] == "VINE GRAPH\n"
 assert Path(saved).read_text() == "VINE GRAPH\n"
 ```
 
+An input keeps its base name in the sandbox, so a function finds an index
+such as `x.bam.bai` next to `x.bam` when both are inputs. `vg.File(path,
+name="config.yaml")` gives an input a name of its own. An input whose base
+name another input of the same task has, that a task writes, that starts with
+`-`, or that is reserved (`infile`, `outfile`, and names that start with
+`.taskvine.`, `vine-graph-`, or `cctools-monitor`) gets a numbered name
+instead, and two inputs given the same `name=` raise `ValueError`. A directory
+is a File too, and the task receives its tree. Never write to an input: on a
+worker it may be a link to the cached copy that other tasks read.
+
 A file name is a relative path inside the sandbox. Asking for a file before
 its task starts declares it, so the files of a Graph task are declared after
 `graph.add()` and before the Graph is submitted. A declared file is a required
@@ -164,7 +174,8 @@ that was returned once stays readable afterwards.
 
 ## Commands
 
-A `vg.Command(template, cores=1, outputs=())` is a shell command line that
+A `vg.Command(template, *, cores=1, memory=None, gpus=0, outputs=(), name=None)`
+is a shell command line that
 tasks run, as a function is for Python tasks. `graph.add(command, **values)`
 or `executor.submit(command, **values)` makes a task that runs it in its
 sandbox, with a value for each placeholder such as `{name}`.
@@ -202,8 +213,22 @@ Values are given by name and inserted shell-quoted. A `vg.File` or a
 `TaskFile` becomes its path in the sandbox, a Task becomes `str()` of its
 result, and any other value `str()` of the value. Every placeholder needs a
 value, and every value a placeholder. Write `{{` and `}}` for braces. A value
-cannot be a selection such as `task["key"]`, a `vg.Shared`, or a container
-that holds tasks or files: read those in a Python task and pass that task.
+cannot be a selection such as `task["key"]`, a `vg.Shared`, a set, a list
+that holds containers, or another container that holds tasks or files: read
+those in a Python task and pass that task.
+
+A list or a tuple inserts each element, quoted on its own, separated by
+spaces, and nothing when it is empty. Its elements may be Files, TaskFiles,
+Tasks, and plain values. A flag repeated for each value is a flat list:
+
+```python
+import ndcctools.taskvine.vine_graph as vg
+
+includes = ["src", "lib"]
+flags = [word for directory in includes for word in ("-I", directory)]
+with vg.Executor(local=True) as executor:
+    assert executor.submit(vg.Command("echo {flags}"), flags=flags).result() == "-I src -I lib\n"
+```
 
 The text a command writes to standard output, at most 1 MiB, is its result. An
 exit status other than zero fails the task, and its `TaskError` carries the
@@ -211,19 +236,36 @@ status as `exit_code` and ends with the end of the command's standard error.
 `cores` is the number of cores the command uses on a worker, where a Python
 task uses one unless its function is a `vg.Function`.
 
+`memory` is the memory in MB the command uses on a worker, which the command
+sees as `$MEMORY`, and `gpus` the GPUs, which it sees as `$GPUS` and
+`$CUDA_VISIBLE_DEVICES`. A task that requests no GPUs sees
+`CUDA_VISIBLE_DEVICES` empty, and so do Python tasks, so a library such as
+PyTorch does not take a GPU another task was given. A command that requested
+memory and was killed for exceeding it, or that exceeded what it requested in
+another way, fails with reason `"resources"`. `name="label"` names the tasks of
+a command in their `repr()` and errors, as in `Task(3, sort)`, with 1 to 64
+letters, digits, or `_.+-`.
+
 A file that a command writes is kept only when it was declared. `outputs`
 lists the files that every task of the command writes, and declares them for
 each task, whether it comes from `graph.add()` or `executor.submit()`.
-`task.file(name)` then names the file. A file whose name differs from task to
-task is declared with `task.file(name)` before the task starts, which only a
-task of a Graph allows, because a submitted task has started already.
+`task.file(name)` then names the file. A placeholder in `outputs` takes the
+task's value, a str or an int inserted as it is, so
+`vg.Command("convert {n}.png {n}.jpg", outputs=["{n}.jpg"])` declares `7.jpg`
+for `n=7`. A file whose name differs from task to task in other ways is
+declared with `task.file(name)` before the task starts, which only a task of a
+Graph allows, because a submitted task has started already.
 
 ## Functions of several cores
 
-A `vg.Function(func, cores=1)` is a Python function whose tasks use `cores`
-cores of a worker, as `cores` does for a Command. It goes wherever a function
-does, in `graph.add()` and `executor.submit()`, and a plain function uses one
-core.
+A `vg.Function(func, *, cores=1, name=None, outputs=())` is a Python
+function whose tasks use `cores` cores of a worker, as `cores` does for a
+Command. It goes wherever a function does, in `graph.add()` and
+`executor.submit()`, and a plain function uses one core. `name` labels its
+tasks, and `outputs` declares the files that each task writes in its working
+directory, with placeholders filled from keyword arguments as for a Command. A
+function that does not write a declared output fails with reason
+`"function"` and a `FileNotFoundError`.
 
 ```python
 import ndcctools.taskvine.vine_graph as vg
@@ -255,9 +297,10 @@ threads. A task that asks for more cores than the largest connected worker
 has waits for a larger worker, which a pool that grows may bring, and so does
 a task that computes such a task's result again after a worker was lost. Once
 two checks a few seconds apart found it so, the Executor prints one notice for
-each such size, such as `Task(7, fit) requests 8 cores; the largest connected
+each such request, such as `Task(7, fit) requests 8 cores; the largest connected
 Worker has 4; it waits for a larger Worker`. Tasks wait without a notice while
-no worker is connected. The same holds for a Command of several cores.
+no worker is connected. The same holds for a Command of several cores, or of
+more memory or GPUs than any worker has.
 `local=True` runs every task in the Executor's own process and ignores
 `cores`.
 
@@ -313,15 +356,17 @@ Vine Graph:
   behind a cluster firewall, start the workers with `--connect-back`.
 
 `executor.port` and `executor.name` report the port and the name of the
-manager. `executor.capacity()` returns the connected workers and their cores
-as a tuple with the fields `workers` and `cores`.
+manager. `executor.capacity()` returns a `Capacity` with the fields `workers`,
+`cores`, `memory` (MB), and `gpus` of the connected workers. A local Executor
+reports one worker of one core, and `None` for memory and GPUs.
 
 ### Progress
 
 While `executor.run()` waits, the Executor draws a progress bar when standard
-output is a terminal, which `progress=False` turns off. `executor.progress()` returns
-the counts at any time, as a tuple with the fields `total`, `completed`,
-`failed`, and `waiting`, over all tasks the Executor started.
+output is a terminal, which `progress_bar=False` turns off.
+`executor.progress()` returns the counts at any time, as a `Progress` with the
+fields `total`, `completed`, `failed`, `cancelled`, and `waiting`, over all
+tasks the Executor started.
 
 ### Local modules
 
@@ -417,7 +462,7 @@ work meanwhile. `task.done()` tells whether a task finished, and
 `result(timeout=seconds)` raises `TimeoutError` when it is still running after
 that long. `task.cancel()` stops a live task that did not finish, together
 with the tasks that read it, and returns whether it cancelled the task.
-`result()` of a cancelled task raises `RuntimeError`. `cancel()` of a task
+`result()` of a cancelled task raises `vg.CancelledError`, a `RuntimeError`. `cancel()` of a task
 that finished or was not submitted returns `False`.
 
 A local Executor runs its tasks one at a time on a thread of its own, in the
@@ -530,7 +575,7 @@ where the function ran. Its fields:
 | --- | --- |
 | `task` | The Task that has no result. |
 | `source` | The Task whose own failure explains it, which is `task` itself when it failed on its own. |
-| `reason` | Why the source failed: `"function"` (its function raised), `"command"` (its command exited with an error status or did not write a declared file), `"signal"` (its function was killed by a signal), `"workers"` (workers kept disconnecting while they ran it), `"input"` (a file it reads is missing), `"retries"`, `"submit"` (it could not be submitted, as when an argument cannot be serialized), or `"result"` (it completed, but its result cannot be loaded or sent). |
+| `reason` | Why the source failed: `"function"` (its function raised or did not write a declared file), `"command"` (its command exited with an error status or did not write a declared file), `"signal"` (its function was killed by a signal), `"resources"` (it used more than it requested), `"workers"` (workers kept disconnecting while they ran it), `"input"` (a file it reads is missing), `"retries"`, `"submit"` (it could not be submitted, as when an argument cannot be serialized), or `"result"` (it completed, but its result cannot be loaded or sent). More reasons may be added. |
 | `exception` | The exception that the source's function raised, or `None`. |
 | `exit_code` | The exit status of the source's command, or `None`. |
 
@@ -622,7 +667,7 @@ cell, use it in later cells, and close it in the last.
 import ndcctools.taskvine.vine_graph as vg
 
 # Cell 1
-executor = vg.Executor(port=9123, progress=False)
+executor = vg.Executor(port=9123, progress_bar=False)
 graph = vg.Graph()
 
 # Cell 2
@@ -696,24 +741,27 @@ assert results[by_key["answer"]] == 20
 
 ## Executor settings
 
-`vg.Executor(port, name, *, local, progress, shared, params, library_modules,
-library_files, output_dir, **manager_options)` takes:
+`vg.Executor(*, port, name, local, progress_bar, shared, params,
+library_modules, library_files, output_dir, ssl, staging_path, run_info_path,
+run_info_template)` takes only keywords:
 
 | Argument | Default | Purpose |
 | --- | --- | --- |
 | `port` | `9123` | Port workers connect to. `0` picks a free port, which `executor.port` reports. |
 | `name` | `None` | Manager name that workers look up in the catalog. |
 | `local` | `False` | Run each task in this process, without TaskVine, for debugging. |
-| `progress` | `True` | Draw a progress bar while `run()` waits, when standard output is a terminal. |
+| `progress_bar` | `True` | Draw a progress bar while `run()` waits, when standard output is a terminal. |
 | `shared` | `None` | Objects the library loads when it starts, as `{name: object}`, read by tasks through `vg.Shared(name)`. |
 | `params` | `None` | TaskVine tuning by name, as a dictionary, applied once when the Executor is created. Its names follow TaskVine and may change. See below. |
 | `library_modules` | `()` | Modules, or module names, the library imports when it starts on a worker. |
 | `library_files` | `None` | Local files sent to the library, as `{local_path: name_on_the_worker}`. |
 | `output_dir` | `./outputs` | Where the files whose paths `TaskFile.path` returns are kept. It is created when the first is asked for. A local Executor also keeps its task sandboxes there while it is open. |
+| `ssl` | `None` | A `(key, certificate)` pair for TLS between the manager and its workers. |
+| `staging_path` | `None` | The manager's staging directory. |
+| `run_info_path`, `run_info_template` | `vine-run-info`, `None` | Where the manager writes its logs. |
 
-Other keyword arguments, such as `ssl` or `run_info_path`, go to the TaskVine
-manager. `params` is the escape hatch to TaskVine tuning: its names follow
-TaskVine and may change with it. It takes these settings:
+`params` is the escape hatch to TaskVine tuning: its names follow TaskVine and
+may change with it. It takes these settings:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
@@ -731,3 +779,16 @@ and applies none of them.
 Closing an Executor keeps only the files that the program saved or whose paths
 `TaskFile.path` returned. Leaving a `with` block because of an exception
 removes those paths too. Input files are never modified.
+
+## Changes in this version
+
+- `Executor`, `Function`, and `Command` take every argument but the first as a
+  keyword, so `vg.Executor(9123)` becomes `vg.Executor(port=9123)`. The
+  Executor takes no other manager options than the ones listed above.
+- `progress=` is `progress_bar=`.
+- `executor.progress()` has the field `cancelled`, and cancelled tasks count
+  there. It and `capacity()` are no longer tuples.
+- `result()` of a cancelled task raises `vg.CancelledError`.
+- On workers, inputs keep their base names in the sandbox, as they did
+  locally, and a directory is accepted as a File.
+- Tasks that request no GPUs now see `CUDA_VISIBLE_DEVICES` empty.

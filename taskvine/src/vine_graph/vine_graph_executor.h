@@ -66,17 +66,34 @@ typedef enum {
 	VINE_GRAPH_FAILURE_INPUT,     /* An input at the Manager is missing. */
 	VINE_GRAPH_FAILURE_RETRIES,   /* More attempts failed for other reasons than max-retries allows. */
 	VINE_GRAPH_FAILURE_CANCELLED, /* The frontend cancelled it. */
-	VINE_GRAPH_FAILURE_SUBMIT     /* Its task could not be created or submitted. */
+	VINE_GRAPH_FAILURE_SUBMIT,    /* Its task could not be created or submitted. */
+	VINE_GRAPH_FAILURE_RESOURCES  /* It used more than it requested: a command of a profile with memory exited with
+				       * status 137, as after a SIGKILL, or TaskVine reported it exhausted its resources or
+				       * its sandbox. */
 } vine_graph_failure_t;
 
 /* An opaque executor. */
 struct vine_graph_executor;
 
-/* The workers connected to an executor's Manager and their cores. Each core runs one node at a time. */
+/* The workers connected to an executor's Manager and their resources. Each core runs one node of one core at a time.
+ * The largest values are each the largest of any connected worker, which need not be one worker. */
 struct vine_graph_capacity {
-	int64_t workers; /* workers connected */
-	int64_t cores;	 /* cores of those workers */
-	int64_t largest; /* cores of the largest of them, or zero without workers */
+	int64_t workers;	/* workers connected */
+	int64_t cores;		/* cores of those workers */
+	int64_t largest;	/* cores of the largest of them, or zero without workers */
+	int64_t memory;		/* MB of memory of those workers */
+	int64_t gpus;		/* GPUs of those workers */
+	int64_t largest_memory; /* MB of memory of the largest of them, or zero without workers */
+	int64_t largest_gpus;	/* GPUs of the largest of them, or zero */
+};
+
+/* What the task of a node requests. Many nodes share one profile, which the executor interns by value, so the fit of
+ * a profile against the largest worker is decided once for all of its nodes. Profile 0 is the default: one core and
+ * nothing else, which a function call takes as one slot of its library without a request. */
+struct vine_graph_profile {
+	int cores;	/* cores, or library slots of a function call; at least one */
+	int64_t memory; /* MB of memory a command requests, or 0 for none */
+	int gpus;	/* GPUs a command requests, or 0 for none; a command without GPUs sees CUDA_VISIBLE_DEVICES empty */
 };
 
 /* How far durability lags behind completions. An output is anchored when it has a copy in the vault, at the Manager
@@ -134,7 +151,8 @@ uint64_t vine_graph_executor_add_node(struct vine_graph_executor *e);
 
 /* Declare a file the frontend provides at source_path and return its id. With vault set, Workers fetch it from the
  * Manager's data service, which suits many small files staged for the run. The file must stay readable until the
- * run ends. Its loss fails the nodes that read it, because it cannot be recomputed. */
+ * run ends. Its loss fails the nodes that read it, because it cannot be recomputed. A directory without vault is
+ * measured once, so its size is that of its tree. */
 uint64_t vine_graph_executor_declare_file(struct vine_graph_executor *e, const char *source_path, int vault);
 
 
@@ -163,18 +181,22 @@ int vine_graph_executor_add_inputs(struct vine_graph_executor *e, uint64_t node_
 int vine_graph_executor_add_input_buffer(struct vine_graph_executor *e, uint64_t node_id, const char *buffer, size_t size, const char *task_path);
 
 /* Make a node not yet submitted run a shell command line instead of the library function: its task is a standard
- * TaskVine task that runs command in its sandbox, with its mounts, and requests cores cores. The node succeeds when the
- * command exits with status zero and every output it declares exists, and fails when it exits with another status,
- * with its standard output as the error message. Return zero, or -1 for an unknown or submitted node, a NULL command,
- * or fewer than one core. */
-int vine_graph_executor_set_command(struct vine_graph_executor *e, uint64_t node_id, const char *command, int cores);
+ * TaskVine task that runs command in its sandbox, with its mounts, and requests what its profile says. The node
+ * succeeds when the command exits with status zero and every output it declares exists, and fails when it exits with
+ * another status, with its standard output as the error message. Return zero, or -1 for an unknown or submitted node or
+ * a NULL command. */
+int vine_graph_executor_set_command(struct vine_graph_executor *e, uint64_t node_id, const char *command);
 
-/* Make a function node not yet submitted request cores cores: its call occupies that many function slots of a library
- * instance, which has one slot per core of its Worker, and the library limits the call's thread pools to as many
- * threads. A command node takes its cores from vine_graph_executor_set_command(). A node of several cores whose task
- * cannot run on the largest connected Worker waits for a larger one (see vine_graph_executor_next_unfit()). Return
- * zero, or -1 for an unknown or submitted node or fewer than one core. */
-int vine_graph_executor_set_cores(struct vine_graph_executor *e, uint64_t node_id, int cores);
+/* Return the id of the profile equal to p, which is added when the executor has none, or -1 for a profile of fewer than
+ * one core or of negative memory or GPUs. Equal profiles have one id, and profile 0 is the default. */
+int vine_graph_executor_add_profile(struct vine_graph_executor *e, const struct vine_graph_profile *p);
+
+/* Make a node not yet submitted request what a profile says. A function call occupies as many function slots of a
+ * library instance as the profile has cores, of one slot per core of its Worker, and the library limits the call's
+ * thread pools to as many threads. Memory and GPUs apply only to command nodes. A node whose profile does not fit the
+ * largest connected Worker waits for a larger one (see vine_graph_executor_next_unfit()). Return zero, or -1 for an
+ * unknown or submitted node or an unknown profile. */
+int vine_graph_executor_set_profile(struct vine_graph_executor *e, uint64_t node_id, int profile);
 
 /* Submit a node whose files are mounted. It runs once every node whose output it reads has completed, and it fails at
  * once when it reads an output of a failed node that exists nowhere. Return zero, or -1 for an unknown or submitted
@@ -206,10 +228,10 @@ uint64_t vine_graph_executor_next_fetched(struct vine_graph_executor *e);
  * Worker can send. */
 uint64_t vine_graph_executor_next_fetch_failed(struct vine_graph_executor *e);
 
-/* Return the next node that waits because it requests more cores than the largest connected Worker has, or zero when
- * none does. A node is reported once, after two checks seconds apart found its task, a recovery of its outputs
- * included, waiting while every connected Worker was too small for it. It keeps waiting for a larger Worker. Without
- * Workers, nodes wait unreported. */
+/* Return the next node that waits because its profile requests more cores, memory, or GPUs than the largest connected
+ * Worker has, or zero when none does. A node is reported once, after two checks seconds apart found its task, a
+ * recovery of its outputs included, waiting while every connected Worker was too small for it. It keeps waiting for a
+ * larger Worker. Without Workers, nodes wait unreported. */
 uint64_t vine_graph_executor_next_unfit(struct vine_graph_executor *e);
 
 /* Set data and length to the bytes of a fetched node output that the Manager holds in memory, a small result that came
@@ -267,7 +289,8 @@ const char *vine_graph_executor_get_node_error(const struct vine_graph_executor 
 vine_graph_failure_t vine_graph_executor_get_node_failure(const struct vine_graph_executor *e, uint64_t node_id);
 
 /* Return the exit status of the command whose failure made a command node, or a node that depends on it, fail, or -1
- * when the failure source is not a command that exited with an error status. */
+ * when the failure source is not a command that exited with an error status. A command that failed as
+ * VINE_GRAPH_FAILURE_RESOURCES by its status 137 reports it too. */
 int vine_graph_executor_get_node_exit_code(const struct vine_graph_executor *e, uint64_t node_id);
 
 /* Return why the run failed as a whole, or NULL. */
