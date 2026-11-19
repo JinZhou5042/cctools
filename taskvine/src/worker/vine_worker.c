@@ -49,6 +49,7 @@ See the file COPYING for details.
 #include "path.h"
 #include "path_disk_size_info.h"
 #include "pattern.h"
+#include "priority_queue.h"
 #include "process.h"
 #include "random.h"
 #include "stringtools.h"
@@ -90,6 +91,19 @@ static struct itable *procs_table = NULL;
 /* Table of all processes currently running, indexed by task_id. */
 /* These are additional pointers into procs_table and should not be deleted */
 static struct itable *procs_running = NULL;
+
+/*
+Time limits of running processes, a min-heap keyed by monotonic deadline in microseconds (stored negated, since the
+priority queue returns the highest priority first). Each entry is a struct process_deadline. An entry whose process
+ended, or whose serial no longer matches the process, is stale and skipped when popped. A round thus peeks the nearest
+deadline in O(1) and pays O(log n) only for entries that come due.
+*/
+static struct priority_queue *procs_deadlines = NULL;
+
+/* The serial of the newest deadline entry, so entries of an ended process are told from those of its successor. */
+static uint64_t procs_deadline_serial = 0;
+
+static void schedule_process_deadline(struct vine_process *p);
 
 /* List of all procs that are waiting to be run. */
 /* These are additional pointers into procs_table and should not be deleted */
@@ -722,6 +736,7 @@ static int start_process(struct vine_process *p, struct link *manager)
 	}
 
 	itable_insert(procs_running, p->task->task_id, p);
+	schedule_process_deadline(p);
 
 	return 1;
 }
@@ -771,20 +786,186 @@ Find any processes that have overrun their declared absolute end time,
 and send a kill signal.  The actual exit of the process will be detected at a later time.
 */
 
+/* An entry of procs_deadlines: the process by task id, and the serial it had when the entry was pushed. */
+struct process_deadline {
+	uint64_t task_id;
+	uint64_t serial;
+};
+
+static timestamp_t monotonic_usec()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (timestamp_t)ts.tv_sec * USECOND + ts.tv_nsec / 1000;
+}
+
+/*
+The monotonic deadline in microseconds of the next time limit of a running process not yet acted on, or 0 without
+one. The absolute end time and the wall time are given in the realtime clock, and are converted once here.
+*/
+static timestamp_t process_next_deadline(struct vine_process *p)
+{
+	timestamp_t now = timestamp_get();
+	timestamp_t mono = monotonic_usec();
+	timestamp_t deadline = 0;
+
+	/* A process killed for a time limit has none left to act on. */
+	if (p->result & (VINE_RESULT_MAX_END_TIME | VINE_RESULT_MAX_WALL_TIME)) {
+		return 0;
+	}
+
+	double end = p->task->resources_requested->end;
+	if (end > 0) {
+		double left = end * USECOND - (double)now;
+		deadline = mono + (left > 0 ? (timestamp_t)left : 0);
+	}
+
+	double wall_time = p->task->resources_requested->wall_time;
+	if (wall_time >= 1 && !p->wall_time_cancelled) {
+		double left = (double)p->execution_start + wall_time * USECOND - (double)now;
+		timestamp_t d = mono + (left > 0 ? (timestamp_t)left : 0);
+		if (deadline == 0 || d < deadline) {
+			deadline = d;
+		}
+	}
+
+	return deadline;
+}
+
+/* Drop stale entries once they outnumber running processes, so the heap stays O(running processes). */
+static void compact_process_deadlines()
+{
+	int size = priority_queue_size(procs_deadlines);
+	if (size < 2 * itable_size(procs_running) + 64) {
+		return;
+	}
+
+	struct priority_queue *fresh = priority_queue_create(itable_size(procs_running) + 1);
+	if (!fresh) {
+		return;
+	}
+
+	struct process_deadline *d;
+	while (priority_queue_size(procs_deadlines) > 0) {
+		double priority = priority_queue_get_top_priority(procs_deadlines);
+		d = priority_queue_pop(procs_deadlines);
+		struct vine_process *p = itable_lookup(procs_running, d->task_id);
+		if (p && p->deadline_serial == d->serial) {
+			priority_queue_push(fresh, d, priority);
+		} else {
+			free(d);
+		}
+	}
+	priority_queue_delete(procs_deadlines);
+	procs_deadlines = fresh;
+}
+
+/* Push the next time limit of a running process, replacing (lazily) any earlier entry it had. */
+static void schedule_process_deadline(struct vine_process *p)
+{
+	p->deadline_serial = ++procs_deadline_serial;
+
+	timestamp_t deadline = process_next_deadline(p);
+	if (deadline == 0) {
+		return;
+	}
+
+	struct process_deadline *d = malloc(sizeof(*d));
+	if (!d) {
+		return;
+	}
+	d->task_id = p->task->task_id;
+	d->serial = p->deadline_serial;
+	priority_queue_push(procs_deadlines, d, -(double)deadline);
+
+	compact_process_deadlines();
+}
+
+/*
+Milliseconds until the nearest time limit of a running process, at least 0, or max_msec when none comes sooner. The
+top entry may be stale, which only wakes the worker early once.
+*/
+static int process_deadline_wait_msec(int max_msec)
+{
+	if (priority_queue_size(procs_deadlines) == 0) {
+		return max_msec;
+	}
+
+	timestamp_t deadline = (timestamp_t)(-priority_queue_get_top_priority(procs_deadlines));
+	timestamp_t now = monotonic_usec();
+	if (deadline <= now) {
+		return 0;
+	}
+
+	timestamp_t msec = (deadline - now + 999) / 1000;
+	return msec < (timestamp_t)max_msec ? (int)msec : max_msec;
+}
+
+/*
+Act on a process past its time limits. Past its absolute end time it is killed. Past its wall time a standard task is
+killed, and a function call is handed to its library to stop. The actual exit is detected later.
+*/
+static void expire_process(struct vine_process *p)
+{
+	timestamp_t now = timestamp_get();
+
+	double end = p->task->resources_requested->end;
+	if (end > 0 && !(p->result & VINE_RESULT_MAX_END_TIME) && now / (double)USECOND > end) {
+		p->result = VINE_RESULT_MAX_END_TIME;
+		vine_process_kill(p);
+		return;
+	}
+
+	double wall_time = p->task->resources_requested->wall_time;
+	if (wall_time < 1 || p->wall_time_cancelled) {
+		return;
+	}
+	if (now <= p->execution_start + (1e6 * wall_time)) {
+		return;
+	}
+
+	debug(D_VINE,
+			"Task %d went over its running time limit: %s > %s\n",
+			p->task->task_id,
+			rmsummary_resource_to_str("wall_time", (now - p->execution_start) / 1e6, 1),
+			rmsummary_resource_to_str("wall_time", wall_time, 1));
+	if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
+		/* A call runs in a child of its library, which kills the child on request. The call keeps its slots and
+		 * resources until the library reports its end. A library that cannot stop a call (direct mode) lets it run
+		 * to its end, which is reported as it ended. */
+		p->wall_time_cancelled = 1;
+		if (p->library_process && p->library_process->library_can_cancel) {
+			vine_process_cancel_function(p);
+		} else {
+			debug(D_VINE, "function call %d is past its wall time, but its library cannot stop it", p->task->task_id);
+		}
+		return;
+	}
+	p->result = VINE_RESULT_MAX_WALL_TIME;
+	vine_process_kill(p);
+}
+
+/*
+Act on every process whose time limit has come, popping due entries from procs_deadlines in O(log n) each. A process
+with a later limit not yet acted on is pushed again.
+*/
 static void expire_procs_running()
 {
-	struct vine_process *p;
-	uint64_t task_id;
-	int iteration;
+	timestamp_t now = monotonic_usec();
 
-	double current_time = timestamp_get() / USECOND;
-
-	ITABLE_ITERATE(procs_running, iteration, task_id, p)
-	{
-		if (p->task->resources_requested->end > 0 && current_time > p->task->resources_requested->end) {
-			p->result = VINE_RESULT_MAX_END_TIME;
-			vine_process_kill(p);
+	while (priority_queue_size(procs_deadlines) > 0) {
+		timestamp_t deadline = (timestamp_t)(-priority_queue_get_top_priority(procs_deadlines));
+		if (deadline > now) {
+			break;
 		}
+
+		struct process_deadline *d = priority_queue_pop(procs_deadlines);
+		struct vine_process *p = itable_lookup(procs_running, d->task_id);
+		if (p && p->deadline_serial == d->serial) {
+			expire_process(p);
+			schedule_process_deadline(p);
+		}
+		free(d);
 	}
 }
 
@@ -1324,56 +1505,6 @@ static int enforce_processes_sandbox_limits()
 	return ok;
 }
 
-/*
-We check maximum_running_time by itself (not in enforce_processes_limits),
-as other running tasks should not be affected by a task timeout.
-*/
-
-static void enforce_processes_max_running_time()
-{
-	struct vine_process *p;
-	uint64_t task_id;
-	int iteration;
-
-	timestamp_t now = timestamp_get();
-
-	ITABLE_ITERATE(procs_running, iteration, task_id, p)
-	{
-
-		/* If the task did not set wall_time, return right away. */
-		if (p->task->resources_requested->wall_time < 1)
-			continue;
-
-		/* A function call over its wall time was already handed to its library to stop. */
-		if (p->wall_time_cancelled)
-			continue;
-
-		if (now > p->execution_start + (1e6 * p->task->resources_requested->wall_time)) {
-			debug(D_VINE,
-					"Task %d went over its running time limit: %s > %s\n",
-					p->task->task_id,
-					rmsummary_resource_to_str("wall_time", (now - p->execution_start) / 1e6, 1),
-					rmsummary_resource_to_str("wall_time", p->task->resources_requested->wall_time, 1));
-			if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
-				/* A call runs in a child of its library, which kills the child on request. The call keeps its
-				 * slots and resources until the library reports its end. A library that cannot stop a call
-				 * (direct mode) lets it run to its end, which is reported as it ended. */
-				p->wall_time_cancelled = 1;
-				if (p->library_process && p->library_process->library_can_cancel) {
-					vine_process_cancel_function(p);
-				} else {
-					debug(D_VINE, "function call %d is past its wall time, but its library cannot stop it", p->task->task_id);
-				}
-				continue;
-			}
-			p->result = VINE_RESULT_MAX_WALL_TIME;
-			vine_process_kill(p);
-		}
-	}
-
-	return;
-}
-
 /* Handle a release message from the manager, asking the worker to cleanly exit. */
 
 static int do_release()
@@ -1884,6 +2015,9 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		int wait_msec = 5000;
 
+		/* Wake at the nearest time limit of a running process. */
+		wait_msec = process_deadline_wait_msec(wait_msec);
+
 		if (sigchld_received_flag) {
 			wait_msec = 0;
 			sigchld_received_flag = 0;
@@ -1910,8 +2044,6 @@ static void vine_worker_serve_manager(struct link *manager)
 			abort_flag = 1;
 			break;
 		}
-
-		enforce_processes_max_running_time();
 
 		/* end a running processes if goes above its declared limits.
 		 * Mark offending process as RESOURCE_EXHASTION. */
@@ -2387,6 +2519,7 @@ void vine_worker_create_structures()
 {
 	procs_table = itable_create(0);
 	procs_running = itable_create(0);
+	procs_deadlines = priority_queue_create(0);
 	procs_waiting = list_create();
 	pending_async_messages = list_create();
 	procs_complete = itable_create(0);
@@ -2419,6 +2552,13 @@ static void vine_worker_delete_structures()
 		itable_delete(procs_table);
 	if (procs_running)
 		itable_delete(procs_running);
+	if (procs_deadlines) {
+		struct process_deadline *d;
+		while ((d = priority_queue_pop(procs_deadlines))) {
+			free(d);
+		}
+		priority_queue_delete(procs_deadlines);
+	}
 	if (procs_complete)
 		itable_delete(procs_complete);
 	if (procs_killed_functions) {
