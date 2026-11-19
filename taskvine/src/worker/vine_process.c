@@ -351,7 +351,8 @@ int vine_process_execute(struct vine_process *p)
 	if (p->pid > 0) {
 		// Make child process the leader of its own process group. This allows
 		// signals to also be delivered to processes forked by the child process.
-		// This is currently used by kill_task().
+		// This is currently used by vine_process_kill(). The child does the same,
+		// so the group exists once either call has run, whichever comes first.
 		setpgid(p->pid, 0);
 
 		/* Start the performance clock just after forking the process. */
@@ -390,6 +391,10 @@ int vine_process_execute(struct vine_process *p)
 		return 0;
 
 	} else {
+		/* Enter its own process group before anything else, so that a kill of the group reaches it even when the
+		 * worker's own setpgid() comes too late. */
+		setpgid(0, 0);
+
 		if (chdir(p->sandbox)) {
 			printf("The sandbox dir is %s", p->sandbox);
 			fatal("could not change directory into %s: %s", p->sandbox, strerror(errno));
@@ -586,18 +591,15 @@ void vine_process_kill(struct vine_process *p)
 		return;
 	}
 
-	// make sure a few seconds have passed since child process was created to avoid sending a signal
-	// before it has been fully initialized. Else, the signal sent to that process gets lost.
-	timestamp_t elapsed_time_execution_start = timestamp_get() - p->execution_start;
-
-	if (elapsed_time_execution_start / 1000000 < 3)
-		sleep(3 - (elapsed_time_execution_start / 1000000));
-
 	debug(D_VINE, "terminating task %d pid %d", p->task->task_id, p->pid);
 
 	// Send signal to process group of child which is denoted by -ve value of child pid.
 	// This is done to ensure delivery of signal to processes forked by the child.
-	kill((-1 * p->pid), SIGKILL);
+	// The child and the worker both create the group right after fork, so a freshly started
+	// task has it already. The signal to the pid alone covers a group that is already gone.
+	if (kill(-p->pid, SIGKILL) < 0) {
+		kill(p->pid, SIGKILL);
+	}
 }
 
 /*
