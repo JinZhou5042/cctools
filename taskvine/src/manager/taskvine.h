@@ -378,6 +378,20 @@ is returned with VINE_RESULT_MAX_RETRIES.
 
 void vine_task_set_retries(struct vine_task *t, int64_t max_retries);
 
+/** Carry the worker losses of earlier tasks for the same work into a task before it is submitted, so that the bound on
+losses holds across them. A frontend that submits a new task after an earlier one returned passes the earlier task's
+"worker_losses_charged" and "worker_losses_excused" metrics (see @ref vine_task_get_metric). The charged losses count
+as tries already used: the task returns with VINE_RESULT_MAX_RETRIES once charged losses and its own tries exceed its
+retries, it is quarantined from its second charged loss, and it is excused at most max_retries + 1 losses in all. Since
+they are tries, they also shorten the retries of results that are retried, such as resource exhaustion. A task that
+was never given losses behaves as before.
+@param t A task object, not yet submitted.
+@param charged The number of worker losses charged to earlier tasks of the same work.
+@param excused The number of worker losses excused for earlier tasks of the same work.
+*/
+
+void vine_task_set_worker_losses(struct vine_task *t, int charged, int excused);
+
 /** Specify the total number of times this task can be return to the manager without being executed. If less than zero,
 the task is tried indefinitely (this the default). A task that did not succeed after the given number is returned with
 the result VINE_RESULT_FORSAKEN.
@@ -615,6 +629,8 @@ const char *vine_task_get_hostname(struct vine_task *t);
 - "bytes_received"
 - "bytes_sent"
 - "bytes_transferred"
+- "worker_losses_charged": the unexpected worker losses that counted as tries of the task
+- "worker_losses_excused": the unexpected worker losses that were excused for the task
 @return The metric value, or zero if an invalid name is given.
 */
 

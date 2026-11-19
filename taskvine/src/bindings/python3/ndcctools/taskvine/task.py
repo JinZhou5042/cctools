@@ -517,6 +517,17 @@ class Task(object):
         return cvine.vine_task_set_retries(self._task, max_retries)
 
     ##
+    # Carry the worker losses of earlier tasks for the same work into this task before it is submitted, so that the
+    # bound on losses holds across them. Pass the earlier task's get_metric("worker_losses_charged") and
+    # get_metric("worker_losses_excused"). Charged losses count as tries already used.
+    #
+    # @param self Reference to the current task object.
+    # @param charged The number of worker losses charged to earlier tasks of the same work.
+    # @param excused The number of worker losses excused for earlier tasks of the same work.
+    def set_worker_losses(self, charged, excused):
+        return cvine.vine_task_set_worker_losses(self._task, charged, excused)
+
+    ##
     # Indicate the number of times the task can be returned to the manager
     # without being executed. If less than 0 (the default), the task is tried indefinitely.
     # A task that did not succeed after the given number of retries is returned
