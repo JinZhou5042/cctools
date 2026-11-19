@@ -24,7 +24,8 @@ with vg.Executor(local=True) as executor:
 
 Two things to know from the start:
 
-- `executor.run(graph)` returns the results of the **sinks** only, the tasks
+- `executor.run(graph)` starts the tasks of the Graph, waits for them, and
+  returns the results of the **sinks** only, the tasks
   that no task reads. Here that is `total`. The result of any other task is
   `task.result()`.
 - Results are read **before the Executor closes**, which is the end of the
@@ -39,12 +40,14 @@ a first try. Without it the tasks run on TaskVine workers, as described under
 
 Two objects keep what to run apart from where it runs:
 
-- `vg.Graph` describes tasks, the data they pass to each other, and rules that
-  add tasks as others complete. `graph.add(func, *args, **kwargs)` records a
-  call without running it and returns a `vg.Task`.
-- `vg.Executor` is where tasks run. `executor.run(graph)` runs a Graph.
-  `executor.submit(func, *args, **kwargs)` starts one task at once and returns
-  its `vg.Task`.
+- `vg.Graph` describes tasks and the data they pass to each other.
+  `graph.add(func, *args, **kwargs)` records a call without running it and
+  returns a `vg.Task`. Iterating over a Graph gives its tasks in the order they
+  were added, and `len(graph)` counts them.
+- `vg.Executor` is where tasks run. `executor.submit(func, *args, **kwargs)`
+  starts one task at once and returns its `vg.Task`. `executor.submit(graph)`
+  starts every task of a Graph that did not start yet and returns at once.
+  `executor.run(graph)` does the same and then waits for the sinks.
 
 A Task passed as an argument of another task gives that task its result, so
 passing Tasks builds the dependencies. Arguments may hold Tasks anywhere
@@ -56,16 +59,24 @@ A task is a call of a Python function, or a run of a shell command given as a
 `vg.Command`. `task.result()` returns what the function returned, or the text
 the command wrote to standard output. A task that fails raises `vg.TaskError`.
 
-One Executor runs any number of Graphs, one at a time, and any number of
-submitted tasks, all on one pool of workers. A Graph runs on one Executor, the
-first that runs it. Running the Graph again runs only the tasks that did not
-finish, including tasks added since.
+A Task of a Graph is a description until its Graph is submitted. From then on
+it is a live task and behaves exactly like a Task that `submit()` returned:
+`result(timeout=None)` waits for it, and `done()`, `failed()`, `cancelled()`,
+and `cancel()` tell and change how far it is. `result()` of a task that was
+not submitted raises `RuntimeError`, and its `repr()` says `not submitted`. A
+live task is numbered by its Executor, which numbers every task it starts in
+one sequence, whatever started it, as in `Task(7, double)`.
 
-`task.done()`, `task.failed()`, and `task.cancelled()` tell how far a task is,
-and `task.func`, `task.args`, `task.kwargs`, `task.readers`, and `task.key`
-describe it. `graph.find(*selectors)` returns tasks of a Graph in the order
-they were added: the tasks that run each function or Command given, each Task
-given, or every task when nothing is given.
+One Executor runs any number of Graphs and submitted tasks at the same time,
+all on one pool of workers. A Graph belongs to the first Executor that takes
+it. Tasks added to a Graph after it was submitted start when it is submitted
+or run again, and tasks that started already are not started again. A task
+may read the live tasks of its Executor, whatever Graph they belong to, but
+not the tasks of another Executor, and not the tasks of another Graph that
+was not submitted yet.
+
+`task.func`, `task.args`, `task.kwargs`, `task.readers`, and `task.key`
+describe a task.
 
 ```python
 import ndcctools.taskvine.vine_graph as vg
@@ -89,7 +100,7 @@ with vg.Executor(local=True) as executor:
     assert record.result()["metadata"] == {"count": 2}
 
 assert results[answer] == 82
-assert graph.find(make_record) == [record]
+assert [task for task in graph if task.func is make_record] == [record]
 ```
 
 ## Files
@@ -134,7 +145,7 @@ assert Path(saved).read_text() == "VINE GRAPH\n"
 
 A file name is a relative path inside the sandbox. Asking for a file before
 its task starts declares it, so the files of a Graph task are declared after
-`graph.add()` and before `executor.run()`. A declared file is a required
+`graph.add()` and before the Graph is submitted. A declared file is a required
 output: a task that does not write it fails.
 
 Once the task completed, the file can be read whether or not a task reads it:
@@ -241,9 +252,14 @@ core, and a task of `cores=k` occupies `k` slots, so a worker of 8 cores runs
 eight tasks of one core, four of two, or two of four at a time. The library
 limits the native thread pools (OpenMP, BLAS) of the task's process to `k`
 threads. A task that asks for more cores than the largest connected worker
-has fails with reason `"cores"` once two checks a few seconds apart found it
-so, and tasks wait while no worker is connected. `local=True` runs every task
-in the Executor's own process and ignores `cores`.
+has waits for a larger worker, which a pool that grows may bring, and so does
+a task that computes such a task's result again after a worker was lost. Once
+two checks a few seconds apart found it so, the Executor prints one notice for
+each such size, such as `Task(7, fit) requests 8 cores; the largest connected
+Worker has 4; it waits for a larger Worker`. Tasks wait without a notice while
+no worker is connected. The same holds for a Command of several cores.
+`local=True` runs every task in the Executor's own process and ignores
+`cores`.
 
 ## Running on workers
 
@@ -302,8 +318,8 @@ as a tuple with the fields `workers` and `cores`.
 
 ### Progress
 
-While a Graph runs, the Executor draws a progress bar when standard output is
-a terminal, which `progress=False` turns off. `executor.progress()` returns
+While `executor.run()` waits, the Executor draws a progress bar when standard
+output is a terminal, which `progress=False` turns off. `executor.progress()` returns
 the counts at any time, as a tuple with the fields `total`, `completed`,
 `failed`, and `waiting`, over all tasks the Executor started.
 
@@ -367,16 +383,17 @@ terminal.
 
 ## Dynamic work
 
-Work that is not known in advance is written in one of two ways. A program
-that looks at a result and then decides what to run calls `executor.submit()`.
-A Graph that grows as its tasks complete uses rules.
+Work that is not known in advance is submitted as results arrive. A program
+that looks at a result and then decides what to run calls `executor.submit()`,
+and `executor.as_completed()` tells which of several tasks finished first.
+Work whose dependencies are known is submitted up front instead.
 
 ### Submitting tasks
 
 `executor.submit(func, *args, **kwargs)` starts a call at once and returns its
-Task. `task.result()` waits for the task. Arguments may hold Files and Tasks
-that the same Executor started or ran: earlier submitted tasks, and tasks of a
-Graph that the Executor ran.
+Task. `task.result()` waits for the task. Arguments may hold Files and the live
+Tasks of the same Executor: earlier submitted tasks, and tasks of the Graphs
+it took.
 
 ```python
 import ndcctools.taskvine.vine_graph as vg
@@ -395,60 +412,86 @@ with vg.Executor(local=True) as executor:
     assert steps == 4 and round(guess.result(), 6) == 1.414214
 ```
 
-On workers, submitted tasks run in the background, so the program can submit
-many and do other work meanwhile. `task.done()` tells whether a task finished,
-and `result(timeout=seconds)` raises `TimeoutError` when it is still running
-after that long. `task.cancel()` stops a task that has not finished, together
-with the submitted tasks that read it, and returns whether it cancelled the
-task. `result()` of a cancelled task raises `RuntimeError`.
+Live tasks run in the background, so the program can submit many and do other
+work meanwhile. `task.done()` tells whether a task finished, and
+`result(timeout=seconds)` raises `TimeoutError` when it is still running after
+that long. `task.cancel()` stops a live task that did not finish, together
+with the tasks that read it, and returns whether it cancelled the task.
+`result()` of a cancelled task raises `RuntimeError`. `cancel()` of a task
+that finished or was not submitted returns `False`.
 
-A local Executor is different in one way: `submit()` runs the task before it
-returns, so the task is finished when the program gets it, and a slow task
-blocks `submit()`.
+A local Executor runs its tasks one at a time on a thread of its own, in the
+order they were submitted, so there too `submit()` returns before the task
+ran.
 
-Leaving the `with` block without an exception waits for the submitted tasks
-that still run, then closes the Executor. Leaving it with an exception
-discards the results.
+Leaving the `with` block without an exception waits for the tasks that still
+run, then closes the Executor. Leaving it with an exception discards the
+results.
 
-### Results as they arrive
+### Dependencies start tasks
 
-`executor.as_completed(tasks, timeout=None)` yields the given tasks as they
-finish, each once, whatever their outcome. Use it to handle results in the
-order they arrive and to submit more work as they do:
+Submit everything you can name up front. A task that takes a Task as an
+argument starts as soon as that input exists, so work whose dependencies are
+known needs no loop. To analyze each simulation as soon as it finishes,
+submit both at once:
 
 ```python
 import ndcctools.taskvine.vine_graph as vg
 
 
-def halve(value):
-    return value // 2
+def simulate(seed):
+    return seed * seed % 7
+
+
+def analyze(sample):
+    return sample * 10
 
 
 with vg.Executor(local=True) as executor:
-    pending = [executor.submit(halve, value) for value in (40, 12, 7)]
-    seen = []
-    while pending:
-        following = []
-        for task in executor.as_completed(pending):
-            seen.append(task.result())
-            if task.result() > 2:
-                following.append(executor.submit(halve, task))
-        pending = following
-    assert sorted(seen) == [1, 1, 2, 3, 3, 5, 6, 10, 20]
+    analyses = [executor.submit(analyze, executor.submit(simulate, seed)) for seed in range(100)]
+    summary = executor.submit(sum, analyses)
+    assert summary.result() == sum(10 * (seed * seed % 7) for seed in range(100))
+```
+
+A Graph does the same with `graph.add()`. A decision that depends on the
+value of a result is ordinary control flow around `result()`, as in the loop
+above that improves a guess until it is good enough.
+
+### The first to finish
+
+`executor.as_completed(tasks, timeout=None)` yields the given live tasks as
+they finish, whatever their outcome, and at once those that finished
+already, like `concurrent.futures.as_completed()`. It is for reacting to
+whichever of several running tasks finishes first, such as a parameter sweep
+that stops at the first good enough trial and cancels the rest:
+
+```python
+import ndcctools.taskvine.vine_graph as vg
+
+
+def trial(seed):
+    return seed * 37 % 101
+
+
+with vg.Executor(local=True) as executor:
+    trials = [executor.submit(trial, seed) for seed in range(50)]
+    for task in executor.as_completed(trials):
+        if task.result() > 90:
+            best = task
+            break
+    for task in trials:
+        task.cancel()
+    assert best.result() > 90
 ```
 
 A task that failed or was cancelled is yielded too, and its `result()` raises.
-With a `timeout` in seconds, the iterator raises `TimeoutError` when tasks are
-still running that long after the call.
+With a `timeout` in seconds, the iteration raises `TimeoutError` when tasks
+are still unfinished that long after the call.
 
-### Rules
+### Graphs that grow
 
-A rule is a function that a run calls with each selected task that completes.
-`@graph.on(*selectors)` registers the decorated function as a rule. A selector
-is a function or a Command, which selects the tasks of the Graph that run it,
-including those added later, or a Task of the Graph. A rule may add tasks to
-its Graph, which run once it returns, cancel its tasks with `task.cancel()`,
-or end the run with `graph.stop()`:
+A Graph may grow while its tasks run: add tasks that read its live tasks, and
+submit the Graph again to start them.
 
 ```python
 import ndcctools.taskvine.vine_graph as vg
@@ -459,37 +502,15 @@ def step(value):
 
 
 graph = vg.Graph()
-graph.add(step, 0)
-
-
-@graph.on(step)
-def again(task):
-    if task.result() < 10:
-        graph.add(step, task)
-
+last = graph.add(step, 0)
 
 with vg.Executor(local=True) as executor:
-    results = executor.run(graph)
-
-assert list(results.values()) == [10]
-assert len(graph.find(step)) == 10
+    executor.submit(graph)
+    while last.result() < 10:
+        last = graph.add(step, last)
+        executor.submit(graph)
+    assert [task.result() for task in graph] == list(range(1, 11))
 ```
-
-Rules are called one at a time and in completion order, in the thread that
-called `executor.run()`. While a rule runs, task states do not change. A rule
-may read the result and the files of any completed task, and `result()` of a
-task that is still running raises `RuntimeError`. `executor.run()` returns
-once no task runs and no rule is due. During a run, only a rule may add tasks,
-register rules, or call `graph.find()`.
-
-A task that failed or was cancelled calls no rule. A rule that raises fails
-the run with a `RuntimeError` that names the rule and the task. A cancelled
-task stays cancelled, and a run does not raise for it. `graph.stop()` ends the
-run once the rule that calls it returns: running tasks are stopped and go back
-to not started, so a later run continues them.
-
-Rules select tasks of their own Graph, never the tasks that
-`executor.submit()` returns, whose results the caller reads itself.
 
 ## Failures
 
@@ -500,15 +521,16 @@ keep running. Lost workers are handled by TaskVine and are not failures,
 unless a task keeps making its workers exit, as a task that exceeds their
 memory does.
 
-`executor.run()` raises a `vg.TaskError` once the other tasks finished, and
-`task.result()` raises the task's own. Its message includes the traceback from
+`executor.run()` raises the `vg.TaskError` of the task whose failure explains
+the first failed sink, once the other tasks finished, and `task.result()`
+raises the task's own. Its message includes the traceback from
 where the function ran. Its fields:
 
 | Field | Meaning |
 | --- | --- |
 | `task` | The Task that has no result. |
 | `source` | The Task whose own failure explains it, which is `task` itself when it failed on its own. |
-| `reason` | Why the source failed: `"function"` (its function raised), `"command"` (its command exited with an error status or did not write a declared file), `"signal"` (its function was killed by a signal), `"workers"` (workers kept disconnecting while they ran it), `"input"` (a file it reads is missing), `"retries"`, `"submit"` (it could not be submitted, as when an argument cannot be serialized), `"cores"` (it asks for more cores than the largest connected worker has), or `"result"` (it completed, but its result cannot be loaded or sent). |
+| `reason` | Why the source failed: `"function"` (its function raised), `"command"` (its command exited with an error status or did not write a declared file), `"signal"` (its function was killed by a signal), `"workers"` (workers kept disconnecting while they ran it), `"input"` (a file it reads is missing), `"retries"`, `"submit"` (it could not be submitted, as when an argument cannot be serialized), or `"result"` (it completed, but its result cannot be loaded or sent). |
 | `exception` | The exception that the source's function raised, or `None`. |
 | `exit_code` | The exit status of the source's command, or `None`. |
 
@@ -533,9 +555,9 @@ with vg.Executor(local=True) as executor:
         executor.run(graph)
     except vg.TaskError as error:
         assert error.task is checks[2] and isinstance(error.exception, ValueError)
-    failed = [task for task in graph.find() if task.failed()]
+    failed = [task for task in graph if task.failed()]
     assert failed == [checks[2], total]
-    assert [task.result() for task in graph.find(check) if not task.failed()] == [0, 1, 3]
+    assert [task.result() for task in checks if not task.failed()] == [0, 1, 3]
 ```
 
 ### Fixing and running again
@@ -623,13 +645,13 @@ executor.close()
 ```
 
 A later cell may add tasks to a Graph and run it again, which runs only the
-new tasks. Submitted tasks keep running between cells, so a later cell can
-check `task.done()` without waiting.
+new tasks. Live tasks keep running between cells, so a later cell can check
+`task.done()` without waiting.
 
 Interrupting a cell leaves the Executor usable. An interrupted
-`executor.run()` stops the tasks that did not finish and returns them to not
-started, so the next run continues them. An interrupted `result()` leaves its
-task running.
+`executor.run()`, `result()`, or `as_completed()` stops waiting and leaves the
+tasks running, so a later cell reads their results. `task.cancel()` stops a
+task that is no longer wanted.
 
 Rerunning the cell that creates an Executor on the same fixed port closes the
 open Executor first and prints a notice. The tasks of the closed Executor then
@@ -665,7 +687,7 @@ dask_graph = {
 }
 
 graph = from_dask(dask_graph)
-by_key = {task.key: task for task in graph.find()}
+by_key = {task.key: task for task in graph}
 with vg.Executor(local=True) as executor:
     results = executor.run(graph)
 
@@ -682,15 +704,16 @@ library_files, output_dir, **manager_options)` takes:
 | `port` | `9123` | Port workers connect to. `0` picks a free port, which `executor.port` reports. |
 | `name` | `None` | Manager name that workers look up in the catalog. |
 | `local` | `False` | Run each task in this process, without TaskVine, for debugging. |
-| `progress` | `True` | Draw a progress bar while a Graph runs, when standard output is a terminal. |
+| `progress` | `True` | Draw a progress bar while `run()` waits, when standard output is a terminal. |
 | `shared` | `None` | Objects the library loads when it starts, as `{name: object}`, read by tasks through `vg.Shared(name)`. |
-| `params` | `None` | Settings by name, as a dictionary, applied once when the Executor is created. See below. |
+| `params` | `None` | TaskVine tuning by name, as a dictionary, applied once when the Executor is created. Its names follow TaskVine and may change. See below. |
 | `library_modules` | `()` | Modules, or module names, the library imports when it starts on a worker. |
 | `library_files` | `None` | Local files sent to the library, as `{local_path: name_on_the_worker}`. |
 | `output_dir` | `./outputs` | Where the files whose paths `TaskFile.path` returns are kept. It is created when the first is asked for. A local Executor also keeps its task sandboxes there while it is open. |
 
 Other keyword arguments, such as `ssl` or `run_info_path`, go to the TaskVine
-manager. `params` takes these settings:
+manager. `params` is the escape hatch to TaskVine tuning: its names follow
+TaskVine and may change with it. It takes these settings:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |

@@ -63,7 +63,8 @@ struct vine_graph_node {
 	unsigned kept : 1;	// ran again after its release, and kept until the frontend lets it go (never released meanwhile)
 	unsigned removed : 1;	// removed from the graph, so only the entries counted in refs still hold the structure
 	unsigned reading : 1;	// submitted and not finished, so counted in each parent's readers
-	unsigned unfit : 1;	// requests more cores than the largest Worker had at the last check
+	unsigned unfit : 1;	// waited for more cores than the largest Worker had at the last check
+	unsigned noticed : 1;	// reported once by vine_graph_executor_next_unfit()
 
 	int remaining_parents;	    // parents not completed yet
 	int depth;		    // longest path from a source, computed by vine_graph_link_node

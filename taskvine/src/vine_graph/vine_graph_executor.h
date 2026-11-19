@@ -66,8 +66,7 @@ typedef enum {
 	VINE_GRAPH_FAILURE_INPUT,     /* An input at the Manager is missing. */
 	VINE_GRAPH_FAILURE_RETRIES,   /* More attempts failed for other reasons than max-retries allows. */
 	VINE_GRAPH_FAILURE_CANCELLED, /* The frontend cancelled it. */
-	VINE_GRAPH_FAILURE_SUBMIT,    /* Its task could not be created or submitted. */
-	VINE_GRAPH_FAILURE_CORES      /* It requests more cores than any connected Worker has. */
+	VINE_GRAPH_FAILURE_SUBMIT     /* Its task could not be created or submitted. */
 } vine_graph_failure_t;
 
 /* An opaque executor. */
@@ -77,6 +76,7 @@ struct vine_graph_executor;
 struct vine_graph_capacity {
 	int64_t workers; /* workers connected */
 	int64_t cores;	 /* cores of those workers */
+	int64_t largest; /* cores of the largest of them, or zero without workers */
 };
 
 /* How far durability lags behind completions. An output is anchored when it has a copy in the vault, at the Manager
@@ -171,9 +171,9 @@ int vine_graph_executor_set_command(struct vine_graph_executor *e, uint64_t node
 
 /* Make a function node not yet submitted request cores cores: its call occupies that many function slots of a library
  * instance, which has one slot per core of its Worker, and the library limits the call's thread pools to as many
- * threads. A node that requests more cores than the largest connected Worker has fails with VINE_GRAPH_FAILURE_CORES
- * once two checks seconds apart found it so. A command node takes its cores from vine_graph_executor_set_command().
- * Return zero, or -1 for an unknown or submitted node or fewer than one core. */
+ * threads. A command node takes its cores from vine_graph_executor_set_command(). A node of several cores whose task
+ * cannot run on the largest connected Worker waits for a larger one (see vine_graph_executor_next_unfit()). Return
+ * zero, or -1 for an unknown or submitted node or fewer than one core. */
 int vine_graph_executor_set_cores(struct vine_graph_executor *e, uint64_t node_id, int cores);
 
 /* Submit a node whose files are mounted. It runs once every node whose output it reads has completed, and it fails at
@@ -205,6 +205,12 @@ uint64_t vine_graph_executor_next_fetched(struct vine_graph_executor *e);
  * vine_graph_executor_fetch_file() tries again, which succeeds once the producer has run again and written a file its
  * Worker can send. */
 uint64_t vine_graph_executor_next_fetch_failed(struct vine_graph_executor *e);
+
+/* Return the next node that waits because it requests more cores than the largest connected Worker has, or zero when
+ * none does. A node is reported once, after two checks seconds apart found its task, a recovery of its outputs
+ * included, waiting while every connected Worker was too small for it. It keeps waiting for a larger Worker. Without
+ * Workers, nodes wait unreported. */
+uint64_t vine_graph_executor_next_unfit(struct vine_graph_executor *e);
 
 /* Set data and length to the bytes of a fetched node output that the Manager holds in memory, a small result that came
  * inline, and return one. Return zero, and set data to NULL, when the Manager holds no copy of the file in memory, which

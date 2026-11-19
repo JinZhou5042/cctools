@@ -53,8 +53,8 @@ struct vine_graph_id_queue {
 /* Seconds of one durability measurement window. */
 #define VINE_GRAPH_WINDOW_SECONDS 5
 
-/* Seconds between checks of the function nodes of several cores against the largest connected Worker. A node fails
- * when two checks in a row find every connected Worker smaller than its request. */
+/* Seconds between checks of the nodes of several cores against the largest connected Worker. A node is reported when
+ * two checks in a row find it waiting while every connected Worker is smaller than its request. */
 #define VINE_GRAPH_CORES_CHECK_SECONDS 5
 
 /* Seconds a large checkpoint waits by default for the readers of its node (see vine_graph_executor_hold()). */
@@ -91,8 +91,8 @@ struct vine_graph_executor {
 	char *function_name; // library function that runs one node
 
 	struct itable *task_id_to_node;		 // maps Manager task id to the id of its graph node after submission
-	struct itable *wide_nodes;		 // ids of submitted function nodes that request several cores, checked
-						 // against the largest connected Worker until they finish
+	struct itable *wide_nodes;		 // ids of submitted nodes that request several cores, checked against the
+						 // largest connected Worker while their outputs may be recomputed
 	timestamp_t wide_check_time;		 // when wide_nodes was last checked
 	struct priority_queue *checkpoint_queue; // borrowed large idata awaiting admission, longest producer first
 	struct priority_queue *checkpoint_small; // the same for idata that comes inline, which other slots receive
@@ -112,6 +112,7 @@ struct vine_graph_executor {
 	struct itable *vault_paths; // vine_file address -> owned path of a fetched output in the vault
 	struct list *fetched;	    // ids of requested files that became readable and were not reported yet
 	struct list *fetch_failed;  // ids of requested files that their Workers cannot send, not reported yet
+	struct list *unfit;	    // ids of nodes that wait for a Worker larger than every connected one, not reported yet
 	struct list *finished;	    // nodes that completed or failed and were not reported yet, counted in their refs
 	struct list *released;	    // nodes whose outputs were released and were not reported yet, counted in their refs
 	struct list *kept;	    // released nodes that ran again and are kept, not reported yet, counted in their refs
@@ -234,6 +235,7 @@ struct vine_graph_executor *vine_graph_executor_create(struct vine_manager *mana
 	e->kept = list_create();
 	e->fetched = list_create();
 	e->fetch_failed = list_create();
+	e->unfit = list_create();
 	e->checkpoint_unsendable = list_create();
 	e->checkpoint_lost = list_create();
 	e->priority_mode = VINE_GRAPH_PRIORITY_LARGEST_INPUT_FIRST;
@@ -373,6 +375,7 @@ void vine_graph_executor_delete(struct vine_graph_executor *e)
 	free(e->removed.ids);
 	list_delete(e->fetched);
 	list_delete(e->fetch_failed);
+	list_delete(e->unfit);
 	free(e->library_name);
 	free(e->function_name);
 	free(e->error);
@@ -700,8 +703,10 @@ static int vine_graph_executor_submit_task(struct vine_graph_executor *e, struct
 		/* A call of one core occupies one slot without a request, as every call did before. */
 		if (node->cores > 1) {
 			vine_task_set_cores(task, node->cores);
-			itable_insert(e->wide_nodes, node->node_id, (void *)(uintptr_t)1);
 		}
+	}
+	if (node->cores > 1) {
+		itable_insert(e->wide_nodes, node->node_id, (void *)(uintptr_t)1);
 	}
 	/* The Manager moves a task whose worker is lost to another worker, so a task that makes its worker exit would
 	 * take every worker in turn. With retries set, it returns once more workers were lost under it than the node may
@@ -2038,10 +2043,14 @@ static void vine_graph_executor_update_progress_bar(struct vine_graph_executor *
 	progress_bar_set_part_total(e->progress_bar, e->recovery_part, e->manager->stats->tasks_recovery);
 }
 
-/* Fail the function nodes that request more cores than the largest connected Worker has, at two checks in a row, so
- * a Worker that is replaced by a larger one fails no node. Each instance of the library takes its whole Worker with
- * one slot per core, so such a call never runs on the Workers connected. Without Workers, nodes wait. This runs every
- * VINE_GRAPH_CORES_CHECK_SECONDS at O(submitted unfinished nodes of several cores). */
+/* Report the nodes of several cores whose task waits while every connected Worker has fewer cores than it requests,
+ * once each, after two checks in a row found it so, so a Worker that is replaced by a larger one reports nothing. Such a
+ * task waits for a larger Worker, which a pool that grows over time may bring. Each instance of the library takes its
+ * whole Worker with one slot per core, so a call of more cores than a Worker has never runs there, and neither does a
+ * command. A task waits while it did not complete, while a new task of a completed node restores its outputs, and while
+ * a Manager recovery task recomputes them. A node leaves the check once it failed, was removed, or was released and is
+ * not being restored, and a restore checks it again. Without Workers, nodes wait unreported. This runs every
+ * VINE_GRAPH_CORES_CHECK_SECONDS at O(nodes of several cores whose outputs may be recomputed). */
 static void vine_graph_executor_check_wide_nodes(struct vine_graph_executor *e)
 {
 	timestamp_t now = timestamp_get();
@@ -2050,32 +2059,26 @@ static void vine_graph_executor_check_wide_nodes(struct vine_graph_executor *e)
 	}
 	e->wide_check_time = now;
 	int largest = (int)e->manager->current_max_worker->cores;
-	struct list *unfit = list_create();
-	if (!unfit) {
-		return;
-	}
 	uint64_t node_id;
 	void *value;
 	int iteration;
 	ITABLE_ITERATE(e->wide_nodes, iteration, node_id, value)
 	{
 		struct vine_graph_node *node = vine_graph_get_node(e->graph, node_id);
-		if (!node || node->completed || node->failed) {
+		if (!node || node->failed || (node->released && !node->restoring)) {
 			itable_remove(e->wide_nodes, node_id);
-		} else if (largest < 1 || node->cores <= largest) {
+			continue;
+		}
+		int waiting = !node->completed || node->restoring || vine_graph_node_is_recovering(node);
+		if (!waiting || largest < 1 || node->cores <= largest) {
 			node->unfit = 0;
 		} else if (!node->unfit) {
 			node->unfit = 1;
-		} else {
-			list_push_tail(unfit, node);
+		} else if (!node->noticed) {
+			node->noticed = 1;
+			list_push_tail(e->unfit, (void *)(uintptr_t)node->node_id);
 		}
 	}
-	struct vine_graph_node *node;
-	while ((node = list_pop_head(unfit))) {
-		itable_remove(e->wide_nodes, node->node_id);
-		vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_CORES, string_format("it requests %d cores, but the largest connected Worker has %d", node->cores, largest));
-	}
-	list_delete(unfit);
 }
 
 /* Free the removed entries of the tables that grow with nodes and files, so the memory of removed nodes can be reused
@@ -2255,6 +2258,11 @@ uint64_t vine_graph_executor_next_fetch_failed(struct vine_graph_executor *e)
 	return e ? (uint64_t)(uintptr_t)list_pop_head(e->fetch_failed) : 0;
 }
 
+uint64_t vine_graph_executor_next_unfit(struct vine_graph_executor *e)
+{
+	return e ? (uint64_t)(uintptr_t)list_pop_head(e->unfit) : 0;
+}
+
 vine_graph_node_state_t vine_graph_executor_get_node_state(const struct vine_graph_executor *e, uint64_t node_id)
 {
 	struct vine_graph_node *node = e ? vine_graph_get_node(e->graph, node_id) : NULL;
@@ -2311,7 +2319,7 @@ uint64_t vine_graph_executor_get_completed_recovery_tasks(const struct vine_grap
 
 struct vine_graph_capacity vine_graph_executor_get_capacity(struct vine_graph_executor *e)
 {
-	struct vine_graph_capacity capacity = {0, 0};
+	struct vine_graph_capacity capacity = {0, 0, 0};
 	if (!e) {
 		return capacity;
 	}
@@ -2319,6 +2327,7 @@ struct vine_graph_capacity vine_graph_executor_get_capacity(struct vine_graph_ex
 	vine_get_stats(e->manager, &stats);
 	capacity.workers = stats.workers_connected;
 	capacity.cores = stats.total_cores;
+	capacity.largest = MAX((int64_t)e->manager->current_max_worker->cores, 0);
 	return capacity;
 }
 

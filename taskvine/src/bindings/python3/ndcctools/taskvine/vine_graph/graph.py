@@ -2,9 +2,9 @@
 # This software is distributed under the GNU General Public License.
 # See the file COPYING for details.
 
-"""A Graph holds tasks, the data they pass to each other, and the rules that add tasks as others complete. An Executor
-(executor.py) runs it on TaskVine Workers, or in this process, and a later run continues it without recomputing what
-completed. The tasks that Executor.submit() starts are Tasks too, which the Executor holds in a graph of its own."""
+"""A Graph holds tasks and the data they pass to each other. Its tasks are descriptions until an Executor (executor.py)
+takes the Graph, and from then on they are live, exactly like the tasks that Executor.submit() starts, which the
+Executor holds in a graph of its own."""
 
 import collections
 import collections.abc
@@ -29,8 +29,9 @@ class _Symbol:
         raise NotImplementedError
 
 
-# The lock that a local run holds while a task changes the working directory of the process, which the executor module
-# installs, so that a relative path given in another thread meanwhile resolves against the caller's directory.
+# The lock that a local runner holds while a task changes the working directory of the process, which the executor
+# module installs where a thread cannot have a working directory of its own, so that a relative path given in another
+# thread meanwhile resolves against the caller's directory.
 _working_directory_lock = None
 
 
@@ -467,9 +468,9 @@ def replace_symbols(value, replace, known=()):
             parent[4](out)
 
 
-# Task states. Only the thread of a run changes them while it runs, and never while a rule runs.
-_NEW = 0  # not started: never submitted, or returned to not-started by a stopped run
-_RUNNING = 1  # submitted and not finished
+# Task states, which change under the lock of the Executor of the task.
+_NEW = 0  # not submitted: a task of a Graph that no Executor took yet
+_RUNNING = 1  # live and not finished
 _COMPLETED = 2
 _FAILED = 3
 _CANCELLED = 4
@@ -496,7 +497,6 @@ class TaskError(RuntimeError):
     - "input": a file it reads is missing at the Manager
     - "retries": more of its attempts failed for other reasons than the setting max-retries allows
     - "submit": it could not be submitted, as when an argument cannot be serialized
-    - "cores": it asks for more cores than the largest connected Worker has (see Function)
     - "result": it completed, but its result cannot be loaded in this process or sent by its Worker
 
     exception is the exception that the function of the source raised, loaded in this process with the source's
@@ -527,8 +527,7 @@ def _sandbox_name(name):
 
 class Command:
     """A shell command line that tasks run, as a function is for Python tasks: g.add(command, **values) or
-    executor.submit(command, **values) makes a task that runs it in its sandbox, and a Command selects its tasks in
-    Graph.on() and Graph.find() as a function does.
+    executor.submit(command, **values) makes a task that runs it in its sandbox.
 
     Placeholders such as {name} take the values given by name, shell-quoted: a File, or a file a task writes
     (task.file(name)), becomes its path in the sandbox, a Task becomes str() of its result, and any other value str()
@@ -542,8 +541,11 @@ class Command:
     whether Graph.add() or Executor.submit() makes it. task.file(name) then names such a file: pass it to other tasks,
     or read it once the task completed with its path, content, text, or save(), whether or not a task reads it. A
     declared file is a required output, so a command that does not write it fails. A file whose name differs from task
-    to task is declared by asking for it with task.file(name) before the task starts, which only a task of a Graph
-    allows, since a submitted task has started already."""
+    to task is declared by asking for it with task.file(name) before the task is submitted, which only a task of a
+    Graph allows, since Executor.submit() submits its task at once.
+
+    A task whose cores exceed those of the largest connected Worker waits for a larger Worker, and the Executor prints
+    a notice once for each size."""
 
     __slots__ = ("_template", "_cores", "_fields", "_outputs", "__weakref__")
 
@@ -600,8 +602,8 @@ class Function:
     A Worker runs the calls of an Executor in one library with a slot per core, and a call of cores=k occupies k slots,
     so a Worker of 8 cores runs eight calls of one core, four of two, or two of four at a time. The library limits the
     native thread pools (OpenMP, BLAS) loaded in the call's process to k threads. A task that asks for more cores than
-    the largest connected Worker has fails with reason "cores" once two checks a few seconds apart found it so, and a
-    task waits while no Worker is connected. An Executor with local=True runs every call in its own process and ignores
+    the largest connected Worker has waits for a larger Worker, as Workers join a pool over time, and the Executor
+    prints a notice once for each size. An Executor with local=True runs every call in its own process and ignores
     cores."""
 
     __slots__ = ("_func", "_cores", "__weakref__")
@@ -634,8 +636,8 @@ def _callable(func):
 
 class TaskFile(_Symbol):
     """A file that a task writes in its sandbox, which other tasks read when it is passed to them. Asking for a file
-    of a task before the task starts declares it, as Command(outputs=...) does for every task of a command, and the
-    task fails when it does not write it. Once the task completed, path, content, text, and save() read the file,
+    of a task before the task is submitted declares it, as Command(outputs=...) does for every task of a command, and
+    the task fails when it does not write it. Once the task completed, path, content, text, and save() read the file,
     whether or not a task reads it. They read through the open Executor, and a path or content that was returned once
     stays readable after it closed."""
 
@@ -777,24 +779,23 @@ def _restore(task, value):
 
 
 class Task(_Selectable):
-    """A call of a function, or a run of a Command, with its arguments. Graph.add() returns the Task of a task that
-    runs when an Executor runs the Graph, and Executor.submit() the Task of a task that starts at once. Pass a Task as
-    an argument of another task to give that task its result, select from it with task[key] or task.attr(name), and
-    name a file it writes with task.file(name).
+    """A call of a function, or a run of a Command, with its arguments. Graph.add() returns a Task that describes a task
+    until an Executor takes its Graph (Executor.submit(graph) or Executor.run(graph)), and Executor.submit() a Task that
+    is live at once. A live Task behaves alike whatever made it: result() waits for its result, done(), failed(), and
+    cancelled() tell how far it is, and cancel() cancels it. Pass a Task as an argument of another task to give that
+    task its result, select from it with task[key] or task.attr(name), and name a file it writes with task.file(name).
 
-    result() returns its result, done(), failed(), and cancelled() tell how far it is, and cancel() cancels it. A Task
-    keeps the Tasks it reads, which args and kwargs return, and the result that result() returned, which stays readable
-    after the Executor closed."""
+    A live Task is named Task(n, f), where n is its number among the tasks of its Executor, and a Task not submitted yet
+    Task(key, f, not submitted), with its key in its Graph. A Task keeps the Tasks it reads, which args and kwargs
+    return, and the result that result() returned, which stays readable after the Executor closed."""
 
-    __slots__ = ("_graph", "key", "_index", "_func", "_args", "_kwargs", "_parents", "_results", "_reads", "_shared",
-                 "_selections", "_outputs", "_readers", "_rules", "_state", "_error", "_record", "_rule_pending",
-                 "_value", "__weakref__")
+    __slots__ = ("_graph", "key", "_func", "_args", "_kwargs", "_parents", "_results", "_reads", "_shared",
+                 "_selections", "_outputs", "_readers", "_state", "_error", "_record", "_value", "__weakref__")
 
     def __init__(self, graph, key, func):
         self._graph = graph
-        # The task's key in its Graph: its number, or its Dask key in a Graph from adaptors.from_dask().
+        # The task's key in its Graph: its number in the Graph, or its Dask key in a Graph from adaptors.from_dask().
         self.key = key
-        self._index = 0  # insertion order in the Graph
         self._func = func
         self._args = ()  # arguments, with every symbol replaced by its reference
         self._kwargs = _NO_KWARGS
@@ -806,17 +807,15 @@ class Task(_Selectable):
         # selection, or None. Such a task needs only the selected value, which its producer may write to a file.
         self._selections = None
         self._outputs = None  # {sandbox path: TaskFile} of the files it writes, or None
-        # Tasks of the Graph that read it, in the order they were added: None, the one reader, or a list of several,
-        # since most tasks have one reader and a list for it would take more memory than the task. A submitted task
-        # holds a list of weak references instead, so it does not keep its readers. See _readers_of().
+        # Tasks of the same Graph that read it, in the order they were added: None, the one reader, or a list of
+        # several, since most tasks have one reader and a list for it would take more memory than the task. A submitted
+        # task holds a list of weak references instead, so it does not keep its readers. See _readers_of().
         self._readers = None
-        self._rules = None  # rules registered for this task alone, or None
         self._state = _NEW
         # The failure of a failed task: (_FAILED, source Task or None for the task itself, message, reason, exit code).
         # Only a source holds its message, reason, and exit code.
         self._error = None
-        self._record = None  # the Executor's record of its latest submission
-        self._rule_pending = False  # its rules are due once it completes
+        self._record = None  # the Executor's record of the task, from when it is live, which holds its number
         self._value = _UNREAD  # the result, once the Executor returned it
 
     def __del__(self):
@@ -849,17 +848,14 @@ class Task(_Selectable):
     @property
     def readers(self):
         """The tasks that read this task's result or files, in the order they were added: tasks of its Graph, or, for
-        a submitted task, the submitted tasks that still exist."""
+        a task that Executor.submit() started, the submitted tasks that still exist."""
         return list(_readers_of(self))
 
     def result(self, timeout=None):
         """Return the result of the task: what its function returned, or the text its command wrote to standard
-        output. A submitted task that is still running is waited for, at most timeout seconds when one is given, after
-        which TimeoutError is raised. A failed task raises its TaskError, and a cancelled one RuntimeError.
-
-        A task of a Graph has a result once an Executor ran the Graph. Before that, and while it did not finish, as in
-        a rule that asks for a task that is still running, RuntimeError is raised, because only Executor.run() waits
-        for the tasks of a Graph. A result that the Executor released meanwhile is computed again.
+        output. A task that is still running is waited for, at most timeout seconds when one is given, after which
+        TimeoutError is raised. A failed task raises its TaskError, and a cancelled task, or one that has not been
+        submitted, RuntimeError. A result that the Executor released meanwhile is computed again.
 
         Results are read through the open Executor. The Task keeps a result that was returned once, by result() or by
         Executor.run(), and returns the same object again, also after the Executor closed. A result that was never
@@ -872,32 +868,34 @@ class Task(_Selectable):
     def done(self):
         """Return whether the task finished: it completed, failed, or was cancelled."""
         if self._state == _RUNNING:
-            self._graph._poll(self)
+            self._graph._poll()
         return self._state >= _COMPLETED
 
     def failed(self):
         """Return whether the task failed, or could not run because a task it reads failed."""
         if self._state == _RUNNING:
-            self._graph._poll(self)
+            self._graph._poll()
         return self._state == _FAILED
 
     def cancelled(self):
         """Return whether cancel() cancelled the task, or a task it reads."""
         if self._state == _RUNNING:
-            self._graph._poll(self)
+            self._graph._poll()
         return self._state == _CANCELLED
 
     def cancel(self):
         """Cancel the task unless it finished, and the tasks that read it: those not started never run, and running
-        ones are stopped. Return True when this call cancelled the task, and False when it had finished: a completed
-        task stays completed, a failed task failed, and a cancelled task cancelled. A task of a Graph is cancelled by a
-        rule, during a run, and a submitted task at any time."""
-        return self._graph._cancel(self)
+        ones are stopped. Return True when this call cancelled the task, and False when it had finished or has not been
+        submitted: a completed task stays completed, a failed task failed, a cancelled task cancelled, and a task not
+        submitted runs once its Graph is submitted."""
+        if self._state != _RUNNING:
+            return False
+        return self._graph._bound(self)._cancel(self)
 
     def file(self, name):
         """Return the file this task writes at name, a relative path in its sandbox. Asking for the same name again
-        returns the same file. A file is declared by asking for it before the task starts, or by the outputs of its
-        Command, so a submitted task, which started already, has the files of its Command and no others."""
+        returns the same file. A file is declared by asking for it before the task is submitted, or by the outputs of
+        its Command, so a task that Executor.submit() started has the files of its Command and no others."""
         normalized = _sandbox_name(name)
         outputs = self._outputs
         if outputs is None:
@@ -915,67 +913,29 @@ class Task(_Selectable):
 
 
 def _undeclared(task, name):
-    """Return the message for a file of a task that was not declared before the task started."""
-    return (f"the file {name!r} of {task!r} was asked for after the task started, so it was not kept; ask for the files "
-            f"of a task before it starts, as when it is added to its Graph, or list the files that a command writes in "
+    """Return the message for a file of a task that was not declared before the task was submitted."""
+    return (f"the file {name!r} of {task!r} was asked for after the task was submitted, so it was not kept; ask for "
+            f"the files of a task before its Graph is submitted, or list the files that a command writes in "
             f"Command(outputs=...)")
 
 
 def _label(task):
-    """Return how messages name a task: its key and the name of its function, or the start of its command."""
-    return _name_task(task.key, task._func)
+    """Return how messages name a task: its number and the name of its function, or the start of its command, or its
+    key in its Graph for a task not submitted yet."""
+    record = task._record
+    if record is None:
+        return _name_task(task.key, task._func, ", not submitted")
+    return _name_task(record.number, task._func)
 
 
-def _name_task(key, func):
+def _name_task(number, func, suffix=""):
     if isinstance(func, Command):
         words = func.template.split()
         name = words[0] if words else "command"
     else:
         func = _callable(func)
         name = getattr(func, "__name__", None) or type(func).__name__
-    return f"Task({key!r}, {name})"
-
-
-class _Rule:
-    """A function that Graph.on() registered, called with each selected task that completes."""
-
-    __slots__ = ("function", "index")
-
-    def __init__(self, function, index):
-        self.function = function
-        self.index = index
-
-
-class _FunctionIndex:
-    """Values listed by function or Command: by the function itself, which tells bound methods of one object apart from
-    others, or by its id when it cannot be hashed."""
-
-    __slots__ = ("hashed", "unhashed")
-
-    def __init__(self):
-        self.hashed = {}
-        self.unhashed = {}  # id -> (function, values)
-
-    def get(self, func):
-        try:
-            return self.hashed.get(func)
-        except TypeError:
-            entry = self.unhashed.get(id(func))
-            return None if entry is None else entry[1]
-
-    def add(self, func, value):
-        try:
-            values = self.hashed.get(func)
-            if values is None:
-                values = self.hashed[func] = []
-        except TypeError:
-            entry = self.unhashed.get(id(func))
-            if entry is None:
-                entry = self.unhashed[id(func)] = (func, [])
-            values = entry[1]
-        # A value added for two selectors that stand for one function, such as two bound methods, is listed once.
-        if not values or values[-1] is not value:
-            values.append(value)
+    return f"Task({number!r}, {name}{suffix})"
 
 
 # Numbers that tell Graphs apart in the references of tasks that read tasks of another Graph.
@@ -983,19 +943,18 @@ _graph_ids = itertools.count(1)
 
 
 class Graph:
-    """Tasks, the data they pass to each other, and rules that add tasks as others complete.
+    """Tasks and the data they pass to each other.
 
-    add() adds a task and returns its Task. on() registers a rule, which a run calls with each selected task that
-    completes, one at a time and in completion order, in the thread that called Executor.run(). While a rule runs, task
-    states do not change, and the rule may add tasks, which run after it returns, cancel tasks, or stop the run. find()
-    returns the selected tasks. Executor.run(graph) blocks until no task runs and no rule is due, and returns the
-    results of the completed sinks, the tasks that no task reads. Running the Graph again runs only what did not
-    finish, and a stopped run continues.
+    add() adds a task and returns its Task, which describes the task until an Executor takes the Graph:
+    Executor.submit(graph) makes every task not submitted yet live and returns at once, and Executor.run(graph) does so
+    and waits for them. Tasks added afterwards become live at the next submit() or run() of the Graph. Iterating a Graph
+    yields its tasks in the order they were added, and len() counts them.
 
-    A Graph describes work and holds no settings: the Executor decides where it runs. The first Executor that runs a
-    Graph holds the results of its tasks, so later runs of the Graph use that Executor."""
+    A Graph describes work and holds no settings: the Executor decides where it runs. The first Executor that takes a
+    Graph holds the results of its tasks, so the Graph belongs to that Executor, and its tasks may read the live tasks
+    of that Executor, such as those that its submit() started and those of other Graphs it took."""
 
-    # The Executor that ran the Graph, which holds the results of its tasks, or None before the first run.
+    # The Executor that the Graph belongs to, which holds the results of its tasks, or None before one took it.
     _executor = None
     # The queue of the records of collected tasks, in the graph of an Executor's submitted tasks (_Calls).
     _dropped = None
@@ -1003,19 +962,15 @@ class Graph:
     def __init__(self):
         self._tasks = {}  # key -> Task, in insertion order
         self._next_key = 1
-        self._by_func = _FunctionIndex()  # function or Command -> its Tasks, in insertion order
-        self._rule_index = _FunctionIndex()  # function or Command -> rules that select its tasks
-        self._rule_count = 0
         # id -> [object, tasks]: argument objects without symbols, scanned once while tasks hold them. An object passed
         # again is assumed unchanged.
         self._plain = {}
         # key -> _Ref(None, key) that arguments of tasks store for the whole result of task key, shared by every
         # reader.
         self._shared_refs = {}
-        self._run = None  # the _Run of the run in progress
-        # Completed tasks whose rules are due, in completion order. A stopped run leaves those it did not call for the
-        # next run.
-        self._due = collections.deque()
+        # Tasks not submitted yet, in the order they were added, in which each comes after the tasks it reads.
+        self._new = collections.deque()
+        self._unfinished = 0  # live tasks that did not finish, counted under the lock of the Executor
         self._id = next(_graph_ids)
         self._ref = weakref.ref(self)  # how the records of an Executor refer to the Graph
         # The Executor's records of the tasks submitted, which it lets go when the Graph is collected.
@@ -1024,103 +979,26 @@ class Graph:
     def __repr__(self):
         return f"Graph({len(self._tasks)} tasks)"
 
-    def __getstate__(self):
-        raise TypeError("a Graph holds rules and the state of its runs, and cannot be pickled")
+    def __iter__(self):
+        """Yield the tasks in the order they were added."""
+        return iter(list(self._tasks.values()))
 
-    # The user interface.
+    def __len__(self):
+        return len(self._tasks)
+
+    def __getstate__(self):
+        raise TypeError("a Graph holds the state of its tasks, and cannot be pickled")
 
     def add(self, func, /, *args, **kwargs):
         """Add a task that calls func, a function or a Function, with these arguments, or runs a Command with values
-        for its placeholders, and return its Task. Tasks of this Graph, their selections and files, and Files may appear anywhere inside the
-        arguments of a function. During a run, only a rule may add tasks, and they run once it returns."""
-        self._check_change("add")
+        for its placeholders, and return its Task, which becomes live when an Executor takes the Graph. Tasks of this
+        Graph and live tasks of its Executor, their selections and files, and Files may appear anywhere inside the
+        arguments of a function."""
         while self._next_key in self._tasks:
             self._next_key += 1
         key = self._next_key
         self._next_key += 1
         return self._add(key, func, args, kwargs)
-
-    def on(self, *selectors):
-        """Register the decorated function as a rule: rule(task) is called with each selected task that completes. A
-        selector is a function or Command, which selects the tasks of this Graph that run it, including those added
-        later, or a Task of this Graph. A task that failed or was cancelled calls no rule, and a rule that raises fails
-        the run. Rules are the only callbacks: they select tasks of their Graph, never the tasks that
-        Executor.submit() returns, whose results the caller reads itself."""
-        if not selectors:
-            raise TypeError("on() takes at least one function, Command, or Task")
-        for selector in selectors:
-            self._check_selector(selector)
-        if self._run is not None:
-            self._check_change("on")
-
-        def register(function):
-            if not callable(function):
-                raise TypeError("a rule must be callable")
-            self._rule_count += 1
-            rule = _Rule(function, self._rule_count)
-            for selector in {id(selector): selector for selector in selectors}.values():
-                if isinstance(selector, Task):
-                    if selector._rules is None:
-                        selector._rules = []
-                    selector._rules.append(rule)
-                    tasks = (selector,)
-                else:
-                    self._rule_index.add(selector, rule)
-                    tasks = self._by_func.get(selector) or ()
-                # Running tasks that a rule now selects call it when they complete.
-                for task in tasks:
-                    if task._state == _RUNNING:
-                        task._rule_pending = True
-            return function
-
-        return register
-
-    def find(self, *selectors):
-        """Return the selected tasks, in the order they were added: the tasks of each function or Command, and each
-        Task given, or every task when none is given. The list is a snapshot. During a run, only a rule may call it."""
-        run = self._run
-        if run is not None and not (run.in_rule and threading.current_thread() is run.thread):
-            raise RuntimeError("during a run, only a rule may call find()")
-        if not selectors:
-            return list(self._tasks.values())
-        found = []
-        for selector in selectors:
-            self._check_selector(selector)
-            if isinstance(selector, Task):
-                found.append((selector,))
-            else:
-                found.append(self._by_func.get(selector) or ())
-        if len(found) == 1:
-            return list(found[0])
-        union = {id(task): task for tasks in found for task in tasks}
-        return sorted(union.values(), key=_INDEX)
-
-    def stop(self):
-        """End the run once the rule that calls this returns: no further rule is called, running tasks are stopped, and
-        Executor.run() returns. Tasks that did not finish go back to not started, so a later run continues them. Only a
-        rule may stop the run."""
-        run = self._check_change("stop", rule_only=True)
-        run.stop_requested = True
-
-    # Construction.
-
-    def _check_change(self, what, rule_only=False):
-        """Raise unless the Graph may change now: outside a run, or inside a rule in the run's thread. Return the run."""
-        run = self._run
-        if run is None:
-            if rule_only:
-                raise RuntimeError(f"{what}() may be called only inside a rule during a run")
-            return None
-        if not run.in_rule or threading.current_thread() is not run.thread:
-            raise RuntimeError(f"during a run, only a rule may call {what}()")
-        return run
-
-    def _check_selector(self, selector):
-        if isinstance(selector, Task):
-            if selector._graph is not self:
-                raise ValueError("a rule or find() selects tasks of its own Graph, and this Task is not one of them")
-        elif isinstance(selector, _Symbol) or not (callable(selector) or isinstance(selector, Command)):
-            raise TypeError("a selector is a function, a Command, or a Task")
 
     def _add(self, key, func, args, kwargs):
         """Record a task under key and return it."""
@@ -1150,11 +1028,11 @@ class Graph:
         return task
 
     def _insert(self, task):
-        """Take a new task into the Graph, and tell the tasks it reads and the run in progress."""
-        task._index = len(self._tasks)
+        """Take a new task into the Graph, tell the tasks of this Graph that it reads, and queue it for submission."""
         self._tasks[task.key] = task
-        self._by_func.add(task._func, task)
         for parent in task._parents:
+            if parent._graph is not self:
+                continue
             readers = parent._readers
             if readers is None:
                 parent._readers = task
@@ -1162,22 +1040,34 @@ class Graph:
                 readers.append(task)
             else:
                 parent._readers = [readers, task]
-        run = self._run
-        if run is not None:
-            run.added.append(task)
-            run.task_added()
+        self._new.append(task)
 
     def _graph_id(self, parent):
         """Return the graph id in the references of this Graph's tasks to a task: None for a task of this Graph."""
         return None if parent._graph is self else parent._graph._id
 
     def _check_parent(self, parent, what):
-        """Raise unless tasks of this Graph may read a task: only its own."""
-        if parent._graph is not self:
-            raise ValueError(f"a task reads {what} of another Graph; a Graph holds every task its tasks read")
+        """Raise unless tasks of this Graph may read a task: one of this Graph, or a live task of its Executor. A Graph
+        that no Executor took yet belongs from now on to the Executor of the live task."""
+        graph = parent._graph
+        if graph is self:
+            return
+        if parent._record is None:
+            raise ValueError(f"a task reads {what} {parent!r}, a task of another Graph that has not been submitted; "
+                             f"submit or run that Graph first, or add the task to the same Graph")
+        executor = graph._executor
+        mine = self._executor
+        if mine is None:
+            executor._bind(self)
+        elif mine is not executor:
+            raise ValueError(f"a task reads {what} {parent!r}, which belongs to another Executor; the tasks of a Graph "
+                             f"read only tasks of the Executor that the Graph belongs to")
 
     def _ref_to(self, parent):
-        """Return the reference that arguments store for the whole result of a task, shared by every reader."""
+        """Return the reference that arguments store for the whole result of a task, shared by every reader of a task
+        of this Graph."""
+        if parent._graph is not self:
+            return _Ref(parent._graph._id, parent.key)
         ref = self._shared_refs.get(parent.key)
         if ref is None:
             ref = self._shared_refs[parent.key] = _Ref(None, parent.key)
@@ -1243,7 +1133,7 @@ class Graph:
         def replace(symbol):
             kind = type(symbol)
             if kind is Task:
-                self._check_parent(symbol, "a Task")
+                self._check_parent(symbol, "the result of")
                 read_result(symbol, ())
                 return self._ref_to(symbol)
             if kind is Shared:
@@ -1254,8 +1144,8 @@ class Graph:
                 return symbol
             if kind is TaskFile:
                 parent = symbol.task
-                self._check_parent(parent, "a file of a Task")
-                if parent._state != _NEW and (parent._record is None or symbol.name not in parent._record.outputs):
+                self._check_parent(parent, "a file of")
+                if parent._record is not None and symbol.name not in parent._record.outputs:
                     raise ValueError(_undeclared(parent, symbol.name))
                 return read_file(parent, symbol.name)
             if kind is _FileRef:
@@ -1266,7 +1156,7 @@ class Graph:
             if isinstance(symbol, _Selection) or kind is _Ref:
                 if isinstance(symbol, _Selection) and isinstance(symbol.source, Task):
                     parent, steps = symbol.source, symbol.steps
-                    self._check_parent(parent, "a Task")
+                    self._check_parent(parent, "the result of")
                 else:
                     # A reference that an adaptor built, or a selection from one, to a task of this Graph.
                     source = symbol._as_ref()
@@ -1301,50 +1191,33 @@ class Graph:
         if selections:
             task._selections = selections
 
-    # Rules.
-
-    def _has_rules(self, task):
-        return task._rules is not None or self._rule_index.get(task._func) is not None
-
-    def _rules_of(self, task):
-        """Return the rules that select a task, each once, in the order they were registered."""
-        by_func = self._rule_index.get(task._func) or ()
-        if task._rules is None:
-            return list(by_func)
-        if not by_func:
-            return list(task._rules)
-        return sorted({id(rule): rule for rule in (*by_func, *task._rules)}.values(), key=_INDEX_OF_RULE)
-
-    # What the Tasks of the Graph ask of the Executor that ran it.
+    # What the Tasks of the Graph ask of the Executor that took it.
 
     def _bound(self, task):
-        """Return the Executor that holds the results of the Graph's tasks, or raise before the first run."""
+        """Return the Executor of a live task, or raise for a task not submitted yet."""
+        if task._record is None:
+            raise RuntimeError(f"{task!r} has not been submitted; submit or run its Graph")
+        return self._executor
+
+    def _poll(self):
+        """Bring the states of the live tasks up to date."""
         executor = self._executor
-        if executor is None:
-            raise RuntimeError(f"{task!r} has not run: Executor.run() runs its Graph")
-        return executor
-
-    def _poll(self, task):
-        """Bring the state of a running task up to date. The tasks of a Graph change only during a run."""
-
-    def _cancel(self, task):
-        run = self._check_change("cancel", rule_only=True)
-        unfinished = task._state < _COMPLETED
-        run.cancel((task,))
-        return unfinished
+        if executor is not None:
+            executor._poll()
 
 
 class _Calls(Graph):
     """The graph of the tasks that an Executor's submit() started. It differs from a Graph that a user builds in what it
     keeps: a submitted task lives while something refers to its Task, so the graph holds its tasks weakly, tasks hold
     their readers weakly, and a collected task queues its record in dropped, from where the Executor lets it go. Its
-    tasks may read tasks of the Graphs that the Executor ran, and no rule selects them."""
+    tasks are live from the start, so none waits for submission."""
 
     def __init__(self, executor, dropped):
         super().__init__()
         self._tasks = weakref.WeakValueDictionary()
         self._plain = None  # arguments are scanned for every task, so the graph keeps none of them
         self._shared_refs = None
+        self._new = None
         self._owner = weakref.ref(executor)
         self._dropped = dropped
 
@@ -1360,7 +1233,6 @@ class _Calls(Graph):
         return executor
 
     def _insert(self, task):
-        task._index = task.key
         self._tasks[task.key] = task
         reader = weakref.ref(task)
         for parent in task._parents:
@@ -1375,31 +1247,5 @@ class _Calls(Graph):
                 readers[:] = [ref for ref in readers if ref() is not None]
             readers.append(reader)
 
-    def _check_parent(self, parent, what):
-        """Raise unless a submitted task may read a task: one submitted before it, or one that the Executor ran."""
-        graph = parent._graph
-        if graph is self:
-            return
-        if graph._executor is not self._owner():
-            raise ValueError(f"a submitted task reads {what} that this Executor neither started nor ran")
-        if parent._record is None:
-            raise ValueError(f"a submitted task reads {parent!r}, which has not started; Executor.run() runs its Graph")
-
     def _ref_to(self, parent):
         return _Ref(self._graph_id(parent), parent.key)
-
-    def _poll(self, task):
-        executor = self._owner()
-        if executor is not None:
-            executor._poll()
-
-    def _cancel(self, task):
-        return self._bound(task)._cancel_call(task)
-
-
-def _INDEX(task):
-    return task._index
-
-
-def _INDEX_OF_RULE(rule):
-    return rule.index
