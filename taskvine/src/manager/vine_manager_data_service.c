@@ -23,6 +23,7 @@
 #include "vine_transfer_receive.h"
 #include "vine_transfer_send.h"
 #include "unlink_recursive.h"
+#include "path_disk_size_info.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -1783,6 +1784,80 @@ struct vine_file *vine_manager_data_service_declare_file(struct vine_manager *ma
 	file = vine_manager_declare_file(manager, file);
 	vault_insert(manager->ds, file, 0, 0);
 	return file;
+}
+
+static void remove_entry_path(struct vine_manager_data_service *ds, const char *path);
+
+/* Install a stored file or directory as the vault entry of a temporary file, as a checkpoint received from a Worker
+ * would be, but as a link to the stored path, like a declared file. */
+int vine_manager_data_service_adopt(struct vine_manager *manager, struct vine_file *temp, const char *path)
+{
+	if (!manager || !manager->ds || !temp || !temp->cached_name || !path) {
+		errno = EINVAL;
+		return 0;
+	}
+	if (temp->type != VINE_TEMP) {
+		errno = EINVAL;
+		return 0;
+	}
+	/* A file with an entry, or with a receive that may publish one, keeps it. */
+	if (temp->vault_entry || temp->vault_jobs) {
+		errno = EEXIST;
+		return 0;
+	}
+	char *source = realpath(path, NULL);
+	if (!source) {
+		return 0;
+	}
+	struct stat info;
+	int64_t size = 0;
+	int small = 0;
+	if (stat(source, &info) != 0) {
+		free(source);
+		return 0;
+	}
+	if (S_ISREG(info.st_mode)) {
+		size = info.st_size;
+		small = size <= VINE_DATA_INLINE_BYTES;
+	} else if (S_ISDIR(info.st_mode)) {
+		int64_t count = 0;
+		if (path_disk_size_info_get(source, &size, &count, NULL) != 0) {
+			free(source);
+			return 0;
+		}
+	} else {
+		free(source);
+		errno = EINVAL;
+		return 0;
+	}
+	char *vault_path = string_format("%s/%s", manager->ds->vault_directory, temp->cached_name);
+	int result = symlink(source, vault_path);
+	int saved_errno = errno;
+	free(source);
+	if (result != 0) {
+		free(vault_path);
+		errno = saved_errno;
+		return 0;
+	}
+	/* A small regular file goes to Workers inline and counts in the vault, as a checkpoint that came inline does. A
+	 * larger entry is only a link, so it does not count, as a declared file does not. */
+	struct vault_entry *entry = vault_insert(manager->ds, temp, small ? size : 0, small);
+	if (!entry) {
+		remove_entry_path(manager->ds, vault_path);
+		free(vault_path);
+		errno = ENOMEM;
+		return 0;
+	}
+	free(vault_path);
+	if (small) {
+		entry->mode = info.st_mode & 0777;
+	}
+	/* The file now exists, as if its producer had run, so its readers may run and it needs no recovery. */
+	temp->state = VINE_FILE_STATE_CREATED;
+	temp->size = size;
+	temp->mode = info.st_mode & 0777;
+	debug(D_VINE, "vault entry %s: adopted from %s, %" PRId64 " bytes", temp->cached_name, path, size);
+	return 1;
 }
 
 /* Delete the entries that vault removal renamed and the copies it queued, one after another, on one executor. */
