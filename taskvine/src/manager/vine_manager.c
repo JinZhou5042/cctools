@@ -1231,6 +1231,13 @@ static int handle_transfer_hostport(struct vine_manager *q, struct vine_worker_i
 	return VINE_MSG_PROCESSED;
 }
 
+/* Return whether a task result is the task going over a limit of its own: its wall time, end time, resources, or
+ * sandbox. */
+static int task_result_is_own_limit(int result)
+{
+	return result == VINE_RESULT_MAX_WALL_TIME || result == VINE_RESULT_MAX_END_TIME || result == VINE_RESULT_RESOURCE_EXHAUSTION || result == VINE_RESULT_SANDBOX_EXHAUSTION;
+}
+
 static vine_result_code_t get_completion_result(struct vine_manager *q, struct vine_worker_info *w, const char *line)
 {
 	if (!q || !w || !line)
@@ -1280,8 +1287,12 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 	}
 
 	if (task_status != VINE_RESULT_SUCCESS) {
-		w->last_failure_time = timestamp_get();
-		t->time_when_last_failure = w->last_failure_time;
+		t->time_when_last_failure = timestamp_get();
+		/* A task that went over its own time or resource limits says nothing about the worker, which stays open to
+		 * other tasks. Any other failure keeps tasks off the worker for the transient error interval. */
+		if (!task_result_is_own_limit(task_status)) {
+			w->last_failure_time = t->time_when_last_failure;
+		}
 	}
 
 	/* A task that the worker forsook, such as a function call whose library died, or a library that exited, did not
