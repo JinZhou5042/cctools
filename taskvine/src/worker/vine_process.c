@@ -249,13 +249,19 @@ int vine_process_execute_and_wait(struct vine_process *p)
 	}
 }
 
-/* Send a message containing details of a function call to the relevant library to execute it.
+/* Send a message containing details of a function call to the relevant library to execute it. A call that occupies
+ * k > 1 slots of its library ends the message with k, from which the library sets the call's thread limit.
  * @param p 	The relevant vine_process structure encapsulating a function call.
  * @return 		1 if the message is successfully sent to the library, 0 otherwise. */
 
 int vine_process_invoke_function(struct vine_process *p)
 {
-	char *buffer = string_format("%d %s %s %s", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name);
+	char *buffer;
+	if (p->task->function_slots_total > 1) {
+		buffer = string_format("%d %s %s %s %d", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name, p->task->function_slots_total);
+	} else {
+		buffer = string_format("%d %s %s %s", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name);
+	}
 	ssize_t result = link_printf(p->library_process->library_write_link, time(0) + options->active_timeout, "%ld\n%s", strlen(buffer), buffer);
 
 	// conservatively assume that the function starts executing as soon as we send it to the library.

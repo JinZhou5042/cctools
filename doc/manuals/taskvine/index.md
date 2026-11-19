@@ -1660,9 +1660,11 @@ occupies one slot by default.  An invocation that requests cores with
 `set_cores(k)` occupies `k` slots of its library instance, and runs only
 on an instance with at least `k` free slots, so a library with 4 slots
 runs four 1-core invocations, two 2-core invocations, or one 4-core
-invocation at a time.  Memory and disk requests of an invocation do not
-affect its placement.  An invocation that requests more cores than the
-library has slots never runs: if the slots of the library do not depend
+invocation at a time.  The library limits the thread pools (OpenMP,
+BLAS) of an invocation to its library cores divided by its slots, and an
+invocation of `k` slots to `k` times that.  Memory and disk requests of
+an invocation do not affect its placement.  An invocation that requests
+more cores than the library has slots never runs: if the slots of the library do not depend
 on the worker (direct execution mode, `set_function_slots`, or `set_cores`
 on the library task), it is returned with the result
 `VINE_RESULT_MISSING_LIBRARY`.  Otherwise it waits for a worker large

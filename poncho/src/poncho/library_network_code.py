@@ -85,7 +85,9 @@ def sigchld_handler(signum, frame):
     os.write(w, b"a")
 
 
-# Read data from worker, start function, and dump result to `outfile`.
+# Read data from worker, start function, and dump result to `outfile`. thread_limit is the thread limit of a call that
+# occupies one slot of the library. A call that occupies k slots, which the worker writes at the end of its invocation
+# when k is above one, runs with k times that limit.
 def start_function(in_pipe_fd, thread_limit=1):
     # read length of buffer to read
     buffer_len = b""
@@ -103,14 +105,16 @@ def start_function(in_pipe_fd, thread_limit=1):
     line = str(os.read(in_pipe_fd, buffer_len), encoding="utf-8")
 
     try:
+        fields = line.split(" ", maxsplit=4)
         (
             function_id,
             function_name,
             function_sandbox,
             function_stdout_filename
-        ) = line.split(" ", maxsplit=3)
+        ) = fields[:4]
+        function_slots = int(fields[4]) if len(fields) > 4 else 1
     except Exception as e:
-        stdout_timed_message(f"error: not enough values to unpack from {line} (expected 4 items), exception: {e}")
+        stdout_timed_message(f"error: not enough values to unpack from {line} (expected 4 or 5 items), exception: {e}")
         exit(1)
 
     try:
@@ -124,7 +128,7 @@ def start_function(in_pipe_fd, thread_limit=1):
         stdout_timed_message(f"error: invalid function name, malformed message {line} from worker")
         exit(1)
 
-    with threadpool_limits(limits=thread_limit):
+    with threadpool_limits(limits=thread_limit * function_slots):
         if exec_method == "direct":
             library_sandbox = os.getcwd()
             try:
