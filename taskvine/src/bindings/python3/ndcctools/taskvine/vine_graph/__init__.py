@@ -4,12 +4,11 @@
 
 """Build task graphs and run them on TaskVine.
 
-A Graph holds tasks, Python calls or shell commands, and the data they pass to each other. vg.Function(func, *args,
-**kwargs) and vg.Command(template, **fields) hold what a task runs, and g.add(spec, cores=k, ...) its settings, such as
-the cores, memory, and gpus it uses. g.add() and submit() take a vg.Function or a vg.Command, never a bare function.
-An Executor is where tasks run: submit(vg.Function(func, *args)) starts one task at once and returns its Task, submit(graph) makes the
-tasks of a Graph live, and run(graph) also waits for them and returns the results of its sinks, the tasks that no task reads. From then on a
-Task behaves alike whatever made it: result() waits for it and returns its result. A task that reads a Task starts once
+A Graph holds tasks, Python calls or shell commands, and the data they pass to each other. Three rules:
+vg.Function(func, *args, **kwargs) and vg.Command(template, **fields) hold what to run and its arguments;
+g.add(spec, **settings) is the only way to make a task, with settings such as cores, memory, gpus, and outputs; and an
+Executor runs Graphs, where run(g) runs and waits, returning the results of its sinks, the tasks that no task reads,
+and submit(g) starts. A live Task's result() waits for it and returns its result. A task that reads a Task starts once
 its input exists, and as_completed() yields whichever of several tasks finishes first. Results are read before the
 Executor closes:
 
@@ -20,8 +19,10 @@ Executor closes:
 
     with vg.Executor(port=9123) as executor:
         print(executor.run(g)[total])
-        more = [executor.submit(vg.Function(abs, -value)) for value in range(3, 6)]
-        print(executor.submit(vg.Function(sum, [total, *more])).result())
+        more = [g.add(vg.Function(abs, -value)) for value in range(3, 6)]
+        again = g.add(vg.Function(sum, [total, *more]))
+        executor.submit(g)
+        print(again.result())
 """
 
 from .graph import URL, CancelledError, Command, File, Function, Graph, Shared, Task, TaskError, TaskFile

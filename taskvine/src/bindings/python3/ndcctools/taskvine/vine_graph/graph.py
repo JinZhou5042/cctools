@@ -3,8 +3,7 @@
 # See the file COPYING for details.
 
 """A Graph holds tasks and the data they pass to each other. Its tasks are descriptions until an Executor (executor.py)
-takes the Graph, and from then on they are live, exactly like the tasks that Executor.submit() starts, which the
-Executor holds in a graph of its own."""
+takes the Graph (Executor.submit(graph) or Executor.run(graph)), and from then on they are live."""
 
 import collections
 import collections.abc
@@ -1051,9 +1050,6 @@ def _readers_of(task):
     if readers is None:
         return ()
     if isinstance(readers, list):
-        if task._graph._dropped is not None:
-            # A submitted task refers to its readers weakly, and lists those that still exist.
-            return [reader for reader in (ref() for ref in readers) if reader is not None]
         return readers
     return (readers,)
 
@@ -1076,8 +1072,7 @@ def _restore(task, value):
 
 class Task(_Selectable):
     """A call of a function, or a run of a Command, with its arguments. Graph.add() returns a Task that describes a task
-    until an Executor takes its Graph (Executor.submit(graph) or Executor.run(graph)), and Executor.submit() a Task that
-    is live at once. A live Task behaves alike whatever made it: result() waits for its result, done(), failed(), and
+    until an Executor takes its Graph (Executor.submit(graph) or Executor.run(graph)), and is live from then on: result() waits for its result, done(), failed(), and
     cancelled() tell how far it is, and cancel() cancels it. Pass a Task as an argument of another task to give that
     task its result, select from it with task[key] or task.attr(name), and name a file it writes with task.file(name).
 
@@ -1104,8 +1099,7 @@ class Task(_Selectable):
         self._selections = None
         self._outputs = None  # {sandbox path: TaskFile} of the files it writes, or None
         # Tasks of the same Graph that read it, in the order they were added: None, the one reader, or a list of
-        # several, since most tasks have one reader and a list for it would take more memory than the task. A submitted
-        # task holds a list of weak references instead, so it does not keep its readers. See _readers_of().
+        # several, since most tasks have one reader and a list for it would take more memory than the task.
         self._readers = None
         self._state = _NEW
         # The failure of a failed task: (_FAILED, source Task or None for the task itself, message, reason, exit code).
@@ -1113,18 +1107,6 @@ class Task(_Selectable):
         self._error = None
         self._record = None  # the Executor's record of the task, from when it is live, which holds its number
         self._value = _UNREAD  # the result, once the Executor returned it
-
-    def __del__(self):
-        # A submitted task that nothing refers to anymore can be read by nobody, so its Executor lets it go. This only
-        # queues the record, because a collection may run anywhere.
-        try:
-            dropped = self._graph._dropped
-            record = self._record
-        except AttributeError:
-            # An interrupt ended __init__ before it set them, so the task was never submitted.
-            return
-        if dropped is not None and record is not None:
-            dropped.append(record)
 
     @property
     def func(self):
@@ -1144,8 +1126,7 @@ class Task(_Selectable):
 
     @property
     def readers(self):
-        """The tasks that read this task's result or files, in the order they were added: tasks of its Graph, or, for
-        a task that Executor.submit() started, the submitted tasks that still exist."""
+        """The tasks of its Graph that read this task's result or files, in the order they were added."""
         return list(_readers_of(self))
 
     def result(self, timeout=None):
@@ -1192,8 +1173,7 @@ class Task(_Selectable):
     def file(self, name):
         """Return the file this task writes at name, a relative path in its sandbox. Asking for the same name again
         returns the same file. A file is declared by asking for it before the task is submitted, or by the outputs of
-        its Function or Command, so a task that Executor.submit() started has the files of its Function or Command and
-        no others."""
+        Graph.add()."""
         normalized = _sandbox_name(name)
         outputs = self._outputs
         if outputs is None:
@@ -1287,12 +1267,10 @@ class Graph:
 
     A Graph describes work and holds no settings: the Executor decides where it runs. The first Executor that takes a
     Graph holds the results of its tasks, so the Graph belongs to that Executor, and its tasks may read the live tasks
-    of that Executor, such as those that its submit() started and those of other Graphs it took."""
+    of that Executor, those of other Graphs it took."""
 
     # The Executor that the Graph belongs to, which holds the results of its tasks, or None before one took it.
     _executor = None
-    # The queue of the records of collected tasks, in the graph of an Executor's submitted tasks (_Calls).
-    _dropped = None
 
     def __init__(self):
         self._tasks = {}  # key -> Task, in insertion order
@@ -1567,46 +1545,3 @@ class Graph:
             executor._poll()
 
 
-class _Calls(Graph):
-    """The graph of the tasks that an Executor's submit() started. It differs from a Graph that a user builds in what it
-    keeps: a submitted task lives while something refers to its Task, so the graph holds its tasks weakly, tasks hold
-    their readers weakly, and a collected task queues its record in dropped, from where the Executor lets it go. Its
-    tasks are live from the start, so none waits for submission."""
-
-    def __init__(self, executor, dropped):
-        super().__init__()
-        self._tasks = weakref.WeakValueDictionary()
-        self._plain = None  # arguments are scanned for every task, so the graph keeps none of them
-        self._shared_refs = None
-        self._new = None
-        self._owner = weakref.ref(executor)
-        self._dropped = dropped
-
-    @property
-    def _executor(self):
-        return self._owner()
-
-    def _bound(self, task):
-        executor = self._owner()
-        if executor is None:
-            raise RuntimeError(f"The Executor that ran {task!r} is gone, and its results with it. Read results before "
-                               f"close() or the end of the with block.")
-        return executor
-
-    def _insert(self, task):
-        self._tasks[task.key] = task
-        reader = weakref.ref(task)
-        for parent in task._parents:
-            if parent._graph is not self:
-                continue
-            readers = parent._readers
-            if readers is None:
-                readers = parent._readers = []
-            elif len(readers) >= 8 and not len(readers) & (len(readers) - 1):
-                # Readers that were collected leave the list whenever it reached twice the size it had after the last
-                # time, so a task that many tasks read in turn keeps a list of the size of those that exist.
-                readers[:] = [ref for ref in readers if ref() is not None]
-            readers.append(reader)
-
-    def _ref_to(self, parent):
-        return _Ref(self._graph_id(parent), parent.key)

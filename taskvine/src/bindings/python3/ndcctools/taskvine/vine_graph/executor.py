@@ -2,8 +2,7 @@
 # This software is distributed under the GNU General Public License.
 # See the file COPYING for details.
 
-"""The public Executor, which makes tasks live: those of a Graph it takes (submit(graph), run(graph)) and single calls
-(submit(func, ...)), which all behave alike from then on. It works through one runner, _Workers (workers.py) on
+"""The public Executor, which makes the tasks of a Graph it takes live (submit(graph), run(graph)). It works through one runner, _Workers (workers.py) on
 TaskVine Workers or _Local (local.py) in this process, and applies what the runner publishes to the Tasks under its
 lock in whichever thread asks how far a task is, waits for one, or iterates as_completed()."""
 
@@ -19,8 +18,8 @@ import weakref
 
 from . import library, store as _store_module
 from .graph import (
-    CONTENT_LIMIT, CancelledError, Command, Graph, Task, TaskError, _CANCELLED, _COMPLETED, _Calls, _FAILED, _FileRef,
-    _NEW, _NoSuchItem, _RUNNING, _UNREAD, _a, _check_task_kind, _label, _readers_of, _undeclared,
+    CONTENT_LIMIT, CancelledError, Command, Graph, Task, TaskError, _CANCELLED, _COMPLETED, _FAILED, _FileRef,
+    _NEW, _NoSuchItem, _RUNNING, _UNREAD, _a, _label, _readers_of, _undeclared,
 )
 from .local import _Local
 from .runner import (
@@ -109,20 +108,21 @@ class Executor:
     """Where tasks run: TaskVine Workers that connect to port, or to the Manager named name through the catalog, or,
     with local=True, this process, one task at a time in the order they were submitted, for debugging without Workers.
 
-    submit(vg.Function(func, *args)) starts one task at once and returns its Task. submit(graph) makes the tasks of a
-    Graph live and returns at once, and run(graph) does so, waits for them, and returns the results of the Graph's sinks. From then on
-    every Task behaves alike, whatever made it: result() waits for it, and cancel() cancels it. A task that reads a Task
-    starts once its input exists, so work whose dependencies are known is submitted up front, and a decision that
-    depends on a result is ordinary control flow around result(). as_completed() yields tasks as they finish, for
-    reacting to whichever of several running tasks finishes first. One Executor runs any number of
-    Graphs and submitted tasks on its Workers. Use it in a with statement, or close() it, and read results before it
-    closes:
+    Graph.add() is the only way to make a task. run(graph) makes the tasks of a Graph live, waits for them, and returns
+    the results of its sinks, and submit(graph) makes them live and returns at once. A live Task's result() waits for
+    it, and cancel() cancels it. A task that reads a Task starts once its input exists, so work whose dependencies are
+    known is added up front, and a decision that depends on a result is ordinary control flow around result(): add
+    more tasks to the Graph and submit it again. as_completed() yields tasks as they finish, for reacting to whichever
+    of several running tasks finishes first. One Executor runs any number of Graphs on its Workers. Use it in a with
+    statement, or close() it, and read results before it closes:
 
         with vg.Executor(port=9123) as executor:
             results = executor.run(graph)
-            task = executor.submit(vg.Function(load, "more.root"))
+            task = graph.add(vg.Function(load, "more.root"))
+            executor.submit(graph)
             if task.result() > 0:
-                executor.submit(vg.Function(fit, task), cores=4)
+                graph.add(vg.Function(fit, task), cores=4)
+                executor.run(graph)
 
     Python tasks run in a TaskVine library on the Workers, and commands as standard TaskVine tasks. The library imports
     library_modules when it starts and loads shared, a dictionary from names to objects that tasks take as
@@ -176,7 +176,6 @@ class Executor:
         except BaseException:
             runner.discard()
             raise
-        self._calls = _Calls(self, runner._dropped)
         self._runner = runner
 
     def __enter__(self):
@@ -253,33 +252,15 @@ class Executor:
 
     # Submission.
 
-    def submit(self, func, /, *extra, cores=1, memory=None, gpus=0, time_limit=None, retries=0, retry_on=Exception,
-               outputs=(), cache=False, name=None):
-        """Start a task that calls a Function or runs a Command, with the settings that Graph.add() takes, and return its Task at once. Files and live Tasks of this Executor, with their selections
-        and files, may appear anywhere inside the arguments of a function. A task that cannot start, as when an
-        argument cannot be serialized, fails, and its result() raises.
-
-        submit(graph) makes every task of a Graph that is not submitted yet live, after the tasks it reads, and returns
-        the Graph at once. Tasks added to the Graph later become live at its next submit() or run(). A Graph belongs to
-        the first Executor that takes it."""
-        if isinstance(func, Graph):
-            if extra:
-                raise TypeError("submit(graph) takes the Graph alone; Graph.add() adds tasks to it")
-            self._submit_graph(func)
-            return func
-        _check_task_kind(func, "submit()")
-        if extra:
-            raise TypeError("submit() takes one Function or Command; pass the arguments inside it, as in "
-                            "submit(vg.Function(f, x, y))")
-        self._check_open()
-        if cache and self._store is None:
-            raise ValueError(f"{func!r} has cache=True, which needs a store: vg.Executor(store=path)")
-        settings = (cores, memory, gpus, time_limit, retries, retry_on, outputs, cache, name)
-        with self._lock:
-            task = self._calls._add(self._last_task + 1, func, settings, "submit()")
-            with self._runner.first_submission():
-                self._start(task)
-        return task
+    def submit(self, graph):
+        """Make every task of a Graph that is not submitted yet live, after the tasks it reads, and return the Graph at
+        once. Tasks added to the Graph later become live at its next submit() or run(). A Graph belongs to the first
+        Executor that takes it."""
+        if not isinstance(graph, Graph):
+            raise TypeError("Executor.submit() takes a vg.Graph; add the task to a graph with g.add(...) and submit "
+                            "the graph")
+        self._submit_graph(graph)
+        return graph
 
     def run(self, graph):
         """Submit the tasks of a Graph that are not submitted yet, as submit(graph) does, wait until every task of the
@@ -287,7 +268,7 @@ class Executor:
         completed. When a sink failed, it raises the TaskError of the task whose own failure explains it instead, and so
         does every later run of the Graph. An interrupt leaves the tasks running, and a later run waits for them
         again."""
-        if not isinstance(graph, Graph) or isinstance(graph, _Calls):
+        if not isinstance(graph, Graph):
             raise TypeError("run() takes a Graph")
         self._submit_graph(graph)
         self._wait_graph(graph)
@@ -385,8 +366,7 @@ class Executor:
         task._state = _RUNNING
         graph = task._graph
         graph._unfinished += 1
-        if graph._dropped is None:
-            graph._records.append(record)
+        graph._records.append(record)
         # A task that now has a reader is no sink anymore, and the release rule waits for its reader.
         for parent in task._parents:
             source = parent._record
@@ -412,9 +392,7 @@ class Executor:
                 task._state = _FAILED
                 self._failed += 1
                 task._error = error
-            graph = task._graph
-            if graph._dropped is None:
-                graph._records.append(record)
+            task._graph._records.append(record)
             self._finish(task)
         finally:
             restore_interrupts()
