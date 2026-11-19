@@ -86,6 +86,9 @@ struct vine_process {
 	 * keeps its resources until the library reports its end, which is MAX_WALL_TIME when the library killed it. */
 	int wall_time_cancelled;
 
+	/* The serial of this process's current entry in the worker's heap of time limits. Older entries are stale. */
+	uint64_t deadline_serial;
+
 	/* expected disk usage by the process. If no cache is used, it is the same as in task. */
 	int64_t disk;
 
