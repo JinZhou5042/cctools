@@ -40,15 +40,13 @@ RESULT = "result"
 FILES = "files"
 
 
-def _installed_paths():
-    paths = sysconfig.get_paths()
-    return tuple(os.path.abspath(paths[kind]) for kind in ("stdlib", "platstdlib", "purelib", "platlib") if kind in paths)
+_PATHS = sysconfig.get_paths()
+# The directories of the installed packages, outside which the program's own modules are.
+_INSTALLED = tuple(os.path.abspath(_PATHS[kind]) for kind in ("stdlib", "platstdlib", "purelib", "platlib")
+                   if kind in _PATHS)
 
 
-_INSTALLED = _installed_paths()
-
-
-def _own_module_file(module_name):
+def own_module_file(module_name):
     """Return the file of a module of the program itself, outside the installed packages, or None."""
     module = sys.modules.get(module_name)
     path = getattr(module, "__file__", None)
@@ -95,13 +93,13 @@ def _module_files(func):
             return
         seen.add(id(value))
         if isinstance(value, types.ModuleType):
-            path = _own_module_file(value.__name__)
+            path = own_module_file(value.__name__)
             if path:
                 found[path] = None
             return
         module = getattr(value, "__module__", None)
         if isinstance(module, str):
-            path = _own_module_file(module)
+            path = own_module_file(module)
             if path:
                 found[path] = None
         code = getattr(value, "__code__", None)

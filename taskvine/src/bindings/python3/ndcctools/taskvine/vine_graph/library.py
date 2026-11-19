@@ -50,7 +50,7 @@ import cloudpickle
 
 from .. import utils as library_utils
 
-from .graph import URL, File, Shared, _Attribute, _NoSuchItem, _Ref, _Symbol, replace_symbols
+from .graph import COMMAND_RESULT_LIMIT, URL, File, Shared, _Attribute, _NoSuchItem, _Ref, _Symbol, replace_symbols
 
 # Sandbox path of the manifest that describes the task.
 MANIFEST = "vine-graph-node.pkl"
@@ -108,7 +108,7 @@ def runtime_identity():
 # A library process that could not prepare itself still starts, and each task it is given fails with a report that
 # starts with this mark, followed by the name of the host and the traceback of the failure. The Manager sees the output
 # of a task but not that of a library, so this is how the reason reaches the user, and the Executor stops the run for
-# it (executor._Workers._publish_finished()).
+# it (workers._Workers._publish_finished()).
 START_FAILURE_MARK = "vine-graph-library-could-not-start "
 # The report of the failure that kept this library process from preparing itself, or None.
 _start_failure = None
@@ -333,14 +333,10 @@ def load_result(path):
         return cloudpickle.load(stream)["Result"]
 
 
-# Bytes of standard output that a command task keeps as its result (graph.COMMAND_RESULT_LIMIT).
-TEXT_RESULT_LIMIT = 1 << 20
-
-
 def load_text_result(path):
-    """Read the result of a command task: the text it wrote to standard output, at most TEXT_RESULT_LIMIT bytes."""
+    """Read the result of a command task: the text it wrote to standard output, at most COMMAND_RESULT_LIMIT bytes."""
     with open(path, "rb") as stream:
-        return stream.read(TEXT_RESULT_LIMIT).decode("utf-8", "replace")
+        return stream.read(COMMAND_RESULT_LIMIT).decode("utf-8", "replace")
 
 
 def save_selection(path, result, steps):
@@ -519,19 +515,22 @@ def run_node():
     that could not prepare itself, report why instead."""
     global _retry_on
     if _start_failure is not None:
-        sys.stdout.write(_start_failure)
-        sys.stdout.flush()
-        os._exit(1)
+        _exit(_start_failure, 1)
     _retry_on = None
     try:
         return _run_node()
     except BaseException as error:
-        sys.stdout.write(failure_report(error, __file__))
-        sys.stdout.flush()
-        sys.stderr.flush()
         # The status tells C whether the task may be tried again. Only an exception of a class of retry_on, matched as
         # an except clause matches it, says so, so a function that exits with that status itself does not.
-        os._exit(RETRY_STATUS if _retry_on and isinstance(error, _retry_on) else 1)
+        _exit(failure_report(error, __file__), RETRY_STATUS if _retry_on and isinstance(error, _retry_on) else 1)
+
+
+def _exit(report, status):
+    """End the task process with status after writing report to its standard output."""
+    sys.stdout.write(report)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(status)
 
 
 def run_standalone():
@@ -543,9 +542,7 @@ def run_standalone():
         with open(STANDALONE, "rb") as stream:
             module_names, shared_path, edata_path, identity = cloudpickle.load(stream)
     except BaseException as error:
-        sys.stdout.write(failure_report(error, __file__))
-        sys.stdout.flush()
-        os._exit(1)
+        _exit(failure_report(error, __file__), 1)
     prepare(module_names, shared_path, edata_path, identity, standalone=True)
     try:
         from threadpoolctl import threadpool_limits
@@ -556,11 +553,8 @@ def run_standalone():
     try:
         save_result(RESULT, output)
     except BaseException as error:
-        sys.stdout.write(failure_report(RuntimeError(f"its result cannot be serialized: {error}"), __file__))
-        sys.stdout.flush()
-        os._exit(1)
-    sys.stdout.flush()
-    os._exit(0)
+        _exit(failure_report(RuntimeError(f"its result cannot be serialized: {error}"), __file__), 1)
+    _exit("", 0)
 
 
 def _run_node():
@@ -580,7 +574,7 @@ def _run_node():
             return entry
         if entry not in objects:
             if isinstance(entry, int):
-                # A number, None, or string is held as it is (executor._LITERAL_TYPES), and any other object as bytes.
+                # A number, None, or string is held as it is (workers._LITERAL_TYPES), and any other object as bytes.
                 value = manifest["objects"][entry]
                 objects[entry] = cloudpickle.loads(value) if type(value) is bytes else value
             elif entry in _edata:

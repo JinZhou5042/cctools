@@ -56,7 +56,28 @@ def reserved_name(name):
     return name in RESERVED_NAMES or name.startswith(RESERVED_PREFIXES)
 
 
-class File(_Symbol):
+class _Input(_Symbol):
+    """Base of the inputs that a task reads under a name of its own in its sandbox, File and URL, which are equal when
+    their location and name are."""
+
+    __slots__ = ()
+
+    def _as_ref(self):
+        return self
+
+    def __eq__(self, other):
+        return isinstance(other, type(self)) and other._location() == self._location() and other.name == self.name
+
+    def __hash__(self):
+        return hash((type(self), self._location(), self.name))
+
+    def __repr__(self):
+        if self.name is None:
+            return f"{type(self).__name__}({self._location()!r})"
+        return f"{type(self).__name__}({self._location()!r}, name={self.name!r})"
+
+
+class File(_Input):
     """A file or directory on the local filesystem that tasks read. A task receives the path of its copy in the task
     sandbox, named like the file when no other input of the task has that name, or name when given, as for a tool that
     reads a fixed name such as File("run7.yaml", name="config.yaml"). A File may be a directory, which the task receives
@@ -76,19 +97,8 @@ class File(_Symbol):
         self.path = _absolute(path)
         self.name = _input_name(name, "File")
 
-    def _as_ref(self):
-        return self
-
-    def __eq__(self, other):
-        return isinstance(other, File) and other.path == self.path and other.name == self.name
-
-    def __hash__(self):
-        return hash((File, self.path, self.name))
-
-    def __repr__(self):
-        if self.name is None:
-            return f"File({self.path!r})"
-        return f"File({self.path!r}, name={self.name!r})"
+    def _location(self):
+        return self.path
 
 
 # The start of a URL: a scheme followed by ://.
@@ -111,7 +121,7 @@ def _input_name(name, what):
     return name
 
 
-class URL(_Symbol):
+class URL(_Input):
     """A remote file that tasks read, which each Worker fetches once from its origin: an http, https, ftp, or file URL,
     fetched with curl, or a root:// URL of XRootD, fetched with xrdcp and the X509 proxy that X509_USER_PROXY names. A
     task receives the path of its copy, named like the last part of the URL path when no other input of the task has
@@ -138,19 +148,8 @@ class URL(_Symbol):
         path = self.url.split("://", 1)[1].split("?", 1)[0].split("#", 1)[0]
         return path.rstrip("/").rsplit("/", 1)[-1] if "/" in path else ""
 
-    def _as_ref(self):
-        return self
-
-    def __eq__(self, other):
-        return isinstance(other, URL) and other.url == self.url and other.name == self.name
-
-    def __hash__(self):
-        return hash((URL, self.url, self.name))
-
-    def __repr__(self):
-        if self.name is None:
-            return f"URL({self.url!r})"
-        return f"URL({self.url!r}, name={self.name!r})"
+    def _location(self):
+        return self.url
 
 
 class Shared(_Symbol):
@@ -215,13 +214,16 @@ class _Selectable(_Symbol):
 
     def __getitem__(self, item):
         """Stand for result[item]. Each [] adds one step, so x["a"]["b"] differs from x[("a", "b")]."""
-        return _Selection(self, (item,))
+        return self._then(item)
 
     def attr(self, name):
         """Stand for an attribute of the result."""
         if not isinstance(name, str):
             raise TypeError("an attribute name must be a string")
-        return _Selection(self, (_Attribute(name),))
+        return self._then(_Attribute(name))
+
+    def _then(self, step):
+        return _Selection(self, (step,))
 
 
 class _Selection(_Selectable):
@@ -233,13 +235,8 @@ class _Selection(_Selectable):
         self.source = source
         self.steps = tuple(steps)
 
-    def __getitem__(self, item):
-        return _Selection(self.source, self.steps + (item,))
-
-    def attr(self, name):
-        if not isinstance(name, str):
-            raise TypeError("an attribute name must be a string")
-        return _Selection(self.source, self.steps + (_Attribute(name),))
+    def _then(self, step):
+        return _Selection(self.source, self.steps + (step,))
 
     def _as_ref(self):
         ref = self.source._as_ref()
@@ -831,45 +828,8 @@ class Command:
     def template(self):
         return self._template
 
-    @property
-    def cores(self):
-        return self._options.cores
-
-    @property
-    def memory(self):
-        """The MB of memory its tasks request, or None."""
-        return self._options.memory
-
-    @property
-    def gpus(self):
-        return self._options.gpus
-
-    @property
-    def outputs(self):
-        """The files that every task of the command writes, as relative paths in the sandbox, and templates for those
-        whose names have placeholders."""
-        return self._outputs
-
-    @property
-    def name(self):
-        """The label of its tasks, or None."""
-        return self._name
-
     def __repr__(self):
-        options = self._options
-        extra = ""
-        if options.memory is not None:
-            extra += f", memory={options.memory}"
-        if options.gpus:
-            extra += f", gpus={options.gpus}"
-        if self._outputs:
-            extra += f", outputs={list(self._outputs)!r}"
-        extra += _retry_repr(options)
-        if self._name is not None:
-            extra += f", name={self._name!r}"
-        if self._cache:
-            extra += ", cache=True"
-        return f"Command({self._template!r}, cores={options.cores}{extra})"
+        return f"Command({self._template!r}, cores={self._options.cores}{_repr_extra(self, False)})"
 
 
 class Function:
@@ -897,18 +857,7 @@ class Function:
     CUDA_VISIBLE_DEVICES, and its library_files in its sandbox under their library names. A task without gpus sees
     CUDA_VISIBLE_DEVICES empty.
 
-    Retries and time limits. time_limit (seconds) stops a task that runs longer, which then fails with reason
-    "timeout". retries=k tries a task up to k more times after failures of the task itself, and retry_on narrows which,
-    as an except clause does: each failure is seen as an exception, the function's own exception, CalledProcessError
-    for a command's exit status other than zero, TimeoutError for "timeout", and MemoryError for "resources", and is
-    retried when it is an instance of a class of retry_on, Exception by default. The last failure is the task's
-    TaskError, whose message lists the earlier ones. Losses of Workers and other failures of the infrastructure are
-    retried apart from these (Executor params max-retries).
-
-    cache=True keeps the results and files of its tasks in the store of the Executor (Executor(store=path)), and a
-    later task of the same function, arguments, and input files takes them from there instead of running.
-
-    name labels its tasks in errors, notices, and repr; it changes nothing else."""
+    time_limit, retries, retry_on, cache, and name work as they do for a Command."""
 
     __slots__ = ("_func", "_options", "_name", "_outputs", "_render", "_cache", "__weakref__")
 
@@ -926,63 +875,46 @@ class Function:
     def func(self):
         return self._func
 
-    @property
-    def cores(self):
-        return self._options.cores
-
-    @property
-    def memory(self):
-        """The MB of memory its tasks request, or None."""
-        return self._options.memory
-
-    @property
-    def gpus(self):
-        return self._options.gpus
-
-    @property
-    def outputs(self):
-        """The files that every call writes in its sandbox, as relative paths, and templates for those whose names have
-        placeholders."""
-        return self._outputs
-
-    @property
-    def name(self):
-        """The label of its tasks, or None."""
-        return self._name
-
     def __repr__(self):
         func = getattr(self._func, "__name__", None) or type(self._func).__name__
-        options = self._options
-        extra = ""
-        if options.memory is not None:
-            extra += f", memory={options.memory}"
-        if options.gpus:
-            extra += f", gpus={options.gpus}"
-        extra += _retry_repr(options)
-        if self._outputs:
-            extra += f", outputs={list(self._outputs)!r}"
-        if self._name is not None:
-            extra += f", name={self._name!r}"
-        if self._cache:
-            extra += ", cache=True"
-        return f"Function({func}, cores={options.cores}{extra})"
+        return f"Function({func}, cores={self._options.cores}{_repr_extra(self, True)})"
 
 
-def _retry_repr(options):
-    """Return the part of the repr of a Function or Command that shows its time limit and retries."""
-    extra = ""
+def _repr_extra(func, retries_first):
+    """Return the part of the repr of a Function or Command after its cores: the settings that differ from the
+    defaults. A Function shows its retries before its outputs, and a Command after them."""
+    options = func._options
+    retries = ""
     if options.time_limit is not None:
-        extra += f", time_limit={options.time_limit}"
+        retries += f", time_limit={options.time_limit}"
     if options.retries:
-        extra += f", retries={options.retries}"
+        retries += f", retries={options.retries}"
         if options.retry_on != (Exception,):
             names = [c.__name__ for c in options.retry_on]
-            extra += f", retry_on={names[0] if len(names) == 1 else '(' + ', '.join(names) + ')'}"
+            retries += f", retry_on={names[0] if len(names) == 1 else '(' + ', '.join(names) + ')'}"
+    outputs = f", outputs={list(func._outputs)!r}" if func._outputs else ""
+    extra = ""
+    if options.memory is not None:
+        extra += f", memory={options.memory}"
+    if options.gpus:
+        extra += f", gpus={options.gpus}"
+    extra += retries + outputs if retries_first else outputs + retries
+    if func._name is not None:
+        extra += f", name={func._name!r}"
+    if func._cache:
+        extra += ", cache=True"
     return extra
 
 
 def _add_common_properties(cls):
-    """Give a Function or Command the properties of its time limit, retries, and cache."""
+    """Give a Function or Command the properties of what its tasks request, write, and are named, of their time limit
+    and retries, and of the cache."""
+    cls.cores = property(lambda self: self._options.cores, doc="The cores its tasks use.")
+    cls.memory = property(lambda self: self._options.memory, doc="The MB of memory its tasks request, or None.")
+    cls.gpus = property(lambda self: self._options.gpus, doc="The GPUs its tasks request.")
+    cls.outputs = property(lambda self: self._outputs, doc="The files that every task writes, as relative paths in "
+                           "the sandbox, and templates for those whose names have placeholders.")
+    cls.name = property(lambda self: self._name, doc="The label of its tasks, or None.")
     cls.time_limit = property(lambda self: self._options.time_limit, doc="Seconds its tasks may run, or None.")
     cls.retries = property(lambda self: self._options.retries, doc="New attempts after failures of a task itself.")
     cls.retry_on = property(lambda self: self._options.retry_on,
