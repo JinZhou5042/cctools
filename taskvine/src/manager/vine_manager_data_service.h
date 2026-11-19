@@ -48,10 +48,7 @@ void vine_manager_data_service_handle(struct vine_manager *manager);
  * When admitted, the Manager thread later calls complete with one when the complete file is published, with zero
  * when the receive fails, or with -1 when it fails because the source answered that it cannot send the file or an
  * entry inside it, such as one it cannot read, which a retry from that source cannot change. An existing vault entry
- * completes immediately. A checkpoint published as a copy in the shared directory (see
- * vine_manager_data_service_set_shared_directory()) keeps its callback while its entry exists: when a Worker's request
- * finds the copy gone, deleted outside the vault, the entry is removed and complete is called again with -2, so the
- * caller must keep its context valid until it removes the file from the vault.
+ * completes immediately.
  * An in-progress request keeps its original callback. Removing the vault entry cancels the receive and drops
  * its callback. */
 vine_manager_checkpoint_result_t vine_manager_data_service_checkpoint(struct vine_manager *manager, struct vine_file *file, void (*complete)(void *, struct vine_file *, int), void *argument);
@@ -82,11 +79,6 @@ int vine_manager_data_service_inline_pending(struct vine_manager *manager, struc
 /* Read the rest of the data of a Worker's inline reply until stoptime. LINK_NOWAIT reads only what arrived. Return 1
  * when no data remains, 0 when more is to come, and -1 when the link failed. */
 int vine_manager_data_service_inline_read(struct vine_manager *manager, struct vine_worker_info *w, time_t stoptime);
-
-/* Handle a Worker's answer to a copy to the shared directory, "cache-copied <token> <size>" or "cache-copy-error <token>
- * <errno>": publish the copy, fail the receive when the file left the Worker's cache, or receive the file over a
- * connection otherwise. Return zero for an answer that matches no copy of the Worker, which breaks the protocol. */
-int vine_manager_data_service_copy_reply(struct vine_manager *manager, struct vine_worker_info *w, const char *line);
 
 /* Declare a regular local file as a workflow-cached VINE_FILE served through the vault. Return NULL on failure.
  * The caller keeps the local source unchanged until undeclaration. */
@@ -144,17 +136,6 @@ void vine_manager_data_service_vault_set_limit(struct vine_manager_data_service 
 /* Limit the bytes of checkpoints held in memory. Beyond it, executors write the oldest to disk. Zero writes every
  * checkpoint to disk before it is published. */
 void vine_manager_data_service_vault_set_memory_limit(struct vine_manager_data_service *ds, int64_t bytes);
-/* Keep checkpoints of at least the shared minimum size in a directory of their own, made inside path, on a file system
- * that the Manager and every Worker mount at the same path. The Worker that holds such a file copies it there in a
- * process of its own ("cache-copy"), up to VINE_DATA_COPY_SLOTS at once, and the vault links the copy under the file's
- * cache name when the Worker answers. While every copy slot is taken, up to VINE_DATA_SHARED_RECEIVES such files come
- * over connections instead, so the vault's own disk adds to the bandwidth without holding the tail of a run. Removing an entry deletes its copy off the Manager thread,
- * and deleting the service removes the directory. A copy deleted by others is noticed when a Worker asks for it: the
- * entry is removed, so the Manager recreates the file for its readers. May be set once. Return zero with errno set on
- * failure. */
-int vine_manager_data_service_set_shared_directory(struct vine_manager_data_service *ds, const char *path);
-/* Set the smallest checkpoint that goes to the shared directory, VINE_DATA_SHARED_MIN_BYTES by default. */
-void vine_manager_data_service_set_shared_min_bytes(struct vine_manager_data_service *ds, int64_t bytes);
 /* Return the bytes of published checkpoint entries plus reservations of receives in progress. */
 int64_t vine_manager_data_service_vault_get_usage(struct vine_manager_data_service *ds);
 
