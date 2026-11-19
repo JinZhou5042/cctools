@@ -1868,6 +1868,8 @@ int vine_manager_data_service_adopt(struct vine_manager *manager, struct vine_fi
 	temp->size = size;
 	temp->mode = info.st_mode & 0777;
 	debug(D_VINE, "vault entry %s: adopted from %s, %" PRId64 " bytes", temp->cached_name, path, size);
+	/* Tasks that waited for this file may now read it from the vault. */
+	vine_schedule_wake_file(manager, temp->cached_name);
 	return 1;
 }
 
