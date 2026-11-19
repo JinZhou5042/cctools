@@ -28,7 +28,8 @@ struct vine_graph_mount {
 	uint64_t file_id;	      // the graph's id of the file, or zero for an input the node owns
 	struct vine_graph_node *node; // borrowed node that mounts the file
 	int pins;		      // on an output, frontend references that keep it from being released
-	int local;		      // on an output, a vault copy exists and is counted in the node's local_outputs
+	unsigned local : 1;	      // on an output, a vault copy exists and is counted in the node's local_outputs
+	unsigned after : 1;	      // on an input, it only orders the node after its producer: never sent to the task
 	char task_path[];	      // path inside the task sandbox
 };
 
@@ -66,6 +67,7 @@ struct vine_graph_node {
 	unsigned unfit : 1;	// waited for more than the largest Worker had at the last check
 	unsigned noticed : 1;	// reported once by vine_graph_executor_next_unfit()
 	unsigned standalone : 1; // runs its function as a standard task (vine_graph_executor_set_standalone())
+	unsigned open : 1;	 // submitted but never dispatched until sealed, and its inputs may still grow
 	unsigned losses_charged : 6; // Worker losses charged to its attempts so far, carried into the next attempt
 	unsigned losses_excused : 6; // Worker losses excused for its attempts so far, carried likewise
 
@@ -117,11 +119,13 @@ struct vine_file *vine_graph_get_file(const struct vine_graph *g, uint64_t file_
 /* Forget a recorded file and return it, or NULL when the id is unknown. Mounts of the file keep their references. */
 struct vine_file *vine_graph_remove_file(struct vine_graph *g, uint64_t file_id);
 
-/* Mount a recorded file at task_path as an input or output of a node that is not submitted yet. A file has at most one
- * producer. Return zero, or -1 for an unknown or submitted node, an unknown file, or a second producer. */
-int vine_graph_add_mount(struct vine_graph *g, uint64_t node_id, uint64_t file_id, const char *task_path, int is_output);
+/* Mount a recorded file at task_path as an input or output of a node that is not submitted yet, or as an input of an
+ * open node, whose producer is linked at once. A file has at most one producer. Return the mount, or NULL for an unknown
+ * or submitted node, an unknown file, a second producer, or an input of an open node whose producer is not submitted. */
+struct vine_graph_mount *vine_graph_add_mount(struct vine_graph *g, uint64_t node_id, uint64_t file_id, const char *task_path, int is_output);
 
-/* Mount a declared file that the graph does not record at task_path as an input of a node that is not submitted yet.
+/* Mount a declared file that the graph does not record at task_path as an input of a node that is not submitted yet, or
+ * of an open node.
  * The node owns the declaration, which the executor undeclares when it removes the node, so the file needs no id. The
  * mount takes a reference of its own. Return zero, or -1 for an unknown or submitted node. */
 int vine_graph_add_owned_input(struct vine_graph *g, uint64_t node_id, struct vine_file *file, const char *task_path);

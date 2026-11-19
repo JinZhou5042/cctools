@@ -70,7 +70,8 @@ typedef enum {
 	VINE_GRAPH_FAILURE_RESOURCES, /* It used more than it requested: a command of a profile with memory exited with
 				       * status 137, as after a SIGKILL, or TaskVine reported it exhausted its resources or
 				       * its sandbox. */
-	VINE_GRAPH_FAILURE_TIMEOUT    /* It ran longer than the time limit of its profile. */
+	VINE_GRAPH_FAILURE_TIMEOUT,   /* It ran longer than the time limit of its profile. */
+	VINE_GRAPH_FAILURE_EXPAND     /* The frontend could not decide the inputs of an open node (vine_graph_executor_fail_open_node()). */
 } vine_graph_failure_t;
 
 /* Failures of a node's own task that the retries of its profile cover, as bits of vine_graph_profile.retry, besides a
@@ -221,6 +222,27 @@ int vine_graph_executor_add_profile(struct vine_graph_executor *e, const struct 
  * largest connected Worker waits for a larger one (see vine_graph_executor_next_unfit()). Return zero, or -1 for an
  * unknown or submitted node or an unknown profile. */
 int vine_graph_executor_set_profile(struct vine_graph_executor *e, uint64_t node_id, int profile);
+
+/* Mount the output file_id on a node not yet submitted only to order it: the node waits for the output's producer, and
+ * fails with it when the output exists nowhere, but its task never receives the file, and a restore of a completed node
+ * does not need it. A frontend orders a node after outputs that it reads itself, outside the task. Return zero, or -1
+ * for an unknown or submitted node, or a file that is not a node output. */
+int vine_graph_executor_add_after(struct vine_graph_executor *e, uint64_t node_id, uint64_t file_id);
+
+/* Make a node not yet submitted open: once submitted, it is linked and counted as any node, so nodes may read its
+ * outputs, but it is never dispatched until vine_graph_executor_seal_node(). Until then, inputs and buffers may still
+ * be mounted on it, each linked to its producer at once, which must be submitted. Such inputs may come from nodes
+ * submitted after it, so the frontend keeps them from reading the open node's outputs, directly or not. Readers that
+ * were linked before keep the depth they had. Return zero, or -1 for an unknown or submitted node. */
+int vine_graph_executor_open_node(struct vine_graph_executor *e, uint64_t node_id);
+
+/* Seal an open node, whose inputs are then fixed: it runs once every node whose output it reads has completed. Return
+ * zero, or -1 for a node that is not open. Sealing a failed node does nothing else. Its cost is O(inputs), once. */
+int vine_graph_executor_seal_node(struct vine_graph_executor *e, uint64_t node_id);
+
+/* Fail an open node that did not finish as VINE_GRAPH_FAILURE_EXPAND with message, and the nodes that need its outputs,
+ * as when the frontend cannot decide what it reads. Return zero, or -1 for a node that is not open or finished. */
+int vine_graph_executor_fail_open_node(struct vine_graph_executor *e, uint64_t node_id, const char *message);
 
 /* Submit a node whose files are mounted. It runs once every node whose output it reads has completed, and it fails at
  * once when it reads an output of a failed node that exists nowhere. Return zero, or -1 for an unknown or submitted

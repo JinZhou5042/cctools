@@ -89,12 +89,23 @@ struct vine_file *vine_graph_remove_file(struct vine_graph *g, uint64_t file_id)
 	return itable_remove(g->files, file_id);
 }
 
-/* Mount file on a node that is not submitted yet. file_id is zero for an input the node owns. */
-static int vine_graph_mount_file(struct vine_graph *g, struct vine_graph_node *node, struct vine_file *file, uint64_t file_id, const char *task_path, int is_output)
+static int vine_graph_link_parent(struct vine_graph_node *node, struct vine_graph_node *parent);
+
+/* Mount file on a node that is not submitted yet, or as an input of an open node, which links its producer at once.
+ * file_id is zero for an input the node owns. Return the mount, or NULL. */
+static struct vine_graph_mount *vine_graph_mount_file(struct vine_graph *g, struct vine_graph_node *node, struct vine_file *file, uint64_t file_id, const char *task_path, int is_output)
 {
 	if (is_output && itable_lookup(g->producers, (uint64_t)(uintptr_t)file)) {
 		debug(D_ERROR, "file %" PRIu64 " already has a producer", file_id);
-		return -1;
+		return NULL;
+	}
+	struct vine_graph_node *parent = NULL;
+	if (node->submitted && !is_output) {
+		parent = vine_graph_get_producer(g, file);
+		if (parent && (!parent->submitted || parent == node)) {
+			debug(D_ERROR, "open node %" PRIu64 " reads an output of node %" PRIu64 ", which is not submitted", node->node_id, parent->node_id);
+			return NULL;
+		}
 	}
 	size_t length = strlen(task_path) + 1;
 	struct vine_graph_mount *mount = xxcalloc(1, sizeof(*mount) + length);
@@ -106,16 +117,21 @@ static int vine_graph_mount_file(struct vine_graph *g, struct vine_graph_node *n
 		itable_insert(g->producers, (uint64_t)(uintptr_t)file, mount);
 	}
 	vine_graph_array_push(is_output ? &node->outputs : &node->inputs, mount);
-	return 0;
+	if (parent) {
+		/* An input of an open node links its producer at once. Python mounts each producer once. */
+		vine_graph_array_push(&node->parents, parent);
+		vine_graph_link_parent(node, parent);
+	}
+	return mount;
 }
 
-int vine_graph_add_mount(struct vine_graph *g, uint64_t node_id, uint64_t file_id, const char *task_path, int is_output)
+struct vine_graph_mount *vine_graph_add_mount(struct vine_graph *g, uint64_t node_id, uint64_t file_id, const char *task_path, int is_output)
 {
 	struct vine_graph_node *node = vine_graph_get_node(g, node_id);
 	struct vine_file *file = vine_graph_get_file(g, file_id);
-	if (!node || node->submitted || !file) {
+	if (!node || (node->submitted && (!node->open || is_output)) || !file) {
 		debug(D_ERROR, "mount of file %" PRIu64 " on node %" PRIu64 " names an unknown file or an unknown or submitted node", file_id, node_id);
-		return -1;
+		return NULL;
 	}
 	return vine_graph_mount_file(g, node, file, file_id, task_path, is_output);
 }
@@ -123,11 +139,11 @@ int vine_graph_add_mount(struct vine_graph *g, uint64_t node_id, uint64_t file_i
 int vine_graph_add_owned_input(struct vine_graph *g, uint64_t node_id, struct vine_file *file, const char *task_path)
 {
 	struct vine_graph_node *node = vine_graph_get_node(g, node_id);
-	if (!node || node->submitted || !file) {
+	if (!node || (node->submitted && !node->open) || !file) {
 		debug(D_ERROR, "an owned input of node %" PRIu64 " names an unknown or submitted node", node_id);
 		return -1;
 	}
-	return vine_graph_mount_file(g, node, file, 0, task_path, 0);
+	return vine_graph_mount_file(g, node, file, 0, task_path, 0) ? 0 : -1;
 }
 
 struct vine_graph_mount *vine_graph_find_output(const struct vine_graph *g, struct vine_file *file)
@@ -167,6 +183,21 @@ struct vine_graph_mount *vine_graph_get_output(const struct vine_graph *g, uint6
 	return file ? vine_graph_find_output(g, file) : NULL;
 }
 
+/* Make a node a child of a parent that is already in its parents array. */
+static int vine_graph_link_parent(struct vine_graph_node *node, struct vine_graph_node *parent)
+{
+	vine_graph_array_push(&parent->children, node);
+	parent->live_children++;
+	node->refs++;
+	if (node->depth < parent->depth + 1) {
+		node->depth = parent->depth + 1;
+	}
+	if (!parent->completed) {
+		node->remaining_parents++;
+	}
+	return 0;
+}
+
 int vine_graph_link_node(struct vine_graph *g, uint64_t node_id)
 {
 	struct vine_graph_node *node = vine_graph_get_node(g, node_id);
@@ -193,16 +224,7 @@ int vine_graph_link_node(struct vine_graph *g, uint64_t node_id)
 		vine_graph_array_push(&node->parents, parent);
 	}
 	for (int i = 0; i < node->parents.count; i++) {
-		struct vine_graph_node *parent = node->parents.items[i];
-		vine_graph_array_push(&parent->children, node);
-		parent->live_children++;
-		node->refs++;
-		if (node->depth < parent->depth + 1) {
-			node->depth = parent->depth + 1;
-		}
-		if (!parent->completed) {
-			node->remaining_parents++;
-		}
+		vine_graph_link_parent(node, node->parents.items[i]);
 	}
 	set_delete(linked);
 	node->submitted = 1;

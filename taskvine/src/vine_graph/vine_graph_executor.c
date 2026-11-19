@@ -580,15 +580,72 @@ uint64_t vine_graph_executor_add_output(struct vine_graph_executor *e, uint64_t 
 		return 0;
 	}
 	uint64_t file_id = vine_graph_add_file(e->graph, file);
-	return vine_graph_add_mount(e->graph, node_id, file_id, task_path, 1) == 0 ? file_id : 0;
+	return vine_graph_add_mount(e->graph, node_id, file_id, task_path, 1) ? file_id : 0;
 }
+
+static int vine_graph_executor_submit_task(struct vine_graph_executor *e, struct vine_graph_node *node);
+static void vine_graph_executor_fail_node(struct vine_graph_executor *e, struct vine_graph_node *node, uint64_t source_id, vine_graph_failure_t failure, char *error);
+static struct vine_graph_node *vine_graph_executor_find_failed_parent(struct vine_graph_executor *e, struct vine_graph_node *node);
 
 int vine_graph_executor_add_input(struct vine_graph_executor *e, uint64_t node_id, uint64_t file_id, const char *task_path)
 {
 	if (!e || !task_path) {
 		return -1;
 	}
-	return vine_graph_add_mount(e->graph, node_id, file_id, task_path, 0);
+	return vine_graph_add_mount(e->graph, node_id, file_id, task_path, 0) ? 0 : -1;
+}
+
+int vine_graph_executor_add_after(struct vine_graph_executor *e, uint64_t node_id, uint64_t file_id)
+{
+	struct vine_graph_node *node = e ? vine_graph_get_node(e->graph, node_id) : NULL;
+	if (!node || node->submitted || !vine_graph_get_output(e->graph, file_id)) {
+		return -1;
+	}
+	struct vine_graph_mount *mount = vine_graph_add_mount(e->graph, node_id, file_id, "", 0);
+	if (!mount) {
+		return -1;
+	}
+	mount->after = 1;
+	return 0;
+}
+
+int vine_graph_executor_open_node(struct vine_graph_executor *e, uint64_t node_id)
+{
+	struct vine_graph_node *node = e ? vine_graph_get_node(e->graph, node_id) : NULL;
+	if (!node || node->submitted) {
+		return -1;
+	}
+	node->open = 1;
+	return 0;
+}
+
+int vine_graph_executor_seal_node(struct vine_graph_executor *e, uint64_t node_id)
+{
+	struct vine_graph_node *node = e ? vine_graph_get_node(e->graph, node_id) : NULL;
+	if (!node || !node->submitted || !node->open) {
+		return -1;
+	}
+	node->open = 0;
+	if (node->failed) {
+		return 0;
+	}
+	struct vine_graph_node *failed_parent;
+	if (node->remaining_parents == 0) {
+		vine_graph_executor_submit_task(e, node);
+	} else if ((failed_parent = vine_graph_executor_find_failed_parent(e, node))) {
+		vine_graph_executor_fail_node(e, node, failed_parent->failure_source_id, VINE_GRAPH_FAILURE_NONE, NULL);
+	}
+	return 0;
+}
+
+int vine_graph_executor_fail_open_node(struct vine_graph_executor *e, uint64_t node_id, const char *message)
+{
+	struct vine_graph_node *node = e && message ? vine_graph_get_node(e->graph, node_id) : NULL;
+	if (!node || !node->submitted || !node->open || node->failed) {
+		return -1;
+	}
+	vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_EXPAND, xxstrdup(message));
+	return 0;
 }
 
 int vine_graph_executor_add_inputs(struct vine_graph_executor *e, uint64_t node_id, int count, const uint64_t *file_ids, const char *const *task_paths)
@@ -665,7 +722,7 @@ int vine_graph_executor_set_profile(struct vine_graph_executor *e, uint64_t node
 int vine_graph_executor_add_input_buffer(struct vine_graph_executor *e, uint64_t node_id, const char *buffer, size_t size, const char *task_path)
 {
 	struct vine_graph_node *node = e && buffer && task_path ? vine_graph_get_node(e->graph, node_id) : NULL;
-	if (!node || node->submitted) {
+	if (!node || (node->submitted && !node->open)) {
 		return -1;
 	}
 	/* Below the worker cache level a buffer gets a random cache name, not a hash of its content, so nodes with equal
@@ -716,7 +773,9 @@ static double vine_graph_executor_priority(struct vine_graph_executor *e, struct
 	case VINE_GRAPH_PRIORITY_LARGEST_INPUT_FIRST:
 		for (int i = 0; i < node->inputs.count; i++) {
 			mount = node->inputs.items[i];
-			priority += (double)vine_file_size(mount->file);
+			if (!mount->after) {
+				priority += (double)vine_file_size(mount->file);
+			}
 		}
 		break;
 	case VINE_GRAPH_PRIORITY_DEPTH_FIRST:
@@ -816,7 +875,10 @@ static int vine_graph_executor_submit_task(struct vine_graph_executor *e, struct
 	struct vine_graph_mount *mount;
 	for (int i = 0; i < node->inputs.count; i++) {
 		mount = node->inputs.items[i];
-		mounted = mounted && vine_task_add_input(task, mount->file, mount->task_path, VINE_TRANSFER_ALWAYS);
+		/* A mount that only orders the node after its producer is not sent. */
+		if (!mount->after) {
+			mounted = mounted && vine_task_add_input(task, mount->file, mount->task_path, VINE_TRANSFER_ALWAYS);
+		}
 	}
 	for (int i = 0; i < node->outputs.count; i++) {
 		mount = node->outputs.items[i];
@@ -843,7 +905,7 @@ static int vine_graph_executor_submit_task(struct vine_graph_executor *e, struct
 	 * the receive in progress or the file in the vault. */
 	for (int i = 0; i < node->inputs.count; i++) {
 		mount = node->inputs.items[i];
-		if (set_lookup(e->checkpoint_pending, mount->file) && !set_lookup(e->checkpoint_parked, mount->file)) {
+		if (!mount->after && set_lookup(e->checkpoint_pending, mount->file) && !set_lookup(e->checkpoint_parked, mount->file)) {
 			vine_manager_data_service_checkpoint_input(e->manager, mount->file, vine_graph_executor_checkpoint_complete, e);
 		}
 	}
@@ -869,7 +931,7 @@ static void vine_graph_executor_submit_children(struct vine_graph_executor *e, s
 	struct vine_graph_node *child;
 	for (int i = 0; i < node->children.count; i++) {
 		child = node->children.items[i];
-		if (--child->remaining_parents == 0 && !child->task_id && !child->completed && !child->failed && !child->removed) {
+		if (--child->remaining_parents == 0 && !child->task_id && !child->completed && !child->failed && !child->removed && !child->open) {
 			list_push_tail(ready, child);
 		}
 	}
@@ -1474,6 +1536,10 @@ static struct vine_graph_node *vine_graph_executor_find_failed_parent(struct vin
 	}
 	for (int i = 0; i < node->inputs.count; i++) {
 		struct vine_graph_mount *mount = node->inputs.items[i];
+		/* An ordering mount counts until the node completes. A restore of its outputs does not need it. */
+		if (mount->after && node->completed) {
+			continue;
+		}
 		parent = vine_graph_get_producer(e->graph, mount->file);
 		if (parent && parent->failed && vine_graph_executor_output_lost(e, parent, mount->file)) {
 			return parent;
@@ -1487,6 +1553,9 @@ static int vine_graph_executor_reads_lost_output(struct vine_graph_executor *e, 
 {
 	for (int i = 0; i < node->inputs.count; i++) {
 		struct vine_graph_mount *mount = node->inputs.items[i];
+		if (mount->after && node->completed) {
+			continue;
+		}
 		if (vine_graph_get_producer(e->graph, mount->file) == parent && vine_graph_executor_output_lost(e, parent, mount->file)) {
 			return 1;
 		}
@@ -1550,7 +1619,8 @@ static void vine_graph_executor_fail_dependents(struct vine_graph_executor *e, s
 			if (child->completed && !child->restoring && !vine_graph_node_is_recovering(child)) {
 				continue;
 			}
-			if (all_lost || vine_graph_executor_reads_lost_output(e, child, current)) {
+			/* A completed child that restores its outputs needs only the mounts its task reads. */
+			if ((all_lost && !child->completed) || vine_graph_executor_reads_lost_output(e, child, current)) {
 				vine_graph_executor_mark_failed(e, child, current->failure_source_id);
 				list_push_tail(failed, child);
 				list_push_tail(worklist, child);
@@ -1661,6 +1731,8 @@ static const char *vine_graph_failure_name(vine_graph_failure_t failure, int com
 		return "resources";
 	case VINE_GRAPH_FAILURE_TIMEOUT:
 		return "timeout";
+	case VINE_GRAPH_FAILURE_EXPAND:
+		return "expand";
 	default:
 		return "failure";
 	}
@@ -1932,7 +2004,7 @@ int vine_graph_executor_submit_node(struct vine_graph_executor *e, uint64_t node
 	e->submitted_nodes++;
 	struct vine_graph_node *node = vine_graph_get_node(e->graph, node_id);
 	struct vine_graph_node *failed_parent;
-	if (node->remaining_parents == 0) {
+	if (node->remaining_parents == 0 && !node->open) {
 		vine_graph_executor_submit_task(e, node);
 	} else if ((failed_parent = vine_graph_executor_find_failed_parent(e, node))) {
 		vine_graph_executor_fail_node(e, node, failed_parent->failure_source_id, VINE_GRAPH_FAILURE_NONE, NULL);
