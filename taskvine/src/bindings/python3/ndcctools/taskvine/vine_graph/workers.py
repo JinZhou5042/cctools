@@ -264,8 +264,7 @@ class _Workers(_Runner):
         self._driver_ident = None
         # C file id of a result or file that an Expand waits for -> [(record of the Expand, data key)]; background thread
         # only. The thread of expansions, started by the first Expand whose inputs all came (_queue_expansion()), takes
-        # those records one at a time (_expand()). A run without an Expand starts no thread, so the threads of its
-        # Executors take the same memory arenas as before.
+        # those records one at a time (_expand()). A run without an Expand needs no such thread.
         self._expand_fetches = {}
         self._expand_queue = queue.SimpleQueue()
         self._expander = None
@@ -280,9 +279,7 @@ class _Workers(_Runner):
             # Workers load the shared objects from the library's file, so this process keeps only their names.
             self._shared = dict.fromkeys(self._shared)
             _open_executors.add(self)
-            self._driver = threading.Thread(target=_drive, args=(weakref.ref(self),), name="vine-graph-executor",
-                                            daemon=True)
-            self._driver.start()
+            self._driver = _start_thread("vine-graph-executor", _drive, weakref.ref(self))
             self._driver_ident = self._driver.ident
         except BaseException:
             self._close(failed=True)
@@ -397,10 +394,10 @@ class _Workers(_Runner):
             if self._driver is not None:
                 capi.vine_graph_executor_wake(self._executor)
         _open_executors.discard(self)
-        if self._expander is not None and self._expander is not threading.current_thread():
+        if self._expander is not None and self._expander_ident != threading.get_ident():
             self._expand_queue.put(None)
             self._expander.join()
-        if self._driver is not None and self._driver is not threading.current_thread():
+        if self._driver is not None and self._driver_ident != threading.get_ident():
             self._driver.join()
         if self._store_thread is not None:
             # Entries being written read the vault, which goes with the C executor.
@@ -858,9 +855,8 @@ class _Workers(_Runner):
             if self._closed:
                 return
             if self._expander is None:
-                self._expander = threading.Thread(target=_run_expansions, args=(weakref.ref(self), self._expand_queue),
-                                                  name="vine-graph-expand", daemon=True)
-                self._expander.start()
+                self._expander = _start_thread("vine-graph-expand", _run_expansions, weakref.ref(self),
+                                               self._expand_queue)
                 self._expander_ident = self._expander.ident
             self._expand_queue.put(record)
 
@@ -1673,6 +1669,72 @@ def _run_expansions(runner_reference, expansions):
                     runner._run_error = f"{error}"
                 runner._changed.notify_all()
         del runner, record
+
+
+# Role -> (jobs, ident, native_id) of the thread of that role that finished its job for a closed runner and waits for
+# the next one (_start_thread()), at most one per role.
+_parked = {}
+_parked_lock = threading.Lock()
+
+
+class _Job:
+    """What a thread of _start_thread() runs for one runner: a target and its arguments, and the thread's identity.
+    join() waits until the target returned."""
+
+    __slots__ = ("target", "args", "ident", "native_id", "done")
+
+    def __init__(self, target, args):
+        self.target = target
+        self.args = args
+        self.ident = None
+        self.native_id = None
+        self.done = threading.Event()
+
+    def join(self):
+        self.done.wait()
+
+
+def _start_thread(role, target, *args):
+    """Run target(*args) on a daemon thread of this role and return its _Job. The thread of a closed runner that
+    waits for its next job takes it, and only without one a new thread starts. glibc gives each thread a memory arena
+    and hands the arena of an exited thread to whichever thread asks next, often a Manager thread, so a new thread
+    per runner would put the next runner's tasks in a fresh arena and leave the memory the last runner freed unused.
+    A thread kept for its role allocates where its earlier runner freed."""
+    job = _Job(target, args)
+    with _parked_lock:
+        parked = _parked.pop(role, None)
+    if parked is not None:
+        jobs, job.ident, job.native_id = parked
+        jobs.put(job)
+        return job
+    jobs = queue.SimpleQueue()
+    jobs.put(job)
+    thread = threading.Thread(target=_serve, args=(role, jobs), name=role, daemon=True)
+    thread.start()
+    job.ident = thread.ident
+    job.native_id = thread.native_id
+    return job
+
+
+def _serve(role, jobs):
+    """Run the jobs of a thread of _start_thread(), and wait for the next one after each, unless another thread of the
+    role already waits."""
+    identity = (jobs, threading.get_ident(), threading.get_native_id())
+    while True:
+        job = jobs.get()
+        try:
+            job.target(*job.args)
+        except BaseException:
+            job.done.set()
+            raise
+        with _parked_lock:
+            park = role not in _parked
+            if park:
+                _parked[role] = identity
+        job.done.set()
+        del job
+        if not park:
+            return
 
 
 def _drive(executor_reference):
