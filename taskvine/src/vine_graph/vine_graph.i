@@ -19,7 +19,8 @@
  * thread runs Python, and the frontend's background thread makes several calls of a few microseconds for every node.
  * So only the calls that can wait release the GIL: vine_graph_executor_wait runs the Manager and polls its links,
  * vine_graph_executor_delete cancels tasks and joins receives, vine_graph_executor_declare_file computes the checksum
- * of a file the frontend provides, and vine_graph_executor_tune creates the vault's directory in a shared file system
+ * of a file the frontend provides, vine_graph_executor_declare_url asks the origin of a URL for its headers,
+ * vine_graph_executor_adopt_output measures a stored directory, and vine_graph_executor_tune creates the vault's directory in a shared file system
  * for shared-directory. Every other call works on memory and queues messages to Workers without
  * waiting. The most it waits for is the removal of a vault entry when it prunes or undeclares a file: an unlink, and
  * the end of a connected receive of that file after its socket is shut down, whose thread never takes the GIL. No call
@@ -29,6 +30,8 @@
 %thread vine_graph_executor_delete;
 %thread vine_graph_executor_declare_file;
 %thread vine_graph_executor_tune;
+%thread vine_graph_executor_declare_url;
+%thread vine_graph_executor_adopt_output;
 
 /* vine_graph_executor_add_inputs() takes its mounts from one Python sequence of (file id, task path) pairs. The task
  * paths point into the strings of the sequence, which the call holds until it returns. */

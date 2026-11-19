@@ -61,12 +61,13 @@ from . import vine_graph_capi as capi  # noqa: E402
 # generated wrapper around each.
 _capi = capi._vine_graph_capi
 from .graph import (  # noqa: E402
-    _LEAF_TYPE_SET, COMMAND_RESULT_LIMIT, CONTENT_LIMIT, CancelledError, Command, File, Function, Graph, Shared, Task,
+    _LEAF_TYPE_SET, COMMAND_RESULT_LIMIT, CONTENT_LIMIT, CancelledError, Command, File, Function, Graph, Shared, Task, URL,
     TaskError, _Calls, _callable, _clashes_with_output, _DEFAULT_OPTIONS, _FileRef, _NoSuchItem, _Ref, _a, _label,
     _link_or_copy, _name_task, _place, _readers_of, _undeclared, reserved_name, _NEW, _RUNNING, _COMPLETED, _FAILED,
     _CANCELLED, _UNREAD,
 )
-from . import graph as _graph_module, install, library  # noqa: E402
+from . import graph as _graph_module, install, library, store as _store_module  # noqa: E402
+import queue  # noqa: E402
 
 # Manager tuning that suits graph execution. The params of an Executor override it.
 MANAGER_TUNING = {
@@ -85,6 +86,8 @@ MANAGER_TUNING = {
     "max-library-retries": 3,
     # Gigabytes of task results the Manager may keep as checkpoints. Zero means unlimited.
     "vault-disk-limit": 1536,
+    # Failed fetches of a URL from its origin after which the tasks that read it fail with reason "input".
+    "max-origin-failures": 3,
 }
 
 # Settings of the C graph executor and their defaults. Executor.run() draws the progress bar (_ProgressBar), so the C
@@ -133,7 +136,14 @@ _FAILURE_REASONS = {
     capi.VINE_GRAPH_FAILURE_CANCELLED: "cancelled",
     capi.VINE_GRAPH_FAILURE_SUBMIT: "submit",
     capi.VINE_GRAPH_FAILURE_RESOURCES: "resources",
+    capi.VINE_GRAPH_FAILURE_TIMEOUT: "timeout",
 }
+
+# The shell command line of a Python task that runs as a standard task instead of a call of the library, as a task of
+# a Function with GPUs does. Python runs the task as the library would (library.run_standalone()), and the shell that
+# starts it does not exec it, so a Python killed by signal N exits with 128 + N, which the C executor tells apart from an
+# exit status. Workers run the python of their environment, as the library does.
+_STANDALONE_LINE = "python -c 'from ndcctools.taskvine.vine_graph import library; library.run_standalone()'; exit $?"
 
 # Seconds the background thread spends on queued calls before it advances the run one step.
 COMMAND_SECONDS = 0.05
@@ -170,7 +180,7 @@ _SHARED_INLINE_TYPES = (types.FunctionType, type)
 # manifest holds them inside its own serialization instead of serializing each on its own. A reference to a whole
 # result, the most common argument, is held as its task (None, key), a tuple that the pickler writes without calling
 # cloudpickle's reducer.
-_REFERENCE_TYPES = (_Ref, _FileRef, File, Shared)
+_REFERENCE_TYPES = (_Ref, _FileRef, File, URL, Shared)
 
 # Immutable values that the manifest holds as they are, inside its own serialization, instead of each being serialized
 # on its own: numbers, None, and strings (bytes are serialized, so that the library tells an object it loads from a value
@@ -403,7 +413,7 @@ class _Record:
     and kept. finished is published under the runner's lock."""
 
     __slots__ = ("graph", "key", "number", "func", "command", "outputs", "staged", "node", "result", "files",
-                 "selections", "selection_files", "finished", "abandoned", "held", "keep", "pin", "kept")
+                 "selections", "selection_files", "finished", "abandoned", "held", "keep", "pin", "kept", "store")
 
     def __init__(self, graph, key):
         self.graph = graph  # weak reference to the task's Graph, which leads to the Task by key
@@ -430,6 +440,8 @@ class _Record:
         self.keep = 0  # why the result is pinned against release (_SINK, _FINAL), set by the submitting side
         self.pin = 0  # pins that the record holds on its result in C
         self.kept = False  # C keeps the node, which ran again after its outputs were released
+        # (key, directory of its entry or None) of a task of cache=True that has a key in the store, or None
+        self.store = None
 
     @property
     def label(self):
@@ -493,6 +505,24 @@ class _Runner:
                 self._run_dir = tempfile.mkdtemp(prefix="vine-graph-run-", dir=self._output_root)
             return self._run_dir
 
+    def _look_up(self, task, record):
+        """Give a task of cache=True its key in the store and its entry there, if any (_Record.store). A task without a
+        key runs as usual, and the store says why once per function."""
+        func = task._func
+        if not getattr(func, "_cache", False):
+            return
+        store = self._store
+        parents = {ref: parent._record for ref, parent in _references(task).items()} if task._parents else {}
+        try:
+            key = store.key(task, parents)
+        except _store_module.NotCacheable as error:
+            store.notice(func, str(error))
+            return
+        entry = store.lookup(key, record.outputs)
+        if entry is not None and record.selections:
+            store.add_selections(entry, record.selections)
+        record.store = (key, entry)
+
     def _file_task_path(self, identity, name):
         """Return a numbered name of a file: a number of its own followed by the end of its name, which holds its
         extension, as much of it as fits in the longest file name a file system takes."""
@@ -518,9 +548,12 @@ class _Runner:
         chosen = []
         counts = {}
         for identity in identities:
-            if identity[0] == "input":
+            if identity[0] == "input" or identity[0] == "url":
                 explicit = identity[2] is not None
-                name = identity[2] if explicit else os.path.basename(identity[1])
+                if explicit:
+                    name = identity[2]
+                else:
+                    name = os.path.basename(identity[1]) if identity[0] == "input" else URL(identity[1]).basename
             else:
                 explicit = False
                 name = os.path.basename(identity[3])
@@ -560,7 +593,7 @@ class _Runner:
             value = kwargs[name]
             for element in (value if type(value) is list or type(value) is tuple else (value,)):
                 kind = type(element)
-                if kind is File or kind is _FileRef:
+                if kind is File or kind is _FileRef or kind is URL:
                     identities.setdefault(library.file_identity(element), None)
         names = self._file_task_paths(task, identities) if identities else None
         prelude = []
@@ -583,7 +616,7 @@ class _Runner:
                     prelude.append(f"{variable}=$({read}) || {{ echo {shlex.quote(f'vine_graph: could not read the result of task {record.label}')} >&2; exit 1; }}")
                     results[path] = record
                 return f'"${variable}"'
-            if kind is File or kind is _FileRef:
+            if kind is File or kind is _FileRef or kind is URL:
                 identity = library.file_identity(value)
                 path = names[identity]
                 if identity not in files:
@@ -629,8 +662,22 @@ class _Workers(_Runner):
 
     def __init__(self, port=cvine.VINE_DEFAULT_PORT, name=None, *, output_dir="./outputs", library_modules=(),
                  library_files=None, shared=None, edata_cache=0, ssl=None, staging_path=None,
-                 run_info_path="vine-run-info", run_info_template=None):
+                 run_info_path="vine-run-info", run_info_template=None, store=None):
         self._closed = False
+        self._store = store
+        # Outputs of tasks of cache=True that missed the store, pinned until the store thread wrote them: number of the
+        # record -> (record, {C file id: name in the entry}, {name: bytes or local path} fetched so far, fetching), and
+        # C file id -> number of a record whose output it is; background thread only
+        self._store_pending = {}
+        self._store_fetches = {}
+        self._store_queue = None
+        self._store_thread = None
+        if store is not None:
+            self._store_queue = queue.SimpleQueue()
+            self._store_thread = threading.Thread(target=_write_entries, args=(store, self._store_queue,
+                                                                               weakref.ref(self)),
+                                                  name="vine-graph-store", daemon=True)
+            self._store_thread.start()
         self._manager = None
         self._executor = None  # opaque C executor handle
         self._resources = ExitStack()
@@ -652,6 +699,7 @@ class _Workers(_Runner):
         # State the background thread owns: the C ids of submitted tasks and files.
         self._records = {}  # C node id -> _Record
         self._input_files = {}  # absolute path of a File -> C file id
+        self._url_files = {}  # URL -> C file id
         self._edata_files = {}  # sandbox name of a staged object -> C file id
 
         # State both threads share, guarded by the lock. The background thread notifies the condition when it
@@ -693,6 +741,10 @@ class _Workers(_Runner):
         self._unfit_sizes = set()
         # _Options -> the id of its profile in the C executor, one per distinct value; background thread only
         self._profiles = {}
+        # (C file id, sandbox name) of what Python tasks that run as standard tasks load at start, declared for the
+        # first of them (_standalone_inputs()), and the cached edata that the library loads; background thread only
+        self._standalone = None
+        self._edata_cache_path = None
         self._driver = None
         self._driver_ident = None
         self._pickler = _Pickler()
@@ -757,6 +809,7 @@ class _Workers(_Runner):
 
     def _install_library(self, edata_path):
         """Install the library, which loads the cached edata at edata_path, if any, when it starts on a Worker."""
+        self._edata_cache_path = edata_path
         modules, files, shared_path = self._library_options
         self._resources.enter_context(
             install.installed(self._manager, self._library_name, modules, files, shared_path, edata_path))
@@ -840,6 +893,12 @@ class _Workers(_Runner):
         _open_executors.discard(self)
         if self._driver is not None and self._driver is not threading.current_thread():
             self._driver.join()
+        if self._store_thread is not None:
+            # Entries being written read the vault, which goes with the C executor.
+            self._store_queue.put(None)
+            self._store_thread.join()
+            self._store_thread = None
+            print(self._store.summary(), file=sys.stderr, flush=True)
         try:
             try:
                 if self._executor is not None:
@@ -915,6 +974,8 @@ class _Workers(_Runner):
         _check_task(task, self._shared)
         if not record.command and task._readers:
             record.selections = _selections_read_from(task) or None
+        if self._store is not None:
+            self._look_up(task, record)
         names = []
         submitted = False
         try:
@@ -1022,6 +1083,10 @@ class _Workers(_Runner):
             # The files that the function writes, which the library checks for after the call.
             "outputs": record.outputs,
         }
+        options = task._func._options if type(task._func) is Function else _DEFAULT_OPTIONS
+        if options.retries:
+            # The exceptions after which the library tells C that the task may be tried again.
+            manifest["retry_on"] = options.retry_on
         return (
             record,
             record.outputs,
@@ -1171,7 +1236,14 @@ class _Workers(_Runner):
             mounts.extend((parent.selection_files[chain], name) for parent, name, chain in selections_read)
             self._check(capi.vine_graph_executor_add_inputs(executor, node, mounts), f"failed to mount the inputs of task {key!r}")
         for identity, name, source in files:
-            if source is None:
+            if identity[0] == "url":
+                file = self._url_files.get(identity[1])
+                if file is None:
+                    file = capi.vine_graph_executor_declare_url(executor, identity[1])
+                    if not file:
+                        raise RuntimeError(f"failed to declare the URL {identity[1]}")
+                    self._url_files[identity[1]] = file
+            elif source is None:
                 if identity[1] not in self._input_files:
                     self._input_files[identity[1]] = self._declare_file(self._link_input(identity[1]))
                 file = self._input_files[identity[1]]
@@ -1179,8 +1251,10 @@ class _Workers(_Runner):
                 file = source.files[identity[3]]
             self._add_input(node, file, name)
         kind = type(record.func)
+        standalone = False
         if kind is Function or kind is Command:
             options = record.func._options
+            standalone = kind is Function and options.gpus > 0
             if options is not _DEFAULT_OPTIONS:
                 if _capi.vine_graph_executor_set_profile(executor, node, self._profile(options)) != 0:
                     raise RuntimeError(f"failed to set what task {key!r} requests")
@@ -1199,8 +1273,89 @@ class _Workers(_Runner):
             # it when it removes the node.
             if capi.vine_graph_executor_add_input_buffer(executor, node, manifest, library.MANIFEST) != 0:
                 raise RuntimeError(f"failed to declare the manifest of task {key!r}")
+            if standalone:
+                # The task loads what the library loads when it starts, from files of the same names.
+                for file, name in self._standalone_inputs():
+                    self._add_input(node, file, name)
+                if capi.vine_graph_executor_set_standalone(executor, node, _STANDALONE_LINE) != 0:
+                    raise RuntimeError(f"failed to make task {key!r} a standard task")
+        if record.store is not None and record.store[1] is not None and self._complete_from_store(record):
+            return
+        if record.store is not None:
+            # A miss keeps its outputs until they are in the store.
+            outputs = {record.result: _store_module.RESULT}
+            for chain, file in (record.selection_files or {}).items():
+                outputs[file] = _store_module.Store.selection_name(chain)
+            for path, file in (record.files or {}).items():
+                outputs[file] = os.path.join(_store_module.FILES, path)
+            for file in outputs:
+                if _capi.vine_graph_executor_pin_file(executor, file) != 0:
+                    raise RuntimeError(f"failed to pin an output of task {key!r}")
+            self._store_pending[record.number] = (record, outputs, {}, False)
         if capi.vine_graph_executor_submit_node(executor, node) != 0:
             raise RuntimeError(f"failed to submit task {key!r}")
+
+    def _complete_from_store(self, record):
+        """Complete the node of a task that hit the store with the entry's files as its outputs, which the vault adopts
+        as their checkpoints, and return True, or False when the vault takes none of them, and the task runs."""
+        entry = record.store[1]
+        executor = self._executor
+        adopt = capi.vine_graph_executor_adopt_output
+        if adopt(executor, record.result, os.path.join(entry, _store_module.RESULT)) != 0:
+            return False
+        for chain, file in (record.selection_files or {}).items():
+            if adopt(executor, file, os.path.join(entry, _store_module.Store.selection_name(chain))) != 0:
+                return False
+        for path, file in (record.files or {}).items():
+            if adopt(executor, file, os.path.join(entry, _store_module.FILES, path)) != 0:
+                return False
+        return capi.vine_graph_executor_complete_node(executor, record.node) == 0
+
+    def _fetch_for_store(self, record):
+        """Fetch the outputs of a completed task that missed the store, which the store thread writes once all came."""
+        pending = self._store_pending.get(record.number)
+        if pending is None or pending[3]:
+            return
+        self._store_pending[record.number] = pending[:3] + (True,)
+        for file in pending[1]:
+            self._store_fetches[file] = record.number
+            if _capi.vine_graph_executor_fetch_file(self._executor, file) != 0:
+                self._release_for_store(record)
+                return
+
+    def _release_for_store(self, record):
+        """Unpin the outputs that a task kept for the store, which is done with them or never gets them."""
+        pending = self._store_pending.pop(record.number, None)
+        if pending is None:
+            return
+        for file in pending[1]:
+            self._store_fetches.pop(file, None)
+            _capi.vine_graph_executor_unpin_file(self._executor, file)
+
+    def _stored(self, record):
+        """Called by the store thread once it wrote, or failed to write, the entry of a record."""
+        self._enqueue(functools.partial(self._release_for_store, record))
+
+    def _standalone_inputs(self):
+        """Return (C file id, sandbox name) of the files that a Python task that runs as a standard task loads at start,
+        declared once: what library.run_standalone() prepares from, the shared objects, the cached edata, and the
+        library files under their library names."""
+        if self._standalone is None:
+            modules, files, shared_path = self._library_options
+            edata_path = self._edata_cache_path
+            context = os.path.join(self._work_dir, library.STANDALONE)
+            with open(context, "wb") as stream:
+                cloudpickle.dump([modules, library.SHARED if shared_path else None,
+                                  library.EDATA_CACHE if edata_path else None, library.runtime_identity()], stream)
+            inputs = [(self._declare_file(context, vault=True), library.STANDALONE)]
+            if shared_path:
+                inputs.append((self._declare_file(shared_path, vault=True), library.SHARED))
+            if edata_path:
+                inputs.append((self._declare_file(edata_path, vault=True), library.EDATA_CACHE))
+            for local, remote in (files or {}).items():
+                inputs.append((self._declare_file(local), remote))
+            self._standalone = inputs
+        return self._standalone
 
     def _profile(self, options):
         """Return the id of the C profile of options, which the first task of a distinct value adds."""
@@ -1210,6 +1365,9 @@ class _Workers(_Runner):
             spec.cores = options.cores
             spec.memory = options.memory or 0
             spec.gpus = options.gpus
+            spec.time_limit = options.time_limit or 0
+            spec.retries = options.retries
+            spec.retry = _retry_bits(options)
             profile = capi.vine_graph_executor_add_profile(self._executor, spec)
             if profile < 0:
                 raise RuntimeError(f"failed to add the profile {options!r}")
@@ -1254,6 +1412,8 @@ class _Workers(_Runner):
                 self._held_files.discard(key)
                 if record.files:
                     _capi.vine_graph_executor_unpin_file(executor, record.files[path])
+        if record.number in self._store_pending:
+            self._release_for_store(record)
         if record.node:
             while record.pin > 0:
                 record.pin -= 1
@@ -1434,6 +1594,8 @@ class _Workers(_Runner):
         fetched = None
         fetches = self._fetches
         while file := capi.vine_graph_executor_next_fetched(self._executor):
+            if self._store_fetches:
+                self._store_fetched(file)
             key, record = fetches.pop(file, (None, None))
             if record is None or record.abandoned:
                 continue
@@ -1446,6 +1608,9 @@ class _Workers(_Runner):
                 fetched[key] = path
         unsendable = []
         while file := capi.vine_graph_executor_next_fetch_failed(self._executor):
+            number = self._store_fetches.get(file)
+            if number is not None and number in self._store_pending:
+                self._release_for_store(self._store_pending[number][0])
             key, record = fetches.pop(file, (None, None))
             if record is not None and not record.abandoned:
                 unsendable.append(key)
@@ -1460,6 +1625,19 @@ class _Workers(_Runner):
                 self._capacity = capacity
             self._changed.notify_all()
         return True
+
+    def _store_fetched(self, file):
+        """Note an output of a task that missed the store that reached the Manager, and hand the task's outputs to the
+        store thread once all came."""
+        number = self._store_fetches.pop(file, None)
+        pending = self._store_pending.get(number) if number is not None else None
+        if pending is None:
+            return
+        record, outputs, items, _ = pending
+        data = capi.vine_graph_executor_get_local_data(self._executor, file)
+        items[outputs[file]] = data if data is not None else capi.vine_graph_executor_get_local_path(self._executor, file)
+        if len(items) == len(outputs):
+            self._store_queue.put((record, list(items.items())))
 
     def _publish_finished(self):
         """Publish the tasks that completed or failed since the last call."""
@@ -1491,6 +1669,11 @@ class _Workers(_Runner):
                     entry = (_FAILED, source, None, reason, None)
             else:
                 entry = _COMPLETED_ENTRY
+            if record.number in self._store_pending:
+                if entry is _COMPLETED_ENTRY:
+                    self._fetch_for_store(record)
+                else:
+                    self._release_for_store(record)
             finished.append((record, entry))
         # A released node stays until its record is let go, so releases are only drained. A node that ran again after
         # its release is kept by C until its record is let go.
@@ -1723,6 +1906,10 @@ class _Workers(_Runner):
         return str(path)
 
 
+class _InputUnavailable(Exception):
+    """A local Executor could not fetch an input of a task, which fails the task with reason "input"."""
+
+
 class _Local(_Runner):
     """The runner of an Executor in this process, for debugging without TaskVine. A thread of its own runs the submitted
     tasks one at a time, in the order they were submitted, so a task runs after the tasks it reads while the program
@@ -1733,8 +1920,9 @@ class _Local(_Runner):
     port = None
     name = None
 
-    def __init__(self, *, output_dir="./outputs", shared=None):
+    def __init__(self, *, output_dir="./outputs", shared=None, store=None):
         self._closed = False
+        self._store = store
         self._shared = _serialize_shared(shared)
         self._last_number = 0  # the number of the latest file a command reads, which names it in sandboxes
         self._file_numbers = {}
@@ -1747,6 +1935,7 @@ class _Local(_Runner):
         self._dropped = collections.deque()  # records of tasks that nothing can ask for anymore
         self._local_paths = {}  # (number of a record, sandbox path) -> local path of a file its task wrote
         self._results = {}  # number of a record -> local path of its task's result file
+        self._downloads = {}  # URL -> local path of its copy in the run directory
         self._seconds = 0.0
         self._keep_paths = set()
         self._pickler = _Pickler()  # of the thread that creates the runner, which checks submitted tasks
@@ -1779,6 +1968,8 @@ class _Local(_Runner):
             self._changed.notify_all()
         if self._thread is not threading.current_thread():
             self._thread.join()
+        if self._store is not None:
+            print(self._store.summary(), file=sys.stderr, flush=True)
         if self._run_dir is None:
             return
         _remove_run_data(self._run_dir, self._keep_paths, remove_all or not self._keep_paths)
@@ -1807,6 +1998,8 @@ class _Local(_Runner):
         # The names of its files are checked as a runner on Workers checks them.
         if task._reads:
             self._file_task_paths(task, {library.file_identity(ref): None for ref in task._reads})
+        if self._store is not None:
+            self._look_up(task, record)
         restore_interrupts = _block_interrupts()
         try:
             with self._lock:
@@ -1856,6 +2049,9 @@ class _Local(_Runner):
         paths = [self._local_paths.pop((record.number, path), None) for path in record.outputs]
         if result is None or any(path in self._keep_paths for path in paths):
             return
+        if record.store is not None and record.store[1] is not None:
+            # A hit read its result and files from the store, which keeps them.
+            return
         if not record.command:
             try:
                 os.unlink(result)
@@ -1893,8 +2089,51 @@ class _Local(_Runner):
             if entry is not None and entry[0] == _FAILED:
                 # As in C, a task that reads a failed or cancelled task does not run, and names its source.
                 return (_FAILED, entry[1], None, entry[3], None)
+        if record.store is not None and record.store[1] is not None:
+            entry = record.store[1]
+            self._results[record.number] = os.path.join(entry, _store_module.RESULT)
+            for path in record.outputs:
+                self._local_paths[(record.number, path)] = os.path.join(entry, _store_module.FILES, path)
+            return _COMPLETED_ENTRY
+        entry = self._run_attempts(record, task)
+        if entry is _COMPLETED_ENTRY and record.store is not None:
+            items = [(_store_module.RESULT, self._results[record.number])]
+            items.extend((os.path.join(_store_module.FILES, path), self._local_paths[(record.number, path)])
+                         for path in record.outputs)
+            try:
+                self._store.write(record.store[0], items)
+            except Exception as error:
+                print(f"vine_graph: the store could not keep the result of {record.label}: {error}", file=sys.stderr,
+                      flush=True)
+        return entry
+
+    def _run_attempts(self, record, task):
+        """Run a task until it completes or fails for good, and return its entry."""
+        kind = type(task._func)
+        options = task._func._options if kind is Function or kind is Command else _DEFAULT_OPTIONS
+        # Failures of the task itself are tried again as on Workers, each seen as the exception that stands for it.
+        history = []
+        while True:
+            entry, error_class = self._run_once(record, task, len(history))
+            if entry[0] != _FAILED or len(history) >= options.retries or error_class is None or \
+                    not options.retries_cover(error_class):
+                break
+            history.append(entry[3])
+        if history and entry[0] == _FAILED:
+            history.append(entry[3])
+            entry = (_FAILED, record, f"it failed {len(history)} times: {', '.join(history)}; the last time {entry[2]}",
+                     *entry[3:])
+        return entry
+
+    def _run_once(self, record, task, attempt):
+        """Run one attempt of a task in a new sandbox, and return its entry and the class of exception that stands for
+        its failure, or None."""
         task_dir = os.path.join(self._output_directory(), ".tasks", f"task-{record.number}")
-        shutil.rmtree(task_dir, ignore_errors=True)
+        if os.path.lexists(task_dir):
+            # Moved aside first, since a process that the earlier attempt left may still write to it.
+            aside = f"{task_dir}.attempt-{attempt}"
+            os.rename(task_dir, aside)
+            shutil.rmtree(aside, ignore_errors=True)
         os.makedirs(task_dir)
         # A task makes the directories of the files it writes, as on a Worker.
         started = time.time()
@@ -1902,6 +2141,8 @@ class _Local(_Runner):
             if record.command:
                 return self._run_command(task, record, task_dir)
             return self._run_function(task, record, task_dir)
+        except _InputUnavailable as error:
+            return (_FAILED, record, str(error), "input", None), None
         finally:
             self._seconds += time.time() - started
 
@@ -1917,13 +2158,14 @@ class _Local(_Runner):
             return _read_text(path) if source.command else library.load_result(path)
 
         def file_path(identity):
-            if identity[0] == "input":
+            if identity[0] == "input" or identity[0] == "url":
+                local = identity[1] if identity[0] == "input" else self._download(identity[1])
                 if identity[2] is None:
-                    return identity[1]
+                    return local
                 # A File with a name is reached under that name, as in a Worker's sandbox.
                 link = os.path.join(task_dir, identity[2])
                 if not os.path.lexists(link):
-                    os.symlink(identity[1], link)
+                    os.symlink(local, link)
                 return link
             return self._local_paths[(sources[(identity[1], identity[2])].number, identity[3])]
 
@@ -1942,10 +2184,13 @@ class _Local(_Runner):
                 result_path = os.path.join(self._run_dir, f"result-{record.number}")
                 library.save_result(result_path, output)
                 self._results[record.number] = result_path
-                return _COMPLETED_ENTRY
+                return _COMPLETED_ENTRY, None
+            except _InputUnavailable:
+                raise
             except BaseException as error:
                 # As on a Worker, anything the function raises, including an exit, fails the task.
-                return (_FAILED, record, library.failure_report(error, __file__, library.__file__), "function", None)
+                return (_FAILED, record, library.failure_report(error, __file__, library.__file__), "function",
+                        None), type(error)
             finally:
                 os.chdir(previous_cwd)
 
@@ -1954,7 +2199,10 @@ class _Local(_Runner):
         for path, parent in results:
             os.symlink(self._results[parent.number], os.path.join(task_dir, path))
         for identity, path, source in files:
-            local = identity[1] if source is None else self._local_paths[(source.number, identity[3])]
+            if identity[0] == "url":
+                local = self._download(identity[1])
+            else:
+                local = identity[1] if source is None else self._local_paths[(source.number, identity[3])]
             os.symlink(local, os.path.join(task_dir, path))
         # A Worker tells a command the cores and memory it requested in CORES and MEMORY, and a command that requested
         # no GPUs sees none.
@@ -1964,16 +2212,49 @@ class _Local(_Runner):
             env["MEMORY"] = str(options.memory)
         if not options.gpus:
             env["CUDA_VISIBLE_DEVICES"] = ""
-        process = subprocess.run(["/bin/sh", "-c", line], cwd=task_dir, stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
+        # The command runs in a session of its own, so a time limit stops every process it started, as on a Worker.
+        process = subprocess.Popen(["/bin/sh", "-c", line], cwd=task_dir, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env, start_new_session=True)
+        try:
+            _, stderr = process.communicate(timeout=options.time_limit)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            return (_FAILED, record, f"it ran longer than its time limit of {options.time_limit} s", "timeout",
+                    None), TimeoutError
         if process.returncode != 0:
-            error = process.stderr.decode("utf-8", "replace")
+            error = stderr.decode("utf-8", "replace")
             return (_FAILED, record, f"its command exited with status {process.returncode}:\n{error}", "command",
-                    process.returncode)
+                    process.returncode), subprocess.CalledProcessError
         for task_path in record.outputs:
             self._local_paths[(record.number, task_path)] = os.path.abspath(os.path.join(task_dir, task_path))
         self._results[record.number] = os.path.join(task_dir, library.RESULT)
-        return _COMPLETED_ENTRY
+        return _COMPLETED_ENTRY, None
+
+    def _download(self, url):
+        """Return the local path of a URL, downloaded once into the run directory, as a Worker fetches it once. A URL
+        that cannot be fetched raises, which fails the task."""
+        path = self._downloads.get(url)
+        if path is None:
+            directory = os.path.join(self._output_directory(), ".urls")
+            os.makedirs(directory, exist_ok=True)
+            path = os.path.join(directory, str(len(self._downloads) + 1))
+            try:
+                if url.startswith("root://"):
+                    subprocess.run(["xrdcp", "--nopbar", "--force", url, path], check=True,
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                else:
+                    import urllib.request
+                    with urllib.request.urlopen(url, timeout=60) as response, open(path + ".part", "wb") as stream:
+                        shutil.copyfileobj(response, stream)
+                    os.rename(path + ".part", path)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                raise _InputUnavailable(f"its input {url} could not be fetched: {error}") from None
+            self._downloads[url] = path
+        return path
 
     # Published state, read by the threads that use the Executor.
 
@@ -2169,7 +2450,7 @@ class Executor:
 
     def __init__(self, *, port=cvine.VINE_DEFAULT_PORT, name=None, local=False, progress_bar=True, shared=None,
                  params=None, library_modules=(), library_files=None, output_dir="./outputs", ssl=None,
-                 staging_path=None, run_info_path="vine-run-info", run_info_template=None):
+                 staging_path=None, run_info_path="vine-run-info", run_info_template=None, store=None):
         self._runner = None
         params = dict(params or {})
         # A bad setting raises before a Manager starts for it.
@@ -2187,14 +2468,15 @@ class Executor:
         self._cancelled = 0
         # record of a live task that did not finish -> the _Watch of each as_completed() that waits for it
         self._watched = {}
+        self._store = None if store is None else _store_module.Store(store)
         if local:
             # A local runner has no Manager, so it takes only what it uses.
-            runner = _Local(output_dir=output_dir, shared=shared)
+            runner = _Local(output_dir=output_dir, shared=shared, store=self._store)
         else:
             runner = _Workers(port, name, output_dir=output_dir, library_modules=library_modules,
                               library_files=library_files, shared=shared, edata_cache=edata_cache, ssl=ssl,
                               staging_path=staging_path, run_info_path=run_info_path,
-                              run_info_template=run_info_template)
+                              run_info_template=run_info_template, store=self._store)
         try:
             runner.set_params(params)
         except BaseException:
@@ -2292,6 +2574,7 @@ class Executor:
             self._submit_graph(func)
             return func
         self._check_open()
+        self._check_cache(func)
         with self._lock:
             task = self._calls._add(self._last_task + 1, func, args, kwargs)
             with self._runner.first_submission():
@@ -2338,12 +2621,19 @@ class Executor:
         new = graph._new
         if not new:
             return
+        for task in new:
+            self._check_cache(task._func)
         with self._lock:
             with self._runner.first_submission():
                 while new:
                     # A task leaves the queue only once it is live, so an interrupt leaves it for the next submission.
                     self._start(new[0])
                     new.popleft()
+
+    def _check_cache(self, func):
+        """Raise ValueError for a Function or Command of cache=True on an Executor without a store."""
+        if getattr(func, "_cache", False) and self._store is None:
+            raise ValueError(f"{func!r} has cache=True, which needs a store: vg.Executor(store=path)")
 
     def _bind(self, graph):
         """Make a Graph belong to this Executor, which lets go of the records of its tasks once the Graph is
@@ -2623,6 +2913,23 @@ class Executor:
             raise
 
 
+def _retry_bits(options):
+    """Return the VINE_GRAPH_RETRY_* bits of the failures that the retries of options cover, each seen as the exception
+    that stands for it."""
+    bits = 0
+    if options.retries_cover(TimeoutError):
+        bits |= capi.VINE_GRAPH_RETRY_TIMEOUT
+    if options.retries_cover(MemoryError):
+        bits |= capi.VINE_GRAPH_RETRY_RESOURCES
+    if options.retries_cover(subprocess.CalledProcessError):
+        bits |= capi.VINE_GRAPH_RETRY_COMMAND
+    return bits
+
+
+# What separates the kinds of the earlier failures of a task that was tried again from the error of its last attempt.
+_HISTORY_END = "; the last time "
+
+
 def _writes_unread_file(task):
     """Return whether a task declared a file that no task of its Graph reads, which only the caller can ask for."""
     read = set()
@@ -2641,6 +2948,10 @@ def task_error(task):
     source_entry = source._error if source._error is not None else entry
     message, reason, exit_code = source_entry[2], source_entry[3], source_entry[4]
     message, exception = library.load_failure(message or "")
+    # A task that was tried again says how its attempts failed before the error of its last one.
+    history = None
+    if message.startswith("it failed ") and _HISTORY_END in message:
+        history, _, message = message.partition(_HISTORY_END)
     task_label, source_label = _label(task), _label(source)
     if isinstance(exception, _NoSuchItem):
         # The message names the two tasks, which the Worker that raised it cannot, and needs no traceback, because
@@ -2680,6 +2991,8 @@ def task_error(task):
     if note:
         message = f"{message.rstrip()}\n{note}"
         exception.add_note(note)
+    if history is not None:
+        message = f" {history}{_HISTORY_END.rstrip()}:{message}"
     if source is task:
         return TaskError(f"task {task_label} failed:{message}", task, source, reason, exception, exit_code)
     return TaskError(f"task {task_label} did not run because task {source_label} failed:{message}", task, source,
@@ -2885,6 +3198,25 @@ def _block_interrupts():
         restore()
         raise
     return restore
+
+
+def _write_entries(store, entries, runner_reference):
+    """Write the entries of tasks that missed the store, in the store thread, until None arrives, and tell the runner
+    when each is done so it unpins the outputs."""
+    while True:
+        item = entries.get()
+        if item is None:
+            return
+        record, items = item
+        try:
+            store.write(record.store[0], items)
+        except Exception as error:
+            print(f"vine_graph: the store could not keep the result of {record.label}: {error}", file=sys.stderr,
+                  flush=True)
+        runner = runner_reference()
+        if runner is not None:
+            runner._stored(record)
+        del runner
 
 
 def _drive(executor_reference):

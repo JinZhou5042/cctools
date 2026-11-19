@@ -67,10 +67,22 @@ typedef enum {
 	VINE_GRAPH_FAILURE_RETRIES,   /* More attempts failed for other reasons than max-retries allows. */
 	VINE_GRAPH_FAILURE_CANCELLED, /* The frontend cancelled it. */
 	VINE_GRAPH_FAILURE_SUBMIT,    /* Its task could not be created or submitted. */
-	VINE_GRAPH_FAILURE_RESOURCES  /* It used more than it requested: a command of a profile with memory exited with
+	VINE_GRAPH_FAILURE_RESOURCES, /* It used more than it requested: a command of a profile with memory exited with
 				       * status 137, as after a SIGKILL, or TaskVine reported it exhausted its resources or
 				       * its sandbox. */
+	VINE_GRAPH_FAILURE_TIMEOUT    /* It ran longer than the time limit of its profile. */
 } vine_graph_failure_t;
+
+/* Failures of a node's own task that the retries of its profile cover, as bits of vine_graph_profile.retry, besides a
+ * function whose runner exits with VINE_GRAPH_RETRY_STATUS, which always counts: a time limit that passed, a use of
+ * more than it requested, and a command's exit status other than zero. */
+#define VINE_GRAPH_RETRY_TIMEOUT 1
+#define VINE_GRAPH_RETRY_RESOURCES 2
+#define VINE_GRAPH_RETRY_COMMAND 4
+
+/* The exit status with which a function runner says that the function's failure is one its profile retries, because
+ * it matched what the frontend retries. Any other non-zero status fails the node at once. */
+#define VINE_GRAPH_RETRY_STATUS 75
 
 /* An opaque executor. */
 struct vine_graph_executor;
@@ -91,9 +103,12 @@ struct vine_graph_capacity {
  * a profile against the largest worker is decided once for all of its nodes. Profile 0 is the default: one core and
  * nothing else, which a function call takes as one slot of its library without a request. */
 struct vine_graph_profile {
-	int cores;	/* cores, or library slots of a function call; at least one */
-	int64_t memory; /* MB of memory a command requests, or 0 for none */
-	int gpus;	/* GPUs a command requests, or 0 for none; a command without GPUs sees CUDA_VISIBLE_DEVICES empty */
+	int cores;	    /* cores, or library slots of a function call; at least one */
+	int64_t memory;	    /* MB of memory the task requests, or 0 for none */
+	int gpus;	    /* GPUs the task requests, or 0 for none; a task without GPUs sees CUDA_VISIBLE_DEVICES empty */
+	int64_t time_limit; /* seconds the task may run, or 0 for no limit; a task past it fails as TIMEOUT */
+	int retries;	    /* new attempts after failures of the task itself that retry covers, 0 for none */
+	int retry;	    /* VINE_GRAPH_RETRY_* bits: which failures of the task itself the retries cover */
 };
 
 /* How far durability lags behind completions. An output is anchored when it has a copy in the vault, at the Manager
@@ -120,7 +135,8 @@ void vine_graph_executor_delete(struct vine_graph_executor *e);
 /* Apply one setting. Return zero, or -1 for an unknown name or invalid value, which
  * vine_graph_executor_check_setting explains.
  * task-priority-mode     Order of ready nodes: largest-input-first (default), depth-first, or fifo.
- * max-retries            Failed attempts allowed per node for infrastructure failures (default 5).
+ * max-retries            Failed attempts allowed per node for infrastructure failures, and Worker losses charged
+ *                        to it across its attempts, less one (default 5, at most 62).
  * release-outputs        1 (default) prunes a node's outputs once every reader is durable (the release rule), and 0
  *                        keeps every output of the run, as for a frontend that may add readers of any node later.
  *                        Unlike a pin, it does not anchor outputs off the checkpoint cut.
@@ -155,6 +171,12 @@ uint64_t vine_graph_executor_add_node(struct vine_graph_executor *e);
  * measured once, so its size is that of its tree. */
 uint64_t vine_graph_executor_declare_file(struct vine_graph_executor *e, const char *source_path, int vault);
 
+/* Declare a remote input that Workers fetch from its origin, a URL of http, https, ftp, or file, or a root:// URL of
+ * XRootD, which uses the X509 proxy that TaskVine finds (X509_USER_PROXY), and return its id. Workers keep it while the
+ * workflow runs. A node fails as INPUT when its origin fails more often than max-origin-failures (Manager tuning)
+ * allows, with the origin's error. */
+uint64_t vine_graph_executor_declare_url(struct vine_graph_executor *e, const char *url);
+
 
 /* Undeclare a file the frontend provided, removing its vault entry and its copies on Workers. The frontend calls this
  * only when no node that may still run reads the file under any id: every reader failed, or was released and will not
@@ -187,13 +209,21 @@ int vine_graph_executor_add_input_buffer(struct vine_graph_executor *e, uint64_t
  * a NULL command. */
 int vine_graph_executor_set_command(struct vine_graph_executor *e, uint64_t node_id, const char *command);
 
+/* Make a node not yet submitted run its function as a standard TaskVine task instead of a call of the library, as for a
+ * node whose profile requests GPUs, which a library call cannot hold. command starts the frontend's runner in the
+ * sandbox, which runs the function as a library call does, writes its result where the library would, and exits with
+ * status 1, VINE_GRAPH_RETRY_STATUS, or the status of a shell whose child a signal killed (128 + N). The frontend mounts
+ * whatever the runner loads at start. Return zero, or -1 for an unknown or submitted node or a NULL command. */
+int vine_graph_executor_set_standalone(struct vine_graph_executor *e, uint64_t node_id, const char *command);
+
 /* Return the id of the profile equal to p, which is added when the executor has none, or -1 for a profile of fewer than
  * one core or of negative memory or GPUs. Equal profiles have one id, and profile 0 is the default. */
 int vine_graph_executor_add_profile(struct vine_graph_executor *e, const struct vine_graph_profile *p);
 
 /* Make a node not yet submitted request what a profile says. A function call occupies as many function slots of a
  * library instance as the profile has cores, of one slot per core of its Worker, and the library limits the call's
- * thread pools to as many threads. Memory and GPUs apply only to command nodes. A node whose profile does not fit the
+ * thread pools to as many threads. A call also holds the memory of its profile when the library shares its Worker
+ * (TaskVine's pool mode). GPUs apply to command and standalone nodes. Every node is stopped at its time limit. A node whose profile does not fit the
  * largest connected Worker waits for a larger one (see vine_graph_executor_next_unfit()). Return zero, or -1 for an
  * unknown or submitted node or an unknown profile. */
 int vine_graph_executor_set_profile(struct vine_graph_executor *e, uint64_t node_id, int profile);
@@ -202,6 +232,19 @@ int vine_graph_executor_set_profile(struct vine_graph_executor *e, uint64_t node
  * once when it reads an output of a failed node that exists nowhere. Return zero, or -1 for an unknown or submitted
  * node, a node that reads an output of a node not submitted before it, or a failed run. */
 int vine_graph_executor_submit_node(struct vine_graph_executor *e, uint64_t node_id);
+
+/* Install a file at path as the vault copy of an output of a node not yet submitted, as if its task had written it and
+ * the vault had checkpointed it, such as a result that a store kept from an earlier run. The path must stay until the
+ * run ends. Return zero, or -1 for a file that is not an output of an unsubmitted node, or a path the vault cannot take.
+ */
+int vine_graph_executor_adopt_output(struct vine_graph_executor *e, uint64_t file_id, const char *path);
+
+/* Complete a node not yet submitted without running it, once every output was adopted: it is linked as
+ * vine_graph_executor_submit_node() links it, and is completed and anchored at once, so its readers, releases,
+ * progress, and fetches treat it as a node whose task completed. A completed node that must recreate an output it lost
+ * runs its task. Return zero, or -1 for an unknown or submitted node, an output without a vault copy, or a node that
+ * reads an output of a node that did not complete. */
+int vine_graph_executor_complete_node(struct vine_graph_executor *e, uint64_t node_id);
 
 /* Pin or unpin a node output. A pinned output is never released. Pins are counted, so each pin needs one unpin.
  * Return zero, or -1 for a file that is not a node output, or an unpin without a pin. An unpin returns one instead when

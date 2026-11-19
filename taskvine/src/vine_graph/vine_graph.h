@@ -65,6 +65,9 @@ struct vine_graph_node {
 	unsigned reading : 1;	// submitted and not finished, so counted in each parent's readers
 	unsigned unfit : 1;	// waited for more than the largest Worker had at the last check
 	unsigned noticed : 1;	// reported once by vine_graph_executor_next_unfit()
+	unsigned standalone : 1; // runs its function as a standard task (vine_graph_executor_set_standalone())
+	unsigned losses_charged : 6; // Worker losses charged to its attempts so far, carried into the next attempt
+	unsigned losses_excused : 6; // Worker losses excused for its attempts so far, carried likewise
 
 	int remaining_parents;	    // parents not completed yet
 	int depth;		    // longest path from a source, computed by vine_graph_link_node

@@ -36,6 +36,16 @@
  * be long, while the frontend reads the whole message. */
 #define VINE_GRAPH_ERROR_LOGGED 4096
 
+/* The worker losses that a node may carry, the most its 6-bit fields hold, which bounds max-retries. */
+#define VINE_GRAPH_MAX_LOSSES 63
+
+/* What a node whose own task failed and was tried again remembers: the failures that its profile's retries covered,
+ * and their kinds, joined by commas, for the message of its final failure. Only nodes that failed so have one. */
+struct vine_graph_attempts {
+	int own_failures; // failures of its task itself that were retried
+	char *history;	  // owned kinds of those failures, such as "timeout, function"
+};
+
 /* Order in which ready nodes are submitted. */
 typedef enum {
 	VINE_GRAPH_PRIORITY_LARGEST_INPUT_FIRST = 0, /* Largest total input size first. */
@@ -162,6 +172,8 @@ struct vine_graph_executor {
 	struct set *yielded;  // borrowed queued files that waited once, which are admitted when they reach the head again
 	struct list *holds;   // owned holds in the order they started
 
+	struct itable *attempts; // node id -> owned vine_graph_attempts of a node whose own failures were retried
+
 	char *error; // why the run failed as a whole, or NULL
 	int tasks_cancelled; // the tasks of a run that failed as a whole were cancelled
 };
@@ -225,7 +237,8 @@ struct vine_graph_executor *vine_graph_executor_create(struct vine_manager *mana
 	e->task_id_to_node = itable_create(0);
 	e->fit_nodes = itable_create(0);
 	e->profile_ids = hash_table_create(0, 0);
-	struct vine_graph_profile default_profile = {1, 0, 0};
+	e->attempts = itable_create(0);
+	struct vine_graph_profile default_profile = {1, 0, 0, 0, 0, 0};
 	vine_graph_executor_add_profile(e, &default_profile);
 	e->checkpoint_queue = priority_queue_create(0);
 	e->checkpoint_small = priority_queue_create(0);
@@ -352,6 +365,13 @@ void vine_graph_executor_delete(struct vine_graph_executor *e)
 	vine_graph_delete(e->graph);
 	itable_delete(e->task_id_to_node);
 	itable_delete(e->fit_nodes);
+	struct vine_graph_attempts *attempts;
+	ITABLE_ITERATE(e->attempts, iteration, node_id, attempts)
+	{
+		free(attempts->history);
+		free(attempts);
+	}
+	itable_delete(e->attempts);
 	free(e->profiles);
 	hash_table_delete(e->profile_ids);
 	/* Queued files hold references of their own. */
@@ -444,7 +464,13 @@ static const char *vine_graph_executor_apply_setting(struct vine_graph_executor 
 		}
 		return NULL;
 	} else if (strcmp(name, "max-retries") == 0) {
-		return vine_graph_parse_count(value, &e->max_retries);
+		/* A node carries its worker losses across attempts, at most max-retries + 1 of them, in fields of 6 bits. */
+		int retries = 0;
+		if (vine_graph_parse_count(value, &retries) || retries > VINE_GRAPH_MAX_LOSSES - 1) {
+			return "it must be an integer from 0 to 62";
+		}
+		e->max_retries = retries;
+		return NULL;
 	} else if (strcmp(name, "release-outputs") == 0) {
 		int release = 0;
 		if (vine_graph_parse_count(value, &release) || release > 1) {
@@ -536,6 +562,24 @@ uint64_t vine_graph_executor_declare_file(struct vine_graph_executor *e, const c
 	return vine_graph_add_file(e->graph, file);
 }
 
+uint64_t vine_graph_executor_declare_url(struct vine_graph_executor *e, const char *url)
+{
+	if (!e || !url) {
+		return 0;
+	}
+	/* TaskVine finds the X509 proxy of an XRootD input itself (X509_USER_PROXY). */
+	struct vine_file *file;
+	if (strncmp(url, "root://", 7) == 0) {
+		file = vine_declare_xrootd(e->manager, url, NULL, NULL, VINE_CACHE_LEVEL_WORKFLOW, 0);
+	} else {
+		file = vine_declare_url(e->manager, url, VINE_CACHE_LEVEL_WORKFLOW, 0);
+	}
+	if (!file) {
+		return 0;
+	}
+	return vine_graph_add_file(e->graph, file);
+}
+
 int vine_graph_executor_undeclare_file(struct vine_graph_executor *e, uint64_t file_id)
 {
 	struct vine_file *file = e ? vine_graph_get_file(e->graph, file_id) : NULL;
@@ -597,12 +641,25 @@ int vine_graph_executor_set_command(struct vine_graph_executor *e, uint64_t node
 	return vine_graph_set_command(e->graph, node_id, command);
 }
 
-int vine_graph_executor_add_profile(struct vine_graph_executor *e, const struct vine_graph_profile *p)
+int vine_graph_executor_set_standalone(struct vine_graph_executor *e, uint64_t node_id, const char *command)
 {
-	if (!e || !p || p->cores < 1 || p->memory < 0 || p->gpus < 0) {
+	struct vine_graph_node *node = e && command ? vine_graph_get_node(e->graph, node_id) : NULL;
+	if (!node || node->submitted) {
 		return -1;
 	}
-	char *key = string_format("%d:%" PRId64 ":%d", p->cores, p->memory, p->gpus);
+	if (vine_graph_set_command(e->graph, node_id, command) != 0) {
+		return -1;
+	}
+	node->standalone = 1;
+	return 0;
+}
+
+int vine_graph_executor_add_profile(struct vine_graph_executor *e, const struct vine_graph_profile *p)
+{
+	if (!e || !p || p->cores < 1 || p->memory < 0 || p->gpus < 0 || p->time_limit < 0 || p->retries < 0) {
+		return -1;
+	}
+	char *key = string_format("%d:%" PRId64 ":%d:%" PRId64 ":%d:%d", p->cores, p->memory, p->gpus, p->time_limit, p->retries, p->retry);
 	uintptr_t found = (uintptr_t)hash_table_lookup(e->profile_ids, key);
 	if (found) {
 		free(key);
@@ -746,6 +803,7 @@ static int vine_graph_executor_submit_task(struct vine_graph_executor *e, struct
 	}
 	const struct vine_graph_profile *profile = &e->profiles[node->profile];
 	if (command) {
+		/* A command node, or a function that runs as a standard task, which a profile with GPUs needs. */
 		vine_task_set_cores(task, profile->cores);
 		/* An explicit memory request also keeps the Manager from giving the task its whole Worker. */
 		if (profile->memory > 0) {
@@ -764,6 +822,13 @@ static int vine_graph_executor_submit_task(struct vine_graph_executor *e, struct
 		if (profile->cores > 1) {
 			vine_task_set_cores(task, profile->cores);
 		}
+		/* A library that shares its Worker gives the call this memory of the Worker while it runs. */
+		if (profile->memory > 0) {
+			vine_task_set_memory(task, profile->memory);
+		}
+	}
+	if (profile->time_limit > 0) {
+		vine_task_set_time_max(task, profile->time_limit);
 	}
 	if (node->profile != 0) {
 		itable_insert(e->fit_nodes, node->node_id, (void *)(uintptr_t)1);
@@ -772,6 +837,9 @@ static int vine_graph_executor_submit_task(struct vine_graph_executor *e, struct
 	 * take every worker in turn. With retries set, it returns once more workers were lost under it than the node may
 	 * fail, counting only losses that no loss of other workers explains, so a mass loss of workers fails no node. */
 	vine_task_set_retries(task, MAX(e->max_retries, 1));
+	/* Losses under earlier attempts of the node count for this one, so the bound and the quarantine of a task that
+	 * makes its Worker exit hold for the node, whatever made the node try again. */
+	vine_task_set_worker_losses(task, node->losses_charged, node->losses_excused);
 	int mounted = 1;
 	struct vine_graph_mount *mount;
 	for (int i = 0; i < node->inputs.count; i++) {
@@ -829,7 +897,7 @@ static void vine_graph_executor_submit_children(struct vine_graph_executor *e, s
 	struct vine_graph_node *child;
 	for (int i = 0; i < node->children.count; i++) {
 		child = node->children.items[i];
-		if (--child->remaining_parents == 0 && !child->task_id && !child->failed && !child->removed) {
+		if (--child->remaining_parents == 0 && !child->task_id && !child->completed && !child->failed && !child->removed) {
 			list_push_tail(ready, child);
 		}
 	}
@@ -1585,6 +1653,33 @@ static struct vine_file *vine_graph_executor_find_lost_input(struct vine_graph_n
 	return NULL;
 }
 
+/* Return the first remote input of a node whose origin failed more often than max-origin-failures allows, which made
+ * the Manager return its task as INPUT_MISSING, or NULL. */
+static struct vine_file *vine_graph_executor_find_dead_url(struct vine_graph_executor *e, struct vine_graph_node *node)
+{
+	for (int i = 0; i < node->inputs.count; i++) {
+		struct vine_graph_mount *mount = node->inputs.items[i];
+		vine_file_type_t type = vine_file_type(mount->file);
+		if ((type == VINE_URL || type == VINE_MINI_TASK) && e->manager->max_origin_failures >= 0 && mount->file->origin_failures > e->manager->max_origin_failures) {
+			return mount->file;
+		}
+	}
+	return NULL;
+}
+
+/* Return what a remote input's origin last said when it failed, or a placeholder. A missing xrdcp says so. */
+static const char *vine_graph_origin_message(struct vine_file *file)
+{
+	const char *message = file->origin_error;
+	if (!message || !*message) {
+		return "its origin failed";
+	}
+	if (strstr(message, "xrdcp") && strstr(message, "not found")) {
+		return "xrdcp is not installed on the Worker";
+	}
+	return message;
+}
+
 /* Return non-zero when the node function or command ran and exited with an error, such as an exception. Its outputs are then
  * missing only because of that error, and its standard output may be longer than the Manager keeps. */
 static int vine_graph_task_function_failed(struct vine_task *task)
@@ -1607,49 +1702,119 @@ static const char *vine_graph_node_output_missing(const struct vine_graph_node *
 	return NULL;
 }
 
-/* Handle a failed attempt with its result. A function that raised, a lost Manager-local input, or too many failures
- * fail the node and its dependents. Other failures are infrastructure failures: the executor resubmits its own task,
- * while the Manager resubmits a recovery task itself when a consumer needs its output again. missing_output names an
- * output that the task did not create, or is NULL. */
+/* Return the name of a kind of failure of a node's own task, as its history and the frontend name it. */
+static const char *vine_graph_failure_name(vine_graph_failure_t failure, int command)
+{
+	switch (failure) {
+	case VINE_GRAPH_FAILURE_FUNCTION:
+		return command ? "command" : "function";
+	case VINE_GRAPH_FAILURE_SIGNAL:
+		return "signal";
+	case VINE_GRAPH_FAILURE_RESOURCES:
+		return "resources";
+	case VINE_GRAPH_FAILURE_TIMEOUT:
+		return "timeout";
+	default:
+		return "failure";
+	}
+}
+
+/* Handle a failure of a node's own task, of a kind its profile may retry. A failure that retry covers, while the node
+ * has retries left, submits a new task of the node and is remembered. Any other fails the node, with the kinds of the
+ * earlier failures in front of error when there were any. A Manager recovery task is not tried again here. */
+static void vine_graph_executor_fail_own(struct vine_graph_executor *e, struct vine_graph_node *node, vine_graph_failure_t failure, char *error, int retryable, int is_recovery)
+{
+	const struct vine_graph_profile *profile = &e->profiles[node->profile];
+	struct vine_graph_attempts *attempts = itable_lookup(e->attempts, node->node_id);
+	int earlier = attempts ? attempts->own_failures : 0;
+	const char *name = vine_graph_failure_name(failure, vine_graph_get_command(e->graph, node) && !node->standalone);
+	if (retryable && earlier < profile->retries && !is_recovery) {
+		if (!attempts) {
+			attempts = calloc(1, sizeof(*attempts));
+			if (!attempts) {
+				vine_graph_executor_fail_node(e, node, node->node_id, failure, error);
+				return;
+			}
+			itable_insert(e->attempts, node->node_id, attempts);
+		}
+		char *history = attempts->history ? string_format("%s, %s", attempts->history, name) : xxstrdup(name);
+		free(attempts->history);
+		attempts->history = history;
+		attempts->own_failures++;
+		debug(D_VINE, "node %" PRIu64 " failed (%s), retry %d of %d", node->node_id, name, attempts->own_failures, profile->retries);
+		free(error);
+		vine_graph_executor_submit_task(e, node);
+		return;
+	}
+	if (attempts && attempts->history) {
+		char *full = string_format("it failed %d times: %s, %s; the last time %s", earlier + 1, attempts->history, name, error ? error : "");
+		free(error);
+		error = full;
+	}
+	vine_graph_executor_fail_node(e, node, node->node_id, failure, error);
+}
+
+/* Handle a failed attempt with its result. A failure of the task itself (a function that raised, a command that exited
+ * with an error, a time limit that passed, a use of more than requested) is retried as its profile says, and otherwise
+ * fails the node with its dependents, and so do a lost Manager-local input and too many other failures. Other failures
+ * are infrastructure failures: the executor resubmits its own task, while the Manager resubmits a recovery task itself
+ * when a consumer needs its output again. missing_output names an output that the task did not create, or is NULL. */
 static void vine_graph_executor_handle_failure(struct vine_graph_executor *e, struct vine_graph_node *node, struct vine_task *task, vine_result_t result, const char *missing_output, int is_recovery)
 {
+	const struct vine_graph_profile *profile = &e->profiles[node->profile];
+	if (result == VINE_RESULT_MAX_WALL_TIME) {
+		vine_graph_executor_fail_own(e, node, VINE_GRAPH_FAILURE_TIMEOUT, string_format("it ran longer than its time limit of %" PRId64 " s", profile->time_limit), profile->retry & VINE_GRAPH_RETRY_TIMEOUT, is_recovery);
+		return;
+	}
 	if (vine_graph_task_function_failed(task)) {
 		const char *output = vine_task_get_stdout(task);
+		output = output ? output : "";
 		int status = vine_task_get_exit_code(task);
+		int retry_resources = profile->retry & VINE_GRAPH_RETRY_RESOURCES;
+		if (node->standalone) {
+			/* A function that runs as a standard task reports the exit status of the shell that started its
+			 * runner, so a signal reads as 128 + N, the status a shell gives a child that a signal killed. */
+			if (status > 128 && profile->memory > 0) {
+				vine_graph_executor_fail_own(e, node, VINE_GRAPH_FAILURE_RESOURCES, string_format("it used more than it requested (memory %" PRId64 " MB): its function was killed by signal %d (%s):\n%s", profile->memory, status - 128, strsignal(status - 128), output), retry_resources, is_recovery);
+			} else if (status > 128) {
+				vine_graph_executor_fail_own(e, node, VINE_GRAPH_FAILURE_SIGNAL, string_format("its function was killed by signal %d (%s):\n%s", status - 128, strsignal(status - 128), output), 0, is_recovery);
+			} else {
+				vine_graph_executor_fail_own(e, node, VINE_GRAPH_FAILURE_FUNCTION, string_format("its function failed:\n%s", output), status == VINE_GRAPH_RETRY_STATUS, is_recovery);
+			}
+			return;
+		}
 		if (vine_graph_get_command(e->graph, node)) {
 			/* A command reports its exit status, and its standard output, which keeps only its standard error,
 			 * since the command line sends its standard output to its result file. A command that requested
 			 * memory and exited with the status of a shell whose child was killed by SIGKILL, as the kernel's
 			 * out-of-memory killer does, used more memory than it requested. */
 			node->exit_code = status;
-			const struct vine_graph_profile *profile = &e->profiles[node->profile];
 			if (status == 128 + SIGKILL && profile->memory > 0) {
-				vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_RESOURCES, string_format("it used more than it requested (memory %" PRId64 " MB): its command exited with status %d:\n%s", profile->memory, status, output ? output : ""));
+				vine_graph_executor_fail_own(e, node, VINE_GRAPH_FAILURE_RESOURCES, string_format("it used more than it requested (memory %" PRId64 " MB): its command exited with status %d:\n%s", profile->memory, status, output), retry_resources, is_recovery);
 				return;
 			}
-			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_FUNCTION, string_format("its command exited with status %d:\n%s", status, output ? output : ""));
+			vine_graph_executor_fail_own(e, node, VINE_GRAPH_FAILURE_FUNCTION, string_format("its command exited with status %d:\n%s", status, output), profile->retry & VINE_GRAPH_RETRY_COMMAND, is_recovery);
 			return;
 		}
 		/* A function call reports the status that waitpid() returned for its process. */
 		if (WIFSIGNALED(status)) {
-			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_SIGNAL, string_format("its function was killed by signal %d (%s):\n%s", WTERMSIG(status), strsignal(WTERMSIG(status)), output ? output : ""));
+			vine_graph_executor_fail_own(e, node, VINE_GRAPH_FAILURE_SIGNAL, string_format("its function was killed by signal %d (%s):\n%s", WTERMSIG(status), strsignal(WTERMSIG(status)), output), 0, is_recovery);
 		} else {
-			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_FUNCTION, string_format("its function failed:\n%s", output ? output : ""));
+			vine_graph_executor_fail_own(e, node, VINE_GRAPH_FAILURE_FUNCTION, string_format("its function failed:\n%s", output), WIFEXITED(status) && WEXITSTATUS(status) == VINE_GRAPH_RETRY_STATUS, is_recovery);
 		}
 		return;
 	}
 	if (result == VINE_RESULT_RESOURCE_EXHAUSTION || result == VINE_RESULT_SANDBOX_EXHAUSTION) {
-		/* Running it again would use as much again. */
-		const struct vine_graph_profile *profile = &e->profiles[node->profile];
+		/* Running it again would use as much again, unless the frontend asked for it. */
 		if (profile->memory > 0) {
-			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_RESOURCES, string_format("it used more than it requested (memory %" PRId64 " MB): %s", profile->memory, vine_result_string(result)));
+			vine_graph_executor_fail_own(e, node, VINE_GRAPH_FAILURE_RESOURCES, string_format("it used more than it requested (memory %" PRId64 " MB): %s", profile->memory, vine_result_string(result)), profile->retry & VINE_GRAPH_RETRY_RESOURCES, is_recovery);
 		} else {
-			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_RESOURCES, string_format("it used more than it requested: %s", vine_result_string(result)));
+			vine_graph_executor_fail_own(e, node, VINE_GRAPH_FAILURE_RESOURCES, string_format("it used more than it requested: %s", vine_result_string(result)), profile->retry & VINE_GRAPH_RETRY_RESOURCES, is_recovery);
 		}
 		return;
 	}
 	if (result == VINE_RESULT_MAX_RETRIES) {
-		vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_WORKERS, string_format("%d workers disconnected while running its task, at times when no other workers were being lost; a task that exceeds the memory of its worker or crashes it makes the worker exit", MAX(e->max_retries, 1) + 1));
+		vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_WORKERS, string_format("%d workers disconnected while running its tasks, at times when no other workers were being lost; a task that exceeds the memory of its worker or crashes it makes the worker exit", MAX((int)node->losses_charged, MAX(e->max_retries, 1) + 1)));
 		return;
 	}
 	struct vine_file *lost = result == VINE_RESULT_INPUT_MISSING ? vine_graph_executor_find_lost_input(node) : NULL;
@@ -1663,6 +1828,11 @@ static void vine_graph_executor_handle_failure(struct vine_graph_executor *e, st
 		} else {
 			vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_INPUT, string_format("its input %s is missing at the Manager", vine_file_source(lost)));
 		}
+		return;
+	}
+	struct vine_file *dead = result == VINE_RESULT_INPUT_MISSING ? vine_graph_executor_find_dead_url(e, node) : NULL;
+	if (dead) {
+		vine_graph_executor_fail_node(e, node, node->node_id, VINE_GRAPH_FAILURE_INPUT, string_format("its input %s could not be fetched: %s", vine_file_source(dead), vine_graph_origin_message(dead)));
 		return;
 	}
 	if (++node->failures > e->max_retries) {
@@ -1748,6 +1918,11 @@ static void vine_graph_executor_handle_node_task(struct vine_graph_executor *e, 
 
 	int restores = is_recovery || node->completed;
 	vine_result_t result = vine_task_get_result(task);
+	/* The worker losses of an attempt carry into the next attempt of the node (vine_graph_executor_submit_task()). */
+	if (!is_recovery) {
+		node->losses_charged = MIN((int64_t)vine_task_get_metric(task, "worker_losses_charged"), VINE_GRAPH_MAX_LOSSES);
+		node->losses_excused = MIN((int64_t)vine_task_get_metric(task, "worker_losses_excused"), VINE_GRAPH_MAX_LOSSES);
+	}
 	/* The Manager keeps at most max_task_stdout_storage (1 GB) of a task's standard output and reports the rest
 	 * missing. That says nothing about the task's outputs, and running the task again prints as much again. */
 	if (result == VINE_RESULT_STDOUT_MISSING && vine_task_get_exit_code(task) == 0) {
@@ -1815,6 +1990,52 @@ int vine_graph_executor_submit_node(struct vine_graph_executor *e, uint64_t node
 	} else if ((failed_parent = vine_graph_executor_find_failed_parent(e, node))) {
 		vine_graph_executor_fail_node(e, node, failed_parent->failure_source_id, VINE_GRAPH_FAILURE_NONE, NULL);
 	}
+	return 0;
+}
+
+int vine_graph_executor_adopt_output(struct vine_graph_executor *e, uint64_t file_id, const char *path)
+{
+	struct vine_graph_mount *mount = e && path ? vine_graph_get_output(e->graph, file_id) : NULL;
+	if (!mount || mount->node->submitted) {
+		return -1;
+	}
+	return vine_manager_data_service_adopt(e->manager, mount->file, path) ? 0 : -1;
+}
+
+int vine_graph_executor_complete_node(struct vine_graph_executor *e, uint64_t node_id)
+{
+	struct vine_graph_node *node = e && !e->error ? vine_graph_get_node(e->graph, node_id) : NULL;
+	if (!node || node->submitted) {
+		return -1;
+	}
+	for (int i = 0; i < node->outputs.count; i++) {
+		struct vine_graph_mount *mount = node->outputs.items[i];
+		if (!vine_manager_data_service_vault_contains(e->manager, mount->file)) {
+			return -1;
+		}
+	}
+	if (vine_graph_link_node(e->graph, node_id) != 0) {
+		return -1;
+	}
+	e->submitted_nodes++;
+	/* The node is completed and anchored as if its task had run and the vault had checkpointed every output. */
+	node->completed = 1;
+	for (int i = 0; i < node->outputs.count; i++) {
+		struct vine_graph_mount *mount = node->outputs.items[i];
+		vine_graph_executor_count_local(e, mount->file);
+		vine_graph_executor_fetch_ready(e, mount->file);
+	}
+	vine_graph_executor_recount(e, node);
+	e->completed_nodes++;
+	e->finished_nodes++;
+	vine_graph_executor_report(e->finished, node);
+	if (e->progress_bar) {
+		progress_bar_update_part(e->progress_bar, e->node_part, 1);
+	}
+	/* Its readers are submitted after it, often in the same batch, so its own outputs are released by the walks of its
+	 * readers, not now, and only its ancestors may be released. */
+	vine_graph_executor_release_from(e, node, 0);
+	debug(D_VINE, "completed node %" PRIu64 " from its adopted outputs", node->node_id);
 	return 0;
 }
 
@@ -2061,6 +2282,11 @@ static void vine_graph_executor_remove_node(struct vine_graph_executor *e, struc
 	if (node->profile != 0) {
 		itable_remove(e->fit_nodes, node->node_id);
 	}
+	struct vine_graph_attempts *attempts = itable_remove(e->attempts, node->node_id);
+	if (attempts) {
+		free(attempts->history);
+		free(attempts);
+	}
 	for (int i = 0; i < node->parents.count; i++) {
 		struct vine_graph_node *parent = node->parents.items[i];
 		if (--parent->live_children == 0 && parent->let_go) {
@@ -2198,6 +2424,7 @@ static void vine_graph_executor_compact_tables(struct vine_graph_executor *e)
 	itable_compact(e->graph->commands);
 	itable_compact(e->task_id_to_node);
 	itable_compact(e->fit_nodes);
+	itable_compact(e->attempts);
 	itable_compact(e->vault_paths);
 	set_compact(e->checkpoint_pending);
 	set_compact(e->checkpoint_parked);

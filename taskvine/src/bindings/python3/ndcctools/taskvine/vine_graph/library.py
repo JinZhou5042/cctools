@@ -50,7 +50,7 @@ import cloudpickle
 
 from .. import utils as library_utils
 
-from .graph import File, Shared, _Attribute, _NoSuchItem, _Ref, _Symbol, replace_symbols
+from .graph import URL, File, Shared, _Attribute, _NoSuchItem, _Ref, _Symbol, replace_symbols
 
 # Sandbox path of the manifest that describes the task.
 MANIFEST = "vine-graph-node.pkl"
@@ -60,6 +60,15 @@ RESULT = "outfile"
 SHARED = "vine-graph-shared.pkl"
 # Library sandbox path of the cached edata.
 EDATA_CACHE = "vine-graph-edata-cache.pkl"
+# Sandbox path of what a Python task that runs as a standard task prepares itself from, as the library does when it
+# starts (run_standalone()).
+STANDALONE = "vine-graph-standalone.pkl"
+# The exit status of a task whose function raised an exception that the task's retry_on lists, which the C executor
+# tries again (VINE_GRAPH_RETRY_STATUS). Any other failure exits with status 1.
+RETRY_STATUS = 75
+
+# The exception classes after which the task that runs may be tried again, from its manifest, or None.
+_retry_on = None
 
 # The shared objects of this library process, by name, which forked tasks inherit.
 _shared = {}
@@ -105,13 +114,14 @@ START_FAILURE_MARK = "vine-graph-library-could-not-start "
 _start_failure = None
 
 
-def prepare(module_names, shared_path, edata_path=None, manager_identity=None):
+def prepare(module_names, shared_path, edata_path=None, manager_identity=None, standalone=False):
     """Prepare this library process when it starts (_prepare()). A failure, such as a module that this Worker cannot
     import, is kept for the tasks to report instead of ending the process, because TaskVine would start the library
-    again and again without telling the Manager why it failed."""
+    again and again without telling the Manager why it failed. A standalone task (run_standalone()) prepares itself so
+    for its one task."""
     global _start_failure
     try:
-        _prepare(module_names, shared_path, edata_path, manager_identity)
+        _prepare(module_names, shared_path, edata_path, manager_identity, standalone)
     except Exception as error:
         _start_failure = f"{START_FAILURE_MARK}{socket.gethostname()}\n{format_user_traceback(error, __file__)}"
         # The library's own output keeps the failure too, for a Manager that watches library logs.
@@ -128,10 +138,11 @@ def start_failure(message):
     return host, report.rstrip()
 
 
-def _prepare(module_names, shared_path, edata_path, manager_identity):
+def _prepare(module_names, shared_path, edata_path, manager_identity, standalone=False):
     """Check that this Worker can run the Manager's tasks, import the modules, then load the shared objects and the
     cached edata, which may need them. Freezing what was loaded keeps the garbage collector from touching that memory,
-    so forked tasks share it instead of copying it."""
+    so forked tasks share it instead of copying it. A standalone task forks nothing, so it skips that, the rehearsal,
+    and learning."""
     if manager_identity is not None:
         identity = runtime_identity()
         mismatched = [f"{key} {identity.get(key)} on this Worker but {value} on the Manager"
@@ -145,6 +156,8 @@ def _prepare(module_names, shared_path, edata_path, manager_identity):
             with open(path, "rb") as stream:
                 blobs = cloudpickle.load(stream)
             objects.update((name, cloudpickle.loads(blob)) for name, blob in blobs.items())
+    if standalone:
+        return
     rehearse()
     _start_learning()
     gc.freeze()
@@ -385,6 +398,8 @@ def file_identity(ref):
     file."""
     if isinstance(ref, File):
         return ("input", ref.path, ref.name)
+    if isinstance(ref, URL):
+        return ("url", ref.url, ref.name)
     return ("output", ref.graph_id, ref.key, ref.path)
 
 
@@ -502,22 +517,57 @@ def load_failure(message):
 def run_node():
     """Run the task described by the sandbox manifest and return its result for the library to write. In a library
     that could not prepare itself, report why instead."""
+    global _retry_on
     if _start_failure is not None:
         sys.stdout.write(_start_failure)
         sys.stdout.flush()
         os._exit(1)
+    _retry_on = None
     try:
         return _run_node()
     except BaseException as error:
         sys.stdout.write(failure_report(error, __file__))
         sys.stdout.flush()
         sys.stderr.flush()
+        # The status tells C whether the task may be tried again. Only an exception of a class of retry_on, matched as
+        # an except clause matches it, says so, so a function that exits with that status itself does not.
+        os._exit(RETRY_STATUS if _retry_on and isinstance(error, _retry_on) else 1)
+
+
+def run_standalone():
+    """Run the task of the sandbox as a standard TaskVine task, as a task of a Function with GPUs runs: prepare this
+    process as the library prepares itself, from the files the task mounts (STANDALONE), limit its native thread pools
+    to the cores it got, run the task as a library call runs it, and write its result where the library would. A
+    failure exits as run_node() exits."""
+    try:
+        with open(STANDALONE, "rb") as stream:
+            module_names, shared_path, edata_path, identity = cloudpickle.load(stream)
+    except BaseException as error:
+        sys.stdout.write(failure_report(error, __file__))
+        sys.stdout.flush()
         os._exit(1)
+    prepare(module_names, shared_path, edata_path, identity, standalone=True)
+    try:
+        from threadpoolctl import threadpool_limits
+        threadpool_limits(limits=max(1, int(os.environ.get("CORES", "1"))))
+    except Exception:
+        pass
+    output = run_node()
+    try:
+        save_result(RESULT, output)
+    except BaseException as error:
+        sys.stdout.write(failure_report(RuntimeError(f"its result cannot be serialized: {error}"), __file__))
+        sys.stdout.flush()
+        os._exit(1)
+    sys.stdout.flush()
+    os._exit(0)
 
 
 def _run_node():
+    global _retry_on
     with open(MANIFEST, "rb") as stream:
         manifest = cloudpickle.load(stream)
+    _retry_on = manifest.get("retry_on")
     objects = {}
 
     def load(entry):

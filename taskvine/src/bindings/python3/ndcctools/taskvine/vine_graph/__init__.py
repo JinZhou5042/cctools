@@ -24,9 +24,9 @@ Executor closes:
         print(executor.submit(sum, [total, *more]).result())
 """
 
-from .graph import CancelledError, Command, File, Function, Graph, Shared, Task, TaskError, TaskFile
+from .graph import URL, CancelledError, Command, File, Function, Graph, Shared, Task, TaskError, TaskFile
 
-__all__ = ["Graph", "Task", "TaskFile", "File", "Command", "Function", "Shared", "Executor", "TaskError",
+__all__ = ["Graph", "Task", "TaskFile", "File", "URL", "Command", "Function", "Shared", "Executor", "TaskError",
            "CancelledError"]
 
 

@@ -71,16 +71,10 @@ class File(_Symbol):
             raise TypeError("a File path must be a string or path-like object")
         if "\0" in path:
             raise ValueError("a File path contains a null byte")
-        if name is not None:
-            name = os.fspath(name)
-            if not isinstance(name, str):
-                raise TypeError("a File name must be a string or path-like object")
-            if "/" in name or _sandbox_name(name) != name:
-                raise ValueError(f"a File name is one file name without a directory, not {name!r}")
-            if reserved_name(name):
-                raise ValueError(f"the name {name!r} is reserved for the runtime in a task sandbox; choose another")
+        if _SCHEME.match(path):
+            raise ValueError(f"{path!r} is a URL; use vg.URL(...) for a remote input")
         self.path = _absolute(path)
-        self.name = name
+        self.name = _input_name(name, "File")
 
     def _as_ref(self):
         return self
@@ -95,6 +89,68 @@ class File(_Symbol):
         if self.name is None:
             return f"File({self.path!r})"
         return f"File({self.path!r}, name={self.name!r})"
+
+
+# The start of a URL: a scheme followed by ://.
+_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+# The schemes of remote inputs that Workers fetch: with curl, and with xrdcp for XRootD.
+URL_SCHEMES = ("http", "https", "ftp", "file", "root")
+
+
+def _input_name(name, what):
+    """Return the name that an input is given in a task sandbox, checked, or None."""
+    if name is None:
+        return None
+    name = os.fspath(name)
+    if not isinstance(name, str):
+        raise TypeError(f"a {what} name must be a string or path-like object")
+    if "/" in name or _sandbox_name(name) != name:
+        raise ValueError(f"a {what} name is one file name without a directory, not {name!r}")
+    if reserved_name(name):
+        raise ValueError(f"the name {name!r} is reserved for the runtime in a task sandbox; choose another")
+    return name
+
+
+class URL(_Symbol):
+    """A remote file that tasks read, which each Worker fetches once from its origin: an http, https, ftp, or file URL,
+    fetched with curl, or a root:// URL of XRootD, fetched with xrdcp and the X509 proxy that X509_USER_PROXY names. A
+    task receives the path of its copy, named like the last part of the URL path when no other input of the task has
+    that name, or name when given. A task whose URL keeps failing to be fetched fails with reason "input" and the error
+    of its origin. A local Executor downloads it once. Never write to an input."""
+
+    __slots__ = ("url", "name")
+
+    def __init__(self, url, name=None):
+        if not isinstance(url, str):
+            raise TypeError("a URL is a string")
+        if "\0" in url or any(c.isspace() for c in url):
+            raise ValueError("a URL holds no spaces or null bytes")
+        match = _SCHEME.match(url)
+        scheme = match.group(0)[:-3].lower() if match else None
+        if scheme not in URL_SCHEMES:
+            raise ValueError(f"a URL starts with one of {', '.join(s + '://' for s in URL_SCHEMES)}, not {url!r}")
+        self.url = url
+        self.name = _input_name(name, "URL")
+
+    @property
+    def basename(self):
+        """The last part of the URL's path, without a query, which names the task's copy by default."""
+        path = self.url.split("://", 1)[1].split("?", 1)[0].split("#", 1)[0]
+        return path.rstrip("/").rsplit("/", 1)[-1] if "/" in path else ""
+
+    def _as_ref(self):
+        return self
+
+    def __eq__(self, other):
+        return isinstance(other, URL) and other.url == self.url and other.name == self.name
+
+    def __hash__(self):
+        return hash((URL, self.url, self.name))
+
+    def __repr__(self):
+        if self.name is None:
+            return f"URL({self.url!r})"
+        return f"URL({self.url!r}, name={self.name!r})"
 
 
 class Shared(_Symbol):
@@ -527,7 +583,8 @@ class TaskError(RuntimeError):
     - "resources": it used more than it requested, as a command that requested memory and exited with status 137, the
       status of a shell whose command was killed by SIGKILL, as the kernel does to a process that runs out of memory
     - "workers": Workers kept disconnecting while they ran it, as when it exceeds their memory or crashes them
-    - "input": a file it reads is missing at the Manager
+    - "input": a file it reads is missing at the Manager, or a URL it reads could not be fetched from its origin
+    - "timeout": it ran longer than its time_limit
     - "retries": more of its attempts failed for other reasons than the setting max-retries allows
     - "submit": it could not be submitted, as when an argument cannot be serialized
     - "result": it completed, but its result cannot be loaded in this process or sent by its Worker
@@ -562,43 +619,52 @@ def _sandbox_name(name):
 
 
 class _Options:
-    """What a task requests of its Worker: cores, memory in MB or None, and GPUs. Equal options are one object
-    (_intern_options()), so the tasks of many Functions and Commands share one, and the Executor turns each into one
-    profile of the C executor. A record is frozen, and unpickling one interns it again."""
+    """What a task requests of its Worker and how it is tried again: cores, memory in MB or None, GPUs, a time limit in
+    seconds or None, the retries after failures of the task itself, and retry_on, the tuple of exception classes those
+    failures must match. Equal options are one object (_intern_options()), so the tasks of many Functions and Commands
+    share one, and the Executor turns each into one profile of the C executor. A record is frozen, and unpickling one
+    interns it again."""
 
-    __slots__ = ("cores", "memory", "gpus")
+    __slots__ = ("cores", "memory", "gpus", "time_limit", "retries", "retry_on")
 
     def __setattr__(self, name, value):
         raise AttributeError("task options are frozen")
 
+    def _values(self):
+        return (self.cores, self.memory, self.gpus, self.time_limit, self.retries, self.retry_on)
+
     def __reduce__(self):
-        return (_intern_options, (self.cores, self.memory, self.gpus))
+        return (_intern_options, self._values())
 
     def __eq__(self, other):
-        return type(other) is _Options and (self.cores, self.memory, self.gpus) == (other.cores, other.memory,
-                                                                                    other.gpus)
+        return type(other) is _Options and self._values() == other._values()
 
     def __hash__(self):
-        return hash((self.cores, self.memory, self.gpus))
+        return hash(self._values())
 
     def __repr__(self):
-        return f"_Options(cores={self.cores}, memory={self.memory}, gpus={self.gpus})"
+        return (f"_Options(cores={self.cores}, memory={self.memory}, gpus={self.gpus}, time_limit={self.time_limit}, "
+                f"retries={self.retries}, retry_on={self.retry_on})")
+
+    def retries_cover(self, error_class):
+        """Return whether a failure seen as an exception of error_class is retried, as an except clause of retry_on
+        would catch it."""
+        return self.retries > 0 and issubclass(error_class, self.retry_on)
 
 
-# (cores, memory, gpus) -> the one _Options of these values. It holds one record per distinct value that a program
-# spells, not one per task.
+# The options as tuples of values -> the one _Options of these values. It holds one record per distinct value that a
+# program spells, not one per task.
 _OPTIONS = {}
 
 
-def _intern_options(cores, memory, gpus):
+def _intern_options(cores, memory, gpus, time_limit=None, retries=0, retry_on=(Exception,)):
     """Return the one _Options of these values."""
-    key = (cores, memory, gpus)
+    key = (cores, memory, gpus, time_limit, retries, retry_on)
     options = _OPTIONS.get(key)
     if options is None:
         options = object.__new__(_Options)
-        object.__setattr__(options, "cores", cores)
-        object.__setattr__(options, "memory", memory)
-        object.__setattr__(options, "gpus", gpus)
+        for name, value in zip(_Options.__slots__, key):
+            object.__setattr__(options, name, value)
         options = _OPTIONS.setdefault(key, options)
     return options
 
@@ -607,15 +673,31 @@ def _intern_options(cores, memory, gpus):
 _DEFAULT_OPTIONS = _intern_options(1, None, 0)
 
 
-def _options(cores, memory=None, gpus=0):
-    """Check what a task requests and return its interned options."""
+def _options(cores, memory=None, gpus=0, time_limit=None, retries=0, retry_on=Exception):
+    """Check what a task requests and how it is tried again, and return its interned options."""
     if type(cores) is not int or cores < 1:
         raise ValueError("cores must be a positive integer")
     if memory is not None and (type(memory) is not int or memory < 1):
         raise ValueError("memory is in MB and must be a positive integer")
     if type(gpus) is not int or gpus < 0:
         raise ValueError("gpus must be a non-negative integer")
-    return _intern_options(cores, memory, gpus)
+    if time_limit is not None:
+        if type(time_limit) not in (int, float) or not time_limit > 0 or time_limit == float("inf"):
+            raise ValueError("time_limit is in seconds and must be a positive number")
+        # Workers count whole seconds.
+        time_limit = max(1, int(-(-time_limit // 1)))
+    if type(retries) is not int or not 0 <= retries <= 1000:
+        raise ValueError("retries must be an integer from 0 to 1000")
+    classes = retry_on if isinstance(retry_on, tuple) else (retry_on,)
+    if not classes or not all(isinstance(c, type) and issubclass(c, BaseException) for c in classes):
+        raise TypeError("retry_on takes an exception class or a tuple of them, as an except clause does")
+    return _intern_options(cores, memory, gpus, time_limit, retries, tuple(dict.fromkeys(classes)))
+
+
+def _check_cache(cache):
+    if type(cache) is not bool:
+        raise TypeError("cache must be True or False")
+    return cache
 
 
 # What name= takes: a label of one word, as TaskVine categories are.
@@ -715,16 +797,29 @@ class Command:
     also be declared by asking for it with task.file(name) before the task is submitted, which only a task of a Graph
     allows, since Executor.submit() submits its task at once.
 
+    Retries and time limits. time_limit (seconds) stops a task that runs longer, which then fails with reason
+    "timeout". retries=k tries a task up to k more times after failures of the task itself, and retry_on narrows which,
+    as an except clause does: each failure is seen as an exception, the function's own exception, CalledProcessError
+    for a command's exit status other than zero, TimeoutError for "timeout", and MemoryError for "resources", and is
+    retried when it is an instance of a class of retry_on, Exception by default. The last failure is the task's
+    TaskError, whose message lists the earlier ones. Losses of Workers and other failures of the infrastructure are
+    retried apart from these (Executor params max-retries).
+
+    cache=True keeps the results and files of its tasks in the store of the Executor (Executor(store=path)), and a
+    later task of the same function, arguments, and input files takes them from there instead of running.
+
     name labels its tasks in errors, notices, and repr; it changes nothing else."""
 
-    __slots__ = ("_template", "_options", "_fields", "_outputs", "_render", "_name", "__weakref__")
+    __slots__ = ("_template", "_options", "_fields", "_outputs", "_render", "_name", "_cache", "__weakref__")
 
-    def __init__(self, template, *, cores=1, memory=None, gpus=0, outputs=(), name=None):
+    def __init__(self, template, *, cores=1, memory=None, gpus=0, time_limit=None, retries=0, retry_on=Exception,
+                 outputs=(), name=None, cache=False):
         if not isinstance(template, str) or not template.strip():
             raise TypeError("a Command takes a command line as a non-empty string")
         if "\0" in template:
             raise ValueError("a command line contains a null byte")
-        self._options = _options(cores, memory, gpus)
+        self._options = _options(cores, memory, gpus, time_limit, retries, retry_on)
+        self._cache = _check_cache(cache)
         fields = _fields_of(template, "command line")
         self._name = _check_label(name)
         self._outputs, self._render = _parse_outputs(outputs)
@@ -769,8 +864,11 @@ class Command:
             extra += f", gpus={options.gpus}"
         if self._outputs:
             extra += f", outputs={list(self._outputs)!r}"
+        extra += _retry_repr(options)
         if self._name is not None:
             extra += f", name={self._name!r}"
+        if self._cache:
+            extra += ", cache=True"
         return f"Command({self._template!r}, cores={options.cores}{extra})"
 
 
@@ -792,14 +890,34 @@ class Function:
     them for other tasks and for reading, and a call that does not write one fails with reason "function". Never write
     to an input file.
 
+    memory (MB) is a request, not a limit: a call holds that memory of its Worker while it runs and sees it as MEMORY.
+    gpus=k runs each task as a standard TaskVine task on a Worker with k GPUs instead of a call of the library, which
+    holds no GPUs: the task starts Python, imports library_modules, and loads the shared objects first, which a call of
+    the library does once per Worker, so it suits tasks that run long compared with that. It sees the GPUs it got in
+    CUDA_VISIBLE_DEVICES, and its library_files in its sandbox under their library names. A task without gpus sees
+    CUDA_VISIBLE_DEVICES empty.
+
+    Retries and time limits. time_limit (seconds) stops a task that runs longer, which then fails with reason
+    "timeout". retries=k tries a task up to k more times after failures of the task itself, and retry_on narrows which,
+    as an except clause does: each failure is seen as an exception, the function's own exception, CalledProcessError
+    for a command's exit status other than zero, TimeoutError for "timeout", and MemoryError for "resources", and is
+    retried when it is an instance of a class of retry_on, Exception by default. The last failure is the task's
+    TaskError, whose message lists the earlier ones. Losses of Workers and other failures of the infrastructure are
+    retried apart from these (Executor params max-retries).
+
+    cache=True keeps the results and files of its tasks in the store of the Executor (Executor(store=path)), and a
+    later task of the same function, arguments, and input files takes them from there instead of running.
+
     name labels its tasks in errors, notices, and repr; it changes nothing else."""
 
-    __slots__ = ("_func", "_options", "_name", "_outputs", "_render", "__weakref__")
+    __slots__ = ("_func", "_options", "_name", "_outputs", "_render", "_cache", "__weakref__")
 
-    def __init__(self, func, *, cores=1, name=None, outputs=()):
+    def __init__(self, func, *, cores=1, memory=None, gpus=0, time_limit=None, retries=0, retry_on=Exception, name=None,
+                 outputs=(), cache=False):
         if isinstance(func, (Command, Function, _Symbol)) or not callable(func):
             raise TypeError("a Function takes a function, such as Function(func, cores=2)")
-        self._options = _options(cores)
+        self._options = _options(cores, memory, gpus, time_limit, retries, retry_on)
+        self._cache = _check_cache(cache)
         self._name = _check_label(name)
         self._outputs, self._render = _parse_outputs(outputs)
         self._func = func
@@ -811,6 +929,15 @@ class Function:
     @property
     def cores(self):
         return self._options.cores
+
+    @property
+    def memory(self):
+        """The MB of memory its tasks request, or None."""
+        return self._options.memory
+
+    @property
+    def gpus(self):
+        return self._options.gpus
 
     @property
     def outputs(self):
@@ -825,12 +952,47 @@ class Function:
 
     def __repr__(self):
         func = getattr(self._func, "__name__", None) or type(self._func).__name__
+        options = self._options
         extra = ""
+        if options.memory is not None:
+            extra += f", memory={options.memory}"
+        if options.gpus:
+            extra += f", gpus={options.gpus}"
+        extra += _retry_repr(options)
         if self._outputs:
             extra += f", outputs={list(self._outputs)!r}"
         if self._name is not None:
             extra += f", name={self._name!r}"
-        return f"Function({func}, cores={self._options.cores}{extra})"
+        if self._cache:
+            extra += ", cache=True"
+        return f"Function({func}, cores={options.cores}{extra})"
+
+
+def _retry_repr(options):
+    """Return the part of the repr of a Function or Command that shows its time limit and retries."""
+    extra = ""
+    if options.time_limit is not None:
+        extra += f", time_limit={options.time_limit}"
+    if options.retries:
+        extra += f", retries={options.retries}"
+        if options.retry_on != (Exception,):
+            names = [c.__name__ for c in options.retry_on]
+            extra += f", retry_on={names[0] if len(names) == 1 else '(' + ', '.join(names) + ')'}"
+    return extra
+
+
+def _add_common_properties(cls):
+    """Give a Function or Command the properties of its time limit, retries, and cache."""
+    cls.time_limit = property(lambda self: self._options.time_limit, doc="Seconds its tasks may run, or None.")
+    cls.retries = property(lambda self: self._options.retries, doc="New attempts after failures of a task itself.")
+    cls.retry_on = property(lambda self: self._options.retry_on,
+                            doc="The exception classes that failures must match to be retried.")
+    cls.cache = property(lambda self: self._cache, doc="Whether results are kept in the store of the Executor.")
+    return cls
+
+
+_add_common_properties(Command)
+_add_common_properties(Function)
 
 
 def _callable(func):
@@ -1163,11 +1325,11 @@ def _check_input_names(task, outputs):
     a file it writes."""
     named = {}
     for ref in task._reads:
-        if type(ref) is not File or ref.name is None:
+        if (type(ref) is not File and type(ref) is not URL) or ref.name is None:
             continue
         other = named.setdefault(ref.name, ref)
         if other is not ref:
-            raise ValueError(f"{task!r} reads two files named {ref.name!r}: {other.path} and {ref.path}")
+            raise ValueError(f"{task!r} reads two files named {ref.name!r}: {other!r} and {ref!r}")
         if _clashes_with_output(ref.name, outputs):
             raise ValueError(f"{task!r} reads {ref!r} under the name of a file it writes")
 
@@ -1386,7 +1548,7 @@ class Graph:
             if kind is Shared:
                 shared.setdefault(symbol.name, None)
                 return symbol
-            if kind is File:
+            if kind is File or kind is URL:
                 reads.setdefault(symbol, symbol)
                 return symbol
             if kind is TaskFile:

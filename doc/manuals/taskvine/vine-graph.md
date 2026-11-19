@@ -172,6 +172,23 @@ Once the task completed, the file can be read whether or not a task reads it:
 Like results, files are read before the Executor closes. A path or content
 that was returned once stays readable afterwards.
 
+### Remote inputs
+
+`vg.URL(url, name=None)` is a remote file that tasks read. Each worker
+fetches it once from its origin and keeps it while the workflow runs: `http`,
+`https`, `ftp`, and `file` URLs with curl, and `root://` URLs of XRootD with
+xrdcp, which uses the X509 proxy that `X509_USER_PROXY` names. A task receives
+the path of its copy, named like the last part of the URL path, or `name`.
+An origin that fails three times, as a URL that returns 404 does, fails the
+tasks that read it with reason `"input"` and the origin's error (Manager
+tuning `max-origin-failures`). `vg.File("https://...")` raises and says to use
+`vg.URL`. A local Executor downloads each URL once into its run directory.
+
+```python
+page = vg.URL("https://example.org/data.csv")
+rows = executor.submit(count_rows, page)
+```
+
 ## Commands
 
 A `vg.Command(template, *, cores=1, memory=None, gpus=0, outputs=(), name=None)`
@@ -258,9 +275,10 @@ Graph allows, because a submitted task has started already.
 
 ## Functions of several cores
 
-A `vg.Function(func, *, cores=1, name=None, outputs=())` is a Python
-function whose tasks use `cores` cores of a worker, as `cores` does for a
-Command. It goes wherever a function does, in `graph.add()` and
+A `vg.Function(func, *, cores=1, memory=None, gpus=0, time_limit=None,
+retries=0, retry_on=Exception, name=None, outputs=(), cache=False)` is a
+Python function whose tasks use `cores` cores of a worker, as `cores` does for
+a Command. It goes wherever a function does, in `graph.add()` and
 `executor.submit()`, and a plain function uses one core. `name` labels its
 tasks, and `outputs` declares the files that each task writes in its working
 directory, with placeholders filled from keyword arguments as for a Command. A
@@ -303,6 +321,76 @@ no worker is connected. The same holds for a Command of several cores, or of
 more memory or GPUs than any worker has.
 `local=True` runs every task in the Executor's own process and ignores
 `cores`.
+
+The library shares its worker with other tasks: it holds no resources itself,
+and each call holds the cores and the `memory` (MB) it requests while it runs,
+and sees them as `CORES` and `MEMORY`. Memory is a request, not a limit.
+
+### Functions with GPUs
+
+A task of `vg.Function(func, gpus=k)` runs as a standard TaskVine task on a
+worker with `k` free GPUs, beside the library, instead of as a call of the
+library. It sees its GPUs in `CUDA_VISIBLE_DEVICES`, and every other task sees
+that variable empty. Each such task starts Python, checks the worker's
+environment, imports `library_modules`, and loads the shared objects and the
+cached edata, which a library call does once per worker, so `gpus=` suits
+tasks that run long compared with that start. Its `library_files` sit in its
+sandbox under their library names. An exit status above 128 means that a
+signal killed it, which reads `"resources"` when it requested `memory`. To get
+an exact amount of memory, request `memory`, since the worker otherwise gives
+the task a share of its memory for its share of GPUs.
+
+## Retries and time limits
+
+Functions and Commands take `time_limit`, `retries`, and `retry_on`:
+
+```python
+fetch = vg.Function(download, retries=3, retry_on=ConnectionError, time_limit=600)
+simulate = vg.Command("run.sh {cfg}", memory=4000, retries=2)
+```
+
+- `time_limit` (seconds) stops a task that runs longer. It fails with reason
+  `"timeout"`. A local Executor applies it to Commands only.
+- `retries=k` runs a task up to `k` more times after failures of the task
+  itself. `retry_on` says which, as an `except` clause does: each failure is
+  seen as an exception, the function's own, `subprocess.CalledProcessError`
+  for a command's non-zero exit, `TimeoutError` for `"timeout"`, and
+  `MemoryError` for `"resources"`, and is retried when it is an instance of a
+  class of `retry_on`, `Exception` by default.
+- After the last attempt the task fails with the reason of that attempt, and
+  its message starts with the history, such as `it failed 3 times: timeout,
+  timeout, function`.
+- Lost workers and infrastructure failures are retried apart from these, by
+  `max-retries`. A task is charged at most `max-retries + 1` worker losses
+  across all its attempts, so a task that crashes its workers fails with
+  reason `"workers"` however its other failures were retried.
+
+## Caching results across runs
+
+`vg.Executor(store=path)` keeps the results and declared files of tasks of
+`cache=True` in a directory, and a later task with the same key takes them
+from there without running, in this run or a later one:
+
+```python
+simulate = vg.Function(run_sim, cache=True)
+with vg.Executor(port=9123, store="~/.cache/my-project") as executor:
+    executor.run(graph)
+```
+
+The key covers the function (its code, the values it captures and the globals
+it reaches; for a function of the program's own modules also the path, size,
+and modification time of the module file), or the Command's template and
+outputs, the arguments serialized, the keys of the tasks it reads with the
+selection or file read of each, and the path, size, and modification time of
+each `vg.File`, a directory by a walk of its tree. A task that reads a task
+without `cache=True`, a `vg.URL`, or a `vg.Shared` object is not cached and
+runs as usual, with one notice per function. The key misses files opened by
+name inside the function, environment variables, randomness, compiled
+extension code, and a File changed without a change of size or modification
+time. A serialization that is not stable, such as a set of strings, causes a
+miss, never a wrong hit. To forget an entry, delete its directory. `cache=True`
+without a store raises `ValueError`. At close the Executor prints a line such
+as `vine_graph: store /path: 120 hits, 3 stored, 2 not cacheable`.
 
 ## Running on workers
 
@@ -575,7 +663,7 @@ where the function ran. Its fields:
 | --- | --- |
 | `task` | The Task that has no result. |
 | `source` | The Task whose own failure explains it, which is `task` itself when it failed on its own. |
-| `reason` | Why the source failed: `"function"` (its function raised or did not write a declared file), `"command"` (its command exited with an error status or did not write a declared file), `"signal"` (its function was killed by a signal), `"resources"` (it used more than it requested), `"workers"` (workers kept disconnecting while they ran it), `"input"` (a file it reads is missing), `"retries"`, `"submit"` (it could not be submitted, as when an argument cannot be serialized), or `"result"` (it completed, but its result cannot be loaded or sent). More reasons may be added. |
+| `reason` | Why the source failed: `"function"` (its function raised or did not write a declared file), `"command"` (its command exited with an error status or did not write a declared file), `"signal"` (its function was killed by a signal), `"resources"` (it used more than it requested), `"workers"` (workers kept disconnecting while they ran it), `"input"` (a file it reads is missing, or a URL could not be fetched), `"timeout"` (it ran longer than its `time_limit`), `"retries"`, `"submit"` (it could not be submitted, as when an argument cannot be serialized), or `"result"` (it completed, but its result cannot be loaded or sent). More reasons may be added. |
 | `exception` | The exception that the source's function raised, or `None`. |
 | `exit_code` | The exit status of the source's command, or `None`. |
 
@@ -759,6 +847,7 @@ run_info_template)` takes only keywords:
 | `ssl` | `None` | A `(key, certificate)` pair for TLS between the manager and its workers. |
 | `staging_path` | `None` | The manager's staging directory. |
 | `run_info_path`, `run_info_template` | `vine-run-info`, `None` | Where the manager writes its logs. |
+| `store` | `None` | A directory that keeps the results of tasks of `cache=True` across runs. |
 
 `params` is the escape hatch to TaskVine tuning: its names follow TaskVine and
 may change with it. It takes these settings:
@@ -766,7 +855,7 @@ may change with it. It takes these settings:
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `task-priority-mode` | `largest-input-first` | Order of ready tasks: `largest-input-first`, `depth-first`, or `fifo`. |
-| `max-retries` | `5` | Failed attempts allowed per task for failures other than its function raising. |
+| `max-retries` | `5` | Failed attempts allowed per task for failures other than its own, and worker losses charged to it, less one (at most 62). |
 | `release-outputs` | `1` | `1` releases a result once every task that reads it is safe. `0` keeps every result. |
 | `shared-directory` | none | A directory that the manager and every worker mount at the same path, such as a shared file system, which then holds the background copies of large results. |
 | `edata-cache` | `0` | Bytes of task functions and arguments of the first `submit()` or `run()` call that the library loads when it starts, so tasks do not fetch them. |
@@ -792,3 +881,10 @@ removes those paths too. Input files are never modified.
 - On workers, inputs keep their base names in the sandbox, as they did
   locally, and a directory is accepted as a File.
 - Tasks that request no GPUs now see `CUDA_VISIBLE_DEVICES` empty.
+- `Function` takes `memory`, `gpus`, `time_limit`, `retries`, `retry_on`, and
+  `cache`, and `Command` takes `time_limit`, `retries`, `retry_on`, and
+  `cache`. A new reason, `"timeout"`, reports a time limit.
+- The library shares its worker (TaskVine's pool mode), so commands and GPU
+  tasks run beside it and an idle library is no longer removed for them.
+- `vg.URL` reads remote inputs, `vg.File` of a URL raises, and
+  `Executor(store=)` caches results across runs.

@@ -61,7 +61,10 @@ def installed(manager, name, modules=(), files=None, shared=None, edata_cache=No
         # A task sees only the GPUs it requested, and calls request none, so the library process and the calls it
         # forks see CUDA_VISIBLE_DEVICES empty.
         library.set_env_var("CUDA_VISIBLE_DEVICES", "")
-        # Without a resource request, each instance takes its whole Worker with one function slot per core.
+        # The library shares its Worker (pool mode): it holds no cores, memory, or GPUs itself, and each call holds the
+        # cores and memory it requests while it runs, so commands and Python tasks with GPUs run beside it, and an idle
+        # instance stays. It has one function slot per core of its Worker.
+        library.set_library_pool(True)
         manager.install_library(library)
         installed_library = True
         yield run_node.__name__
