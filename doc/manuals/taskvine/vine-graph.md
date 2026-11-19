@@ -33,8 +33,7 @@ big = dict(cores=2, retries=1)
 models = [g.add(vg.Function(train, data, seed, lr=0.1), **big) for seed in range(4)]
 best = g.add(vg.Function(max, models))
 top = g.add(vg.Command("sort -n {t} | tail -3 > top.txt", t=table.file("table.csv")), outputs=["top.txt"], time_limit=60)
-mean = g.add(vg.Function(round, s["mean"], 2))
-note = g.add(vg.Command("echo mean={m} > note.txt", m=mean), outputs=["note.txt"])
+note = g.add(vg.Command("echo mean={m} > note.txt", m=s["mean"]), outputs=["note.txt"])
 n = g.add(vg.Function(count_lines, top.file("top.txt")))
 
 with vg.Executor(local=True) as ex:
@@ -51,12 +50,14 @@ with vg.Executor(local=True) as ex:
 
 Three rules cover the whole interface:
 
-- **`vg.Function` and `vg.Command` hold what to run and its arguments.**
-  `vg.Function(func, *args, **kwargs)` calls `func(*args, **kwargs)`, and
-  every keyword goes to `func`. `vg.Command(template, **fields)` fills the
-  placeholders of a shell command line.
+- **`vg.Function`, `vg.Command`, and `vg.Expand` hold what to run and its
+  arguments.** `vg.Function(func, *args, **kwargs)` calls
+  `func(*args, **kwargs)`, and every keyword goes to `func`.
+  `vg.Command(template, **fields)` fills the placeholders of a shell command
+  line. `vg.Expand(builder, *args, **kwargs)` decides more tasks from results
+  (see [Expanding](#expanding)).
 - **`g.add(spec, **settings)` is the only way to make a task.** It takes
-  exactly one positional argument, a Function or a Command, and every setting
+  exactly one positional argument, a Function, Command, or Expand, and every setting
   (`cores`, `retries`, `outputs`, ...) is a keyword of `add()`. A dictionary of
   settings, such as `big` above, applies the same settings to many tasks.
 - **`ex.run(g)` runs and waits, `ex.submit(g)` starts.** `run(g)` returns
@@ -68,8 +69,8 @@ Three rules cover the whole interface:
 item of it (`t["k"]`, or an attribute with `t.attr("name")`), a list, tuple,
 set, dictionary, or dataclass that holds tasks, or a declared output file
 (`t.file(name)`). A Function gets the value, or a local path for a file. A
-Command gets the sandbox path of a file, or `str()` of a result. A task starts
-as soon as what it reads exists.
+Command gets the sandbox path of a file, or `str()` of a result or of an item
+of it. A task starts as soon as what it reads exists.
 
 Read results **before the Executor closes**: a result returned once stays on
 its Task, one never read is gone. `local=True` runs tasks in this process
@@ -84,7 +85,7 @@ waits for it, and `done()`, `failed()`, `cancelled()`, and `cancel()` tell and
 change its state. `result()` of an unsubmitted task raises `RuntimeError`. A
 live task is numbered by its Executor, as in `Task(7, train)`.
 
-`task.func` is the Function or Command, and `task.args` and `task.kwargs` its
+`task.func` is the Function, Command, or Expand, and `task.args` and `task.kwargs` its
 arguments. `task.readers` lists the tasks that read it, and `task.key` is its
 key in the Graph. The settings given to `add()` are read back from
 `task.func`, as in `task.func.cores`.
@@ -210,12 +211,14 @@ with vg.Executor(local=True) as ex:
 ```
 
 Fields are inserted shell-quoted. A `vg.File` or a `TaskFile` becomes its
-sandbox path, a Task becomes `str()` of its result, and any other value
-becomes `str()` of itself. A flat list or tuple inserts each element quoted on
-its own, separated by spaces. Every placeholder needs a field and every field
-a placeholder. Write `{{` and `}}` for braces. A field cannot be a selection
-such as `t["k"]`, a `vg.Shared`, a set, or a nested container: compute those
-in a Python task and pass that task, as `mean` in the first example does.
+sandbox path, a Task becomes `str()` of its result, an item or attribute of a
+result such as `t["k"]` or `t.attr("x")` becomes `str()` of that value, as in
+`m=s["mean"]` in the first example, and any other value becomes `str()` of
+itself. A flat list or tuple inserts each element quoted on its own, separated
+by spaces. Every placeholder needs a field and every field a placeholder.
+Write `{{` and `}}` for braces. A field cannot be a `vg.Shared`, a set, or a
+dictionary or other container that holds tasks: compute those in a Python
+task and pass that task.
 
 A non-zero exit status fails the task, and its `TaskError` carries the status
 as `exit_code` and ends with the tail of standard error.
@@ -374,6 +377,72 @@ cancelled task raises `vg.CancelledError`, a `RuntimeError`. Leaving the
 `with` block normally waits for running tasks. Leaving it with an exception
 discards the results.
 
+### Expanding
+
+When the tasks to run depend on a result, such as one task per file of a
+listing, add a `vg.Expand(builder, *args, **kwargs)`. Once every task its
+arguments hold finished, `builder(*values)` runs once, in the program's
+process, and returns a list of Functions, Commands, or Expands. Each becomes a
+task with the settings given to `g.add()` for the Expand, and the Expand's
+result is the list of their results, in order. Tasks that read the Expand
+read that list. The Executor expands by itself: `ex.submit(g)` is enough, with
+no `result()` in between.
+
+```python
+import ndcctools.taskvine.vine_graph as vg
+
+def list_files(dataset):
+    return [f"{dataset}/file{index}.root" for index in range(4)]
+
+def process(path):
+    index = int(path.rsplit("file", 1)[1].split(".")[0])
+    return {"electrons": index + 1, "muons": 2 * index}
+
+def per_file(paths):
+    return [vg.Function(process, path) for path in paths]
+
+def merge(histograms):
+    merged = {}
+    for histogram in histograms:
+        for region, count in histogram.items():
+            merged[region] = merged.get(region, 0) + count
+    return merged
+
+def fit(count, step):
+    return count / (step + 1)
+
+def refine(count, step=0):
+    if step == 2:
+        return [vg.Function(round, count, 3)]
+    return [vg.Expand(refine, vg.Function(fit, count, step), step + 1)]
+
+g = vg.Graph()
+files = g.add(vg.Function(list_files, "/data/run7"))
+histograms = g.add(vg.Expand(per_file, files), cores=2)
+merged = g.add(vg.Function(merge, histograms))
+fits = {region: g.add(vg.Expand(refine, merged[region])) for region in ("electrons", "muons")}
+
+with vg.Executor(local=True) as ex:
+    ex.run(g)
+    assert merged.result() == {"electrons": 10, "muons": 12}
+    assert fits["muons"].result() == [[[6.0]]]
+```
+
+`per_file` returns one task per file, each of two cores, and `merge` reads
+their list. `refine` decides each round from the last: an Expand also takes a
+Function, Command, or Expand directly as an argument, which becomes a task of
+its own that the Expand reads, so each round reads the fit of the round
+before, and the result nests as the Expands do.
+
+An Expand's arguments are those of a Function. Its builder never runs again,
+also when results are recomputed after a lost worker. It fails with reason
+`"expand"` when the builder raises (its exception is in the `TaskError`),
+returns anything but a list of specs, or returns a task that reads the Expand
+or a task that reads it. A failed or cancelled input fails or cancels it
+without a call, and cancelling it cancels the tasks it expanded into. Those
+tasks have no Task of your own: read them through the Expand's result, and
+`ex.progress()` counts them. `g.add()` takes no `outputs` for an Expand.
+
 ### The first to finish
 
 `ex.as_completed(tasks, timeout=None)` yields the given live tasks as they
@@ -412,7 +481,7 @@ message includes the traceback. Its fields:
 | --- | --- |
 | `task` | The Task that has no result. |
 | `source` | The Task whose own failure explains it, which is `task` itself when it failed on its own. |
-| `reason` | Why the source failed: `"function"` (its function raised or did not write a declared file), `"command"` (its command exited with an error status or did not write a declared file), `"signal"` (its function was killed by a signal), `"resources"` (it used more than it requested), `"workers"` (workers kept disconnecting while they ran it), `"input"` (a file it reads is missing, or a URL could not be fetched), `"timeout"` (it ran longer than its `time_limit`), `"retries"`, `"submit"` (it could not be submitted, as when an argument cannot be serialized), or `"result"` (it completed, but its result cannot be loaded or sent). More reasons may be added. |
+| `reason` | Why the source failed: `"function"` (its function raised or did not write a declared file), `"command"` (its command exited with an error status or did not write a declared file), `"signal"` (its function was killed by a signal), `"resources"` (it used more than it requested), `"workers"` (workers kept disconnecting while they ran it), `"input"` (a file it reads is missing, or a URL could not be fetched), `"timeout"` (it ran longer than its `time_limit`), `"retries"`, `"submit"` (it could not be submitted, as when an argument cannot be serialized), `"expand"` (its builder failed, see [Expanding](#expanding)), or `"result"` (it completed, but its result cannot be loaded or sent). More reasons may be added. |
 | `exception` | The exception that the source's function raised, or `None`. |
 | `exit_code` | The exit status of the source's command, or `None`. |
 
