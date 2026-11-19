@@ -348,6 +348,14 @@ void vine_task_set_retries(struct vine_task *t, int64_t max_retries)
 	}
 }
 
+void vine_task_set_worker_losses(struct vine_task *t, int charged, int excused)
+{
+	t->worker_losses_charged = MAX(0, charged);
+	t->worker_losses_excused = MAX(0, excused);
+	/* Charged losses are tries used, so the task has max_retries + 1 - charged tries left. */
+	t->try_count = t->worker_losses_charged;
+}
+
 void vine_task_set_max_forsaken(struct vine_task *t, int64_t max_forsaken)
 {
 	if (max_forsaken < 0) {
@@ -834,6 +842,8 @@ int64_t vine_task_get_metric(struct vine_task *t, const char *name)
 	METRIC(bytes_received);
 	METRIC(bytes_sent);
 	METRIC(bytes_transferred);
+	METRIC(worker_losses_charged);
+	METRIC(worker_losses_excused);
 	return 0;
 }
 
