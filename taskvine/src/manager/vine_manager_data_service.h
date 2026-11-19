@@ -92,6 +92,15 @@ int vine_manager_data_service_copy_reply(struct vine_manager *manager, struct vi
 /* Declare a regular local file as a workflow-cached VINE_FILE served through the vault. Return NULL on failure.
  * The caller keeps the local source unchanged until undeclaration. */
 struct vine_file *vine_manager_data_service_declare_file(struct vine_manager *manager, const char *source_path);
+/* Install a stored file or directory at path as the vault checkpoint of the temporary file temp, under temp's cache
+ * name, as if a checkpoint had received it: tasks that read temp get it from the vault, a small one with the task over
+ * the control link, and it survives the loss of every Worker. temp becomes created, with the size of path, so its
+ * readers need no producer to run. The entry is a link to path, which the caller keeps unchanged until the entry is
+ * removed, as when temp is pruned or undeclared. Removing the entry never deletes path. A regular file of at most
+ * VINE_DATA_INLINE_BYTES counts against the vault limit as a checkpoint that came inline does, and a larger entry does
+ * not, since the vault only links to it. Return 1 on success, or 0 with errno set when temp is not a VINE_TEMP, already
+ * has a vault entry or a receive in progress (EEXIST), or path is neither a regular file nor a directory. */
+int vine_manager_data_service_adopt(struct vine_manager *manager, struct vine_file *temp, const char *path);
 /* A declared file up to this many bytes travels with its task over the control link, like any local input, instead of
  * through the data port, and a checkpoint up to this many bytes comes back over the control link. A connection of its own costs more than such a file, and every connection occupies an entry
  * of the host's connection tracking table for minutes after it closes. */
