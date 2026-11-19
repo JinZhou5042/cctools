@@ -109,8 +109,8 @@ class Executor:
     """Where tasks run: TaskVine Workers that connect to port, or to the Manager named name through the catalog, or,
     with local=True, this process, one task at a time in the order they were submitted, for debugging without Workers.
 
-    submit(func, *args) starts one task at once and returns its Task. submit(graph) makes the tasks of a Graph live and
-    returns at once, and run(graph) does so, waits for them, and returns the results of the Graph's sinks. From then on
+    submit(vg.Function(func), *args) starts one task at once and returns its Task. submit(graph) makes the tasks of a
+    Graph live and returns at once, and run(graph) does so, waits for them, and returns the results of the Graph's sinks. From then on
     every Task behaves alike, whatever made it: result() waits for it, and cancel() cancels it. A task that reads a Task
     starts once its input exists, so work whose dependencies are known is submitted up front, and a decision that
     depends on a result is ordinary control flow around result(). as_completed() yields tasks as they finish, for
@@ -120,9 +120,9 @@ class Executor:
 
         with vg.Executor(port=9123) as executor:
             results = executor.run(graph)
-            task = executor.submit(load, "more.root")
+            task = executor.submit(vg.Function(load), "more.root")
             if task.result() > 0:
-                executor.submit(fit, task)
+                executor.submit(vg.Function(fit), task)
 
     Python tasks run in a TaskVine library on the Workers, and commands as standard TaskVine tasks. The library imports
     library_modules when it starts and loads shared, a dictionary from names to objects that tasks take as
@@ -254,8 +254,8 @@ class Executor:
     # Submission.
 
     def submit(self, func, /, *args, **kwargs):
-        """Start a task that calls func, a function or a Function, with these arguments, or runs a Command with values
-        for its placeholders, and return its Task at once. Files and live Tasks of this Executor, with their selections
+        """Start a task that calls a Function with these arguments, or runs a Command with values for its placeholders,
+        and return its Task at once. Files and live Tasks of this Executor, with their selections
         and files, may appear anywhere inside the arguments of a function. A task that cannot start, as when an
         argument cannot be serialized, fails, and its result() raises.
 
@@ -270,7 +270,7 @@ class Executor:
         self._check_open()
         self._check_cache(func)
         with self._lock:
-            task = self._calls._add(self._last_task + 1, func, args, kwargs)
+            task = self._calls._add(self._last_task + 1, func, args, kwargs, "submit()")
             with self._runner.first_submission():
                 self._start(task)
         return task

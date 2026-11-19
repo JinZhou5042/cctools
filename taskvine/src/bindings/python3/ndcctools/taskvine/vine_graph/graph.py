@@ -767,7 +767,7 @@ def _task_outputs(func, kwargs):
 
 
 class Command:
-    """A shell command line that tasks run, as a function is for Python tasks: g.add(command, **values) or
+    """A shell command line that tasks run, as a Function is for Python tasks: g.add(command, **values) or
     executor.submit(command, **values) makes a task that runs it in its sandbox.
 
     Placeholders such as {name} take the values given by name, shell-quoted: a File, or a file a task writes
@@ -835,8 +835,8 @@ class Command:
 class Function:
     """A Python function that tasks call with several cores of a Worker, or with files they write, as a Command runs a
     command line with them: g.add(Function(func, cores=4), *args) or executor.submit(Function(func, cores=4), *args)
-    makes a task that calls func with these arguments, and a Function is used in their place wherever a function is. A
-    plain function, or cores=1, uses one core.
+    makes a task that calls func with these arguments. Every Python task is a Function: g.add() and submit() take no
+    bare function. cores=1 uses one core.
 
     A Worker runs the calls of an Executor in one library with a slot per core, and a call of cores=k occupies k slots,
     so a Worker of 8 cores runs eight calls of one core, four of two, or two of four at a time. The library limits the
@@ -930,6 +930,16 @@ _add_common_properties(Function)
 def _callable(func):
     """Return what a Python task calls: the function of a Function, or func itself."""
     return func._func if type(func) is Function else func
+
+
+def _check_task_kind(func, method):
+    """Raise TypeError unless func, the first argument of method, is a Function or a Command."""
+    if type(func) is Function or isinstance(func, Command):
+        return
+    name = getattr(func, "__name__", None) if callable(func) and not isinstance(func, _Symbol) else None
+    if name:
+        raise TypeError(f"{method} takes a vg.Function or vg.Command; wrap {name} as vg.Function({name})")
+    raise TypeError(f"{method} takes a vg.Function or vg.Command followed by its arguments, not {func!r}")
 
 
 class TaskFile(_Symbol):
@@ -1326,8 +1336,7 @@ class Graph:
         raise TypeError("a Graph holds the state of its tasks, and cannot be pickled")
 
     def add(self, func, /, *args, **kwargs):
-        """Add a task that calls func, a function or a Function, with these arguments, or runs a Command with values
-        for its placeholders, and return its Task, which becomes live when an Executor takes the Graph. Tasks of this
+        """Add a task that calls a Function with these arguments, or runs a Command with values for its placeholders, and return its Task, which becomes live when an Executor takes the Graph. Tasks of this
         Graph and live tasks of its Executor, their selections and files, and Files may appear anywhere inside the
         arguments of a function."""
         while self._next_key in self._tasks:
@@ -1336,8 +1345,9 @@ class Graph:
         self._next_key += 1
         return self._add(key, func, args, kwargs)
 
-    def _add(self, key, func, args, kwargs):
-        """Record a task under key and return it."""
+    def _add(self, key, func, args, kwargs, method="g.add()"):
+        """Record a task of a Function or Command under key and return it."""
+        _check_task_kind(func, method)
         command = isinstance(func, Command)
         if command:
             if args:
@@ -1351,11 +1361,9 @@ class Graph:
                 if extra:
                     problems.append(f"no placeholder for {', '.join(extra)}")
                 raise TypeError(f"{func!r}: {'; '.join(problems)}")
-        elif type(func) is not Function and (isinstance(func, _Symbol) or not callable(func)):
-            raise TypeError("a task needs a function or a Command followed by its arguments")
         if key in self._tasks:
             raise ValueError(f"a task with key {key!r} already exists")
-        outputs = _task_outputs(func, kwargs) if (command or type(func) is Function) and func._outputs else ()
+        outputs = _task_outputs(func, kwargs) if func._outputs else ()
         task = Task(self, key, func)
         self._record_arguments(task, args, kwargs)
         if outputs:

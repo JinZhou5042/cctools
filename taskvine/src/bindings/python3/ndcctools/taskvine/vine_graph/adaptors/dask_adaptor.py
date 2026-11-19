@@ -24,7 +24,7 @@ from .dask_common import (
     resolve_graph_key_if_task,
 )
 from .dask_task_spec import DaskTaskSpecConverter
-from ..graph import Graph, _FileRef, _Ref, replace_symbols
+from ..graph import Function, Graph, _FileRef, _Ref, replace_symbols
 
 
 def from_dask(dsk, expand_subgraphs=False):
@@ -35,7 +35,7 @@ def from_dask(dsk, expand_subgraphs=False):
     # A Graph takes each task after the tasks it reads, and a Dask graph lists them in any order.
     for key in _upstream_first(tasks):
         func, args, kwargs = tasks[key]
-        graph._add(key, func, args, kwargs)
+        graph._add(key, func if isinstance(func, Function) else Function(func), args, kwargs)
     return graph
 
 

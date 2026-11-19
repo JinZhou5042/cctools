@@ -6,9 +6,9 @@
 
 A Graph holds tasks, Python calls or shell commands, and the data they pass to each other. A task uses one core of a
 Worker, and vg.Function(func, cores=k) and vg.Command(line, cores=k) make tasks that use k; a Command also requests
-memory and gpus. An Executor is where tasks
-run: submit(func, *args) starts one task at once and returns its Task, submit(graph) makes the tasks of a Graph live,
-and run(graph) also waits for them and returns the results of its sinks, the tasks that no task reads. From then on a
+memory and gpus. g.add() and submit() take a vg.Function or a vg.Command, never a bare function. An Executor is where
+tasks run: submit(vg.Function(func), *args) starts one task at once and returns its Task, submit(graph) makes the
+tasks of a Graph live, and run(graph) also waits for them and returns the results of its sinks, the tasks that no task reads. From then on a
 Task behaves alike whatever made it: result() waits for it and returns its result. A task that reads a Task starts once
 its input exists, and as_completed() yields whichever of several tasks finishes first. Results are read before the
 Executor closes:
@@ -16,12 +16,12 @@ Executor closes:
     import ndcctools.taskvine.vine_graph as vg
 
     g = vg.Graph()
-    total = g.add(sum, [g.add(abs, -1), g.add(abs, -2)])
+    total = g.add(vg.Function(sum), [g.add(vg.Function(abs), -1), g.add(vg.Function(abs), -2)])
 
     with vg.Executor(port=9123) as executor:
         print(executor.run(g)[total])
-        more = [executor.submit(abs, -value) for value in range(3, 6)]
-        print(executor.submit(sum, [total, *more]).result())
+        more = [executor.submit(vg.Function(abs), -value) for value in range(3, 6)]
+        print(executor.submit(vg.Function(sum), [total, *more]).result())
 """
 
 from .graph import URL, CancelledError, Command, File, Function, Graph, Shared, Task, TaskError, TaskFile
