@@ -229,6 +229,7 @@ struct vine_task *vine_task_copy(const struct vine_task *task)
 	}
 
 	new->function_slots_requested = task->function_slots_requested;
+	new->library_pool = task->library_pool;
 
 	/* Scheduling features of task are copied. */
 	new->resource_request = task->resource_request;
@@ -318,6 +319,11 @@ const char *vine_task_get_library_provided(struct vine_task *t)
 void vine_task_set_function_slots(struct vine_task *t, int nslots)
 {
 	t->function_slots_requested = nslots;
+}
+
+void vine_task_set_library_pool(struct vine_task *t, int pool)
+{
+	t->library_pool = pool ? 1 : 0;
 }
 
 void vine_task_set_function_exec_mode(struct vine_task *t, vine_task_func_exec_mode_t exec_mode)

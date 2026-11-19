@@ -82,6 +82,10 @@ struct vine_process {
 	int library_startup_length;
 	int library_startup_received;
 
+	/* If this is a function call, whether it ran past its wall time and its library was asked to stop it. The call
+	 * keeps its resources until the library reports its end, which is MAX_WALL_TIME when the library killed it. */
+	int wall_time_cancelled;
+
 	/* expected disk usage by the process. If no cache is used, it is the same as in task. */
 	int64_t disk;
 

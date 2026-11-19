@@ -159,17 +159,31 @@ def read_message(in_pipe_fd):
     return str(data, encoding="utf-8")
 
 
-# Split an invocation into the function id, name, sandbox, stdout file, and the number of library slots the call
-# occupies, which the worker writes at the end only when it is above one.
+# Split an invocation into its function id, name, sandbox, stdout file, number of slots, and key=value options. The
+# worker writes the number of slots k when k is above one or when options follow, and the options cores=<k> and
+# memory=<MB> when the call holds cores and memory of the worker (a library in pool mode).
 def parse_invocation(line):
-    fields = line.split(" ", maxsplit=4)
-    function_id, function_name, function_sandbox, function_stdout_filename = fields[:4]
-    function_slots = int(fields[4]) if len(fields) > 4 else 1
-    return function_id, function_name, function_sandbox, function_stdout_filename, function_slots
+    fields = line.split(" ")
+    (
+        function_id,
+        function_name,
+        function_sandbox,
+        function_stdout_filename
+    ) = fields[:4]
+    function_slots = 1
+    options = {}
+    for field in fields[4:]:
+        if "=" in field:
+            key, value = field.split("=", 1)
+            options[key] = value
+        else:
+            function_slots = int(field)
+    return function_id, function_name, function_sandbox, function_stdout_filename, function_slots, options
 
 
 # Start the function of an invocation, and dump result to `outfile`. thread_limit is the thread limit of a call that
-# occupies one slot of the library, and a call that occupies k slots runs with k times that limit.
+# occupies one slot of the library. A call that occupies k slots runs with k times that limit. In fork mode a call that
+# holds cores and memory of the worker sees them as CORES and MEMORY.
 def start_function(line, thread_limit=1):
     global spare_wanted
     try:
@@ -179,9 +193,10 @@ def start_function(line, thread_limit=1):
             function_sandbox,
             function_stdout_filename,
             function_slots,
+            function_options,
         ) = parse_invocation(line)
     except Exception as e:
-        stdout_timed_message(f"error: not enough values to unpack from {line} (expected 4 or 5 items), exception: {e}")
+        stdout_timed_message(f"error: malformed invocation {line} (expected at least 4 items), exception: {e}")
         exit(1)
 
     try:
@@ -248,7 +263,7 @@ def start_function(line, thread_limit=1):
         limit_thread_pools(thread_limit)
         p = os.fork()
         if p == 0:
-            run_function(function_id, function_name, function_sandbox, function_stdout_filename, event, call_thread_limit)
+            run_function(function_id, function_name, function_sandbox, function_stdout_filename, event, call_thread_limit, function_options)
         elif p < 0:
             stdout_timed_message(f"TASK {function_id} error: unable to fork to execute {function_name}")
             return -1, function_id
@@ -265,7 +280,7 @@ def start_function(line, thread_limit=1):
 # Run a function call in a forked process, which reports its exit status on the report pipe and exits. The arguments
 # are loaded from the call's infile when event is None. The call's thread pools are limited to thread_limit, which
 # costs nothing when the process inherited that limit.
-def run_function(function_id, function_name, function_sandbox, function_stdout_filename, event, thread_limit):
+def run_function(function_id, function_name, function_sandbox, function_stdout_filename, event, thread_limit, function_options):
     exit_status = 1
     # sys.modules keeps the order of imports, so the modules this call imports follow the ones it inherited.
     inherited_modules = len(sys.modules)
@@ -285,6 +300,12 @@ def run_function(function_id, function_name, function_sandbox, function_stdout_f
             except Exception:
                 stdout_timed_message(f"TASK {function_id} error: can't load the arguments from {arg_infile}")
                 raise
+
+        # the call sees the cores and memory it holds
+        if "cores" in function_options:
+            os.environ["CORES"] = function_options["cores"]
+        if "memory" in function_options:
+            os.environ["MEMORY"] = function_options["memory"]
 
         # change the working directory to the function's sandbox
         os.chdir(function_sandbox)
@@ -383,8 +404,8 @@ def fork_spare(thread_limit):
             if not chunks:
                 exit_status = 0
             else:
-                function_id, function_name, function_sandbox, function_stdout_filename, function_slots = parse_invocation(b"".join(chunks).decode())
-                run_function(int(function_id), function_name, function_sandbox, function_stdout_filename, None, thread_limit * function_slots)
+                function_id, function_name, function_sandbox, function_stdout_filename, function_slots, function_options = parse_invocation(b"".join(chunks).decode())
+                run_function(int(function_id), function_name, function_sandbox, function_stdout_filename, None, thread_limit * function_slots, function_options)
         finally:
             os._exit(exit_status)
     os.close(read_fd)

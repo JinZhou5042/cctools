@@ -368,6 +368,10 @@ const struct rmsummary *vine_manager_task_resources_max(struct vine_manager *q, 
 /* Find a library template on the manager */
 struct vine_task *vine_manager_find_library_template(struct vine_manager *q, const char *library_name);
 
+/* Internal: Return true if t is a function call of a library in pool mode, whose calls take their cores and memory from
+ * the worker (see vine_task_set_library_pool). */
+int vine_manager_function_call_in_pool(struct vine_manager *q, struct vine_task *t);
+
 /* Internal: Enable shortcut of main loop upon child process completion. Needed for Makeflow to interleave local and remote execution. */
 void vine_manager_enable_process_shortcut(struct vine_manager *q);
 
