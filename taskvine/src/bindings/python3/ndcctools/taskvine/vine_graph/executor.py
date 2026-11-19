@@ -137,10 +137,10 @@ class Executor:
     params. All arguments are keyword-only.
 
     Results. The result of a task that can still be asked for without a new task is kept: a sink of a Graph, a
-    submitted task that no submitted task reads yet, and every result or file that was read here. Other results are
+    task with a declared file that no task reads, and every result or file that was read here. Other results are
     released once the tasks that read them are safe, and one of them that is asked for after all, by result(), by a
-    file, or by a task added or submitted later, is computed again, which the caller does not see. A submitted task is
-    let go when nothing refers to its Task anymore, and the tasks of a Graph when the Graph is collected."""
+    file, or by a task added later, is computed again, which the caller does not see. The tasks of a Graph are let go
+    when the Graph is collected."""
 
     def __init__(self, *, port=cvine.VINE_DEFAULT_PORT, name=None, local=False, progress_bar=True, shared=None,
                  params=None, library_modules=(), library_files=None, output_dir="./outputs", ssl=None,

@@ -309,8 +309,7 @@ class _Runner:
         # (record, entry) of tasks that finished, published for the Executor, which removes each once it applied it
         self._events = collections.deque()
         self._unfinished = 0  # tasks submitted that did not finish
-        # Records of tasks that nothing can ask for anymore: submitted tasks that were collected, and the tasks of
-        # collected Graphs. Any thread appends, and the runner's thread lets them go.
+        # Records of tasks that nothing can ask for anymore: the tasks of collected Graphs. Any thread appends, and the runner's thread lets them go.
         self._dropped = collections.deque()
         self._keep_paths = set()  # local paths that TaskFile.path returned, which stay after close
         self._pickler = _Pickler()  # of the thread that creates the runner, which serializes submitted tasks

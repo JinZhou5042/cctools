@@ -1,69 +1,137 @@
 # Vine Graph
 
-Vine Graph runs Python function calls and shell commands on TaskVine, either
-as a graph built in advance or as tasks started one at a time while others
-run.
+Vine Graph runs Python function calls and shell commands on TaskVine as a
+graph of tasks that grows while it runs.
 
 ```python
+from pathlib import Path
+
 import ndcctools.taskvine.vine_graph as vg
 
-def double(value):
-    return 2 * value
+def load(path):
+    return [float(line) for line in Path(path).read_text().split()]
 
-graph = vg.Graph()
-parts = [graph.add(vg.Function(double), value) for value in range(3)]
-total = graph.add(vg.Function(sum), parts)
+def stats(data):
+    return {"mean": sum(data) / len(data), "min": min(data), "max": max(data)}
 
-with vg.Executor(local=True) as executor:
-    results = executor.run(graph)
-    assert results == {total: 6}
-    assert parts[1].result() == 2
+def train(data, seed, lr=0.1):
+    return round(sum(data) * lr + seed, 3)
+
+def write_table(data):
+    Path("table.csv").write_text("".join(f"{value}\n" for value in data))
+
+def count_lines(path):
+    return len(Path(path).read_text().splitlines())
+
+Path("data.txt").write_text("4\n8\n15\n16\n23\n42\n")
+
+g = vg.Graph()
+data = g.add(vg.Function(load, vg.File("data.txt")))
+s = g.add(vg.Function(stats, data))
+table = g.add(vg.Function(write_table, data), outputs=["table.csv"])
+big = dict(cores=2, retries=1)
+models = [g.add(vg.Function(train, data, seed, lr=0.1), **big) for seed in range(4)]
+best = g.add(vg.Function(max, models))
+top = g.add(vg.Command("sort -n {t} | tail -3 > top.txt", t=table.file("table.csv")), outputs=["top.txt"], time_limit=60)
+mean = g.add(vg.Function(round, s["mean"], 2))
+note = g.add(vg.Command("echo mean={m} > note.txt", m=mean), outputs=["note.txt"])
+n = g.add(vg.Function(count_lines, top.file("top.txt")))
+
+with vg.Executor(local=True) as ex:
+    ex.run(g)
+    print("best model:", best.result(), "top lines:", n.result())
+    print(top.file("top.txt").text)
+    note.file("note.txt").save("note.txt")
+
+    extra = [g.add(vg.Function(train, data, k), **big) for k in range(10, 13)]
+    ex.submit(g)
+    for t in ex.as_completed(extra, timeout=600):
+        print(t.result())
 ```
 
-`executor.run(graph)` returns the results of the **sinks** only, the tasks
-that no task reads (here `total`). Any other result is `task.result()`. Read
-results **before the Executor closes**: one returned once stays on its Task,
-one never read is gone. `local=True` runs tasks in this process without
-workers; see [Running on workers](#running-on-workers) for the rest.
+Three rules cover the whole interface:
 
-## The programming model
+- **`vg.Function` and `vg.Command` hold what to run and its arguments.**
+  `vg.Function(func, *args, **kwargs)` calls `func(*args, **kwargs)`, and
+  every keyword goes to `func`. `vg.Command(template, **fields)` fills the
+  placeholders of a shell command line.
+- **`g.add(spec, **settings)` is the only way to make a task.** It takes
+  exactly one positional argument, a Function or a Command, and every setting
+  (`cores`, `retries`, `outputs`, ...) is a keyword of `add()`. A dictionary of
+  settings, such as `big` above, applies the same settings to many tasks.
+- **`ex.run(g)` runs and waits, `ex.submit(g)` starts.** `run(g)` returns
+  `{sink: result}` for the sinks, the tasks that no task reads. `submit(g)`
+  starts every task not started yet and returns at once. Tasks added later
+  start at the next `submit()` or `run()`.
 
-- `vg.Graph` describes tasks and the data they pass to each other.
-  `graph.add(vg.Function(func), *args, **kwargs)` records a call without
-  running it and returns a `vg.Task`. Iterating over a Graph gives its tasks
-  in the order they were added, and `len(graph)` counts them.
-- `vg.Executor` is where tasks run.
-  `executor.submit(vg.Function(func), *args, **kwargs)` starts one task at
-  once and returns its `vg.Task`. `executor.submit(graph)` starts every task
-  of a Graph that did not start yet and returns at once.
-  `executor.run(graph)` does the same and then waits.
+**What a task can read.** A task can read another task's whole result, an
+item of it (`t["k"]`, or an attribute with `t.attr("name")`), a list, tuple,
+set, dictionary, or dataclass that holds tasks, or a declared output file
+(`t.file(name)`). A Function gets the value, or a local path for a file. A
+Command gets the sandbox path of a file, or `str()` of a result. A task starts
+as soon as what it reads exists.
 
-The first argument of `add()` and `submit()` is always a `vg.Function` or a
-`vg.Command`. A bare callable raises `TypeError`.
+Read results **before the Executor closes**: a result returned once stays on
+its Task, one never read is gone. `local=True` runs tasks in this process
+without workers; see [Running on workers](#running-on-workers) for the rest.
 
-A Task passed as an argument of another task gives that task its result, which
-builds the dependencies, and the reader starts as soon as its inputs exist.
-Tasks may appear anywhere inside lists, tuples, sets, dictionary values, and
-dataclasses. `task["key"]` and `task.attr("name")` select an item or an
-attribute of a result without adding a task, as in
-`graph.add(vg.Function(scale), record["values"])`.
+## Graphs and tasks
 
-A Task of a Graph is a description until its Graph is submitted, and then
-behaves exactly like a Task that `submit()` returned: `result(timeout=None)`
+`g.add()` returns a `vg.Task`. Iterating over a Graph gives its tasks in the
+order they were added, and `len(g)` counts them. A Task is a description
+until its Graph is submitted, and then a live task: `result(timeout=None)`
 waits for it, and `done()`, `failed()`, `cancelled()`, and `cancel()` tell and
 change its state. `result()` of an unsubmitted task raises `RuntimeError`. A
-live task is numbered by its Executor, as in `Task(7, double)`. `task.func`,
-`task.args`, `task.kwargs`, `task.readers`, and `task.key` describe a task.
+live task is numbered by its Executor, as in `Task(7, train)`.
 
-One Executor runs any number of Graphs and submitted tasks at once. A Graph
-belongs to the first Executor that takes it, and a task may read only tasks of
-its own Graph or live tasks of its own Executor.
+`task.func` is the Function or Command, and `task.args` and `task.kwargs` its
+arguments. `task.readers` lists the tasks that read it, and `task.key` is its
+key in the Graph. The settings given to `add()` are read back from
+`task.func`, as in `task.func.cores`.
+
+One Executor runs any number of Graphs at once on one pool of workers. A
+Graph belongs to the first Executor that takes it, and a task may read only
+tasks of its own Graph or live tasks of its own Executor.
+
+## Task settings
+
+`g.add(spec, *, cores=1, memory=None, gpus=0, time_limit=None, retries=0,
+retry_on=Exception, outputs=(), cache=False, name=None)`:
+
+- `cores` is the number of cores the task uses on a worker. A Python task of
+  `cores=k` takes `k` of the library's slots (one per core) and limits its
+  OpenMP and BLAS threads to `k`.
+- `memory` is the memory in MB, and `gpus` the number of GPUs. Tasks see
+  them as `CORES`, `MEMORY`, `GPUS`, and `CUDA_VISIBLE_DEVICES`. Tasks that
+  request no GPUs see `CUDA_VISIBLE_DEVICES` empty. A command that exceeds its
+  memory fails with reason `"resources"`. For Python tasks memory is a
+  request, not a limit.
+- `outputs` declares the files a task writes in its sandbox. Only declared
+  files are kept, and a task that does not write one fails. A placeholder in
+  `outputs` is filled from the Function's keywords or the Command's fields,
+  so `g.add(vg.Command("convert {n}.png {n}.jpg", n=7), outputs=["{n}.jpg"])`
+  declares `7.jpg`. Write a fixed name in the template itself.
+- `time_limit`, `retries`, and `retry_on` are described under
+  [Retries and time limits](#retries-and-time-limits), and `cache` under
+  [Caching results across runs](#caching-results-across-runs).
+- `name="label"` names the task in `repr()` and errors, as in `Task(3, sort)`,
+  with 1 to 64 letters, digits, or `_.+-`.
+
+A task that asks for more than the largest connected worker has waits for a
+larger one, with one notice such as `Task(7, fit) requests 8 cores; the
+largest connected Worker has 4; it waits for a larger Worker`. `local=True`
+ignores resources.
+
+A Python task with `gpus=k` runs as a standard TaskVine task beside the
+library on a worker with `k` free GPUs. It starts its own Python and loads
+`library_modules` and shared objects itself, so `gpus=` suits long tasks.
+Request `memory` to get an exact amount; otherwise the worker gives it a share
+of memory for its share of GPUs.
 
 ## Files
 
-`vg.File(path)` is an existing local file or directory. `task.file(name)`, a
-`vg.TaskFile`, is a file that a task writes in its sandbox, the directory it
-runs in. A task that takes either as an argument receives a local path.
+`vg.File(path)` is an existing local file or directory, and `task.file(name)`,
+a `vg.TaskFile`, is a declared output of a task.
 
 ```python
 from pathlib import Path
@@ -75,12 +143,12 @@ def uppercase(source_path):
 
 Path("input.txt").write_text("vine graph\n")
 
-graph = vg.Graph()
-produced = graph.add(vg.Function(uppercase), vg.File("input.txt")).file("result.txt")
-length = graph.add(vg.Function(lambda path: len(Path(path).read_text())), produced)
+g = vg.Graph()
+produced = g.add(vg.Function(uppercase, vg.File("input.txt")), outputs=["result.txt"]).file("result.txt")
+length = g.add(vg.Function(lambda path: len(Path(path).read_text()), produced))
 
-with vg.Executor(local=True) as executor:
-    assert executor.run(graph)[length] == 11
+with vg.Executor(local=True) as ex:
+    assert ex.run(g)[length] == 11
     assert produced.text == "VINE GRAPH\n"
     saved = produced.save("kept/result.txt")
 ```
@@ -93,9 +161,9 @@ start with `.taskvine.`, `vine-graph-`, or `cctools-monitor`) gets a numbered
 name instead. Two inputs given the same `name=` raise `ValueError`. Never write
 to an input: it may be a shared cached copy.
 
-A file name is a relative sandbox path. Asking for it before its task starts
-declares it as a required output. Once the task completed, the file can be
-read:
+A file name is a relative sandbox path. `task.file(name)` of a name not in
+`outputs` declares it too, but only before the task is submitted. Once the
+task completed, the file can be read:
 
 - `file.save(path)` puts the file at a path of your choice, making
   directories and replacing what is there, and returns the absolute path.
@@ -116,16 +184,13 @@ times (Manager tuning `max-origin-failures`) fails the tasks that read it with
 reason `"input"`. `vg.File("https://...")` raises and says to use `vg.URL`.
 
 ```python
-page = vg.URL("https://example.org/data.csv")
-rows = executor.submit(vg.Function(count_rows), page)
+rows = g.add(vg.Function(count_rows, vg.URL("https://example.org/data.csv")))
 ```
 
 ## Commands
 
-A `vg.Command(template, *, cores=1, memory=None, gpus=0, outputs=(), name=None)`
-is a shell command line that tasks run. `graph.add(command, **values)` or
-`executor.submit(command, **values)` makes a task that runs it in its sandbox,
-with a value for each placeholder such as `{name}`.
+A task of `vg.Command(template, **fields)` runs the command line in its
+sandbox. Its result is its standard output, at most 1 MiB.
 
 ```python
 from pathlib import Path
@@ -133,95 +198,33 @@ from pathlib import Path
 import ndcctools.taskvine.vine_graph as vg
 
 Path("words.txt").write_text("pear\napple\nfig\n")
-sort = vg.Command("sort {source} > sorted.txt", outputs=["sorted.txt"])
 
-graph = vg.Graph()
-sorted_file = graph.add(sort, source=vg.File("words.txt")).file("sorted.txt")
-first = graph.add(vg.Command("head -n 1 {source}"), source=sorted_file)
-report = graph.add(vg.Command("echo {flags} {word}"), flags=["first", "is"], word=first)
+g = vg.Graph()
+sort = g.add(vg.Command("sort {source} > sorted.txt", source=vg.File("words.txt")), outputs=["sorted.txt"])
+first = g.add(vg.Command("head -n 1 {source}", source=sort.file("sorted.txt")))
+report = g.add(vg.Command("echo {words} {word}", words=["first", "is"], word=first))
 
-with vg.Executor(local=True) as executor:
-    assert executor.run(graph)[report] == "first is apple\n"
-    assert sorted_file.text == "apple\nfig\npear\n"
+with vg.Executor(local=True) as ex:
+    assert ex.run(g)[report] == "first is apple\n"
+    assert sort.file("sorted.txt").text == "apple\nfig\npear\n"
 ```
 
-Values are given by name and inserted shell-quoted. A `vg.File` or a
-`TaskFile` becomes its sandbox path, a Task becomes `str()` of its result, and
-any other value becomes `str()` of itself. A flat list or tuple inserts each
-element quoted on its own, separated by spaces. Every placeholder needs a
-value and every value a placeholder. Write `{{` and `}}` for braces. A value
-cannot be a selection, a `vg.Shared`, a set, or a nested container: compute
-those in a Python task and pass that task.
+Fields are inserted shell-quoted. A `vg.File` or a `TaskFile` becomes its
+sandbox path, a Task becomes `str()` of its result, and any other value
+becomes `str()` of itself. A flat list or tuple inserts each element quoted on
+its own, separated by spaces. Every placeholder needs a field and every field
+a placeholder. Write `{{` and `}}` for braces. A field cannot be a selection
+such as `t["k"]`, a `vg.Shared`, a set, or a nested container: compute those
+in a Python task and pass that task, as `mean` in the first example does.
 
-Standard output, at most 1 MiB, is the result. A non-zero exit status fails
-the task, and its `TaskError` carries the status as `exit_code` and ends with
-the tail of standard error.
-
-- `cores` is the number of cores the command uses on a worker.
-- `memory` is the memory in MB, seen as `$MEMORY`. A command that exceeds it
-  fails with reason `"resources"`.
-- `gpus` is the number of GPUs, seen as `$GPUS` and `$CUDA_VISIBLE_DEVICES`.
-  Tasks that request no GPUs, Python tasks included, see
-  `CUDA_VISIBLE_DEVICES` empty.
-- `name="label"` names the tasks in `repr()` and errors, as in `Task(3, sort)`,
-  with 1 to 64 letters, digits, or `_.+-`.
-- `outputs` declares the files every task writes, and only declared files are
-  kept. A placeholder in `outputs` takes the task's value, so `vg.Command("convert {n}.png {n}.jpg", outputs=["{n}.jpg"])` declares
-  `7.jpg` for `n=7`. Other per-task names are declared with `task.file(name)`
-  before the task starts, which only a Graph task allows.
-
-## Functions with resources
-
-A `vg.Function(func, *, cores=1, memory=None, gpus=0, time_limit=None,
-retries=0, retry_on=Exception, name=None, outputs=(), cache=False)` wraps a
-Python function and goes wherever a function does. A plain function uses one
-core. `name` labels its tasks, and `outputs` declares the files each task
-writes in its working directory, with placeholders filled from keyword
-arguments as for a Command. A missing declared output fails the task with
-reason `"function"` and a `FileNotFoundError`.
-
-```python
-import ndcctools.taskvine.vine_graph as vg
-
-def solve(size):
-    import numpy
-
-    matrix = numpy.eye(size) * 2
-    return float(numpy.linalg.solve(matrix, numpy.ones(size)).sum())
-
-wide_solve = vg.Function(solve, cores=4)
-
-graph = vg.Graph()
-results = [graph.add(wide_solve, 100 * n) for n in range(1, 4)]
-total = graph.add(vg.Function(sum), results)
-
-with vg.Executor(local=True) as executor:
-    assert executor.run(graph)[total] == 300.0
-    assert executor.submit(wide_solve, 10).result() == 5.0
-```
-
-A task of `cores=k` takes `k` of a worker's library slots (one per core) and
-limits its OpenMP and BLAS threads to `k`. It sees `CORES` and `MEMORY` (MB).
-Memory is a request, not a limit. A task that asks for more than the largest
-connected worker has waits for a larger one, with one notice such as `Task(7, fit) requests 8 cores; the largest connected
-Worker has 4; it waits for a larger Worker`. `local=True` ignores resources.
-
-### Functions with GPUs
-
-A task of `vg.Function(func, gpus=k)` runs as a standard TaskVine task on a
-worker with `k` free GPUs, beside the library, and sees its GPUs in
-`CUDA_VISIBLE_DEVICES`. Each such task starts its own Python and loads
-`library_modules` and shared objects itself, so `gpus=` suits long tasks. Its
-`library_files` sit in its sandbox. Request `memory` to get an exact amount;
-otherwise the worker gives it a share of memory for its share of GPUs.
+A non-zero exit status fails the task, and its `TaskError` carries the status
+as `exit_code` and ends with the tail of standard error.
 
 ## Retries and time limits
 
-Functions and Commands take `time_limit`, `retries`, and `retry_on`:
-
 ```python
-fetch = vg.Function(download, retries=3, retry_on=ConnectionError, time_limit=600)
-simulate = vg.Command("run.sh {cfg}", memory=4000, retries=2)
+fetch = g.add(vg.Function(download, url), retries=3, retry_on=ConnectionError, time_limit=600)
+sim = g.add(vg.Command("run.sh {cfg}", cfg=vg.File("a.cfg")), memory=4000, retries=2)
 ```
 
 - `time_limit` (seconds) stops a task that runs longer, with reason
@@ -239,14 +242,14 @@ simulate = vg.Command("run.sh {cfg}", memory=4000, retries=2)
 
 ## Caching results across runs
 
-`vg.Executor(store=path)` keeps the results and declared files of tasks of
-`cache=True` in a directory. A later task with the same key, in this run or a
-later one, takes them from there without running:
+`vg.Executor(store=path)` keeps the results and declared files of tasks added
+with `cache=True` in a directory. A later task with the same key, in this run
+or a later one, takes them from there without running:
 
 ```python
-simulate = vg.Function(run_sim, cache=True)
-with vg.Executor(port=9123, store="~/.cache/my-project") as executor:
-    executor.run(graph)
+sim = g.add(vg.Function(run_sim, config), cache=True)
+with vg.Executor(port=9123, store="~/.cache/my-project") as ex:
+    ex.run(g)
 ```
 
 The key covers the function's code, captured values, and globals (or the
@@ -264,11 +267,11 @@ the tasks:
 ```python
 import ndcctools.taskvine.vine_graph as vg
 
-graph = vg.Graph()
-total = graph.add(vg.Function(sum), [graph.add(vg.Function(abs), -value) for value in range(1, 6)])
+g = vg.Graph()
+total = g.add(vg.Function(sum, [g.add(vg.Function(abs, -value)) for value in range(1, 6)]))
 
-with vg.Executor(port=9123, name="vine-graph-example") as executor:
-    assert executor.run(graph)[total] == 15
+with vg.Executor(port=9123, name="vine-graph-example") as ex:
+    assert ex.run(g)[total] == 15
 ```
 
 Run the program in one terminal and start a worker in another:
@@ -295,24 +298,27 @@ Three things are particular to Vine Graph:
 - **The manager copies results from workers.** If it cannot reach them, start
   the workers with `--connect-back`.
 
-`executor.port` and `executor.name` report the manager's port and name.
-`executor.capacity()` returns a `Capacity` (`workers`, `cores`, `memory` in MB,
-`gpus`) of the connected workers. `executor.progress()` returns a `Progress`
-(`total`, `completed`, `failed`, `cancelled`, `waiting`) over all tasks.
+`ex.port` and `ex.name` report the manager's port and name. `ex.capacity()`
+returns a `Capacity` (`workers`, `cores`, `memory` in MB, `gpus`) of the
+connected workers. `ex.progress()` returns a `Progress` (`total`,
+`completed`, `failed`, `cancelled`, `waiting`) over all tasks.
 
 ### Local modules
 
 A function from the program's main file travels with its task, but one
 imported from a local file such as `helpers.py` needs that file on the worker.
-`library_files` sends local files to the library, as `{local_path: name_on_the_worker}`, and
-`library_modules` imports modules once when the library starts:
+`library_files` sends local files to the library, as
+`{local_path: name_on_the_worker}`, and `library_modules` imports modules once
+when the library starts:
 
 ```python
 import ndcctools.taskvine.vine_graph as vg
 import helpers
 
-with vg.Executor(port=9123, library_files={"helpers.py": "helpers.py"}, library_modules=["helpers"]) as executor:
-    assert executor.submit(vg.Function(helpers.triple), 2).result() == 6
+g = vg.Graph()
+six = g.add(vg.Function(helpers.triple, 2))
+with vg.Executor(port=9123, library_files={"helpers.py": "helpers.py"}, library_modules=["helpers"]) as ex:
+    assert ex.run(g)[six] == 6
 ```
 
 ### Sharing modules and data across tasks
@@ -328,9 +334,10 @@ import ndcctools.taskvine.vine_graph as vg
 def predict(model, value):
     return model["weight"] * value
 
-model = {"weight": 3}
-with vg.Executor(port=9123, library_modules=["json"], shared={"model": model}) as executor:
-    tasks = [executor.submit(vg.Function(predict), vg.Shared("model"), value) for value in range(10)]
+g = vg.Graph()
+tasks = [g.add(vg.Function(predict, vg.Shared("model"), value)) for value in range(10)]
+with vg.Executor(port=9123, library_modules=["json"], shared={"model": {"weight": 3}}) as ex:
+    ex.run(g)
     assert [task.result() for task in tasks] == [3 * value for value in range(10)]
 ```
 
@@ -339,8 +346,8 @@ to see, or write a file. A failed task's traceback is in its `TaskError`.
 
 ## Dynamic work
 
-Submit up front what dependencies can describe, and decide on values with
-plain control flow around `result()`:
+Add what dependencies can describe up front, and decide on values with plain
+control flow around `result()`: add tasks, `submit()` the Graph, and read.
 
 ```python
 import ndcctools.taskvine.vine_graph as vg
@@ -348,10 +355,13 @@ import ndcctools.taskvine.vine_graph as vg
 def improve(guess, target):
     return (guess + target / guess) / 2
 
-with vg.Executor(local=True) as executor:
-    guess = executor.submit(vg.Function(float), 1)
+g = vg.Graph()
+guess = g.add(vg.Function(float, 1))
+with vg.Executor(local=True) as ex:
+    ex.submit(g)
     while abs(guess.result() ** 2 - 2) > 1e-9:
-        guess = executor.submit(vg.Function(improve), guess, 2)
+        guess = g.add(vg.Function(improve, guess, 2))
+        ex.submit(g)
     assert round(guess.result(), 6) == 1.414214
 ```
 
@@ -366,43 +376,25 @@ discards the results.
 
 ### The first to finish
 
-`executor.as_completed(tasks, timeout=None)` yields the given live tasks as
-they finish, whatever their outcome, like `concurrent.futures.as_completed()`.
-A failed or cancelled task is yielded too, and its `result()` raises. The
+`ex.as_completed(tasks, timeout=None)` yields the given live tasks as they
+finish, whatever their outcome, like `concurrent.futures.as_completed()`. A
+failed or cancelled task is yielded too, and its `result()` raises. The
 `timeout` covers the whole iteration:
 
 ```python
 import ndcctools.taskvine.vine_graph as vg
 
-with vg.Executor(local=True) as executor:
-    trials = [executor.submit(vg.Function(lambda s: s * 37 % 101), seed) for seed in range(50)]
-    for task in executor.as_completed(trials):
+g = vg.Graph()
+trials = [g.add(vg.Function(lambda s: s * 37 % 101, seed)) for seed in range(50)]
+with vg.Executor(local=True) as ex:
+    ex.submit(g)
+    for task in ex.as_completed(trials):
         if task.result() > 90:
             best = task
             break
     for task in trials:
         task.cancel()
     assert best.result() > 90
-```
-
-### Graphs that grow
-
-A Graph may grow while its tasks run: add tasks that read its live tasks, and
-submit the Graph again to start them.
-
-```python
-import ndcctools.taskvine.vine_graph as vg
-
-step = vg.Function(lambda value: value + 1)
-graph = vg.Graph()
-last = graph.add(step, 0)
-
-with vg.Executor(local=True) as executor:
-    executor.submit(graph)
-    while last.result() < 10:
-        last = graph.add(step, last)
-        executor.submit(graph)
-    assert [task.result() for task in graph] == list(range(1, 11))
 ```
 
 ## Failures
@@ -412,9 +404,9 @@ cannot run after `max-retries` attempts. The tasks that read it fail too,
 without running, while independent tasks keep running. Lost workers are not
 failures, unless a task keeps making its workers exit.
 
-`executor.run()` raises the `vg.TaskError` that explains the first failed
-sink, once the other tasks finished, and `task.result()` raises the task's
-own. Its message includes the traceback. Its fields:
+`ex.run()` raises the `vg.TaskError` that explains the first failed sink,
+once the other tasks finished, and `task.result()` raises the task's own. Its
+message includes the traceback. Its fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -427,41 +419,41 @@ own. Its message includes the traceback. Its fields:
 ### Listing, fixing, and running again
 
 A failed task stays failed. In a script, fix the cause and run again. In a
-session, submit the fixed call with the failed task's arguments, and then the
+session, add the fixed call with the failed task's arguments, and then the
 calls that read it:
 
 ```python
 import ndcctools.taskvine.vine_graph as vg
 
-graph = vg.Graph()
-numbers = [graph.add(vg.Function(int), text) for text in ("1", "2.", "3")]
-total = graph.add(vg.Function(sum), numbers)
+g = vg.Graph()
+numbers = [g.add(vg.Function(int, text)) for text in ("1", "2.", "3")]
+total = g.add(vg.Function(sum, numbers))
 
-with vg.Executor(local=True) as executor:
+with vg.Executor(local=True) as ex:
     try:
-        executor.run(graph)
+        ex.run(g)
     except vg.TaskError as error:
         bad = error.source
         assert isinstance(error.exception, ValueError) and error.reason == "function"
-    assert [task for task in graph if task.failed()] == [numbers[1], total]
-    fixed = executor.submit(vg.Function(lambda text: int(text.rstrip("."))), *bad.args)
-    again = executor.submit(vg.Function(sum), [fixed if task is bad else task for task in numbers])
+    assert [task for task in g if task.failed()] == [numbers[1], total]
+    fixed = g.add(vg.Function(lambda text: int(text.rstrip(".")), *bad.args))
+    again = g.add(vg.Function(sum, [fixed if task is bad else task for task in numbers]))
+    ex.submit(g)
     assert again.result() == 6
 ```
 
 ## How long results are kept
 
 The Executor keeps every result that can be asked for without a new task: a
-sink, a submitted task that nothing reads yet, and every result or file that
-was read. Other intermediate results are released from the workers once their
-readers are safe, and are computed again, unseen, if asked for after all. The
-setting `release-outputs` set to `0` keeps every result.
+sink, and every result or file that was read. Other intermediate results are
+released from the workers once their readers are safe, and are computed
+again, unseen, if asked for after all. The setting `release-outputs` set to
+`0` keeps every result.
 
-A submitted task is let go when its Task is no longer referenced, and the
-tasks of a Graph when the Graph is collected, so a long session holds only
-what its variables refer to. Results lost with a worker are fetched from the
-manager's background copies or computed again. Nothing survives the program
-except the files it saved.
+The tasks of a Graph are let go when the Graph is collected, so a long
+session holds only what its variables refer to. Results lost with a worker
+are fetched from the manager's background copies or computed again. Nothing
+survives the program except the files it saved.
 
 ## Notebooks
 
@@ -472,20 +464,20 @@ cells, and close it in the last:
 import ndcctools.taskvine.vine_graph as vg
 
 # Cell 1
-executor = vg.Executor(port=9123, progress_bar=False)
-graph = vg.Graph()
+ex = vg.Executor(port=9123, progress_bar=False)
+g = vg.Graph()
 
 # Cell 2
-squares = [graph.add(vg.Function(pow), value, 2) for value in range(8)]
-results = executor.run(graph)
+squares = [g.add(vg.Function(pow, value, 2)) for value in range(8)]
+results = ex.run(g)
 
 # Cell 3, at any later time
 assert squares[3].result() == 9
-total = graph.add(vg.Function(sum), squares)
-assert executor.run(graph)[total] == 140
+total = g.add(vg.Function(sum, squares))
+assert ex.run(g)[total] == 140
 
 # Last cell
-executor.close()
+ex.close()
 ```
 
 Running a Graph again runs only its new tasks. Interrupting a cell stops
@@ -508,10 +500,10 @@ from ndcctools.taskvine.vine_graph.adaptors import from_dask
 def multiply(left, right):
     return left * right
 
-graph = from_dask({"incremented": (abs, -2), "answer": (multiply, "incremented", 10)})
-by_key = {task.key: task for task in graph}
-with vg.Executor(local=True) as executor:
-    results = executor.run(graph)
+g = from_dask({"incremented": (abs, -2), "answer": (multiply, "incremented", 10)})
+by_key = {task.key: task for task in g}
+with vg.Executor(local=True) as ex:
+    results = ex.run(g)
 
 assert results[by_key["answer"]] == 20
 ```
@@ -522,7 +514,7 @@ assert results[by_key["answer"]] == 20
 
 | Argument | Default | Purpose |
 | --- | --- | --- |
-| `port` | `9123` | Port workers connect to, or a range `(low, high)`. `0` picks a free port, which `executor.port` reports. |
+| `port` | `9123` | Port workers connect to, or a range `(low, high)`. `0` picks a free port, which `ex.port` reports. |
 | `name` | `None` | Manager name that workers look up in the catalog. |
 | `local` | `False` | Run each task in this process, without TaskVine. |
 | `progress_bar` | `True` | Draw a progress bar while `run()` waits, when standard output is a terminal. |
@@ -534,7 +526,7 @@ assert results[by_key["answer"]] == 20
 | `ssl` | `None` | A `(key, certificate)` pair for TLS between the manager and its workers. |
 | `staging_path` | `None` | The manager's staging directory. |
 | `run_info_path`, `run_info_template` | `vine-run-info`, `None` | Where the manager writes its logs. |
-| `store` | `None` | A directory that keeps the results of tasks of `cache=True` across runs. |
+| `store` | `None` | A directory that keeps the results of tasks added with `cache=True` across runs. |
 
 `params` is the escape hatch to TaskVine tuning. Its names follow TaskVine and
 may change with it:
