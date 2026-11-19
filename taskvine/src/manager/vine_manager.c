@@ -7948,7 +7948,7 @@ static const char *const vine_tune_names[] = {
 	"resource-management-interval", "max-task-stdout-storage", "max-new-workers", "large-task-check-interval",
 	"option-blocklist-slow-workers-timeout", "watch-library-logfiles", "sandbox-grow-factor",
 	"max-library-retries", "disk-proportion-available-to-task", "enforce-worker-eviction-interval",
-	"clean-redundant-replicas", "shift-disk-load",
+	"clean-redundant-replicas", "shift-disk-load", "max-origin-failures",
 	NULL};
 
 int vine_tune_known(const char *name)
