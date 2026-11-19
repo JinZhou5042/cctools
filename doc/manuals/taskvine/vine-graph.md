@@ -198,7 +198,7 @@ The text a command writes to standard output, at most 1 MiB, is its result. An
 exit status other than zero fails the task, and its `TaskError` carries the
 status as `exit_code` and ends with the end of the command's standard error.
 `cores` is the number of cores the command uses on a worker, where a Python
-task uses one.
+task uses one unless its function is a `vg.Function`.
 
 A file that a command writes is kept only when it was declared. `outputs`
 lists the files that every task of the command writes, and declares them for
@@ -206,6 +206,44 @@ each task, whether it comes from `graph.add()` or `executor.submit()`.
 `task.file(name)` then names the file. A file whose name differs from task to
 task is declared with `task.file(name)` before the task starts, which only a
 task of a Graph allows, because a submitted task has started already.
+
+## Functions of several cores
+
+A `vg.Function(func, cores=1)` is a Python function whose tasks use `cores`
+cores of a worker, as `cores` does for a Command. It goes wherever a function
+does, in `graph.add()` and `executor.submit()`, and a plain function uses one
+core.
+
+```python
+import ndcctools.taskvine.vine_graph as vg
+
+
+def solve(size):
+    import numpy
+
+    matrix = numpy.eye(size) * 2
+    return float(numpy.linalg.solve(matrix, numpy.ones(size)).sum())
+
+
+wide_solve = vg.Function(solve, cores=4)
+
+graph = vg.Graph()
+results = [graph.add(wide_solve, 100 * n) for n in range(1, 4)]
+total = graph.add(sum, results)
+
+with vg.Executor(local=True) as executor:
+    assert executor.run(graph)[total] == 300.0
+    assert executor.submit(wide_solve, 10).result() == 5.0
+```
+
+A worker runs the Python tasks of an Executor in one library with a slot per
+core, and a task of `cores=k` occupies `k` slots, so a worker of 8 cores runs
+eight tasks of one core, four of two, or two of four at a time. The library
+limits the native thread pools (OpenMP, BLAS) of the task's process to `k`
+threads. A task that asks for more cores than the largest connected worker
+has fails with reason `"cores"` once two checks a few seconds apart found it
+so, and tasks wait while no worker is connected. `local=True` runs every task
+in the Executor's own process and ignores `cores`.
 
 ## Running on workers
 
@@ -470,7 +508,7 @@ where the function ran. Its fields:
 | --- | --- |
 | `task` | The Task that has no result. |
 | `source` | The Task whose own failure explains it, which is `task` itself when it failed on its own. |
-| `reason` | Why the source failed: `"function"` (its function raised), `"command"` (its command exited with an error status or did not write a declared file), `"signal"` (its function was killed by a signal), `"workers"` (workers kept disconnecting while they ran it), `"input"` (a file it reads is missing), `"retries"`, `"submit"` (it could not be submitted, as when an argument cannot be serialized), or `"result"` (it completed, but its result cannot be loaded or sent). |
+| `reason` | Why the source failed: `"function"` (its function raised), `"command"` (its command exited with an error status or did not write a declared file), `"signal"` (its function was killed by a signal), `"workers"` (workers kept disconnecting while they ran it), `"input"` (a file it reads is missing), `"retries"`, `"submit"` (it could not be submitted, as when an argument cannot be serialized), `"cores"` (it asks for more cores than the largest connected worker has), or `"result"` (it completed, but its result cannot be loaded or sent). |
 | `exception` | The exception that the source's function raised, or `None`. |
 | `exit_code` | The exit status of the source's command, or `None`. |
 

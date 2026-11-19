@@ -61,9 +61,9 @@ from . import vine_graph_capi as capi  # noqa: E402
 # generated wrapper around each.
 _capi = capi._vine_graph_capi
 from .graph import (  # noqa: E402
-    _LEAF_TYPE_SET, COMMAND_RESULT_LIMIT, CONTENT_LIMIT, Command, File, Graph, Shared, Task, TaskError, _Calls,
-    _FileRef, _NoSuchItem, _Ref, _a, _label, _link_or_copy, _name_task, _place, _readers_of, _undeclared, _NEW, _RUNNING,
-    _COMPLETED, _FAILED, _CANCELLED, _UNREAD,
+    _LEAF_TYPE_SET, COMMAND_RESULT_LIMIT, CONTENT_LIMIT, Command, File, Function, Graph, Shared, Task, TaskError,
+    _Calls, _callable, _FileRef, _NoSuchItem, _Ref, _a, _label, _link_or_copy, _name_task, _place, _readers_of,
+    _undeclared, _NEW, _RUNNING, _COMPLETED, _FAILED, _CANCELLED, _UNREAD,
 )
 from . import graph as _graph_module, install, library  # noqa: E402
 
@@ -132,6 +132,7 @@ _FAILURE_REASONS = {
     capi.VINE_GRAPH_FAILURE_RETRIES: "retries",
     capi.VINE_GRAPH_FAILURE_CANCELLED: "cancelled",
     capi.VINE_GRAPH_FAILURE_SUBMIT: "submit",
+    capi.VINE_GRAPH_FAILURE_CORES: "cores",
 }
 
 # Seconds the background thread spends on queued calls before it advances the run one step.
@@ -555,9 +556,9 @@ class _Workers(_Runner):
     itself once when it starts: it imports library_modules, loads shared, a dictionary from names to objects that tasks
     take as vg.Shared(name), and, within edata_cache bytes, the smallest function and argument objects of the first
     submission, so tasks do not fetch their files. library_files maps local paths to names in the library sandbox.
-    Command tasks run as standard TaskVine tasks with the cores they request. output_dir holds the directory of the
-    file paths that TaskFile.path returns, which stay after close, and other keyword arguments go to the TaskVine
-    Manager."""
+    Command tasks run as standard TaskVine tasks with the cores they request, and a call of a Function with several
+    cores occupies as many slots of the library. output_dir holds the directory of the file paths that TaskFile.path
+    returns, which stay after close, and other keyword arguments go to the TaskVine Manager."""
 
     def __init__(self, port=cvine.VINE_DEFAULT_PORT, name=None, *, output_dir="./outputs", library_modules=(),
                  library_files=None, shared=None, edata_cache=0, **manager_options):
@@ -878,7 +879,7 @@ class _Workers(_Runner):
             result_paths = [path for path, _ in results]
             return (record, record.outputs, (), result_records, result_paths, (), files, (), None,
                     (line, task._func.cores))
-        func, args, kwargs = task._func, task._args, task._kwargs
+        func, args, kwargs = _callable(task._func), task._args, task._kwargs
         files = {}
         mounts = []  # (file identity, sandbox path, record of the task that writes the file or None)
         if task._reads:
@@ -1111,6 +1112,9 @@ class _Workers(_Runner):
             if capi.vine_graph_executor_set_command(executor, node, command[0], command[1]) != 0:
                 raise RuntimeError(f"failed to set the command of task {key!r}")
         else:
+            if type(record.func) is Function and record.func.cores > 1:
+                if capi.vine_graph_executor_set_cores(executor, node, record.func.cores) != 0:
+                    raise RuntimeError(f"failed to set the cores of task {key!r}")
             # The library holds the cached objects, so tasks neither mount nor fetch their files.
             for name, path in edata:
                 if name not in self._cached_edata:
@@ -1679,7 +1683,7 @@ class _Local(_Runner):
         # The function and its arguments are serialized as a runner on Workers serializes them, so one that cannot be
         # serialized fails alike.
         if not record.command:
-            self._pickler.dumps(task._func)
+            self._pickler.dumps(_callable(task._func))
             self._pickler.dumps((task._args, task._kwargs))
         self._queue.append((record, task))
         return record
@@ -1771,7 +1775,8 @@ class _Local(_Runner):
         self._events.append((record, entry))
 
     def _run_function(self, task, record, task_dir):
-        func, args, kwargs = task._func, task._args, task._kwargs
+        # The process runs one call at a time, so a Function's cores change nothing here.
+        func, args, kwargs = _callable(task._func), task._args, task._kwargs
         serialized = self._pickler.dumps((args, kwargs))
         sources = {ref: parent._record for ref, parent in _references(task).items()} if task._parents else {}
 
@@ -2040,10 +2045,11 @@ class Executor:
     # Single tasks.
 
     def submit(self, func, /, *args, **kwargs):
-        """Start a task that calls func with these arguments, or runs a Command with values for its placeholders, and
-        return its Task at once. Files, and Tasks that this Executor started or ran, with their selections and files,
-        may appear anywhere inside the arguments of a function. task.result() waits for the task and returns its
-        result. A task that cannot start, as when an argument cannot be serialized, fails, and its result() raises."""
+        """Start a task that calls func, a function or a Function, with these arguments, or runs a Command with values
+        for its placeholders, and return its Task at once. Files, and Tasks that this Executor started or ran, with
+        their selections and files, may appear anywhere inside the arguments of a function. task.result() waits for the
+        task and returns its result. A task that cannot start, as when an argument cannot be serialized, fails, and its
+        result() raises."""
         self._check_open()
         with self._lock:
             self._last_call += 1

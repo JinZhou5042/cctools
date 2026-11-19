@@ -66,7 +66,8 @@ typedef enum {
 	VINE_GRAPH_FAILURE_INPUT,     /* An input at the Manager is missing. */
 	VINE_GRAPH_FAILURE_RETRIES,   /* More attempts failed for other reasons than max-retries allows. */
 	VINE_GRAPH_FAILURE_CANCELLED, /* The frontend cancelled it. */
-	VINE_GRAPH_FAILURE_SUBMIT     /* Its task could not be created or submitted. */
+	VINE_GRAPH_FAILURE_SUBMIT,    /* Its task could not be created or submitted. */
+	VINE_GRAPH_FAILURE_CORES      /* It requests more cores than any connected Worker has. */
 } vine_graph_failure_t;
 
 /* An opaque executor. */
@@ -167,6 +168,13 @@ int vine_graph_executor_add_input_buffer(struct vine_graph_executor *e, uint64_t
  * with its standard output as the error message. Return zero, or -1 for an unknown or submitted node, a NULL command,
  * or fewer than one core. */
 int vine_graph_executor_set_command(struct vine_graph_executor *e, uint64_t node_id, const char *command, int cores);
+
+/* Make a function node not yet submitted request cores cores: its call occupies that many function slots of a library
+ * instance, which has one slot per core of its Worker, and the library limits the call's thread pools to as many
+ * threads. A node that requests more cores than the largest connected Worker has fails with VINE_GRAPH_FAILURE_CORES
+ * once two checks seconds apart found it so. A command node takes its cores from vine_graph_executor_set_command().
+ * Return zero, or -1 for an unknown or submitted node or fewer than one core. */
+int vine_graph_executor_set_cores(struct vine_graph_executor *e, uint64_t node_id, int cores);
 
 /* Submit a node whose files are mounted. It runs once every node whose output it reads has completed, and it fails at
  * once when it reads an output of a failed node that exists nowhere. Return zero, or -1 for an unknown or submitted

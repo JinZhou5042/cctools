@@ -4,7 +4,8 @@
 
 """Build task graphs and run them on TaskVine.
 
-A Graph holds tasks, Python calls or shell commands, and rules that add tasks as others complete. An Executor is where
+A Graph holds tasks, Python calls or shell commands, and rules that add tasks as others complete. A task uses one core
+of a Worker, and vg.Function(func, cores=k) and vg.Command(line, cores=k) make tasks that use k. An Executor is where
 tasks run: run() executes a Graph and returns the results of its sinks, the tasks that no task reads, and submit()
 starts one task at once and returns its Task, whose result() waits for it. task.result() returns the result of any
 other task, and results are read before the Executor closes:
@@ -25,9 +26,9 @@ other task, and results are read before the Executor closes:
             print(executor.submit(sum, [total, more]).result())
 """
 
-from .graph import Command, File, Graph, Shared, Task, TaskError, TaskFile
+from .graph import Command, File, Function, Graph, Shared, Task, TaskError, TaskFile
 
-__all__ = ["Graph", "Task", "TaskFile", "File", "Command", "Shared", "Executor", "TaskError"]
+__all__ = ["Graph", "Task", "TaskFile", "File", "Command", "Function", "Shared", "Executor", "TaskError"]
 
 
 def __dir__():

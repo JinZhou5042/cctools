@@ -496,6 +496,7 @@ class TaskError(RuntimeError):
     - "input": a file it reads is missing at the Manager
     - "retries": more of its attempts failed for other reasons than the setting max-retries allows
     - "submit": it could not be submitted, as when an argument cannot be serialized
+    - "cores": it asks for more cores than the largest connected Worker has (see Function)
     - "result": it completed, but its result cannot be loaded in this process or sent by its Worker
 
     exception is the exception that the function of the source raised, loaded in this process with the source's
@@ -588,6 +589,47 @@ class Command:
     def __repr__(self):
         outputs = f", outputs={list(self._outputs)!r}" if self._outputs else ""
         return f"Command({self._template!r}, cores={self._cores}{outputs})"
+
+
+class Function:
+    """A Python function that tasks call with several cores of a Worker, as a Command runs a command line with them:
+    g.add(Function(func, cores=4), *args) or executor.submit(Function(func, cores=4), *args) makes a task that calls
+    func with these arguments, and a Function is used in their place wherever a function is. A plain function, or
+    cores=1, uses one core.
+
+    A Worker runs the calls of an Executor in one library with a slot per core, and a call of cores=k occupies k slots,
+    so a Worker of 8 cores runs eight calls of one core, four of two, or two of four at a time. The library limits the
+    native thread pools (OpenMP, BLAS) loaded in the call's process to k threads. A task that asks for more cores than
+    the largest connected Worker has fails with reason "cores" once two checks a few seconds apart found it so, and a
+    task waits while no Worker is connected. An Executor with local=True runs every call in its own process and ignores
+    cores."""
+
+    __slots__ = ("_func", "_cores", "__weakref__")
+
+    def __init__(self, func, cores=1):
+        if isinstance(func, (Command, Function, _Symbol)) or not callable(func):
+            raise TypeError("a Function takes a function, such as Function(func, cores=2)")
+        if type(cores) is not int or cores < 1:
+            raise ValueError("cores must be a positive integer")
+        self._func = func
+        self._cores = cores
+
+    @property
+    def func(self):
+        return self._func
+
+    @property
+    def cores(self):
+        return self._cores
+
+    def __repr__(self):
+        name = getattr(self._func, "__name__", None) or type(self._func).__name__
+        return f"Function({name}, cores={self._cores})"
+
+
+def _callable(func):
+    """Return what a Python task calls: the function of a Function, or func itself."""
+    return func._func if type(func) is Function else func
 
 
 class TaskFile(_Symbol):
@@ -791,7 +833,7 @@ class Task(_Selectable):
 
     @property
     def func(self):
-        """The function or Command the task runs."""
+        """The function, Function, or Command the task runs."""
         return self._func
 
     @property
@@ -889,6 +931,7 @@ def _name_task(key, func):
         words = func.template.split()
         name = words[0] if words else "command"
     else:
+        func = _callable(func)
         name = getattr(func, "__name__", None) or type(func).__name__
     return f"Task({key!r}, {name})"
 
@@ -987,8 +1030,8 @@ class Graph:
     # The user interface.
 
     def add(self, func, /, *args, **kwargs):
-        """Add a task that calls func with these arguments, or runs a Command with values for its placeholders, and
-        return its Task. Tasks of this Graph, their selections and files, and Files may appear anywhere inside the
+        """Add a task that calls func, a function or a Function, with these arguments, or runs a Command with values
+        for its placeholders, and return its Task. Tasks of this Graph, their selections and files, and Files may appear anywhere inside the
         arguments of a function. During a run, only a rule may add tasks, and they run once it returns."""
         self._check_change("add")
         while self._next_key in self._tasks:
@@ -1094,7 +1137,7 @@ class Graph:
                 if extra:
                     problems.append(f"no placeholder for {', '.join(extra)}")
                 raise TypeError(f"{func!r}: {'; '.join(problems)}")
-        elif isinstance(func, _Symbol) or not callable(func):
+        elif type(func) is not Function and (isinstance(func, _Symbol) or not callable(func)):
             raise TypeError("a task needs a function or a Command followed by its arguments")
         if key in self._tasks:
             raise ValueError(f"a task with key {key!r} already exists")
