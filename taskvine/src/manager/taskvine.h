@@ -1470,6 +1470,7 @@ a times series, if this feature is enabled. See @ref vine_enable_monitoring.
  - "option_blocklist_slow_workers_timeout" Timeout for slow workers to come back to the pool. (default=900)
  - "watch-library-logfiles" If 1, watch the output files produced by each of the library processes running on the remote workers, take them back the current logging directory. (default=0)
  - "max-library-retries" The number of times a library task can fail and be retried before it is permanently removed.
+ - "max-origin-failures" A task whose workers cannot set it up because an input url or mini task failed to be fetched from its origin more than this many times fails with VINE_RESULT_INPUT_MISSING. Failed copies from peer workers and library deaths do not count. (default=-1, unlimited)
 @param value The value to set the parameter to.
 @return 0 on succes, -1 on failure.
 */

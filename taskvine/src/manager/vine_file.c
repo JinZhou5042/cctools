@@ -65,6 +65,7 @@ int vine_file_delete(struct vine_file *f)
 		}
 
 		vine_task_delete(f->mini_task);
+		free(f->origin_error);
 		free(f->source);
 		free(f->cached_name);
 		free(f->data);
@@ -328,11 +329,14 @@ struct vine_file *vine_file_xrootd(const char *source, struct vine_file *proxy, 
 		}
 	}
 
-	char *command = string_format("xrdcp %s output.root", source);
+	char *quoted = string_escape_shell(source);
+	char *command = string_format("xrdcp %s output.root", quoted);
+	free(quoted);
 	struct vine_task *t = vine_task_create(command);
 
+	/* The proxy is mounted under the name that X509_USER_PROXY gives. */
 	if (proxy) {
-		vine_task_set_env_var(t, "X509_USER_PROXY", "proxy509");
+		vine_task_set_env_var(t, "X509_USER_PROXY", "proxy509.pem");
 		vine_task_add_input(t, proxy, "proxy509.pem", 0);
 	}
 

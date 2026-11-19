@@ -494,9 +494,15 @@ Transfer a single input file from a url to the local transfer path via curl.
 
 static int do_curl_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *transfer_path, const char *cache_path, char **error_message)
 {
-	char *command = string_format("curl -sSL --stderr /dev/stdout -o \"%s\" \"%s\"", transfer_path, f->source);
+	/* --fail makes an HTTP error status a failed transfer, whose message names the status, instead of a cached error
+	 * page. Both names are quoted for the shell. */
+	char *path = string_escape_shell(transfer_path);
+	char *source = string_escape_shell(f->source);
+	char *command = string_format("curl -sSfL --stderr /dev/stdout -o %s %s", path, source);
 	int result = do_internal_command(c, command, error_message);
 	free(command);
+	free(source);
+	free(path);
 
 	return result;
 }

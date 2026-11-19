@@ -45,6 +45,8 @@ struct vine_file {
 	int original_producer_task_id;   // For temp files, the task ID of the original task that produces this file.
 	struct vine_worker_info *source_worker; // if this is a substitute file, attach the worker serving it. 
 	int change_message_shown; // True if error message already shown.
+	int origin_failures; // For a url or mini task, the times a worker failed to fetch it from its origin, not a peer.
+	char *origin_error;  // For a url or mini task, the error message of its latest origin failure, or null.
 	int refcount;       // Number of references from a task object, delete when zero.
 };
 

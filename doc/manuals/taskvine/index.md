@@ -2818,6 +2818,7 @@ change.
 | load-from-shared-filesystem | If set to 1, workers can load in data to their caches from the shared filesystem | 0 |
 | long-timeout | Set the minimum timeout in seconds when sending a large message to a single worker. | 3600 |
 | max-retrievals | Sets the max number of tasks to retrieve per manager wait(). If less than 1, the manager prefers to retrieve all completed tasks before dispatching new tasks to workers. | 1 |
+| max-origin-failures | A task whose input URL or mini task could not be fetched from its origin more than this many times (failed copies from peer workers do not count) fails with the result input missing, instead of being returned to the workers without end. -1 is unlimited. | -1 |
 | min-transfer-timeout | Set the minimum number of seconds to wait for files to be transferred to or from a worker. | 10 |
 | monitor-interval        | Maximum number of seconds between resource monitor measurements. If less than 1, use default. | 5 |
 | prefer-dispatch | If 1, try to dispatch tasks even if there are retrieved tasks ready to be reportedas done. | 0 |
