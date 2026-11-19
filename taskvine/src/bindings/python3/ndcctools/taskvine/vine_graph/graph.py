@@ -771,7 +771,8 @@ class Command:
 
     Placeholders such as {name} take the values given by name, shell-quoted: a File, or a file a task writes
     (task.file(name)), becomes its path in the sandbox, a Task becomes str() of its result without trailing newlines,
-    and any other value str() of the value. A list or tuple renders each element, separated by spaces, and an empty one
+    a selection such as task["mean"] or task.attr("x") str() of the selected value, and any other value str() of the
+    value. A list or tuple renders each element, separated by spaces, and an empty one
     adds nothing. For a repeated flag, pass [w for v in vcfs for w in ("-I", v)]. Every placeholder needs a value, and
     every value a placeholder. Write {{ and }} for braces. The text a command writes to standard output, at most 1 MiB,
     is its result, and an exit status other than zero fails it, with the end of its standard error in its TaskError.
@@ -1221,9 +1222,6 @@ def _name_task(number, func, suffix=""):
 
 def _check_command_value(name, value):
     """Raise for a value of a placeholder that a command cannot read."""
-    if isinstance(value, _Selection):
-        raise TypeError(f"the value of {{{name}}} is a selection, which a command cannot read; read it in a Python task "
-                        f"and pass that task")
     if isinstance(value, Shared):
         raise TypeError(f"the value of {{{name}}} is a shared object, which only Python tasks take")
     if not isinstance(value, _Symbol) and _scanner()(value):

@@ -307,7 +307,7 @@ class _Local(_Runner):
 
     def _run_command(self, task, record, task_dir):
         line, results, files = self._command_line(task, shlex.quote(sys.executable))
-        for path, parent in results:
+        for path, parent, _ in results:
             os.symlink(self._results[parent.number], os.path.join(task_dir, path))
         for identity, path, source in files:
             if identity[0] == "url":

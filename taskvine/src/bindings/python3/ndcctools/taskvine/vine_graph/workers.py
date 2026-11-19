@@ -480,10 +480,11 @@ class _Workers(_Runner):
         thread declares and mounts. The sandbox name of every staged file the task holds is added to names."""
         graph = task._graph
         if record.command:
-            line, results, files = self._command_line(task, "python3")
-            result_records = [parent for _, parent in results]
-            result_paths = [path for path, _ in results]
-            return (record, record.outputs, (), result_records, result_paths, (), files, (), None, line)
+            line, results, files = self._command_line(task, "python3", selection_files=True)
+            result_records = [parent for _, parent, chain in results if chain is None]
+            result_paths = [path for path, _, chain in results if chain is None]
+            selections_read = [(parent, path, chain) for path, parent, chain in results if chain is not None]
+            return (record, record.outputs, (), result_records, result_paths, selections_read, files, (), None, line)
         func, args, kwargs = _callable(task._func), task._args, task._kwargs
         files = {}
         mounts = []  # (file identity, sandbox path, record of the task that writes the file or None)

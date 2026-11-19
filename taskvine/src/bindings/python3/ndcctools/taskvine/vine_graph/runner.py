@@ -6,6 +6,7 @@
 the lock that interrupts never leave held, and how sandboxes name files and commands. _Workers (workers.py) runs tasks on
 TaskVine Workers and _Local (local.py) in this process."""
 
+import base64
 import collections
 import ctypes
 import errno
@@ -38,7 +39,7 @@ from . import vine_graph_capi as capi  # noqa: E402
 from . import graph as _graph_module, library, store as _store_module  # noqa: E402
 from .graph import (  # noqa: E402
     COMMAND_RESULT_LIMIT, URL, File, TaskError, _COMPLETED, _FileRef, _Ref, _clashes_with_output, _name_task,
-    reserved_name,
+    reserved_name, selection_key,
 )
 
 # The C functions themselves, which the background thread calls for every task without the generated Python wrapper.
@@ -111,6 +112,14 @@ _NAME_MAX = 255
 # The Python code that the shell of a command task runs to read str() of a Python task's result, which the result file
 # holds serialized. Workers run it with the python3 of their environment, and local runs with this interpreter.
 _STR_RESULT = 'import sys, cloudpickle; sys.stdout.write(str(cloudpickle.load(open(sys.argv[1], "rb"))["Result"]))'
+# The Python code that reads str() of a selection that its producer wrote to a file (library.save_selection()), and
+# the code that selects from a whole result, that of a Python task or the text of a command, by the selection steps,
+# serialized and encoded in base64. A selection that the result lacks raises in the command, as in a Python task.
+_STR_SELECTION = ("import sys; from ndcctools.taskvine.vine_graph import library; "
+                  "sys.stdout.write(str(library.load_selection(sys.argv[1])))")
+_STR_SELECTED = ("import base64, sys, cloudpickle; from ndcctools.taskvine.vine_graph import library; "
+                 "value = (library.load_text_result if sys.argv[2] == 'text' else library.load_result)(sys.argv[1]); "
+                 "sys.stdout.write(str(library._select(value, cloudpickle.loads(base64.b64decode(sys.argv[3])))))")
 
 
 class _Lock(_thread.RLock):
@@ -485,11 +494,13 @@ class _Runner:
                 names[identity] = name
         return names
 
-    def _command_line(self, task, python):
+    def _command_line(self, task, python, selection_files=False):
         """Return the shell command line of a Command task and what it mounts: (sandbox path of each result it reads,
-        record), and (file identity, sandbox path, record of the task that writes it or None) of each file.
+        record, selection key of the producer's selection file or None for its whole result), and (file identity, sandbox path, record of the task that writes it or None) of each file.
         Placeholders take the shell-quoted path of a file in the sandbox, the text of a task result, which the shell
-        reads into a variable first, without its trailing newlines, and str() of any other value. A list or tuple
+        reads into a variable first, without its trailing newlines, str() of a value selected from a result, as a
+        Python task selects it, and str() of any other value. With selection_files, a selection that the producer writes
+        to a file of its own is read from that file. A list or tuple
         renders each element so, separated by spaces. The command's standard output goes to the result file, which
         keeps at most COMMAND_RESULT_LIMIT bytes, and a command that exits with status zero fails when it did not write
         a file it declared."""
@@ -507,24 +518,46 @@ class _Runner:
                     identities.setdefault(library.file_identity(element), None)
         names = self._file_task_paths(task, identities) if identities else None
         prelude = []
-        variables = {}  # number of a record whose result the task reads -> the shell variable of its text
-        results = {}  # sandbox path of a result the task reads -> its record
+        # (number of a record whose result the task reads, selection key or () for the whole result) -> the shell
+        # variable of its text
+        variables = {}
+        # sandbox path of a result or selection file the task reads -> (its record, selection key of a selection file
+        # of the producer, or None for the whole result)
+        results = {}
         files = {}  # identity -> (identity, sandbox path, record of the task that writes it or None)
+
+        read_once = task._selections
 
         def render(value):
             kind = type(value)
             if kind is _Ref:
-                record = parents[(value.graph_id, value.key)]._record
-                variable = variables.get(record.number)
+                ref = (value.graph_id, value.key)
+                record = parents[ref]._record
+                steps = value.steps
+                chain = selection_key(steps) if steps else ()
+                # A chain that has no key, such as a step of another type, is told apart by the place it is read at.
+                slot = (record.number, chain if chain is not None else id(value))
+                variable = variables.get(slot)
                 if variable is None:
-                    path = f"vine-graph-result-{record.number}"
-                    variable = variables[record.number] = f"vine_graph_value_{len(prelude) + 1}"
-                    if record.command:
-                        read = f"cat {path}"
+                    variable = variables[slot] = f"vine_graph_value_{len(prelude) + 1}"
+                    if not steps:
+                        path = f"vine-graph-result-{record.number}"
+                        read = f"cat {path}" if record.command else f"{python} -c {shlex.quote(_STR_RESULT)} {path}"
+                        results[path] = (record, None)
+                    elif selection_files and read_once and ref in read_once and chain is not None and \
+                            record.selections and chain in record.selections:
+                        # The producer writes the selection to a file of its own, which the task mounts instead of the
+                        # whole result, as a Python task that reads the same selection does.
+                        path = f"vine-graph-selection-{record.number}"
+                        read = f"{python} -c {shlex.quote(_STR_SELECTION)} {path}"
+                        results[path] = (record, chain)
                     else:
-                        read = f"{python} -c {shlex.quote(_STR_RESULT)} {path}"
+                        path = f"vine-graph-result-{record.number}"
+                        encoded = base64.b64encode(cloudpickle.dumps(steps)).decode()
+                        read = (f"{python} -c {shlex.quote(_STR_SELECTED)} {path} "
+                                f"{'text' if record.command else 'pickle'} {encoded}")
+                        results[path] = (record, None)
                     prelude.append(f"{variable}=$({read}) || {{ echo {shlex.quote(f'vine_graph: could not read the result of task {record.label}')} >&2; exit 1; }}")
-                    results[path] = record
                 return f'"${variable}"'
             if kind is File or kind is _FileRef or kind is URL:
                 identity = library.file_identity(value)
@@ -542,7 +575,7 @@ class _Runner:
                 values[name] = " ".join(render(element) for element in value)
             else:
                 values[name] = render(value)
-        results = list(results.items())
+        results = [(path, record, chain) for path, (record, chain) in results.items()]
         files = list(files.values())
         checks = "".join(f'if [ ! -e {shlex.quote(path)} ]; then echo {shlex.quote(f"vine_graph: the command did not write its output {path}")} >&2; vine_graph_status=1; fi\n'
                          for path in (task._outputs or ()))
