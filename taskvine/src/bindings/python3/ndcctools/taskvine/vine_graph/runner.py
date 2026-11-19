@@ -84,10 +84,8 @@ EXECUTOR_TUNING = {
     "checkpoint-yield": 10,
 }
 
-# Graph executor settings: those above, and shared-directory, which has no default. It names a directory that the
-# Manager and every Worker mount at one path, such as a shared file system, where the vault keeps large checkpoints
-# that the Workers holding them write, besides those it receives itself (Manager tuning vault-shared-min-bytes).
-EXECUTOR_SETTINGS = frozenset(EXECUTOR_TUNING) | {"shared-directory"}
+# Graph executor settings: those above.
+EXECUTOR_SETTINGS = frozenset(EXECUTOR_TUNING)
 
 # The setting of the Executor itself: a budget in bytes of function and argument objects of the first submission that
 # the library on each Worker loads when it starts, so tasks do not fetch their files. Zero, the default, caches none.

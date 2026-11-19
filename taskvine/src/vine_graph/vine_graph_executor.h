@@ -111,9 +111,8 @@ struct vine_graph_profile {
 	int retry;	    /* VINE_GRAPH_RETRY_* bits: which failures of the task itself the retries cover */
 };
 
-/* How far durability lags behind completions. An output is anchored when it has a copy in the vault, at the Manager
- * or in the vault's shared directory. Until then, or until its readers no longer need it and it is released, its loss makes its
- * producer run again. Rates and the lag are measured over the last complete window of a few seconds. Large outputs are
+/* How far durability lags behind completions. An output is anchored when it has a copy in the vault, at the Manager.
+ * Until then, or until its readers no longer need it and it is released, its loss makes its producer run again. Rates and the lag are measured over the last complete window of a few seconds. Large outputs are
  * those the vault receives over connections of their own, above an inline transfer (64 KiB). */
 struct vine_graph_durability {
 	int64_t exposed;	/* outputs of completed nodes that are neither anchored nor released */
@@ -149,12 +148,7 @@ void vine_graph_executor_delete(struct vine_graph_executor *e);
  *                        anchored. A lost output then recomputes at most a band, never a longer chain.
  * checkpoint-yield       Seconds a large output's checkpoint waits, once, while the node has children whose tasks run
  *                        and read it from the Worker that also sends the checkpoint (default 10, 0 disables it). An
- *                        output the frontend fetches never waits.
- * shared-directory       A directory that the Manager and every Worker mount at the same path, such as a shared
- *                        file system. The vault keeps large checkpoints in a directory of its own there, which the
- *                        Workers holding them write in the background, besides those it receives itself
- *                        (vine_set_vault_shared_directory(), and the Manager tuning vault-shared-min-bytes). It can be
- *                        set once. */
+ *                        output the frontend fetches never waits. */
 int vine_graph_executor_tune(struct vine_graph_executor *e, const char *name, const char *value);
 
 /* Return NULL if vine_graph_executor_tune would accept a setting, or a static string that explains what the setting
