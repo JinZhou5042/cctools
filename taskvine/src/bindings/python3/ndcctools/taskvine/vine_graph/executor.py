@@ -112,7 +112,8 @@ class Executor:
     the results of its sinks, and submit(graph) makes them live and returns at once. A live Task's result() waits for
     it, and cancel() cancels it. A task that reads a Task starts once its input exists, so work whose dependencies are
     known is added up front, and a decision that depends on a result is ordinary control flow around result(): add
-    more tasks to the Graph and submit it again. as_completed() yields tasks as they finish, for reacting to whichever
+    more tasks to the Graph and submit it again, or add a vg.Expand, whose builder returns the tasks to run once its inputs
+exist, with no wait of the caller. as_completed() yields tasks as they finish, for reacting to whichever
     of several running tasks finishes first. One Executor runs any number of Graphs on its Workers. Use it in a with
     statement, or close() it, and read results before it closes:
 
@@ -154,7 +155,6 @@ class Executor:
         self._local = bool(local)
         # Held while task states change, which happens in the thread that holds it.
         self._lock = _Lock()
-        self._last_task = 0  # the number of the latest record, which numbers the tasks in the order they went live
         # Tasks that this Executor made live, and how many of them completed, failed, and were cancelled, for progress().
         self._started = 0
         self._completed = 0
@@ -244,7 +244,9 @@ class Executor:
         """Return how far the tasks are that this Executor made live, as a Progress with the fields total, completed,
         failed, cancelled, and waiting, the tasks that did not finish yet."""
         self._poll()
-        total, completed, failed, cancelled = self._started, self._completed, self._failed, self._cancelled
+        # The tasks that Expands expanded into count as they go live.
+        total = self._started + self._runner._spawned
+        completed, failed, cancelled = self._completed, self._failed, self._cancelled
         return Progress(total, completed, failed, cancelled, max(total - completed - failed - cancelled, 0))
 
     def _check_open(self):
@@ -331,8 +333,7 @@ class Executor:
         record = _Record(task._graph._ref, task.key)
         # The number is taken before anything is queued, so a submission that an interrupt stopped after queuing, whose
         # task is submitted again under a new record, never shares its number, by which the runner knows records.
-        self._last_task += 1
-        record.number = self._last_task
+        record.number = self._runner.next_number()
         record.func = task._func
         record.command = isinstance(task._func, Command)
         record.outputs = tuple(task._outputs) if task._outputs else ()
@@ -409,6 +410,19 @@ class Executor:
 
     def _apply_event(self, record, entry):
         if record.abandoned:
+            return
+        if record.child:
+            # A task that an Expand expanded into has no Task to apply its outcome to, only the counts of progress(),
+            # which count its first outcome, as for a Task.
+            if record.child == 2:
+                return
+            record.child = 2
+            if entry[0] == _COMPLETED:
+                self._completed += 1
+            elif entry[3] == "cancelled":
+                self._cancelled += 1
+            else:
+                self._failed += 1
             return
         task = _task_of(record)
         if task is None or task._record is not record or task._state != _RUNNING:

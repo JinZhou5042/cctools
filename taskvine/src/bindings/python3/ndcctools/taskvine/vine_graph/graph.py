@@ -584,6 +584,8 @@ class TaskError(RuntimeError):
     - "retries": more of its attempts failed for other reasons than the setting max-retries allows
     - "submit": it could not be submitted, as when an argument cannot be serialized
     - "result": it completed, but its result cannot be loaded in this process or sent by its Worker
+    - "expand": the builder of its Expand raised, returned anything but a list of Functions, Commands, and Expands, or
+      returned a task that reads the Expand
 
     Reasons may grow: compare with these strings, and treat others as failures.
 
@@ -830,8 +832,43 @@ class Function:
         return f"Function({func}, cores={self._options.cores}{_repr_extra(self, True)})"
 
 
+class Expand:
+    """A builder function and its arguments, which g.add(expand, **settings) makes a task of whose work is decided from
+    results: once every task that its arguments hold finished, builder(*args, **kwargs) runs once, in this process, with
+    their values, and returns a list of Functions, Commands, or Expands. Each becomes a task with the settings of the
+    Expand's task, and the Expand's result is the list of their results, in order, a nested list for a nested Expand.
+    The Executor does this by itself, with no call of result() or a wait in between: submit(g) is enough.
+
+    Arguments are those of a Function, and only an Expand also takes a Function, Command, or Expand directly as an
+    argument, which becomes a task of its own that the Expand reads, with the same settings. A builder that raises, or
+    returns anything but such a list, fails the task with reason "expand", and so does a task it returns that reads the
+    Expand or a task that reads it. The builder never runs again, also when results are computed again."""
+
+    __slots__ = ("_builder", "_args", "_kwargs", "_options", "_name", "_outputs", "_render", "_cache", "__weakref__")
+
+    def __init__(self, builder, /, *args, **kwargs):
+        if isinstance(builder, (Command, Function, Expand, _Symbol)) or not callable(builder):
+            raise TypeError("an Expand takes a builder function and its arguments, such as Expand(per_file, files)")
+        self._builder = builder
+        self._args = args
+        self._kwargs = kwargs
+        _default_settings(self)
+
+    @property
+    def builder(self):
+        return self._builder
+
+    def __repr__(self):
+        builder = getattr(self._builder, "__name__", None) or type(self._builder).__name__
+        return f"Expand({builder}, cores={self._options.cores}{_repr_extra(self, True)})"
+
+
+# What Graph.add() makes a task of.
+_SPECS = (Function, Command, Expand)
+
+
 def _default_settings(spec):
-    """Give a Function or Command the settings of a task that Graph.add() was given none for."""
+    """Give a Function, Command, or Expand the settings of a task that Graph.add() was given none for."""
     spec._options = _DEFAULT_OPTIONS
     spec._cache = False
     spec._name = None
@@ -840,7 +877,7 @@ def _default_settings(spec):
 
 
 def _bind(spec, cores, memory, gpus, time_limit, retries, retry_on, outputs, cache, name):
-    """Return (what the task runs, its positional arguments, its keyword arguments) for a Function or Command and the
+    """Return (what the task runs, its positional arguments, its keyword arguments) for a Function, Command, or Expand and the
     settings of Graph.add(). What the task runs is a copy that holds the settings and no arguments, so the arguments
     live only in the task, as references to the tasks they read."""
     bound = object.__new__(type(spec))
@@ -852,6 +889,11 @@ def _bind(spec, cores, memory, gpus, time_limit, retries, retry_on, outputs, cac
     bound._cache = _check_cache(cache)
     bound._name = _check_label(name)
     bound._outputs, bound._render = _parse_outputs(outputs) if outputs else ((), None)
+    if type(spec) is Expand:
+        bound._builder = spec._builder
+        bound._args = ()
+        bound._kwargs = {}
+        return bound, spec._args, spec._kwargs
     if type(spec) is Function:
         bound._func = spec._func
         bound._args = ()
@@ -869,7 +911,7 @@ def _bind(spec, cores, memory, gpus, time_limit, retries, retry_on, outputs, cac
 
 
 def _repr_extra(func, retries_first):
-    """Return the part of the repr of a Function or Command after its cores: the settings that differ from the
+    """Return the part of the repr of a Function, Command, or Expand after its cores: the settings that differ from the
     defaults. A Function shows its retries before its outputs, and a Command after them."""
     options = func._options
     retries = ""
@@ -895,7 +937,7 @@ def _repr_extra(func, retries_first):
 
 
 def _add_common_properties(cls):
-    """Give a Function or Command the properties of what its tasks request, write, and are named, of their time limit
+    """Give a Function, Command, or Expand the properties of what its tasks request, write, and are named, of their time limit
     and retries, and of the cache."""
     cls.cores = property(lambda self: self._options.cores, doc="The cores its tasks use.")
     cls.memory = property(lambda self: self._options.memory, doc="The MB of memory its tasks request, or None.")
@@ -913,21 +955,25 @@ def _add_common_properties(cls):
 
 _add_common_properties(Command)
 _add_common_properties(Function)
+_add_common_properties(Expand)
 
 
 def _callable(func):
-    """Return what a Python task calls: the function of a Function, or func itself."""
-    return func._func if type(func) is Function else func
+    """Return what a Python task calls: the function of a Function, the builder of an Expand, or func itself."""
+    kind = type(func)
+    if kind is Function:
+        return func._func
+    return func._builder if kind is Expand else func
 
 
 def _check_task_kind(func, method):
-    """Raise TypeError unless func, the first argument of method, is a Function or a Command."""
-    if type(func) is Function or isinstance(func, Command):
+    """Raise TypeError unless func, the first argument of method, is a Function, Command, or Expand."""
+    if type(func) in _SPECS:
         return
     name = getattr(func, "__name__", None) if callable(func) and not isinstance(func, _Symbol) else None
     if name:
-        raise TypeError(f"{method} takes a vg.Function or vg.Command; wrap {name} as vg.Function({name})")
-    raise TypeError(f"{method} takes a vg.Function or vg.Command followed by its arguments, not {func!r}")
+        raise TypeError(f"{method} takes a vg.Function, vg.Command, or vg.Expand; wrap {name} as vg.Function({name})")
+    raise TypeError(f"{method} takes a vg.Function, vg.Command, or vg.Expand followed by its arguments, not {func!r}")
 
 
 class TaskFile(_Symbol):
@@ -1111,7 +1157,7 @@ class Task(_Selectable):
 
     @property
     def func(self):
-        """The Function or Command the task runs, with the settings it was added with (cores, memory, gpus, outputs,
+        """The Function, Command, or Expand the task runs, with the settings it was added with (cores, memory, gpus, outputs,
         time_limit, retries, retry_on, cache, name), and without its arguments, which args and kwargs give."""
         return self._func
 
@@ -1209,7 +1255,7 @@ def _label(task):
 
 def _name_task(number, func, suffix=""):
     kind = type(func)
-    if (kind is Command or kind is Function) and func._name is not None:
+    if kind in _SPECS and func._name is not None:
         name = func._name
     elif kind is Command:
         words = func.template.split()
@@ -1284,8 +1330,11 @@ class Graph:
         self._unfinished = 0  # live tasks that did not finish, counted under the lock of the Executor
         self._id = next(_graph_ids)
         self._ref = weakref.ref(self)  # how the records of an Executor refer to the Graph
-        # The Executor's records of the tasks submitted, which it lets go when the Graph is collected.
+        # The Executor's records of the tasks submitted, which it lets go when the Graph is collected, with those of the
+        # tasks that Expands of the Graph expanded into.
         self._records = []
+        # key -> Task of a task that an Expand expanded into, made when something asks for it (_task_of())
+        self._expanded = weakref.WeakValueDictionary()
 
     def __repr__(self):
         return f"Graph({len(self._tasks)} tasks)"
@@ -1302,9 +1351,11 @@ class Graph:
 
     def add(self, spec, /, *extra, cores=1, memory=None, gpus=0, time_limit=None, retries=0, retry_on=Exception,
             outputs=(), cache=False, name=None):
-        """Add a task that calls a Function or runs a Command, with these settings, and return its Task, which becomes
-        live when an Executor takes the Graph. Tasks of this Graph and live tasks of its Executor, their selections and
-        files, and Files may appear anywhere inside the arguments of a Function.
+        """Add a task that calls a Function, runs a Command, or expands into tasks that an Expand decides, with these
+        settings, and return its Task, which becomes live when an Executor takes the Graph. Tasks of this Graph and
+        live tasks of its Executor, their selections and files, and Files may appear anywhere inside the arguments of a
+        Function or Expand. The settings of an Expand are those of every task it expands into, and it takes no
+        outputs.
 
         cores is the number of cores the task uses on a Worker. memory (MB) and gpus are requests, not limits: a task
         waits for a Worker that can grant them, and sees CORES, MEMORY, GPUS, and CUDA_VISIBLE_DEVICES for what it got.
@@ -1323,7 +1374,7 @@ class Graph:
         in errors, notices, and repr."""
         _check_task_kind(spec, "g.add()")
         if extra:
-            raise TypeError("g.add() takes one Function or Command; pass the arguments inside it, as in "
+            raise TypeError("g.add() takes one Function, Command, or Expand; pass the arguments inside it, as in "
                             "g.add(vg.Function(f, x, y))")
         while self._next_key in self._tasks:
             self._next_key += 1
@@ -1332,11 +1383,31 @@ class Graph:
         return self._add(key, spec, (cores, memory, gpus, time_limit, retries, retry_on, outputs, cache, name))
 
     def _add(self, key, spec, settings=None, method="g.add()"):
-        """Record a task of a Function or Command and its settings, as Graph.add() takes them, under key and return
+        """Record a task of a Function, Command, or Expand and its settings, as Graph.add() takes them, under key and return
         it."""
         _check_task_kind(spec, method)
         if settings is None:
             settings = (1, None, 0, None, 0, Exception, (), False, None)
+        kind = type(spec)
+        if key in self._tasks:
+            raise ValueError(f"a task with key {key!r} already exists")
+        if kind is Expand:
+            if settings[6]:
+                raise TypeError("an Expand writes no files of its own, so g.add() takes no outputs for it; give the "
+                                "tasks that its builder returns their files")
+            # A Function, Command, or Expand passed directly to an Expand is a task of its own, with the same
+            # settings, which the Expand reads.
+            hidden = itertools.count()
+            spec = Expand(spec._builder,
+                          *[self._add((key, "a", next(hidden)), value, settings, method) if type(value) in _SPECS
+                            else value for value in spec._args],
+                          **{name: self._add((key, "a", next(hidden)), value, settings, method)
+                             if type(value) in _SPECS else value for name, value in spec._kwargs.items()})
+        else:
+            for value in (*spec._args, *spec._kwargs.values()) if kind is Function else spec._values.values():
+                if type(value) in _SPECS:
+                    raise TypeError(f"{spec!r} takes {value!r} as an argument, which only a vg.Expand takes; add it "
+                                    f"with g.add() and pass its Task")
         func, args, kwargs = _bind(spec, *settings)
         command = type(func) is Command
         if command:
@@ -1349,11 +1420,11 @@ class Graph:
                 if extra:
                     problems.append(f"no placeholder for {', '.join(extra)}")
                 raise TypeError(f"{spec!r}: {'; '.join(problems)}")
-        if key in self._tasks:
-            raise ValueError(f"a task with key {key!r} already exists")
         outputs = _task_outputs(func, kwargs) if func._outputs else ()
         task = Task(self, key, func)
         self._record_arguments(task, args, kwargs)
+        if kind is Expand and task._shared:
+            raise TypeError("the builder of an Expand runs in this process, where vg.Shared objects are not loaded")
         if outputs:
             # The files of a Function or Command are declared for each of its tasks before the task can start.
             task._outputs = {name: TaskFile(task, name) for name in outputs}
@@ -1527,6 +1598,34 @@ class Graph:
                       if steps and parent not in repeated}
         if selections:
             task._selections = selections
+
+    def _expanded_task(self, record):
+        """Return the Task of a task that an Expand of this Graph expanded into, made from its record on first use.
+        Such tasks have no Task until something asks for one, as the TaskError of a task that it made fail does."""
+        task = self._expanded.get(record.key)
+        if task is None:
+            task = Task(self, record.key, record.func)
+            task._record = record
+            entry = record.finished
+            if entry is None:
+                task._state = _RUNNING
+            elif entry[0] == _COMPLETED:
+                task._state = _COMPLETED
+            elif entry[3] == "cancelled":
+                task._state = _CANCELLED
+            else:
+                task._state = _FAILED
+                source = entry[1]
+                task._error = (_FAILED, None, *entry[2:]) if source is record else \
+                    (_FAILED, source.graph() and source.graph()._task_of_record(source), None, entry[3], None)
+            task = self._expanded.setdefault(record.key, task)
+        return task
+
+    def _task_of_record(self, record):
+        task = self._tasks.get(record.key)
+        if task is None and record.child:
+            task = self._expanded_task(record)
+        return task
 
     # What the Tasks of the Graph ask of the Executor that took it.
 

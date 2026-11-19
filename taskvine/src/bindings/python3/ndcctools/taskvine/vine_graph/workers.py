@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import types
 import weakref
 from contextlib import ExitStack
@@ -37,13 +38,14 @@ from ndcctools.taskvine.manager import Manager
 
 from . import install, library, store as _store_module
 from .graph import (
-    _LEAF_TYPE_SET, Command, File, Function, Shared, TaskError, URL, _DEFAULT_OPTIONS, _FAILED, _FileRef, _Ref,
+    _LEAF_TYPE_SET, Command, Expand, File, Function, Shared, TaskError, URL, _DEFAULT_OPTIONS, _FAILED, _FileRef, _Ref,
     _callable, _link_or_copy, _place, _readers_of,
 )
 from .runner import (
     COMMAND_ERROR_TAIL, EDATA_CACHE, EXECUTOR_SETTINGS, EXECUTOR_TUNING, MANAGER_TUNING, _COMPLETED_ENTRY, _INTERRUPT,
     _Record, _Runner, _block_interrupts, _capi, _check_params, _check_task, _load_result,
-    _manager_setting, _read_file, _references, _task_of, _too_large, _written_size, capi, cvine,
+    _manager_setting, _read_file, _references, _task_of, _too_large, _written_size, capi, cvine, _ExpandState,
+    _Pickler, _expansion, _expand_state,
 )
 
 # TaskError.reason of each kind of failure that C reports. A command that fails as a function does reads "command".
@@ -57,6 +59,7 @@ _FAILURE_REASONS = {
     capi.VINE_GRAPH_FAILURE_SUBMIT: "submit",
     capi.VINE_GRAPH_FAILURE_RESOURCES: "resources",
     capi.VINE_GRAPH_FAILURE_TIMEOUT: "timeout",
+    capi.VINE_GRAPH_FAILURE_EXPAND: "expand",
 }
 
 # The shell command line of a Python task that runs as a standard task, as a task of a Function with GPUs does
@@ -157,6 +160,15 @@ class _Serialized:
             os.unlink(self.path)
 
 
+class _Open(tuple):
+    """A queued call that submits the open node of an Expand in the background thread (_submit_open())."""
+
+    __slots__ = ()
+
+    def __call__(self):
+        self[0]._submit_open(self[1])
+
+
 class _Submission(list):
     """A queued call that submits a task in the background thread: the list of what it declares and mounts
     (_submit_node()), one object for the garbage collector instead of a partial, a tuple, and a list."""
@@ -250,6 +262,15 @@ class _Workers(_Runner):
         self._edata_cache_path = None
         self._driver = None
         self._driver_ident = None
+        # C file id of a result or file that an Expand waits for -> [(record of the Expand, data key)]; background thread
+        # only. The thread of expansions, started by the first Expand whose inputs all came (_queue_expansion()), takes
+        # those records one at a time (_expand()). A run without an Expand starts no thread, so the threads of its
+        # Executors take the same memory arenas as before.
+        self._expand_fetches = {}
+        self._expand_queue = queue.SimpleQueue()
+        self._expander = None
+        self._expander_ident = None
+        self._expand_pickler = None
         self._work_dir = None  # what the runner writes for itself, in the Manager's staging directory
         self._edata_dir = None
         try:
@@ -376,6 +397,9 @@ class _Workers(_Runner):
             if self._driver is not None:
                 capi.vine_graph_executor_wake(self._executor)
         _open_executors.discard(self)
+        if self._expander is not None and self._expander is not threading.current_thread():
+            self._expand_queue.put(None)
+            self._expander.join()
         if self._driver is not None and self._driver is not threading.current_thread():
             self._driver.join()
         if self._store_thread is not None:
@@ -447,18 +471,22 @@ class _Workers(_Runner):
         _check_task(task, self._shared)
         if not record.command and task._readers:
             record.selections = _selections_read_from(task) or None
-        if self._store is not None:
+        expand = type(task._func) is Expand
+        if self._store is not None and not expand:
             self._look_up(task, record)
         names = []
         submitted = False
         try:
-            plan = self._plan(task, record, names)
+            plan = self._open_plan(task, record) if expand else self._plan(task, record, names)
             restore_interrupts = _block_interrupts()
             try:
                 with self._lock:
                     record.staged = names[0] if len(names) == 1 else tuple(names)
-                    command = _Submission(plan)
-                    command.executor = self
+                    if expand:
+                        command = _Open((self, plan))
+                    else:
+                        command = _Submission(plan)
+                        command.executor = self
                     # The flag and the call that queues the task are next to each other, so a task is never queued
                     # without its record or recorded without being queued.
                     self._queued += 1
@@ -570,9 +598,28 @@ class _Workers(_Runner):
             selections_read or (),
             mounts,
             edata or (),
-            self._pickler.dumps(manifest),
+            self._thread_pickler().dumps(manifest),
             None,
         )
+
+    def _thread_pickler(self):
+        """Return the Pickler of the calling thread: the runner's, or that of the thread of expansions."""
+        if threading.get_ident() == self._expander_ident:
+            if self._expand_pickler is None:
+                self._expand_pickler = _Pickler()
+            return self._expand_pickler
+        return self._pickler
+
+    def _open_plan(self, task, record):
+        """Return what the background thread needs to submit the open node of an Expand: the selections its readers
+        read, the records whose results and (record, sandbox path) of the files it reads, and what its expansion waits
+        for (_ExpandState)."""
+        selections = [(chain, path) for chain, (_, path) in record.selections.items()] if record.selections else ()
+        results = [parent._record for parent in task._results or ()]
+        parents = _references(task) if task._parents else {}
+        files = [(parents[(ref.graph_id, ref.key)]._record, ref.path) for ref in task._reads or ()
+                 if type(ref) is _FileRef]
+        return record, selections, results, files, _expand_state(task, parents)
 
     def _manifest_entry(self, value, entries, names, inline, edata):
         """Return how the manifest of a task refers to its function or an argument value. entries maps the id of each
@@ -593,11 +640,12 @@ class _Workers(_Runner):
     def _stage(self, value, inline_limit=0):
         """Serialize one object. Return None and its bytes when they fit in inline_limit, and otherwise write them to
         a new staged file and return its sandbox name and local path."""
-        self._last_number += 1
-        name = f"vine-graph-edata-{self._last_number}"
+        with self._lock:
+            self._last_number += 1
+            name = f"vine-graph-edata-{self._last_number}"
         target = _Serialized(os.path.join(self._edata_dir, name), inline_limit)
         try:
-            self._pickler.dump(value, target)
+            self._thread_pickler().dump(value, target)
             target.close()
         except BaseException:
             target.discard()
@@ -764,6 +812,203 @@ class _Workers(_Runner):
         if capi.vine_graph_executor_submit_node(executor, node) != 0:
             raise RuntimeError(f"failed to submit task {key!r}")
 
+    def _submit_open(self, plan):
+        """Submit the open node of an Expand, which stands for it and runs once its expansion sealed it: its result,
+        the selection files its readers read, and mounts that order it after the tasks it reads. Pin and fetch what the
+        builder reads, and hand the Expand to the thread of expansions at once when it reads nothing."""
+        record, selections, results, files, state = plan
+        executor = self._executor
+        node = capi.vine_graph_executor_add_node(executor)
+        if not node:
+            raise MemoryError(f"could not add a graph node for task {record.key!r}")
+        record.node = node
+        self._records[node] = record
+        record.result = self._add_output(node, library.RESULT)
+        if record.keep:
+            if _capi.vine_graph_executor_pin_file(executor, record.result) != 0:
+                raise RuntimeError(f"failed to pin the result of task {record.key!r}")
+            record.pin = 1
+        if selections:
+            record.selection_files = {chain: self._add_output(node, path) for chain, path in selections}
+        waits = [(parent.result, parent.number) for parent in results]
+        waits.extend((parent.files[path], (parent.number, path)) for parent, path in files)
+        for file, _ in waits:
+            self._check(capi.vine_graph_executor_add_after(executor, node, file), f"failed to order task {record.key!r}")
+        if capi.vine_graph_executor_open_node(executor, node) != 0 or \
+                capi.vine_graph_executor_submit_node(executor, node) != 0:
+            raise RuntimeError(f"failed to submit task {record.key!r}")
+        record.expand = state
+        for file, key in waits:
+            # The builder reads the data in this process, so it is pinned and fetched until the builder ran.
+            if _capi.vine_graph_executor_pin_file(executor, file) != 0:
+                raise RuntimeError("failed to pin an input of an Expand")
+            state.pinned.append(file)
+            state.waiting += 1
+            self._expand_fetches.setdefault(file, []).append((record, key))
+            if _capi.vine_graph_executor_fetch_file(executor, file) != 0:
+                raise RuntimeError("failed to fetch an input of an Expand")
+        if not state.waiting:
+            state.phase = 1
+            self._queue_expansion(record)
+
+    def _queue_expansion(self, record):
+        """Hand an Expand whose inputs all came to the thread of expansions, starting it the first time. Background thread
+        only, under the runner's lock against _close()."""
+        with self._lock:
+            if self._closed:
+                return
+            if self._expander is None:
+                self._expander = threading.Thread(target=_run_expansions, args=(weakref.ref(self), self._expand_queue),
+                                                  name="vine-graph-expand", daemon=True)
+                self._expander.start()
+                self._expander_ident = self._expander.ident
+            self._expand_queue.put(record)
+
+    def _expand_fetched(self, file, data):
+        """Give the Expands that wait for a fetched file its data, and hand each that has all of its data to the thread
+        of expansions."""
+        for record, key in self._expand_fetches.pop(file, ()):
+            state = record.expand
+            if type(state) is not _ExpandState or state.phase != 0 or key in state.data:
+                continue
+            state.data[key] = data
+            state.waiting -= 1
+            if not state.waiting:
+                state.phase = 1
+                self._queue_expansion(record)
+
+    def _expand_unfetchable(self, file):
+        """Fail the Expands that wait for a file that its Worker cannot send."""
+        for record, _ in self._expand_fetches.pop(file, ()):
+            if type(record.expand) is _ExpandState and record.expand.phase == 0:
+                self._fail_expansion(record, "a result that its builder reads cannot be sent by its Worker")
+
+    def _end_expansion(self, record):
+        """Unpin what the builder of an Expand read, once it ran or never will. Called in the background thread."""
+        state = record.expand
+        if type(state) is not _ExpandState:
+            return
+        pinned, state.pinned = state.pinned, []
+        for file in pinned:
+            waiters = self._expand_fetches.get(file)
+            if waiters:
+                waiters[:] = [waiter for waiter in waiters if waiter[0] is not record]
+                if not waiters:
+                    del self._expand_fetches[file]
+            _capi.vine_graph_executor_unpin_file(self._executor, file)
+        state.phase = 2
+
+    def _fail_expansion(self, record, message):
+        """Fail the open node of an Expand whose expansion failed, with reason "expand". Called in the background
+        thread."""
+        self._end_expansion(record)
+        record.expand = None
+        if record.node and not record.abandoned:
+            capi.vine_graph_executor_fail_open_node(self._executor, record.node, message)
+            self._publish_finished()
+
+    def _expand(self, record):
+        """Run the builder of an Expand whose inputs all came, in the thread of expansions, stage the tasks it expands
+        into, and queue their submissions and the seal of the Expand's node for the background thread at once, under
+        the runner's lock only. A failure fails the Expand with reason "expand"."""
+        state = record.expand
+        if record.abandoned or record.finished is not None or type(state) is not _ExpandState:
+            self._enqueue(functools.partial(self._end_expansion, record))
+            return
+        sources = state.sources
+        data = state.data
+
+        def load_task_result(ref):
+            source = sources[ref]
+            return _load_result(source, data[source.number])
+
+        def file_path(identity):
+            if identity[0] != "output":
+                return identity[1]
+            source = sources[(identity[1], identity[2])]
+            fetched = data[(source.number, identity[3])]
+            if type(fetched) is not bytes:
+                return fetched
+            path = os.path.join(self._work_dir, f"expand-{source.number}-{os.path.basename(identity[3])}")
+            with open(path, "wb") as stream:
+                stream.write(fetched)
+            return path
+
+        outcome = _expansion(self, record, state, load_task_result, file_path)
+        if outcome is None or isinstance(outcome, str):
+            if outcome is None:
+                self._enqueue(functools.partial(self._end_expansion, record))
+            else:
+                self._enqueue(functools.partial(self._fail_expansion, record, outcome))
+            return
+        tasks, gather = outcome
+        commands = []
+        staged = []
+        try:
+            for task, child in tasks:
+                _check_task(task, self._shared)
+                if type(task._func) is Expand:
+                    if task._readers:
+                        child.selections = _selections_read_from(task) or None
+                    commands.append(_Open((self, self._open_plan(task, child))))
+                    continue
+                if not child.command and task._readers:
+                    child.selections = _selections_read_from(task) or None
+                if self._store is not None:
+                    self._look_up(task, child)
+                names = []
+                staged.append((child, names))
+                command = _Submission(self._plan(task, child, names))
+                command.executor = self
+                commands.append(command)
+            names = []
+            staged.append((record, names))
+            plan = self._plan(gather, record, names)
+        except Exception as error:
+            with self._lock:
+                for _, names in staged:
+                    self._drop_staged(names)
+            message = "".join(traceback.format_exception_only(error)).strip()
+            self._enqueue(functools.partial(self._fail_expansion, record, f"a task that its builder returned could not "
+                                                                         f"be submitted: {message}"))
+            return
+        children = [child for _, child in tasks]
+        graph = record.graph()
+        with self._lock:
+            for child, names in staged:
+                child.staged = names[0] if len(names) == 1 else tuple(names)
+            if self._closed or graph is None:
+                for child, names in staged:
+                    self._drop_staged(names)
+                    child.staged = None
+                return
+            self._unfinished += len(children)
+            self._spawned += len(children)
+            graph._records.extend(children)
+            seal = functools.partial(self._seal, record, plan[3], plan[4], plan[8], children)
+            self._queued += len(commands) + 1
+            target = self._commands if self._held is None else self._held
+            target.extend(commands)
+            target.append(seal)
+            self._wake_locked()
+
+    def _seal(self, record, result_records, result_paths, manifest, children):
+        """Mount the results of the tasks that an Expand expanded into on its open node, with the manifest of the call
+        that gathers them, and seal it. An Expand that was cancelled or failed meanwhile cancels them instead."""
+        self._end_expansion(record)
+        executor = self._executor
+        record.expand = children
+        if record.abandoned or _capi.vine_graph_executor_get_node_state(executor, record.node) != \
+                capi.VINE_GRAPH_NODE_WAITING:
+            self._cancel_nodes(children)
+            return
+        mounts = list(zip(map(_RESULT_FILE, result_records), result_paths))
+        self._check(capi.vine_graph_executor_add_inputs(executor, record.node, mounts),
+                    f"failed to mount the inputs of task {record.key!r}")
+        if capi.vine_graph_executor_add_input_buffer(executor, record.node, manifest, library.MANIFEST) != 0 or \
+                capi.vine_graph_executor_seal_node(executor, record.node) != 0:
+            raise RuntimeError(f"failed to seal task {record.key!r}")
+
     def _complete_from_store(self, record):
         """Complete the node of a task that hit the store with the entry's files as its outputs, which the vault adopts
         as their checkpoints, and return True, or False when the vault takes none of them, and the task runs."""
@@ -839,9 +1084,15 @@ class _Workers(_Runner):
 
     def _cancel_nodes(self, records):
         cancel = _capi.vine_graph_executor_cancel_node
-        for record in records:
+        records = list(records)
+        while records:
+            record = records.pop()
             if record.node:
                 cancel(self._executor, record.node)
+            if type(record.expand) is list:
+                # The tasks that an Expand expanded into are cancelled with it, once.
+                records.extend(record.expand)
+                record.expand = None
         # The tasks and their dependents are finished when cancel_node() returns.
         self._publish_finished()
 
@@ -863,6 +1114,9 @@ class _Workers(_Runner):
             return
         record.abandoned = True
         executor = self._executor
+        if type(record.expand) is _ExpandState:
+            self._end_expansion(record)
+        record.expand = None
         if record.staged is not None:
             names, record.staged = record.staged, None
             self._drop_staged(names if type(names) is tuple else (names,))
@@ -1058,6 +1312,8 @@ class _Workers(_Runner):
         while file := capi.vine_graph_executor_next_fetched(self._executor):
             if self._store_fetches:
                 self._store_fetched(file)
+            if self._expand_fetches and file in self._expand_fetches:
+                self._expand_fetched(file, self._local_data(file))
             key, record = fetches.pop(file, (None, None))
             if record is None or record.abandoned:
                 continue
@@ -1068,6 +1324,8 @@ class _Workers(_Runner):
                 fetched[key] = path
         unsendable = []
         while file := capi.vine_graph_executor_next_fetch_failed(self._executor):
+            if self._expand_fetches and file in self._expand_fetches:
+                self._expand_unfetchable(file)
             number = self._store_fetches.get(file)
             if number is not None and number in self._store_pending:
                 self._release_for_store(self._store_pending[number][0])
@@ -1134,6 +1392,10 @@ class _Workers(_Runner):
                     entry = (_FAILED, source, None, reason, None)
             else:
                 entry = _COMPLETED_ENTRY
+            if type(record.expand) is _ExpandState and record.expand.phase == 0:
+                # Its builder never runs, as when a task it reads failed or it was cancelled.
+                self._end_expansion(record)
+                record.expand = None
             if record.number in self._store_pending:
                 if entry is _COMPLETED_ENTRY:
                     self._fetch_for_store(record)
@@ -1390,6 +1652,27 @@ def _write_entries(store, entries, runner_reference):
         if runner is not None:
             runner._stored(record)
         del runner
+
+
+def _run_expansions(runner_reference, expansions):
+    """Run the builders of Expands, one at a time, in the thread of expansions, until None arrives. The thread blocks
+    SIGINT, as the background thread does, and holds the runner only while it expands."""
+    _signal.pthread_sigmask(_signal.SIG_BLOCK, _INTERRUPT)
+    while True:
+        record = expansions.get()
+        if record is None:
+            return
+        runner = runner_reference()
+        if runner is None or runner._closed:
+            return
+        try:
+            runner._expand(record)
+        except Exception as error:
+            with runner._lock:
+                if runner._run_error is None:
+                    runner._run_error = f"{error}"
+                runner._changed.notify_all()
+        del runner, record
 
 
 def _drive(executor_reference):

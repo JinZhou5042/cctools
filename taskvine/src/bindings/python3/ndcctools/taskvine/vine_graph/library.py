@@ -510,6 +510,12 @@ def load_failure(message):
     return text, error if isinstance(error, BaseException) else None
 
 
+def gather(*results):
+    """Return the results of the tasks that an Expand expanded into as a list: the function of the task that stands for
+    the Expand once it expanded."""
+    return list(results)
+
+
 def run_node():
     """Run the task described by the sandbox manifest and return its result for the library to write. In a library
     that could not prepare itself, report why instead."""

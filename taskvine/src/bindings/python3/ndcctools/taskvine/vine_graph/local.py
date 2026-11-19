@@ -22,10 +22,10 @@ import weakref
 import cloudpickle
 
 from . import graph as _graph_module, library, store as _store_module
-from .graph import Command, Function, _DEFAULT_OPTIONS, _FAILED, _callable, _place
+from .graph import Command, Expand, Function, _DEFAULT_OPTIONS, _FAILED, _callable, _place
 from .runner import (
     _COMPLETED_ENTRY, _HISTORY_END, _INTERRUPT, _Lock, _Pickler, _Runner, _block_interrupts, _check_params, _check_task,
-    _load_result, _read_file, _references,
+    _load_result, _read_file, _references, _expand_state, _expansion,
 )
 
 # Held while a local runner executes a task, so the local tasks of every Executor run one at a time. A local task
@@ -103,13 +103,15 @@ class _Local(_Runner):
         _check_task(task, self._shared)
         # The function and its arguments are serialized as a runner on Workers serializes them, so one that cannot be
         # serialized fails alike.
-        if not record.command:
+        if type(task._func) is Expand:
+            pass
+        elif not record.command:
             self._pickler.dumps(_callable(task._func))
             self._pickler.dumps((task._args, task._kwargs))
         # The names of its files are checked as a runner on Workers checks them.
         if task._reads:
             self._file_task_paths(task, {library.file_identity(ref): None for ref in task._reads})
-        if self._store is not None:
+        if self._store is not None and type(task._func) is not Expand:
             self._look_up(task, record)
         restore_interrupts = _block_interrupts()
         try:
@@ -200,6 +202,8 @@ class _Local(_Runner):
             if entry is not None and entry[0] == _FAILED:
                 # As in C, a task that reads a failed or cancelled task does not run, and names its source.
                 return (_FAILED, entry[1], None, entry[3], None)
+        if type(task._func) is Expand:
+            return self._expand(record, task)
         if record.store is not None and record.store[1] is not None:
             entry = record.store[1]
             self._results[record.number] = os.path.join(entry, _store_module.RESULT)
@@ -217,6 +221,66 @@ class _Local(_Runner):
                 print(f"vine_graph: the store could not keep the result of {record.label}: {error}", file=sys.stderr,
                       flush=True)
         return entry
+
+    def _expand(self, record, task):
+        """Run the builder of an Expand, then the tasks it expands into, in order, in this thread, and gather their
+        results as the Expand's result, as on Workers. Its tasks read results where they were written."""
+        parents = _references(task) if task._parents else {}
+        state = _expand_state(task, parents)
+
+        def load_task_result(ref):
+            source = state.sources[ref]
+            path = self._results[source.number]
+            return library.load_text_result(path) if source.command else library.load_result(path)
+
+        def file_path(identity):
+            if identity[0] != "output":
+                return identity[1]
+            return self._local_paths[(state.sources[(identity[1], identity[2])].number, identity[3])]
+
+        with _LOCAL_TASKS:
+            outcome = _expansion(self, record, state, load_task_result, file_path)
+        if outcome is None:
+            return (_FAILED, record, "its Graph was collected", "cancelled", None)
+        if isinstance(outcome, str):
+            return (_FAILED, record, outcome, "expand", None)
+        tasks, gather = outcome
+        graph = record.graph()
+        with self._lock:
+            self._unfinished += len(tasks)
+            self._spawned += len(tasks)
+            if graph is not None:
+                graph._records.extend(child for _, child in tasks)
+        del graph
+        for child_task, child in tasks:
+            try:
+                _check_task(child_task, self._shared)
+            except Exception as error:
+                # As on Workers, a task that cannot be submitted fails the expansion before any of its tasks runs.
+                for _, unrun in tasks:
+                    with self._lock:
+                        self._finish(unrun, (_FAILED, record, "it was cancelled", "cancelled", None))
+                return (_FAILED, record, f"a task that its builder returned could not be submitted: {error}", "expand",
+                        None)
+        for child_task, child in tasks:
+            if record.finished is not None:
+                # The Expand was cancelled while it ran its tasks.
+                entry = (_FAILED, record, "it was cancelled", "cancelled", None)
+            else:
+                entry = self._run(child, child_task)
+            with self._lock:
+                self._finish(child, entry)
+        values = []
+        for parent in gather._parents:
+            entry = parent._record.finished
+            if entry[0] == _FAILED:
+                return (_FAILED, entry[1], None, entry[3], None)
+            path = self._results[parent._record.number]
+            values.append(library.load_text_result(path) if parent._record.command else library.load_result(path))
+        result_path = os.path.join(self._output_directory(), f"result-{record.number}")
+        library.save_result(result_path, values)
+        self._results[record.number] = result_path
+        return _COMPLETED_ENTRY
 
     def _run_attempts(self, record, task):
         """Run a task until it completes or fails for good, and return its entry."""

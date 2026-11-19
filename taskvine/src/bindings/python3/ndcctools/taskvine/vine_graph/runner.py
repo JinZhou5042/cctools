@@ -38,7 +38,8 @@ sys.modules.setdefault("cvine", cvine)
 from . import vine_graph_capi as capi  # noqa: E402
 from . import graph as _graph_module, library, store as _store_module  # noqa: E402
 from .graph import (  # noqa: E402
-    COMMAND_RESULT_LIMIT, URL, File, TaskError, _COMPLETED, _FileRef, _Ref, _clashes_with_output, _name_task,
+    COMMAND_RESULT_LIMIT, URL, Command, File, Function, Graph, TaskError, _COMPLETED, _FileRef, _RUNNING, _Ref,
+    _SPECS, _callable, _clashes_with_output, _name_task,
     reserved_name, selection_key,
 )
 
@@ -248,7 +249,7 @@ class _Record:
     and kept. finished is published under the runner's lock."""
 
     __slots__ = ("graph", "key", "number", "func", "command", "outputs", "staged", "node", "result", "files",
-                 "selections", "selection_files", "finished", "abandoned", "held", "keep", "pin", "kept", "store")
+                 "selections", "selection_files", "finished", "abandoned", "held", "keep", "pin", "kept", "store", "expand", "child")
 
     def __init__(self, graph, key):
         self.graph = graph  # weak reference to the task's Graph, which leads to the Task by key
@@ -277,6 +278,10 @@ class _Record:
         self.kept = False  # C keeps the node, which ran again after its outputs were released
         # (key, directory of its entry or None) of a task of cache=True that has a key in the store, or None
         self.store = None
+        # Of an Expand: what its expansion waits for and holds until it is sealed, then the records of the tasks it
+        # expanded into, which a cancel reaches. None for other tasks.
+        self.expand = None
+        self.child = False  # an Expand expanded into this task, which has a Task only when asked for
 
     @property
     def label(self):
@@ -284,10 +289,91 @@ class _Record:
         return _name_task(self.number, self.func)
 
 
+class _ExpandState:
+    """What the expansion of an Expand needs until its builder ran: the builder, the stored arguments, the records of
+    the tasks they read by (graph id, key), the data keys whose fetched data the builder still waits for and the data
+    by key, the C files pinned for it, and how far it is: 0 waiting for data, 1 handed to the thread of expansions, 2
+    done. A local runner uses only the first four."""
+
+    __slots__ = ("func", "builder", "args", "kwargs", "sources", "waiting", "data", "pinned", "phase")
+
+    def __init__(self, func, args, kwargs, sources):
+        self.func = func
+        self.builder = _callable(func)
+        self.args = args
+        self.kwargs = kwargs
+        self.sources = sources
+        self.waiting = 0
+        self.data = {}
+        self.pinned = []
+        self.phase = 0
+
+
+def _expand_state(task, parents):
+    """Return the _ExpandState of the task of an Expand, whose parents are {(graph id, key): Task}."""
+    return _ExpandState(task._func, task._args, task._kwargs,
+                        {ref: parent._record for ref, parent in parents.items()})
+
+
+def _expansion(runner, record, state, load_task_result, file_path):
+    """Run the builder of an Expand once, and return (tasks, gather) or the message of its failure: tasks is
+    [(Task, record)] of the tasks it expands into, in an order where each comes after the tasks it reads, and gather the
+    Task of the call that stands for the Expand once it expanded, which reads the results of the tasks the builder
+    returned. The tasks live in a Graph of their own, which nothing else uses, so neither the Graph of the Expand nor
+    the Executor's lock is touched. Their records belong to the Graph of the Expand, which lets them go with it."""
+    try:
+        specs = library.run_task(state.builder, state.args, state.kwargs, load_task_result, file_path, _no_shared)
+    except BaseException as error:
+        return library.failure_report(error, __file__, library.__file__)
+    if type(specs) is not list or any(type(spec) not in _SPECS for spec in specs):
+        kind = type(specs).__name__ if type(specs) is not list else \
+            f"a list that holds {next(type(spec).__name__ for spec in specs if type(spec) not in _SPECS)}"
+        return (f"its builder returned {kind}; a builder returns a list of vg.Function, vg.Command, or vg.Expand, "
+                f"which the Expand runs")
+    graph = record.graph()
+    if graph is None:
+        return None
+    func = state.func
+    options = func._options
+    settings = (options.cores, options.memory, options.gpus, options.time_limit, options.retries, options.retry_on, (),
+                func._cache, func._name)
+    scratch = Graph()
+    scratch._executor = graph._executor
+    key = record.key
+    try:
+        top = [scratch._add((key, index), spec, settings) for index, spec in enumerate(specs)]
+    except (TypeError, ValueError) as error:
+        return f"a task that its builder returned cannot be added: {error}"
+    tasks = []
+    for task in scratch._new:
+        for parent in task._parents:
+            if parent._graph is not scratch and parent._record.number >= record.number:
+                # Only tasks that went live before the Expand cannot read it, directly or through others.
+                return (f"a task that its builder returned reads {parent!r}, which went live after {record.label} and "
+                        f"may read it; a task the builder returns reads only tasks that went live before the Expand")
+        child = _Record(graph._ref, task.key)
+        child.number = runner.next_number()
+        child.func = task._func
+        child.command = type(task._func) is Command
+        child.outputs = tuple(task._outputs) if task._outputs else ()
+        child.child = True
+        task._record = child
+        task._state = _RUNNING
+        tasks.append((task, child))
+    scratch._new.clear()
+    gather = scratch._add((key, "gather"), Function(library.gather, *top))
+    scratch._new.clear()
+    return tasks, gather
+
+
+def _no_shared(name):
+    raise TypeError("the builder of an Expand runs in this process, where vg.Shared objects are not loaded")
+
+
 def _task_of(record):
     """Return the Task of a record, or None when the task or its Graph was collected."""
     graph = record.graph()
-    return None if graph is None else graph._tasks.get(record.key)
+    return None if graph is None else graph._task_of_record(record)
 
 
 def _references(task):
@@ -310,6 +396,10 @@ class _Runner:
         self._store = store
         self._shared = _serialize_shared(shared)  # name -> serialized shared object
         self._last_number = 0  # the number of the latest file or staged object, which names it in sandboxes
+        # The number of the latest record, which numbers the tasks in the order they went live, and the tasks that
+        # Expands expanded into, which progress() counts; both under the lock
+        self._last_task = 0
+        self._spawned = 0
         self._file_numbers = {}  # file identity -> number that names the file in sandboxes
         # The lock of the state that the runner's thread shares with the threads that use the Executor, whose condition
         # the runner's thread notifies when it publishes changes.
@@ -331,6 +421,12 @@ class _Runner:
     @property
     def closed(self):
         return self._closed
+
+    def next_number(self):
+        """Return the number of a new record. A number is never given twice, whichever thread asks."""
+        with self._lock:
+            self._last_task += 1
+            return self._last_task
 
     def close(self):
         """Cancel unfinished tasks and release every task result. File paths that TaskFile.path returned stay in
@@ -446,8 +542,10 @@ class _Runner:
         """Return a numbered name of a file: a number of its own followed by the end of its name, which holds its
         extension, as much of it as fits in the longest file name a file system takes."""
         if identity not in self._file_numbers:
-            self._last_number += 1
-            self._file_numbers[identity] = self._last_number
+            # The thread of an expansion names files too.
+            with self._lock:
+                self._last_number += 1
+                self._file_numbers[identity] = self._last_number
         prefix = f"vine-graph-file-{self._file_numbers[identity]}-"
         excess = len(os.fsencode(prefix + name)) - _NAME_MAX
         start = 0
