@@ -674,12 +674,18 @@ less than a byte a second for, T. Off, curl runs without a timeout.
 
 static int do_curl_transfer(struct vine_cache *c, struct vine_cache_file *f, const char *transfer_path, const char *cache_path, char **error_message)
 {
+	/* --fail makes an HTTP error status a failed transfer, whose message names the status, instead of a cached error
+	 * page. Both names are quoted for the shell. */
 	int timeout = vine_worker_options_timeout(options, 0);
 	char *limits = timeout ? string_format("--connect-timeout %d -y %d -Y 1 ", timeout, timeout) : xxstrdup("");
-	char *command = string_format("curl -sSL --stderr /dev/stdout %s-o \"%s\" \"%s\"", limits, transfer_path, f->source);
+	char *path = string_escape_shell(transfer_path);
+	char *source = string_escape_shell(f->source);
+	char *command = string_format("curl -sSfL --stderr /dev/stdout %s-o %s %s", limits, path, source);
 	free(limits);
 	int result = do_internal_command(c, command, error_message);
 	free(command);
+	free(source);
+	free(path);
 
 	return result;
 }

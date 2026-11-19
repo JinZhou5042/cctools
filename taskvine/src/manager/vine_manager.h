@@ -299,6 +299,7 @@ struct vine_manager {
 	timestamp_t transient_error_interval; /* microseconds between new attempts on task rescheduling and using a file replica as source after a failure. */
 
 	int max_library_retries;        /* The maximum time that a library can be failed and retry another one, if over this count the library template will be removed */
+	int max_origin_failures;        /* A task forsaken for an input url or mini task whose fetches from its origin failed more often fails as INPUT_MISSING. -1 (the default) is unlimited. */
 	int watch_library_logfiles;     /* If true, watch the output files produced by each of the library processes running on the remote workers, take them back the current logging directory */
 
 	double sandbox_grow_factor;         /* When task disk sandboxes are exhausted, increase the allocation using their measured valued times this factor */

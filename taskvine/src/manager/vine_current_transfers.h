@@ -62,6 +62,9 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 
 int vine_current_transfers_remove_success(struct vine_manager *q, const char *id);
 
+/* Return true if the transfer with this id fetches a file from its origin, not from a peer worker. */
+int vine_current_transfers_from_origin(struct vine_manager *q, const char *id);
+
 int vine_current_transfers_url_in_use(struct vine_manager *q, const char *source);
 
 int vine_current_transfers_wipe_worker(struct vine_manager *q, struct vine_worker_info *w);

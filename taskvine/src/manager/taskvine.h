@@ -1606,6 +1606,7 @@ when such a worker exists, since the workers of one host are often lost together
  - "max-library-retries" The number of times a library task can fail and be retried before it is permanently removed.
  - "worker-source-max-checkpoints" The number of checkpoints that one worker sends to the manager's vault at once, over
 connections or as copies to its shared directory. They do not count against worker-source-max-transfers. (default=10)
+ - "max-origin-failures" A task whose workers cannot set it up because an input url or mini task failed to be fetched from its origin more than this many times fails with VINE_RESULT_INPUT_MISSING. Failed copies from peer workers and library deaths do not count. (default=-1, unlimited)
 @param value The value to set the parameter to.
 @return 0 on succes, -1 on failure.
 */

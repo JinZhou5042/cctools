@@ -2883,6 +2883,7 @@ change.
 | long-timeout | Set the minimum timeout in seconds when sending a large message to a single worker. | 3600 |
 | manager-response-timeout | The manager's own response time X_M in seconds, which it sends to workers with a probe link. Such a worker checks the manager on the probe link and leaves it when a check stays unanswered for 2 X_M (see below). 0 leaves workers to judge the manager by their first connection. | 0 |
 | max-retrievals | Sets the max number of tasks to retrieve per manager wait(). If less than 1, the manager prefers to retrieve all completed tasks before dispatching new tasks to workers. | 1 |
+| max-origin-failures | A task whose input URL or mini task could not be fetched from its origin more than this many times (failed copies from peer workers do not count) fails with the result input missing, instead of being returned to the workers without end. -1 is unlimited. | -1 |
 | min-transfer-timeout | Set the minimum number of seconds to wait for files to be transferred to or from a worker. | 10 |
 | monitor-interval        | Maximum number of seconds between resource monitor measurements. If less than 1, use default. | 5 |
 | perf-log-interval | Minimum number of seconds between performance log entries. Each entry takes a pass over every worker. | 1 |

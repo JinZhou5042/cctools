@@ -456,6 +456,12 @@ void set_throttle(struct vine_manager *m, struct vine_worker_info *w, int is_des
 	}
 }
 
+int vine_current_transfers_from_origin(struct vine_manager *q, const char *id)
+{
+	struct vine_transfer_pair *p = hash_table_lookup(q->current_transfer_table, id);
+	return p && !p->source_worker;
+}
+
 int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const char *cachename)
 {
 	struct vine_transfer_pair *p = hash_table_lookup(q->current_transfer_table, id);
@@ -468,12 +474,12 @@ int vine_current_transfers_set_failure(struct vine_manager *q, char *id, const c
 	struct vine_worker_info *source_worker = p->source_worker;
 	struct vine_worker_info *dest_worker = p->dest_worker;
 
-	/* A transfer from a URL has no source worker, so no worker is at fault. */
-	if (!source_worker) {
+	/* A fetch from the file's origin, such as a url, has no source worker to blame. */
+	if (!source_worker && dest_worker) {
 		return 0;
 	}
 
-	/* If p is valid, the destination should always be valid, because a failed worker causes the transfer record to be removed,
+	/* If p is valid, the elements of p should always be valid, because a failed worker causes the transfer record to be removed,
 	 * not nulled out. This shouldn't happen, but we check and emit an error just in case. */
 	if (!dest_worker) {
 		debug(D_ERROR, "%s: transfer record for file %s with id %s is found, but destination worker is null", __func__, cachename, id);

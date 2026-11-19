@@ -150,7 +150,9 @@ static vine_url_cache_t get_url_properties(const char *url, char *tag)
 
 	/* Otherwise, proceed to use curl to get the headers. */
 
-	char *command = string_format("curl -IL --connect-timeout %d --max-time %d --verbose --stderr /dev/stdout \"%s\"", VINE_URL_HEADERS_CONNECT_TIMEOUT, VINE_URL_HEADERS_TIMEOUT, url);
+	char *quoted = string_escape_shell(url);
+	char *command = string_format("curl -IL --connect-timeout %d --max-time %d --verbose --stderr /dev/stdout %s", VINE_URL_HEADERS_CONNECT_TIMEOUT, VINE_URL_HEADERS_TIMEOUT, quoted);
+	free(quoted);
 
 	FILE *stream = popen(command, "r");
 

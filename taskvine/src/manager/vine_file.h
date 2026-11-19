@@ -47,6 +47,8 @@ struct vine_file {
 	struct vine_worker_info *source_worker; // if this is a substitute file, attach the worker serving it. 
 	int change_message_shown; // True if error message already shown.
 	int manager_sends;	  // Copies of this file that the manager is sending itself, counted only for a file whose sends it limits (see vine_manager_limits_sends()).
+	int origin_failures; // For a url or mini task, the times a worker failed to fetch it from its origin, not a peer.
+	char *origin_error;  // For a url or mini task, the error message of its latest origin failure, or null.
 	int refcount;       // Number of references from a task object, delete when zero.
 
 	/* Scheduler state of a file that keeps ready tasks from every worker (see vine_schedule.h). blocked_serial advances

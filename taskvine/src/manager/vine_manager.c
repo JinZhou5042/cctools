@@ -1147,7 +1147,18 @@ static vine_msg_code_t handle_cache_invalid(struct vine_manager *q, struct vine_
 
 		message[length] = 0;
 		debug(D_VINE, "%s (%s) invalidated %s with error: %s", w->hostname, w->addrport, cachename, message);
-		free(message);
+
+		/* Count the failures to fetch a url or produce a mini task's file from its origin. A url comes from its origin
+		 * when its transfer has no source worker. A mini task runs without a transfer id, which only a copy from a
+		 * peer has. See should_resubmit_task(). */
+		struct vine_file *f = hash_table_lookup(q->file_table, cachename);
+		if (f && ((f->type == VINE_URL && n >= 3 && vine_current_transfers_from_origin(q, transfer_id)) || (f->type == VINE_MINI_TASK && n < 3))) {
+			f->origin_failures += 1;
+			free(f->origin_error);
+			f->origin_error = message;
+		} else {
+			free(message);
+		}
 
 		process_replica_on_event(q, w, cachename, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_CACHE_INVALID);
 
@@ -1163,7 +1174,6 @@ static vine_msg_code_t handle_cache_invalid(struct vine_manager *q, struct vine_
 		/* Respond to a missing replica notification by re-queuing the corresponding file
 		 * for replication. If the replica does not have any ready source, it will be silently
 		 * discarded in the replication phase. */
-		struct vine_file *f = hash_table_lookup(q->file_table, cachename);
 		vine_temp_queue_for_replication(q, f);
 
 		/* Successfully processed this message. */
@@ -4387,10 +4397,37 @@ static int should_resubmit_task_on_sandbox_exhaustion(struct vine_manager *q, st
 
 /* Returns true if this completed task should be resubmitted into the READY state. */
 
+/* Return an input of t, a url or mini task's file, that failed to be fetched from its origin more often than
+ * max-origin-failures allows, or null. */
+static struct vine_file *input_past_origin_failures(struct vine_manager *q, struct vine_task *t)
+{
+	if (q->max_origin_failures < 0) {
+		return 0;
+	}
+	struct vine_mount *m;
+	LIST_ITERATE(t->input_mounts, m)
+	{
+		if (m->file && m->file->origin_failures > q->max_origin_failures) {
+			return m->file;
+		}
+	}
+	return 0;
+}
+
 static int should_resubmit_task(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
 {
 	/* in this function, any change_task_state should only be to VINE_TASK_READY */
 	if (t->result == VINE_RESULT_FORSAKEN) {
+		/* A task forsaken because an input cannot be fetched from its origin would be forsaken without end. Library
+		 * deaths and failed copies from peers do not count. */
+		struct vine_file *f = input_past_origin_failures(q, t);
+		if (f) {
+			notice(D_VINE, "task %d failed: its input %s could not be fetched from its origin %d times: %s", t->task_id, f->source, f->origin_failures, f->origin_error ? f->origin_error : "");
+			/* Set directly, since vine_task_set_result() keeps a result such as FORSAKEN over INPUT_MISSING. */
+			t->result = VINE_RESULT_INPUT_MISSING;
+			return 0;
+		}
+
 		if (t->max_forsaken > -1 && t->forsaken_count > t->max_forsaken) {
 			return 0;
 		}
@@ -5738,6 +5775,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->update_interval = VINE_UPDATE_INTERVAL;
 	q->max_library_retries = VINE_TASK_MAX_LIBRARY_RETRIES;
+	q->max_origin_failures = -1;
 	q->resource_management_interval = VINE_RESOURCE_MEASUREMENT_INTERVAL;
 	q->transient_error_interval = VINE_DEFAULT_TRANSIENT_ERROR_INTERVAL;
 	q->max_task_stdout_storage = MAX_TASK_STDOUT_STORAGE;
@@ -8116,6 +8154,8 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "max-library-retries")) {
 		q->max_library_retries = MAX(1, value);
+	} else if (!strcmp(name, "max-origin-failures")) {
+		q->max_origin_failures = value < 0 ? -1 : (int)value;
 	} else if (!strcmp(name, "disk-proportion-available-to-task")) {
 		if (value < 1 && value > 0) {
 			q->disk_proportion_available_to_task = value;
