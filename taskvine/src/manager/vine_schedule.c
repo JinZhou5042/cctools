@@ -85,8 +85,9 @@ int vine_schedule_in_ramp_down(struct vine_manager *q)
 int check_worker_have_enough_resources(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, struct rmsummary *tr)
 {
 	/* Skip if it is a function task. Resource guarantees for function calls are handled at the end of @check_worker_against_task, which calls
-	 * @vine_schedule.c:vine_schedule_find_library to locate a suitable library for the function call, it directly returns false if no appropriate library is found  */
-	if (t->needs_library) {
+	 * @vine_schedule.c:vine_schedule_find_library to locate a suitable library for the function call, it directly returns false if no appropriate library is found.
+	 * A call of a library in pool mode takes its cores and memory from the worker, so it is checked like other tasks. */
+	if (t->needs_library && !vine_manager_function_call_in_pool(q, t)) {
 		return 1;
 	}
 
@@ -99,7 +100,7 @@ int check_worker_have_enough_resources(struct vine_manager *q, struct vine_worke
 	int iteration;
 	ITABLE_ITERATE(w->current_tasks, iteration, task_id, ti)
 	{
-		if (ti->state == VINE_TASK_RUNNING && ti->provides_library && ti->function_slots_inuse == 0) {
+		if (ti->state == VINE_TASK_RUNNING && ti->provides_library && !ti->library_pool && ti->function_slots_inuse == 0) {
 			worker_net_resources->disk.inuse -= ti->current_resource_box->disk;
 			worker_net_resources->cores.inuse -= ti->current_resource_box->cores;
 			worker_net_resources->memory.inuse -= ti->current_resource_box->memory;
@@ -157,14 +158,15 @@ int check_worker_have_enough_disk_with_inputs(struct vine_manager *q, struct vin
  */
 static int check_worker_have_committable_resources(struct vine_manager *q, struct vine_worker_info *w)
 {
-	/* Check if there are free slots on any of the running libraries */
+	/* Check if there are free slots on any of the running libraries. The free slots of a library in pool mode are the
+	 * worker's free cores, which are checked below. */
 	if (w->current_libraries && itable_size(w->current_libraries) > 0) {
 		uint64_t task_id;
 		struct vine_task *t;
 		int iteration;
 		ITABLE_ITERATE(w->current_libraries, iteration, task_id, t)
 		{
-			if (t->function_slots_inuse < t->function_slots_total) {
+			if (!t->library_pool && t->function_slots_inuse < t->function_slots_total) {
 				return 1;
 			}
 		}
@@ -310,7 +312,7 @@ int check_worker_against_task(struct vine_manager *q, struct vine_worker_info *w
 		} else {
 			library = vine_manager_find_library_template(q, t->needs_library);
 			if (library) {
-				if (slots > 1 && !library_has_slots_on_worker(q, w, library, slots)) {
+				if (slots > 1 && !library->library_pool && !library_has_slots_on_worker(q, w, library, slots)) {
 					/* A new instance of the library would have too few slots for this call. */
 					return 0;
 				} else if (check_worker_against_task(q, w, library)) {
@@ -352,13 +354,16 @@ static int count_worker_free_cores(struct vine_manager *q, struct vine_worker_in
 {
 	int free_cores = 0;
 
-	/* library tasks may themselves consume many cores but can have free slots */
+	/* library tasks may themselves consume many cores but can have free slots. The free slots of a library in pool
+	 * mode are free cores of the worker, which are counted below. */
 	uint64_t task_id;
 	struct vine_task *t;
 	int iteration;
 	ITABLE_ITERATE(w->current_libraries, iteration, task_id, t)
 	{
-		free_cores += t->function_slots_total - t->function_slots_inuse;
+		if (!t->library_pool) {
+			free_cores += t->function_slots_total - t->function_slots_inuse;
+		}
 	}
 
 	/* count the free cores on the worker */
@@ -637,8 +642,9 @@ void vine_schedule_check_for_large_tasks(struct vine_manager *q)
 		// in case there are continues, etc. below.
 		skip_list_next(cur);
 
-		/* A function call uses no resources of its own, only slots of a library instance. */
-		if (t->needs_library) {
+		/* A function call uses no resources of its own, only slots of a library instance, unless its library is in
+		 * pool mode, whose calls take the worker's cores and memory and are compared with the workers. */
+		if (t->needs_library && !vine_manager_function_call_in_pool(q, t)) {
 			if (is_function_call_larger_than_any_library(q, t)) {
 				unfit_slots++;
 				largest_unfit_slots = MAX(largest_unfit_slots, vine_task_function_call_slots(t));

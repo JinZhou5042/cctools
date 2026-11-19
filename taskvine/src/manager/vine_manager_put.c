@@ -514,7 +514,8 @@ vine_result_code_t vine_manager_put_task(
 	if (t->needs_library) {
 		vine_manager_send(q, w, "needs_library %s\n", t->needs_library);
 		/* A call that occupies more than one slot of its library says so. Its cores line stays zero, since the library
-		 * already holds the cores. Without the line the worker assumes one slot. */
+		 * already holds the cores, except for a library in pool mode, whose calls hold their own cores and memory.
+		 * Without the line the worker assumes one slot. */
 		if (t->function_slots_total > 1) {
 			vine_manager_send(q, w, "function_slots %d\n", t->function_slots_total);
 		}
@@ -524,6 +525,9 @@ vine_result_code_t vine_manager_put_task(
 		vine_manager_send(q, w, "provides_library %s\n", t->provides_library);
 		vine_manager_send(q, w, "function_slots %d\n", t->function_slots_total);
 		vine_manager_send(q, w, "func_exec_mode %d\n", t->func_exec_mode);
+		if (t->library_pool) {
+			vine_manager_send(q, w, "library_pool 1\n");
+		}
 	}
 
 	vine_manager_send(q, w, "category %s\n", t->category);
@@ -535,8 +539,8 @@ vine_result_code_t vine_manager_put_task(
 		vine_manager_send(q, w, "disk %s\n", rmsummary_resource_to_str("disk", limits->disk, 0));
 
 		/* Do not set end, wall_time if running the resource monitor. We let the monitor police these resources.
-		 */
-		if (q->monitor_mode != VINE_MON_WATCHDOG) {
+		 * A function call runs without the monitor, so the worker polices its wall time either way. */
+		if (q->monitor_mode != VINE_MON_WATCHDOG || t->needs_library) {
 			if (limits->end > 0) {
 				vine_manager_send(q, w, "end_time %s\n", rmsummary_resource_to_str("end", limits->end, 0));
 			}

@@ -320,6 +320,18 @@ If unset, the library will runs as many functions as it has cores available.
 */
 void vine_task_set_function_slots(struct vine_task *t, int nslots);
 
+/** Make a library share the resources of its worker with other tasks.
+A library in this mode reserves no cores, memory, or gpus, and its disk only when requested. Each of its function calls
+takes the cores it requests (one when unset) and the memory it requests (none when unset) from the worker while it
+runs, as a standard task does, and sees them as CORES and MEMORY. The library has one slot per core of its worker, so
+its calls are bounded by the worker's cores, not by slots, and an idle library is not removed to make room for other
+tasks. Function slots and cores requested for the library are ignored. Calls must run in fork mode to be stopped at
+their wall time. Libraries without this mode are unchanged.
+@param t A library task object.
+@param pool Non-zero to enable the mode, zero to disable it.
+*/
+void vine_task_set_library_pool(struct vine_task *t, int pool);
+
 /** Set the execution mode of functions inside a library.
 A mode can either be "fork" where the library forks and executes functions, or
 "direct" where the library executes a function in its memory space.

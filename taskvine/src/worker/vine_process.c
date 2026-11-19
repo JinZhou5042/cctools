@@ -250,14 +250,22 @@ int vine_process_execute_and_wait(struct vine_process *p)
 }
 
 /* Send a message containing details of a function call to the relevant library to execute it. A call that occupies
- * k > 1 slots of its library ends the message with k, from which the library sets the call's thread limit.
+ * k > 1 slots of its library adds k, from which the library sets the call's thread limit. A call that holds cores and
+ * memory of the worker (pool mode) always adds k, then cores=<k> and, with memory, memory=<MB>, which the library sets
+ * as the call's CORES and MEMORY.
  * @param p 	The relevant vine_process structure encapsulating a function call.
  * @return 		1 if the message is successfully sent to the library, 0 otherwise. */
 
 int vine_process_invoke_function(struct vine_process *p)
 {
 	char *buffer;
-	if (p->task->function_slots_total > 1) {
+	int64_t cores = p->task->resources_requested->cores;
+	int64_t memory = p->task->resources_requested->memory;
+	if (cores > 0) {
+		char *options = memory > 0 ? string_format(" memory=%" PRId64, memory) : xxstrdup("");
+		buffer = string_format("%d %s %s %s %d cores=%" PRId64 "%s", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name, MAX(1, p->task->function_slots_total), cores, options);
+		free(options);
+	} else if (p->task->function_slots_total > 1) {
 		buffer = string_format("%d %s %s %s %d", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name, p->task->function_slots_total);
 	} else {
 		buffer = string_format("%d %s %s %s", p->task->task_id, p->task->command_line, p->sandbox, p->output_file_name);
@@ -428,7 +436,8 @@ int vine_process_execute(struct vine_process *p)
 					in_pipe_fd,
 					out_pipe_fd,
 					p->task->task_id,
-					(int)p->task->resources_requested->cores,
+					/* A library in pool mode holds no cores, and its calls run on the worker's cores, one per slot. */
+					p->task->library_pool ? MAX(1, p->task->function_slots_total) : (int)p->task->resources_requested->cores,
 					p->task->function_slots_total,
 					getppid());
 		}

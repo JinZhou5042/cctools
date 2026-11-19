@@ -102,13 +102,18 @@ static struct list *pending_async_messages = NULL;
 /* These are additional pointers into procs_table and should not be deleted */
 static struct itable *procs_complete = NULL;
 
-/* A killed function call still running in its library, which keeps the call's slots until it confirms the end. */
+/* A killed function call still running in its library, which keeps the call's slots, and the cores and memory it takes
+ * from the worker in pool mode, until the library confirms the end. */
 struct killed_function {
 	/* The library process that runs the call. */
 	struct vine_process *library;
 	/* The number of slots of the library the call occupies. */
 	int slots;
+	/* The cores and memory of the worker the call holds, zero unless its library is in pool mode. */
+	int64_t cores;
+	int64_t memory;
 };
+
 
 /* Table of killed function calls still running in their library, indexed by task_id, with a struct killed_function as
  * value. */
@@ -805,6 +810,15 @@ static void finish_running_tasks(vine_result_t result)
 	}
 }
 
+/* Release what a killed function call held once its library confirmed its end or ended itself. */
+static void release_killed_function(struct killed_function *killed)
+{
+	killed->library->function_slots_inuse -= killed->slots;
+	cores_allocated -= killed->cores;
+	memory_allocated -= killed->memory;
+	free(killed);
+}
+
 /*
 Reap the functions running in a library process that ends. They run in children of the library and end with it, so
 they are forsaken, and the manager runs them again. A function thus never runs without its library, and no process
@@ -832,7 +846,7 @@ static void reap_library_functions(struct vine_process *library)
 	{
 		if (killed->library == library) {
 			itable_remove(procs_killed_functions, task_id);
-			free(killed);
+			release_killed_function(killed);
 		}
 	}
 }
@@ -899,13 +913,17 @@ static int handle_completed_tasks(struct link *manager)
 			struct killed_function *killed = itable_lookup(procs_killed_functions, done_task_id);
 			if (killed && killed->library == p) {
 				itable_remove(procs_killed_functions, done_task_id);
-				p->function_slots_inuse -= killed->slots;
-				free(killed);
+				release_killed_function(killed);
 				continue;
 			}
 			fp = itable_lookup(procs_table, done_task_id);
 			if (fp) {
 				fp->exit_code = done_exit_code;
+				/* A call stopped at its wall time ran past it only if the library killed it. One that ended first
+				 * is reported as it ended. */
+				if (fp->wall_time_cancelled && WIFSIGNALED(done_exit_code) && WTERMSIG(done_exit_code) == SIGKILL) {
+					fp->result = VINE_RESULT_MAX_WALL_TIME;
+				}
 				reap_process(fp, manager);
 			}
 		}
@@ -986,6 +1004,8 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 			task->function_slots_requested = n;
 			/* Also set the total number determined by the manager. */
 			task->function_slots_total = n;
+		} else if (sscanf(line, "library_pool %" PRId64, &n) == 1) {
+			vine_task_set_library_pool(task, n);
 		} else if (sscanf(line, "func_exec_mode %" PRId64, &n) == 1) {
 			vine_task_func_exec_mode_t func_exec_mode = n;
 			if (func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_INVALID) {
@@ -1053,6 +1073,10 @@ static int do_task(struct link *manager, int task_id, time_t stoptime)
 		type = VINE_PROCESS_TYPE_FUNCTION;
 	} else if (task->provides_library) {
 		type = VINE_PROCESS_TYPE_LIBRARY;
+		/* A library in pool mode has one slot per core of this worker, and its calls hold their own cores. */
+		if (task->library_pool && task->func_exec_mode != VINE_TASK_FUNC_EXEC_MODE_DIRECT) {
+			task->function_slots_total = MAX(1, (int)total_resources->cores.total);
+		}
 	} else {
 		type = VINE_PROCESS_TYPE_STANDARD;
 	}
@@ -1190,11 +1214,16 @@ static int do_kill(int task_id)
 		vine_process_kill_and_wait(p);
 		reap_process(p, /* do not stage out */ NULL);
 		if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
-			/* The library keeps running the call until it confirms its end, so its slots stay occupied. */
+			/* The library keeps running the call until it confirms its end, so its slots, and its cores and memory in
+			 * pool mode, stay occupied. */
 			struct killed_function *killed = xxmalloc(sizeof(*killed));
 			killed->library = p->library_process;
 			killed->slots = function_slots_needed(p->task);
+			killed->cores = p->task->resources_requested->cores;
+			killed->memory = p->task->resources_requested->memory;
 			p->library_process->function_slots_inuse += killed->slots;
+			cores_allocated += killed->cores;
+			memory_allocated += killed->memory;
 			itable_insert(procs_killed_functions, task_id, killed);
 			if (p->library_process->library_can_cancel) {
 				vine_process_cancel_function(p);
@@ -1315,12 +1344,28 @@ static void enforce_processes_max_running_time()
 		if (p->task->resources_requested->wall_time < 1)
 			continue;
 
+		/* A function call over its wall time was already handed to its library to stop. */
+		if (p->wall_time_cancelled)
+			continue;
+
 		if (now > p->execution_start + (1e6 * p->task->resources_requested->wall_time)) {
 			debug(D_VINE,
 					"Task %d went over its running time limit: %s > %s\n",
 					p->task->task_id,
 					rmsummary_resource_to_str("wall_time", (now - p->execution_start) / 1e6, 1),
 					rmsummary_resource_to_str("wall_time", p->task->resources_requested->wall_time, 1));
+			if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
+				/* A call runs in a child of its library, which kills the child on request. The call keeps its
+				 * slots and resources until the library reports its end. A library that cannot stop a call
+				 * (direct mode) lets it run to its end, which is reported as it ended. */
+				p->wall_time_cancelled = 1;
+				if (p->library_process && p->library_process->library_can_cancel) {
+					vine_process_cancel_function(p);
+				} else {
+					debug(D_VINE, "function call %d is past its wall time, but its library cannot stop it", p->task->task_id);
+				}
+				continue;
+			}
 			p->result = VINE_RESULT_MAX_WALL_TIME;
 			vine_process_kill(p);
 		}

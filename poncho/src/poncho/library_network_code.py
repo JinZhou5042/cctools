@@ -103,21 +103,43 @@ def read_message(in_pipe_fd):
     return str(os.read(in_pipe_fd, buffer_len), encoding="utf-8")
 
 
+# Split an invocation into its function id, name, sandbox, stdout file, number of slots, and key=value options. The
+# worker writes the number of slots k when k is above one or when options follow, and the options cores=<k> and
+# memory=<MB> when the call holds cores and memory of the worker (a library in pool mode).
+def parse_invocation(line):
+    fields = line.split(" ")
+    (
+        function_id,
+        function_name,
+        function_sandbox,
+        function_stdout_filename
+    ) = fields[:4]
+    function_slots = 1
+    options = {}
+    for field in fields[4:]:
+        if "=" in field:
+            key, value = field.split("=", 1)
+            options[key] = value
+        else:
+            function_slots = int(field)
+    return function_id, function_name, function_sandbox, function_stdout_filename, function_slots, options
+
+
 # Start the function of an invocation, and dump result to `outfile`. thread_limit is the thread limit of a call that
-# occupies one slot of the library. A call that occupies k slots, which the worker writes at the end of its invocation
-# when k is above one, runs with k times that limit.
+# occupies one slot of the library. A call that occupies k slots runs with k times that limit. In fork mode a call that
+# holds cores and memory of the worker sees them as CORES and MEMORY.
 def start_function(line, thread_limit=1):
     try:
-        fields = line.split(" ", maxsplit=4)
         (
             function_id,
             function_name,
             function_sandbox,
-            function_stdout_filename
-        ) = fields[:4]
-        function_slots = int(fields[4]) if len(fields) > 4 else 1
+            function_stdout_filename,
+            function_slots,
+            function_options,
+        ) = parse_invocation(line)
     except Exception as e:
-        stdout_timed_message(f"error: not enough values to unpack from {line} (expected 4 or 5 items), exception: {e}")
+        stdout_timed_message(f"error: malformed invocation {line} (expected at least 4 items), exception: {e}")
         exit(1)
 
     try:
@@ -176,6 +198,12 @@ def start_function(line, thread_limit=1):
                 exit_status = 1
 
                 try:
+                    # the call sees the cores and memory it holds
+                    if "cores" in function_options:
+                        os.environ["CORES"] = function_options["cores"]
+                    if "memory" in function_options:
+                        os.environ["MEMORY"] = function_options["memory"]
+
                     # change the working directory to the function's sandbox
                     os.chdir(function_sandbox)
 

@@ -2834,13 +2834,28 @@ struct rmsummary *vine_manager_choose_resources_for_task(struct vine_manager *q,
 {
 	struct rmsummary *limits = rmsummary_create(-1);
 
-	/* Special case: A function-call task consumes no resources. */
-	/* Return early, otherwise these zeroes are expanded to use the whole worker. */
+	/* Special case: A function-call task consumes no resources, since its library holds them. A call of a library in
+	 * pool mode takes its cores and memory from the worker instead. Return early, otherwise these values are expanded
+	 * to use the whole worker. The call's wall time goes with its box, so the worker stops the call at that time. */
 
 	if (t->needs_library) {
 		limits->cores = 0;
 		limits->memory = 0;
 		limits->disk = 0;
+		limits->gpus = 0;
+		if (vine_manager_function_call_in_pool(q, t)) {
+			limits->cores = vine_task_function_call_slots(t);
+			limits->memory = MAX(0, t->resources_requested->memory);
+		}
+		limits->wall_time = t->resources_requested->wall_time;
+		return limits;
+	}
+
+	/* A library in pool mode reserves nothing but the disk it requests, since its calls take their own resources. */
+	if (t->provides_library && t->library_pool) {
+		limits->cores = 0;
+		limits->memory = 0;
+		limits->disk = MAX(0, t->resources_requested->disk);
 		limits->gpus = 0;
 		return limits;
 	}
@@ -3013,6 +3028,9 @@ int vine_manager_library_slots(struct vine_task *t, const struct rmsummary *limi
 {
 	if (t->func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_DIRECT) {
 		return 1;
+	} else if (t->library_pool) {
+		/* A library in pool mode has one slot per core of its worker, set when it is dispatched. */
+		return 0;
 	} else if (t->function_slots_requested > 0) {
 		return t->function_slots_requested;
 	} else if (limits) {
@@ -3042,6 +3060,10 @@ static vine_result_code_t start_one_task(struct vine_manager *q, struct vine_wor
 
 	if (t->provides_library) {
 		t->function_slots_total = vine_manager_library_slots(t, limits);
+		/* A library in pool mode has one slot per core of the worker, so only the worker's cores bound its calls. */
+		if (t->library_pool && t->func_exec_mode != VINE_TASK_FUNC_EXEC_MODE_DIRECT) {
+			t->function_slots_total = MAX(1, (int)w->resources->cores.total);
+		}
 	}
 
 	char *command_line;
@@ -3174,7 +3196,8 @@ static void find_max_worker(struct vine_manager *q)
  * the task is a function call and the library can run it.
  * This code corresponds to the assumption of
  * @vine.schedule.c:check_worker_have_enough_resources() - empty libraries
- * are not counted towards the resources in use and will be killed if needed. */
+ * are not counted towards the resources in use and will be killed if needed.
+ * A library in pool mode holds no resources, so it is never killed for room. */
 static void kill_empty_libraries_on_worker(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
 {
 	int iteration;
@@ -3182,6 +3205,9 @@ static void kill_empty_libraries_on_worker(struct vine_manager *q, struct vine_w
 	struct vine_task *libtask;
 	ITABLE_ITERATE(w->current_libraries, iteration, libtask_id, libtask)
 	{
+		if (libtask->library_pool) {
+			continue;
+		}
 		if (libtask->function_slots_inuse == 0 && (!t->needs_library || strcmp(t->needs_library, libtask->provides_library))) {
 			vine_cancel_by_task_id(q, libtask_id);
 		}
@@ -5193,6 +5219,15 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 struct vine_task *vine_manager_find_library_template(struct vine_manager *q, const char *library_name)
 {
 	return hash_table_lookup(q->library_templates, library_name);
+}
+
+int vine_manager_function_call_in_pool(struct vine_manager *q, struct vine_task *t)
+{
+	if (!t->needs_library) {
+		return 0;
+	}
+	struct vine_task *library = vine_manager_find_library_template(q, t->needs_library);
+	return library && library->library_pool;
 }
 
 static void handle_library_update(struct vine_manager *q, struct vine_worker_info *w, const char *line)

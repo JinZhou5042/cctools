@@ -1671,6 +1671,29 @@ on the library task), it is returned with the result
 enough, and the manager periodically reports it as a task that cannot fit
 any connected worker.
 
+A library can instead share the resources of its worker with other tasks
+by calling `set_library_pool(True)` on the library task before installing
+it.  Such a library reserves no cores, memory, or GPUs, and has one slot
+per core of its worker.  Each of its invocations takes the cores it
+requests (one by default) and the memory it requests (none by default)
+from the worker while it runs, as a normal task does, so invocations and
+normal tasks share the worker's cores and memory, and an idle library is
+not removed to make room for other tasks.  In fork mode an invocation sees
+its cores and memory as the `CORES` and `MEMORY` environment variables.
+An invocation that requests more than any connected worker has waits, and
+the manager periodically reports it.
+
+An invocation with a wall time (`set_time_max`) that it exceeds is stopped
+by its library in fork mode: the library kills the process that runs the
+invocation, which keeps its slots and resources until the library reports
+its end, and the invocation is returned with the result
+`VINE_RESULT_MAX_WALL_TIME`.  An invocation that ends before the library
+stops it is returned as it ended.  The invocation runs in the process
+group of its library, so processes that it started itself are killed only
+when the library ends.
+A library in direct mode cannot stop an invocation, which then runs to its
+end.
+
 ### Stateful Serverless Computing
 A function typically sets up its states (e.g., load modules/packages, build internal models or states) before executing its computation. With advanced serverless computing in TaskVine, you can set up a shared state between function invocations so the cost of setting up states doesn't have to be paid for every invocation, but instead is paid once and shared many times. TaskVine supports this technique as demonstrated via the below example.
 
