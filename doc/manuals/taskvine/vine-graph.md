@@ -26,27 +26,31 @@ def count_lines(path):
 Path("data.txt").write_text("4\n8\n15\n16\n23\n42\n")
 
 g = vg.Graph()
-data = g.add(vg.Function(load, vg.File("data.txt")))
-s = g.add(vg.Function(stats, data))
-table = g.add(vg.Function(write_table, data), outputs=["table.csv"])
+data_task = g.add(vg.Function(load, vg.File("data.txt")))
+stats_task = g.add(vg.Function(stats, data_task))
+table_task = g.add(vg.Function(write_table, data_task), outputs=["table.csv"])
 big = dict(cores=2, retries=1)
-models = [g.add(vg.Function(train, data, seed, lr=0.1), **big) for seed in range(4)]
-best = g.add(vg.Function(max, models))
-top = g.add(vg.Command("sort -n {t} | tail -3 > top.txt", t=table.file("table.csv")), outputs=["top.txt"], time_limit=60)
-note = g.add(vg.Command("echo mean={m} > note.txt", m=s["mean"]), outputs=["note.txt"])
-n = g.add(vg.Function(count_lines, top.file("top.txt")))
+model_tasks = [g.add(vg.Function(train, data_task, seed, lr=0.1), **big) for seed in range(4)]
+best_task = g.add(vg.Function(max, model_tasks))
+top_task = g.add(vg.Command("sort -n {t} | tail -3 > top.txt", t=table_task.file("table.csv")), outputs=["top.txt"], time_limit=60)
+note_task = g.add(vg.Command("echo mean={m} > note.txt", m=stats_task["mean"]), outputs=["note.txt"])
+lines_task = g.add(vg.Function(count_lines, top_task.file("top.txt")))
 
 with vg.Executor(local=True) as ex:
     ex.run(g)
-    print("best model:", best.result(), "top lines:", n.result())
-    print(top.file("top.txt").text)
-    note.file("note.txt").save("note.txt")
+    print("best model:", best_task.result(), "top lines:", lines_task.result())
+    print(top_task.file("top.txt").text)
+    note_task.file("note.txt").save("note.txt")
 
-    extra = [g.add(vg.Function(train, data, k), **big) for k in range(10, 13)]
+    extra_tasks = [g.add(vg.Function(train, data_task, k), **big) for k in range(10, 13)]
     ex.submit(g)
-    for t in ex.as_completed(extra, timeout=600):
-        print(t.result())
+    for task in ex.as_completed(extra_tasks, timeout=600):
+        print(task.result())
 ```
+
+In the examples, a variable that holds a Task ends in `_task`, one that holds
+a list or dictionary of Tasks ends in `_tasks`, and a value returned by
+`result()` has no suffix.
 
 Three rules cover the whole interface:
 
@@ -66,9 +70,9 @@ Three rules cover the whole interface:
   start at the next `submit()` or `run()`.
 
 **What a task can read.** A task can read another task's whole result, an
-item of it (`t["k"]`, or an attribute with `t.attr("name")`), a list, tuple,
+item of it (`task["k"]`, or an attribute with `task.attr("name")`), a list, tuple,
 set, dictionary, or dataclass that holds tasks, or a declared output file
-(`t.file(name)`). A Function gets the value, or a local path for a file. A
+(`task.file(name)`). A Function gets the value, or a local path for a file. A
 Command gets the sandbox path of a file, or `str()` of a result or of an item
 of it. A task starts as soon as what it reads exists.
 
@@ -146,10 +150,10 @@ Path("input.txt").write_text("vine graph\n")
 
 g = vg.Graph()
 produced = g.add(vg.Function(uppercase, vg.File("input.txt")), outputs=["result.txt"]).file("result.txt")
-length = g.add(vg.Function(lambda path: len(Path(path).read_text()), produced))
+length_task = g.add(vg.Function(lambda path: len(Path(path).read_text()), produced))
 
 with vg.Executor(local=True) as ex:
-    assert ex.run(g)[length] == 11
+    assert ex.run(g)[length_task] == 11
     assert produced.text == "VINE GRAPH\n"
     saved = produced.save("kept/result.txt")
 ```
@@ -185,7 +189,7 @@ times (Manager tuning `max-origin-failures`) fails the tasks that read it with
 reason `"input"`. `vg.File("https://...")` raises and says to use `vg.URL`.
 
 ```python
-rows = g.add(vg.Function(count_rows, vg.URL("https://example.org/data.csv")))
+rows_task = g.add(vg.Function(count_rows, vg.URL("https://example.org/data.csv")))
 ```
 
 ## Commands
@@ -201,19 +205,19 @@ import ndcctools.taskvine.vine_graph as vg
 Path("words.txt").write_text("pear\napple\nfig\n")
 
 g = vg.Graph()
-sort = g.add(vg.Command("sort {source} > sorted.txt", source=vg.File("words.txt")), outputs=["sorted.txt"])
-first = g.add(vg.Command("head -n 1 {source}", source=sort.file("sorted.txt")))
-report = g.add(vg.Command("echo {words} {word}", words=["first", "is"], word=first))
+sort_task = g.add(vg.Command("sort {source} > sorted.txt", source=vg.File("words.txt")), outputs=["sorted.txt"])
+first_task = g.add(vg.Command("head -n 1 {source}", source=sort_task.file("sorted.txt")))
+report_task = g.add(vg.Command("echo {words} {word}", words=["first", "is"], word=first_task))
 
 with vg.Executor(local=True) as ex:
-    assert ex.run(g)[report] == "first is apple\n"
-    assert sort.file("sorted.txt").text == "apple\nfig\npear\n"
+    assert ex.run(g)[report_task] == "first is apple\n"
+    assert sort_task.file("sorted.txt").text == "apple\nfig\npear\n"
 ```
 
 Fields are inserted shell-quoted. A `vg.File` or a `TaskFile` becomes its
 sandbox path, a Task becomes `str()` of its result, an item or attribute of a
-result such as `t["k"]` or `t.attr("x")` becomes `str()` of that value, as in
-`m=s["mean"]` in the first example, and any other value becomes `str()` of
+result such as `task["k"]` or `task.attr("x")` becomes `str()` of that value, as in
+`m=stats_task["mean"]` in the first example, and any other value becomes `str()` of
 itself. A flat list or tuple inserts each element quoted on its own, separated
 by spaces. Every placeholder needs a field and every field a placeholder.
 Write `{{` and `}}` for braces. A field cannot be a `vg.Shared`, a set, or a
@@ -226,8 +230,8 @@ as `exit_code` and ends with the tail of standard error.
 ## Retries and time limits
 
 ```python
-fetch = g.add(vg.Function(download, url), retries=3, retry_on=ConnectionError, time_limit=600)
-sim = g.add(vg.Command("run.sh {cfg}", cfg=vg.File("a.cfg")), memory=4000, retries=2)
+fetch_task = g.add(vg.Function(download, url), retries=3, retry_on=ConnectionError, time_limit=600)
+sim_task = g.add(vg.Command("run.sh {cfg}", cfg=vg.File("a.cfg")), memory=4000, retries=2)
 ```
 
 - `time_limit` (seconds) stops a task that runs longer, with reason
@@ -250,7 +254,7 @@ with `cache=True` in a directory. A later task with the same key, in this run
 or a later one, takes them from there without running:
 
 ```python
-sim = g.add(vg.Function(run_sim, config), cache=True)
+sim_task = g.add(vg.Function(run_sim, config), cache=True)
 with vg.Executor(port=9123, store="~/.cache/my-project") as ex:
     ex.run(g)
 ```
@@ -271,10 +275,10 @@ the tasks:
 import ndcctools.taskvine.vine_graph as vg
 
 g = vg.Graph()
-total = g.add(vg.Function(sum, [g.add(vg.Function(abs, -value)) for value in range(1, 6)]))
+total_task = g.add(vg.Function(sum, [g.add(vg.Function(abs, -value)) for value in range(1, 6)]))
 
 with vg.Executor(port=9123, name="vine-graph-example") as ex:
-    assert ex.run(g)[total] == 15
+    assert ex.run(g)[total_task] == 15
 ```
 
 Run the program in one terminal and start a worker in another:
@@ -319,9 +323,9 @@ import ndcctools.taskvine.vine_graph as vg
 import helpers
 
 g = vg.Graph()
-six = g.add(vg.Function(helpers.triple, 2))
+six_task = g.add(vg.Function(helpers.triple, 2))
 with vg.Executor(port=9123, library_files={"helpers.py": "helpers.py"}, library_modules=["helpers"]) as ex:
-    assert ex.run(g)[six] == 6
+    assert ex.run(g)[six_task] == 6
 ```
 
 ### Sharing modules and data across tasks
@@ -338,10 +342,10 @@ def predict(model, value):
     return model["weight"] * value
 
 g = vg.Graph()
-tasks = [g.add(vg.Function(predict, vg.Shared("model"), value)) for value in range(10)]
+predict_tasks = [g.add(vg.Function(predict, vg.Shared("model"), value)) for value in range(10)]
 with vg.Executor(port=9123, library_modules=["json"], shared={"model": {"weight": 3}}) as ex:
     ex.run(g)
-    assert [task.result() for task in tasks] == [3 * value for value in range(10)]
+    assert [task.result() for task in predict_tasks] == [3 * value for value in range(10)]
 ```
 
 On workers, `print` output of Python tasks is not shown. Return what you want
@@ -359,13 +363,13 @@ def improve(guess, target):
     return (guess + target / guess) / 2
 
 g = vg.Graph()
-guess = g.add(vg.Function(float, 1))
+guess_task = g.add(vg.Function(float, 1))
 with vg.Executor(local=True) as ex:
     ex.submit(g)
-    while abs(guess.result() ** 2 - 2) > 1e-9:
-        guess = g.add(vg.Function(improve, guess, 2))
+    while abs(guess_task.result() ** 2 - 2) > 1e-9:
+        guess_task = g.add(vg.Function(improve, guess_task, 2))
         ex.submit(g)
-    assert round(guess.result(), 6) == 1.414214
+    assert round(guess_task.result(), 6) == 1.414214
 ```
 
 Live tasks run in the background, also on a local Executor, which runs them
@@ -417,15 +421,15 @@ def refine(count, step=0):
     return [vg.Expand(refine, vg.Function(fit, count, step), step + 1)]
 
 g = vg.Graph()
-files = g.add(vg.Function(list_files, "/data/run7"))
-histograms = g.add(vg.Expand(per_file, files), cores=2)
-merged = g.add(vg.Function(merge, histograms))
-fits = {region: g.add(vg.Expand(refine, merged[region])) for region in ("electrons", "muons")}
+files_task = g.add(vg.Function(list_files, "/data/run7"))
+hists_task = g.add(vg.Expand(per_file, files_task), cores=2)
+merged_task = g.add(vg.Function(merge, hists_task))
+fit_tasks = {region: g.add(vg.Expand(refine, merged_task[region])) for region in ("electrons", "muons")}
 
 with vg.Executor(local=True) as ex:
     ex.run(g)
-    assert merged.result() == {"electrons": 10, "muons": 12}
-    assert fits["muons"].result() == [[[6.0]]]
+    assert merged_task.result() == {"electrons": 10, "muons": 12}
+    assert fit_tasks["muons"].result() == [[[6.0]]]
 ```
 
 `per_file` returns one task per file, each of two cores, and `merge` reads
@@ -454,16 +458,16 @@ failed or cancelled task is yielded too, and its `result()` raises. The
 import ndcctools.taskvine.vine_graph as vg
 
 g = vg.Graph()
-trials = [g.add(vg.Function(lambda s: s * 37 % 101, seed)) for seed in range(50)]
+trial_tasks = [g.add(vg.Function(lambda s: s * 37 % 101, seed)) for seed in range(50)]
 with vg.Executor(local=True) as ex:
     ex.submit(g)
-    for task in ex.as_completed(trials):
+    for task in ex.as_completed(trial_tasks):
         if task.result() > 90:
-            best = task
+            best_task = task
             break
-    for task in trials:
+    for task in trial_tasks:
         task.cancel()
-    assert best.result() > 90
+    assert best_task.result() > 90
 ```
 
 ## Failures
@@ -495,20 +499,20 @@ calls that read it:
 import ndcctools.taskvine.vine_graph as vg
 
 g = vg.Graph()
-numbers = [g.add(vg.Function(int, text)) for text in ("1", "2.", "3")]
-total = g.add(vg.Function(sum, numbers))
+number_tasks = [g.add(vg.Function(int, text)) for text in ("1", "2.", "3")]
+total_task = g.add(vg.Function(sum, number_tasks))
 
 with vg.Executor(local=True) as ex:
     try:
         ex.run(g)
     except vg.TaskError as error:
-        bad = error.source
+        bad_task = error.source
         assert isinstance(error.exception, ValueError) and error.reason == "function"
-    assert [task for task in g if task.failed()] == [numbers[1], total]
-    fixed = g.add(vg.Function(lambda text: int(text.rstrip(".")), *bad.args))
-    again = g.add(vg.Function(sum, [fixed if task is bad else task for task in numbers]))
+    assert [task for task in g if task.failed()] == [number_tasks[1], total_task]
+    fixed_task = g.add(vg.Function(lambda text: int(text.rstrip(".")), *bad_task.args))
+    again_task = g.add(vg.Function(sum, [fixed_task if task is bad_task else task for task in number_tasks]))
     ex.submit(g)
-    assert again.result() == 6
+    assert again_task.result() == 6
 ```
 
 ## How long results are kept
@@ -537,13 +541,13 @@ ex = vg.Executor(port=9123, progress_bar=False)
 g = vg.Graph()
 
 # Cell 2
-squares = [g.add(vg.Function(pow, value, 2)) for value in range(8)]
+square_tasks = [g.add(vg.Function(pow, value, 2)) for value in range(8)]
 results = ex.run(g)
 
 # Cell 3, at any later time
-assert squares[3].result() == 9
-total = g.add(vg.Function(sum, squares))
-assert ex.run(g)[total] == 140
+assert square_tasks[3].result() == 9
+total_task = g.add(vg.Function(sum, square_tasks))
+assert ex.run(g)[total_task] == 140
 
 # Last cell
 ex.close()
@@ -570,11 +574,11 @@ def multiply(left, right):
     return left * right
 
 g = from_dask({"incremented": (abs, -2), "answer": (multiply, "incremented", 10)})
-by_key = {task.key: task for task in g}
+key_tasks = {task.key: task for task in g}
 with vg.Executor(local=True) as ex:
     results = ex.run(g)
 
-assert results[by_key["answer"]] == 20
+assert results[key_tasks["answer"]] == 20
 ```
 
 ## Executor settings

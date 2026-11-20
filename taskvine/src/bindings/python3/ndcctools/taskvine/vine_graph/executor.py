@@ -119,10 +119,10 @@ exist, with no wait of the caller. as_completed() yields tasks as they finish, f
 
         with vg.Executor(port=9123) as executor:
             results = executor.run(graph)
-            task = graph.add(vg.Function(load, "more.root"))
+            load_task = graph.add(vg.Function(load, "more.root"))
             executor.submit(graph)
-            if task.result() > 0:
-                graph.add(vg.Function(fit, task), cores=4)
+            if load_task.result() > 0:
+                graph.add(vg.Function(fit, load_task), cores=4)
                 executor.run(graph)
 
     Python tasks run in a TaskVine library on the Workers, and commands as standard TaskVine tasks. The library imports

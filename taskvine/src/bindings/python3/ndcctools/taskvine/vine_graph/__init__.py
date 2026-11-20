@@ -16,14 +16,14 @@ Executor closes:
     import ndcctools.taskvine.vine_graph as vg
 
     g = vg.Graph()
-    total = g.add(vg.Function(sum, [g.add(vg.Function(abs, -1)), g.add(vg.Function(abs, -2))]))
+    total_task = g.add(vg.Function(sum, [g.add(vg.Function(abs, -1)), g.add(vg.Function(abs, -2))]))
 
     with vg.Executor(port=9123) as executor:
-        print(executor.run(g)[total])
-        more = [g.add(vg.Function(abs, -value)) for value in range(3, 6)]
-        again = g.add(vg.Function(sum, [total, *more]))
+        print(executor.run(g)[total_task])
+        more_tasks = [g.add(vg.Function(abs, -value)) for value in range(3, 6)]
+        again_task = g.add(vg.Function(sum, [total_task, *more_tasks]))
         executor.submit(g)
-        print(again.result())
+        print(again_task.result())
 """
 
 from .graph import URL, CancelledError, Command, Expand, File, Function, Graph, Shared, Task, TaskError, TaskFile

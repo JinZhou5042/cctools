@@ -212,7 +212,7 @@ class _Selectable(_Symbol):
     __slots__ = ()
 
     def __getitem__(self, item):
-        """Stand for result[item]. Each [] adds one step, so x["a"]["b"] differs from x[("a", "b")]."""
+        """Stand for result[item]. Each [] adds one step, so task["a"]["b"] differs from task[("a", "b")]."""
         return self._then(item)
 
     def attr(self, name):
@@ -286,7 +286,7 @@ _KEY_TYPES = (str, bytes, int, bool, type(None))
 
 def selection_key(steps):
     """Return a hashable key of a chain of selection steps, equal only for chains that select alike, or None for a
-    chain with a step of another type. Keys include each step's type, so x[1], x[True], and x["1"] differ."""
+    chain with a step of another type. Keys include each step's type, so task[1], task[True], and task["1"] differ."""
     keys = []
     for step in steps:
         kind = type(step)
@@ -810,7 +810,7 @@ class Command:
 
 class Function:
     """A Python function and the arguments to call it with, which g.add(function, **settings) makes a task of:
-    g.add(vg.Function(train, data, 1, lr=0.1), cores=4, retries=2). Every keyword argument goes to func, and every
+    g.add(vg.Function(train, data_task, 1, lr=0.1), cores=4, retries=2). Every keyword argument goes to func, and every
     setting of the task goes to Graph.add(). Every Python task is a Function: Graph.add() takes no bare function."""
 
     __slots__ = ("_func", "_args", "_kwargs", "_options", "_name", "_outputs", "_render", "_cache", "__weakref__")
@@ -848,7 +848,7 @@ class Expand:
 
     def __init__(self, builder, /, *args, **kwargs):
         if isinstance(builder, (Command, Function, Expand, _Symbol)) or not callable(builder):
-            raise TypeError("an Expand takes a builder function and its arguments, such as Expand(per_file, files)")
+            raise TypeError("an Expand takes a builder function and its arguments, such as Expand(per_file, files_task)")
         self._builder = builder
         self._args = args
         self._kwargs = kwargs
