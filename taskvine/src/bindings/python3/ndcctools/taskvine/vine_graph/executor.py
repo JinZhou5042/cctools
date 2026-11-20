@@ -90,18 +90,88 @@ class Progress:
 
 class _Watch:
     """The tasks of one as_completed() call: those that did not finish wait in pending, and the thread that applies the
-    outcome of one moves it to ready (Executor._finish()), which costs O(calls that wait for it) per finished task."""
+    outcome of one moves it to ready (Executor._finish()), which costs O(calls that wait for it) per finished task.
+    members holds the tasks of pending and ready, so that add() ignores a task it holds in O(1)."""
 
-    __slots__ = ("pending", "ready")
+    __slots__ = ("pending", "ready", "members")
 
     def __init__(self):
         self.pending = set()
         self.ready = collections.deque()
+        self.members = set()
 
     def finished(self, task):
         """Move a task that finished from pending to ready. Called with the Executor lock held."""
         self.pending.discard(task)
         self.ready.append(task)
+
+
+class _AsCompleted:
+    """The iterator that Executor.as_completed() returns. It yields each of its tasks once as it finishes, and add()
+    gives it another task. The iteration ends when no task is left, and an iteration that ended continues after a later
+    add(). The timeout of as_completed() covers the whole iteration."""
+
+    __slots__ = ("_executor", "_watch", "_deadline")
+
+    def __init__(self, executor, deadline):
+        self._executor = executor
+        self._watch = _Watch()
+        self._deadline = deadline
+
+    def __iter__(self):
+        return self
+
+    def __len__(self):
+        """Return the number of tasks not yielded yet."""
+        return len(self._watch.members)
+
+    def add(self, task):
+        """Add a live task of this Executor, which is yielded once it finished, or next when it finished already. A task
+        the iterator holds and did not yield yet is ignored. Safe to call from another thread than the iteration."""
+        executor = self._executor
+        executor._check_task(task)
+        watch = self._watch
+        finished = False
+        with executor._lock:
+            if task in watch.members:
+                return
+            watch.members.add(task)
+            if task._state == _RUNNING:
+                watch.pending.add(task)
+                executor._watched.setdefault(task._record, []).append(watch)
+            else:
+                watch.ready.append(task)
+                finished = True
+        if finished:
+            # A wait of another thread yields it now.
+            executor._runner.poke()
+
+    def update(self, tasks):
+        """Add each of tasks, as add() does."""
+        for task in tasks:
+            self.add(task)
+
+    def __next__(self):
+        executor = self._executor
+        runner = executor._runner
+        watch = self._watch
+        while True:
+            with executor._lock:
+                if not watch.ready:
+                    if not watch.pending:
+                        raise StopIteration
+                    executor._apply(runner.take_events())
+                if watch.ready:
+                    task = watch.ready.popleft()
+                    watch.members.discard(task)
+                    return task
+                pending = len(watch.pending)
+                # An add() of a finished task after this point ends the wait below.
+                pokes = runner._pokes
+            remaining = None if self._deadline is None else self._deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError(f"{pending} tasks did not finish in time")
+            runner.wait_events(0.5 if remaining is None else min(remaining, 0.5), pokes)
 
 
 class Executor:
@@ -499,45 +569,24 @@ exist, with no wait of the caller. as_completed() yields tasks as they finish, f
         and at once those that finished already, as concurrent.futures.as_completed() does. It is for reacting to
         whichever of several running tasks finishes first. A task that failed or was cancelled is yielded like one that
         completed, and its result() tells. With a timeout in seconds, the iteration raises TimeoutError when tasks are
-        still unfinished that long after this call."""
+        still unfinished that long after this call. The iterator's add(task) gives it another live task, for a
+        controller whose next tasks depend on its own state (see _AsCompleted)."""
         deadline = None if timeout is None else time.monotonic() + timeout
         tasks = list(dict.fromkeys(tasks))
         for task in tasks:
-            if not isinstance(task, Task):
-                raise TypeError("as_completed() takes Tasks")
-            if task._record is None:
-                raise ValueError(f"{task!r} has not been submitted; submit or run its Graph")
-            if task._graph._executor is not self:
-                raise ValueError(f"{task!r} belongs to another Executor")
-        watch = _Watch()
-        with self._lock:
-            for task in tasks:
-                if task._state == _RUNNING:
-                    watch.pending.add(task)
-                    self._watched.setdefault(task._record, []).append(watch)
-                else:
-                    watch.ready.append(task)
-        return self._as_completed(watch, deadline)
+            self._check_task(task)
+        iterator = _AsCompleted(self, deadline)
+        iterator.update(tasks)
+        return iterator
 
-    def _as_completed(self, watch, deadline):
-        runner = self._runner
-        while True:
-            with self._lock:
-                if not watch.ready:
-                    if not watch.pending:
-                        return
-                    self._apply(runner.take_events())
-                task = watch.ready.popleft() if watch.ready else None
-                pending = len(watch.pending)
-            if task is not None:
-                yield task
-                # The iterator does not keep a task it yielded.
-                task = None
-                continue
-            remaining = None if deadline is None else deadline - time.monotonic()
-            if remaining is not None and remaining <= 0:
-                raise TimeoutError(f"{pending} tasks did not finish in time")
-            runner.wait_events(0.5 if remaining is None else min(remaining, 0.5))
+    def _check_task(self, task):
+        """Raise unless task is a live task of this Executor."""
+        if not isinstance(task, Task):
+            raise TypeError("as_completed() takes Tasks")
+        if task._record is None:
+            raise ValueError(f"{task!r} has not been submitted; submit its Graph first")
+        if task._graph._executor is not self:
+            raise ValueError(f"{task!r} belongs to another Executor")
 
     def _cancel(self, task):
         """Cancel a live task that did not finish, and return whether it was cancelled. The runner cancels the live

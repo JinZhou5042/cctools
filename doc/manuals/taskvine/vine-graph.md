@@ -470,6 +470,37 @@ with vg.Executor(local=True) as ex:
     assert best_task.result() > 90
 ```
 
+### Driving a graph from a controller (frontends)
+
+Build the graph once and use `vg.Expand` for dynamic work. A framework or
+controller whose next tasks depend on its own state, not on task results, may
+instead grow one Graph as it goes. The iterator of `as_completed()` takes more
+tasks with `add(task)`, as Dask's does: a task that already finished is yielded
+next, a task it holds already is ignored, and a task whose Graph was not
+submitted raises `ValueError`. The iteration ends when no task is left, and a
+later `add()` continues it. Submit each refill once:
+
+```python
+import ndcctools.taskvine.vine_graph as vg
+
+g = vg.Graph()
+with vg.Executor(local=True) as ex:
+    stream = ex.as_completed([])
+    total = 0
+    for refill in range(10):
+        refill_tasks = [g.add(vg.Function(pow, refill * 10 + n, 2)) for n in range(10)]
+        ex.submit(g)
+        for task in refill_tasks:
+            stream.add(task)
+        done_task = next(stream)  # react to one, then refill
+        total += done_task.result()
+    total += sum(task.result() for task in stream)
+    assert total == sum(n * n for n in range(100))
+```
+
+`add()` costs O(1) and may come from another thread than the iteration. The
+controller's own code runs only in its threads.
+
 ## Failures
 
 A task fails when its function raises, its command exits non-zero, or it

@@ -434,9 +434,9 @@ class _Local(_Runner):
     # Published state, read by the threads that use the Executor. A local task that waits for a local runner lets
     # other local tasks run meanwhile (_local_tasks_released()).
 
-    def wait_events(self, timeout):
+    def wait_events(self, timeout, pokes=None):
         with _local_tasks_released():
-            _Runner.wait_events(self, timeout)
+            _Runner.wait_events(self, timeout, pokes)
 
     def take_events(self, timeout=0):
         with _local_tasks_released():

@@ -407,6 +407,7 @@ class _Runner:
         self._changed = threading.Condition(self._lock)
         # (record, entry) of tasks that finished, published for the Executor, which removes each once it applied it
         self._events = collections.deque()
+        self._pokes = 0  # count of poke() calls, which end the waits in progress
         self._unfinished = 0  # tasks submitted that did not finish
         # Records of tasks that nothing can ask for anymore: the tasks of collected Graphs. Any thread appends, and the runner's thread lets them go.
         self._dropped = collections.deque()
@@ -463,15 +464,24 @@ class _Runner:
 
     # Published state, read by the threads that use the Executor.
 
-    def wait_events(self, timeout):
-        """Wait up to timeout seconds until a task finished whose event was not taken yet, or the runner stopped."""
+    def wait_events(self, timeout, pokes=None):
+        """Wait up to timeout seconds until a task finished whose event was not taken yet, the runner stopped, or
+        poke() was called since the count of pokes was pokes (by default, since this call)."""
         deadline = time.monotonic() + timeout
         with self._lock:
-            while not self._events and not self._closed and self._run_error is None:
+            if pokes is None:
+                pokes = self._pokes
+            while not self._events and not self._closed and self._run_error is None and pokes == self._pokes:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return
                 self._changed.wait(min(remaining, 0.5))
+
+    def poke(self):
+        """End the waits of wait_events() in progress, for a thread that gave a waiter something to do."""
+        with self._lock:
+            self._pokes += 1
+            self._changed.notify_all()
 
     def take_events(self, timeout=0):
         """Return the queue of the (record, entry) of tasks that finished and were not applied yet, waiting up to timeout
