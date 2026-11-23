@@ -1003,11 +1003,15 @@ static void cleanup_worker_files(struct vine_manager *q, struct vine_worker_info
 
 	/* get the list of cached files before they are removed by worker disconnect */
 	char *cachename = NULL;
-	struct vine_file *f;
+	struct vine_file_replica *replica;
 
-	HASH_TABLE_ITERATE_SNAPSHOT(w->current_files, cachename, f)
+	HASH_TABLE_ITERATE_SNAPSHOT(w->current_files, cachename, replica)
 	{
-		delete_worker_file(q, w, cachename, f->cache_level, VINE_CACHE_LEVEL_WORKFLOW);
+		/* The table of a worker holds replicas, so the file comes from the manager's file table. */
+		struct vine_file *f = hash_table_lookup(q->file_table, cachename);
+		if (f) {
+			delete_worker_file(q, w, cachename, f->cache_level, VINE_CACHE_LEVEL_WORKFLOW);
+		}
 
 		/* clean up worker replicas from the replica table, because deleting a CREATING replica will result in its
 		 * state being DELETING, and deleting a DELETING replica does not change its state, so we need to manually
