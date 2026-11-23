@@ -131,8 +131,7 @@ static void hold_removed(struct itable *h, struct entry *e)
  * unless it holds more than REMOVED_KEEP_MIN entries and eight times the live entries plus buckets, so it never holds
  * more than a constant times the most removals between two compactions, and a table that is filled and emptied again
  * and again does not reallocate it each time. The removed entries stay in an array rather than in a list linked
- * through them: freeing walks the array in removal order without a cache miss per entry, and a list link would move
- * the inline key of a hash_table entry and slow its lookups. */
+ * through them: freeing walks the array in removal order without a cache miss per entry. */
 static void free_removed(struct itable *h)
 {
 	if (h->need_compact) {
