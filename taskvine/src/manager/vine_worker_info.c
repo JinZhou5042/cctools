@@ -5,6 +5,8 @@ See the file COPYING for details.
 */
 
 #include "vine_worker_info.h"
+#include "set.h"
+#include "vine_file.h"
 #include "vine_counters.h"
 #include "vine_file_replica.h"
 #include "vine_protocol.h"
@@ -21,6 +23,11 @@ struct vine_worker_info *vine_worker_create(struct link *lnk)
 
 	w->type = VINE_WORKER_TYPE_UNKNOWN;
 	w->link = lnk;
+	w->lw = link_writer_create(lnk);
+	if (!w->lw) {
+		free(w);
+		return 0;
+	}
 
 	w->hostname = strdup("unknown");
 	w->os = strdup("unknown");
@@ -33,28 +40,40 @@ struct vine_worker_info *vine_worker_create(struct link *lnk)
 	w->features = hash_table_create(4, 0);
 
 	w->current_files = hash_table_create(0, 0);
-	w->current_tasks = itable_create(0);
-	w->current_libraries = itable_create(0);
+	/* A pass over a table visits every bucket, and the scheduler passes over these tables of each worker for every
+	 * dispatch, so they start small and grow with the tasks and libraries that a worker holds. */
+	w->current_tasks = itable_create(7);
+	w->current_libraries = itable_create(7);
 
 	w->start_time = timestamp_get();
 	w->end_time = -1;
 
 	w->last_update_msg_time = w->start_time;
 	w->last_transfer_failure = 0;
+	w->last_source_failure = 0;
 	w->last_failure_time = 0;
 
 	vine_counters.worker.created++;
 
 	w->incoming_xfer_counter = 0;
 	w->outgoing_xfer_counter = 0;
+	w->outgoing_xfer_bytes = 0;
+	w->outgoing_refused_bytes = -1;
+	w->outgoing_checkpoints = 0;
 
 	return w;
 }
 
 void vine_worker_delete(struct vine_worker_info *w)
 {
+	link_writer_delete(w->lw);
 	if (w->link)
 		link_close(w->link);
+	link_writer_delete(w->probe_lw);
+	if (w->probe_link) {
+		link_close(w->probe_link);
+	}
+	free(w->probe_key);
 
 	free(w->hostname);
 	free(w->os);
@@ -74,6 +93,13 @@ void vine_worker_delete(struct vine_worker_info *w)
 	hash_table_delete(w->current_files);
 	itable_delete(w->current_tasks);
 	itable_delete(w->current_libraries);
+	if (w->blocked_files) {
+		struct vine_file *f;
+		while ((f = set_pop(w->blocked_files))) {
+			vine_file_delete(f);
+		}
+		set_delete(w->blocked_files);
+	}
 
 	free(w);
 
@@ -118,8 +144,9 @@ struct jx *vine_worker_to_jx(struct vine_worker_info *w)
 	jx_insert_string(j, "version", w->version);
 	if (w->factory_name)
 		jx_insert_string(j, "factory_name", w->factory_name);
-	if (w->factory_name)
+	if (w->workerid) {
 		jx_insert_string(j, "workerid", w->workerid);
+	}
 
 	vine_resources_add_to_jx(w->resources, j);
 
@@ -135,4 +162,15 @@ struct jx *vine_worker_to_jx(struct vine_worker_info *w)
 	current_tasks_to_jx(j, w);
 
 	return j;
+}
+
+/*
+A transfer from this worker failed at its destination, and the worker sent nothing since. Its host may hang with its
+connections open, so another transfer from it would wait for the same peer transfer timeout. It is not chosen as a
+source until any message from it shows that it is alive.
+*/
+
+int vine_worker_source_is_suspect(struct vine_worker_info *w)
+{
+	return w->last_source_failure > w->last_msg_recv_time;
 }

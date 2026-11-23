@@ -5,6 +5,7 @@ See the file COPYING for details.
 */
 
 #include "vine_manager.h"
+#include "vine_manager_data_service.h"
 #include "vine_blocklist.h"
 #include "vine_counters.h"
 #include "vine_current_transfers.h"
@@ -13,6 +14,7 @@ See the file COPYING for details.
 #include "vine_file.h"
 #include "vine_file_replica.h"
 #include "vine_file_replica_table.h"
+#include "vine_manager_catalog.h"
 #include "vine_manager_factory.h"
 #include "vine_manager_get.h"
 #include "vine_manager_put.h"
@@ -51,6 +53,7 @@ See the file COPYING for details.
 #include "jx_print.h"
 #include "link.h"
 #include "link_auth.h"
+#include "link_writer.h"
 #include "list.h"
 #include "load_average.h"
 #include "macros.h"
@@ -75,12 +78,15 @@ See the file COPYING for details.
 #include <fcntl.h>
 #include <float.h>
 #include <math.h>
+#ifdef __GLIBC__
+#endif
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -92,11 +98,364 @@ See the file COPYING for details.
 /* Default value for seconds between measurement of manager local resources. */
 #define VINE_RESOURCE_MEASUREMENT_INTERVAL 30
 
-/* Default value for keepalive interval in seconds. */
+/* Default value for keepalive interval in seconds, while the timeout framework is off. */
 #define VINE_DEFAULT_KEEPALIVE_INTERVAL 120
 
-/* Default value for keepalive timeout in seconds. */
+/* Default value for keepalive timeout in seconds, while the timeout framework is off. */
 #define VINE_DEFAULT_KEEPALIVE_TIMEOUT 900
+
+/*
+Timeouts. The timeout framework is off by default: every wait uses the timeouts above and the tunings short-timeout,
+long-timeout, and min-transfer-timeout. It is on for a worker that declares its response time X (info
+response-timeout, the worker's --response-timeout), and for every worker while the manager's response-timeout is set,
+until a worker declares its own. A healthy worker then makes progress within X, and the manager judges it failed when it
+makes no progress for T = 2X (vine_manager_worker_timeout()):
+- every blocking read or write on its link fails after T without progress (link_set_idle_timeout()), within the
+  stoptimes that callers keep as outer limits;
+- while the manager waits on it, with data queued for it or in a synchronous exchange, it fails when neither a byte
+  written to it nor a byte read from it moved for T (worker_made_no_progress(), the one judgment by T);
+- a worker that sends nothing gets a keepalive check after T/2 and is removed when it has not answered for T, unless
+  keepalive-interval and keepalive-timeout are set; a worker that declared X gets its checks on its probe link (see
+  "Probe link" below), where nothing waits ahead of them, and its control queue is judged after a stall bound much
+  longer than T while the probe link answers (vine_manager_queue_stall_timeout());
+- a data service transfer from or to it fails after T without progress, and a connect-back waits at most 2T;
+- the TLS handshake and the password check of a new connection share a deadline of T.
+
+Declared limits: the manager's own steps work under VINE_ROUND_BUDGET, except the synchronous exchanges listed above
+vine_manager_recv(), so a worker's X must exceed the longest of those as the worker sees them; and, for a worker
+without a probe link, the network must drain the buffers on the path within X/2, or a keepalive check that waits
+behind them arrives late.
+*/
+
+int vine_manager_worker_timeout(struct vine_manager *q, struct vine_worker_info *w, int otherwise)
+{
+	int x = (w && w->response_timeout > 0) ? w->response_timeout : q->response_timeout;
+	return x > 0 ? 2 * x : otherwise;
+}
+
+/*
+Judge a worker by the progress on its link while the manager waits on it, that is, while its writer holds data. With
+the timeout framework on, the worker has failed when neither a byte written to it nor a byte read from it moved for
+T. Off, it is the rule of the send queue alone: the writer took no data for min-transfer-timeout. This is the one
+judgment of a worker by progress; keepalives judge a worker that the manager does not wait on.
+*/
+static int link_made_no_progress(struct vine_manager *q, struct link_writer *lw, struct link *link, int timeout)
+{
+	if (link_writer_empty(lw)) {
+		return 0;
+	}
+	timestamp_t progress = link_writer_last_progress(lw);
+	int limit = q->minimum_transfer_timeout;
+	if (timeout > 0) {
+		progress = MAX(progress, link_last_read(link));
+		limit = timeout;
+	}
+	return limit > 0 && timestamp_monotonic() - progress >= (timestamp_t)limit * 1000000;
+}
+
+static int worker_made_no_progress(struct vine_manager *q, struct vine_worker_info *w)
+{
+	return link_made_no_progress(q, w->lw, w->link, vine_manager_worker_timeout(q, w, 0));
+}
+
+static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_info *w, char *line);
+static void unwatch_worker_queue(struct vine_manager *q, struct vine_worker_info *w);
+
+/*
+Probe link. With the timeout framework on, a check on the control link waits behind everything queued ahead of it:
+the manager's queue, both kernel buffers, task descriptions, and inline files of up to 64 KiB, so its answer may take
+as long as the worker takes to read all of that however healthy the worker is: Lemma NF(c) bounds it by about 328 s
+(about 813 s on buffers of 10 MB, timeout/theory-appendix.md, Appendix E.3), and T = 2X there is a heuristic. A worker
+that declares X (--response-timeout) therefore opens a second connection to the manager's port once it has sent its
+greeting, authenticated as the control link is (TLS and password), whose first line is probe <worker-id>. The
+manager pairs it with the worker of that id in probe_rendezvous, whichever half arrives first, and from then on sends
+its keepalive checks there. The probe link carries only check from the manager and the answers info round-stats and
+alive from the worker; any other line is a protocol error that removes the worker. The manager sends a check only
+after the last one was answered, so at most one check lies ahead of a check, and the worker reads the link in every
+round of its main loop and answers in the round that reads it. Losing the probe link removes the worker, through the
+same removal as the control link. The control link keeps its own judgment of a queue that makes no progress
+(link_made_no_progress()), after the stall bound below instead of T while the probe link judges the worker. A worker
+that declares no X opens no probe link, and its checks stay on the control link. The same link carries the worker's
+checks of the manager the other way (see "Workers judge the manager" below): the manager declares its own X_M there
+(response-timeout), the worker sends check, and the manager answers alive.
+
+The timeout on the probe link (timeout/theory.md, section 6.1). The X that a worker declares bounds the wall-clock
+time of one of its rounds plus one crossing of the path. Nothing lies ahead of a check, since the manager sends the
+next one only after the answer, so the worker reads it in the round in progress when it arrives or in the next, and
+answers in the round that reads it, on a link that holds nothing else. The answer therefore reaches the manager
+within two rounds and two crossings of the check's handover: at most 2X. The check is written when it is handed
+over, and the manager reads the probe link before it declares (probe_worker()), so neither its notice delay nor its
+service interval enters. T = 2X is the accuracy floor on the probe link (tolerance 1) while the worker keeps its
+declared X. The worker reads the bodies of puts and tasks in pieces within its rounds (the whole-message rule above
+ROUND_BUDGET in vine_worker.c), so it answers on the probe link in every round, also in the middle of a large put,
+and the answer on the probe link is the only evidence of the judgment (probe_worker()). A stopped worker is removed
+within about 1.5 T with the interval T/2, whatever the manager keeps sending it. On the control link the same 2X is a
+heuristic, since everything queued ahead of a check delays its answer.
+*/
+#define VINE_PROBE_ROUNDS 2
+
+static int vine_manager_probe_timeout(struct vine_manager *q, struct vine_worker_info *w)
+{
+	int x = (w && w->response_timeout > 0) ? w->response_timeout : q->response_timeout;
+	return x > 0 ? VINE_PROBE_ROUNDS * x : 0;
+}
+
+/*
+The control queue of a worker judged by its probe link. The answers on the probe link show that the worker's loop
+runs, and that loop reads its control link in every round. A queue on the control link that takes no data meanwhile
+therefore waits only for room that the worker's reads made and that the worker's kernel has not yet shown the manager's,
+which takes up to d_L = o_max + RTO_cap + 4d + d_a after a lost window update (timeout/theory-appendix.md, Lemma W).
+A judgment by room is accurate only from the accuracy floor of the room constructions (Theorem A.8(b) and (e)): c_W =
+3d + d_a + 3 d_L + epsilon_W + 4 J_W above the time the party takes to make the room, which the probe's T bounds here,
+since the worker reads everything that arrived within a round. With the numbers of Appendix E.4 (o_max = 0, RTO_cap =
+TCP_RTO_MAX = 120 s, d = 0.2 s, d_a = d + 0.2 s, epsilon_W and J_W of 1.5 s each), d_L is about 121 s and c_W about
+372 s. A stalled control queue of such a worker is therefore judged after T + VINE_QUEUE_STALL_SLACK, not after T:
+at T = 4 s the judgment after T was a judgment by room about 90 times below its accuracy floor, which a full socket on a
+lossy path or a slow proxy could fail. A worker whose probe link is silent is removed by probe_worker() after T, so a
+stopped worker is removed as fast as before. The tuning queue-stall-timeout sets the bound instead. Synchronous
+exchanges (flush_worker_queue_reading()) keep T, because the manager's own loop waits in them, and a worker without a
+probe link keeps T too.
+*/
+#define VINE_QUEUE_STALL_SLACK 372
+
+static int vine_manager_queue_stall_timeout(struct vine_manager *q, int timeout)
+{
+	return q->queue_stall_timeout > 0 ? q->queue_stall_timeout : timeout + VINE_QUEUE_STALL_SLACK;
+}
+
+/* The interval and the timeout of the checks on a worker's probe link: T/2 and T unless keepalives are set. */
+static int probe_check_timeout(struct vine_manager *q, struct vine_worker_info *w)
+{
+	return q->keepalive_timeout >= 0 ? q->keepalive_timeout : vine_manager_probe_timeout(q, w);
+}
+
+static int probe_check_interval(struct vine_manager *q, struct vine_worker_info *w)
+{
+	return q->keepalive_interval >= 0 ? q->keepalive_interval : probe_check_timeout(q, w) / 2;
+}
+
+/* Whether the checks on the probe link judge the worker, so that its control queue gets the stall bound. */
+static int probe_judges_worker(struct vine_manager *q, struct vine_worker_info *w)
+{
+	return w->probe_link && probe_check_interval(q, w) > 0 && probe_check_timeout(q, w) > 0;
+}
+
+/* The timeout of the control queue of a worker: the stall bound when its probe link judges it, else T or zero. */
+static int worker_queue_timeout(struct vine_manager *q, struct vine_worker_info *w)
+{
+	int timeout = vine_manager_worker_timeout(q, w, 0);
+	if (timeout && probe_judges_worker(q, w)) {
+		return vine_manager_queue_stall_timeout(q, timeout);
+	}
+	return timeout;
+}
+
+/*
+Tell a worker on its probe link the manager's own response time X_M and the bound of a stalled control queue, both in
+seconds: response-timeout <X_M> <bound>, with zeros while the manager declares no X_M. A worker that knows X_M judges
+the manager as the manager judges it (see "Workers judge the manager" below). Returns zero if the probe link failed.
+*/
+static int probe_declare(struct vine_manager *q, struct vine_worker_info *w)
+{
+	int x = q->manager_response_timeout;
+	int bound = x > 0 ? vine_manager_queue_stall_timeout(q, VINE_PROBE_ROUNDS * x) : 0;
+	char line[64];
+	int length = snprintf(line, sizeof(line), "response-timeout %d %d\n", x, bound);
+	debug(D_VINE, "tx probe to %s (%s): %.*s", w->hostname, w->addrport, length - 1, line);
+	link_writer_push(w->probe_lw, line, length);
+	return link_writer_send_async(w->probe_lw, 0);
+}
+
+/*
+Workers judge the manager. A worker that knows X_M (manager-response-timeout, sent at the pairing of the probe link
+and whenever it changes) sends check on its probe link when it has heard nothing from the manager on either link for
+T_M / 2, T_M = VINE_PROBE_ROUNDS X_M, and leaves the manager when that check stays unanswered for T_M with nothing read
+on either link since it was sent. The manager reads urgent links first in each step (probe links are urgent in the
+poll set, poll_active_workers()) and answers alive at once, so X_M must bound one step of vine_wait() as a worker sees
+it, VINE_ROUND_BUDGET and the synchronous exchanges included, plus one crossing. Without X_M a worker keeps the old
+judgment of its control queue.
+*/
+
+/* The most lines that one read of a probe link handles. An answer is two lines, so more is left for the next step. */
+#define VINE_PROBE_LINES 8
+
+/*
+Read the whole lines that reached a worker's probe link without waiting. Returns zero when the link failed or carried
+something other than an answer, which the caller handles: this never removes the worker, so it is safe inside an
+iteration of worker_table.
+*/
+static int read_probe_link(struct vine_manager *q, struct vine_worker_info *w)
+{
+	char line[VINE_LINE_MAX];
+	int lines = 0;
+	while (lines < VINE_PROBE_LINES && link_buffer_has_line(w->probe_link) == 1) {
+		if (link_readline(w->probe_link, line, sizeof(line), LINK_NOWAIT) <= 0) {
+			debug(D_VINE, "worker %s (%s) lost its probe link", w->hostname, w->addrport);
+			return 0;
+		}
+		lines++;
+		debug(D_VINE, "rx probe from %s (%s): %s", w->hostname, w->addrport, line);
+		if (!strcmp(line, "alive")) {
+			w->probe_sent = 0;
+			w->probe_answer = timestamp_monotonic();
+		} else if (!strcmp(line, "check")) {
+			/* The worker judges the manager: answer within this step, on a link that holds only answers. */
+			debug(D_VINE, "tx probe to %s (%s): alive", w->hostname, w->addrport);
+			link_writer_push(w->probe_lw, "alive\n", 6);
+			if (!link_writer_send_async(w->probe_lw, 0)) {
+				return 0;
+			}
+		} else if (string_prefix_is(line, "info round-stats ")) {
+			handle_info(q, w, line);
+		} else {
+			debug(D_VINE, "worker %s (%s) sent an unexpected message on its probe link: %s", w->hostname, w->addrport, line);
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/*
+Keepalives on the probe link: a check after the interval without one outstanding, and removal when a check stays
+unanswered for T. Unless set, the interval and the timeout are T/2 and T of the probe link. Returns zero when the
+worker has failed.
+
+The judgment counts only the answers on the probe link, the probe channel of timeout/theory.md (Definition 1.20): the
+worker never waits for the manager in its main loop and serves the probe link first in every round, so a healthy
+worker answers within 2X however much the manager sends it on the control link, and nothing written there can delay
+the removal of a stopped worker. A queue on the control link that stops moving is still judged by
+link_made_no_progress(), after the stall bound (vine_manager_queue_stall_timeout()).
+*/
+
+static int probe_worker(struct vine_manager *q, struct vine_worker_info *w)
+{
+	int timeout = probe_check_timeout(q, w);
+	int interval = probe_check_interval(q, w);
+	if (interval <= 0) {
+		return 1;
+	}
+	timestamp_t now = timestamp_monotonic();
+	if (!w->probe_sent) {
+		if (now - w->probe_answer >= (timestamp_t)interval * 1000000) {
+			link_writer_push(w->probe_lw, "check\n", 6);
+			if (!link_writer_send_async(w->probe_lw, 0)) {
+				debug(D_VINE, "Failed to send a check on the probe link of worker %s (%s).", w->hostname, w->addrport);
+				return 0;
+			}
+			debug(D_VINE, "Sent a check on the probe link of worker %s (%s)", w->hostname, w->addrport);
+			w->probe_sent = now;
+		}
+		return 1;
+	}
+	/* A check of a few bytes on an otherwise empty link leaves at once; this only finishes a write that a full
+	 * socket took in part. */
+	if (!link_writer_empty(w->probe_lw) && !link_writer_send_async(w->probe_lw, 0)) {
+		return 0;
+	}
+	if (now - w->probe_sent >= (timestamp_t)timeout * 1000000) {
+		/* An answer that reached the link but was not read yet counts, even after a long step of the manager's
+		 * own: read it before declaring. */
+		if (!read_probe_link(q, w)) {
+			return 0;
+		}
+		if (w->probe_sent) {
+			debug(D_VINE, "Removing worker %s (%s): hasn't answered a check on its probe link for more than %d s", w->hostname, w->addrport, timeout);
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/* Forget the probe link half that a connection left waiting under its worker id. */
+static void probe_unregister(struct vine_manager *q, struct vine_worker_info *w)
+{
+	if (!w->probe_key) {
+		return;
+	}
+	if (hash_table_lookup(q->probe_rendezvous, w->probe_key) == w) {
+		hash_table_remove(q->probe_rendezvous, w->probe_key);
+	}
+	free(w->probe_key);
+	w->probe_key = NULL;
+}
+
+/*
+Make the connection temp the probe link of worker w, and delete temp's own entry. temp has not identified as a worker,
+so it holds no tasks, files, or transfers, and nothing but worker_table, the capacity index, the poll set, and the
+rendezvous refers to it. Its queue is dropped: nothing may be queued on a probe link but checks.
+*/
+static void probe_attach(struct vine_manager *q, struct vine_worker_info *w, struct vine_worker_info *temp)
+{
+	probe_unregister(q, w);
+	probe_unregister(q, temp);
+	unwatch_worker_queue(q, temp);
+	hash_table_remove(q->worker_table, temp->hashkey);
+	vine_schedule_capacity_index_remove(q, temp);
+
+	w->probe_link = temp->link;
+	temp->link = NULL;
+	link_poll_set_add(q->poll_set, w->probe_link, LINK_READ, w);
+	/* Checks of the worker are read first in every step. */
+	link_poll_set_urgent(q->poll_set, w->probe_link, 1);
+	link_set_idle_timeout(w->probe_link, vine_manager_probe_timeout(q, w));
+	w->probe_sent = 0;
+	w->probe_answer = timestamp_monotonic();
+
+	debug(D_VINE, "worker %s (%s) opened its probe link from %s", w->hostname, w->addrport, temp->addrport);
+	vine_worker_delete(temp);
+	/* A failure shows when the next check is sent or read, which removes the worker outside this handler. */
+	probe_declare(q, w);
+}
+
+/* A worker that declared X waits for its probe link, or takes the one that arrived first. */
+static void probe_register(struct vine_manager *q, struct vine_worker_info *w)
+{
+	if (w->response_timeout <= 0 || !w->workerid || w->probe_link || w->probe_key || w->type != VINE_WORKER_TYPE_WORKER) {
+		return;
+	}
+	struct vine_worker_info *temp = hash_table_lookup(q->probe_rendezvous, w->workerid);
+	if (!temp) {
+		w->probe_key = xxstrdup(w->workerid);
+		hash_table_insert(q->probe_rendezvous, w->probe_key, w);
+	} else if (temp->type == VINE_WORKER_TYPE_UNKNOWN) {
+		w->probe_lw = link_writer_create(temp->link);
+		if (w->probe_lw) {
+			probe_attach(q, w, temp);
+		}
+	}
+}
+
+/*
+The first line of a connection that is the probe link of a worker: probe <worker-id>. Pair it with its worker, or
+leave it waiting until the worker declares X. A connection that waits too long is removed like any connection that
+never identified (ask_for_workers_updates()).
+*/
+static vine_msg_code_t handle_probe_hello(struct vine_manager *q, struct vine_worker_info *temp, const char *line)
+{
+	char id[VINE_LINE_MAX];
+	if (temp->type != VINE_WORKER_TYPE_UNKNOWN || temp->probe_key || sscanf(line, "probe %s", id) != 1) {
+		return VINE_MSG_FAILURE;
+	}
+	struct vine_worker_info *w = hash_table_lookup(q->probe_rendezvous, id);
+	if (!w) {
+		temp->probe_key = xxstrdup(id);
+		hash_table_insert(q->probe_rendezvous, temp->probe_key, temp);
+		debug(D_VINE, "probe link %s waits for worker %s", temp->addrport, id);
+		return VINE_MSG_PROCESSED;
+	}
+	if (w->type != VINE_WORKER_TYPE_WORKER) {
+		return VINE_MSG_FAILURE;
+	}
+	w->probe_lw = link_writer_create(temp->link);
+	if (!w->probe_lw) {
+		return VINE_MSG_FAILURE;
+	}
+	probe_attach(q, w, temp);
+	return VINE_MSG_PROCESSED_MOVED;
+}
+
+/* Length of the budget for the work of one step of vine_wait(). */
+#define VINE_ROUND_BUDGET ONE_SECOND
 
 /* Default value before entity is considered again after last failure, in usecs */
 #define VINE_DEFAULT_TRANSIENT_ERROR_INTERVAL (15 * ONE_SECOND)
@@ -116,6 +475,10 @@ See the file COPYING for details.
 
 /* Default value for how frequently to check for tasks that do not fit any worker. */
 #define VINE_LARGE_TASK_CHECK_INTERVAL 180000000 // 3 minutes in usecs
+
+/* An unexpected loss of a worker is not charged to the tasks it ran if another worker was lost in a way that no task
+ * explains within this time before. See cleanup_worker(). */
+#define VINE_WORKER_LOSS_EXCUSE_WINDOW (5 * ONE_SECOND)
 
 /* Default value for how frequently to allow calls to vine_hungry_computation. */
 #define VINE_HUNGRY_CHECK_INTERVAL 5000000 // 5 seconds in usecs
@@ -142,6 +505,7 @@ static void update_max_worker(const char *hashkey, void *w, void *max);
 
 static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_task *t, vine_task_state_t new_state);
 static void push_task_to_ready_tasks(struct vine_manager *q, struct vine_task *t);
+static void ready_tasks_remove(struct vine_manager *q, struct vine_task *t);
 
 static int task_request_count(struct vine_manager *q, const char *category, category_allocation_t request);
 
@@ -151,6 +515,7 @@ static vine_msg_code_t handle_manager_status(struct vine_manager *q, struct vine
 static vine_msg_code_t handle_resources(struct vine_manager *q, struct vine_worker_info *w, time_t stoptime);
 static vine_msg_code_t handle_feature(struct vine_manager *q, struct vine_worker_info *w, const char *line);
 static void handle_library_update(struct vine_manager *q, struct vine_worker_info *w, const char *line);
+static vine_msg_code_t handle_lost(struct vine_manager *q, struct vine_worker_info *w, const char *line);
 static void log_manager_start_timezone();
 
 static struct jx *manager_to_jx(struct vine_manager *q);
@@ -166,6 +531,7 @@ static void aggregate_workers_resources(
 		struct vine_manager *q, struct vine_resources *rtotal, struct vine_resources *rmin, struct vine_resources *rmax, int64_t *inuse_cache, struct hash_table *features);
 static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout, const char *tag, int task_id);
 static void disconnect_all_workers(struct vine_manager *q);
+static void round_summary_log(struct vine_manager *q);
 
 static int vine_manager_check_inputs_available(struct vine_manager *q, struct vine_task *t);
 static void vine_manager_consider_recovery_task(struct vine_manager *q, struct vine_file *lost_file, struct vine_task *rt);
@@ -271,10 +637,154 @@ static char *link_to_hash_key(struct link *link)
 	return string_format("0x%p", link);
 }
 
+/* The link of a removed worker whose sealed queue still holds a final message, such as exit or release. */
+struct departing_link {
+	struct link *link;
+	struct link_writer *lw;
+	time_t draining; /* When the queue was written and the write side shut down, or zero while the queue is written. */
+	int timeout;	 /* T of the worker while the timeout framework is on, or zero, see link_made_no_progress(). */
+};
+
+static void departing_link_delete(struct departing_link *d)
+{
+	link_writer_delete(d->lw);
+	link_close(d->link);
+	free(d);
+}
+
+/* Shut down the write side of a departing link whose queue was written, so the worker reads the end of the stream
+ * after its final message. The link is closed only once the worker closed its side: closing a socket that holds unread
+ * data, such as the cache updates that the worker sent while it read the queue, sends a reset instead of the end of the
+ * stream, and the worker's kernel then discards what the worker had not read yet, which may be the final message. */
+static void departing_link_drain_start(struct vine_manager *q, struct departing_link *d)
+{
+	shutdown(link_fd(d->link), SHUT_WR);
+	d->draining = time(0);
+	link_poll_set_modify(q->poll_set, d->link, LINK_READ);
+}
+
+/* Read and discard what a departing worker sent, without waiting, until the step's budget expires. Return one when the
+ * worker closed the link or the link failed, so it can be closed. */
+static int departing_link_drained(struct vine_manager *q, struct departing_link *d)
+{
+	char buffer[65536];
+	do {
+		int64_t length = link_read_avail(d->link, buffer, sizeof(buffer), LINK_NOWAIT);
+		if (length == 0) {
+			return 1;
+		}
+		if (length < 0) {
+			return !(errno == ETIMEDOUT || errno_is_temporary(errno));
+		}
+	} while (!budget_expired(&q->round));
+	return 0;
+}
+
 /*
-This function sends a message to the worker and records the time the message is
-successfully sent. This timestamp is used to determine when to send keepalive checks.
+Visit a worker in send_to_workers() while its queue holds data or until its failure is handled, and watch its link for
+room. Workers marked for removal are not visited, as they were not when the poll table held only worker_table.
 */
+static void watch_worker_queue(struct vine_manager *q, struct vine_worker_info *w)
+{
+	if (w->sending || w->pending_removal) {
+		return;
+	}
+	if (link_writer_empty(w->lw) && !link_writer_failed(w->lw)) {
+		return;
+	}
+	w->sending = list_cursor_create(q->sending_workers);
+	list_insert(w->sending, w);
+	list_seek(w->sending, -1);
+	link_poll_set_modify(q->poll_set, w->link, LINK_READ | LINK_WRITE);
+}
+
+/* Forget that a worker waits for the release of held sends. */
+static void drop_held_worker(struct vine_worker_info *w)
+{
+	if (!w->send_held) {
+		return;
+	}
+	list_drop(w->send_held);
+	list_cursor_delete(w->send_held);
+	w->send_held = NULL;
+}
+
+/* Stop visiting a worker in send_to_workers(), and stop watching its link for room. */
+static void unwatch_worker_queue(struct vine_manager *q, struct vine_worker_info *w)
+{
+	drop_held_worker(w);
+	if (!w->sending) {
+		return;
+	}
+	list_drop(w->sending);
+	list_cursor_delete(w->sending);
+	w->sending = NULL;
+	link_poll_set_modify(q->poll_set, w->link, LINK_READ);
+}
+
+/*
+Add data to a worker's queue. A queue that held nothing writes at once what the link takes, as a direct write would,
+for at most the rest of the current step. Later data waits until the poll finds the link writable.
+*/
+static int queue_to_worker(struct vine_manager *q, struct vine_worker_info *w, int was_empty, int queued)
+{
+	int result = 0;
+	if (!queued) {
+		result = -1;
+	} else if (q->send_holds > 0) {
+		/* The outermost release writes it, together with the rest of the operation, and watches the link only for
+		 * what remains, which saves changing the poll set twice for a queue that one write empties. */
+		if (!w->pending_removal && !w->send_held) {
+			w->send_held = list_cursor_create(q->send_held_workers);
+			list_insert(w->send_held, w);
+			list_seek(w->send_held, -1);
+		}
+		return 0;
+	} else if (was_empty && !link_writer_send_async(w->lw, q->round.end)) {
+		result = -1;
+	}
+	watch_worker_queue(q, w);
+	return result;
+}
+
+void vine_manager_send_hold(struct vine_manager *q)
+{
+	q->send_holds++;
+}
+
+void vine_manager_send_release(struct vine_manager *q)
+{
+	if (q->send_holds <= 0 || --q->send_holds > 0) {
+		return;
+	}
+	/* A failed or stalled queue is handled by send_to_workers() in the next step, so no worker is removed here. */
+	struct vine_worker_info *w;
+	while ((w = list_peek_head(q->send_held_workers))) {
+		drop_held_worker(w);
+		if (!link_writer_empty(w->lw)) {
+			link_writer_send_async(w->lw, q->round.end);
+		}
+		watch_worker_queue(q, w);
+	}
+}
+
+int vine_manager_send_data(struct vine_manager *q, struct vine_worker_info *w, const char *data, size_t length)
+{
+	int was_empty = link_writer_empty(w->lw);
+	return queue_to_worker(q, w, was_empty, link_writer_push(w->lw, data, length));
+}
+
+int vine_manager_send_file(struct vine_manager *q, struct vine_worker_info *w, const char *path, int64_t offset, int64_t length)
+{
+	int was_empty = link_writer_empty(w->lw);
+	return queue_to_worker(q, w, was_empty, link_writer_push_file(w->lw, path, offset, length));
+}
+
+int vine_manager_send_shared(struct vine_manager *q, struct vine_worker_info *w, struct link_writer_shared *s)
+{
+	int was_empty = link_writer_empty(w->lw);
+	return queue_to_worker(q, w, was_empty, link_writer_push_shared(w->lw, s));
+}
 
 __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager *q, struct vine_worker_info *w, const char *fmt, ...)
 {
@@ -285,7 +795,6 @@ __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager 
 	}
 
 	va_list va;
-	time_t stoptime;
 	buffer_t B[1];
 	buffer_init(B);
 	buffer_abortonfailure(B, 1);
@@ -297,13 +806,29 @@ __attribute__((format(printf, 3, 4))) int vine_manager_send(struct vine_manager 
 
 	debug(D_VINE, "tx to %s (%s): %s", w->hostname, w->addrport, buffer_tostring(B));
 
-	stoptime = time(0) + q->short_timeout;
-
-	int result = link_putlstring(w->link, buffer_tostring(B), buffer_pos(B), stoptime);
+	int length = buffer_pos(B);
+	int result = vine_manager_send_data(q, w, buffer_tostring(B), length);
 
 	buffer_free(B);
 
+	return result < 0 ? -1 : length;
+}
+
+/* Write everything queued for a status client before the manager writes to its link directly. A worker's requests are
+ * written by flush_worker_queue_reading(). */
+static int flush_worker_queue(struct vine_manager *q, struct vine_worker_info *w)
+{
+	int result = link_writer_send_sync(w->lw, timestamp_monotonic() + q->long_timeout * 1000000LL, 0);
+	/* A failed queue is handled by send_to_workers(). */
+	watch_worker_queue(q, w);
 	return result;
+}
+
+/* Tell a worker the manager's data port. */
+
+static int send_manager_transfer_port(struct vine_manager *q, struct vine_worker_info *w)
+{
+	return vine_manager_send(q, w, "manager_transfer_port %d\n", vine_manager_data_service_port(q->ds));
 }
 
 /* Handle a name message coming back from the worker, requesting the manager's project name. */
@@ -361,17 +886,59 @@ static void handle_idle_disconnect_request(struct vine_manager *q, struct vine_w
 	return;
 }
 
+/* Copy the next space-separated word of a message into word, which holds size bytes, and return the position after it,
+ * or NULL when there is no word or it does not fit. */
+static const char *message_word(const char *s, char *word, size_t size)
+{
+	if (!s) {
+		return NULL;
+	}
+	while (*s == ' ') {
+		s++;
+	}
+	size_t length = strcspn(s, " \n");
+	if (length == 0 || length >= size) {
+		return NULL;
+	}
+	memcpy(word, s, length);
+	word[length] = 0;
+	return s + length;
+}
+
+/* Parse the next space-separated word of a message as a decimal integer, and return the position after it, or NULL. */
+static const char *message_integer(const char *s, long long *value)
+{
+	if (!s) {
+		return NULL;
+	}
+	char *end;
+	errno = 0;
+	*value = strtoll(s, &end, 10);
+	if (end == s || errno || (*end && *end != ' ' && *end != '\n')) {
+		return NULL;
+	}
+	return end;
+}
+
 /* Handle an info message coming from the worker that provides a variety of metrics. */
 
 static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_info *w, char *line)
 {
 	char field[VINE_LINE_MAX];
-	char value[VINE_LINE_MAX];
 
-	int n = sscanf(line, "info %s %[^\n]", field, value);
-
-	if (n != 2)
+	/* The field is a word and the value the rest of the line, which must not be empty. It is parsed without sscanf,
+	 * because a worker sends info tasks_running for every task. */
+	const char *rest = message_word(string_prefix_is(line, "info ") ? line + strlen("info") : NULL, field, sizeof(field));
+	if (!rest) {
 		return VINE_MSG_FAILURE;
+	}
+	while (*rest == ' ') {
+		rest++;
+	}
+	const char *value = rest;
+	if (!*value || *value == '\n') {
+		return VINE_MSG_FAILURE;
+	}
 
 	if (string_prefix_is(field, "tasks_running")) {
 		w->dynamic_tasks_running = atoi(value);
@@ -389,6 +956,24 @@ static vine_msg_code_t handle_info(struct vine_manager *q, struct vine_worker_in
 		handle_library_update(q, w, value);
 	} else if (string_prefix_is(field, "transfer_port_bind_failed")) {
 		notice(D_VINE, "Worker %s (%s) could not bind transfer port; peer transfers disabled.", w->hostname, w->addrport);
+	} else if (string_prefix_is(field, "connect-back")) {
+		/* The Manager cannot reach this Worker's transfer port, so the Worker opens the connections that bring its
+		 * files to the data port. */
+		w->transfer_connect_back = atoi(value) != 0;
+	} else if (string_prefix_is(field, "response-timeout")) {
+		/* The worker declares its response time X, which turns the timeout framework on for it, see "Timeouts". */
+		w->response_timeout = MAX(0, atoi(value));
+		link_set_idle_timeout(w->link, vine_manager_worker_timeout(q, w, 0));
+		probe_register(q, w);
+	} else if (string_prefix_is(field, "round-stats")) {
+		/* With the timeout framework on, the worker reports the rounds of its main loop since its last answer to a
+		 * check: their number, the longest (its measured X), that round's slowest step and its length, and the
+		 * window, in microseconds. */
+		long long rounds, longest, step_time, window;
+		char step[64];
+		if (sscanf(value, "%lld %lld %63s %lld %lld", &rounds, &longest, step, &step_time, &window) == 5) {
+			debug(D_VINE, "round-stats: worker=%s host=%s rounds=%lld round_max_us=%lld step=%s step_us=%lld window_us=%lld", w->addrport, w->hostname, rounds, longest, step, step_time, window);
+		}
 	}
 
 	// Note we always mark info messages as processed, as they are optional.
@@ -400,16 +985,23 @@ Change the state of a file replica on an event.
 If the final state is DELETED, remove the replica from the table.
 */
 
-static int process_replica_on_event(struct vine_manager *q, struct vine_worker_info *w, const char *cachename, vine_file_replica_state_transition_event_t event)
+/* Apply an event to the replica of cachename that worker w holds, already looked up by the caller. Return 0 when the
+ * state did not change, 1 when it changed, and 2 when the replica reached DELETED and was deleted. */
+static int process_replica_event(struct vine_manager *q, struct vine_worker_info *w, const char *cachename, struct vine_file_replica *replica, vine_file_replica_state_transition_event_t event)
 {
-	struct vine_file_replica *replica = vine_file_replica_table_lookup(w, cachename);
 	if (!replica) {
 		return 0;
 	}
 
 	/* change the state of the replica on the event */
+	vine_file_replica_state_t old_state = replica->state;
 	if (!vine_file_replica_change_state_on_event(replica, event)) {
 		return 0;
+	}
+
+	/* A replica that became ready is a transfer source for ready tasks that wait for this file. */
+	if (old_state != VINE_FILE_REPLICA_STATE_READY && replica->state == VINE_FILE_REPLICA_STATE_READY) {
+		vine_schedule_wake_file(q, cachename);
 	}
 
 	/* remove the replica if the final state is DELETED */
@@ -418,9 +1010,15 @@ static int process_replica_on_event(struct vine_manager *q, struct vine_worker_i
 		if (removed_replica) {
 			vine_file_replica_delete(removed_replica);
 		}
+		return 2;
 	}
 
 	return 1;
+}
+
+static int process_replica_on_event(struct vine_manager *q, struct vine_worker_info *w, const char *cachename, vine_file_replica_state_transition_event_t event)
+{
+	return process_replica_event(q, w, cachename, vine_file_replica_table_lookup(w, cachename), event) != 0;
 }
 
 /*
@@ -432,70 +1030,81 @@ of the file for the purposes of cache storage management.
 static vine_msg_code_t handle_cache_update(struct vine_manager *q, struct vine_worker_info *w, const char *line)
 {
 	char cachename[VINE_LINE_MAX];
-	int type;
-	int cache_level;
+	long long type;
+	long long cache_level;
 	long long size;
 	long long mtime;
 	long long transfer_time;
 	long long start_time;
 	char id[VINE_LINE_MAX];
 
-	if (sscanf(line, "cache-update %s %d %d %lld %lld %lld %lld %s", cachename, &type, &cache_level, &size, &mtime, &transfer_time, &start_time, id) == 8) {
-		/*
-		If an unsolicited cache-update arrives, there are several possibilities:
-		- The worker is telling us about an item from a previous run.
-		- The file was created as an output of a task.
-		*/
-		struct vine_file_replica *replica = vine_file_replica_table_get_or_create(q, w, cachename, type, cache_level, size, mtime);
+	/* cache-update <cachename> <type> <cache_level> <size> <mtime> <transfer_time> <start_time> <transfer_id>, parsed
+	 * without sscanf because a worker sends one for every file it receives or creates. */
+	const char *s = message_word(line + strlen("cache-update"), cachename, sizeof(cachename));
+	s = message_integer(s, &type);
+	s = message_integer(s, &cache_level);
+	s = message_integer(s, &size);
+	s = message_integer(s, &mtime);
+	s = message_integer(s, &transfer_time);
+	s = message_integer(s, &start_time);
+	s = message_word(s, id, sizeof(id));
+	if (!s) {
+		return VINE_MSG_PROCESSED;
+	}
 
-		replica->type = type;
-		replica->cache_level = cache_level;
-		replica->size = size;
-		replica->mtime = mtime;
-		replica->transfer_time = transfer_time;
+	/*
+	If an unsolicited cache-update arrives, there are several possibilities:
+	- The worker is telling us about an item from a previous run.
+	- The file was created as an output of a task.
+	*/
+	struct vine_file_replica *replica = vine_file_replica_table_get_or_create(q, w, cachename, type, cache_level, size, mtime);
 
-		process_replica_on_event(q, w, cachename, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_CACHE_UPDATE);
+	replica->type = type;
+	replica->cache_level = cache_level;
+	replica->size = size;
+	replica->mtime = mtime;
+	replica->transfer_time = transfer_time;
 
-		vine_current_transfers_set_success(q, id);
-		vine_current_transfers_remove(q, id);
+	int deleted = process_replica_event(q, w, cachename, replica, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_CACHE_UPDATE) == 2;
 
-		vine_txn_log_write_cache_update(q, w, size, transfer_time, start_time, cachename);
+	/* A worker sends X for a file that no transfer record describes, such as the output of a task. */
+	if (strcmp(id, "X")) {
+		vine_current_transfers_remove_success(q, id);
+	}
 
-		/* process_replica_on_eventt may have deleted the replica,
-		 * so we check here again and return if there's nothing
-		 * more to update */
-		replica = vine_file_replica_table_lookup(w, cachename);
-		if (!replica) {
-			return VINE_MSG_PROCESSED;
+	vine_txn_log_write_cache_update(q, w, size, transfer_time, start_time, cachename);
+
+	/* The event deletes a replica that was being deleted, and then there is nothing more to update. */
+	if (deleted) {
+		return VINE_MSG_PROCESSED;
+	}
+
+	w->resources->disk.inuse += BYTES_TO_MEGABYTES(size);
+
+	/* If the replica corresponds to a declared file. */
+
+	struct vine_file *f = hash_table_lookup(q->file_table, cachename);
+	if (f) {
+		/* We know it exists and how large it is now. */
+		f->state = VINE_FILE_STATE_CREATED;
+		f->size = size;
+
+		/* If the replica's type was a URL, it means the manager expected the destination worker to download it
+		 * from elsewhere. Now that it's physically present, we can resolve its type back to the original. */
+		if (replica->type == VINE_URL) {
+			replica->type = f->type;
 		}
 
-		w->resources->disk.inuse += BYTES_TO_MEGABYTES(size);
-
-		/* If the replica corresponds to a declared file. */
-
-		struct vine_file *f = hash_table_lookup(q->file_table, cachename);
-		if (f) {
-			/* We know it exists and how large it is now. */
-			f->state = VINE_FILE_STATE_CREATED;
-			f->size = size;
-
-			/* If the replica's type was a URL, it means the manager expected the destination worker to download it
-			 * from elsewhere. Now that it's physically present, we can resolve its type back to the original. */
-			if (replica->type == VINE_URL) {
-				replica->type = f->type;
+		/* If a TEMP file, perform various actions as needed. */
+		if (f->type == VINE_TEMP) {
+			if (q->temp_replica_count > 1) {
+				vine_temp_queue_for_replication(q, f);
 			}
-
-			/* If a TEMP file, perform various actions as needed. */
-			if (f->type == VINE_TEMP) {
-				if (q->temp_replica_count > 1) {
-					vine_temp_queue_for_replication(q, f);
-				}
-				if (q->shift_disk_load) {
-					vine_temp_shift_disk_load(q, w, f);
-				}
-				if (q->clean_redundant_replicas) {
-					vine_temp_clean_redundant_replicas(q, f);
-				}
+			if (q->shift_disk_load) {
+				vine_temp_shift_disk_load(q, w, f);
+			}
+			if (q->clean_redundant_replicas) {
+				vine_temp_clean_redundant_replicas(q, f);
 			}
 		}
 	}
@@ -538,7 +1147,18 @@ static vine_msg_code_t handle_cache_invalid(struct vine_manager *q, struct vine_
 
 		message[length] = 0;
 		debug(D_VINE, "%s (%s) invalidated %s with error: %s", w->hostname, w->addrport, cachename, message);
-		free(message);
+
+		/* Count the failures to fetch a url or produce a mini task's file from its origin. A url comes from its origin
+		 * when its transfer has no source worker. A mini task runs without a transfer id, which only a copy from a
+		 * peer has. See should_resubmit_task(). */
+		struct vine_file *f = hash_table_lookup(q->file_table, cachename);
+		if (f && ((f->type == VINE_URL && n >= 3 && vine_current_transfers_from_origin(q, transfer_id)) || (f->type == VINE_MINI_TASK && n < 3))) {
+			f->origin_failures += 1;
+			free(f->origin_error);
+			f->origin_error = message;
+		} else {
+			free(message);
+		}
 
 		process_replica_on_event(q, w, cachename, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_CACHE_INVALID);
 
@@ -554,7 +1174,6 @@ static vine_msg_code_t handle_cache_invalid(struct vine_manager *q, struct vine_
 		/* Respond to a missing replica notification by re-queuing the corresponding file
 		 * for replication. If the replica does not have any ready source, it will be silently
 		 * discarded in the replication phase. */
-		struct vine_file *f = hash_table_lookup(q->file_table, cachename);
 		vine_temp_queue_for_replication(q, f);
 
 		/* Successfully processed this message. */
@@ -580,6 +1199,7 @@ static int handle_transfer_port(struct vine_manager *q, struct vine_worker_info 
 	}
 
 	w->transfer_port_active = 1;
+	vine_schedule_wake_worker(q, w);
 	link_address_remote(w->link, w->transfer_host, &dummy_port);
 
 	free(w->transfer_url);
@@ -602,12 +1222,20 @@ static int handle_transfer_hostport(struct vine_manager *q, struct vine_worker_i
 	}
 
 	w->transfer_port_active = 1;
+	vine_schedule_wake_worker(q, w);
 
 	int is_ip = address_is_valid_ip(w->transfer_host);
 	free(w->transfer_url);
 	w->transfer_url = string_format("worker%s://%s:%d", is_ip ? "ip" : "", w->transfer_host, w->transfer_port);
 
 	return VINE_MSG_PROCESSED;
+}
+
+/* Return whether a task result is the task going over a limit of its own: its wall time, end time, resources, or
+ * sandbox. */
+static int task_result_is_own_limit(int result)
+{
+	return result == VINE_RESULT_MAX_WALL_TIME || result == VINE_RESULT_MAX_END_TIME || result == VINE_RESULT_RESOURCE_EXHAUSTION || result == VINE_RESULT_SANDBOX_EXHAUSTION;
 }
 
 static vine_result_code_t get_completion_result(struct vine_manager *q, struct vine_worker_info *w, const char *line)
@@ -623,23 +1251,25 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 	timestamp_t execution_time, start_time, end_time;
 	timestamp_t observed_execution_time;
 
-	// Format: task completion status, exit status (exit code or signal), output length, bytes_sent, execution time,
-	// task_id
-	int n = sscanf(line,
-			"complete %d %d %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64 "",
-			&task_status,
-			&exit_status,
-			&output_length,
-			&bytes_sent,
-			&start_time,
-			&end_time,
-			&sandbox_used,
-			&task_id);
-
-	if (n < 7) {
+	// Format: task completion status, exit status (exit code or signal), output length, bytes_sent, start time, end
+	// time, sandbox used, task_id. It is parsed without sscanf, because a worker sends one for every task.
+	long long fields[8];
+	const char *s = string_prefix_is(line, "complete ") ? line + strlen("complete") : NULL;
+	for (int i = 0; i < 8; i++) {
+		s = message_integer(s, &fields[i]);
+	}
+	if (!s) {
 		debug(D_VINE, "Invalid message from worker %s (%s): %s", w->hostname, w->addrport, line);
 		return VINE_WORKER_FAILURE;
 	}
+	task_status = fields[0];
+	exit_status = fields[1];
+	output_length = fields[2];
+	bytes_sent = fields[3];
+	start_time = fields[4];
+	end_time = fields[5];
+	sandbox_used = fields[6];
+	task_id = fields[7];
 
 	execution_time = end_time - start_time;
 
@@ -657,8 +1287,22 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 	}
 
 	if (task_status != VINE_RESULT_SUCCESS) {
-		w->last_failure_time = timestamp_get();
-		t->time_when_last_failure = w->last_failure_time;
+		t->time_when_last_failure = timestamp_get();
+		/* A task that went over its own time or resource limits says nothing about the worker, which stays open to
+		 * other tasks. Any other failure keeps tasks off the worker for the transient error interval. */
+		if (!task_result_is_own_limit(task_status)) {
+			w->last_failure_time = t->time_when_last_failure;
+		}
+	}
+
+	/* A task that the worker forsook, such as a function call whose library died, or a library that exited, did not
+	 * complete, but the worker still sends the standard output it has after the message. It is discarded so that the
+	 * next message is read from its start. */
+	if ((task_status == VINE_RESULT_FORSAKEN || task_status == VINE_RESULT_LIBRARY_EXIT) && bytes_sent > 0) {
+		time_t stoptime = time(0) + vine_manager_transfer_time(q, w, bytes_sent);
+		if (link_soak(w->link, bytes_sent, stoptime) != bytes_sent) {
+			return VINE_WORKER_FAILURE;
+		}
 	}
 
 	/* If the task was forsaken by the worker or couldn't exeute, it didn't really complete.*/
@@ -668,16 +1312,27 @@ static vine_result_code_t get_completion_result(struct vine_manager *q, struct v
 		debug(D_VINE, "Task %d library %s failed", t->task_id, t->provides_library);
 		struct vine_task *original = hash_table_lookup(q->library_templates, t->provides_library);
 		if (original) {
-			original->library_failed_count++;
+			/* The template retires after max_library_retries instances in a row fail to start. An instance that
+			 * completed a function call had started, so its death, such as a kill during a long run, starts the count
+			 * again instead of adding to it. */
+			if (t->library_ran_function) {
+				original->library_failed_count = 0;
+			} else {
+				original->library_failed_count++;
+			}
 			original->time_when_last_failure = timestamp_get();
 		}
-		debug(D_VINE | D_NOTICE, "Library %s failed on worker %s (%s)", t->provides_library, w->hostname, w->addrport);
 		if (q->watch_library_logfiles) {
-			debug(D_VINE | D_NOTICE, ", check the library log file %s\n", t->library_log_path);
+			debug(D_VINE | D_NOTICE, "Library %s failed on worker %s (%s), check the library log file %s", t->provides_library, w->hostname, w->addrport, t->library_log_path);
 		} else {
-			debug(D_VINE | D_NOTICE, ", enable watch-library-logfiles for debug\n");
+			debug(D_VINE | D_NOTICE, "Library %s failed on worker %s (%s), enable watch-library-logfiles for debug", t->provides_library, w->hostname, w->addrport);
 		}
 	} else {
+		/* A function call that completed, whatever its result, shows that its library instance started. */
+		if (t->needs_library && t->library_task) {
+			t->library_task->library_ran_function = 1;
+		}
+
 		/* Update task stats for this completion. */
 		observed_execution_time = timestamp_get() - t->time_when_commit_end;
 
@@ -780,9 +1435,19 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		return VINE_MSG_FAILURE;
 	}
 
+	/* Any message ends the suspicion of a source whose transfer failed, so tasks that wait for its files may run. */
+	int suspect = vine_worker_source_is_suspect(w);
 	w->last_msg_recv_time = timestamp_get();
+	if (suspect) {
+		vine_schedule_wake_worker(q, w);
+	}
 
 	debug(D_VINE, "rx from %s (%s): %s", w->hostname, w->addrport, line);
+
+	/* The data of an inline reply follows its header, also from a worker that is being removed. */
+	if (string_prefix_is(line, "inline-")) {
+		return vine_manager_data_service_inline_reply(q, w, line) ? VINE_MSG_PROCESSED : VINE_MSG_FAILURE;
+	}
 
 	if (!w || w->pending_removal) {
 		// message from zombie beyond the grave muahaha, marked it as processed and do nothing else.
@@ -792,10 +1457,28 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		return VINE_MSG_PROCESSED;
 	}
 
+	/* A losing worker's reports of its earlier files are dropped, see vine_lose_worker(). The error message of a
+	 * cache-invalid follows it. */
+	if (string_prefix_is(line, "lost ")) {
+		return handle_lost(q, w, line);
+	} else if (w->losing && (string_prefix_is(line, "cache-update") || string_prefix_is(line, "cache-invalid"))) {
+		debug(D_VINE, "dropped a stale message from %s (%s), which is losing its state", w->hostname, w->addrport);
+		int message_length;
+		if (string_prefix_is(line, "cache-invalid") &&
+				(sscanf(line, "cache-invalid %*s %d", &message_length) != 1 || link_soak(w->link, message_length, stoptime) != message_length)) {
+			return VINE_MSG_FAILURE;
+		}
+		return VINE_MSG_PROCESSED;
+	}
+
 	char path[length];
 
-	// Check for status updates that can be consumed here.
-	if (string_prefix_is(line, "alive")) {
+	// Check for status updates that can be consumed here, the most frequent first.
+	if (string_prefix_is(line, "cache-update")) {
+		result = handle_cache_update(q, w, line);
+	} else if (string_prefix_is(line, "complete")) {
+		result = handle_complete(q, w, line);
+	} else if (string_prefix_is(line, "alive")) {
 		result = VINE_MSG_PROCESSED;
 	} else if (string_prefix_is(line, "taskvine")) {
 		result = handle_taskvine(q, w, line);
@@ -816,8 +1499,9 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		result = handle_name(q, w, line);
 	} else if (string_prefix_is(line, "info")) {
 		result = handle_info(q, w, line);
-	} else if (string_prefix_is(line, "cache-update")) {
-		result = handle_cache_update(q, w, line);
+	} else if (string_prefix_is(line, "probe ")) {
+		/* Deletes w when it pairs the connection with its worker. */
+		result = handle_probe_hello(q, w, line);
 	} else if (string_prefix_is(line, "cache-invalid")) {
 		result = handle_cache_invalid(q, w, line);
 	} else if (string_prefix_is(line, "transfer-hostport")) {
@@ -826,8 +1510,6 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 		result = handle_transfer_port(q, w, line);
 	} else if (sscanf(line, "GET %s HTTP/%*d.%*d", path) == 1) {
 		result = handle_http_request(q, w, path, stoptime);
-	} else if (string_prefix_is(line, "complete")) {
-		result = handle_complete(q, w, line);
 	} else {
 		// Message is not a status update: return it to the user.
 		result = VINE_MSG_NOT_PROCESSED;
@@ -837,15 +1519,84 @@ static vine_msg_code_t vine_manager_recv_no_retry(struct vine_manager *q, struct
 }
 
 /*
+Write everything queued for a worker before the manager reads its reply to a request, and read and handle the messages
+of its own that the worker sends meanwhile. The worker finishes a message it has begun before it handles the next
+request, and writes the messages it queued before a direct reply, waiting for the manager to read them. A manager that
+only wrote would then wait for the worker while the worker waits for it, until long-timeout. Reading and handling the
+messages while writing keeps both sides moving with no buffer beyond the link's own, in the order the worker sent them,
+as the loop of vine_manager_recv() handles them once the queue is written. No reply can arrive before the request at
+the tail of the queue is written, so every message read here is asynchronous, and any other is an error.
+*/
+
+static int flush_worker_queue_reading(struct vine_manager *q, struct vine_worker_info *w, char *line, size_t length)
+{
+	timestamp_t deadline = timestamp_monotonic() + q->long_timeout * 1000000LL;
+	/* With the timeout framework on, a worker that neither takes data nor sends any for T has failed, however long
+	 * the exchange may take, so the wait wakes at least once a second to judge it. */
+	int timeout = vine_manager_worker_timeout(q, w, 0);
+	int result = 1;
+	while (!link_writer_empty(w->lw)) {
+		if (!link_writer_send_async(w->lw, deadline) || link_writer_empty(w->lw)) {
+			break;
+		}
+		struct link_info info = {w->link, LINK_READ | LINK_WRITE, 0};
+		timestamp_t now = timestamp_monotonic();
+		int msec = now < deadline ? (int)((deadline - now + 999) / 1000) : 0;
+		if (timeout) {
+			msec = MIN(msec, 1000);
+		}
+		if (msec <= 0 || link_poll(&info, 1, msec) < 0) {
+			result = 0;
+			break;
+		}
+		if (timeout && worker_made_no_progress(q, w)) {
+			debug(D_VINE, "worker %s (%s) took and sent nothing for %d s", w->hostname, w->addrport, timeout);
+			result = 0;
+			break;
+		}
+		if (!(info.revents & LINK_READ)) {
+			continue;
+		}
+		/* The data of an inline reply is read as it arrives, as handle_worker() reads it. */
+		if (vine_manager_data_service_inline_pending(q, w)) {
+			result = vine_manager_data_service_inline_read(q, w, LINK_NOWAIT) >= 0;
+		} else {
+			result = vine_manager_recv_no_retry(q, w, line, length) == VINE_MSG_PROCESSED;
+		}
+		if (!result || w->pending_removal) {
+			result = 0;
+			break;
+		}
+	}
+	/* A failed queue is handled by send_to_workers(). */
+	watch_worker_queue(q, w);
+	return result && !link_writer_failed(w->lw);
+}
+
+/*
 Call vine_manager_recv_no_retry and silently retry if the result indicates
 an asynchronous update message like 'keepalive' or 'resource'.
+
+Every caller reads the reply to a request it just queued, so the queue is written first. These exchanges remain
+synchronous on the manager's thread, each wait bounded by the manager's timeouts: the standard output of
+a task (send_stdout), the outputs of a task (get, getfile), the results of watched files (send_results), and a file
+fetched with vine_fetch_file (getfile).
 */
 
 vine_msg_code_t vine_manager_recv(struct vine_manager *q, struct vine_worker_info *w, char *line, int length)
 {
 	vine_msg_code_t result = VINE_MSG_PROCESSED;
 
+	if (!flush_worker_queue_reading(q, w, line, length)) {
+		debug(D_VINE, "failed to send a request to %s (%s)", w->hostname, w->addrport);
+		return VINE_MSG_FAILURE;
+	}
+
 	do {
+		/* The reply follows the data of an inline reply that is still arriving. */
+		if (vine_manager_data_service_inline_read(q, w, time(0) + q->long_timeout) < 0) {
+			return VINE_MSG_FAILURE;
+		}
 		result = vine_manager_recv_no_retry(q, w, line, length);
 	} while (result == VINE_MSG_PROCESSED);
 
@@ -925,67 +1676,60 @@ int vine_manager_transfer_time(struct vine_manager *q, struct vine_worker_info *
 	return timeout;
 }
 
-/* Read from the catalog if fetch_factory is enabled. */
-
-static void update_read_catalog(struct vine_manager *q)
+/* Apply the answer of the last factory query that the catalog updater completed, if one came. */
+static void apply_factory_answer(struct vine_manager *q)
 {
-	time_t stoptime = time(0) + 5; // Short timeout for query
-
-	if (q->fetch_factory) {
-		vine_manager_factory_update_all(q, stoptime);
+	struct list *names, *records;
+	if (q->catalog && vine_manager_catalog_take_factories(q->catalog, &names, &records)) {
+		vine_manager_factory_apply(q, names, records);
 	}
 }
 
 /*
-Send an update to the catalog describing the state of this manager.
+Send an update to the catalog describing the state of this manager, and query it for the factories that feed it, as
+needed. The manager builds the update and hands it to its catalog updater, whose thread looks up the catalog servers,
+connects, sends, and queries, so the manager never waits for a server, a name lookup, or a fork of its process.
 */
-
-static void update_write_catalog(struct vine_manager *q)
-{
-	// Only write if we have a name.
-	if (!q->name)
-		return;
-
-	// Generate the manager status in an jx, and print it to a buffer.
-
-	struct jx *j = manager_to_jx(q);
-	char *str = jx_print_string(j);
-
-	// Send the buffer.
-	debug(D_VINE, "Advertising manager status to the catalog server(s) at %s ...", q->catalog_hosts);
-	if (!catalog_query_send_update(q->catalog_hosts, str, CATALOG_UPDATE_BACKGROUND | CATALOG_UPDATE_CONDITIONAL)) {
-
-		// If the send failed b/c the buffer is too big, send the lean version instead.
-		struct jx *lj = manager_lean_to_jx(q);
-		char *lstr = jx_print_string(lj);
-		catalog_query_send_update(q->catalog_hosts, lstr, CATALOG_UPDATE_BACKGROUND);
-		free(lstr);
-		jx_delete(lj);
-	}
-
-	// Clean up.
-	free(str);
-	jx_delete(j);
-}
-
-/* Send and receive updates from the catalog server as needed. */
-
 static void update_catalog(struct vine_manager *q, int force_update)
 {
+	apply_factory_answer(q);
+
 	// Only update every last_update_time seconds.
 	if (!force_update && (time(0) - q->catalog_last_update_time) < q->update_interval)
+		return;
+
+	q->catalog_last_update_time = time(0);
+
+	// Only write if we have a name.
+	if (!q->name)
 		return;
 
 	// If host and port are not set, pick defaults.
 	if (!q->catalog_hosts)
 		q->catalog_hosts = xxstrdup(CATALOG_HOST);
 
-	// Update the catalog.
-	update_write_catalog(q);
+	if (!q->catalog) {
+		q->catalog = vine_manager_catalog_create();
+		if (!q->catalog) {
+			return;
+		}
+	}
 
-	update_read_catalog(q);
+	// Generate the manager status, and the lean version sent instead when the first is too big.
+	struct jx *j = manager_to_jx(q);
+	struct jx *lj = manager_lean_to_jx(q);
+	char *str = jx_print_string(j);
+	char *lstr = jx_print_string(lj);
+	jx_delete(j);
+	jx_delete(lj);
 
-	q->catalog_last_update_time = time(0);
+	char *factory_filter = 0;
+	struct list *factory_names = 0;
+	if (q->fetch_factory) {
+		factory_filter = vine_manager_factory_query(q, &factory_names);
+	}
+
+	vine_manager_catalog_post(q->catalog, q->catalog_hosts, str, lstr, factory_filter, factory_names);
 }
 
 void vine_update_catalog(struct vine_manager *m)
@@ -1003,11 +1747,15 @@ static void cleanup_worker_files(struct vine_manager *q, struct vine_worker_info
 
 	/* get the list of cached files before they are removed by worker disconnect */
 	char *cachename = NULL;
-	struct vine_file *f;
+	struct vine_file_replica *replica;
 
-	HASH_TABLE_ITERATE_SNAPSHOT(w->current_files, cachename, f)
+	HASH_TABLE_ITERATE_SNAPSHOT(w->current_files, cachename, replica)
 	{
-		delete_worker_file(q, w, cachename, f->cache_level, VINE_CACHE_LEVEL_WORKFLOW);
+		/* The table of a worker holds replicas, so the file comes from the manager's file table. */
+		struct vine_file *f = hash_table_lookup(q->file_table, cachename);
+		if (f) {
+			delete_worker_file(q, w, cachename, f->cache_level, VINE_CACHE_LEVEL_WORKFLOW);
+		}
 
 		/* clean up worker replicas from the replica table, because deleting a CREATING replica will result in its
 		 * state being DELETING, and deleting a DELETING replica does not change its state, so we need to manually
@@ -1085,8 +1833,28 @@ static int enforce_worker_eviction_interval(struct vine_manager *q)
 	return vine_manager_release_random_worker(q);
 }
 
+/* Whether the unexpected loss of a worker at time now is excused for task t, because another worker was lost shortly
+ * before in a way that no task explains: it held tasks, none of which had been charged a loss. A loss of t itself never
+ * excuses t. Only the two most recent unexplained losses are consulted, and those of t are among its own two most
+ * recent unexplained losses, which t remembers. A task is excused at most max_retries + 1 losses, as many as it may be
+ * charged, because tasks that make their workers exit provide each other's evidence while none of them is charged:
+ * two of them, once another loss had excused their first losses, excused each other without end. See cleanup_worker(). */
+static int worker_loss_is_excused(struct vine_manager *q, struct vine_task *t, timestamp_t now)
+{
+	if (t->max_retries > 0 && t->worker_losses_excused > t->max_retries) {
+		return 0;
+	}
+	for (int i = 0; i < 2; i++) {
+		timestamp_t evidence = q->time_unexplained_worker_losses[i];
+		if (evidence && evidence != t->time_unexplained_losses[0] && evidence != t->time_unexplained_losses[1] && now - evidence <= VINE_WORKER_LOSS_EXCUSE_WINDOW) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 /* Remove all tasks and other associated state from a given worker. */
-static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w)
+static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w, vine_worker_disconnect_reason_t reason)
 {
 	struct vine_task *t;
 	uint64_t task_id;
@@ -1096,6 +1864,32 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w)
 		return;
 
 	vine_current_transfers_wipe_worker(q, w);
+
+	/* Each dispatch counts as a try. A loss is charged to the tasks the worker ran only when the worker disconnected
+	 * unexpectedly and no other worker was lost shortly before in a way that no task explains, that is, while it held
+	 * only tasks that had never been charged a loss; a task's own losses never excuse it. A task that makes every
+	 * worker it lands on exit, such as one that exceeds the memory of its worker, is charged once it loses a worker
+	 * with no such loss of another worker shortly before, then explains each later loss of its workers, which keep
+	 * being charged, and it returns once it is out of retries instead of taking every worker in turn. Losses during a
+	 * mass loss or a cascade of external removals are excused and give the try back, as forsaken tasks do, and the
+	 * tasks they excuse stay uncharged, so their later losses still count as evidence while the cascade continues. A
+	 * task is excused at most max_retries + 1 losses, so it loses at most 2 * (max_retries + 1) workers. A task charged
+	 * once is quarantined only after a second charged loss (see vine_schedule.h), but it already explains the loss of
+	 * any worker that holds it: it is the suspect, so that loss excuses no other task, as before. */
+	timestamp_t now = timestamp_get();
+	int unexpected = reason == VINE_WORKER_DISCONNECT_FAILURE;
+	int unexplained = 0;
+	ITABLE_ITERATE(w->current_tasks, iteration, task_id, t)
+	{
+		if (t->type == VINE_TASK_TYPE_LIBRARY) {
+			continue;
+		}
+		if (t->worker_losses_charged) {
+			unexplained = 0;
+			break;
+		}
+		unexplained = 1;
+	}
 
 	ITABLE_ITERATE(w->current_tasks, iteration, task_id, t)
 	{
@@ -1110,9 +1904,38 @@ static void cleanup_worker(struct vine_manager *q, struct vine_worker_info *w)
 			t->time_workers_execute_all += delta_time;
 		}
 
-		/* Remove the unfinished task and update data structures. */
-		reap_task_from_worker(q, w, t, VINE_TASK_READY);
-		vine_task_clean(t);
+		/* Remove the unfinished task and update data structures. A task out of retries returns to the application
+		 * instead of going to another worker. */
+		vine_task_state_t new_state = VINE_TASK_READY;
+		if (t->type != VINE_TASK_TYPE_LIBRARY) {
+			if (!unexpected) {
+				t->try_count -= 1;
+			} else if (worker_loss_is_excused(q, t, now)) {
+				t->try_count -= 1;
+				t->worker_losses_excused += 1;
+			} else {
+				t->worker_losses_charged += 1;
+				if (t->max_retries > 0 && t->try_count > t->max_retries) {
+					vine_task_set_result(t, VINE_RESULT_MAX_RETRIES);
+					new_state = VINE_TASK_RETRIEVED;
+				}
+			}
+			if (unexpected && unexplained) {
+				/* The loss becomes evidence below, which never excuses this task. */
+				t->time_unexplained_losses[1] = t->time_unexplained_losses[0];
+				t->time_unexplained_losses[0] = now;
+			}
+			debug(D_VINE, "task %d lost worker %s (%s): %d of %d tries used", t->task_id, w->hostname, w->addrport, t->try_count, t->max_retries);
+		}
+		reap_task_from_worker(q, w, t, new_state);
+		if (new_state == VINE_TASK_READY) {
+			vine_task_clean(t);
+		}
+	}
+
+	if (unexpected && unexplained) {
+		q->time_unexplained_worker_losses[1] = q->time_unexplained_worker_losses[0];
+		q->time_unexplained_worker_losses[0] = now;
 	}
 
 	itable_clear(w->current_tasks, 0);
@@ -1143,6 +1966,24 @@ static void recall_worker_lost_temp_files(struct vine_manager *q, struct vine_wo
 	}
 }
 
+/* Forget the tasks, files, and transfers of a worker as its loss does: its tasks return to the ready queue, and its
+ * replicas and transfers are forgotten. Used when the worker is removed and when its state is lost on request. */
+
+static void forget_worker_state(struct vine_manager *q, struct vine_worker_info *w, vine_worker_disconnect_reason_t reason)
+{
+	/* Workers that receive files from this one would wait for the peer transfer timeout, so they abandon them now. */
+	vine_current_transfers_abandon_source(q, w);
+	vine_schedule_quarantine_remove_worker(q, w);
+
+	hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
+
+	if (q->transfer_temps_recovery) {
+		recall_worker_lost_temp_files(q, w);
+	}
+
+	cleanup_worker(q, w, reason);
+}
+
 /* Remove a worker from this master by removing all remote state, all local state, and disconnecting. */
 
 void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info *w, vine_worker_disconnect_reason_t reason)
@@ -1158,23 +1999,130 @@ void vine_manager_remove_worker(struct vine_manager *q, struct vine_worker_info 
 
 	vine_txn_log_write_worker(q, w, 1, reason);
 
-	hash_table_remove(q->worker_table, w->hashkey);
-	hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
-	hash_table_remove(q->workers_idle_disconnecting, w->hashkey);
+	/* A final message, such as exit or release, is written if the link takes it now. */
+	link_writer_send_async(w->lw, 0);
 
-	if (q->transfer_temps_recovery) {
-		recall_worker_lost_temp_files(q, w);
+	/* An exit or release keeps the link: the sealed queue refuses what cleanup would still send and is written in
+	 * later steps, until it fails or takes no data for the minimum transfer timeout, and once it is written the link
+	 * stays until the worker closes it (see departing_link_drain_start()), so the worker reads the final message even
+	 * when it went out at once. Otherwise the manager never waits on a worker it removes: messages that cleanup sends,
+	 * such as unlink and kill, fail at once, and the next write fails the queue, which then refuses them. A worker
+	 * that loses its manager kills its tasks and prunes its cache itself. */
+	int departing = reason == VINE_WORKER_DISCONNECT_EXPLICIT && !link_writer_failed(w->lw);
+	if (departing) {
+		link_writer_seal(w->lw);
+	} else {
+		shutdown(link_fd(w->link), SHUT_WR);
+		link_writer_send_async(w->lw, 0);
 	}
 
-	cleanup_worker(q, w);
+	vine_manager_data_service_remove_worker(q->ds, w);
+
+	hash_table_remove(q->worker_table, w->hashkey);
+	vine_schedule_capacity_index_remove(q, w);
+	probe_unregister(q, w);
+	hash_table_remove(q->workers_idle_disconnecting, w->hashkey);
+
+	forget_worker_state(q, w, reason);
+	vine_current_transfers_detach_host(q, w);
 
 	vine_manager_factory_worker_leave(q, w);
+
+	/* Cleanup may have queued messages that the failed or sealed queue refused. */
+	unwatch_worker_queue(q, w);
+
+	if (departing) {
+		struct departing_link *d = xxmalloc(sizeof(*d));
+		d->link = w->link;
+		d->lw = w->lw;
+		d->draining = 0;
+		d->timeout = vine_manager_worker_timeout(q, w, 0);
+		list_push_tail(q->departing_links, d);
+		/* Polled only for room. */
+		link_poll_set_add(q->poll_set, d->link, LINK_WRITE, NULL);
+		w->link = NULL;
+		w->lw = NULL;
+	}
 
 	vine_worker_delete(w);
 
 	find_max_worker(q);
 
 	debug(D_VINE, "%d workers connected in total now", count_workers(q, VINE_WORKER_TYPE_WORKER));
+}
+
+/*
+Lose the state of a worker on request, as its loss would, while it stays connected.
+
+The manager forgets the worker's tasks, replicas, and transfers at once, as vine_manager_remove_worker() does, and
+sends "lose <n>", where n counts the losses of this worker. The worker kills its tasks and libraries, ends the
+transfers that it serves, removes its cached files of workflow level or less and every file not yet ready, and
+answers "lost <n>", followed by a cache-update for each file that it keeps.
+
+Until "lost <n>" arrives the worker is losing: it takes no task and no transfer, so the manager records nothing new on
+it. The link is ordered, so whatever the worker sent before "lost <n>" describes state from before the loss: a
+cache-update or cache-invalid is dropped, and a completion names a task that the worker no longer holds and is
+discarded as any unknown completion is. Receives from the worker into the vault are cancelled and reported as for a
+removed worker, and the worker answers its inline requests and copies before "lost <n>", so their answers are read
+as usual. Whatever follows "lost <n>" describes only the empty worker. A loss requested while the worker is still
+losing sends a new number, and only the answer to the latest one ends the loss.
+*/
+
+int vine_lose_worker(struct vine_manager *q, const char *worker_id)
+{
+	if (!q || !worker_id) {
+		return -1;
+	}
+
+	char *key;
+	struct vine_worker_info *w;
+	struct vine_worker_info *found = NULL;
+	int iteration;
+
+	/* The worker is found first and its state lost after the walk over worker_table. */
+	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+	{
+		if (w->type == VINE_WORKER_TYPE_WORKER && w->workerid && !strcmp(w->workerid, worker_id)) {
+			found = w;
+			break;
+		}
+	}
+
+	if (!found || found->pending_removal) {
+		return -1;
+	}
+
+	w = found;
+	debug(D_VINE | D_NOTICE, "Losing the state of worker %s (%s) on request", w->hostname, w->addrport);
+	q->stats->workers_lost++;
+
+	w->lose_sequence++;
+	w->losing = 1;
+	vine_manager_data_service_lose_worker(q->ds, w);
+	forget_worker_state(q, w, VINE_WORKER_DISCONNECT_FAILURE);
+	vine_manager_send(q, w, "lose %" PRId64 "\n", w->lose_sequence);
+
+	return 0;
+}
+
+/* The worker answered a loss of its state: the answer to the latest loss ends it. */
+
+static vine_msg_code_t handle_lost(struct vine_manager *q, struct vine_worker_info *w, const char *line)
+{
+	int64_t sequence;
+	if (sscanf(line, "lost %" SCNd64, &sequence) != 1) {
+		return VINE_MSG_FAILURE;
+	}
+
+	if (w->losing && sequence == w->lose_sequence) {
+		debug(D_VINE, "worker %s (%s) lost its state", w->hostname, w->addrport);
+		w->losing = 0;
+		count_worker_resources(q, w);
+		/* The worker takes tasks again, as a worker that connects does. */
+		vine_schedule_wake_all(q);
+	}
+
+	return VINE_MSG_PROCESSED;
 }
 
 /* Mark a worker for removal. The worker is taken out of worker_table, so it is not used for anything,
@@ -1191,6 +2139,14 @@ void vine_manager_mark_worker_for_removal(struct vine_manager *q, struct vine_wo
 
 	w->pending_removal = reason;
 	hash_table_remove(q->worker_table, w->hashkey);
+	vine_schedule_capacity_index_remove(q, w);
+	probe_unregister(q, w);
+	/* Like every link outside worker_table, its link is no longer polled or written in later steps. */
+	unwatch_worker_queue(q, w);
+	link_poll_set_remove(q->poll_set, w->link);
+	if (w->probe_link) {
+		link_poll_set_remove(q->poll_set, w->probe_link);
+	}
 	list_push_tail(q->zombie_workers, w);
 }
 
@@ -1233,13 +2189,22 @@ static void add_worker(struct vine_manager *q)
 	char addr[LINK_ADDRESS_MAX];
 	int port;
 
-	struct link *link = link_accept(q->manager_link, time(0) + q->short_timeout);
+	/* The listener is readable when this is called, so a connection is waiting. */
+	struct link *link = link_accept(q->manager_link, LINK_NOWAIT);
 	if (!link) {
 		return;
 	}
 
 	link_keepalive(link, 1);
 	link_tune(link, LINK_TUNE_INTERACTIVE);
+
+	/* The TLS handshake and the password check exchange a few short messages on the Manager thread, so a client that
+	 * sends nothing, or trickles bytes that renew an idle timeout, must not hold the Manager: together they get one
+	 * deadline, T with the timeout framework on and short-timeout otherwise. The handshake used to wait as long as
+	 * the client took, which stalled every vine_wait() behind a client that connected and sent nothing. */
+	int timeout = vine_manager_worker_timeout(q, NULL, 0);
+	link_set_idle_timeout(link, timeout);
+	time_t stoptime = time(0) + (timeout ? timeout : q->short_timeout);
 
 	if (!link_address_remote(link, addr, &port)) {
 		link_close(link);
@@ -1249,7 +2214,7 @@ static void add_worker(struct vine_manager *q)
 	debug(D_VINE, "worker %s:%d connected", addr, port);
 
 	if (q->ssl_enabled) {
-		if (link_ssl_wrap_accept(link, q->ssl_key, q->ssl_cert)) {
+		if (link_ssl_wrap_accept_stoptime(link, q->ssl_key, q->ssl_cert, stoptime)) {
 			debug(D_VINE, "worker %s:%d completed ssl connection", addr, port);
 		} else {
 			debug(D_VINE, "worker %s:%d failed ssl connection", addr, port);
@@ -1262,7 +2227,7 @@ static void add_worker(struct vine_manager *q)
 
 	if (q->password) {
 		debug(D_VINE, "worker %s:%d authenticating", addr, port);
-		if (!link_auth_password(link, q->password, time(0) + q->short_timeout)) {
+		if (!link_auth_password(link, q->password, stoptime)) {
 			debug(D_VINE | D_NOTICE, "worker %s:%d presented the wrong password", addr, port);
 			link_close(link);
 			return;
@@ -1279,7 +2244,34 @@ static void add_worker(struct vine_manager *q)
 	w->hashkey = link_to_hash_key(link);
 	w->addrport = string_format("%s:%d", addr, port);
 
+	if (!link_poll_set_add(q->poll_set, link, LINK_READ, w)) {
+		debug(D_NOTICE, "Cannot watch the connection of worker %s:%d.", addr, port);
+		vine_worker_delete(w);
+		return;
+	}
+
 	hash_table_insert(q->worker_table, w->hashkey, w);
+	vine_schedule_capacity_index_add(q, w);
+}
+
+/* Ask a worker to delete a file from its cache. The message is assembled without formatting, because a release sends
+ * one for every replica of every released file. */
+static void send_unlink(struct vine_manager *q, struct vine_worker_info *w, const char *filename)
+{
+	if (!w || w->pending_removal) {
+		return;
+	}
+	char message[VINE_LINE_MAX];
+	size_t length = strlen(filename);
+	if (length + 8 > sizeof(message)) {
+		vine_manager_send(q, w, "unlink %s\n", filename);
+		return;
+	}
+	memcpy(message, "unlink ", 7);
+	memcpy(message + 7, filename, length);
+	message[7 + length] = '\n';
+	debug(D_VINE, "tx to %s (%s): unlink %s", w->hostname, w->addrport, filename);
+	vine_manager_send_data(q, w, message, length + 8);
 }
 
 /* Delete a single file on a remote worker except those with greater delete_upto_level cache level */
@@ -1288,7 +2280,7 @@ int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const
 {
 	if (cache_level <= delete_upto_level) {
 		process_replica_on_event(q, w, filename, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_UNLINK);
-		vine_manager_send(q, w, "unlink %s\n", filename);
+		send_unlink(q, w, filename);
 		return 1;
 	}
 
@@ -1544,6 +2536,49 @@ static int fetch_outputs_from_worker(struct vine_manager *q, struct vine_worker_
 	return 1;
 }
 
+/* Return whether a library template named name exists. Every check of a ready function call asks this, and the calls
+ * of a run usually need one library, so the last answer is kept until a template is added or removed. */
+static int library_template_exists(struct vine_manager *q, const char *name)
+{
+	if (q->library_checked_name && q->library_checked_serial == q->library_templates_serial && !strcmp(q->library_checked_name, name)) {
+		return q->library_checked_found;
+	}
+	char *copy = strdup(name);
+	if (!copy) {
+		return hash_table_lookup(q->library_templates, name) != NULL;
+	}
+	free(q->library_checked_name);
+	q->library_checked_name = copy;
+	q->library_checked_serial = q->library_templates_serial;
+	q->library_checked_found = hash_table_lookup(q->library_templates, name) != NULL;
+	return q->library_checked_found;
+}
+
+/*
+Return true if a function call needs more slots than every instance of its library can have. That holds when the
+library's slots do not depend on the worker (direct mode, requested slots, or requested cores) and are fewer than the
+call's core request. Such a call could never run, so it returns as VINE_RESULT_MISSING_LIBRARY: no library that can
+serve it exists. A library whose slots follow the size of each worker is reported by
+vine_schedule_check_for_large_tasks() instead, since a larger worker may still connect.
+*/
+
+static int function_call_exceeds_library(struct vine_manager *q, struct vine_task *t)
+{
+	int slots = vine_task_function_call_slots(t);
+	if (slots <= 1) {
+		return 0;
+	}
+
+	struct vine_task *library = hash_table_lookup(q->library_templates, t->needs_library);
+	int library_slots = vine_manager_library_slots(library, NULL);
+	if (library_slots < 1 || slots <= library_slots) {
+		return 0;
+	}
+
+	notice(D_VINE, "function call %d needs %d slots, but every instance of library %s has %d slots", t->task_id, slots, t->needs_library, library_slots);
+	return 1;
+}
+
 /*
 Retrieve task that cannot run for unfixable policy reasons,
 such as exceeded the absolute end time, no library task available, etc.
@@ -1561,8 +2596,10 @@ static int retrieve_ready_task(struct vine_manager *q, struct vine_task *t, doub
 	if (t->resources_requested->end > 0 && t->resources_requested->end <= now_secs) {
 		debug(D_VINE, "task %d has exceeded its end time", t->task_id);
 		result = VINE_RESULT_MAX_END_TIME;
-	} else if (t->needs_library && !hash_table_lookup(q->library_templates, t->needs_library)) {
+	} else if (t->needs_library && !library_template_exists(q, t->needs_library)) {
 		debug(D_VINE, "task %d does not match any submitted library named \"%s\"", t->task_id, t->needs_library);
+		result = VINE_RESULT_MISSING_LIBRARY;
+	} else if (t->needs_library && function_call_exceeds_library(q, t)) {
 		result = VINE_RESULT_MISSING_LIBRARY;
 	}
 	if (q->fixed_location_in_queue && t->has_fixed_locations) {
@@ -1669,6 +2706,7 @@ static vine_msg_code_t handle_taskvine(struct vine_manager *q, struct vine_worke
 		free(w->version);
 
 	w->hostname = strdup(items[0]);
+	vine_current_transfers_attach_host(q, w);
 	w->os = strdup(items[1]);
 	w->arch = strdup(items[2]);
 	w->version = strdup(items[3]);
@@ -1697,6 +2735,9 @@ static vine_msg_code_t handle_taskvine(struct vine_manager *q, struct vine_worke
 		 * also, don't return VINE_MSG_PROCESSED, as it would trigger do-while loop in vine_manager_recv().
 		 * Must keep w pointer valid until message processing completes, then cleanup safely. */
 		w->draining = 1;
+		return VINE_MSG_FAILURE;
+	}
+	if (!send_manager_transfer_port(q, w)) {
 		return VINE_MSG_FAILURE;
 	}
 
@@ -1851,7 +2892,8 @@ static vine_result_code_t get_stdout(struct vine_manager *q, struct vine_worker_
 	}
 
 	if (retrieved_output_length > 0) {
-		debug(D_VINE, "Receiving stdout of task %d (size: %" PRId64 " bytes) from %s (%s) ...", t->task_id, retrieved_output_length, w->addrport, w->hostname);
+		/* The message that announced the output (complete or stdout) was logged with its task and length, and the
+		 * end of the read is logged below, so its start is not logged. */
 
 		// First read the bytes we keep.
 		stoptime = time(0) + vine_manager_transfer_time(q, w, retrieved_output_length);
@@ -1862,7 +2904,7 @@ static vine_result_code_t get_stdout(struct vine_manager *q, struct vine_worker_
 			t->output[actual] = '\0';
 			return VINE_WORKER_FAILURE;
 		}
-		debug(D_VINE, "Retrieved %" PRId64 " bytes from %s (%s)", actual, w->hostname, w->addrport);
+		debug(D_VINE, "Retrieved %" PRId64 " bytes of stdout of task %d from %s (%s)", actual, t->task_id, w->hostname, w->addrport);
 
 		// Then read the bytes we need to throw away.
 		if (output_length > retrieved_output_length) {
@@ -2210,16 +3252,13 @@ static struct jx *manager_to_jx(struct vine_manager *q)
 	vine_get_stats(q, &info);
 
 	// Add special properties expected by the catalog server
-	char owner[USERNAME_MAX];
-	username_get(owner);
-
 	jx_insert_string(j, "type", "vine_manager");
 	if (q->name)
 		jx_insert_string(j, "project", q->name);
 	jx_insert_integer(j, "starttime",
 			(q->stats->time_when_started / 1000000)); // catalog expects time_t not timestamp_t
 	jx_insert_string(j, "working_dir", q->workingdir);
-	jx_insert_string(j, "owner", owner);
+	jx_insert_string(j, "owner", q->owner);
 	jx_insert_string(j, "version", CCTOOLS_VERSION);
 	jx_insert_integer(j, "port", vine_port(q));
 	jx_insert_integer(j, "priority", q->priority);
@@ -2378,9 +3417,7 @@ static struct jx *manager_lean_to_jx(struct vine_manager *q)
 #endif
 	jx_insert_boolean(j, "ssl", use_ssl);
 
-	char owner[USERNAME_MAX];
-	username_get(owner);
-	jx_insert_string(j, "owner", owner);
+	jx_insert_string(j, "owner", q->owner);
 
 	if (q->name)
 		jx_insert_string(j, "project", q->name);
@@ -2571,6 +3608,11 @@ static vine_msg_code_t handle_manager_status(struct vine_manager *q, struct vine
 		return VINE_MSG_FAILURE;
 	}
 
+	/* The answer is written directly, after the header lines that an http request queued. */
+	if (!flush_worker_queue(q, target)) {
+		jx_delete(a);
+		return VINE_MSG_FAILURE;
+	}
 	jx_print_link(a, l, stoptime);
 	jx_delete(a);
 
@@ -2658,18 +3700,34 @@ between the link and the vine_worker, then processing on or more
 messages available.
 */
 
-static vine_result_code_t handle_worker(struct vine_manager *q, struct link *l)
+static vine_result_code_t handle_worker(struct vine_manager *q, struct vine_worker_info *w)
 {
 	char line[VINE_LINE_MAX];
-	struct vine_worker_info *w;
 
-	char *key = link_to_hash_key(l);
-	w = hash_table_lookup(q->worker_table, key);
-	free(key);
-
-	/* This should not happen, but just in case: */
-	if (!w)
+	/* The poll set gives the worker of the link. A worker that a message just marked for removal left worker_table. */
+	if (w->pending_removal) {
 		return VINE_WORKER_FAILURE;
+	}
+
+	/* Read what arrived of an inline reply's data without waiting for the rest, so a partial reply never stalls the
+	 * manager. The next message is read only after the data. */
+	if (vine_manager_data_service_inline_pending(q, w)) {
+		if (vine_manager_data_service_inline_read(q, w, LINK_NOWAIT) < 0) {
+			q->stats->workers_lost++;
+			handle_worker_failure(q, w);
+			return VINE_WORKER_FAILURE;
+		}
+		return VINE_SUCCESS;
+	}
+
+	/* Whole-line rule, as in the worker's main loop: a message is handled only once its first line is whole in the
+	 * buffer (link_buffer_has_line()), so a worker or a path that stops in the middle of a line never holds the step.
+	 * Before, the read of that line waited up to T (long-timeout off) on the manager's thread, which no other worker
+	 * was served during. A worker that sends part of a line and nothing more is judged as a silent one is, by its
+	 * probe link or its keepalives. The rest of a multi-line message is still read synchronously. */
+	if (link_buffer_has_line(w->link) != 1) {
+		return VINE_SUCCESS;
+	}
 
 	vine_msg_code_t mcode;
 	mcode = vine_manager_recv_no_retry(q, w, line, sizeof(line));
@@ -2682,8 +3740,14 @@ static vine_result_code_t handle_worker(struct vine_manager *q, struct link *l)
 		return VINE_SUCCESS;
 		break;
 
+	case VINE_MSG_PROCESSED_MOVED:
+		/* The connection is now the probe link of its worker, and w is gone. */
+		return VINE_LINK_MOVED;
+
 	case VINE_MSG_PROCESSED_DISCONNECT:
 		// A status query was received and processed, so disconnect.
+		/* The client reads its whole answer before the link closes. */
+		flush_worker_queue(q, w);
 		vine_manager_mark_worker_for_removal(q, w, VINE_WORKER_DISCONNECT_STATUS_WORKER);
 		// It was not really a failure, but signals to the calling code that the worker
 		// is not available anymore.
@@ -2706,56 +3770,6 @@ static vine_result_code_t handle_worker(struct vine_manager *q, struct link *l)
 	}
 
 	return VINE_SUCCESS;
-}
-
-/*
-Construct the table of network links to be considered,
-including the manager's accepting link, and one for
-each active worker.
-*/
-
-static int build_poll_table(struct vine_manager *q)
-{
-	int n = 0;
-	char *key;
-	struct vine_worker_info *w;
-	int iteration;
-
-	// Allocate a small table, if it hasn't been done yet.
-	if (!q->poll_table) {
-		q->poll_table = malloc(sizeof(*q->poll_table) * q->poll_table_size);
-		if (!q->poll_table) {
-			// if we can't allocate a poll table, we can't do anything else.
-			fatal("allocating memory for poll table failed.");
-		}
-	}
-
-	// The first item in the poll table is the manager link, which accepts new connections.
-	q->poll_table[0].link = q->manager_link;
-	q->poll_table[0].events = LINK_READ;
-	q->poll_table[0].revents = 0;
-	n = 1;
-
-	// For every worker in the hash table, add an item to the poll table
-	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
-	{
-		// If poll table is not large enough, reallocate it
-		if (n >= q->poll_table_size) {
-			q->poll_table_size *= 2;
-			q->poll_table = realloc(q->poll_table, sizeof(*q->poll_table) * q->poll_table_size);
-			if (q->poll_table == NULL) {
-				// if we can't allocate a poll table, we can't do anything else.
-				fatal("reallocating memory for poll table failed.");
-			}
-		}
-
-		q->poll_table[n].link = w->link;
-		q->poll_table[n].events = LINK_READ;
-		q->poll_table[n].revents = 0;
-		n++;
-	}
-
-	return n;
 }
 
 static void vine_manager_compute_input_size(struct vine_manager *q, struct vine_task *t)
@@ -2786,13 +3800,28 @@ struct rmsummary *vine_manager_choose_resources_for_task(struct vine_manager *q,
 {
 	struct rmsummary *limits = rmsummary_create(-1);
 
-	/* Special case: A function-call task consumes no resources. */
-	/* Return early, otherwise these zeroes are expanded to use the whole worker. */
+	/* Special case: A function-call task consumes no resources, since its library holds them. A call of a library in
+	 * pool mode takes its cores and memory from the worker instead. Return early, otherwise these values are expanded
+	 * to use the whole worker. The call's wall time goes with its box, so the worker stops the call at that time. */
 
 	if (t->needs_library) {
 		limits->cores = 0;
 		limits->memory = 0;
 		limits->disk = 0;
+		limits->gpus = 0;
+		if (vine_manager_function_call_in_pool(q, t)) {
+			limits->cores = vine_task_function_call_slots(t);
+			limits->memory = MAX(0, t->resources_requested->memory);
+		}
+		limits->wall_time = t->resources_requested->wall_time;
+		return limits;
+	}
+
+	/* A library in pool mode reserves nothing but the disk it requests, since its calls take their own resources. */
+	if (t->provides_library && t->library_pool) {
+		limits->cores = 0;
+		limits->memory = 0;
+		limits->disk = MAX(0, t->resources_requested->disk);
 		limits->gpus = 0;
 		return limits;
 	}
@@ -2956,6 +3985,30 @@ struct rmsummary *vine_manager_choose_resources_for_task(struct vine_manager *q,
 }
 
 /*
+Return the number of function slots a library instance gets when it runs with the given resources: one in direct mode,
+else the slots the user requested, else one per core. With no resources, return the number it gets on every worker,
+or zero when that depends on the worker.
+*/
+
+int vine_manager_library_slots(struct vine_task *t, const struct rmsummary *limits)
+{
+	if (t->func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_DIRECT) {
+		return 1;
+	} else if (t->library_pool) {
+		/* A library in pool mode has one slot per core of its worker, set when it is dispatched. */
+		return 0;
+	} else if (t->function_slots_requested > 0) {
+		return t->function_slots_requested;
+	} else if (limits) {
+		return limits->cores;
+	} else if (t->resources_requested->cores > 0) {
+		/* The library's own core request overrides the resources chosen for it on any worker. */
+		return t->resources_requested->cores;
+	}
+	return 0;
+}
+
+/*
 Start one task on a given worker by specializing the task to the worker,
 sending the appropriate input files, and then sending the details of the task.
 Note that the "infile" and "outfile" components of the task refer to
@@ -2972,12 +4025,10 @@ static vine_result_code_t start_one_task(struct vine_manager *q, struct vine_wor
 	*/
 
 	if (t->provides_library) {
-		if (t->func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_DIRECT) {
-			t->function_slots_total = 1;
-		} else if (t->function_slots_requested <= 0) {
-			t->function_slots_total = limits->cores;
-		} else {
-			t->function_slots_total = t->function_slots_requested;
+		t->function_slots_total = vine_manager_library_slots(t, limits);
+		/* A library in pool mode has one slot per core of the worker, so only the worker's cores bound its calls. */
+		if (t->library_pool && t->func_exec_mode != VINE_TASK_FUNC_EXEC_MODE_DIRECT) {
+			t->function_slots_total = MAX(1, (int)w->resources->cores.total);
 		}
 	}
 
@@ -2994,9 +4045,10 @@ static vine_result_code_t start_one_task(struct vine_manager *q, struct vine_wor
 	free(command_line);
 
 	if (result == VINE_SUCCESS) {
+		/* The task message, logged as it was queued, holds the worker and the command, and the change to RUNNING
+		 * that follows records the dispatch, so it is not logged again here. */
 		t->current_resource_box = limits;
 		rmsummary_merge_override_basic(t->resources_allocated, limits);
-		debug(D_VINE, "%s (%s) busy on '%s'", w->hostname, w->addrport, t->command_line);
 	} else {
 		rmsummary_delete(limits);
 	}
@@ -3063,6 +4115,9 @@ static void count_worker_resources(struct vine_manager *q, struct vine_worker_in
 
 	/* The disk usage includes the sandboxes of each task + the shared cache in use. */
 	w->resources->disk.inuse += BYTES_TO_MEGABYTES(w->inuse_cache);
+
+	/* Committed cores, library slots, and reported cores change only before a count, so the count places the worker. */
+	vine_schedule_capacity_index_update(q, w);
 }
 
 static void update_max_worker(const char *hashkey, void *w_ptr, void *max_ptr)
@@ -3111,18 +4166,33 @@ static void find_max_worker(struct vine_manager *q)
  * the task is a function call and the library can run it.
  * This code corresponds to the assumption of
  * @vine.schedule.c:check_worker_have_enough_resources() - empty libraries
- * are not counted towards the resources in use and will be killed if needed. */
+ * are not counted towards the resources in use and will be killed if needed.
+ * A library in pool mode holds no resources, so it is never killed for room. */
 static void kill_empty_libraries_on_worker(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
 {
+	/* Cancelling removes a library from current_libraries, so the libraries are collected first and cancelled after
+	 * the walk, which removal would otherwise break. */
+	struct list *unused = list_create();
+	if (!unused) {
+		return;
+	}
 	int iteration;
 	uint64_t libtask_id;
 	struct vine_task *libtask;
 	ITABLE_ITERATE(w->current_libraries, iteration, libtask_id, libtask)
 	{
+		if (libtask->library_pool) {
+			continue;
+		}
 		if (libtask->function_slots_inuse == 0 && (!t->needs_library || strcmp(t->needs_library, libtask->provides_library))) {
-			vine_cancel_by_task_id(q, libtask_id);
+			list_push_tail(unused, (void *)(uintptr_t)libtask_id);
 		}
 	}
+	void *id;
+	while ((id = list_pop_head(unused))) {
+		vine_cancel_by_task_id(q, (uint64_t)(uintptr_t)id);
+	}
+	list_delete(unused);
 }
 
 /*
@@ -3145,8 +4215,11 @@ static vine_result_code_t commit_task_to_worker(struct vine_manager *q, struct v
 
 	/* If this is a function needing a library, dispatch the library. */
 	if (t->needs_library) {
+		/* The call occupies this many slots of its library instance until it is reaped. */
+		t->function_slots_total = vine_task_function_call_slots(t);
+
 		/* Consider whether the library task is already on that machine. */
-		t->library_task = vine_schedule_find_library(q, w, t->needs_library);
+		t->library_task = vine_schedule_find_library(q, w, t->needs_library, t->function_slots_total);
 		if (!t->library_task) {
 			/* Otherwise send the library to the worker. */
 			/* Note that this call will re-enter commit_task_to_worker. */
@@ -3174,7 +4247,7 @@ static vine_result_code_t commit_task_to_worker(struct vine_manager *q, struct v
 		 * and decrement it when the function task completes. */
 		vine_task_addref(t->library_task);
 		/* If start_one_task_fails, this will be decremented in handle_failure below. */
-		t->library_task->function_slots_inuse++;
+		t->library_task->function_slots_inuse += t->function_slots_total;
 	}
 	/* If this is a library task, bookkeep it on the worker's side */
 	if (t->provides_library) {
@@ -3185,11 +4258,15 @@ static vine_result_code_t commit_task_to_worker(struct vine_manager *q, struct v
 	t->addrport = xxstrdup(w->addrport);
 
 	t->time_when_commit_start = timestamp_get();
+	/* The inputs and the description of the task leave in one write. */
+	vine_manager_send_hold(q);
 	result = start_one_task(q, w, t);
+	vine_manager_send_release(q);
 	t->time_when_commit_end = timestamp_get();
 
 	itable_insert(w->current_tasks, t->task_id, t);
 	t->worker = w;
+	vine_schedule_quarantine_commit(q, w, t);
 
 	change_task_state(q, t, VINE_TASK_RUNNING);
 
@@ -3222,7 +4299,7 @@ static vine_result_code_t commit_task_group_to_worker(struct vine_manager *q, st
 	do {
 
 		if (counter && (result == VINE_SUCCESS)) {
-			skip_list_remove(q->ready_tasks, t);
+			ready_tasks_remove(q, t);
 			// decrement refcount
 			vine_task_delete(t);
 		}
@@ -3309,10 +4386,37 @@ static int should_resubmit_task_on_sandbox_exhaustion(struct vine_manager *q, st
 
 /* Returns true if this completed task should be resubmitted into the READY state. */
 
+/* Return an input of t, a url or mini task's file, that failed to be fetched from its origin more often than
+ * max-origin-failures allows, or null. */
+static struct vine_file *input_past_origin_failures(struct vine_manager *q, struct vine_task *t)
+{
+	if (q->max_origin_failures < 0) {
+		return 0;
+	}
+	struct vine_mount *m;
+	LIST_ITERATE(t->input_mounts, m)
+	{
+		if (m->file && m->file->origin_failures > q->max_origin_failures) {
+			return m->file;
+		}
+	}
+	return 0;
+}
+
 static int should_resubmit_task(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
 {
 	/* in this function, any change_task_state should only be to VINE_TASK_READY */
 	if (t->result == VINE_RESULT_FORSAKEN) {
+		/* A task forsaken because an input cannot be fetched from its origin would be forsaken without end. Library
+		 * deaths and failed copies from peers do not count. */
+		struct vine_file *f = input_past_origin_failures(q, t);
+		if (f) {
+			notice(D_VINE, "task %d failed: its input %s could not be fetched from its origin %d times: %s", t->task_id, f->source, f->origin_failures, f->origin_error ? f->origin_error : "");
+			/* Set directly, since vine_task_set_result() keeps a result such as FORSAKEN over INPUT_MISSING. */
+			t->result = VINE_RESULT_INPUT_MISSING;
+			return 0;
+		}
+
 		if (t->max_forsaken > -1 && t->forsaken_count > t->max_forsaken) {
 			return 0;
 		}
@@ -3342,6 +4446,34 @@ static int should_resubmit_task(struct vine_manager *q, struct vine_worker_info 
 	}
 }
 
+/* Put a task at the head of waiting_retrieval_list and keep its position, so that removing it, also when its worker is
+ * removed, does not search the list. */
+static void retrieval_list_push(struct vine_manager *q, struct vine_task *t)
+{
+	if (t->retrieval) {
+		return;
+	}
+	t->retrieval = list_cursor_create(q->waiting_retrieval_list);
+	if (list_seek(t->retrieval, 0)) {
+		list_insert(t->retrieval, t);
+		list_prev(t->retrieval);
+	} else {
+		list_insert(t->retrieval, t);
+		list_seek(t->retrieval, 0);
+	}
+}
+
+/* Take a task out of waiting_retrieval_list. A task that is not there is left alone. */
+static void retrieval_list_remove(struct vine_task *t)
+{
+	if (!t->retrieval) {
+		return;
+	}
+	list_drop(t->retrieval);
+	list_cursor_delete(t->retrieval);
+	t->retrieval = NULL;
+}
+
 /*
 Remove a running or completed task from a worker, and then update
 all auxiliary data structures to remove the association
@@ -3357,6 +4489,8 @@ static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_inf
 
 	/* Make sure the task and worker agree before changing anything. */
 	assert(t->worker == w);
+
+	vine_schedule_quarantine_reap(q, w, t);
 
 	/* Tell worker to remove the task sandbox (and if necessary, the running process) */
 	vine_manager_send(q, w, "kill %d\n", t->task_id);
@@ -3375,8 +4509,13 @@ static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_inf
 	/* if t is a function task, t->library_task should not be invalidated, and we decrement the reference count of the library task.
 	 * if t->library_task is NULL or it had been released before, then something is going wrong. */
 	if (t->needs_library && t->library_task) {
-		t->library_task->function_slots_inuse = MAX(0, t->library_task->function_slots_inuse - 1);
-		vine_task_delete(t->library_task);
+		struct vine_task *library = t->library_task;
+		library->function_slots_inuse = MAX(0, library->function_slots_inuse - t->function_slots_total);
+		/* The last function of an instance whose library was removed ends the instance. */
+		if (library->library_retired && library->function_slots_inuse == 0 && library->worker) {
+			vine_cancel_by_task_id(q, library->task_id);
+		}
+		vine_task_delete(library);
 		t->library_task = NULL;
 	}
 
@@ -3387,7 +4526,7 @@ static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_inf
 		itable_remove(q->running_table, t->task_id);
 		break;
 	case VINE_TASK_WAITING_RETRIEVAL:
-		list_remove(q->waiting_retrieval_list, t);
+		retrieval_list_remove(t);
 		break;
 	default:
 		assert(t->state > VINE_TASK_READY);
@@ -3419,11 +4558,25 @@ static void reap_task_from_worker(struct vine_manager *q, struct vine_worker_inf
 	count_worker_resources(q, w);
 }
 
+/* Return non-zero when a large temporary file that the vault holds should still come from a peer: a worker holds a READY
+ * copy that it may send, and only its transfers in flight keep it from sending now. Its next free transfer wakes the
+ * task (vine_schedule_wake_worker()), and a holder that is removed, suspected, or fails a transfer leaves the vault to
+ * serve it. Decided on 2026-10-23: two readers of a large output were dispatched about 20 ms apart, the first took
+ * the producer as its source and put it at its byte budget, and the second read the vault's copy through manager://
+ * at 22-55 MB/s, 6-7 s for 136-243 MB, where the peer would have sent it in 0.15-0.25 s once the first ended. On the
+ * cluster, 20 of 21 vault reads above 8 MB in a logged run happened while a connected worker held a READY copy. */
+static int vault_read_waits_for_peer(struct vine_manager *q, struct vine_file *f)
+{
+	return f->type == VINE_TEMP && f->size > VINE_DATA_INLINE_BYTES && !(f->flags & VINE_PEER_NOSHARE) && f->cache_level > VINE_CACHE_LEVEL_TASK && vine_file_replica_table_has_holder(q, f->cached_name);
+}
+
 /*
 Determine whether there is transfer capacity to assign this task to this worker.
 Returns true on success, false if there are insufficient transfer sources.
 If a file can be fetched from a substitute source,
 this function modifies the file->substitute field to reflect that source.
+vine_manager_transfer_source_available() applies the same rules to one file without a destination, and the two must
+agree.
 */
 
 int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t)
@@ -3451,6 +4604,18 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 			m->substitute = NULL;
 		}
 
+		/* A small checkpoint in the vault goes with the task over the control connection, which costs less than a
+		 * transfer of its own from a peer or the data port and needs no transfer capacity. */
+		if (vine_manager_data_service_vault_small_file(q, m->file)) {
+			continue;
+		}
+
+		/* A small file that comes inline into the vault goes with the task once it is published, which costs less
+		 * than a transfer from a peer, and the publication wakes the task. */
+		if (vine_manager_data_service_receiving_inline(q, m->file)) {
+			return 0;
+		}
+
 		/* Provide a substitute file object to describe the peer. */
 		if (!(m->file->flags & VINE_PEER_NOSHARE) && (m->file->cache_level > VINE_CACHE_LEVEL_TASK)) {
 			if ((peer = vine_file_replica_table_find_worker(q, m->file->cached_name))) {
@@ -3463,6 +4628,29 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 
 		/* If that resulted in a match, move on to the next file. */
 		if (found_match) {
+			continue;
+		}
+
+		/*
+		Files in the data service vault are delivered through the data port, whatever their type.
+		A VINE_FILE in the vault is Manager-local data, such as application inputs. A VINE_TEMP in the vault is
+		a task output with a checkpoint copy, so it stays recoverable after the copy is removed. Like any URL
+		source, the vault entry is limited by file-source-max-transfers.
+		A small VINE_FILE is the exception: the manager sends it at dispatch like any other local file.
+		*/
+		int small_local_file = m->file->type == VINE_FILE && m->file->size <= VINE_DATA_INLINE_BYTES;
+		if (!small_local_file && vine_manager_data_service_vault_contains(q, m->file)) {
+			if (vault_read_waits_for_peer(q, m->file)) {
+				return 0;
+			}
+			char *source = string_format("manager://%s", m->file->cached_name);
+			if (vine_current_transfers_url_in_use(q, source) >= q->file_source_max_transfers) {
+				free(source);
+				return 0;
+			}
+			m->substitute = vine_file_substitute_url(m->file, source, NULL);
+			free(source);
+			debug(D_VINE, "vault hit: task %d file %s", t->task_id, m->file->cached_name);
 			continue;
 		}
 
@@ -3487,12 +4675,81 @@ int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine
 			if (!vine_manager_transfer_capacity_available(q, w, m->file->mini_task)) {
 				return 0;
 			}
+		} else if (vine_manager_limits_sends(q, m->file) && m->file->manager_sends >= q->file_source_max_transfers) {
+			/* The manager is already sending as many copies of this file as it sends at once. */
+			return 0;
 		} else {
 			/* keep going */
 		}
 	}
 
 	return 1;
+}
+
+/*
+Determine whether an input that the destination worker does not hold can be fetched now: from a peer with transfer
+capacity, from the data service vault or its URL within file-source-max-transfers, or from the manager at dispatch,
+which also sends a small checkpoint from the vault, and sends a local file that peers may share within
+file-source-max-transfers copies at a time (vine_manager_limits_sends()). A small file that comes inline into the vault
+has no source until it is published.
+It applies the rules of vine_manager_transfer_capacity_available() without choosing a source or allocating a
+substitute, and the answer does not depend on the destination. A mini task depends on the destination and counts as
+available, so the full check decides for it.
+*/
+
+int vine_manager_transfer_source_available(struct vine_manager *q, struct vine_file *f)
+{
+	if (vine_manager_data_service_vault_small_file(q, f)) {
+		return 1;
+	}
+
+	if (vine_manager_data_service_receiving_inline(q, f)) {
+		return 0;
+	}
+
+	if (!(f->flags & VINE_PEER_NOSHARE) && (f->cache_level > VINE_CACHE_LEVEL_TASK) && vine_file_replica_table_has_source(q, f->cached_name)) {
+		return 1;
+	}
+
+	int small_local_file = f->type == VINE_FILE && f->size <= VINE_DATA_INLINE_BYTES;
+	if (!small_local_file && vine_manager_data_service_vault_contains(q, f)) {
+		if (vault_read_waits_for_peer(q, f)) {
+			return 0;
+		}
+		char source[VINE_LINE_MAX];
+		snprintf(source, sizeof(source), "manager://%s", f->cached_name);
+		return vine_current_transfers_url_in_use(q, source) < q->file_source_max_transfers;
+	}
+
+	if (f->type == VINE_URL) {
+		return vine_current_transfers_url_in_use(q, f->source) < q->file_source_max_transfers;
+	}
+
+	if (f->type == VINE_TEMP) {
+		return 0;
+	}
+
+	if (vine_manager_limits_sends(q, f)) {
+		return f->manager_sends < q->file_source_max_transfers;
+	}
+
+	return 1;
+}
+
+/*
+A local file that peers may share is sent by the manager itself to at most file-source-max-transfers workers at a time,
+like a URL source, and the other workers get it from peers once a copy is ready. Without the bound, a large file read
+by tasks on many workers went with the first task to every worker at once, before any worker held a copy that a peer
+could serve, and every copy went through the manager's link. Each send in progress counts in manager_sends until its
+replica becomes ready or is deleted, events that also wake the tasks that wait for the file, so a send to a worker that
+is lost or stops reading ends when the worker is removed. A small file goes with the task like a message, so it is not
+limited.
+*/
+
+int vine_manager_limits_sends(struct vine_manager *q, struct vine_file *f)
+{
+	/* Without peer transfers, no other worker can serve the copies that wait, so the manager sends every one. */
+	return q->peer_transfers_enabled && f->type == VINE_FILE && f->size > VINE_DATA_INLINE_BYTES && !(f->flags & VINE_PEER_NOSHARE) && f->cache_level > VINE_CACHE_LEVEL_TASK;
 }
 
 /*
@@ -3618,17 +4875,33 @@ Determine whether there is a suitable library task for a function call task.
 
 static int vine_manager_check_library_for_function_call(struct vine_manager *q, struct vine_task *t)
 {
-	if (!t->needs_library || hash_table_lookup(q->library_templates, t->needs_library))
+	if (!t->needs_library || library_template_exists(q, t->needs_library)) {
 		return 1;
+	}
 	return 0;
 }
 
 /*
-Consider if a task is eligible to run.
+Return true if an input that kept the task from every worker at its last scheduling attempt exists nowhere, such as a
+lost temporary file, so the inputs of the task must be checked, which starts their recovery.
 */
-int consider_task(struct vine_manager *q, struct vine_task *t)
+
+static int vine_manager_blocking_input_lost(struct vine_manager *q, struct vine_task *t)
 {
-	timestamp_t now_usecs = timestamp_get();
+	for (int i = 0; i < 2; i++) {
+		struct vine_file *f = t->blocking_inputs[i];
+		if (f && f->type == VINE_TEMP && !vine_temp_exists_somewhere(q, f)) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/*
+Consider if a task is eligible to run, apart from its inputs, which are checked once a worker is found.
+*/
+static int consider_task(struct vine_manager *q, struct vine_task *t, timestamp_t now_usecs)
+{
 	double now_secs = ((double)now_usecs) / ONE_SECOND;
 
 	// Skip task if min requested start time not met.
@@ -3647,11 +4920,6 @@ int consider_task(struct vine_manager *q, struct vine_task *t)
 		return 0;
 	}
 
-	// Skip task if temp input files have not been materialized.
-	if (!vine_manager_check_inputs_available(q, t)) {
-		return 0;
-	}
-
 	// Skip function call task if no suitable library template was installed.
 	if (!vine_manager_check_library_for_function_call(q, t)) {
 		return 0;
@@ -3667,9 +4935,10 @@ to run, finding the best worker for that task, and then committing
 the task to the worker.
 */
 
-static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor *cur, int iter_depth, double now_secs)
+static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor *cur, int iter_depth, timestamp_t now_usecs)
 {
 	struct vine_task *t;
+	double now_secs = ((double)now_usecs) / ONE_SECOND;
 
 	int task_unready = 0; // set to 1 if at least one task was moved from ready_list
 
@@ -3680,7 +4949,21 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 		if (iter_count >= iter_depth) {
 			break;
 		}
+
+		/* Tasks left when the step's budget expires are considered in the next step, from this cursor. A blocked task
+		 * that waits for an event costs O(1), without the library lookup of the checks below, so the clock is read
+		 * before each task that is checked and only every 64 tasks among those that wait. */
+		int waits = vine_schedule_task_waits(q, t);
+		if (iter_count > 0 && (!waits || iter_count % 64 == 0) && budget_expired(&q->round)) {
+			break;
+		}
 		iter_count++;
+
+		if (waits) {
+			q->schedule_waiting_run++;
+			continue;
+		}
+		q->schedule_waiting_run = 0;
 
 		if (retrieve_ready_task(q, t, now_secs)) {
 			skip_list_remove_here(cur);
@@ -3692,7 +4975,15 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 			continue;
 		}
 
-		if (!consider_task(q, t)) {
+		/* A task whose recorded inputs without a transfer source still keep it from every worker is skipped, in O(1)
+		 * while it waits for an event that can unblock it (see vine_schedule.h), instead of a pass over all its inputs
+		 * and the workers. Its other inputs are checked again, and recovery of a lost one started, once the recorded
+		 * inputs no longer block it. */
+		if (vine_schedule_task_is_blocked(q, t)) {
+			continue;
+		}
+
+		if (!consider_task(q, t, now_usecs)) {
 			continue;
 		}
 
@@ -3700,6 +4991,20 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 		q->stats_measure->time_scheduling = timestamp_get();
 		struct vine_worker_info *w = vine_schedule_task_to_worker(q, t);
 		q->stats->time_scheduling += timestamp_get() - q->stats_measure->time_scheduling;
+
+		/* Inputs are checked once the task has a worker, and when scheduling stopped at an input that exists nowhere.
+		 * With peer transfers, the scheduler stops at the first inputs without a transfer source, and an input that
+		 * exists nowhere is one of them. The check starts the recovery of lost temporary files. Checking every input of
+		 * every waiting task first cost a pass over all its inputs in each dispatch pass. */
+		if (!w) {
+			if (!q->peer_transfers_enabled || vine_manager_blocking_input_lost(q, t)) {
+				vine_manager_check_inputs_available(q, t);
+			}
+			continue;
+		}
+		if (!vine_manager_check_inputs_available(q, t)) {
+			continue;
+		}
 
 		if (w) {
 			task_unready = 1;
@@ -3725,6 +5030,7 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 			case VINE_APP_FAILURE: /* failed to dispatch, commit put the task back in the right place. */
 			case VINE_WORKER_FAILURE:
 			case VINE_END_OF_LIST: /* shouldn't happen */
+			case VINE_LINK_MOVED:  /* shouldn't happen */
 				/* Task already removed above */
 				break;
 			case VINE_MGR_FAILURE:
@@ -3733,15 +5039,80 @@ static int send_one_task_with_cr(struct vine_manager *q, struct skip_list_cursor
 				push_task_to_ready_tasks(q, t);
 				break;
 			}
+
+			/* Once the last worker with room is taken, the rest of the pass cannot dispatch a task. */
+			if (result == VINE_SUCCESS && !vine_schedule_any_worker_accepts_tasks(q)) {
+				break;
+			}
 		}
 	}
 
 	return task_unready;
 }
 
+/*
+Find ready tasks that can no longer run, at most once a second. Dispatch passes find them otherwise, but no pass runs
+while no worker has room for a task.
+*/
+
+static int retrieve_ready_tasks(struct vine_manager *q, double now_secs)
+{
+	timestamp_t now = timestamp_get();
+	if (now - q->time_last_ready_tasks_check < ONE_SECOND) {
+		return 0;
+	}
+	q->time_last_ready_tasks_check = now;
+
+	int retrieved = 0;
+	struct vine_task *t;
+	struct skip_list_cursor *cur = skip_list_cursor_create(q->ready_tasks);
+	skip_list_seek(cur, 0);
+	SKIP_LIST_ITERATE_CURSOR(cur, t)
+	{
+		if (retrieve_ready_task(q, t, now_secs)) {
+			skip_list_remove_here(cur);
+			q->schedule_wakes++;
+			retrieved = 1;
+		}
+	}
+	skip_list_cursor_delete(cur);
+
+	return retrieved;
+}
+
 static int send_one_task(struct vine_manager *q)
 {
-	double now_secs = ((double)timestamp_get()) / ONE_SECOND;
+	timestamp_t now_usecs = timestamp_get();
+	double now_secs = ((double)now_usecs) / ONE_SECOND;
+
+	/* Without a worker that has room, a pass would only try each ready task against each worker. The manager waits
+	 * instead, until a worker sends a message or for a second. */
+	q->dispatch_blocked = !vine_schedule_any_worker_accepts_tasks(q);
+	if (q->dispatch_blocked) {
+		return retrieve_ready_tasks(q, now_secs);
+	}
+
+	/* Blocked ready tasks wait for events that can unblock them, and are checked again once a second for the
+	 * conditions that change with time alone, such as the end of a holder's transient error interval. */
+	if (now_usecs - q->time_last_blocked_wake >= ONE_SECOND) {
+		q->time_last_blocked_wake = now_usecs;
+		vine_schedule_wake_all(q);
+	}
+
+	/* Once passes have found every ready task waiting, in a row and with no event since that may end a wait or change
+	 * the ready tasks, another pass would only find them waiting again, so it is skipped. A step then costs O(1)
+	 * instead of a visit to each waiting task. Like a pass without a worker with room, it lets the next poll wait:
+	 * the events that end a wait come with a worker message, a finished transfer of the data service, a submission,
+	 * or the wake above once a second. */
+	if (q->schedule_waiting_wakes != q->schedule_wakes) {
+		q->schedule_waiting_wakes = q->schedule_wakes;
+		q->schedule_waiting_run = 0;
+	} else if (q->schedule_waiting_run >= (uint64_t)skip_list_size(q->ready_tasks)) {
+		q->dispatch_blocked = 1;
+		return 0;
+	}
+	q->blocked_pass++;
+
 	int iter_depth = MIN(skip_list_size(q->ready_tasks), q->attempt_schedule_depth);
 
 	// if ready_tasks_cr is not pointing at a task
@@ -3752,7 +5123,7 @@ static int send_one_task(struct vine_manager *q)
 	}
 
 	int sent = 0;
-	sent = send_one_task_with_cr(q, q->ready_tasks_cr, iter_depth, now_secs);
+	sent = send_one_task_with_cr(q, q->ready_tasks_cr, iter_depth, now_usecs);
 
 	return sent;
 }
@@ -3784,10 +5155,10 @@ static int receive_tasks_from_worker(struct vine_manager *q, struct vine_worker_
 		if (t->state == VINE_TASK_WAITING_RETRIEVAL) {
 			/* Attempt to fetch it. */
 			if (fetch_outputs_from_worker(q, w, task_id)) {
-				/* If it was fetched, update stats and keep going. */
+				/* If it was fetched, update stats and keep going, until the step's budget expires. */
 				tasks_received++;
 
-				if (tasks_received >= max_to_receive) {
+				if (tasks_received >= max_to_receive || budget_expired(&q->round)) {
 					break;
 				}
 			} else {
@@ -3815,18 +5186,39 @@ static void ask_for_workers_updates(struct vine_manager *q)
 	int iteration;
 	timestamp_t current_time = timestamp_get();
 
+	/* Removing a worker changes worker_table, so failed workers are removed after the iteration. */
+	struct list *failed = list_create();
+
 	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
 	{
+		/* Unless set, keepalives follow T of the worker while the timeout framework is on, see "Timeouts". */
+		int timeout = vine_manager_worker_timeout(q, w, 0);
+		int keepalive_interval = q->keepalive_interval >= 0 ? q->keepalive_interval : (timeout ? timeout / 2 : VINE_DEFAULT_KEEPALIVE_INTERVAL);
+		int keepalive_timeout = q->keepalive_timeout >= 0 ? q->keepalive_timeout : (timeout ? timeout : VINE_DEFAULT_KEEPALIVE_TIMEOUT);
 
-		if (q->keepalive_interval > 0) {
+		/* A worker with a probe link is checked there, whatever its control link holds. */
+		if (w->probe_link) {
+			if (!probe_worker(q, w)) {
+				list_push_tail(failed, w);
+			}
+			continue;
+		}
+
+		if (keepalive_interval > 0) {
 
 			/* we have not received taskvine message from worker yet, so we
 			 * simply check again its start_time. */
 			if (!strcmp(w->hostname, "unknown")) {
-				if ((int)((current_time - w->start_time) / 1000000) >= q->keepalive_timeout) {
-					debug(D_VINE, "Removing worker %s (%s): hasn't sent its initialization in more than %d s", w->hostname, w->addrport, q->keepalive_timeout);
-					handle_worker_failure(q, w);
+				if ((int)((current_time - w->start_time) / 1000000) >= keepalive_timeout) {
+					debug(D_VINE, "Removing worker %s (%s): hasn't sent its initialization in more than %d s", w->hostname, w->addrport, keepalive_timeout);
+					list_push_tail(failed, w);
 				}
+				continue;
+			}
+
+			/* A worker with queued data is judged by the progress of its queue instead, because a check would wait
+			 * behind that data, and a worker that takes data is alive. */
+			if (!link_writer_empty(w->lw)) {
 				continue;
 			}
 
@@ -3834,10 +5226,10 @@ static void ask_for_workers_updates(struct vine_manager *q)
 			// (2) we are past keepalive interval
 			if (w->last_msg_recv_time > w->last_update_msg_time) {
 				int64_t last_update_elapsed_time = (int64_t)(current_time - w->last_update_msg_time) / 1000000;
-				if (last_update_elapsed_time >= q->keepalive_interval) {
+				if (last_update_elapsed_time >= keepalive_interval) {
 					if (vine_manager_send(q, w, "check\n") < 0) {
 						debug(D_VINE, "Failed to send keepalive check to worker %s (%s).", w->hostname, w->addrport);
-						handle_worker_failure(q, w);
+						list_push_tail(failed, w);
 					} else {
 						debug(D_VINE, "Sent keepalive check to worker %s (%s)", w->hostname, w->addrport);
 						w->last_update_msg_time = current_time;
@@ -3848,18 +5240,23 @@ static void ask_for_workers_updates(struct vine_manager *q)
 				// time since we last polled link for responses has exceeded keepalive timeout. If so,
 				// remove worker.
 				if (q->link_poll_end > w->last_update_msg_time) {
-					if ((int)((q->link_poll_end - w->last_update_msg_time) / 1000000) >= q->keepalive_timeout) {
+					if ((int)((q->link_poll_end - w->last_update_msg_time) / 1000000) >= keepalive_timeout) {
 						debug(D_VINE,
 								"Removing worker %s (%s): hasn't responded to keepalive check for more than %d s",
 								w->hostname,
 								w->addrport,
-								q->keepalive_timeout);
-						handle_worker_failure(q, w);
+								keepalive_timeout);
+						list_push_tail(failed, w);
 					}
 				}
 			}
 		}
 	}
+
+	while ((w = list_pop_head(failed))) {
+		handle_worker_failure(q, w);
+	}
+	list_delete(failed);
 }
 
 /*
@@ -3910,8 +5307,19 @@ static int disconnect_slow_workers(struct vine_manager *q)
 
 	timestamp_t current = timestamp_get();
 
-	ITABLE_ITERATE(q->tasks, iteration, task_id, t)
+	/* Only a task at a worker can be slow, and the tasks at workers are the running ones and those waiting for
+	 * retrieval. They are collected first, because removing a task or a worker below changes both collections. */
+	struct list *candidates = list_create();
+	ITABLE_ITERATE(q->running_table, iteration, task_id, t)
 	{
+		list_push_tail(candidates, t);
+	}
+	LIST_ITERATE(q->waiting_retrieval_list, t)
+	{
+		list_push_tail(candidates, t);
+	}
+
+	while ((t = list_pop_head(candidates))) {
 
 		c = vine_category_lookup_or_create(q, t->category);
 		/* disconnect slow workers is not enabled for this category */
@@ -3970,6 +5378,8 @@ static int disconnect_slow_workers(struct vine_manager *q)
 			}
 		}
 	}
+
+	list_delete(candidates);
 
 	return removed;
 }
@@ -4049,13 +5459,13 @@ static void reset_task_to_state(struct vine_manager *q, struct vine_task *t, vin
 		break;
 
 	case VINE_TASK_READY:
-		skip_list_remove(q->ready_tasks, t);
+		ready_tasks_remove(q, t);
 		change_task_state(q, t, new_state);
 		break;
 
 	case VINE_TASK_WAITING_RETRIEVAL:
 		/* do the same for run vs waiting retrieval, only difference is waiting_retrieval_list */
-		list_remove(q->waiting_retrieval_list, t);
+		retrieval_list_remove(t);
 		/* fall through */
 	case VINE_TASK_RUNNING:
 		/* t->worker must be set if in RUNNING state */
@@ -4161,7 +5571,37 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 		link_address_local(q->manager_link, address, &q->port);
 	}
 
-	debug(D_VINE, "manager start");
+	q->ds = vine_manager_data_service_create(runtime_dir);
+	int wake[2] = {-1, -1};
+	if (q->ds && pipe(wake) == 0) {
+		q->wake_link = link_attach_to_fd(wake[0]);
+	}
+	if (q->wake_link) {
+		q->poll_set = link_poll_set_create();
+	}
+	if (!q->poll_set || !link_poll_set_add(q->poll_set, q->manager_link, LINK_READ, NULL) || !link_poll_set_add(q->poll_set, q->wake_link, LINK_READ, NULL)) {
+		debug(D_NOTICE, "Could not create the poll set of the manager.");
+		if (q->wake_link) {
+			link_close(q->wake_link);
+			close(wake[1]);
+		} else if (wake[0] >= 0) {
+			close(wake[0]);
+			close(wake[1]);
+		}
+		link_poll_set_delete(q->poll_set);
+		vine_manager_data_service_delete(q->ds);
+		link_close(q->manager_link);
+		free(runtime_dir);
+		free(q);
+		return NULL;
+	}
+	q->wake_fd = wake[1];
+	for (int i = 0; i < 2; i++) {
+		fcntl(wake[i], F_SETFD, FD_CLOEXEC);
+		fcntl(wake[i], F_SETFL, O_NONBLOCK);
+	}
+
+	debug(D_VINE, "manager start on port %d with data port %d", q->port, vine_manager_data_service_port(q->ds));
 
 	q->runtime_directory = runtime_dir;
 
@@ -4189,6 +5629,10 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	/* priority has 3 components: vine_priority_t, user given priority, and -task_id */
 	q->ready_tasks = skip_list_create(3, 0.5);
+	/* priority has 2 components: the free capacity priority of a worker and -serial */
+	q->workers_by_capacity = skip_list_create(2, 0.5);
+	q->blocked_sources = hash_table_create(0, 0);
+	q->blocked_epoch = 1;
 	q->running_table = itable_create(0);
 	q->waiting_retrieval_list = list_create();
 	q->retrieved_list = list_create();
@@ -4199,6 +5643,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->library_templates = hash_table_create(0, 0);
 
 	q->worker_table = hash_table_create(0, 0);
+	q->probe_rendezvous = hash_table_create(0, 0);
 	q->zombie_workers = list_create();
 	q->file_worker_table = hash_table_create(0, 0);
 	q->temp_files_to_replicate = priority_queue_create(0);
@@ -4209,6 +5654,9 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->factory_table = hash_table_create(0, 0);
 	q->current_transfer_table = hash_table_create(0, 0);
+	q->next_transfer_id = (uint64_t)random_int64();
+	q->current_transfer_url_table = hash_table_create(0, 0);
+	q->transfer_hosts = hash_table_create(0, 0);
 	q->task_group_table = itable_create(0);
 	q->group_id_counter = 1;
 	q->fetch_factory = 0;
@@ -4225,9 +5673,9 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->workers_with_watched_file_updates = hash_table_create(0, 0);
 
-	// The poll table is initially null, and will be created
-	// (and resized) as needed by build_poll_table.
-	q->poll_table_size = 8;
+	q->sending_workers = list_create();
+	q->send_held_workers = list_create();
+	q->departing_links = list_create();
 
 	q->worker_selection_algorithm = VINE_SCHEDULE_FILES;
 	q->process_pending_check = 0;
@@ -4239,13 +5687,27 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 	q->time_last_large_tasks_check = timestamp_get();
 	q->task_info_list = list_create();
 
+	q->time_last_compaction = 0;
+
 	q->time_last_wait = 0;
 	q->time_last_log_stats = 0;
+	round_window_reset(&q->round_summary);
 
 	q->catalog_hosts = 0;
+	q->catalog = 0;
 
-	q->keepalive_interval = VINE_DEFAULT_KEEPALIVE_INTERVAL;
-	q->keepalive_timeout = VINE_DEFAULT_KEEPALIVE_TIMEOUT;
+	/* The owner goes into every status report and catalog update. Looking it up may ask a name service, so it is
+	 * looked up once. */
+	char owner[USERNAME_MAX];
+	username_get(owner);
+	q->owner = xxstrdup(owner);
+
+	/* Negative keepalive settings mean the defaults, which follow T while the timeout framework is on. */
+	q->keepalive_interval = -1;
+	q->keepalive_timeout = -1;
+	q->response_timeout = 0;
+	q->manager_response_timeout = 0;
+	q->queue_stall_timeout = 0;
 
 	q->monitor_mode = VINE_MON_DISABLED;
 
@@ -4283,9 +5745,11 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->file_source_max_transfers = VINE_FILE_SOURCE_MAX_TRANSFERS;
 	q->worker_source_max_transfers = VINE_WORKER_SOURCE_MAX_TRANSFERS;
+	q->worker_source_max_checkpoints = VINE_WORKER_SOURCE_MAX_CHECKPOINTS;
 	q->perf_log_interval = VINE_PERF_LOG_INTERVAL;
 
 	q->temp_replica_count = 1;
+	q->temp_replica_distinct_hosts = 0;
 	q->clean_redundant_replicas = 0;
 	q->shift_disk_load = 0;
 	q->transfer_temps_recovery = 0;
@@ -4300,6 +5764,7 @@ struct vine_manager *vine_ssl_create(int port, const char *key, const char *cert
 
 	q->update_interval = VINE_UPDATE_INTERVAL;
 	q->max_library_retries = VINE_TASK_MAX_LIBRARY_RETRIES;
+	q->max_origin_failures = -1;
 	q->resource_management_interval = VINE_RESOURCE_MEASUREMENT_INTERVAL;
 	q->transient_error_interval = VINE_DEFAULT_TRANSIENT_ERROR_INTERVAL;
 	q->max_task_stdout_storage = MAX_TASK_STDOUT_STORAGE;
@@ -4379,6 +5844,7 @@ int vine_enable_peer_transfers(struct vine_manager *q)
 {
 	debug(D_VINE, "Peer Transfers enabled");
 	q->peer_transfers_enabled = 1;
+	vine_schedule_wake_all(q);
 	return 1;
 }
 
@@ -4387,6 +5853,21 @@ int vine_disable_peer_transfers(struct vine_manager *q)
 	debug(D_VINE, "Peer Transfers disabled");
 	fprintf(stderr, "warning: Peer Transfers disabled. Temporary files will be returned to the manager upon creation.");
 	q->peer_transfers_enabled = 0;
+	vine_schedule_wake_all(q);
+	return 1;
+}
+
+int vine_enable_external_recovery_handling(struct vine_manager *q)
+{
+	debug(D_VINE, "External recovery handling enabled");
+	q->external_recovery_handling = 1;
+	return 1;
+}
+
+int vine_disable_external_recovery_handling(struct vine_manager *q)
+{
+	debug(D_VINE, "External recovery handling disabled");
+	q->external_recovery_handling = 0;
 	return 1;
 }
 
@@ -4443,6 +5924,11 @@ int vine_port(struct vine_manager *q)
 	} else {
 		return 0;
 	}
+}
+
+int vine_data_port(struct vine_manager *q)
+{
+	return q ? vine_manager_data_service_port(q->ds) : 0;
 }
 
 void vine_set_scheduler(struct vine_manager *q, vine_schedule_t algorithm)
@@ -4544,9 +6030,15 @@ void vine_delete(struct vine_manager *q)
 		return;
 	}
 
+	if (q->round_summary.rounds > 0) {
+		round_summary_log(q);
+	}
+
 	/* now that the manager is shutting down, worker removals are not an invalid event, so we
 	 * disable the immediate recovery to avoid submitting recovery tasks for lost files */
 	q->immediate_recovery = 0;
+	vine_manager_data_service_delete(q->ds);
+	q->ds = NULL;
 
 	vine_fair_write_workflow_info(q);
 
@@ -4554,11 +6046,41 @@ void vine_delete(struct vine_manager *q)
 
 	disconnect_all_workers(q);
 
+	/* A final message of a removed worker goes out if its link takes it within a second. The links whose messages went
+	 * out then close once their workers closed their sides, within one more second for all of them, so the workers
+	 * read the messages (see departing_link_drain_start()). */
+	struct list *written = list_create();
+	struct departing_link *d;
+	while ((d = list_pop_head(q->departing_links))) {
+		if ((!d->draining && !link_writer_send_sync(d->lw, timestamp_monotonic() + 1000000, 0)) || !written) {
+			departing_link_delete(d);
+		} else {
+			shutdown(link_fd(d->link), SHUT_WR);
+			list_push_tail(written, d);
+		}
+	}
+	if (written) {
+		time_t stoptime = time(0) + 1;
+		while ((d = list_pop_head(written))) {
+			char buffer[65536];
+			while (link_read_avail(d->link, buffer, sizeof(buffer), stoptime) > 0) {
+			}
+			departing_link_delete(d);
+		}
+		list_delete(written);
+	}
+	list_delete(q->departing_links);
+
 	vine_perf_log_write_update(q, 1);
 
 	if (q->name) {
 		update_catalog(q, 1);
 	}
+	/* The updater sends the last update in its own thread, which may outlive the manager if a catalog server does not
+	 * take it within the short timeout. */
+	vine_manager_catalog_delete(q->catalog, q->short_timeout);
+	q->catalog = 0;
+	free(q->owner);
 
 	/* we call this function here before any of the structures are freed. */
 	vine_disable_monitoring(q);
@@ -4567,8 +6089,12 @@ void vine_delete(struct vine_manager *q)
 		free(q->catalog_hosts);
 	}
 
+	skip_list_clear(q->workers_by_capacity, NULL);
+	skip_list_delete(q->workers_by_capacity);
+	vine_schedule_delete_blocked_sources(q);
 	hash_table_clear(q->worker_table, (void *)vine_worker_delete);
 	hash_table_delete(q->worker_table);
+	hash_table_delete(q->probe_rendezvous);
 	list_delete(q->zombie_workers);
 
 	hash_table_clear(q->file_worker_table, (void *)set_delete);
@@ -4586,6 +6112,8 @@ void vine_delete(struct vine_manager *q)
 
 	vine_current_transfers_clear(q);
 	hash_table_delete(q->current_transfer_table);
+	hash_table_delete(q->current_transfer_url_table);
+	hash_table_delete(q->transfer_hosts);
 
 	vine_task_groups_clear(q);
 	itable_delete(q->task_group_table);
@@ -4602,11 +6130,13 @@ void vine_delete(struct vine_manager *q)
 
 	hash_table_clear(q->library_templates, (void *)vine_task_delete);
 	hash_table_delete(q->library_templates);
+	free(q->library_checked_name);
 
 	/* delete files after deleting tasks so that rc are correctly updated. */
 	hash_table_clear(q->file_table, (void *)vine_file_delete);
 	hash_table_delete(q->file_table);
 
+	q->last_category = NULL;
 	hash_table_clear(q->categories, (void *)category_free);
 	hash_table_delete(q->categories);
 
@@ -4632,7 +6162,11 @@ void vine_delete(struct vine_manager *q)
 	hash_table_clear(q->properties, (void *)free);
 	hash_table_delete(q->properties);
 
-	free(q->poll_table);
+	list_delete(q->sending_workers);
+	list_delete(q->send_held_workers);
+	link_poll_set_delete(q->poll_set);
+	link_close(q->wake_link);
+	close(q->wake_fd);
 	free(q->ssl_cert);
 	free(q->ssl_key);
 
@@ -4758,6 +6292,17 @@ char *vine_monitor_wrap(struct vine_manager *q, struct vine_worker_info *w, stru
 
 /* Put a given task on the ready list, taking into account the task priority and the manager schedule. */
 
+/* Remove a task from the ready list. Its priority, which ends with its unique task id, finds it without a scan, unless
+ * the priority changed after the task was inserted. */
+static void ready_tasks_remove(struct vine_manager *q, struct vine_task *t)
+{
+	double priority[] = {t->manager_priority, t->user_priority, -t->task_id};
+	if (!skip_list_remove_by_priority_arr(q->ready_tasks, priority)) {
+		skip_list_remove(q->ready_tasks, t);
+	}
+	q->schedule_wakes++;
+}
+
 static void push_task_to_ready_tasks(struct vine_manager *q, struct vine_task *t)
 {
 	vine_priority_t manager_priority = VINE_PRIORITY_NORMAL;
@@ -4773,6 +6318,7 @@ static void push_task_to_ready_tasks(struct vine_manager *q, struct vine_task *t
 	}
 
 	skip_list_insert(q->ready_tasks, t, t->manager_priority, t->user_priority, -t->task_id);
+	q->schedule_wakes++;
 
 	/* If the task has been used before, clear out accumulated state. */
 	vine_task_clean(t);
@@ -4804,6 +6350,10 @@ static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_t
 		break;
 	case VINE_TASK_READY:
 		c->vine_stats->tasks_waiting--;
+		/* A task that is no longer ready keeps no worker reserved for it. */
+		if (new_state != VINE_TASK_READY) {
+			vine_schedule_quarantine_release(t);
+		}
 		break;
 	case VINE_TASK_RUNNING:
 		c->vine_stats->tasks_running--;
@@ -4831,13 +6381,16 @@ static vine_task_state_t change_task_state(struct vine_manager *q, struct vine_t
 		vine_task_set_result(t, VINE_RESULT_UNKNOWN);
 		push_task_to_ready_tasks(q, t);
 		c->vine_stats->tasks_waiting++;
+		if (t->resources_requested->gpus > 0) {
+			q->gpus_requested = 1;
+		}
 		break;
 	case VINE_TASK_RUNNING:
 		itable_insert(q->running_table, t->task_id, t);
 		c->vine_stats->tasks_running++;
 		break;
 	case VINE_TASK_WAITING_RETRIEVAL:
-		list_push_head(q->waiting_retrieval_list, t);
+		retrieval_list_push(q, t);
 		c->vine_stats->tasks_with_results++;
 		break;
 	case VINE_TASK_RETRIEVED:
@@ -4978,11 +6531,16 @@ int vine_submit(struct vine_manager *q, struct vine_task *t)
 
 	/* Add reference to task when adding it to primary table. */
 	itable_insert(q->tasks, t->task_id, vine_task_addref(t));
+	if (t->type == VINE_TASK_TYPE_STANDARD) {
+		q->standard_tasks_count++;
+	}
 
 	/* Ensure category structure is created. */
 	vine_category_lookup_or_create(q, t->category);
 
 	change_task_state(q, t, VINE_TASK_READY);
+	/* The new task may be dispatched at once, so the next wait polls workers without sleeping first. */
+	q->nothing_happened_last_wait_cycle = 0;
 
 	t->time_when_submitted = timestamp_get();
 	q->stats->tasks_submitted++;
@@ -5072,6 +6630,13 @@ struct vine_task *send_library_to_worker(struct vine_manager *q, struct vine_wor
 		return t;
 	} else {
 		/* if failure, tasks was handled by handle_failure(...) according to result. */
+		if (result == VINE_APP_FAILURE) {
+			/* The instance could not be sent because of the library itself, such as an input file that no longer
+			 * exists. That is a failure to start: it counts toward max_library_retries and waits for the transient
+			 * error interval, so the template is not sent again at once by every scheduling attempt. */
+			original->library_failed_count++;
+			original->time_when_last_failure = timestamp_get();
+		}
 		return 0;
 	}
 }
@@ -5083,13 +6648,16 @@ void vine_manager_install_library(struct vine_manager *q, struct vine_task *t, c
 	t->task_id = -1;
 	vine_task_set_library_provided(t, name);
 	hash_table_insert(q->library_templates, name, t);
+	q->library_templates_serial++;
 	t->time_when_submitted = timestamp_get();
 }
 
+/* End every instance of a library and delete its template. An idle instance is cancelled at once. A busy one is
+ * retired: it takes no new function calls and is cancelled when its last call ends, so running calls complete. Idle
+ * instances are collected before any is cancelled, because a task state change can iterate the worker table, for
+ * example to write the performance log, and that would break an iteration in progress. */
 void vine_manager_remove_library(struct vine_manager *q, const char *name)
 {
-	/* Cancelling a task can iterate the worker table, for example to write the performance log, so the instances
-	 * are collected before any is cancelled. */
 	struct list *instances = list_create();
 	char *worker_key;
 	struct vine_worker_info *w;
@@ -5103,7 +6671,13 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 		int library_iteration;
 		ITABLE_ITERATE(w->current_libraries, library_iteration, task_id, library)
 		{
-			if (!strcmp(library->provides_library, name)) {
+			if (strcmp(library->provides_library, name)) {
+				continue;
+			}
+			if (library->function_slots_inuse > 0) {
+				/* A busy instance finishes its running functions and ends with the last one. */
+				library->library_retired = 1;
+			} else {
 				list_push_tail(instances, library);
 			}
 		}
@@ -5116,11 +6690,13 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 		vine_cancel_by_task_id(q, task_id);
 		if (w) {
 			itable_remove(w->current_libraries, task_id);
+			vine_schedule_capacity_index_update(q, w);
 		}
 	}
 	list_delete(instances);
 
 	struct vine_task *library_template = hash_table_remove(q->library_templates, name);
+	q->library_templates_serial++;
 	vine_task_delete(library_template);
 	debug(D_VINE, "All instances and the template for library %s have been removed", name);
 }
@@ -5128,6 +6704,15 @@ void vine_manager_remove_library(struct vine_manager *q, const char *name)
 struct vine_task *vine_manager_find_library_template(struct vine_manager *q, const char *library_name)
 {
 	return hash_table_lookup(q->library_templates, library_name);
+}
+
+int vine_manager_function_call_in_pool(struct vine_manager *q, struct vine_task *t)
+{
+	if (!t->needs_library) {
+		return 0;
+	}
+	struct vine_task *library = vine_manager_find_library_template(q, t->needs_library);
+	return library && library->library_pool;
 }
 
 static void handle_library_update(struct vine_manager *q, struct vine_worker_info *w, const char *line)
@@ -5205,6 +6790,13 @@ struct vine_task *vine_wait(struct vine_manager *q, int timeout)
 	return vine_wait_for_tag(q, NULL, timeout);
 }
 
+void vine_wake(struct vine_manager *q)
+{
+	/* Only the write touches the manager, so any thread may call this. A full pipe already holds a wake. */
+	ssize_t result = write(q->wake_fd, "x", 1);
+	(void)result;
+}
+
 struct vine_task *vine_wait_for_tag(struct vine_manager *q, const char *tag, int timeout)
 {
 	return vine_wait_internal(q, timeout, tag, -1);
@@ -5216,16 +6808,133 @@ struct vine_task *vine_wait_for_task_id(struct vine_manager *q, int task_id, int
 }
 
 /*
-Consider all of the connected workers, and act open each connection
-that has pending input data, until the input buffer is empty.
-Return the number of workers that *failed* and disconnected.
+Write queued data to the workers whose links have room, for at most the rest of the current step, and remove the
+workers whose queue failed or made no progress (link_made_no_progress()). A worker that stops reading thus costs the
+manager nothing until it is removed. Return the number of workers removed.
 */
+
+/* Write a queue whose link has room, within the step budget. Return -1 if it failed or made no progress, 1 if it is
+ * empty, or 0 while data waits. */
+static int advance_queue(struct vine_manager *q, struct link_writer *lw, struct link *link, int timeout, int writable)
+{
+	if (writable) {
+		link_writer_send_async(lw, q->round.end);
+	}
+	if (link_writer_failed(lw) || link_made_no_progress(q, lw, link, timeout)) {
+		return -1;
+	}
+	return link_writer_empty(lw);
+}
+
+static int send_to_workers(struct vine_manager *q)
+{
+	int removed = 0;
+	struct vine_worker_info *w;
+	struct list_cursor *cursor = list_cursor_create(q->sending_workers);
+	list_seek(cursor, 0);
+	while (list_get(cursor, (void **)&w)) {
+		/* Move on first: removing the worker drops its entry. */
+		list_next(cursor);
+
+		int state = advance_queue(q, w->lw, w->link, worker_queue_timeout(q, w), link_poll_set_take(q->poll_set, w->link, LINK_WRITE));
+		if (state > 0) {
+			unwatch_worker_queue(q, w);
+		} else if (state < 0) {
+			if (link_writer_failed(w->lw)) {
+				debug(D_VINE, "Removing worker %s (%s): its link failed", w->hostname, w->addrport);
+			} else if (probe_judges_worker(q, w) && vine_manager_worker_timeout(q, w, 0)) {
+				int stall = worker_queue_timeout(q, w);
+				debug(D_VINE, "Removing worker %s (%s): its control queue took and sent no data for %d s, though it answers on its probe link", w->hostname, w->addrport, stall);
+			} else {
+				int timeout = vine_manager_worker_timeout(q, w, 0);
+				debug(D_VINE, "Removing worker %s (%s): took %sno data for %d s", w->hostname, w->addrport, timeout ? "and sent " : "", timeout ? timeout : q->minimum_transfer_timeout);
+			}
+			q->stats->workers_lost++;
+			vine_manager_remove_worker(q, w, VINE_WORKER_DISCONNECT_FAILURE);
+			removed++;
+		}
+	}
+	list_cursor_delete(cursor);
+	return removed;
+}
+
+/*
+Write the final messages of removed workers within the step budget. A link is closed once its queue fails or makes no
+progress (link_made_no_progress()), or, once the queue is written, when the worker closes its side or the minimum
+transfer timeout passes, T with the timeout framework on (see departing_link_drain_start()).
+*/
+static void send_to_departing_links(struct vine_manager *q)
+{
+	int count = list_size(q->departing_links);
+	struct departing_link *d;
+	while (count-- > 0 && (d = list_pop_head(q->departing_links))) {
+		link_poll_set_take(q->poll_set, d->link, LINK_READ | LINK_WRITE);
+		if (!d->draining) {
+			int state = advance_queue(q, d->lw, d->link, d->timeout, 1);
+			if (state < 0) {
+				departing_link_delete(d);
+				continue;
+			}
+			if (state > 0) {
+				departing_link_drain_start(q, d);
+			}
+		}
+		if (d->draining && (departing_link_drained(q, d) || time(0) - d->draining >= (d->timeout ? d->timeout : q->minimum_transfer_timeout))) {
+			departing_link_delete(d);
+		} else {
+			list_push_tail(q->departing_links, d);
+		}
+	}
+}
+
+/*
+Wait for activity on the links of the poll set, and act upon each worker connection that has pending input data, until
+its input buffer is empty or the step's budget expires. A step costs time in proportion to the links that are ready, not
+to all connected workers. Workers that were not reached keep their place ahead of workers that became ready later, and
+messages left in a buffer keep the next poll from waiting. Return the number of workers that *failed* and disconnected.
+*/
+
+/*
+Each step of vine_wait() is timed as a round (round_timer.h): from the end of its poll to the start of the next poll or
+the return of vine_wait(), with its parts named, so the debug log tells how long the manager was unable to answer
+because of its own work. Every ROUND_SUMMARY_INTERVAL seconds, and at vine_delete(), a round summary line gives the
+number of steps, the longest step, and its slowest part. The cost is a reading of the clock per part.
+*/
+#define ROUND_SUMMARY_INTERVAL 60
+
+static void round_summary_log(struct vine_manager *q)
+{
+	struct round_window *w = &q->round_summary;
+	debug(D_VINE, "round summary: seconds=%.1f rounds=%" PRId64 " round_max_us=%" PRIu64 " step=%s step_us=%" PRIu64, round_window_length(w) / 1e6, w->rounds, (uint64_t)w->longest, w->step, (uint64_t)w->step_time);
+	round_window_reset(w);
+}
+
+/* End a part of the current step of vine_wait(), named by what it did. */
+static void vine_manager_round_step(struct vine_manager *q, const char *name)
+{
+	if (q->round_running) {
+		round_timer_step(&q->round_timer, name);
+	}
+}
+
+/* End the current step of vine_wait(), its last part named. */
+static void vine_manager_round_end(struct vine_manager *q, const char *name)
+{
+	if (!q->round_running) {
+		return;
+	}
+	q->round_running = 0;
+	round_timer_finish(&q->round_timer, name, &q->round_summary, NULL);
+	if (round_window_length(&q->round_summary) >= (timestamp_t)ROUND_SUMMARY_INTERVAL * 1000000) {
+		round_summary_log(q);
+	}
+}
 
 static int poll_active_workers(struct vine_manager *q, int stoptime)
 {
 	BEGIN_ACCUM_TIME(q, time_polling);
 
-	int n = build_poll_table(q);
+	vine_manager_data_service_poll(q->ds, q->poll_set);
 
 	// We poll in at most small time segments (of a half a second). This lets
 	// promptly dispatch tasks, while avoiding wasting cpu cycles when the
@@ -5243,32 +6952,86 @@ static int poll_active_workers(struct vine_manager *q, int stoptime)
 
 	BEGIN_ACCUM_TIME(q, time_polling);
 
+	vine_manager_round_end(q, "other");
+
 	// Poll all links for activity.
-	link_poll(q->poll_table, n, msec);
+	link_poll_set_wait(q->poll_set, msec);
 	q->link_poll_end = timestamp_get();
+	round_timer_start(&q->round_timer);
+	q->round_running = 1;
 
 	END_ACCUM_TIME(q, time_polling);
 
+	/* The work of this step starts after the poll. Message handling, retrievals, accepting workers, and writing to
+	 * workers stop when its budget expires and continue in the next step. */
+	budget_start(&q->round, VINE_ROUND_BUDGET);
+
 	BEGIN_ACCUM_TIME(q, time_status_msgs);
 
-	int i;
+	/* Probe links first, whatever else is ready, so a worker's check is answered within this step and its answers
+	 * to the manager's checks are read before any other work (see "Workers judge the manager"). Only probe links
+	 * are urgent, and each read takes a few lines. */
 	int workers_failed = 0;
-
-	/* Consider all active connections of any kind. */
-	for (i = 1; i < n; i++) {
-
-		/* If there is pending input data on that connection. */
-		if (q->poll_table[i].revents) {
-
-			/* Act on the next input message, until there is no more buffered data. */
-			do {
-				if (handle_worker(q, q->poll_table[i].link) == VINE_WORKER_FAILURE) {
-					workers_failed++;
-					break;
-				}
-			} while (!link_buffer_empty(q->poll_table[i].link));
+	struct link *link;
+	struct vine_worker_info *w;
+	int revents;
+	while ((link = link_poll_set_next_urgent(q->poll_set, &revents, (void **)&w))) {
+		if (w && (revents & LINK_READ) && link == w->probe_link && !read_probe_link(q, w)) {
+			q->stats->workers_lost++;
+			handle_worker_failure(q, w);
+			workers_failed++;
 		}
 	}
+
+	q->connections_waiting = link_poll_set_take(q->poll_set, q->manager_link, LINK_READ);
+
+	workers_failed += send_to_workers(q);
+	send_to_departing_links(q);
+	vine_manager_round_step(q, "send-to-workers");
+
+	vine_manager_data_service_handle(q);
+	vine_manager_round_step(q, "data-service");
+
+	if (link_poll_set_take(q->poll_set, q->wake_link, LINK_READ)) {
+		/* Several wakes before this poll end the same wait. */
+		char buffer[64];
+		while (read(link_fd(q->wake_link), buffer, sizeof(buffer)) > 0) {
+		}
+		q->woken = 1;
+	}
+
+	/* Consider the ready worker connections in turn. The other links left are those of the data service, which
+	 * handles them in every step, so their events only end the wait. A worker that is not reached keeps its place
+	 * for the next step. */
+	int handled = 0;
+	while ((handled == 0 || !budget_expired(&q->round)) && (link = link_poll_set_next(q->poll_set, &revents, (void **)&w))) {
+		if (!w || !(revents & LINK_READ)) {
+			continue;
+		}
+		handled++;
+
+		/* Answers on a probe link are read whole, without waiting. */
+		if (link == w->probe_link) {
+			if (!read_probe_link(q, w)) {
+				q->stats->workers_lost++;
+				handle_worker_failure(q, w);
+				workers_failed++;
+			}
+			continue;
+		}
+
+		/* Act on the next input message, until there is no more buffered data. */
+		do {
+			vine_result_code_t r = handle_worker(q, w);
+			if (r == VINE_WORKER_FAILURE) {
+				workers_failed++;
+				break;
+			} else if (r == VINE_LINK_MOVED) {
+				break;
+			}
+		} while (!link_buffer_empty(link) && !budget_expired(&q->round));
+	}
+	vine_manager_round_step(q, "worker-messages");
 
 	END_ACCUM_TIME(q, time_status_msgs);
 
@@ -5282,11 +7045,11 @@ static int connect_new_workers(struct vine_manager *q, int stoptime, int max_new
 	// If the manager link was awake, then accept at most max_new_workers.
 	// Note we are using the information gathered in poll_active_workers, which
 	// is a little ugly.
-	if (q->poll_table[0].revents) {
+	if (q->connections_waiting) {
 		do {
 			add_worker(q);
 			new_workers++;
-		} while (link_usleep(q->manager_link, 0, 1, 0) && (stoptime >= time(0) && (max_new_workers > new_workers)));
+		} while (link_usleep(q->manager_link, 0, 1, 0) && (stoptime >= time(0) && (max_new_workers > new_workers)) && !budget_expired(&q->round));
 	}
 
 	return new_workers;
@@ -5366,6 +7129,13 @@ struct vine_task *find_task_to_return(struct vine_manager *q, const char *tag, i
 
 		/* The task was given a reference when added to the table, so delete a reference on removal. */
 		itable_remove(q->tasks, t->task_id);
+		if (type == VINE_TASK_TYPE_STANDARD) {
+			q->standard_tasks_count--;
+		}
+		if (type == VINE_TASK_TYPE_RECOVERY && q->external_recovery_handling) {
+			/* The application receives the table's reference and deletes the task when it is done. */
+			return t;
+		}
 		vine_task_delete(t);
 
 		/* CAREFUL: a non-standard task *may* no longer exist following vine_delete! */
@@ -5415,6 +7185,36 @@ struct vine_task *find_task_to_return(struct vine_manager *q, const char *tag, i
 	return NULL;
 }
 
+/* Free the removed entries of the integer tables that grow with tasks, so the memory around them can be reused.
+ * An itable keeps removed entries until a later insert or walk compacts them, and after an application deletes most of
+ * its tasks no insert may come, so those entries pinned the freed memory around them. A hash_table needs no such call:
+ * it frees a removed entry at once, or at the end of the iteration that removed it.
+ * A compaction must not run while a walk of its table is in progress. This runs at the top of a step of vine_wait(),
+ * outside every walk and every operation of the manager, and the application cannot be inside a walk of a manager
+ * table. Compaction costs O(removed entries), amortized O(1) per removal, plus a bounded part of each resize in
+ * progress.
+ * The heap is not trimmed: malloc_trim() walks every free chunk of every arena under the arena's lock, about 10-30 ms
+ * per million chunks and over a second for an 8 GB heap, and from another thread it holds the manager's allocations for
+ * as long. Freed memory stays with the allocator, which reuses it for later tasks and files. */
+static void compact_tables(struct vine_manager *q)
+{
+	itable_compact(q->tasks);
+	itable_compact(q->running_table);
+
+	char *key;
+	struct vine_worker_info *w;
+	int iteration;
+	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+	{
+		itable_compact(w->current_tasks);
+		if (w->blocked_files) {
+			set_compact(w->blocked_files);
+		}
+	}
+
+	vine_manager_data_service_compact(q->ds);
+}
+
 static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout, const char *tag, int task_id)
 {
 	/*
@@ -5458,6 +7258,9 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 	int events = 0;
 	print_password_warning(q);
 
+	/* A wake that arrived during an earlier wait was answered when that wait returned. */
+	q->woken = 0;
+
 	// compute stoptime
 	time_t stoptime = (timeout == VINE_WAIT_FOREVER) ? 0 : time(0) + timeout;
 
@@ -5475,6 +7278,14 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			events++;
 		}
 
+		timestamp_t compaction_time = timestamp_get();
+		if (compaction_time - q->time_last_compaction >= ONE_SECOND) {
+			q->time_last_compaction = compaction_time;
+			BEGIN_ACCUM_TIME(q, time_internal);
+			compact_tables(q);
+			END_ACCUM_TIME(q, time_internal);
+		}
+
 		BEGIN_ACCUM_TIME(q, time_internal);
 		// update catalog if appropriate
 		if (q->name) {
@@ -5486,6 +7297,7 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		}
 
 		END_ACCUM_TIME(q, time_internal);
+		vine_manager_round_step(q, "housekeeping");
 
 		// break loop if there is a task to be returned to the user; or if prefering dispatching, if there
 		// are no tasks to be dispatched; or if we already looped once and no events were triggered.
@@ -5501,6 +7313,11 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			}
 		}
 
+		// return to the application, which another thread asked for with vine_wake.
+		if (q->woken) {
+			break;
+		}
+
 		// retrieve worker status messages
 		if (poll_active_workers(q, stoptime) > 0) {
 			// at least one worker was removed.
@@ -5512,14 +7329,33 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 
 		// get updates for watched files.
 		if (hash_table_size(q->workers_with_watched_file_updates)) {
+			/* Receiving the updates also handles other messages of a worker, which can iterate the worker table or
+			 * remove a worker, so the workers that announced updates are collected by key before any is asked. */
+			struct list *keys = list_create();
 			struct vine_worker_info *w;
 			char *key;
 			int iteration;
-			HASH_TABLE_ITERATE(q->worker_table, iteration, key, w) // should this be workers_with_watched_file_updates?
+			HASH_TABLE_ITERATE(q->workers_with_watched_file_updates, iteration, key, w)
 			{
-				get_watched_file_updates(q, w);
-				hash_table_remove(q->workers_with_watched_file_updates, w->hashkey);
+				list_push_tail(keys, xxstrdup(key));
 			}
+			hash_table_clear(q->workers_with_watched_file_updates, 0);
+			int asked = 0;
+			while ((key = list_pop_head(keys))) {
+				w = hash_table_lookup(q->worker_table, key);
+				if (w) {
+					/* Workers left when the step's budget expires are asked in the next step. */
+					if (asked && budget_expired(&q->round)) {
+						hash_table_insert(q->workers_with_watched_file_updates, key, w);
+					} else {
+						get_watched_file_updates(q, w);
+						asked++;
+					}
+				}
+				free(key);
+			}
+			list_delete(keys);
+			vine_manager_round_step(q, "watched-files");
 		}
 
 		// check if we need to kill any workers if the user has specified an eviction interval.
@@ -5543,6 +7379,8 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 		// are retrieved.
 		int retrieved_this_cycle = 0;
 		BEGIN_ACCUM_TIME(q, time_receive);
+		/* The unlinks of task files that retrieval sends leave in one write per worker. */
+		vine_manager_send_hold(q);
 		do {
 			struct vine_task *head = list_peek_head(q->waiting_retrieval_list);
 			if (!head) {
@@ -5558,8 +7396,10 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			int retrieved_from_worker = receive_tasks_from_worker(q, w, retrieved_this_cycle);
 			retrieved_this_cycle += retrieved_from_worker;
 			events += retrieved_from_worker;
-		} while (q->max_retrievals < 0 || retrieved_this_cycle < q->max_retrievals || !skip_list_size(q->ready_tasks));
+		} while ((q->max_retrievals < 0 || retrieved_this_cycle < q->max_retrievals || !skip_list_size(q->ready_tasks)) && !budget_expired(&q->round));
+		vine_manager_send_release(q);
 		END_ACCUM_TIME(q, time_receive);
+		vine_manager_round_step(q, "retrieval");
 
 		if (retrieved_this_cycle) {
 			// reset priority cursor on task retrieval, as workers
@@ -5583,45 +7423,59 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 			BEGIN_ACCUM_TIME(q, time_send);
 			result = send_one_task(q);
 			END_ACCUM_TIME(q, time_send);
+			vine_manager_round_step(q, "dispatch");
 			if (result) {
 				// sent at least one task
 				events++;
 				sent_in_previous_cycle = 1;
 				continue;
 			}
+		} else {
+			/* No task is dispatched before enough workers connect, and each connection ends the wait. */
+			q->dispatch_blocked = 1;
 		}
 
 		// Check if any temp files need replication and start replicating
 		BEGIN_ACCUM_TIME(q, time_internal);
 		result = vine_temp_start_replication(q);
 		END_ACCUM_TIME(q, time_internal);
+		vine_manager_round_step(q, "replication");
 		if (result) {
 			// recovered at least one temp file
 			events++;
 			continue;
 		}
 
-		// send keepalives to appropriate workers
-		BEGIN_ACCUM_TIME(q, time_status_msgs);
-		ask_for_workers_updates(q);
-		END_ACCUM_TIME(q, time_status_msgs);
+		/* Keepalives, slow and drained workers, and blocks are measured in seconds, and each check takes a pass
+		 * over the workers or the tasks at workers, so the checks run at most once a second. */
+		timestamp_t worker_checks_time = timestamp_get();
+		if (worker_checks_time - q->time_last_worker_checks >= ONE_SECOND) {
+			q->time_last_worker_checks = worker_checks_time;
 
-		// Kill off slow/drained workers.
-		BEGIN_ACCUM_TIME(q, time_internal);
-		result = disconnect_slow_workers(q);
-		result += shutdown_drained_workers(q);
-		vine_blocklist_unblock_all_by_time(q, time(0));
-		END_ACCUM_TIME(q, time_internal);
-		if (result) {
-			// removed at least one worker
-			events++;
-			continue;
+			// send keepalives to appropriate workers
+			BEGIN_ACCUM_TIME(q, time_status_msgs);
+			ask_for_workers_updates(q);
+			END_ACCUM_TIME(q, time_status_msgs);
+
+			// Kill off slow/drained workers.
+			BEGIN_ACCUM_TIME(q, time_internal);
+			result = disconnect_slow_workers(q);
+			result += shutdown_drained_workers(q);
+			vine_blocklist_unblock_all_by_time(q, time(0));
+			END_ACCUM_TIME(q, time_internal);
+			vine_manager_round_step(q, "worker-checks");
+			if (result) {
+				// removed at least one worker
+				events++;
+				continue;
+			}
 		}
 
 		// if new workers, connect n of them
 		BEGIN_ACCUM_TIME(q, time_status_msgs);
 		result = connect_new_workers(q, stoptime, MAX(q->wait_for_workers, q->max_new_workers));
 		END_ACCUM_TIME(q, time_status_msgs);
+		vine_manager_round_step(q, "accept-workers");
 		if (result) {
 			// accepted at least one worker
 			// reset priority cursor as new workers
@@ -5669,17 +7523,22 @@ static struct vine_task *vine_wait_internal(struct vine_manager *q, int timeout,
 
 		// if we got here, no events were triggered this time around.
 		// if we went through the entire ready list without finding a task to dispatch,
-		// or we are still waiting for workers,
+		// or we are still waiting for workers, or no worker has room for a task,
 		// we set the nothing_happened_last_wait_cycle flag so that link_poll waits for some time
 		// the next time around, or return retrieved tasks if there some available.
-		if ((!skip_list_get(q->ready_tasks_cr, NULL) || waiting_for_workers) && list_size(q->retrieved_list) < 1) {
+		if ((!skip_list_get(q->ready_tasks_cr, NULL) || waiting_for_workers || q->dispatch_blocked) && list_size(q->retrieved_list) < 1) {
 			q->nothing_happened_last_wait_cycle = 1;
 		}
 	}
 
-	if (events > 0) {
-		vine_perf_log_write_update(q, 1);
+	/* Events write a performance log entry at most once per interval, because computing the statistics takes a pass
+	 * over every worker. An event held back is written by a later wait once the interval passed. */
+	if (events > 0 || q->perf_log_pending) {
+		vine_perf_log_write_update(q, 0);
 	}
+
+	/* The time until the next wait is the application's. */
+	vine_manager_round_end(q, "other");
 
 	q->time_last_wait = timestamp_get();
 
@@ -5691,7 +7550,7 @@ struct vine_task *vine_manager_no_wait(struct vine_manager *q, const char *tag, 
 	BEGIN_ACCUM_TIME(q, time_internal);
 	struct vine_task *t = find_task_to_return(q, tag, task_id);
 	if (t) {
-		vine_perf_log_write_update(q, 1);
+		vine_perf_log_write_update(q, 0);
 	}
 	END_ACCUM_TIME(q, time_internal);
 
@@ -5845,16 +7704,23 @@ int vine_workers_shutdown(struct vine_manager *q, int n)
 	if (n < 1)
 		n = hash_table_size(q->worker_table);
 
-	// send worker the "exit" msg
+	/* Removing a worker changes worker_table, so the workers are chosen first and shut down after the iteration. */
+	struct list *chosen = list_create();
 	HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
 	{
 		if (i >= n)
 			break;
 		if (w->tasks_committed == 0) {
-			vine_manager_shut_down_worker(q, w);
+			list_push_tail(chosen, w);
 			i++;
 		}
 	}
+
+	// send worker the "exit" msg
+	while ((w = list_pop_head(chosen))) {
+		vine_manager_shut_down_worker(q, w);
+	}
+	list_delete(chosen);
 
 	return i;
 }
@@ -5994,32 +7860,21 @@ static void disconnect_all_workers(struct vine_manager *q)
 If there are any standard tasks (those submitted by the user)
 known to the manager, then the system is not empty, and the caller
 should wait some more.
-XXX This is a linear-time operation, perhaps there is a more efficient way to do it.
 */
 
 int vine_empty(struct vine_manager *q)
 {
-	struct vine_task *t;
-	uint64_t task_id;
-	int iteration;
-
-	ITABLE_ITERATE(q->tasks, iteration, task_id, t)
-	{
-		if (t->type == VINE_TASK_TYPE_STANDARD)
-			return 0;
-	}
-
-	return 1;
+	return q->standard_tasks_count == 0;
 }
 
 void vine_set_keepalive_interval(struct vine_manager *q, int interval)
 {
-	q->keepalive_interval = interval;
+	q->keepalive_interval = MAX(0, interval);
 }
 
 void vine_set_keepalive_timeout(struct vine_manager *q, int timeout)
 {
-	q->keepalive_timeout = timeout;
+	q->keepalive_timeout = MAX(0, timeout);
 }
 
 void vine_set_manager_preferred_connection(struct vine_manager *q, const char *preferred_connection)
@@ -6034,8 +7889,65 @@ void vine_set_manager_preferred_connection(struct vine_manager *q, const char *p
 	q->manager_preferred_connection = xxstrdup(preferred_connection);
 }
 
+/* Turn the debug log down to errors and notices, and close the performance, transactions, and taskgraph logs for the
+ * rest of the run. Their writers skip a log that is not open. */
+static void disable_logs(struct vine_manager *q)
+{
+	debug_flags_restore(D_NOTICE | D_ERROR | D_FATAL);
+	if (q->perf_logfile) {
+		fclose(q->perf_logfile);
+		q->perf_logfile = NULL;
+	}
+	if (q->txn_logfile) {
+		vine_txn_log_write_manager(q, "END");
+		fclose(q->txn_logfile);
+		q->txn_logfile = NULL;
+	}
+	if (q->graph_logfile) {
+		vine_taskgraph_log_write_footer(q);
+		fclose(q->graph_logfile);
+		q->graph_logfile = NULL;
+	}
+}
+
+/* The names that vine_tune() takes. vine_tune() refuses a name that is not listed before it looks at its branches, so
+ * a name works only when it is both listed here and handled there, and the list stays complete. */
+static const char *const vine_tune_names[] = {
+	"attempt-schedule-depth", "category-steady-n-tasks", "default-transfer-rate",
+	"disconnect-slow-worker-factor", "hungry-minimum", "hungry-minimum-factor", "immediate-recovery",
+	"keepalive-interval", "keepalive-timeout", "long-timeout", "max-retrievals", "min-transfer-timeout",
+	"monitor-interval", "prefer-dispatch", "force-proportional-resources", "proportional-resources",
+	"force-proportional-resources-whole-tasks", "proportional-whole-tasks", "ramp-down-heuristic",
+	"resource-submit-multiplier", "asynchrony-multiplier", "response-timeout", "manager-response-timeout",
+	"queue-stall-timeout", "short-timeout", "temp-replica-count", "temp-replica-distinct-hosts",
+	"transfer-outlier-factor", "transfer-replica-per-cycle", "transfer-temps-recovery",
+	"transient-error-interval", "wait-for-workers", "max-workers", "worker-retrievals",
+	"file-source-max-transfers", "worker-source-max-transfers", "worker-source-max-checkpoints", "vault-disk-limit",
+	"vault-memory-limit",
+	"load-from-shared-filesystem", "perf-log-interval", "enable-logs", "update-interval", "task-groups",
+	"resource-management-interval", "max-task-stdout-storage", "max-new-workers", "large-task-check-interval",
+	"option-blocklist-slow-workers-timeout", "watch-library-logfiles", "sandbox-grow-factor",
+	"max-library-retries", "disk-proportion-available-to-task", "enforce-worker-eviction-interval",
+	"clean-redundant-replicas", "shift-disk-load", "max-origin-failures",
+	NULL};
+
+int vine_tune_known(const char *name)
+{
+	for (int i = 0; vine_tune_names[i]; i++) {
+		if (!strcmp(name, vine_tune_names[i])) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 int vine_tune(struct vine_manager *q, const char *name, double value)
 {
+	if (!vine_tune_known(name)) {
+		debug(D_NOTICE | D_VINE, "Warning: tuning parameter \"%s\" not recognized\n", name);
+		return -1;
+	}
+
 	if (!strcmp(name, "attempt-schedule-depth")) {
 		q->attempt_schedule_depth = MAX(1, (int)value);
 
@@ -6096,12 +8008,44 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "resource-submit-multiplier") || !strcmp(name, "asynchrony-multiplier")) {
 		q->resource_submit_multiplier = MAX(value, 1.0);
+		vine_schedule_capacity_index_update_all(q);
+
+	} else if (!strcmp(name, "response-timeout")) {
+		/* A positive X turns the timeout framework on for workers that declared none, and zero turns it off. */
+		q->response_timeout = MAX(0, (int)value);
+		char *key;
+		int iteration;
+		struct vine_worker_info *w;
+		HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+		{
+			link_set_idle_timeout(w->link, vine_manager_worker_timeout(q, w, 0));
+		}
+
+	} else if (!strcmp(name, "manager-response-timeout") || !strcmp(name, "queue-stall-timeout")) {
+		/* Workers with a probe link learn the manager's X_M and its stall bound at once (probe_declare()). */
+		if (!strcmp(name, "manager-response-timeout")) {
+			q->manager_response_timeout = MAX(0, (int)value);
+		} else {
+			q->queue_stall_timeout = MAX(0, (int)value);
+		}
+		char *key;
+		int iteration;
+		struct vine_worker_info *w;
+		HASH_TABLE_ITERATE(q->worker_table, iteration, key, w)
+		{
+			if (w->probe_link) {
+				probe_declare(q, w);
+			}
+		}
 
 	} else if (!strcmp(name, "short-timeout")) {
 		q->short_timeout = MAX(1, (int)value);
 
 	} else if (!strcmp(name, "temp-replica-count")) {
 		q->temp_replica_count = MAX(1, (int)value);
+
+	} else if (!strcmp(name, "temp-replica-distinct-hosts")) {
+		q->temp_replica_distinct_hosts = !!((int)value);
 
 	} else if (!strcmp(name, "transfer-outlier-factor")) {
 		q->transfer_outlier_factor = value;
@@ -6134,11 +8078,28 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 	} else if (!strcmp(name, "worker-source-max-transfers")) {
 		q->worker_source_max_transfers = MAX(1, (int)value);
 
+	} else if (!strcmp(name, "worker-source-max-checkpoints")) {
+		q->worker_source_max_checkpoints = MAX(1, (int)value);
+
+	} else if (!strcmp(name, "vault-disk-limit")) {
+		/* Gigabytes of checkpoint data the data service vault may hold. Zero means unlimited. */
+		vine_manager_data_service_vault_set_limit(q->ds, (int64_t)(MAX(0, value) * 1e9));
+
+	} else if (!strcmp(name, "vault-memory-limit")) {
+		/* Gigabytes of small checkpoints the vault holds in memory before it writes them to disk. Zero writes all. */
+		vine_manager_data_service_vault_set_memory_limit(q->ds, (int64_t)(MAX(0, value) * 1e9));
+
 	} else if (!strcmp(name, "load-from-shared-filesystem")) {
 		q->load_from_shared_fs_enabled = !!((int)value);
 
 	} else if (!strcmp(name, "perf-log-interval")) {
 		q->perf_log_interval = MAX(1, (int)value);
+
+	} else if (!strcmp(name, "enable-logs")) {
+		/* Logs that were turned off stay off, because reopening them would lose what they recorded. */
+		if (!(int)value) {
+			disable_logs(q);
+		}
 
 	} else if (!strcmp(name, "update-interval")) {
 		q->update_interval = MAX(1, (int)value);
@@ -6169,10 +8130,13 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 
 	} else if (!strcmp(name, "max-library-retries")) {
 		q->max_library_retries = MAX(1, value);
+	} else if (!strcmp(name, "max-origin-failures")) {
+		q->max_origin_failures = value < 0 ? -1 : (int)value;
 	} else if (!strcmp(name, "disk-proportion-available-to-task")) {
 		if (value < 1 && value > 0) {
 			q->disk_proportion_available_to_task = value;
 		}
+
 	} else if (!strcmp(name, "enforce-worker-eviction-interval")) {
 		q->enforce_worker_eviction_interval = (timestamp_t)(MAX(0, (int)value) * ONE_SECOND);
 
@@ -6186,6 +8150,9 @@ int vine_tune(struct vine_manager *q, const char *name, double value)
 		debug(D_NOTICE | D_VINE, "Warning: tuning parameter \"%s\" not recognized\n", name);
 		return -1;
 	}
+
+	/* A setting may change the limits that keep ready tasks blocked, so each is checked again. */
+	vine_schedule_wake_all(q);
 
 	return 0;
 }
@@ -6523,18 +8490,27 @@ void vine_set_category_resources_max(struct vine_manager *q, const char *categor
 {
 	struct category *c = vine_category_lookup_or_create(q, category);
 	category_specify_max_allocation(c, rm);
+	if (rm && rm->gpus > 0) {
+		q->gpus_requested = 1;
+	}
 }
 
 void vine_set_category_resources_min(struct vine_manager *q, const char *category, const struct rmsummary *rm)
 {
 	struct category *c = vine_category_lookup_or_create(q, category);
 	category_specify_min_allocation(c, rm);
+	if (rm && rm->gpus > 0) {
+		q->gpus_requested = 1;
+	}
 }
 
 void vine_set_category_first_allocation_guess(struct vine_manager *q, const char *category, const struct rmsummary *rm)
 {
 	struct category *c = vine_category_lookup_or_create(q, category);
 	category_specify_first_allocation_guess(c, rm);
+	if (rm && rm->gpus > 0) {
+		q->gpus_requested = 1;
+	}
 }
 
 int vine_set_category_mode(struct vine_manager *q, const char *category, vine_category_mode_t mode)
@@ -6620,6 +8596,12 @@ const struct rmsummary *vine_manager_task_resources_min(struct vine_manager *q, 
 
 struct category *vine_category_lookup_or_create(struct vine_manager *q, const char *name)
 {
+	/* The manager looks up the category of a task many times, and most tasks share one, so the last one is compared
+	 * first. Categories live until the manager is deleted, so the pointer stays valid. */
+	if (q->last_category && name && !strcmp(q->last_category->name, name)) {
+		return q->last_category;
+	}
+
 	struct category *c = category_lookup_or_create(q->categories, name);
 
 	if (!c->vine_stats) {
@@ -6627,6 +8609,7 @@ struct category *vine_category_lookup_or_create(struct vine_manager *q, const ch
 		category_specify_allocation_mode(c, (category_mode_t)q->allocation_default_mode);
 	}
 
+	q->last_category = c;
 	return c;
 }
 
@@ -6660,24 +8643,52 @@ int vine_prune_file(struct vine_manager *m, struct vine_file *f)
 
 	int pruned_replica_count = 0;
 
-	/* delete all of the replicas present at remote workers. */
+	/* A vault entry of a temporary file is one of its replicas. A VINE_FILE vault entry is Manager-local data. */
+	if (f->type == VINE_TEMP) {
+		vine_manager_data_service_vault_remove(m->ds, f);
+		vine_schedule_wake_declared_file(m, f);
+	}
+
+	/* delete all of the replicas present at remote workers. Removing a replica removes its worker from the set, so
+	 * the workers are copied first, into an array on the stack when they fit, as they usually do. */
 	struct set *source_workers = hash_table_lookup(m->file_worker_table, f->cached_name);
 	if (source_workers && set_size(source_workers) > 0) {
-		void **workers_array = set_values_array(source_workers);
-		if (workers_array) {
-			for (int i = 0; workers_array[i] != NULL; i++) {
-				struct vine_worker_info *w = (struct vine_worker_info *)workers_array[i];
-				delete_worker_file(m, w, f->cached_name, 0, 0);
+		struct vine_worker_info *stack_workers[16];
+		int count = set_size(source_workers);
+		struct vine_worker_info **workers = count <= 16 ? stack_workers : malloc(sizeof(*workers) * count);
+		if (!workers) {
+			return 0;
+		}
+		int n = 0;
+		int iteration;
+		struct vine_worker_info *w;
+		SET_ITERATE(source_workers, iteration, w)
+		{
+			workers[n++] = w;
+		}
+		for (int i = 0; i < n; i++) {
+			w = workers[i];
+			send_unlink(m, w, f->cached_name);
 
-				/* update replica table for the worker */
+			/* A replica that is still being created, such as one whose put was sent, gets a cache-update or a
+			 * cache-invalid that the worker sent before it read the unlink. It stays, DELETING, until that message
+			 * deletes it, because a cache-update for a replica the table no longer holds would create a READY
+			 * replica of a file that the unlink then removed, and other workers would fetch it from there in
+			 * vain until both were released for repeated transfer failures. Other replicas go at once. */
+			struct vine_file_replica *replica = vine_file_replica_table_lookup(w, f->cached_name);
+			if (replica && replica->state == VINE_FILE_REPLICA_STATE_CREATING) {
+				vine_file_replica_change_state_on_event(replica, VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_UNLINK);
+			} else {
 				struct vine_file_replica *removed_replica = vine_file_replica_table_remove(m, w, f->cached_name);
 				if (removed_replica) {
 					vine_file_replica_delete(removed_replica);
 				}
-
-				pruned_replica_count++;
 			}
-			set_free_values_array(workers_array);
+
+			pruned_replica_count++;
+		}
+		if (workers != stack_workers) {
+			free(workers);
 		}
 	}
 
@@ -6715,12 +8726,17 @@ void vine_undeclare_file(struct vine_manager *m, struct vine_file *f)
 		return;
 	}
 
+	/* vine_prune_file() removes the vault entry of a temporary file itself. */
+	if (f->type != VINE_TEMP) {
+		vine_manager_data_service_vault_remove(m->ds, f);
+		vine_schedule_wake_declared_file(m, f);
+	}
+
 	/* First prune the file on all workers */
 	vine_prune_file(m, f);
 
 	/* Then, remove the object from our table and delete a reference. */
-	if (hash_table_lookup(m->file_table, f->cached_name)) {
-		hash_table_remove(m->file_table, f->cached_name);
+	if (hash_table_remove(m->file_table, f->cached_name)) {
 		vine_file_delete(f);
 	}
 

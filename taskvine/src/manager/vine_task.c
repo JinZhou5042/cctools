@@ -94,6 +94,11 @@ void vine_task_clean(struct vine_task *t)
 	t->time_when_retrieval = 0;
 	t->time_when_done = 0;
 
+	t->blocking_inputs[0] = NULL;
+	t->blocking_inputs[1] = NULL;
+	t->blocked_epoch = 0;
+	t->blocking_vault = 0;
+
 	t->time_workers_execute_last = 0;
 	t->time_workers_execute_last_start = 0;
 	t->time_workers_execute_last_end = 0;
@@ -149,6 +154,10 @@ void vine_task_reset(struct vine_task *t)
 	t->library_failed_count = 0;
 	t->exhausted_attempts = 0;
 	t->workers_slow = 0;
+	t->time_unexplained_losses[0] = t->time_unexplained_losses[1] = 0;
+	t->worker_losses_excused = 0;
+	t->worker_losses_charged = 0;
+	t->quarantine_worker = NULL;
 
 	t->time_workers_execute_all = 0;
 	t->time_workers_execute_exhaustion = 0;
@@ -220,6 +229,7 @@ struct vine_task *vine_task_copy(const struct vine_task *task)
 	}
 
 	new->function_slots_requested = task->function_slots_requested;
+	new->library_pool = task->library_pool;
 
 	/* Scheduling features of task are copied. */
 	new->resource_request = task->resource_request;
@@ -311,6 +321,11 @@ void vine_task_set_function_slots(struct vine_task *t, int nslots)
 	t->function_slots_requested = nslots;
 }
 
+void vine_task_set_library_pool(struct vine_task *t, int pool)
+{
+	t->library_pool = pool ? 1 : 0;
+}
+
 void vine_task_set_function_exec_mode(struct vine_task *t, vine_task_func_exec_mode_t exec_mode)
 {
 	if (t->provides_library) {
@@ -344,6 +359,14 @@ void vine_task_set_retries(struct vine_task *t, int64_t max_retries)
 	}
 }
 
+void vine_task_set_worker_losses(struct vine_task *t, int charged, int excused)
+{
+	t->worker_losses_charged = MAX(0, charged);
+	t->worker_losses_excused = MAX(0, excused);
+	/* Charged losses are tries used, so the task has max_retries + 1 - charged tries left. */
+	t->try_count = t->worker_losses_charged;
+}
+
 void vine_task_set_max_forsaken(struct vine_task *t, int64_t max_forsaken)
 {
 	if (max_forsaken < 0) {
@@ -369,6 +392,14 @@ void vine_task_set_disk(struct vine_task *t, int64_t disk)
 	} else {
 		t->resources_requested->disk = disk;
 	}
+}
+
+int vine_task_function_call_slots(const struct vine_task *t)
+{
+	if (t->resources_requested->cores >= 1) {
+		return (int)ceil(t->resources_requested->cores);
+	}
+	return 1;
 }
 
 void vine_task_set_cores(struct vine_task *t, int cores)
@@ -470,7 +501,18 @@ Emit warnings if inconsistencies are detected, but keep going otherwise.
 
 void vine_task_check_consistency(struct vine_task *t)
 {
-	struct hash_table *table = hash_table_create(0, 0);
+	/* Names conflict only within a list of two or more mounts. The check runs at every submission, and a table of the
+	 * default 127 buckets was an allocation of 1 KB for a task with one input and one output. */
+	int inputs = list_size(t->input_mounts);
+	int outputs = list_size(t->output_mounts);
+	if (inputs < 2 && outputs < 2) {
+		return;
+	}
+
+	struct hash_table *table = hash_table_create(MAX(inputs, outputs), 0);
+	if (!table) {
+		return;
+	}
 	struct vine_mount *m;
 
 	/* Cannot have multiple input files mapped to the same remote name. */
@@ -813,6 +855,27 @@ const char *vine_task_get_state(struct vine_task *t)
 	return vine_task_state_to_string(t->state);
 }
 
+int vine_task_get_recovery_source_task_id(struct vine_task *t)
+{
+	if (!t || t->type != VINE_TASK_TYPE_RECOVERY) {
+		return 0;
+	}
+
+	/*
+	Recovery tasks are copies of original tasks and keep the same output file objects.
+	The file records the original producer so the task does not need duplicate state.
+	*/
+	struct vine_mount *m;
+	LIST_ITERATE(t->output_mounts, m)
+	{
+		if (m && m->file && m->file->original_producer_task_id > 0) {
+			return m->file->original_producer_task_id;
+		}
+	}
+
+	return 0;
+}
+
 #define METRIC(x) \
 	if (!strcmp(name, #x)) \
 		return t->x;
@@ -830,6 +893,8 @@ int64_t vine_task_get_metric(struct vine_task *t, const char *name)
 	METRIC(bytes_received);
 	METRIC(bytes_sent);
 	METRIC(bytes_transferred);
+	METRIC(worker_losses_charged);
+	METRIC(worker_losses_excused);
 	return 0;
 }
 

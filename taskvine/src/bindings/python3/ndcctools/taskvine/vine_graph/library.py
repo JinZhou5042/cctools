@@ -1,0 +1,629 @@
+# Copyright (C) 2025- The University of Notre Dame
+# This software is distributed under the GNU General Public License.
+# See the file COPYING for details.
+
+"""The TaskVine library that runs Python tasks on Workers, and the formats both sides share.
+
+This module is what a Worker's library process runs: prepare() when it starts, and run_node(), the library's only
+function, which every Python task calls without arguments. The Executor installs the library (install.py) and
+reads what tasks write with the functions here, so the manifest, result, selection, and failure formats live in one
+place.
+
+The task sandbox holds a manifest at MANIFEST with the function and the arguments of the task, small ones serialized
+inside it, larger ones as staged files named by sandbox path, and references to results and files as they are, and the
+sandbox paths of the results and files the task reads. run_node() returns the function's result, which the TaskVine
+library writes to RESULT as {"Result", "Success", "Reason"}. A function that raises prints its traceback and its
+exception serialized (failure_report()), and ends the task process with a non-zero status, because the library
+otherwise reports exceptions with status zero. Local execution calls run_task() too, so both run a function alike.
+
+A task that reads a result at exactly one place, through a selection such as node[k], needs only the selected value.
+The manifest of the task that produces the result may list selections, which run_node() writes each to a file of its
+own with save_selection(), and a task that reads one of them mounts only that file instead of the whole result.
+
+The library prepares itself once when it starts, in its own process: it imports the modules it was given, then loads
+the shared objects from one file, SHARED, which maps each name to the object serialized on its own, and the cached
+edata from another, EDATA_CACHE, which maps sandbox names of staged objects to their serialized bytes. Every task it
+forks inherits all of them, so tasks neither import those modules nor load those objects again, and a task reads a
+cached object instead of the file that its manifest names.
+
+The library also learns objects from its tasks: a staged object, result, or selection whose load took a task at least
+LEARN_SECONDS is linked into the library sandbox and reported to the library (ndcctools.taskvine.utils.note_library()),
+which loads it once a second task reported it, within a budget of file bytes, so the tasks forked afterwards inherit it
+instead of loading the file each (_learn()).
+"""
+
+import base64
+import collections
+import gc
+import hashlib
+import importlib
+import os
+import shutil
+import socket
+import sys
+import tempfile
+import time
+import traceback
+from pathlib import Path
+
+import cloudpickle
+
+from .. import utils as library_utils
+
+from .graph import COMMAND_RESULT_LIMIT, URL, File, Shared, _Attribute, _NoSuchItem, _Ref, _Symbol, replace_symbols
+
+# Sandbox path of the manifest that describes the task.
+MANIFEST = "vine-graph-node.pkl"
+# Sandbox path where the TaskVine library writes the result of a function call.
+RESULT = "outfile"
+# Library sandbox path of the shared objects.
+SHARED = "vine-graph-shared.pkl"
+# Library sandbox path of the cached edata.
+EDATA_CACHE = "vine-graph-edata-cache.pkl"
+# Sandbox path of what a Python task that runs as a standard task prepares itself from, as the library does when it
+# starts (run_standalone()).
+STANDALONE = "vine-graph-standalone.pkl"
+# The exit status of a task whose function raised an exception that the task's retry_on lists, which the C executor
+# tries again (VINE_GRAPH_RETRY_STATUS). Any other failure exits with status 1.
+RETRY_STATUS = 75
+
+# The exception classes after which the task that runs may be tried again, from its manifest, or None.
+_retry_on = None
+
+# The shared objects of this library process, by name, which forked tasks inherit.
+_shared = {}
+# The cached edata of this library process, by the sandbox name of its staged file, which forked tasks inherit.
+_edata = {}
+
+# Seconds that loading a file takes a task before the task reports the file to its library.
+LEARN_SECONDS = 0.01
+# Library sandbox directory of the links to the files that tasks reported.
+LEARNED = "vine-graph-learned"
+# Seconds that a file reported by one task keeps its link while no second task reports it.
+REPORT_SECONDS = 60
+# The absolute path of LEARNED in a library process that learns objects, or None, as in a local Executor.
+_learn_directory = None
+# Bytes of reported files that the library may hold links to and objects of, and the bytes it holds of each.
+_learn_budget = 0
+_learned_bytes = 0
+_reported_bytes = 0
+# The objects that the library process learned, which forked tasks inherit, by the name of the file's link
+# (_load_file()): (object, bytes of the file).
+_learned = {}
+# Files that one task reported and the library has not learned, by the name of their link: (time, bytes of the file).
+_reported = {}
+_last_sweep = 0.0
+
+
+def runtime_identity():
+    """Return what a Worker must share with its Manager to run the Manager's tasks: the Python version, which tasks'
+    code is compiled for, cloudpickle, which serializes them, and the vine_graph code that reads their manifests."""
+    digest = hashlib.sha256()
+    for path in (Path(__file__), Path(__file__).with_name("graph.py")):
+        digest.update(path.read_bytes())
+    code = digest.hexdigest()[:12]
+    return {"python": "%d.%d" % sys.version_info[:2], "cloudpickle": cloudpickle.__version__, "vine_graph library": code}
+
+
+# A library process that could not prepare itself still starts, and each task it is given fails with a report that
+# starts with this mark, followed by the name of the host and the traceback of the failure. The Manager sees the output
+# of a task but not that of a library, so this is how the reason reaches the user, and the Executor stops the run for
+# it (workers._Workers._publish_finished()).
+START_FAILURE_MARK = "vine-graph-library-could-not-start "
+# The report of the failure that kept this library process from preparing itself, or None.
+_start_failure = None
+
+
+def prepare(module_names, shared_path, edata_path=None, manager_identity=None, standalone=False):
+    """Prepare this library process when it starts (_prepare()). A failure, such as a module that this Worker cannot
+    import, is kept for the tasks to report instead of ending the process, because TaskVine would start the library
+    again and again without telling the Manager why it failed. A standalone task (run_standalone()) prepares itself so
+    for its one task."""
+    global _start_failure
+    try:
+        _prepare(module_names, shared_path, edata_path, manager_identity, standalone)
+    except Exception as error:
+        _start_failure = f"{START_FAILURE_MARK}{socket.gethostname()}\n{format_user_traceback(error, __file__)}"
+        # The library's own output keeps the failure too, for a Manager that watches library logs.
+        sys.stdout.write(_start_failure)
+        sys.stdout.flush()
+
+
+def start_failure(message):
+    """Return (host, traceback) of the library start-up failure that the output of a failed task reports, or None."""
+    start = message.find(START_FAILURE_MARK)
+    if start < 0:
+        return None
+    host, _, report = message[start + len(START_FAILURE_MARK):].partition("\n")
+    return host, report.rstrip()
+
+
+def _prepare(module_names, shared_path, edata_path, manager_identity, standalone=False):
+    """Check that this Worker can run the Manager's tasks, import the modules, then load the shared objects and the
+    cached edata, which may need them. Freezing what was loaded keeps the garbage collector from touching that memory,
+    so forked tasks share it instead of copying it. A standalone task forks nothing, so it skips that, the rehearsal,
+    and learning."""
+    if manager_identity is not None:
+        identity = runtime_identity()
+        mismatched = [f"{key} {identity.get(key)} on this Worker but {value} on the Manager"
+                      for key, value in manager_identity.items() if identity.get(key) != value]
+        if mismatched:
+            raise RuntimeError("this Worker's environment does not match the Manager's: " + "; ".join(mismatched))
+    for name in module_names:
+        importlib.import_module(name)
+    for path, objects in ((shared_path, _shared), (edata_path, _edata)):
+        if path:
+            with open(path, "rb") as stream:
+                blobs = cloudpickle.load(stream)
+            objects.update((name, cloudpickle.loads(blob)) for name, blob in blobs.items())
+    if standalone:
+        return
+    rehearse()
+    _start_learning()
+    gc.freeze()
+
+
+def _start_learning():
+    """Let this library process learn objects from its tasks, when its runtime passes notes. The budget is a 32nd of
+    the host's memory, at most 1 GB of files, because objects take more memory than their files."""
+    global _learn_directory, _learn_budget
+    install = getattr(library_utils, "set_library_note_handler", None)
+    if install is None:
+        return
+    try:
+        memory = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        directory = os.path.abspath(LEARNED)
+        os.makedirs(directory, exist_ok=True)
+    except (OSError, ValueError):
+        return
+    _learn_directory = directory
+    _learn_budget = min(1 << 30, memory // 32)
+    install(_learn)
+
+
+def _load_pickle(path):
+    with open(path, "rb") as stream:
+        return cloudpickle.load(stream)
+
+
+def _load_file(path, kind, loader):
+    """Return loader(path), or the library's object of the file when the library learned it. A load that takes at
+    least LEARN_SECONDS links the file into the library sandbox under a name of its kind, device, inode, size, and
+    modification time, and reports the name to the library. The link keeps the inode, so the name stands for no other
+    file while the link exists, which a task checks before it takes the library's object."""
+    if _learn_directory is None:
+        return loader(path)
+    try:
+        info = os.stat(path)
+    except OSError:
+        return loader(path)
+    name = f"{kind}-{info.st_dev}-{info.st_ino}-{info.st_size}-{info.st_mtime_ns}"
+    link = os.path.join(_learn_directory, name)
+    entry = _learned.get(name)
+    if entry is not None:
+        try:
+            if os.stat(link).st_ino == info.st_ino:
+                return entry[0]
+        except OSError:
+            pass
+    started = time.perf_counter()
+    value = loader(path)
+    if time.perf_counter() - started >= LEARN_SECONDS and info.st_size <= _learn_budget:
+        try:
+            os.link(path, link)
+        except FileExistsError:
+            pass
+        except OSError:
+            return value
+        library_utils.note_library(name)
+    return value
+
+
+def _unlink(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _learn(names):
+    """Note handler of the library process (ndcctools.taskvine.utils.set_library_note_handler()): load the objects of
+    the files that a second task reported, within the budget, so the tasks forked afterwards inherit them, and return
+    whether it loaded any. A file that one task reported keeps its link for REPORT_SECONDS. Every ten seconds, objects
+    of files that left the Worker's cache, which only the library's link still holds, are dropped with their links."""
+    global _learned_bytes, _reported_bytes, _last_sweep
+    loaders = {"e": _load_pickle, "r": load_result, "s": load_selection}
+    now = time.monotonic()
+    changed = False
+    for name in names:
+        if name in _learned:
+            continue
+        link = os.path.join(_learn_directory, name)
+        size = int(name.split("-")[3])
+        if name not in _reported:
+            if _learned_bytes + _reported_bytes + size > _learn_budget:
+                _unlink(link)
+            else:
+                _reported[name] = (now, size)
+                _reported_bytes += size
+            continue
+        _reported_bytes -= _reported.pop(name)[1]
+        try:
+            if _learned_bytes + size > _learn_budget:
+                raise MemoryError
+            value = loaders[name[0]](link)
+        except Exception:
+            _unlink(link)
+            continue
+        _learned[name] = (value, size)
+        _learned_bytes += size
+        changed = True
+    if now - _last_sweep >= 10:
+        _last_sweep = now
+        for name, (_, size) in list(_learned.items()):
+            link = os.path.join(_learn_directory, name)
+            try:
+                held = os.stat(link).st_nlink > 1
+            except OSError:
+                held = False
+            if not held:
+                del _learned[name]
+                _learned_bytes -= size
+                _unlink(link)
+        for name, (reported, size) in list(_reported.items()):
+            if now - reported < REPORT_SECONDS:
+                break
+            del _reported[name]
+            _reported_bytes -= size
+            _unlink(os.path.join(_learn_directory, name))
+    if changed:
+        gc.freeze()
+    return changed
+
+
+# Number of times rehearse() runs a task, enough for the interpreter to specialize the code that tasks run.
+REHEARSALS = 4
+
+
+def rehearse():
+    """Run a small task in a scratch sandbox a few times. A forked task that runs code for the first time pays for
+    work that the library process could do once for all of them: the first check of a type against an abstract base
+    class, such as the Mapping check that finds references in arguments, walks every subclass of that class, and the
+    interpreter specializes code by writing to it, which makes the kernel copy the page in each task. Done here, the
+    answers and the specialized code are inherited by every task. A failure only leaves the work to the tasks. Return
+    whether the task ran."""
+    cwd = os.getcwd()
+    sandbox = None
+    try:
+        # Arguments may hold other containers, which the task below does not.
+        replace_symbols(([], set(), frozenset(), collections.deque()), lambda symbol: symbol)
+        sandbox = tempfile.mkdtemp(prefix="vine-graph-rehearsal-", dir=cwd)
+        os.chdir(sandbox)
+        # A function defined outside any module is serialized by value, as functions of a user's script are.
+        namespace = {}
+        exec("def increment(value, step=1):\n    return value + step\n", namespace)
+        save_result("result", 0)
+        manifest = {"objects": [cloudpickle.dumps(namespace["increment"]), cloudpickle.dumps(_Ref("parent")),
+                                cloudpickle.dumps(1)],
+                    "callable": 0, "args": [1], "kwargs": {"step": 2}, "scan": ((0,), ()),
+                    "inputs": {"parent": "result"},
+                    "selected": {}, "selections": [], "files": {}}
+        with open(MANIFEST, "wb") as stream:
+            cloudpickle.dump(manifest, stream)
+        for _ in range(REHEARSALS):
+            save_result(RESULT, _run_node())
+        return load_result(RESULT) == 1
+    except Exception:
+        return False
+    finally:
+        os.chdir(cwd)
+        if sandbox:
+            shutil.rmtree(sandbox, ignore_errors=True)
+
+
+def save_result(path, value):
+    """Write a task result in the format of the TaskVine library."""
+    with open(path, "wb") as stream:
+        cloudpickle.dump({"Result": value, "Success": True, "Reason": None}, stream)
+
+
+def load_result(path):
+    """Read a task result written by the TaskVine library or save_result()."""
+    with open(path, "rb") as stream:
+        return cloudpickle.load(stream)["Result"]
+
+
+def load_text_result(path):
+    """Read the result of a command task: the text it wrote to standard output, at most COMMAND_RESULT_LIMIT bytes."""
+    with open(path, "rb") as stream:
+        return stream.read(COMMAND_RESULT_LIMIT).decode("utf-8", "replace")
+
+
+def save_selection(path, result, steps):
+    """Write what steps select from a task result: the selected value, or the exception that the selection or its
+    serialization raises, which load_selection() raises in the task that reads it. The selection never fails the
+    task that produced the result, so the file always exists. A value that cannot be serialized on its own, such as
+    state that the result's own serialization replaces, is selected again from a serialized copy of the result, which
+    is what a task that loads the whole result selects from. The file holds a flag that tells a value from an
+    exception, followed by either."""
+    with open(path, "wb") as stream:
+        try:
+            value = _select(result, steps)
+        except Exception as error:
+            _save_outcome(stream, False, _portable_error(error))
+            return
+        try:
+            _save_outcome(stream, True, value)
+            return
+        except Exception:
+            del value
+        try:
+            _save_outcome(stream, True, _select(cloudpickle.loads(cloudpickle.dumps(result)), steps))
+        except Exception as error:
+            _save_outcome(stream, False, _portable_error(error))
+
+
+def _save_outcome(stream, selected, value):
+    stream.seek(0)
+    stream.truncate()
+    cloudpickle.dump(selected, stream)
+    cloudpickle.dump(value, stream)
+
+
+def load_selection(path):
+    """Return the value that a file written by save_selection() holds, or raise the exception it holds."""
+    with open(path, "rb") as stream:
+        selected = cloudpickle.load(stream)
+        value = cloudpickle.load(stream)
+    if not selected:
+        raise value
+    return value
+
+
+def _portable_error(error):
+    """Return error, or a RuntimeError with its message when it cannot be serialized and loaded again."""
+    try:
+        cloudpickle.loads(cloudpickle.dumps(error))
+        return error
+    except Exception:
+        return RuntimeError("".join(traceback.format_exception_only(error)).strip())
+
+
+def file_identity(ref):
+    """Return the key under which a manifest lists the path of a File, with the name it was given, or of a task's output
+    file."""
+    if isinstance(ref, File):
+        return ("input", ref.path, ref.name)
+    if isinstance(ref, URL):
+        return ("url", ref.url, ref.name)
+    return ("output", ref.key, ref.path)
+
+
+def _select(value, steps):
+    """Apply selection steps to a value: an attribute step reads the attribute, and an item step reads value[step],
+    or, for an object that does not support items, such as a plain class instance or a dataclass, the attribute named
+    step. A value that has no such item, or neither items nor such an attribute, raises _NoSuchItem."""
+    for step in steps:
+        if isinstance(step, _Attribute):
+            value = getattr(value, step.name)
+        elif hasattr(type(value), "__getitem__"):
+            try:
+                value = value[step]
+            except (LookupError, TypeError) as error:
+                raise _NoSuchItem(repr(step), type(value).__name__, type(error)) from None
+        else:
+            try:
+                value = getattr(value, step)
+            except (AttributeError, TypeError):
+                raise _NoSuchItem(repr(step), type(value).__name__) from None
+    return value
+
+
+def run_task(func, args, kwargs, load_task_result, file_path, load_shared_object, read_once=(), load_selected=None,
+             scan=None):
+    """Call func after replacing each reference in its arguments: a task result with load_task_result(key of the
+    task), a file with file_path(file_identity(file)), and a shared object with load_shared_object(name). Other
+    arguments reach func unchanged. A result or shared object read twice is one object. A task in read_once is read at
+    exactly one place, through a selection, and load_selected(task, steps) returns the selected value, by default
+    selected from load_task_result(task), so the whole result does not stay in memory while func runs. scan, the
+    positions and keywords of the arguments that may hold references, limits the search to them, and None searches
+    every argument."""
+    results = {}
+    shared = {}
+    if load_selected is None:
+        def load_selected(task, steps):
+            return _select(load_task_result(task), steps)
+
+    def replace(ref):
+        if isinstance(ref, Shared):
+            if ref.name not in shared:
+                shared[ref.name] = load_shared_object(ref.name)
+            return shared[ref.name]
+        if isinstance(ref, _Ref):
+            task = ref.key
+            try:
+                if task in read_once:
+                    return load_selected(task, ref.steps)
+                if task not in results:
+                    results[task] = load_task_result(task)
+                return _select(results[task], ref.steps)
+            except _NoSuchItem as error:
+                # The Executor names the task whose result has no such item.
+                error.task = task
+                raise
+        return file_path(file_identity(ref))
+
+    # Replacing all arguments at once keeps an object passed as several arguments one object. An object that holds no
+    # reference stays as it is, also inside an argument that is searched.
+    if scan is None:
+        args, kwargs = replace_symbols((tuple(args), dict(kwargs)), replace)
+    elif scan[0] or scan[1]:
+        positions, names = scan
+        found, named = replace_symbols((tuple(args[index] for index in positions), {name: kwargs[name] for name in names}),
+                                       replace)
+        args = list(args)
+        for index, value in zip(positions, found):
+            args[index] = value
+        kwargs = {**kwargs, **named}
+    return func(*args, **kwargs)
+
+
+def format_user_traceback(error, *runner_files):
+    """Return the traceback of an exception without the frames of the runner files that called the task function."""
+    frames = error.__traceback__
+    while frames is not None and frames.tb_frame.f_code.co_filename in runner_files:
+        frames = frames.tb_next
+    return "".join(traceback.format_exception(type(error), error, frames))
+
+
+# A failed task's report ends with a line that holds its exception serialized, which the Executor loads for
+# TaskError.exception. A serialization larger than FAILURE_LIMIT bytes is left out, and so is one that fails.
+FAILURE_MARK = "\nvine-graph-exception "
+FAILURE_LIMIT = 65536
+
+
+def failure_report(error, *runner_files):
+    """Return the traceback of an exception that a task raised, followed by the exception serialized on one line."""
+    report = format_user_traceback(error, *runner_files)
+    try:
+        data = cloudpickle.dumps(error)
+    except Exception:
+        return report
+    if len(data) > FAILURE_LIMIT:
+        return report
+    return f"{report}{FAILURE_MARK}{base64.b64encode(data).decode()}\n"
+
+
+def load_failure(message):
+    """Split the report of a failed task into its text and the exception it carries, or None when it carries none or
+    the exception cannot be loaded in this process."""
+    start = message.rfind(FAILURE_MARK)
+    if start < 0:
+        return message, None
+    line_end = message.find("\n", start + len(FAILURE_MARK))
+    encoded = message[start + len(FAILURE_MARK):] if line_end < 0 else message[start + len(FAILURE_MARK):line_end]
+    text = message[:start + 1] + ("" if line_end < 0 else message[line_end + 1:])
+    try:
+        error = cloudpickle.loads(base64.b64decode(encoded, validate=True))
+    except Exception:
+        return text, None
+    return text, error if isinstance(error, BaseException) else None
+
+
+def gather(*results):
+    """Return the results of the tasks that an Expand expanded into as a list: the function of the task that stands for
+    the Expand once it expanded."""
+    return list(results)
+
+
+def run_node():
+    """Run the task described by the sandbox manifest and return its result for the library to write. In a library
+    that could not prepare itself, report why instead."""
+    global _retry_on
+    if _start_failure is not None:
+        _exit(_start_failure, 1)
+    _retry_on = None
+    try:
+        return _run_node()
+    except BaseException as error:
+        # The status tells C whether the task may be tried again. Only an exception of a class of retry_on, matched as
+        # an except clause matches it, says so, so a function that exits with that status itself does not.
+        _exit(failure_report(error, __file__), RETRY_STATUS if _retry_on and isinstance(error, _retry_on) else 1)
+
+
+def _exit(report, status):
+    """End the task process with status after writing report to its standard output."""
+    sys.stdout.write(report)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(status)
+
+
+def run_standalone():
+    """Run the task of the sandbox as a standard TaskVine task, as a task of a Function with GPUs runs: prepare this
+    process as the library prepares itself, from the files the task mounts (STANDALONE), limit its native thread pools
+    to the cores it got, run the task as a library call runs it, and write its result where the library would. A
+    failure exits as run_node() exits."""
+    try:
+        with open(STANDALONE, "rb") as stream:
+            module_names, shared_path, edata_path, identity = cloudpickle.load(stream)
+    except BaseException as error:
+        _exit(failure_report(error, __file__), 1)
+    prepare(module_names, shared_path, edata_path, identity, standalone=True)
+    try:
+        from threadpoolctl import threadpool_limits
+        threadpool_limits(limits=max(1, int(os.environ.get("CORES", "1"))))
+    except Exception:
+        pass
+    output = run_node()
+    try:
+        save_result(RESULT, output)
+    except BaseException as error:
+        _exit(failure_report(RuntimeError(f"its result cannot be serialized: {error}"), __file__), 1)
+    _exit("", 0)
+
+
+def _run_node():
+    global _retry_on
+    with open(MANIFEST, "rb") as stream:
+        manifest = cloudpickle.load(stream)
+    _retry_on = manifest.get("retry_on")
+    objects = {}
+
+    def load(entry):
+        # An entry is the index of an object serialized inside the manifest, the sandbox path of a staged file, which
+        # the library may hold already, a tuple of the key of the task whose whole result the argument is, or another
+        # reference to data the task reads, which the manifest holds as it is.
+        if type(entry) is tuple:
+            return _Ref(*entry)
+        if isinstance(entry, _Symbol):
+            return entry
+        if entry not in objects:
+            if isinstance(entry, int):
+                # A number, None, or string is held as it is (workers._LITERAL_TYPES), and any other object as bytes.
+                value = manifest["objects"][entry]
+                objects[entry] = cloudpickle.loads(value) if type(value) is bytes else value
+            elif entry in _edata:
+                objects[entry] = _edata[entry]
+            else:
+                objects[entry] = _load_file(entry, "e", _load_pickle)
+        return objects[entry]
+
+    texts = manifest.get("texts", ())
+
+    def load_task_result(task):
+        # The result of a command task is the text of its standard output.
+        if texts and task in texts:
+            return load_text_result(manifest["inputs"][task])
+        return _load_file(manifest["inputs"][task], "r", load_result)
+
+    def load_selected(task, steps):
+        # A result read only through a selection is either a file of its own or selected from the whole result.
+        path = manifest["selected"][task]
+        if path is None:
+            return _select(load_task_result(task), steps)
+        return _load_file(path, "s", load_selection)
+
+    function = load(manifest["callable"])
+    args = tuple(load(task_path) for task_path in manifest["args"])
+    kwargs = {name: load(task_path) for name, task_path in manifest["kwargs"].items()}
+    # A function may change its working directory, so it receives the paths of its files in the sandbox as absolute
+    # paths, as a local Executor gives them, and the selections and the result are written to the sandbox afterwards.
+    sandbox = os.getcwd()
+    files = manifest["files"]
+    try:
+        output = run_task(function, args, kwargs, load_task_result,
+                          lambda identity: os.path.join(sandbox, files[identity]), _shared.__getitem__,
+                          manifest["selected"], load_selected, manifest.get("scan"))
+    finally:
+        os.chdir(sandbox)
+    del function, args, kwargs
+    objects.clear()
+    # A declared file that the function did not write fails the task as the function's own error, as in a local
+    # Executor, instead of an attempt that TaskVine retries.
+    for path in manifest.get("outputs", ()):
+        if not os.path.lexists(os.path.join(sandbox, path)):
+            raise FileNotFoundError(f"the function did not write its output {path!r}")
+    for steps, path in manifest["selections"]:
+        save_selection(path, output, steps)
+    return output

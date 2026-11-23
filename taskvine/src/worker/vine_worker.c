@@ -15,12 +15,14 @@ See the file COPYING for details.
 #include "vine_resources.h"
 #include "vine_sandbox.h"
 #include "vine_transfer.h"
+#include "vine_transfer_receive.h"
 #include "vine_transfer_server.h"
 #include "vine_watcher.h"
 #include "vine_worker_options.h"
 #include "vine_workspace.h"
 
 #include "address.h"
+#include "budget.h"
 #include "catalog_query.h"
 #include "cctools.h"
 #include "change_process_title.h"
@@ -41,6 +43,7 @@ See the file COPYING for details.
 #include "jx_parse.h"
 #include "jx_print.h"
 #include "link.h"
+#include "link_writer.h"
 #include "link_auth.h"
 #include "list.h"
 #include "load_average.h"
@@ -48,7 +51,9 @@ See the file COPYING for details.
 #include "md5.h"
 #include "path.h"
 #include "path_disk_size_info.h"
+#include "round_timer.h"
 #include "pattern.h"
+#include "priority_queue.h"
 #include "process.h"
 #include "random.h"
 #include "stringtools.h"
@@ -75,6 +80,7 @@ See the file COPYING for details.
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 /***************************************************************/
 /* Primary Worker Data Structures for Tracking Tasks and Files */
@@ -91,16 +97,67 @@ static struct itable *procs_table = NULL;
 /* These are additional pointers into procs_table and should not be deleted */
 static struct itable *procs_running = NULL;
 
+/*
+Time limits of running processes, a min-heap keyed by monotonic deadline in microseconds (stored negated, since the
+priority queue returns the highest priority first). Each entry is a struct process_deadline. An entry whose process
+ended, or whose serial no longer matches the process, is stale and skipped when popped. A round thus peeks the nearest
+deadline in O(1) and pays O(log n) only for entries that come due.
+*/
+static struct priority_queue *procs_deadlines = NULL;
+
+/* The serial of the newest deadline entry, so entries of an ended process are told from those of its successor. */
+static uint64_t procs_deadline_serial = 0;
+
+static void schedule_process_deadline(struct vine_process *p);
+
 /* List of all procs that are waiting to be run. */
 /* These are additional pointers into procs_table and should not be deleted */
 static struct list *procs_waiting = NULL;
 
-/* List of asynchronous messages pending to be sent to the manager */
-static struct list *pending_async_messages = NULL;
+/* Everything sent to the manager, written only as the link takes it, so the worker and a manager that writes to it at
+ * the same time never wait for each other. */
+static struct link_writer *manager_lw = NULL;
+static struct link *manager_link = NULL; /* The link that manager_lw writes to. */
+
+/* The probe link to the manager and its writer, open while the worker declares X (see open_probe_link()), else null. */
+static struct link *probe_link = NULL;
+static struct link_writer *probe_lw = NULL;
+
+/* The manager's own response time X_M and the bound of a stalled control queue, in seconds, as the manager declared
+ * them on the probe link (response-timeout), or zero: the worker then judges the manager by its probe link (see
+ * probe_manager()). manager_check_sent is when the outstanding check of the manager was handed to probe_lw, or zero. */
+static int manager_response_timeout = 0;
+static int manager_stall_timeout = 0;
+static timestamp_t manager_check_sent = 0;
+
+/* Processes that do_kill() signalled and dropped before they exited, indexed by pid. Their tasks are gone, so only
+ * their exit status remains to be collected, which the main loop does without waiting and a disconnect does waiting. */
+static struct itable *procs_killed = NULL;
 
 /* Table of all processes with results to be sent back, indexed by task_id. */
 /* These are additional pointers into procs_table and should not be deleted */
 static struct itable *procs_complete = NULL;
+
+/* Processes that ended and whose outputs are moving into the cache, in the order they ended. A process is in no other
+ * table but procs_table until continue_stageout() moves it to procs_complete, so it is neither running nor reported.
+ * These are additional pointers into procs_table and should not be deleted. */
+static struct list *procs_stageout = NULL;
+
+/* A killed function call still running in its library, which keeps the call's slots, and the cores and memory it takes
+ * from the worker in pool mode, until the library confirms the end. */
+struct killed_function {
+	/* The library process that runs the call. */
+	struct vine_process *library;
+	/* The number of slots of the library the call occupies. */
+	int slots;
+	/* The cores and memory of the worker the call holds, zero unless its library is in pool mode. */
+	int64_t cores;
+	int64_t memory;
+};
+
+/* Table of killed function calls still running in their library, indexed by task_id, with a struct killed_function as
+ * value. */
+static struct itable *procs_killed_functions = NULL;
 
 /* Table of current transfers and their id. */
 static struct hash_table *current_transfers = NULL;
@@ -197,93 +254,37 @@ struct vine_worker_options *options = 0;
 
 extern int vine_hack_do_not_compute_cached_name;
 
-/* Send a printf-formatted message to the current manager. */
+static void finish_running_task(struct vine_process *p, vine_result_t result);
 
-__attribute__((format(printf, 2, 3))) void send_message(struct link *l, const char *fmt, ...)
+/* Queue a line and the bytes that follow it as one entry, so a partly written message is finished whole. */
+
+static void send_message_data(const char *line, size_t line_length, const char *data, size_t length)
 {
-	char debug_msg[2 * VINE_LINE_MAX];
-	va_list va;
-	va_list debug_va;
-
-	va_start(va, fmt);
-
-	string_nformat(debug_msg, sizeof(debug_msg), "tx: %s", fmt);
-	va_copy(debug_va, va);
-
-	vdebug(D_VINE, debug_msg, debug_va);
-	link_vprintf(l, time(0) + options->active_timeout, fmt, va);
-
-	va_end(va);
-	va_end(debug_va);
-}
-
-/*
-Send messages from list of asychronous messages available.
-Asynchronus messages are measured and sent as to not overflow the
-TCP window (typically 64KB). This is done to avoid deadlock. Should
-the worker overflow the window, deadlock may occur in the scenario in
-which the manager requests data from the worker (files, etc.) during the
-the time in which the worker is sending data, causing the worker to block.
-This function attempts to deliver messages that have been buffered via
-the function send_async_message. We measure the size of the window and
-bytes present within the window. As we iterate though buffered messages,
-should a buffered message not overflow the the window, it is sent. Otherwise,
-we break once a message would overflow the window.
-*/
-
-void deliver_async_messages(struct link *l)
-{
-	/* If no pending messages, return right away. */
-	int messages = list_size(pending_async_messages);
-	if (messages < 1)
+	if (!manager_lw) {
 		return;
-
-	/* Determine how much space is available for sending */
-	int recv_window;
-	int send_window;
-	link_window_get(l, &send_window, &recv_window);
-
-	int bytes_in_buffer = link_get_buffer_bytes(l);
-	int bytes_available = send_window - bytes_in_buffer;
-
-	int visited;
-
-	/* Consider each message in the pending queue: */
-	for (visited = 0; visited < messages; visited++) {
-		char *message = list_peek_head(pending_async_messages);
-		int message_size = strlen(message);
-		/*
-		If the message fits in the available space, send it.
-		OR: If it is larger than the whole window, send it anyway
-		because we will have to block one way or the other.
-		Otherwise, stop here and return later.
-		*/
-		if (message_size < bytes_available || message_size > send_window) {
-			message = list_pop_head(pending_async_messages);
-			bytes_available -= message_size;
-			debug(D_VINE, "tx: %s", message);
-			link_printf(l, time(0) + options->active_timeout, "%s", message);
-			free(message);
-		} else {
-			break;
-		}
+	}
+	debug(D_VINE, "tx: %.*s", (int)line_length, line);
+	if (length == 0) {
+		link_writer_push(manager_lw, line, line_length);
+	} else {
+		char *message = xxmalloc(line_length + length);
+		memcpy(message, line, line_length);
+		memcpy(message + line_length, data, length);
+		link_writer_push(manager_lw, message, line_length + length);
+		free(message);
 	}
 }
 
-/* Buffer an asynchronous message to be sent to the manager */
+/* Queue a printf-formatted message to the current manager. */
 
-void send_async_message(struct link *l, const char *fmt, ...)
+__attribute__((format(printf, 1, 2))) void send_message(const char *fmt, ...)
 {
-	assert(l);
-
 	va_list va;
 	va_start(va, fmt);
 	int length = vsnprintf(NULL, 0, fmt, va);
 	va_end(va);
-
-	/* Abort if the message is longer than VINE_LINE_MAX. */
-	if (length >= VINE_LINE_MAX) {
-		fatal("message to the manager is %d bytes, more than VINE_LINE_MAX", length);
+	if (length < 0) {
+		return;
 	}
 
 	char *message = xxmalloc(length + 1);
@@ -291,8 +292,63 @@ void send_async_message(struct link *l, const char *fmt, ...)
 	vsnprintf(message, length + 1, fmt, va);
 	va_end(va);
 
-	list_push_tail(pending_async_messages, message);
-	deliver_async_messages(l); // attempt to deliver message, will be delivered later if buffer is full.
+	send_message_data(message, length, NULL, 0);
+	free(message);
+}
+
+/*
+Answer a manager request for the data of a cached file over the control link: "inline-data <name> <length> <mode>"
+followed by the bytes, or "inline-error <name> <errno>". The manager asks only for small files, so a connection of
+their own, which costs more than the file and occupies an entry of the host's connection tracking table for minutes,
+is not needed. A file larger than limit or not a regular file, such as a directory, is refused with EFBIG or EISDIR,
+and the manager then fetches it over a connection, as it does larger files. The reply goes through the manager queue, ordered
+with the other messages of the worker, and the manager reads it without waiting for the rest of a partial reply.
+*/
+
+static int do_inline_get(struct link *manager, const char *cachename, int64_t limit)
+{
+	char cachename_encoded[VINE_LINE_MAX];
+	url_encode(cachename, cachename_encoded, sizeof(cachename_encoded));
+
+	int error = 0;
+	int fd = -1;
+	struct stat info;
+	char *data = NULL;
+
+	if (!cachename[0] || strchr(cachename, '/') || !strcmp(cachename, ".") || !strcmp(cachename, "..")) {
+		error = EACCES;
+	} else {
+		char *path = vine_cache_data_path(cache_manager, cachename);
+		/* A FIFO would block the open until a writer comes, which never does. */
+		fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+		free(path);
+		if (fd < 0 || fstat(fd, &info) < 0) {
+			error = errno;
+		} else if (!S_ISREG(info.st_mode)) {
+			error = EISDIR;
+		} else if (info.st_size > limit) {
+			error = EFBIG;
+		} else {
+			data = xxmalloc(info.st_size + 1);
+			if (full_read(fd, data, info.st_size) != info.st_size) {
+				error = EIO;
+			}
+		}
+	}
+	if (fd >= 0) {
+		close(fd);
+	}
+
+	if (error) {
+		debug(D_VINE, "cannot send %s inline: %s", cachename, strerror(error));
+		send_message("inline-error %s %d\n", cachename_encoded, error);
+	} else {
+		char line[VINE_LINE_MAX];
+		int length = snprintf(line, sizeof(line), "inline-data %s %lld %o\n", cachename_encoded, (long long)info.st_size, (unsigned)(info.st_mode & 0777));
+		send_message_data(line, length, data, info.st_size);
+	}
+	free(data);
+	return 1;
 }
 
 /* Send asynchronous task completion messages for current complete processes */
@@ -306,18 +362,20 @@ void send_complete_tasks(struct link *l)
 		p = itable_pop(procs_complete);
 		if (p->output_length <= 1024 && p->output_length > 0) {
 
-			char *output;
+			char *output = xxmalloc(p->output_length + 1);
 			int output_file = open(p->output_file_name, O_RDONLY);
-			output = malloc(p->output_length + 1);
-			full_read(output_file, output, p->output_length);
-			output[p->output_length] = '\0';
-			close(output_file);
-			send_async_message(l,
-					"complete %d %d %lld %lld %llu %llu %d %d\n%s",
+			ssize_t length = output_file >= 0 ? full_read(output_file, output, p->output_length) : -1;
+			if (output_file >= 0) {
+				close(output_file);
+			}
+			/* The manager reads exactly the length sent, so a short read or a NUL byte shortens the output. */
+			output[MAX(length, 0)] = '\0';
+			length = strlen(output);
+			send_message("complete %d %d %lld %lld %llu %llu %" PRId64 " %d\n%s",
 					p->result,
 					p->exit_code,
-					(long long)p->output_length,
-					(long long)p->output_length,
+					(long long)length,
+					(long long)length,
 					(unsigned long long)p->execution_start,
 					(unsigned long long)p->execution_end,
 					p->sandbox_size,
@@ -325,12 +383,11 @@ void send_complete_tasks(struct link *l)
 					output);
 			free(output);
 		} else {
-			send_async_message(l,
-					"complete %d %d %lld %lld %llu %llu %d %d\n",
+			send_message("complete %d %d %lld %lld %llu %llu %" PRId64 " %d\n",
 					p->result,
 					p->exit_code,
 					(long long)p->output_length,
-					0,
+					0LL,
 					(unsigned long long)p->execution_start,
 					(unsigned long long)p->execution_end,
 					p->sandbox_size,
@@ -339,15 +396,32 @@ void send_complete_tasks(struct link *l)
 	}
 }
 
-static void report_changes(struct link *manager)
-{
-	vine_watcher_send_changes(watcher, manager, time(0) + options->active_timeout);
-	send_message(manager, "end\n");
+/*
+Queue the changes of watched files, followed by "end". If the data of a change cannot be sent in full, because the
+file shrank before the queue read it or the link failed, the queue fails, because the manager would read anything sent
+next as part of that data, and the worker disconnects. Return false if the queue refused the changes.
+*/
 
+static int report_changes(struct link *manager)
+{
 	results_to_be_sent_msg = 0;
+
+	/* The changes follow the messages already queued, and the queue sends each one's data whole. */
+	if (!vine_watcher_send_changes(watcher, manager_lw)) {
+		debug(D_VINE, "failed to send the changes of watched files");
+		return 0;
+	}
+
+	send_message("end\n");
+	return 1;
 }
 
-/* Receive a single-line message from the current manager. */
+/*
+Receive a single-line message from the current manager. The main loop calls it only for a line that is whole in the
+link's buffer, so it never waits there: the worker makes no blocking read of a manager message once it serves the
+manager (see "Whole-message rule" above ROUND_BUDGET), and a message of its own that the link took only in part
+continues in the next round instead of before a read (the deadlock rule of link_writer.h).
+*/
 
 int recv_message(struct link *l, char *line, int length, time_t stoptime)
 {
@@ -368,41 +442,159 @@ static void reset_idle_timer()
 }
 
 /*
-Measure the disk used by the worker. We only manually measure the cache directory, as processes measure themselves.
+Disk measurement runs on the main loop in pieces, each limited by the budget of a round. A measurement starts at most
+every check_resources_interval seconds. It measures the cache directory, then the sandbox of every task that requested
+disk and was running when the measurement started, and resumes in the next round where the budget stopped it. A large
+cache or sandbox, or a slow disk, then never keeps the main loop from reading the manager.
+*/
+
+/* Non-zero while a measurement is in progress. */
+static int disk_measurement_active = 0;
+
+/* State of the cache directory measurement between rounds. NULL when it has not started or has completed. */
+static struct path_disk_size_info *cache_disk_state = NULL;
+
+/* Non-zero once the current measurement completed the cache directory and moved on to sandboxes. */
+static int cache_disk_measured_now = 0;
+
+/* Ids of the tasks whose sandboxes the current measurement has yet to measure. The head is the one in progress. */
+static struct list *disk_measurement_tasks = NULL;
+
+/* Megabytes and files of the cache directory, from the last complete measurement. */
+static int64_t cache_disk_measured = 0;
+static int64_t cache_files_measured = 0;
+
+static void start_disk_measurement()
+{
+	if (disk_measurement_active || !cache_manager) {
+		return;
+	}
+
+	disk_measurement_active = 1;
+	cache_disk_measured_now = 0;
+
+	struct vine_process *p;
+	uint64_t task_id;
+	int iteration;
+	ITABLE_ITERATE(procs_running, iteration, task_id, p)
+	{
+		if (p->task->resources_requested->disk >= 1) {
+			list_push_tail(disk_measurement_tasks, (void *)(uintptr_t)task_id);
+		}
+	}
+}
+
+/* Abandon a measurement in progress, as when the worker disconnects from its manager. */
+
+static void stop_disk_measurement()
+{
+	path_disk_size_info_delete_state(cache_disk_state);
+	cache_disk_state = NULL;
+	while (list_pop_head(disk_measurement_tasks)) {
+	}
+	disk_measurement_active = 0;
+	cache_disk_measured_now = 0;
+}
+
+/* Measure the cache directory until the budget expires. Return 1 once the measurement of the cache completed. */
+
+static int measure_cache_disk(const struct budget *b)
+{
+	char *cache_dir = vine_cache_data_path(cache_manager, ".");
+	int result = path_disk_size_info_get_budget(cache_dir, b, &cache_disk_state, NULL);
+	free(cache_dir);
+
+	if (result == 0 && !cache_disk_state->complete_measurement) {
+		return 0;
+	}
+
+	if (result == 0 && cache_disk_state->last_byte_size_complete >= 0) {
+		cache_disk_measured = (int64_t)ceil(cache_disk_state->last_byte_size_complete / (1.0 * MEGA));
+		cache_files_measured = cache_disk_state->last_file_count_complete;
+		debug(D_VINE, "disk measurement: cache uses %" PRId64 " MB in %" PRId64 " files", cache_disk_measured, cache_files_measured);
+	} else {
+		debug(D_VINE, "disk measurement of the cache did not complete");
+	}
+
+	path_disk_size_info_delete_state(cache_disk_state);
+	cache_disk_state = NULL;
+	return 1;
+}
+
+/*
+Continue the disk measurement until the budget expires, and end each running task whose sandbox went over the disk
+it requested once its measurement completes. Return 0 if a task was ended.
+*/
+
+static int continue_disk_measurement(const struct budget *b)
+{
+	if (!disk_measurement_active) {
+		return 1;
+	}
+
+	if (!cache_disk_measured_now) {
+		if (!measure_cache_disk(b)) {
+			return 1;
+		}
+		cache_disk_measured_now = 1;
+	}
+
+	int ok = 1;
+	void *item;
+	while ((item = list_peek_head(disk_measurement_tasks))) {
+		if (budget_expired(b)) {
+			return ok;
+		}
+
+		/* The task may have ended since the measurement began. */
+		struct vine_process *p = itable_lookup(procs_running, (uint64_t)(uintptr_t)item);
+		if (p && !vine_process_measure_disk(p, b)) {
+			return ok;
+		}
+		list_pop_head(disk_measurement_tasks);
+
+		if (p && p->sandbox_size > p->task->resources_requested->disk) {
+			debug(D_VINE,
+					"Task %d went over its disk size limit: %s > %s\n",
+					p->task->task_id,
+					rmsummary_resource_to_str("disk", p->sandbox_size, /* with units */ 1),
+					rmsummary_resource_to_str("disk", p->task->resources_requested->disk, 1));
+			finish_running_task(p, VINE_RESULT_SANDBOX_EXHAUSTION);
+			trash_move(p->sandbox);
+			ok = 0;
+		}
+	}
+
+	disk_measurement_active = 0;
+	cache_disk_measured_now = 0;
+	return ok;
+}
+
+/*
+Measure the disk used by the worker: start a new measurement unless one is in progress, and return the usage of the
+cache directory from the last complete measurement and of task sandboxes from their latest measurements.
 */
 
 static int64_t measure_worker_disk()
 {
-	static struct path_disk_size_info *state = NULL;
-
-	if (!cache_manager)
+	if (!cache_manager) {
 		return 0;
-
-	char *cache_dir = vine_cache_data_path(cache_manager, ".");
-	path_disk_size_info_get_r(cache_dir, options->max_time_on_measurement, &state, NULL);
-	free(cache_dir);
-
-	int64_t disk_measured = 0;
-	if (state->last_byte_size_complete >= 0) {
-		disk_measured = (int64_t)ceil(state->last_byte_size_complete / (1.0 * MEGA));
 	}
 
-	files_counted = state->last_file_count_complete;
+	start_disk_measurement();
 
-	if (state->complete_measurement) {
-		/* if a complete measurement has been done, then update
-		 * for the found value, and add the known values of the processes. */
+	int64_t disk_measured = cache_disk_measured;
+	files_counted = cache_files_measured;
 
-		struct vine_process *p;
-		uint64_t task_id;
-		int iteration;
+	struct vine_process *p;
+	uint64_t task_id;
+	int iteration;
 
-		ITABLE_ITERATE(procs_table, iteration, task_id, p)
-		{
-			if (p->sandbox_size > 0) {
-				disk_measured += p->sandbox_size;
-				files_counted += p->sandbox_file_count;
-			}
+	ITABLE_ITERATE(procs_table, iteration, task_id, p)
+	{
+		if (p->sandbox_size > 0) {
+			disk_measured += p->sandbox_size;
+			files_counted += p->sandbox_file_count;
 		}
 	}
 
@@ -471,7 +663,7 @@ static void send_features(struct link *manager)
 	{
 		char feature_encoded[VINE_LINE_MAX];
 		url_encode(f, feature_encoded, VINE_LINE_MAX);
-		send_async_message(manager, "feature %s\n", feature_encoded);
+		send_message("feature %s\n", feature_encoded);
 	}
 }
 
@@ -480,8 +672,7 @@ static void vine_resources_send(struct link *manager, struct vine_resources *r)
 	debug(D_VINE, "Sending resource description to manager:");
 	vine_resources_debug(r);
 
-	send_async_message(manager,
-			"resources\ncores %lf\nmemory %lf\ndisk %lf\ngpus %lf\nworkers %lf\ntag %" PRId64 "\nend\n",
+	send_message("resources\ncores %lf\nmemory %lf\ndisk %lf\ngpus %lf\nworkers %lf\ntag %" PRId64 "\nend\n",
 			r->cores.total,
 			r->memory.total,
 			r->disk.total,
@@ -510,7 +701,7 @@ Send a message to the manager with my current statistics information.
 
 static void send_stats_update(struct link *manager)
 {
-	send_async_message(manager, "info tasks_running %lld\n", (long long)itable_size(procs_running));
+	send_message("info tasks_running %lld\n", (long long)itable_size(procs_running));
 }
 
 /*
@@ -518,9 +709,44 @@ Send a periodic keepalive message to the manager, otherwise it will
 think that the worker has crashed and gone away.
 */
 
+/*
+Rounds of the main loop, measured by a round timer (round_timer.h). The report window holds the rounds since the last
+answer to a check of the manager, the summary window those since the last round summary in the debug log.
+*/
+static struct round_window round_report;
+static struct round_window round_summary;
+
+/* Seconds between round summaries in the debug log. */
+#define ROUND_SUMMARY_INTERVAL 60
+
+/*
+With the timeout framework on, each answer to a check also reports the rounds since the last answer, so the manager
+sees the worker's response time X as it is: info round-stats <rounds> <longest round> <its slowest step> <that step>
+<window>, durations in microseconds. A manager that does not know the field ignores it.
+*/
+static void send_round_stats(struct link_writer *lw)
+{
+	if (options->response_timeout <= 0) {
+		return;
+	}
+	struct round_window *w = &round_report;
+	char line[VINE_LINE_MAX];
+	int length = snprintf(line, sizeof(line), "info round-stats %" PRId64 " %" PRIu64 " %s %" PRIu64 " %" PRIu64 "\n", w->rounds, (uint64_t)w->longest, w->step, (uint64_t)w->step_time, (uint64_t)round_window_length(w));
+	round_window_reset(w);
+	if (length <= 0 || length >= (int)sizeof(line)) {
+		return;
+	}
+	if (lw == probe_lw) {
+		debug(D_VINE, "tx probe: %.*s", length - 1, line);
+		link_writer_push(lw, line, length);
+	} else {
+		send_message_data(line, length, NULL, 0);
+	}
+}
+
 static int send_keepalive(struct link *manager, int force_resources)
 {
-	send_async_message(manager, "alive\n");
+	send_message("alive\n");
 	send_resource_update(manager);
 	return 1;
 }
@@ -541,8 +767,7 @@ void vine_worker_send_cache_update(struct link *manager, const char *cachename, 
 		transfer_id = xxstrdup("X");
 	}
 
-	send_async_message(manager,
-			"cache-update %s %d %d %lld %lld %lld %lld %s\n",
+	send_message("cache-update %s %d %d %lld %lld %lld %lld %s\n",
 			cachename,
 			f->original_type,
 			f->cache_level,
@@ -570,10 +795,10 @@ void vine_worker_send_cache_invalid(struct link *manager, const char *cachename,
 	char *transfer_id = hash_table_remove(current_transfers, cachename);
 	if (transfer_id) {
 		debug(D_VINE, "Sending Cache invalid transfer id: %s", transfer_id);
-		send_async_message(manager, "cache-invalid %s %d %s\n%s", cachename, length, transfer_id, message);
+		send_message("cache-invalid %s %d %s\n%s", cachename, length, transfer_id, message);
 		free(transfer_id);
 	} else {
-		send_async_message(manager, "cache-invalid %s %d\n%s", cachename, length, message);
+		send_message("cache-invalid %s %d\n%s", cachename, length, message);
 	}
 }
 
@@ -584,7 +809,7 @@ Send an asynchronous message to the manager indicating where the worker is liste
 static void send_transfer_address(struct link *manager)
 {
 	if (!vine_transfer_server_running()) {
-		send_async_message(manager, "info transfer_port_bind_failed\n");
+		send_message("info transfer_port_bind_failed %d-%d\n", options->transfer_port_min, options->transfer_port_max);
 		return;
 	}
 	char addr[LINK_ADDRESS_MAX];
@@ -596,9 +821,9 @@ static void send_transfer_address(struct link *manager)
 	}
 
 	if (options->reported_transfer_host) {
-		send_async_message(manager, "transfer-hostport %s %d\n", options->reported_transfer_host, port);
+		send_message("transfer-hostport %s %d\n", options->reported_transfer_host, port);
 	} else {
-		send_async_message(manager, "transfer-port %d\n", port);
+		send_message("transfer-port %d\n", port);
 	}
 }
 
@@ -619,8 +844,7 @@ static void report_worker_ready(struct link *manager)
 		strcpy(hostname, "unknown");
 	}
 
-	send_async_message(manager,
-			"taskvine %d %s %s %s %d.%d.%d\n",
+	send_message("taskvine %d %s %s %s %d.%d.%d\n",
 			VINE_PROTOCOL_VERSION,
 			hostname,
 			options->os_name,
@@ -628,18 +852,35 @@ static void report_worker_ready(struct link *manager)
 			CCTOOLS_VERSION_MAJOR,
 			CCTOOLS_VERSION_MINOR,
 			CCTOOLS_VERSION_MICRO);
-	send_async_message(manager, "info worker-id %s\n", worker_id);
+	send_message("info worker-id %s\n", worker_id);
 	vine_cache_scan(cache_manager, manager);
 
 	send_features(manager);
 	send_transfer_address(manager);
-	send_async_message(manager, "info worker-end-time %" PRId64 "\n", (int64_t)DIV_INT_ROUND_UP(options->end_time, USECOND));
+	if (options->connect_back) {
+		send_message("info connect-back 1\n");
+	}
+	send_message("info worker-end-time %" PRId64 "\n", (int64_t)DIV_INT_ROUND_UP(options->end_time, USECOND));
+
+	if (options->response_timeout > 0) {
+		/* Declare the response time X, which turns the timeout framework on at the manager for this worker. */
+		send_message("info response-timeout %d\n", options->response_timeout);
+	}
 
 	if (options->factory_name) {
-		send_async_message(manager, "info from-factory %s\n", options->factory_name);
+		send_message("info from-factory %s\n", options->factory_name);
 	}
 
 	send_keepalive(manager, 1);
+}
+
+/*
+Return the number of library slots a function task occupies, which the manager sends as its function_slots line.
+*/
+
+static int function_slots_needed(struct vine_task *t)
+{
+	return MAX(1, t->function_slots_total);
 }
 
 /*
@@ -683,19 +924,20 @@ static int start_process(struct vine_process *p, struct link *manager)
 		 * Also set the sigchld flag so the worker will immediately check for the library
 		 * startup instead of sleeping and waiting for the manager. */
 		if (p->task->provides_library) {
-			send_async_message(manager, "info library-update %d %d\n", p->task->task_id, VINE_LIBRARY_STARTED);
+			send_message("info library-update %d %d\n", p->task->task_id, VINE_LIBRARY_STARTED);
 			sigchld_received_flag = 1;
 		}
 
-		/* If this process represents a function, update the number running. */
+		/* If this process represents a function, occupy its slots of the library. */
 		if (t->needs_library) {
-			p->library_process->functions_running++;
+			p->library_process->function_slots_inuse += function_slots_needed(t);
 		}
 	} else {
 		fatal("unable to start task_id %d!", p->task->task_id);
 	}
 
 	itable_insert(procs_running, p->task->task_id, p);
+	schedule_process_deadline(p);
 
 	return 1;
 }
@@ -704,7 +946,21 @@ static int start_process(struct vine_process *p, struct link *manager)
 This process has ended so mark it complete and
 account for the resources as necessary.
 Should maintain parallel structure to start_process() above.
+With a manager, its outputs are moved into the cache by continue_stageout(), which then reports it complete.
 */
+
+/* Measure the standard output after stage-out, which moves it into the cache when it is also a task output. */
+
+static void complete_process(struct vine_process *p)
+{
+	struct stat info;
+	if (!stat(p->output_file_name, &info)) {
+		p->output_length = info.st_size;
+	} else {
+		p->output_length = 0;
+	}
+	itable_insert(procs_complete, p->task->task_id, p);
+}
 
 static void reap_process(struct vine_process *p, struct link *manager)
 {
@@ -718,22 +974,15 @@ static void reap_process(struct vine_process *p, struct link *manager)
 	xpu_tracker_free(gpu_tracker, p->task->task_id);
 	xpu_tracker_free(core_tracker, p->task->task_id);
 
-	if (manager) {
-		vine_sandbox_stageout(p, cache_manager, manager);
-	}
-
 	if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
-		p->library_process->functions_running--;
+		p->library_process->function_slots_inuse -= function_slots_needed(p->task);
 	}
 
 	itable_remove(procs_running, p->task->task_id);
-	itable_insert(procs_complete, p->task->task_id, p);
-
-	struct stat info;
-	if (!stat(p->output_file_name, &info)) {
-		p->output_length = info.st_size;
+	if (manager) {
+		list_push_tail(procs_stageout, p);
 	} else {
-		p->output_length = 0;
+		complete_process(p);
 	}
 
 	total_task_execution_time += (p->execution_end - p->execution_start);
@@ -741,24 +990,212 @@ static void reap_process(struct vine_process *p, struct link *manager)
 }
 
 /*
+Move the outputs of ended processes into the cache, in the order the processes ended, until the budget expires, and
+then report each process complete. Measuring a directory output resumes in the next round where the budget stopped
+it. Each call makes progress even with an expired budget, so a process whose outputs are regular files is reported in
+the round it ended.
+*/
+
+static void continue_stageout(struct link *manager, const struct budget *b)
+{
+	struct vine_process *p;
+	while ((p = list_peek_head(procs_stageout))) {
+		if (!vine_sandbox_stageout(p, cache_manager, manager, b)) {
+			return;
+		}
+		list_pop_head(procs_stageout);
+		complete_process(p);
+		if (budget_expired(b)) {
+			return;
+		}
+	}
+}
+
+/*
 Find any processes that have overrun their declared absolute end time,
 and send a kill signal.  The actual exit of the process will be detected at a later time.
 */
 
+/* An entry of procs_deadlines: the process by task id, and the serial it had when the entry was pushed. */
+struct process_deadline {
+	uint64_t task_id;
+	uint64_t serial;
+};
+
+static timestamp_t monotonic_usec()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (timestamp_t)ts.tv_sec * USECOND + ts.tv_nsec / 1000;
+}
+
+/*
+The monotonic deadline in microseconds of the next time limit of a running process not yet acted on, or 0 without
+one. The absolute end time and the wall time are given in the realtime clock, and are converted once here.
+*/
+static timestamp_t process_next_deadline(struct vine_process *p)
+{
+	timestamp_t now = timestamp_get();
+	timestamp_t mono = monotonic_usec();
+	timestamp_t deadline = 0;
+
+	/* A process killed for a time limit has none left to act on. */
+	if (p->result & (VINE_RESULT_MAX_END_TIME | VINE_RESULT_MAX_WALL_TIME)) {
+		return 0;
+	}
+
+	double end = p->task->resources_requested->end;
+	if (end > 0) {
+		double left = end * USECOND - (double)now;
+		deadline = mono + (left > 0 ? (timestamp_t)left : 0);
+	}
+
+	double wall_time = p->task->resources_requested->wall_time;
+	if (wall_time >= 1 && !p->wall_time_cancelled) {
+		double left = (double)p->execution_start + wall_time * USECOND - (double)now;
+		timestamp_t d = mono + (left > 0 ? (timestamp_t)left : 0);
+		if (deadline == 0 || d < deadline) {
+			deadline = d;
+		}
+	}
+
+	return deadline;
+}
+
+/* Drop stale entries once they outnumber running processes, so the heap stays O(running processes). */
+static void compact_process_deadlines()
+{
+	int size = priority_queue_size(procs_deadlines);
+	if (size < 2 * itable_size(procs_running) + 64) {
+		return;
+	}
+
+	struct priority_queue *fresh = priority_queue_create(itable_size(procs_running) + 1);
+	if (!fresh) {
+		return;
+	}
+
+	struct process_deadline *d;
+	while (priority_queue_size(procs_deadlines) > 0) {
+		double priority = priority_queue_get_top_priority(procs_deadlines);
+		d = priority_queue_pop(procs_deadlines);
+		struct vine_process *p = itable_lookup(procs_running, d->task_id);
+		if (p && p->deadline_serial == d->serial) {
+			priority_queue_push(fresh, d, priority);
+		} else {
+			free(d);
+		}
+	}
+	priority_queue_delete(procs_deadlines);
+	procs_deadlines = fresh;
+}
+
+/* Push the next time limit of a running process, replacing (lazily) any earlier entry it had. */
+static void schedule_process_deadline(struct vine_process *p)
+{
+	p->deadline_serial = ++procs_deadline_serial;
+
+	timestamp_t deadline = process_next_deadline(p);
+	if (deadline == 0) {
+		return;
+	}
+
+	struct process_deadline *d = malloc(sizeof(*d));
+	if (!d) {
+		return;
+	}
+	d->task_id = p->task->task_id;
+	d->serial = p->deadline_serial;
+	priority_queue_push(procs_deadlines, d, -(double)deadline);
+
+	compact_process_deadlines();
+}
+
+/*
+Milliseconds until the nearest time limit of a running process, at least 0, or max_msec when none comes sooner. The
+top entry may be stale, which only wakes the worker early once.
+*/
+static int process_deadline_wait_msec(int max_msec)
+{
+	if (priority_queue_size(procs_deadlines) == 0) {
+		return max_msec;
+	}
+
+	timestamp_t deadline = (timestamp_t)(-priority_queue_get_top_priority(procs_deadlines));
+	timestamp_t now = monotonic_usec();
+	if (deadline <= now) {
+		return 0;
+	}
+
+	timestamp_t msec = (deadline - now + 999) / 1000;
+	return msec < (timestamp_t)max_msec ? (int)msec : max_msec;
+}
+
+/*
+Act on a process past its time limits. Past its absolute end time it is killed. Past its wall time a standard task is
+killed, and a function call is handed to its library to stop. The actual exit is detected later.
+*/
+static void expire_process(struct vine_process *p)
+{
+	timestamp_t now = timestamp_get();
+
+	double end = p->task->resources_requested->end;
+	if (end > 0 && !(p->result & VINE_RESULT_MAX_END_TIME) && now / (double)USECOND > end) {
+		p->result = VINE_RESULT_MAX_END_TIME;
+		vine_process_kill(p);
+		return;
+	}
+
+	double wall_time = p->task->resources_requested->wall_time;
+	if (wall_time < 1 || p->wall_time_cancelled) {
+		return;
+	}
+	if (now <= p->execution_start + (1e6 * wall_time)) {
+		return;
+	}
+
+	debug(D_VINE,
+			"Task %d went over its running time limit: %s > %s\n",
+			p->task->task_id,
+			rmsummary_resource_to_str("wall_time", (now - p->execution_start) / 1e6, 1),
+			rmsummary_resource_to_str("wall_time", wall_time, 1));
+	if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
+		/* A call runs in a child of its library, which kills the child on request. The call keeps its slots and
+		 * resources until the library reports its end. A library that cannot stop a call (direct mode) lets it run
+		 * to its end, which is reported as it ended. */
+		p->wall_time_cancelled = 1;
+		if (p->library_process && p->library_process->library_can_cancel) {
+			vine_process_cancel_function(p);
+		} else {
+			debug(D_VINE, "function call %d is past its wall time, but its library cannot stop it", p->task->task_id);
+		}
+		return;
+	}
+	p->result = VINE_RESULT_MAX_WALL_TIME;
+	vine_process_kill(p);
+}
+
+/*
+Act on every process whose time limit has come, popping due entries from procs_deadlines in O(log n) each. A process
+with a later limit not yet acted on is pushed again.
+*/
 static void expire_procs_running()
 {
-	struct vine_process *p;
-	uint64_t task_id;
-	int iteration;
+	timestamp_t now = monotonic_usec();
 
-	double current_time = timestamp_get() / USECOND;
-
-	ITABLE_ITERATE(procs_running, iteration, task_id, p)
-	{
-		if (p->task->resources_requested->end > 0 && current_time > p->task->resources_requested->end) {
-			p->result = VINE_RESULT_MAX_END_TIME;
-			vine_process_kill(p);
+	while (priority_queue_size(procs_deadlines) > 0) {
+		timestamp_t deadline = (timestamp_t)(-priority_queue_get_top_priority(procs_deadlines));
+		if (deadline > now) {
+			break;
 		}
+
+		struct process_deadline *d = priority_queue_pop(procs_deadlines);
+		struct vine_process *p = itable_lookup(procs_running, d->task_id);
+		if (p && p->deadline_serial == d->serial) {
+			expire_process(p);
+			schedule_process_deadline(p);
+		}
+		free(d);
 	}
 }
 
@@ -784,6 +1221,15 @@ static void finish_running_tasks(vine_result_t result)
 	}
 }
 
+/* Release what a killed function call held once its library confirmed its end or ended itself. */
+static void release_killed_function(struct killed_function *killed)
+{
+	killed->library->function_slots_inuse -= killed->slots;
+	cores_allocated -= killed->cores;
+	memory_allocated -= killed->memory;
+	free(killed);
+}
+
 /*
 Reap the functions running in a library process that ends. They run in children of the library and end with it, so
 they are forsaken, and the manager runs them again. A function thus never runs without its library, and no process
@@ -803,6 +1249,15 @@ static void reap_library_functions(struct vine_process *library)
 			finish_running_task(p, VINE_RESULT_FORSAKEN);
 			reap_process(p, /* do not stage out */ NULL);
 			p->library_process = NULL;
+		}
+	}
+
+	struct killed_function *killed;
+	ITABLE_ITERATE(procs_killed_functions, iteration, task_id, killed)
+	{
+		if (killed->library == library) {
+			itable_remove(procs_killed_functions, task_id);
+			release_killed_function(killed);
 		}
 	}
 }
@@ -866,9 +1321,20 @@ static int handle_completed_tasks(struct link *manager)
 
 		/* If p is a library, check to see if any results waiting. */
 		while (vine_process_library_get_result(p, &done_task_id, &done_exit_code)) {
+			struct killed_function *killed = itable_lookup(procs_killed_functions, done_task_id);
+			if (killed && killed->library == p) {
+				itable_remove(procs_killed_functions, done_task_id);
+				release_killed_function(killed);
+				continue;
+			}
 			fp = itable_lookup(procs_table, done_task_id);
 			if (fp) {
 				fp->exit_code = done_exit_code;
+				/* A call stopped at its wall time ran past it only if the library killed it. One that ended first
+				 * is reported as it ended. */
+				if (fp->wall_time_cancelled && WIFSIGNALED(done_exit_code) && WTERMSIG(done_exit_code) == SIGKILL) {
+					fp->result = VINE_RESULT_MAX_WALL_TIME;
+				}
 				reap_process(fp, manager);
 			}
 		}
@@ -907,14 +1373,115 @@ static void normalize_resources(struct vine_process *p)
 }
 
 /*
-Handle an incoming task message from the manager.
-Generate a vine_process wrapped around a vine_task,
-and deposit it into the waiting list.
+A message of the manager whose body follows its first line: the lines of a task or a mini task up to their end line,
+with the bodies that cmd and env lines announce, or the item of a put. The main loop reads the body in pieces as it
+arrives, within the budget of each round (see "Whole-message rule" above ROUND_BUDGET), so a large file or task never
+keeps the worker from answering. The protocol is in order and the manager's messages are read one at a time, so at
+most one body is in progress, and the messages after it wait in the link until it completes.
 */
+struct manager_body {
+	struct vine_task *task;                  /* The task or mini task whose lines are arriving, or NULL for a put. */
+	int mini_task;                           /* Non-zero when task is a mini task, which produces cache_name. */
+	char *data;                              /* The body of a cmd or env line that is arriving, or NULL. */
+	int data_is_env;                         /* Non-zero when data is the body of an env line. */
+	int64_t data_length;                     /* The bytes of data that the line announced. */
+	int64_t data_received;                   /* The bytes of data received so far. */
+	struct vine_transfer_receiver *receiver; /* The receive of the item of a put, or NULL for a task. */
+	char *transfer_path;                     /* Where a put arrives before it enters the cache. */
+	char *cache_name;                        /* The cache name of a put or of the file that a mini task produces. */
+	char *source;                            /* The file in the mini task's sandbox that becomes cache_name. */
+	vine_cache_level_t cache_level;          /* The cache level of a put or mini task. */
+	int mode;                                /* The mode of the file of a mini task. */
+	int64_t size;                            /* The size the manager gave for the file of a mini task. */
+	timestamp_t start;                       /* When the put started, for the cache's transfer time. */
+};
 
-static struct vine_task *do_task_body(struct link *manager, int task_id, time_t stoptime)
+/* The message whose body is in progress, or NULL. */
+static struct manager_body *manager_body = NULL;
+
+static void manager_body_delete(struct manager_body *b)
 {
-	char line[VINE_LINE_MAX];
+	if (!b) {
+		return;
+	}
+	if (b->task) {
+		vine_task_delete(b->task);
+	}
+	vine_transfer_receiver_delete(b->receiver);
+	free(b->data);
+	free(b->transfer_path);
+	free(b->cache_name);
+	free(b->source);
+	free(b);
+}
+
+/* Drop a body that will not complete, with what a put had written. */
+static void abandon_manager_body(void)
+{
+	if (!manager_body) {
+		return;
+	}
+	if (manager_body->transfer_path) {
+		/* Close the file before it goes to the trash. */
+		vine_transfer_receiver_delete(manager_body->receiver);
+		manager_body->receiver = NULL;
+		trash_move(manager_body->transfer_path);
+	}
+	manager_body_delete(manager_body);
+	manager_body = NULL;
+}
+
+/* Start reading the lines of a task, or of a mini task that produces cache_name from source. Returns zero when out of
+ * memory. */
+static int start_task_body(int64_t task_id, const char *cache_name, const char *source, vine_cache_level_t cache_level, int64_t size, int mode)
+{
+	struct manager_body *b = calloc(1, sizeof(*b));
+	if (!b) {
+		return 0;
+	}
+	b->task = vine_task_create(0);
+	b->task->task_id = task_id;
+	if (cache_name) {
+		b->mini_task = 1;
+		b->cache_name = xxstrdup(cache_name);
+		b->source = xxstrdup(source);
+		b->cache_level = cache_level;
+		b->size = size;
+		b->mode = mode;
+	}
+	manager_body = b;
+	return 1;
+}
+
+/*
+Handle a request to put a file by receiving the file stream into a temporary transfer path, and then (if successful)
+add the file to the cache manager. Returns zero when out of memory.
+*/
+static int start_put(const char *cache_name, vine_cache_level_t cache_level)
+{
+	struct manager_body *b = calloc(1, sizeof(*b));
+	if (!b) {
+		return 0;
+	}
+	char *transfer_dir = vine_cache_transfer_path(cache_manager, ".");
+	b->receiver = vine_transfer_receiver_create(transfer_dir);
+	free(transfer_dir);
+	if (!b->receiver) {
+		free(b);
+		return 0;
+	}
+	b->transfer_path = vine_cache_transfer_path(cache_manager, cache_name);
+	b->cache_name = xxstrdup(cache_name);
+	b->cache_level = cache_level;
+	b->start = timestamp_get();
+	manager_body = b;
+	return 1;
+}
+
+/* Handle one line of a task. Returns 1 for a line that may be followed by more, 2 for the end line, and 0 for an
+ * invalid line. A cmd or env line leaves its body in b->data, which arrives next. */
+static int task_body_line(struct manager_body *b, const char *line)
+{
 	char localname[VINE_LINE_MAX];
 	char taskname[VINE_LINE_MAX];
 	char taskname_encoded[VINE_LINE_MAX];
@@ -922,93 +1489,102 @@ static struct vine_task *do_task_body(struct link *manager, int task_id, time_t 
 	char category[VINE_LINE_MAX];
 	int flags, length, groupid;
 	int64_t n;
-
 	timestamp_t nt;
+	struct vine_task *task = b->task;
 
-	struct vine_task *task = vine_task_create(0);
-	task->task_id = task_id;
-
-	while (recv_message(manager, line, sizeof(line), stoptime)) {
-		if (!strcmp(line, "end")) {
-			break;
-		} else if (sscanf(line, "category %s", category)) {
-			vine_task_set_category(task, category);
-		} else if (sscanf(line, "cmd %d", &length) == 1) {
-			char *cmd = malloc(length + 1);
-			link_read(manager, cmd, length, stoptime);
-			cmd[length] = 0;
-			vine_task_set_command(task, cmd);
-			debug(D_VINE, "rx: %s", cmd);
-			free(cmd);
-		} else if (sscanf(line, "needs_library %s", library_name) == 1) {
-			vine_task_set_library_required(task, library_name);
-		} else if (sscanf(line, "provides_library %s", library_name) == 1) {
-			vine_task_set_library_provided(task, library_name);
-		} else if (sscanf(line, "function_slots %" PRId64, &n) == 1) {
-			/* Set the number of slots requested by the user. */
-			task->function_slots_requested = n;
-			/* Also set the total number determined by the manager. */
-			task->function_slots_total = n;
-		} else if (sscanf(line, "func_exec_mode %" PRId64, &n) == 1) {
-			vine_task_func_exec_mode_t func_exec_mode = n;
-			if (func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_INVALID) {
-				debug(D_VINE | D_NOTICE, "invalid func_exec_mode from manager: %s", line);
-				vine_task_delete(task);
-				return 0;
-			}
-			task->func_exec_mode = func_exec_mode;
-		} else if (sscanf(line, "infile %s %s %d", localname, taskname_encoded, &flags)) {
-			url_decode(taskname_encoded, taskname, VINE_LINE_MAX);
-			vine_hack_do_not_compute_cached_name = 1;
-			vine_task_add_input_file(task, localname, taskname, flags);
-		} else if (sscanf(line, "outfile %s %s %d", localname, taskname_encoded, &flags)) {
-			url_decode(taskname_encoded, taskname, VINE_LINE_MAX);
-			vine_hack_do_not_compute_cached_name = 1;
-			vine_task_add_output_file(task, localname, taskname, flags);
-		} else if (sscanf(line, "cores %" PRId64, &n)) {
-			vine_task_set_cores(task, n);
-		} else if (sscanf(line, "memory %" PRId64, &n)) {
-			vine_task_set_memory(task, n);
-		} else if (sscanf(line, "disk %" PRId64, &n)) {
-			vine_task_set_disk(task, n);
-		} else if (sscanf(line, "gpus %" PRId64, &n)) {
-			vine_task_set_gpus(task, n);
-		} else if (sscanf(line, "groupid %d", &groupid)) {
-			task->group_id = groupid;
-		} else if (sscanf(line, "wall_time %" PRIu64, &nt)) {
-			vine_task_set_time_max(task, nt);
-		} else if (sscanf(line, "end_time %" PRIu64, &nt)) {
-			vine_task_set_time_end(task, nt * USECOND); // end_time needs it usecs
-		} else if (sscanf(line, "env %d", &length) == 1) {
-			char *env = malloc(length + 2); /* +2 for \n and \0 */
-			link_read(manager, env, length + 1, stoptime);
-			env[length] = 0; /* replace \n with \0 */
-			char *value = strchr(env, '=');
-			if (value) {
-				*value = 0;
-				value++;
-				vine_task_set_env_var(task, env, value);
-			}
-			free(env);
-		} else {
-			debug(D_VINE | D_NOTICE, "invalid command from manager: %s", line);
-			vine_task_delete(task);
+	if (!strcmp(line, "end")) {
+		return 2;
+	} else if (sscanf(line, "category %s", category)) {
+		vine_task_set_category(task, category);
+	} else if (sscanf(line, "cmd %d", &length) == 1 && length >= 0) {
+		b->data = malloc(length + 1);
+		if (!b->data) {
 			return 0;
 		}
+		b->data_is_env = 0;
+		b->data_length = length;
+		b->data_received = 0;
+	} else if (sscanf(line, "needs_library %s", library_name) == 1) {
+		vine_task_set_library_required(task, library_name);
+	} else if (sscanf(line, "provides_library %s", library_name) == 1) {
+		vine_task_set_library_provided(task, library_name);
+	} else if (sscanf(line, "function_slots %" PRId64, &n) == 1) {
+		/* Set the number of slots requested by the user. */
+		task->function_slots_requested = n;
+		/* Also set the total number determined by the manager. */
+		task->function_slots_total = n;
+	} else if (sscanf(line, "library_pool %" PRId64, &n) == 1) {
+		vine_task_set_library_pool(task, n);
+	} else if (sscanf(line, "func_exec_mode %" PRId64, &n) == 1) {
+		vine_task_func_exec_mode_t func_exec_mode = n;
+		if (func_exec_mode == VINE_TASK_FUNC_EXEC_MODE_INVALID) {
+			debug(D_VINE | D_NOTICE, "invalid func_exec_mode from manager: %s", line);
+			return 0;
+		}
+		task->func_exec_mode = func_exec_mode;
+	} else if (sscanf(line, "infile %s %s %d", localname, taskname_encoded, &flags)) {
+		url_decode(taskname_encoded, taskname, VINE_LINE_MAX);
+		vine_hack_do_not_compute_cached_name = 1;
+		vine_task_add_input_file(task, localname, taskname, flags);
+	} else if (sscanf(line, "outfile %s %s %d", localname, taskname_encoded, &flags)) {
+		url_decode(taskname_encoded, taskname, VINE_LINE_MAX);
+		vine_hack_do_not_compute_cached_name = 1;
+		vine_task_add_output_file(task, localname, taskname, flags);
+	} else if (sscanf(line, "cores %" PRId64, &n)) {
+		vine_task_set_cores(task, n);
+	} else if (sscanf(line, "memory %" PRId64, &n)) {
+		vine_task_set_memory(task, n);
+	} else if (sscanf(line, "disk %" PRId64, &n)) {
+		vine_task_set_disk(task, n);
+	} else if (sscanf(line, "gpus %" PRId64, &n)) {
+		vine_task_set_gpus(task, n);
+	} else if (sscanf(line, "groupid %d", &groupid)) {
+		task->group_id = groupid;
+	} else if (sscanf(line, "wall_time %" PRIu64, &nt)) {
+		vine_task_set_time_max(task, nt);
+	} else if (sscanf(line, "end_time %" PRIu64, &nt)) {
+		vine_task_set_time_end(task, nt * USECOND); // end_time needs it usecs
+	} else if (sscanf(line, "env %d", &length) == 1 && length >= 0) {
+		/* The body ends with a newline. */
+		b->data = malloc(length + 2);
+		if (!b->data) {
+			return 0;
+		}
+		b->data_is_env = 1;
+		b->data_length = length + 1;
+		b->data_received = 0;
+	} else {
+		debug(D_VINE | D_NOTICE, "invalid command from manager: %s", line);
+		return 0;
 	}
-
-	return task;
+	return 1;
 }
 
-/* Handle the receipt of a task description and add it to the proper data structures. */
-
-static int do_task(struct link *manager, int task_id, time_t stoptime)
+/* Apply the body of a cmd or env line that has all arrived. */
+static void task_body_data(struct manager_body *b)
 {
-	struct vine_task *task = do_task_body(manager, task_id, stoptime);
-	if (!task)
-		return 0;
+	if (b->data_is_env) {
+		b->data[b->data_length - 1] = 0; /* replace \n with \0 */
+		char *value = strchr(b->data, '=');
+		if (value) {
+			*value = 0;
+			value++;
+			vine_task_set_env_var(b->task, b->data, value);
+		}
+	} else {
+		b->data[b->data_length] = 0;
+		vine_task_set_command(b->task, b->data);
+		debug(D_VINE, "rx: %s", b->data);
+	}
+	free(b->data);
+	b->data = NULL;
+}
 
-	last_task_received = task->task_id;
+/* Handle a task whose lines have all arrived by adding it to the proper data structures. Returns zero on failure. */
+static int finish_task(struct vine_task *task)
+{
+	int64_t task_id = task->task_id;
+	last_task_received = task_id;
 
 	vine_process_type_t type = VINE_PROCESS_TYPE_STANDARD;
 
@@ -1016,13 +1592,18 @@ static int do_task(struct link *manager, int task_id, time_t stoptime)
 		type = VINE_PROCESS_TYPE_FUNCTION;
 	} else if (task->provides_library) {
 		type = VINE_PROCESS_TYPE_LIBRARY;
+		/* A library in pool mode has one slot per core of this worker, and its calls hold their own cores. */
+		if (task->library_pool && task->func_exec_mode != VINE_TASK_FUNC_EXEC_MODE_DIRECT) {
+			task->function_slots_total = MAX(1, (int)total_resources->cores.total);
+		}
 	} else {
 		type = VINE_PROCESS_TYPE_STANDARD;
 	}
 
 	struct vine_process *p = vine_process_create(task, type);
-	if (!p)
+	if (!p) {
 		return 0;
+	}
 
 	itable_insert(procs_table, task_id, p);
 
@@ -1034,37 +1615,91 @@ static int do_task(struct link *manager, int task_id, time_t stoptime)
 	return 1;
 }
 
-/*
-Handle a request to put a file by receiving the file stream
-into a temporary transfer path, and then (if successful)
-add the file to the cache manager.
-*/
-
-static int do_put(struct link *manager, const char *cachename, vine_cache_level_t cache_level, int64_t expected_size)
+/* Read what has arrived of the lines of a task, while the budget lasts and at least one piece. Returns zero when the
+ * task is invalid, 2 when it is complete, and 1 while more is to come. */
+static int continue_task_body(struct link *manager, struct manager_body *b, const struct budget *round)
 {
-	int64_t actual_size = 0;
-	int mode = 0;
-	int mtime = 0;
+	int pieces = 0;
+	while (pieces == 0 || !budget_expired(round)) {
+		pieces++;
+		if (b->data) {
+			/* At most 64 KB per piece, so a large command that keeps arriving still yields to the budget. */
+			int64_t wanted = MIN(b->data_length - b->data_received, 1 << 16);
+			ssize_t n = wanted > 0 ? link_read_avail(manager, b->data + b->data_received, wanted, LINK_NOWAIT) : 0;
+			if (n < 0 && (errno == ETIMEDOUT || errno_is_temporary(errno))) {
+				return 1;
+			}
+			if (wanted > 0 && n <= 0) {
+				debug(D_VINE, "failed to read the body of a task line from the manager");
+				return 0;
+			}
+			b->data_received += n;
+			if (b->data_received == b->data_length) {
+				task_body_data(b);
+			}
+			continue;
+		}
+		if (link_buffer_has_line(manager) != 1) {
+			return 1;
+		}
+		char line[VINE_LINE_MAX];
+		if (!recv_message(manager, line, sizeof(line), LINK_NOWAIT)) {
+			debug(D_VINE, "failed to read a task line from the manager");
+			return 0;
+		}
+		int r = task_body_line(b, line);
+		if (r != 1) {
+			return r;
+		}
+	}
+	return 1;
+}
 
-	char *transfer_dir = vine_cache_transfer_path(cache_manager, ".");
-	char *transfer_path = vine_cache_transfer_path(cache_manager, cachename);
+/*
+Continue the message whose body is in progress with what has arrived, while the budget lasts and at least one piece.
+Once the body is complete, its message is handled and manager_body is NULL. Returns zero when the message failed, which
+disconnects the manager as a failed message always did.
+*/
+static int continue_manager_body(struct link *manager, const struct budget *round)
+{
+	struct manager_body *b = manager_body;
+	int r = 1;
 
-	timestamp_t start = timestamp_get();
-	char *error_message = NULL;
-	int r = vine_transfer_get_any(manager, transfer_dir, &actual_size, &mode, &mtime, time(0) + options->active_timeout, &error_message);
-	timestamp_t stop = timestamp_get();
-
-	/* XXX actual_size should equal expected size, but only for a simple file, not a dir. */
-
-	if (r) {
-		vine_cache_add_file(cache_manager, cachename, transfer_path, cache_level, mode, actual_size, mtime, start, stop - start, manager);
+	if (b->receiver) {
+		vine_transfer_receive_status_t status = vine_transfer_receiver_continue(b->receiver, manager, round);
+		if (status == VINE_TRANSFER_RECEIVE_PENDING) {
+			return 1;
+		}
+		/* The cache records the bytes that arrived, which for a directory differ from the size the manager gave. */
+		if (status == VINE_TRANSFER_RECEIVE_COMPLETE) {
+			timestamp_t stop = timestamp_get();
+			struct vine_transfer_receiver *receiver = b->receiver;
+			vine_cache_add_file(cache_manager, b->cache_name, b->transfer_path, b->cache_level, vine_transfer_receiver_mode(receiver), vine_transfer_receiver_size(receiver), vine_transfer_receiver_mtime(receiver), b->start, stop - b->start, manager);
+		} else {
+			vine_transfer_receiver_delete(b->receiver);
+			b->receiver = NULL;
+			trash_move(b->transfer_path);
+			r = 0;
+		}
+		reset_idle_timer();
 	} else {
-		trash_file(transfer_path);
+		r = continue_task_body(manager, b, round);
+		if (r == 1) {
+			return 1;
+		}
+		if (r == 2) {
+			struct vine_task *task = b->task;
+			b->task = NULL;
+			if (b->mini_task) {
+				r = vine_cache_add_mini_task(cache_manager, b->cache_name, b->source, task, b->cache_level, b->mode, b->size);
+			} else {
+				r = finish_task(task);
+			}
+		}
 	}
 
-	free(transfer_path);
-	free(transfer_dir);
-
+	manager_body_delete(b);
+	manager_body = NULL;
 	return r;
 }
 
@@ -1087,22 +1722,6 @@ static int do_put_url_now(const char *cache_name, vine_cache_level_t cache_level
 }
 
 /*
-Accept a mini_task that is executed on demand.
-We will then extract the file "source" from the sandbox in order to produce "cache_name".
-*/
-
-static int do_put_mini_task(struct link *manager, time_t stoptime, const char *cache_name, vine_cache_level_t cache_level, int64_t size, int mode, const char *source)
-{
-	mini_task_id++;
-
-	struct vine_task *mini_task = do_task_body(manager, mini_task_id, stoptime);
-	if (!mini_task)
-		return 0;
-
-	return vine_cache_add_mini_task(cache_manager, cache_name, source, mini_task, cache_level, mode, size);
-}
-
-/*
 The manager has requested the deletion of a file in the cache
 directory.  If the request is valid, then move the file to the
 trash and deal with it there.
@@ -1114,7 +1733,11 @@ static int do_unlink(struct link *manager, const char *path)
 
 	int result = 0;
 
-	if (path_within_dir(cached_path, workspace->workspace_dir)) {
+	/* A cache name of one path component names an entry of the cache directory, which is within the workspace.
+	 * Other names are checked by resolving their parents, which takes a system call per path component. */
+	int plain_name = !strchr(path, '/') && strcmp(path, ".") && strcmp(path, "..");
+
+	if (plain_name || path_within_dir(cached_path, workspace->workspace_dir)) {
 		vine_cache_remove(cache_manager, path, manager);
 		result = 1;
 	} else {
@@ -1150,18 +1773,63 @@ static int do_kill(int task_id)
 		if (p->type == VINE_PROCESS_TYPE_LIBRARY) {
 			reap_library_functions(p);
 		}
-		vine_process_kill_and_wait(p);
+		/* The process is not waited for here, which would stop the main loop until it exits. Its sandbox goes to the
+		 * trash below, so a task sent again under the same id gets a new one, and its exit status is collected later. */
+		vine_process_kill(p);
+		if (p->pid > 0) {
+			itable_insert(procs_killed, p->pid, (void *)(uintptr_t)p->pid);
+		}
 		reap_process(p, /* do not stage out */ NULL);
+		if (p->type == VINE_PROCESS_TYPE_FUNCTION) {
+			/* The library keeps running the call until it confirms its end, so its slots, and its cores and memory in
+			 * pool mode, stay occupied. */
+			struct killed_function *killed = xxmalloc(sizeof(*killed));
+			killed->library = p->library_process;
+			killed->slots = function_slots_needed(p->task);
+			killed->cores = p->task->resources_requested->cores;
+			killed->memory = p->task->resources_requested->memory;
+			p->library_process->function_slots_inuse += killed->slots;
+			cores_allocated += killed->cores;
+			memory_allocated += killed->memory;
+			itable_insert(procs_killed_functions, task_id, killed);
+			if (p->library_process->library_can_cancel) {
+				vine_process_cancel_function(p);
+			}
+		}
 	}
 
 	itable_remove(procs_complete, p->task->task_id);
 	list_remove(procs_waiting, p);
+	list_remove(procs_stageout, p);
 
 	vine_watcher_remove_process(watcher, p);
 
 	vine_process_delete(p);
 
 	return 1;
+}
+
+/*
+Collect the exit status of processes that do_kill() dropped. Without waiting, collect only those that exited. With
+waiting, as when disconnecting, wait for each, which is short because each was sent SIGKILL.
+*/
+
+static void reap_killed_processes(int wait)
+{
+	uint64_t pid;
+	void *dummy;
+	int iteration;
+	ITABLE_ITERATE(procs_killed, iteration, pid, dummy)
+	{
+		pid_t result;
+		do {
+			result = waitpid((pid_t)pid, NULL, wait ? 0 : WNOHANG);
+		} while (wait && result < 0 && errno == EINTR);
+		/* An error other than an interruption means the process is no longer a child to wait for. */
+		if (result != 0) {
+			itable_remove(procs_killed, pid);
+		}
+	}
 }
 
 /*
@@ -1187,98 +1855,13 @@ static void kill_all_tasks()
 	assert(itable_size(procs_running) == 0);
 	assert(itable_size(procs_complete) == 0);
 	assert(list_size(procs_waiting) == 0);
+	assert(list_size(procs_stageout) == 0);
 	assert(cores_allocated == 0);
 	assert(memory_allocated == 0);
 	assert(disk_allocated == 0);
 	assert(gpus_allocated == 0);
 
 	debug(D_VINE, "all data structures are clean");
-}
-
-/* Check whether a given process is still within the various limits imposed on it. */
-
-static int enforce_process_sanbox_limits(struct vine_process *p)
-{
-	/* If the task did not set disk usage, return right away. */
-	if (p->task->resources_requested->disk < 1)
-		return 1;
-
-	vine_process_measure_disk(p, options->max_time_on_measurement);
-	if (p->sandbox_size > p->task->resources_requested->disk) {
-		debug(D_VINE,
-				"Task %d went over its disk size limit: %s > %s\n",
-				p->task->task_id,
-				rmsummary_resource_to_str("disk", p->sandbox_size, /* with units */ 1),
-				rmsummary_resource_to_str("disk", p->task->resources_requested->disk, 1));
-		return 0;
-	}
-
-	return 1;
-}
-
-/* Check all processes to see whether they have exceeded various limits, and kill if necessary. */
-
-static int enforce_processes_sandbox_limits()
-{
-	static time_t last_check_time = 0;
-
-	struct vine_process *p;
-	uint64_t task_id;
-	int iteration;
-
-	int ok = 1;
-
-	/* Do not check too often, as it is expensive (particularly disk) */
-	if ((time(0) - last_check_time) < options->check_resources_interval)
-		return 1;
-
-	ITABLE_ITERATE(procs_running, iteration, task_id, p)
-	{
-		if (!enforce_process_sanbox_limits(p)) {
-			finish_running_task(p, VINE_RESULT_SANDBOX_EXHAUSTION);
-			trash_file(p->sandbox);
-
-			ok = 0;
-		}
-	}
-
-	last_check_time = time(0);
-
-	return ok;
-}
-
-/*
-We check maximum_running_time by itself (not in enforce_processes_limits),
-as other running tasks should not be affected by a task timeout.
-*/
-
-static void enforce_processes_max_running_time()
-{
-	struct vine_process *p;
-	uint64_t task_id;
-	int iteration;
-
-	timestamp_t now = timestamp_get();
-
-	ITABLE_ITERATE(procs_running, iteration, task_id, p)
-	{
-
-		/* If the task did not set wall_time, return right away. */
-		if (p->task->resources_requested->wall_time < 1)
-			continue;
-
-		if (now > p->execution_start + (1e6 * p->task->resources_requested->wall_time)) {
-			debug(D_VINE,
-					"Task %d went over its running time limit: %s > %s\n",
-					p->task->task_id,
-					rmsummary_resource_to_str("wall_time", (now - p->execution_start) / 1e6, 1),
-					rmsummary_resource_to_str("wall_time", p->task->resources_requested->wall_time, 1));
-			p->result = VINE_RESULT_MAX_WALL_TIME;
-			vine_process_kill(p);
-		}
-	}
-
-	return;
 }
 
 /* Handle a release message from the manager, asking the worker to cleanly exit. */
@@ -1290,15 +1873,188 @@ static int do_release()
 	return 0;
 }
 
+/* Close the probe link and drop what its queue still holds. */
+
+static void close_probe_link(void)
+{
+	link_writer_delete(probe_lw);
+	probe_lw = NULL;
+	if (probe_link) {
+		link_close(probe_link);
+	}
+	probe_link = NULL;
+	manager_response_timeout = 0;
+	manager_stall_timeout = 0;
+	manager_check_sent = 0;
+}
+
+/* Close the link to the manager and drop what its queue still holds, and the probe link with it. */
+
+static void close_manager_link(struct link *manager)
+{
+	abandon_manager_body();
+	link_writer_delete(manager_lw);
+	manager_lw = NULL;
+	manager_link = NULL;
+	link_close(manager);
+	close_probe_link();
+}
+
+/* The most lines that one round reads from the probe link. The manager sends one check at a time. */
+#define PROBE_LINES 8
+
+/* The timeout of a check of the manager is this many times X_M, as the manager's timeout of a check of a worker is
+ * VINE_PROBE_ROUNDS times the worker's X (vine_manager.c). */
+#define MANAGER_PROBE_ROUNDS 2
+
+/*
+Answer the manager's checks on the probe link in this round: info round-stats (with the framework on) and alive go out
+on the probe link at once, and the resource update that a check on the control link also brings goes on the control
+link. The same link brings the manager's answers to the worker's own checks (alive) and its declaration of X_M
+(response-timeout <X_M> <stall bound>). Lines are read only when whole in the buffer, so the round never waits for the
+manager. A probe link that fails or carries anything else is closed, and the worker goes on: the manager judges the
+loss of its half, and the control link the rest.
+*/
+static void serve_probe_link(struct link *manager, struct budget *round)
+{
+	int lines = 0;
+	while (lines < PROBE_LINES && link_buffer_has_line(probe_link) == 1) {
+		char line[VINE_LINE_MAX];
+		if (link_readline(probe_link, line, sizeof(line), LINK_NOWAIT) <= 0) {
+			debug(D_VINE, "the probe link to the manager closed");
+			close_probe_link();
+			return;
+		}
+		lines++;
+		debug(D_VINE, "rx probe: %s", line);
+		int x, bound;
+		if (!strcmp(line, "alive")) {
+			manager_check_sent = 0;
+			continue;
+		} else if (sscanf(line, "response-timeout %d %d", &x, &bound) == 2) {
+			manager_response_timeout = MAX(0, x);
+			manager_stall_timeout = MAX(0, bound);
+			manager_check_sent = 0;
+			continue;
+		} else if (strcmp(line, "check")) {
+			debug(D_NOTICE, "unexpected message on the probe link to the manager: %s", line);
+			close_probe_link();
+			return;
+		}
+		send_round_stats(probe_lw);
+		debug(D_VINE, "tx probe: alive");
+		link_writer_push(probe_lw, "alive\n", 6);
+		send_resource_update(manager);
+	}
+	if (!link_writer_empty(probe_lw) && !link_writer_send_async(probe_lw, round->end)) {
+		debug(D_VINE, "failed to answer on the probe link to the manager");
+		close_probe_link();
+	}
+}
+
+/* The timeout T_M of a check of the manager on the probe link, or zero while the manager declared no X_M. */
+static int manager_probe_timeout(void)
+{
+	return (probe_link && manager_response_timeout > 0) ? MANAGER_PROBE_ROUNDS * manager_response_timeout : 0;
+}
+
+/* When the worker last read a byte of the manager on either link. */
+static timestamp_t manager_last_heard(struct link *manager)
+{
+	return probe_link ? MAX(link_last_read(manager), link_last_read(probe_link)) : link_last_read(manager);
+}
+
+/*
+Judge the manager by the probe link, as the manager judges the worker (see "Workers judge the manager" in
+vine_manager.c), once the manager declared X_M. A check goes out on the probe link when nothing came from the manager
+on either link for T_M / 2, one at a time, and any byte of the manager on either link ends it. When a check stays
+unanswered for T_M with nothing read since, the worker reads the probe link once more, so an answer that waited for
+this round counts, and then leaves the manager. Returns zero when it does. The time of the next action of this
+judgment bounds the wait of the main loop (manager_probe_wait()), so the worker notices it within a round.
+*/
+static int probe_manager(struct link *manager, struct budget *round)
+{
+	int timeout = manager_probe_timeout();
+	if (!timeout) {
+		return 1;
+	}
+	timestamp_t now = timestamp_monotonic();
+	timestamp_t heard = manager_last_heard(manager);
+	if (manager_check_sent && heard >= manager_check_sent) {
+		manager_check_sent = 0;
+	}
+	if (!manager_check_sent) {
+		if (now - heard >= (timestamp_t)timeout * USECOND / 2) {
+			debug(D_VINE, "tx probe: check");
+			link_writer_push(probe_lw, "check\n", 6);
+			if (!link_writer_send_async(probe_lw, round->end)) {
+				debug(D_VINE, "failed to send a check on the probe link to the manager");
+				close_probe_link();
+				return 1;
+			}
+			manager_check_sent = now;
+		}
+		return 1;
+	}
+	if (now - manager_check_sent < (timestamp_t)timeout * USECOND) {
+		return 1;
+	}
+	serve_probe_link(manager, round);
+	if (!probe_link || !manager_check_sent || manager_last_heard(manager) >= manager_check_sent) {
+		manager_check_sent = 0;
+		return 1;
+	}
+	debug(D_NOTICE, "the manager answered no check on the probe link and sent nothing on either link for %d s (X_M %d s), disconnecting", timeout, manager_response_timeout);
+	return 0;
+}
+
+/* The longest wait in milliseconds of the main loop before probe_manager() has something to do, or the given wait. */
+static int manager_probe_wait(struct link *manager, int msec)
+{
+	int timeout = manager_probe_timeout();
+	if (!timeout) {
+		return msec;
+	}
+	timestamp_t next = manager_check_sent ? manager_check_sent + (timestamp_t)timeout * USECOND : manager_last_heard(manager) + (timestamp_t)timeout * USECOND / 2;
+	timestamp_t now = timestamp_monotonic();
+	int until = next > now ? (int)((next - now + 999) / 1000) : 0;
+	return msec < 0 ? until : MIN(msec, until);
+}
+
+/*
+The control queue to the manager has taken and sent no data for its bound. With the probe link judging the manager,
+the bound is the stall bound that the manager declared, much longer than T, because the answers on the probe link show
+that the manager's loop runs and the queue then waits only for room that the manager's kernel has not shown yet (see
+vine_manager_queue_stall_timeout() in vine_manager.c). Otherwise it is T of the worker (vine_worker_made_no_progress()).
+*/
+int vine_worker_made_no_progress(struct link_writer *lw, struct link *link);
+
+static int manager_queue_stalled(struct link *manager)
+{
+	if (!manager_probe_timeout()) {
+		return vine_worker_made_no_progress(manager_lw, manager);
+	}
+	if (!manager_stall_timeout || link_writer_empty(manager_lw)) {
+		return 0;
+	}
+	timestamp_t progress = MAX(link_writer_last_progress(manager_lw), link_last_read(manager));
+	return timestamp_monotonic() - progress >= (timestamp_t)manager_stall_timeout * USECOND;
+}
+
 /* Handle an unexpected disconnection by the current manager, and clean up everything. */
 
 static void disconnect_manager(struct link *manager)
 {
 	debug(D_VINE, "disconnecting from manager %s:%d", current_manager_address->addr, current_manager_address->port);
-	link_close(manager);
+
+	/* Queued messages, such as info vacating, go out before the link closes, unless the link fails. Messages that this
+	 * manager did not take belong to its session, and a partly sent one would corrupt the next. */
+	link_writer_send_sync(manager_lw, timestamp_monotonic() + options->active_timeout * 1000000LL, 0);
+	close_manager_link(manager);
 
 	debug(D_VINE, "killing all outstanding tasks");
 	kill_all_tasks();
+	reap_killed_processes(1);
 
 	if (released_by_manager) {
 		released_by_manager = 0;
@@ -1309,30 +2065,69 @@ static void disconnect_manager(struct link *manager)
 	}
 }
 
-void send_stdout(struct link *l, int64_t task_id)
+static void send_stdout(int64_t task_id)
 {
 	char line[VINE_LINE_MAX];
 	struct vine_process *p = itable_lookup(procs_table, task_id);
 	if (!p) {
 		strcpy(line, "process unknown: no stdout");
 		errno = ESRCH;
-		send_message(l, "error %s %d\n", line, errno);
+		send_message("error %s %d\n", line, errno);
 		return;
 	}
 
 	int output_file = open(p->output_file_name, O_RDONLY);
 	if (output_file < 0) {
-		send_message(l, "error %s %d\n", p->output_file_name, errno);
+		send_message("error %s %d\n", p->output_file_name, errno);
 		return;
 	}
 
-	send_message(l, "stdout %" SCNd64 " %lld\n", task_id, (long long)p->output_length);
+	send_message("stdout %" SCNd64 " %lld\n", task_id, (long long)p->output_length);
+	/* The queue owns the descriptor and reads the output as the link takes it. */
+	link_writer_push_fd(manager_lw, output_file, 0, p->output_length);
+}
 
-	if (output_file >= 0) {
-		link_stream_from_fd(l, output_file, p->output_length, time(0) + options->active_timeout);
-		close(output_file);
+/* The number of the loss of the session's state in progress, which "lost" answers once its files are removed, or zero
+ * when no loss is in progress. */
+static int64_t lose_sequence = 0;
+
+/*
+Lose the state of the manager's session on its request, as a worker that loses its manager does, while it stays
+connected: kill the tasks and libraries, end the transfers that the transfer server serves, kill the transfers and
+copies in progress, and remove the cached files of workflow level or less and every file not yet ready. The kills
+never wait, and the files are removed in budgeted pieces (continue_lose()). A loss that comes while another is in
+progress replaces it. See vine_lose_worker().
+*/
+
+static int do_lose(struct link *manager, int64_t sequence)
+{
+	debug(D_VINE, "losing the state of this session (%" PRId64 ")", sequence);
+
+	kill_all_tasks();
+
+	if (!vine_transfer_server_restart(cache_manager, manager)) {
+		debug(D_VINE, "could not restart the transfer server");
+		return 0;
 	}
-	return;
+
+	vine_cache_lose_start(cache_manager, manager);
+	hash_table_clear(current_transfers, free);
+	lose_sequence = sequence;
+
+	return 1;
+}
+
+/* Remove more files of the loss in progress. Once all are removed, the answer "lost <sequence>" tells the manager that
+ * whatever follows describes only the empty worker, and the files kept are reported again. */
+
+static void continue_lose(struct link *manager, const struct budget *b)
+{
+	if (!lose_sequence || !vine_cache_lose_continue(cache_manager, b)) {
+		return;
+	}
+	send_message("lost %" PRId64 "\n", lose_sequence);
+	vine_cache_scan(cache_manager, manager);
+	lose_sequence = 0;
 }
 
 /* Handle the next incoming message from the currently connected manager. */
@@ -1347,16 +2142,26 @@ static int handle_manager(struct link *manager)
 	char transfer_id[VINE_LINE_MAX];
 	int64_t length;
 	int64_t task_id = 0;
+	uint64_t token;
 	int mode, n;
 	int r = 0;
 	int cache_level;
 
 	if (recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
 		if (sscanf(line, "task %" SCNd64, &task_id) == 1) {
-			r = do_task(manager, task_id, time(0) + options->active_timeout);
+			r = start_task_body(task_id, NULL, NULL, 0, 0, 0);
+		} else if (sscanf(line, "connect-back %" SCNu64, &token) == 1) {
+			/* A failure only fails this receive, which the manager retries. */
+			vine_transfer_server_connect_back(cache_manager, manager, token);
+			r = 1;
+		} else if (sscanf(line, "manager_transfer_port %" SCNd64, &length) == 1) {
+			char manager_ip[LINK_ADDRESS_MAX];
+			int manager_port;
+			r = length > 0 && length <= 65535 && link_address_remote(manager, manager_ip, &manager_port) &&
+				vine_cache_set_manager_transfer(cache_manager, manager_ip, (int)length);
 		} else if (sscanf(line, "put %s %d %" SCNd64, filename_encoded, &cache_level, &length) == 3) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = do_put(manager, filename, cache_level, length);
+			r = start_put(filename, cache_level);
 			reset_idle_timer();
 		} else if (sscanf(line, "puturl %s %s %d %" SCNd64 " %o %s", source_encoded, filename_encoded, &cache_level, &length, &mode, transfer_id) == 6) {
 			url_decode(filename_encoded, filename, sizeof(filename));
@@ -1373,17 +2178,21 @@ static int handle_manager(struct link *manager)
 		} else if (sscanf(line, "mini_task %s %s %d %" SCNd64 " %o", source_encoded, filename_encoded, &cache_level, &length, &mode) == 5) {
 			url_decode(source_encoded, source, sizeof(source));
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = do_put_mini_task(manager, time(0) + options->active_timeout, filename, cache_level, length, mode, source);
+			mini_task_id++;
+			r = start_task_body(mini_task_id, filename, source, cache_level, length, mode);
 			reset_idle_timer();
 		} else if (sscanf(line, "unlink %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
 			r = do_unlink(manager, filename);
+		} else if (sscanf(line, "inline-get %s %" SCNd64, filename_encoded, &length) == 2) {
+			url_decode(filename_encoded, filename, sizeof(filename));
+			r = do_inline_get(manager, filename, length);
 		} else if (sscanf(line, "getfile %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = vine_transfer_put_any(manager, cache_manager, filename, VINE_TRANSFER_MODE_FILE_ONLY, time(0) + options->active_timeout);
+			r = vine_transfer_put_any(manager_lw, cache_manager, filename, VINE_TRANSFER_MODE_FILE_ONLY);
 		} else if (sscanf(line, "get %s", filename_encoded) == 1) {
 			url_decode(filename_encoded, filename, sizeof(filename));
-			r = vine_transfer_put_any(manager, cache_manager, filename, VINE_TRANSFER_MODE_ANY, time(0) + options->active_timeout);
+			r = vine_transfer_put_any(manager_lw, cache_manager, filename, VINE_TRANSFER_MODE_ANY);
 		} else if (sscanf(line, "kill %" SCNd64, &task_id) == 1) {
 			if (task_id >= 0) {
 				r = do_kill(task_id);
@@ -1391,21 +2200,23 @@ static int handle_manager(struct link *manager)
 				kill_all_tasks();
 				r = 1;
 			}
+		} else if (sscanf(line, "lose %" SCNd64, &length) == 1) {
+			r = do_lose(manager, length);
 		} else if (!strncmp(line, "release", 8)) {
 			r = do_release();
 		} else if (!strncmp(line, "exit", 5)) {
 			abort_flag = 1;
 			r = 1;
 		} else if (!strncmp(line, "check", 6)) {
+			send_round_stats(manager_lw);
 			r = send_keepalive(manager, 0);
 		} else if (!strncmp(line, "auth", 4)) {
 			fprintf(stderr, "vine_worker: this manager requires a password. (use the -P option)\n");
 			r = 0;
 		} else if (sscanf(line, "send_results %d", &n) == 1) {
-			report_changes(manager);
-			r = 1;
+			r = report_changes(manager);
 		} else if (sscanf(line, "send_stdout %" SCNd64 "", &task_id) == 1) {
-			send_stdout(manager, task_id);
+			send_stdout(task_id);
 			r = 1;
 		} else {
 			debug(D_VINE, "Unrecognized manager message: %s.\n", line);
@@ -1455,10 +2266,10 @@ static int task_resources_fit_eventually(struct vine_task *t)
 }
 
 /*
-Find a suitable library process that can provide a slot to run this library right NOW.
+Find a suitable library process that has enough free slots to run this function right NOW.
 */
 
-static struct vine_process *find_running_library_for_function(const char *library_name)
+static struct vine_process *find_running_library_for_function(const char *library_name, int slots)
 {
 	uint64_t task_id;
 	struct vine_process *p;
@@ -1467,7 +2278,7 @@ static struct vine_process *find_running_library_for_function(const char *librar
 	ITABLE_ITERATE(procs_running, iteration, task_id, p)
 	{
 		if (p->task->provides_library && !strcmp(p->task->provides_library, library_name)) {
-			if (p->library_ready && p->functions_running < p->task->function_slots_total) {
+			if (p->library_ready && p->function_slots_inuse + slots <= p->task->function_slots_total) {
 				return p;
 			}
 		}
@@ -1486,8 +2297,12 @@ static int process_ready_to_run_now(struct vine_process *p, struct vine_cache *c
 		return 0;
 
 	if (p->task->needs_library) {
+		if (itable_lookup(procs_killed_functions, p->task->task_id)) {
+			return 0;
+		}
+
 		/* Here is where we attach a function to a specific library. */
-		p->library_process = find_running_library_for_function(p->task->needs_library);
+		p->library_process = find_running_library_for_function(p->task->needs_library, function_slots_needed(p->task));
 		if (!p->library_process)
 			return 0;
 	}
@@ -1577,7 +2392,7 @@ static int enforce_worker_limits(struct link *manager)
 				total_resources->disk.inuse);
 
 		if (manager) {
-			send_message(manager, "info disk_exhausted %lf\n", total_resources->disk.inuse);
+			send_message("info disk_exhausted %lf\n", total_resources->disk.inuse);
 		}
 
 		return 0;
@@ -1590,7 +2405,7 @@ static int enforce_worker_limits(struct link *manager)
 				total_resources->memory.inuse);
 
 		if (manager) {
-			send_message(manager, "info memory_exhausted %lf\n", total_resources->memory.inuse);
+			send_message("info memory_exhausted %lf\n", total_resources->memory.inuse);
 		}
 
 		return 0;
@@ -1608,7 +2423,7 @@ static int enforce_worker_promises(struct link *manager)
 	if (options->end_time > 0 && timestamp_get() > ((uint64_t)options->end_time)) {
 		warn(D_NOTICE, "vine_worker: reached the wall time limit %" PRIu64 " s\n", (uint64_t)options->manual_wall_time_option);
 		if (manager) {
-			send_message(manager, "info wall_time_exhausted %" PRIu64 "\n", (uint64_t)options->manual_wall_time_option);
+			send_message("info wall_time_exhausted %" PRIu64 "\n", (uint64_t)options->manual_wall_time_option);
 		}
 		return 0;
 	}
@@ -1620,7 +2435,7 @@ static int enforce_worker_promises(struct link *manager)
 				total_resources->disk.total);
 
 		if (manager) {
-			send_message(manager, "info disk_error %lf\n", total_resources->disk.total);
+			send_message("info disk_error %lf\n", total_resources->disk.total);
 		}
 
 		return 0;
@@ -1635,26 +2450,18 @@ back the library startup message with JSON containing the name of
 the library, which should match the task's provides_library label.
 */
 
-static int check_library_startup(struct vine_process *p)
+/* What a read of a library's startup message found (read_library_startup()). */
+typedef enum {
+	LIBRARY_STARTUP_FAILED,	  /* the message is invalid, or the library closed its pipe or failed to send it */
+	LIBRARY_STARTUP_READY,	  /* the message is complete and names the library this worker started */
+	LIBRARY_STARTUP_NOTHING,  /* the library sent nothing yet */
+	LIBRARY_STARTUP_PARTIAL,  /* the library began its message, and the rest has not arrived */
+} library_startup_t;
+
+/* Check the startup message of a library, a JX object that names it. */
+static int check_library_startup(struct vine_process *p, const char *message)
 {
-	char buffer_len[VINE_LINE_MAX];
-	int length = 0;
-
-	/* Read a line that gives the length of the response message. */
-	if (!link_readline(p->library_read_link, buffer_len, VINE_LINE_MAX, LINK_NOWAIT)) {
-		return 0;
-	}
-	sscanf(buffer_len, "%d", &length);
-
-	/* Now read that length of message and null-terminate it. */
-	char buffer[length + 1];
-	if (link_read(p->library_read_link, buffer, length, LINK_NOWAIT) <= 0) {
-		return 0;
-	}
-	buffer[length] = 0;
-
-	/* Check that the response is JX and contains the expected name. */
-	struct jx *response = jx_parse_string(buffer);
+	struct jx *response = jx_parse_string(message);
 
 	const char *name = jx_lookup_string(response, "name");
 	int taskid = jx_lookup_integer(response, "taskid");
@@ -1676,11 +2483,53 @@ static int check_library_startup(struct vine_process *p)
 		if (p->task->func_exec_mode && converted_exec_mode != p->task->func_exec_mode) {
 			ok = 0;
 		}
+		p->library_can_cancel = jx_lookup_boolean(response, "cancel");
 	}
 	if (response) {
 		jx_delete(response);
 	}
 	return ok;
+}
+
+/* Read what arrived of a library's startup message, a line with the length of the message and then the message,
+ * without waiting: the library's pipe does not block, and the parts already read are kept in the process, so a
+ * library that stops in the middle of its message never holds the main loop. */
+static library_startup_t read_library_startup(struct vine_process *p)
+{
+	struct link *l = p->library_read_link;
+	if (!p->library_startup) {
+		int line = link_buffer_has_line(l);
+		if (line == 0) {
+			return LIBRARY_STARTUP_NOTHING;
+		}
+		if (line < 0) {
+			return LIBRARY_STARTUP_PARTIAL;
+		}
+		char header[VINE_LINE_MAX];
+		int length = -1;
+		if (!link_readline(l, header, sizeof(header), LINK_NOWAIT) || sscanf(header, "%d", &length) != 1 || length < 0) {
+			return LIBRARY_STARTUP_FAILED;
+		}
+		p->library_startup = malloc(length + 1);
+		if (!p->library_startup) {
+			return LIBRARY_STARTUP_FAILED;
+		}
+		p->library_startup_length = length;
+		p->library_startup_received = 0;
+	}
+	while (p->library_startup_received < p->library_startup_length) {
+		ssize_t n = link_read_avail(l, p->library_startup + p->library_startup_received, p->library_startup_length - p->library_startup_received, LINK_NOWAIT);
+		if (n > 0) {
+			p->library_startup_received += n;
+		} else if (n < 0 && (errno_is_temporary(errno) || errno == ETIMEDOUT)) {
+			/* Nothing more arrived: a read that may not wait reports an expired stoptime as ETIMEDOUT. */
+			return LIBRARY_STARTUP_PARTIAL;
+		} else {
+			return LIBRARY_STARTUP_FAILED;
+		}
+	}
+	p->library_startup[p->library_startup_length] = 0;
+	return check_library_startup(p, p->library_startup) ? LIBRARY_STARTUP_READY : LIBRARY_STARTUP_FAILED;
 }
 
 /* Check whether all known libraries are ready to execute functions.
@@ -1694,9 +2543,10 @@ static void check_libraries_ready(struct link *manager)
 	int iteration;
 	struct list *failed_libraries = list_create();
 
-	struct link_info library_link_info;
-	library_link_info.events = LINK_READ;
-	library_link_info.revents = 0;
+	/* A library that began its message and sent nothing more for this long fails: X with the timeout framework on,
+	 * since the main loop must answer the manager within X, and otherwise active_timeout, the bound of every other
+	 * read from a library. */
+	timestamp_t stall = (timestamp_t)(options->response_timeout > 0 ? options->response_timeout : options->active_timeout) * USECOND;
 
 	/* Loop through all processes to find libraries and check if they are alive. */
 	ITABLE_ITERATE(procs_running, iteration, library_task_id, library_process)
@@ -1705,27 +2555,29 @@ static void check_libraries_ready(struct link *manager)
 		if (library_process->type != VINE_PROCESS_TYPE_LIBRARY || library_process->library_ready)
 			continue;
 
-		library_link_info.link = library_process->library_read_link;
-
-		/* Check if library has sent its startup message. */
-		if (link_poll(&library_link_info, 1, 0) && (library_link_info.revents & LINK_READ)) {
-			if (check_library_startup(library_process)) {
-				debug(D_VINE, "Library %s reports ready to execute functions.", library_process->task->provides_library);
-				library_process->library_ready = 1;
-			} else {
-				/* Collect failed libraries so procs_running is not re-iterated here. */
-				debug(D_VINE,
-						"Library %s task id %" PRIu64 " verification failed (unexpected response). Killing it.",
-						library_process->task->provides_library,
-						library_task_id);
-				list_push_tail(failed_libraries, library_process);
-			}
-		} else {
-			/* The library is running and the link has no readable data, do nothing until the
-			 * handle_completed_tasks detects its failure or it sends back the startup message */
+		/* A library that has not started sends nothing, which costs one read that finds nothing. Until the library
+		 * sends its message or ends, which handle_completed_tasks() detects, there is nothing to do. */
+		library_startup_t state = read_library_startup(library_process);
+		if (state == LIBRARY_STARTUP_READY) {
+			debug(D_VINE, "Library %s reports ready to execute functions.", library_process->task->provides_library);
+			library_process->library_ready = 1;
+			free(library_process->library_startup);
+			library_process->library_startup = NULL;
+		} else if (state == LIBRARY_STARTUP_FAILED) {
+			/* Collect failed libraries so procs_running is not re-iterated here. */
+			debug(D_VINE,
+					"Library %s task id %" PRIu64 " verification failed (unexpected response). Killing it.",
+					library_process->task->provides_library,
+					library_task_id);
+			list_push_tail(failed_libraries, library_process);
+		} else if (state == LIBRARY_STARTUP_PARTIAL && timestamp_monotonic() - link_last_read(library_process->library_read_link) > stall) {
+			debug(D_NOTICE,
+					"Library %s task id %" PRIu64 " verification failed (sent part of its startup message and nothing for %" PRIu64 " s). Killing it.",
+					library_process->task->provides_library,
+					library_task_id,
+					(uint64_t)(stall / USECOND));
+			list_push_tail(failed_libraries, library_process);
 		}
-
-		library_link_info.revents = 0;
 	}
 
 	while ((library_process = list_pop_head(failed_libraries))) {
@@ -1735,23 +2587,95 @@ static void check_libraries_ready(struct link *manager)
 	list_delete(failed_libraries);
 }
 
+/* Signal handlers write a byte here, so a signal that arrives just before the main loop waits still ends the wait. */
+static int wake_pipe[2] = {-1, -1};
+static struct link *wake_link = NULL;
+
+/* Close both ends of the wake pipe at exit. The write end is marked closed first, so a signal that arrives meanwhile
+ * fails its write instead of writing to a descriptor that was reused. */
+static void close_wake_pipe()
+{
+	int write_end = wake_pipe[1];
+	wake_pipe[1] = -1;
+	if (write_end >= 0) {
+		close(write_end);
+	}
+	/* The link owns the read end and closes it. */
+	if (wake_link) {
+		link_close(wake_link);
+		wake_link = NULL;
+	} else if (wake_pipe[0] >= 0) {
+		close(wake_pipe[0]);
+	}
+	wake_pipe[0] = -1;
+}
+
+static void wake_main_loop(void)
+{
+	int saved_errno = errno;
+	/* A failed write means the pipe is full, which already wakes the loop. */
+	if (write(wake_pipe[1], "", 1) < 0) {
+	}
+	errno = saved_errno;
+}
+
+/*
+Each round of the main loop waits for the manager, and then works for at most a budget of one second before it waits
+again. A step that may take long, such as measuring the disk, measuring outputs as they move into the cache, emptying
+the trash, or reading many buffered messages, checks the budget between items and continues in the next round, so a
+request of the manager never waits long behind background work. When a round leaves work, the next round does not wait
+for the manager.
+
+Some steps remain unbounded by design: hard-linking a directory input into a sandbox (file_link_recursive) and single
+system calls.
+
+Whole-message rule: the loop handles a message of the manager only once its first line is whole in the link's buffer
+(link_buffer_has_line), so a manager that stops in the middle of a line never holds the loop. Such a line is judged
+like a silent manager: after T without a byte (framework on) or after the idle timeout (off, the old bound of that
+read), the worker disconnects. The rest of a message whose first line announces more, the lines of a task up to its
+end line (task, mini_task) and the item of a put, may be larger than the link's buffer, so it cannot wait whole there:
+it is read in pieces of at most 64 KB as it arrives, within the budget of each round, into its destination (the
+cache's transfer path for a put, the task for a task), and the message completes in a later round (manager_body). The
+messages after it wait in the link until then. A body that makes no progress is judged as a part of a line is, after T
+(on) or the active timeout (off, the old bound of its blocking reads). The worker therefore never waits for the manager
+in this loop, and the probe link, served first, is answered in every round, also in the middle of a large put.
+*/
+#define ROUND_BUDGET USECOND
+
+/*
+With the timeout framework on (--response-timeout), judge another party, the manager or a library, by the progress on
+its link while this worker waits on it, that is, while the writer to it holds data: the party has failed when neither
+a byte written to it nor a byte read from it moved for T. This is the worker's one judgment of a party by progress;
+blocking reads and writes on its links fail after T without progress by the links' idle timeouts. Off, nothing is
+judged here.
+*/
+int vine_worker_made_no_progress(struct link_writer *lw, struct link *link)
+{
+	int timeout = vine_worker_options_timeout(options, 0);
+	if (!timeout || !lw || link_writer_empty(lw)) {
+		return 0;
+	}
+	timestamp_t progress = MAX(link_writer_last_progress(lw), link_last_read(link));
+	return timestamp_monotonic() - progress >= (timestamp_t)timeout * USECOND;
+}
+
 /* Start working for the (newly connected) manager on this given link. */
 
 static void vine_worker_serve_manager(struct link *manager)
 {
-	sigset_t mask;
-
 	debug(D_VINE, "working for manager at %s:%d.\n", current_manager_address->addr, current_manager_address->port);
 
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGCHLD);
-	sigaddset(&mask, SIGTERM);
-	sigaddset(&mask, SIGQUIT);
-	sigaddset(&mask, SIGINT);
-	sigaddset(&mask, SIGUSR1);
-	sigaddset(&mask, SIGUSR2);
-
 	reset_idle_timer();
+
+	/* Non-zero when the last round left work that continues in the next round, which then does not wait. */
+	int work_remains = 0;
+
+	/* What link_buffer_has_line() last said of the manager's link: minus one while only the start of a line is
+	 * buffered, which then waits in the buffer for the rest. */
+	int line = 0;
+
+	round_window_reset(&round_report);
+	round_window_reset(&round_summary);
 
 	// Start serving managers
 	while (!abort_flag) {
@@ -1763,7 +2687,7 @@ static void vine_worker_serve_manager(struct link *manager)
 					current_manager_address->addr,
 					current_manager_address->port,
 					options->idle_timeout);
-			send_async_message(manager, "info idle-disconnect-request %lld\n", (long long)options->idle_timeout);
+			send_message("info idle-disconnect-request %lld\n", (long long)options->idle_timeout);
 			reset_idle_timer();
 		}
 
@@ -1772,38 +2696,131 @@ static void vine_worker_serve_manager(struct link *manager)
 			break;
 		}
 
-		/*
-		link_usleep will cause the worker to sleep for a time until
-		interrupted by a SIGCHILD signal.  However, the signal could
-		have been delivered while we were outside of the wait function,
-		setting sigchld_received_flag.  In that case, do not block
-		but proceed with the
-
-		There is a still a (very small) race condition in that the
-		signal could be received between the check and link_usleep,
-		hence a maximum wait time of five seconds is enforced.
-		*/
-
+		/* Wait for the manager or a signal. A flag set before the wait skips it, and the wake pipe ends it for a
+		 * signal that arrives in between. Work left by the last round also skips it. */
 		int wait_msec = 5000;
+
+		/* Wake at the nearest time limit of a running process. */
+		wait_msec = process_deadline_wait_msec(wait_msec);
 
 		if (sigchld_received_flag) {
 			wait_msec = 0;
 			sigchld_received_flag = 0;
 		}
-
-		int manager_activity = link_usleep_mask(manager, wait_msec * 1000, &mask, 1, 0);
-		if (manager_activity < 0)
-			break;
-
-		int ok = 1;
-		if (manager_activity) {
-			ok &= handle_manager(manager);
+		if (work_remains) {
+			wait_msec = 0;
 		}
+		wait_msec = manager_probe_wait(manager, wait_msec);
+
+		/* Before the poll, because a read may wait for a manager that waits for these messages. */
+		if (!link_writer_send_async(manager_lw, timestamp_monotonic() + ROUND_BUDGET)) {
+			debug(D_VINE, "failed to send to the manager");
+			break;
+		}
+
+		/* Queued messages also wait for the manager to make room for them, and calls queued to libraries for room in
+		 * their pipes. */
+		int manager_events = LINK_READ | (link_writer_empty(manager_lw) ? 0 : LINK_WRITE);
+		struct link_info waits[3 + vine_process_libraries_sending()];
+		int nwaits = 0;
+		waits[nwaits++] = (struct link_info){manager, manager_events, 0};
+		if (wake_link) {
+			waits[nwaits++] = (struct link_info){wake_link, LINK_READ, 0};
+		}
+		/* The probe link is read in every round that it has input. */
+		int probe_index = -1;
+		if (probe_link) {
+			probe_index = nwaits;
+			waits[nwaits++] = (struct link_info){probe_link, LINK_READ | (link_writer_empty(probe_lw) ? 0 : LINK_WRITE), 0};
+		}
+		vine_process_libraries_poll(waits + nwaits);
+		nwaits += vine_process_libraries_sending();
+		int ready = link_poll(waits, nwaits, wait_msec);
+		char drain[64];
+		while (wake_link && read(wake_pipe[0], drain, sizeof(drain)) > 0) {
+		}
+		/* Messages that an earlier round left in the link's buffer do not make the socket readable. */
+		int manager_activity = (ready > 0 && (waits[0].revents & LINK_READ)) || !link_buffer_empty(manager);
+
+		struct budget round;
+		budget_start(&round, ROUND_BUDGET);
+		struct round_timer timer;
+		round_timer_start(&timer);
+
+		/* Checks first: an answer never waits behind the manager's messages or the round's other work. */
+		if (probe_link && ((probe_index >= 0 && ready > 0 && waits[probe_index].revents) || !link_buffer_empty(probe_link) || !link_writer_empty(probe_lw))) {
+			serve_probe_link(manager, &round);
+		}
+		if (!probe_manager(manager, &round)) {
+			break;
+		}
+		round_timer_step(&timer, "probe");
+
+		/* Handle the messages already in the link's buffer until the budget expires, as the manager does, so that a
+		 * long task, such as one with thousands of inputs, is read at once rather than one line per round. A message
+		 * is handled only once its first line is whole in the buffer, and its body, if any, is read as it arrives, so
+		 * the loop never waits for the manager (whole-message rule, see "Timeouts" above ROUND_BUDGET). */
+		int ok = 1;
+		while (ok && !abort_flag && manager_activity) {
+			if (manager_body) {
+				ok = continue_manager_body(manager, &round);
+				if (manager_body) {
+					break;
+				}
+			} else {
+				line = link_buffer_has_line(manager);
+				if (line != 1) {
+					break;
+				}
+				ok = handle_manager(manager);
+				line = 0;
+			}
+			if (budget_expired(&round)) {
+				break;
+			}
+		}
+		if (ok && (manager_body || line == -1)) {
+			/* While the probe link judges the manager, a message stalled on the control link waits for the stall
+			 * bound, as a stalled queue does (manager_queue_stalled()). */
+			int timeout = vine_worker_options_timeout(options, manager_body ? options->active_timeout : options->idle_timeout);
+			if (manager_probe_timeout() && manager_stall_timeout) {
+				timeout = manager_stall_timeout;
+			}
+			if (timestamp_monotonic() - link_last_read(manager) >= (timestamp_t)timeout * USECOND) {
+				debug(D_NOTICE, "the manager sent part of a message and nothing more for %d s, disconnecting", timeout);
+				break;
+			}
+		}
+
+		round_timer_step(&timer, "manager-messages");
+
+		/* Replies leave at once. */
+		if (!link_writer_send_async(manager_lw, round.end)) {
+			debug(D_VINE, "failed to send to the manager");
+			break;
+		}
+		if (manager_queue_stalled(manager)) {
+			int stall = manager_probe_timeout() ? manager_stall_timeout : vine_worker_options_timeout(options, 0);
+			debug(D_NOTICE, "the manager took and sent nothing on the control link for %d s, disconnecting", stall);
+			break;
+		}
+		vine_process_libraries_send(round.end);
+		round_timer_step(&timer, "send");
 
 		expire_procs_running();
 
 		ok &= handle_completed_tasks(manager);
+		reap_killed_processes(0);
+		round_timer_step(&timer, "completed-tasks");
+
+		continue_stageout(manager, &round);
+		round_timer_step(&timer, "stage-out");
+
+		continue_lose(manager, &round);
+		round_timer_step(&timer, "lose");
+
 		ok &= vine_cache_check_xfer_files(cache_manager, manager);
+		round_timer_step(&timer, "finished-transfers");
 
 		measure_worker_resources();
 
@@ -1813,11 +2830,11 @@ static void vine_worker_serve_manager(struct link *manager)
 			break;
 		}
 
-		enforce_processes_max_running_time();
-
 		/* end a running processes if goes above its declared limits.
 		 * Mark offending process as RESOURCE_EXHASTION. */
-		enforce_processes_sandbox_limits();
+		round_timer_step(&timer, "resources");
+		continue_disk_measurement(&round);
+		round_timer_step(&timer, "disk-measurement");
 
 		/* end running processes if worker resources are exhasusted, and marked
 		 * them as FORSAKEN, so they can be resubmitted somewhere else. */
@@ -1832,9 +2849,7 @@ static void vine_worker_serve_manager(struct link *manager)
 
 		/* Check all known libraries if they are ready to execute functions. */
 		check_libraries_ready(manager);
-
-		/* deliver queued asynchronous messages if available */
-		deliver_async_messages(manager);
+		round_timer_step(&timer, "transfers-libraries");
 
 		int task_event = 0;
 		if (ok) {
@@ -1858,9 +2873,11 @@ static void vine_worker_serve_manager(struct link *manager)
 			}
 		}
 
+		round_timer_step(&timer, "task-start");
+
 		if (ok) {
 			if (vine_watcher_check(watcher)) {
-				send_async_message(manager, "available_results\n");
+				send_message("available_results\n");
 			}
 			if (itable_size(procs_complete) > 0) {
 				send_complete_tasks(manager);
@@ -1870,15 +2887,90 @@ static void vine_worker_serve_manager(struct link *manager)
 			}
 		}
 
+		round_timer_step(&timer, "task-reports");
+
+		/* Delete what was moved to the trash, after everything else this round. */
+		int trash_done = trash_empty_budget(&round);
+		timestamp_t round_length = round_timer_finish(&timer, "trash", &round_report, &round_summary);
+
 		if (!ok) {
 			break;
 		}
+
+		work_remains = !link_buffer_empty(manager) || list_size(procs_stageout) > 0 || lose_sequence || disk_measurement_active || !trash_done;
 
 		// Reset options->idle_stoptime if something interesting is happening at this worker.
 		if (list_size(procs_waiting) > 0 || itable_size(procs_table) > 0 || itable_size(procs_complete) > 0) {
 			reset_idle_timer();
 		}
+
+		/* A round longer than X breaks the response time that this worker declared to the manager. */
+		if (options->response_timeout > 0 && round_length > (timestamp_t)options->response_timeout * USECOND) {
+			debug(D_NOTICE, "a round of the main loop took %.3f s, longer than the response time %d s; its slowest step was %s (%.3f s)", round_length / 1e6, options->response_timeout, timer.slowest, timer.slowest_time / 1e6);
+		}
+
+		/* The longest round of each interval, and its slowest step, for measurements of the response time. */
+		if (round_window_length(&round_summary) >= (timestamp_t)ROUND_SUMMARY_INTERVAL * USECOND) {
+			struct round_window *w = &round_summary;
+			debug(D_VINE, "round summary: seconds=%.1f rounds=%" PRId64 " round_max_us=%" PRIu64 " step=%s step_us=%" PRIu64, round_window_length(w) / 1e6, w->rounds, (uint64_t)w->longest, w->step, (uint64_t)w->step_time);
+			round_window_reset(w);
+		}
 	}
+}
+
+/*
+Open the probe link of a worker that declares its response time X (see "Probe link" in vine_manager.c): a second
+connection to the manager's port, set up as the control link is (TLS, password), whose first line names this worker,
+probe <worker-id>. It carries only the manager's checks and the answers to them, so a check never waits behind other
+data, and the main loop reads it in every round. Setting it up waits like the control link's handshake, before the
+main loop starts. If it cannot be opened, the checks stay on the control link.
+*/
+static void open_probe_link(int port, const char *host, int use_ssl)
+{
+	struct link *link = link_connect(current_manager_address->addr, port, options->idle_stoptime);
+	if (!link) {
+		debug(D_NOTICE, "could not open the probe link to %s:%d: %s; checks stay on the control link", current_manager_address->addr, port, strerror(errno));
+		return;
+	}
+	link_set_idle_timeout(link, vine_worker_options_timeout(options, 0));
+
+	if (options->ssl_requested || use_ssl) {
+		const char *sni_host = options->tls_sni ? options->tls_sni : host;
+		if (link_ssl_wrap_connect(link, sni_host) < 1) {
+			debug(D_NOTICE, "could not set up ssl on the probe link; checks stay on the control link");
+			link_close(link);
+			return;
+		}
+	}
+
+	link_tune(link, LINK_TUNE_INTERACTIVE);
+
+	if (options->password && !link_auth_password(link, options->password, options->idle_stoptime)) {
+		debug(D_NOTICE, "the manager refused the password on the probe link; checks stay on the control link");
+		link_close(link);
+		return;
+	}
+
+	struct link_writer *lw = link_writer_create(link);
+	if (!lw) {
+		link_close(link);
+		return;
+	}
+	char line[VINE_LINE_MAX];
+	int length = snprintf(line, sizeof(line), "probe %s\n", worker_id);
+	debug(D_VINE, "tx probe: probe %s", worker_id);
+	link_writer_push(lw, line, length);
+	timestamp_t deadline = timestamp_monotonic() + (options->idle_stoptime > time(0) ? (timestamp_t)(options->idle_stoptime - time(0)) * 1000000 : 0);
+	if (!link_writer_send_sync(lw, deadline, 0)) {
+		debug(D_NOTICE, "could not identify the probe link to the manager; checks stay on the control link");
+		link_writer_delete(lw);
+		link_close(link);
+		return;
+	}
+
+	probe_link = link;
+	probe_lw = lw;
+	debug(D_VINE, "opened the probe link to the manager");
 }
 
 /* Attempt to connect, authenticate, and work with the manager at this specific host and port. */
@@ -1909,6 +3001,10 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 		return 0;
 	}
 
+	/* With the timeout framework on, every wait on the manager fails when it makes no progress for T, within the
+	 * stoptime of each call, from the TLS handshake on. */
+	link_set_idle_timeout(manager, vine_worker_options_timeout(options, 0));
+
 	if (options->ssl_requested && !use_ssl) {
 		fprintf(stderr, "vine_worker: --ssl was given, but manager %s:%d is not using ssl.\n", host, port);
 		link_close(manager);
@@ -1928,6 +3024,14 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 
 	link_tune(manager, LINK_TUNE_INTERACTIVE);
 
+	manager_lw = link_writer_create(manager);
+	manager_link = manager;
+	if (!manager_lw) {
+		fprintf(stderr, "vine_worker: cannot allocate memory for the manager connection\n");
+		link_close(manager);
+		return 0;
+	}
+
 	char local_addr[LINK_ADDRESS_MAX];
 	int local_port;
 	link_address_local(manager, local_addr, &local_port);
@@ -1939,7 +3043,7 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 		debug(D_VINE, "authenticating to manager");
 		if (!link_auth_password(manager, options->password, options->idle_stoptime)) {
 			fprintf(stderr, "vine_worker: wrong password for manager %s:%d\n", host, port);
-			link_close(manager);
+			close_manager_link(manager);
 			return 0;
 		}
 	}
@@ -1947,16 +3051,16 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	if (verify_project) {
 		char line[VINE_LINE_MAX];
 		debug(D_VINE, "verifying manager's project name");
-		send_message(manager, "name\n");
-		if (!recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
+		send_message("name\n");
+		if (!link_writer_send_sync(manager_lw, timestamp_monotonic() + (options->idle_stoptime > time(0) ? (timestamp_t)(options->idle_stoptime - time(0)) * 1000000 : 0), 0) || !recv_message(manager, line, sizeof(line), options->idle_stoptime)) {
 			debug(D_VINE, "no response from manager while verifying name");
-			link_close(manager);
+			close_manager_link(manager);
 			return 0;
 		}
 
 		if (strcmp(line, verify_project)) {
 			fprintf(stderr, "vine_worker: manager has project %s instead of %s\n", line, verify_project);
-			link_close(manager);
+			close_manager_link(manager);
 			return 0;
 		}
 	}
@@ -1969,7 +3073,7 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 	vine_cache_load(cache_manager);
 
 	/* Start the transfer server, which serves up the cache directory. */
-	if (!vine_transfer_server_start(cache_manager, options->transfer_port_min, options->transfer_port_max)) {
+	if (!vine_transfer_server_start(cache_manager, manager, options->transfer_port_min, options->transfer_port_max)) {
 		fprintf(stderr, "vine_worker: unable to bind transfer port (check --transfer-port or cluster permissions)\n");
 	}
 
@@ -1977,14 +3081,19 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 
 	report_worker_ready(manager);
 
+	if (options->response_timeout > 0) {
+		open_probe_link(port, host, use_ssl);
+	}
+
 	vine_worker_serve_manager(manager);
 
 	if (abort_signal_received) {
-		send_async_message(manager, "info vacating %d\n", abort_signal_received);
+		send_message("info vacating %d\n", abort_signal_received);
 	}
 
 	last_task_received = 0;
 	results_to_be_sent_msg = 0;
+	lose_sequence = 0;
 
 	disconnect_manager(manager);
 	printf("disconnected from manager %s:%d\n", host, port);
@@ -1993,6 +3102,9 @@ static int vine_worker_serve_manager_by_hostport(const char *host, int port, con
 
 	/* Stop the transfer server from serving the cache directory. */
 	vine_transfer_server_stop();
+
+	/* A disk measurement in progress belongs to this manager's cache. */
+	stop_disk_measurement();
 
 	/* Remove all cached files of workflow or less. */
 	vine_cache_prune(cache_manager, VINE_CACHE_LEVEL_WORKFLOW);
@@ -2245,11 +3357,13 @@ static void handle_abort(int sig)
 {
 	abort_flag = 1;
 	abort_signal_received = sig;
+	wake_main_loop();
 }
 
 static void handle_sigchld(int sig)
 {
 	sigchld_received_flag = 1;
+	wake_main_loop();
 }
 
 struct list *parse_manager_addresses(const char *specs, int default_port)
@@ -2289,9 +3403,13 @@ void vine_worker_create_structures()
 {
 	procs_table = itable_create(0);
 	procs_running = itable_create(0);
+	procs_deadlines = priority_queue_create(0);
 	procs_waiting = list_create();
-	pending_async_messages = list_create();
 	procs_complete = itable_create(0);
+	procs_stageout = list_create();
+	procs_killed = itable_create(0);
+	procs_killed_functions = itable_create(0);
+	disk_measurement_tasks = list_create();
 
 	current_transfers = hash_table_create(0, 0);
 
@@ -2320,8 +3438,25 @@ static void vine_worker_delete_structures()
 		itable_delete(procs_table);
 	if (procs_running)
 		itable_delete(procs_running);
+	if (procs_deadlines) {
+		struct process_deadline *d;
+		while ((d = priority_queue_pop(procs_deadlines))) {
+			free(d);
+		}
+		priority_queue_delete(procs_deadlines);
+	}
 	if (procs_complete)
 		itable_delete(procs_complete);
+	if (procs_stageout)
+		list_delete(procs_stageout);
+	if (procs_killed)
+		itable_delete(procs_killed);
+	if (procs_killed_functions) {
+		itable_clear(procs_killed_functions, free);
+		itable_delete(procs_killed_functions);
+	}
+	if (disk_measurement_tasks)
+		list_delete(disk_measurement_tasks);
 	if (procs_waiting)
 		list_delete(procs_waiting);
 }
@@ -2385,6 +3520,15 @@ int main(int argc, char *argv[])
 	signal(SIGUSR2, handle_abort);
 	signal(SIGCHLD, handle_sigchld);
 
+	/* Neither end of the wake pipe blocks, and tasks do not inherit it. */
+	if (pipe(wake_pipe) == 0) {
+		for (int i = 0; i < 2; i++) {
+			fcntl(wake_pipe[i], F_SETFL, O_NONBLOCK);
+			fcntl(wake_pipe[i], F_SETFD, FD_CLOEXEC);
+		}
+		wake_link = link_attach_to_fd(wake_pipe[0]);
+	}
+
 	/* Create the workspace directory and move there. */
 	workspace = vine_workspace_create(options->workspace_dir);
 	if (!workspace) {
@@ -2399,6 +3543,12 @@ int main(int argc, char *argv[])
 
 	/* Move to the workspace directory. */
 	chdir(workspace->workspace_dir);
+
+	/* A worker that was killed before it disconnected leaves its task sandboxes, partial transfers, and trash in a
+	 * workspace given with --workspace. A task of a later worker with the same task id would then find a sandbox that
+	 * holds the files of the earlier task, so everything but the cache, which vine_cache_load() checks, is removed. */
+	trash_setup(workspace->trash_dir);
+	vine_workspace_cleanup(workspace);
 
 	/* If the total number of cores was not set manually, fix it to the observed number of cores. */
 	if (options->cores_total < 1) {
@@ -2427,6 +3577,8 @@ int main(int argc, char *argv[])
 	vine_worker_serve_managers();
 
 	/* Clean up data structures to satisfy valgrind at process exit. */
+
+	close_wake_pipe();
 
 	vine_workspace_delete(workspace);
 	workspace = 0;

@@ -444,20 +444,41 @@ void list_clear(struct list *l, void (*delete_func)(void *item))
 	}
 }
 
+/*
+Set up a cursor on the stack with the same references as list_cursor_create(),
+for the push, pop, and peek functions, which would otherwise allocate and free
+a cursor on every call. Release it with stack_cursor_release().
+*/
+
+static void stack_cursor_init(struct list_cursor *cur, struct list *list)
+{
+	cur->list = list;
+	cur->target = NULL;
+	list_ref(list);
+}
+
+static void stack_cursor_release(struct list_cursor *cur)
+{
+	list_reset(cur);
+	list_unref(cur->list);
+}
+
 int list_push_head(struct list *l, void *item)
 {
-	struct list_cursor *cur = list_cursor_create(l);
-	list_seek(cur, 0);
-	list_insert(cur, item);
-	list_cursor_delete(cur);
+	struct list_cursor cur;
+	stack_cursor_init(&cur, l);
+	list_seek(&cur, 0);
+	list_insert(&cur, item);
+	stack_cursor_release(&cur);
 	return 1;
 }
 
 int list_push_tail(struct list *l, void *item)
 {
-	struct list_cursor *cur = list_cursor_create(l);
-	list_insert(cur, item);
-	list_cursor_delete(cur);
+	struct list_cursor cur;
+	stack_cursor_init(&cur, l);
+	list_insert(&cur, item);
+	stack_cursor_release(&cur);
 	return 1;
 }
 
@@ -468,11 +489,12 @@ void *list_pop_head(struct list *l)
 	if (!l)
 		return NULL;
 
-	struct list_cursor *cur = list_cursor_create(l);
-	list_seek(cur, 0);
-	list_get(cur, &item);
-	list_drop(cur);
-	list_cursor_delete(cur);
+	struct list_cursor cur;
+	stack_cursor_init(&cur, l);
+	list_seek(&cur, 0);
+	list_get(&cur, &item);
+	list_drop(&cur);
+	stack_cursor_release(&cur);
 
 	return item;
 }
@@ -484,11 +506,12 @@ void *list_pop_tail(struct list *l)
 	if (!l)
 		return NULL;
 
-	struct list_cursor *cur = list_cursor_create(l);
-	list_seek(cur, -1);
-	list_get(cur, &item);
-	list_drop(cur);
-	list_cursor_delete(cur);
+	struct list_cursor cur;
+	stack_cursor_init(&cur, l);
+	list_seek(&cur, -1);
+	list_get(&cur, &item);
+	list_drop(&cur);
+	stack_cursor_release(&cur);
 
 	return item;
 }
@@ -540,10 +563,11 @@ void *list_peek_head(struct list *l)
 	if (!l)
 		return NULL;
 
-	struct list_cursor *cur = list_cursor_create(l);
-	list_seek(cur, 0);
-	list_get(cur, &item);
-	list_cursor_delete(cur);
+	struct list_cursor cur;
+	stack_cursor_init(&cur, l);
+	list_seek(&cur, 0);
+	list_get(&cur, &item);
+	stack_cursor_release(&cur);
 
 	return item;
 }
@@ -555,10 +579,11 @@ void *list_peek_tail(struct list *l)
 	if (!l)
 		return NULL;
 
-	struct list_cursor *cur = list_cursor_create(l);
-	list_seek(cur, -1);
-	list_get(cur, &item);
-	list_cursor_delete(cur);
+	struct list_cursor cur;
+	stack_cursor_init(&cur, l);
+	list_seek(&cur, -1);
+	list_get(&cur, &item);
+	stack_cursor_release(&cur);
 
 	return item;
 }

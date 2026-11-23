@@ -20,6 +20,7 @@ See the file COPYING for details.
 
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -33,15 +34,21 @@ Determine whether all the files needed by this process are present.
 Return VINE_STATUS_READY if all are present.
 Return VINE_STATUS_PROCESSING if some are not ready.
 Return VINE_STATUS_FAILED if some have definitely failed.
+
+Files stay in the cache once present, so each call resumes at the first input that was not ready the last time.
+The cache starts the transfers of all inputs on its own.
 */
 
 vine_cache_status_t vine_sandbox_ensure(struct vine_process *p, struct vine_cache *cache, struct link *manager, struct itable *procs_table)
 {
-	int processing = 0;
+	if (!p->input_cursor) {
+		p->input_cursor = list_cursor_create(p->task->input_mounts);
+		list_seek(p->input_cursor, 0);
+	}
 
 	struct vine_mount *m;
-	LIST_ITERATE(p->task->input_mounts, m)
-	{
+	while (list_get(p->input_cursor, (void **)&m)) {
+		int processing = 0;
 		vine_cache_status_t cache_status = vine_cache_ensure(cache, m->file->cached_name);
 
 		switch (cache_status) {
@@ -80,13 +87,14 @@ vine_cache_status_t vine_sandbox_ensure(struct vine_process *p, struct vine_cach
 			debug(D_VINE, "unavailable in cache for task sandbox: %s", m->file->cached_name);
 			return VINE_CACHE_STATUS_FAILED;
 		}
+
+		if (processing) {
+			return VINE_CACHE_STATUS_PROCESSING;
+		}
+		list_next(p->input_cursor);
 	}
 
-	if (processing) {
-		return VINE_CACHE_STATUS_PROCESSING;
-	} else {
-		return VINE_CACHE_STATUS_READY;
-	}
+	return VINE_CACHE_STATUS_READY;
 }
 
 /*
@@ -105,7 +113,10 @@ static int stage_input_file(struct vine_process *p, struct vine_mount *m, struct
 	vine_cache_status_t status;
 	status = vine_cache_ensure(cache, f->cached_name);
 	if (status == VINE_CACHE_STATUS_READY) {
-		create_dir_parents(sandbox_path, 0777);
+		/* The sandbox exists, so only an input named inside a subdirectory needs its parents created. */
+		if (strchr(m->remote_name, '/')) {
+			create_dir_parents(sandbox_path, 0777);
+		}
 		debug(D_VINE, "input: link %s -> %s", cache_path, sandbox_path);
 		if (m->flags & VINE_MOUNT_SYMLINK) {
 			/* If the user has requested a symlink, just do that b/c it is faster for large dirs. */
@@ -183,59 +194,104 @@ int vine_sandbox_stagein(struct vine_process *p, struct vine_cache *cache)
 }
 
 /*
-Move a given output file back to the target cache location
-and inform the manager of the added file.
+Move a given output file back to the target cache location and inform the manager of the added file. A regular file
+takes one stat. A directory is measured in pieces, resuming the measurement kept in the process, until the budget
+expires. Return 0 if the output continues in a later call, and 1 once the output was handled, whether it was added to
+the cache or not.
 */
 
-static int stage_output_file(struct vine_process *p, struct vine_mount *m, struct vine_file *f, struct vine_cache *cache, struct link *manager)
+static int stage_output_file(struct vine_process *p, struct vine_mount *m, struct vine_file *f, struct vine_cache *cache, struct link *manager, const struct budget *b)
 {
-	char *cache_path = vine_cache_data_path(cache, f->cached_name);
 	char *sandbox_path = vine_sandbox_full_path(p, m->remote_name);
+	int64_t size = 0;
 
-	int result = 0;
-	int mode;
-	time_t mtime;
-	int64_t size;
+	/* A mode of zero means that the output was not observed yet, because every file type has a nonzero mode. */
+	if (!p->output_mode) {
+		struct stat info;
+		debug(D_VINE, "output: measuring %s", sandbox_path);
+		if (stat(sandbox_path, &info) < 0) {
+			debug(D_VINE, "output: unable to measure size of %s: %s\n", sandbox_path, strerror(errno));
+			free(sandbox_path);
+			return 1;
+		}
+		p->output_mode = info.st_mode;
+		p->output_mtime = info.st_mtime;
+		size = info.st_size;
+		if (S_ISDIR(p->output_mode) && budget_expired(b)) {
+			free(sandbox_path);
+			return 0;
+		}
+	}
 
+	if (S_ISDIR(p->output_mode)) {
+		int result = path_disk_size_info_get_budget(sandbox_path, b, &p->output_measurement_state, NULL);
+		if (result == 0 && !p->output_measurement_state->complete_measurement) {
+			free(sandbox_path);
+			return 0;
+		}
+		if (result < 0) {
+			debug(D_VINE, "output: unable to measure size of %s: %s\n", sandbox_path, strerror(errno));
+		}
+		size = p->output_measurement_state->last_byte_size_complete;
+		path_disk_size_info_delete_state(p->output_measurement_state);
+		p->output_measurement_state = NULL;
+		if (result < 0) {
+			p->output_mode = 0;
+			free(sandbox_path);
+			return 1;
+		}
+	}
+
+	char *cache_path = vine_cache_data_path(cache, f->cached_name);
 	timestamp_t transfer_time = p->execution_end - p->execution_start;
 
-	debug(D_VINE, "output: measuring %s", sandbox_path);
-	if (vine_cache_file_measure_metadata(sandbox_path, &mode, &size, &mtime)) {
-		debug(D_VINE, "output: moving %s to %s", sandbox_path, cache_path);
-		if (vine_cache_add_file(cache, f->cached_name, sandbox_path, f->cache_level, mode, size, mtime, p->execution_start, transfer_time, manager)) {
-			f->size = size;
-			result = 1;
-		} else {
-			debug(D_VINE, "output: unable to move %s to %s: %s\n", sandbox_path, cache_path, strerror(errno));
-			result = 0;
-		}
+	debug(D_VINE, "output: moving %s to %s", sandbox_path, cache_path);
+	if (vine_cache_add_file(cache, f->cached_name, sandbox_path, f->cache_level, p->output_mode, size, p->output_mtime, p->execution_start, transfer_time, manager)) {
+		f->size = size;
 	} else {
-		debug(D_VINE, "output: unable to measure size of %s: %s\n", sandbox_path, strerror(errno));
-		result = 0;
+		debug(D_VINE, "output: unable to move %s to %s: %s\n", sandbox_path, cache_path, strerror(errno));
 	}
+	p->output_mode = 0;
 
 	free(cache_path);
 	free(sandbox_path);
 
-	return result;
+	return 1;
 }
 
 /*
-Move all output files of a completed process back into the proper cache location.
-This function deliberately does not fail.  If any of the desired outputs was not
-created, we still want the task to be marked as completed and sent back to the
-manager.
+Move all output files of a completed process back into the proper cache location, until the budget expires. Return 1
+once every output was handled, or 0 if a later call continues where this one stopped. Each call makes progress even
+with an expired budget: it handles one regular file, or it observes a directory output or measures one of its entries.
+A process whose outputs are regular files thus completes in one call unless the budget expires between its outputs.
 
-The manager will handle the consequences of missing output files when processing
-the result of the task. Therefore, this function should be call BEFORE the task is
-reported as done to the manager.
+Stage-out deliberately does not fail. If any of the desired outputs was not created, we still want the task to be
+marked as completed and sent back to the manager. The manager will handle the consequences of missing output files
+when processing the result of the task. Therefore, the task should be reported as done only after this function
+returned 1.
 */
 
-void vine_sandbox_stageout(struct vine_process *p, struct vine_cache *cache, struct link *manager)
+int vine_sandbox_stageout(struct vine_process *p, struct vine_cache *cache, struct link *manager, const struct budget *b)
 {
-	struct vine_mount *m;
-	LIST_ITERATE(p->task->output_mounts, m)
-	{
-		stage_output_file(p, m, m->file, cache, manager);
+	if (!p->output_cursor) {
+		p->output_cursor = list_cursor_create(p->task->output_mounts);
+		list_seek(p->output_cursor, 0);
 	}
+
+	int handled = 0;
+	struct vine_mount *m;
+	while (list_get(p->output_cursor, (void **)&m)) {
+		if (handled && budget_expired(b)) {
+			return 0;
+		}
+		if (!stage_output_file(p, m, m->file, cache, manager, b)) {
+			return 0;
+		}
+		handled++;
+		list_next(p->output_cursor);
+	}
+
+	list_cursor_delete(p->output_cursor);
+	p->output_cursor = NULL;
+	return 1;
 }

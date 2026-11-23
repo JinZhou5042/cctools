@@ -1,8 +1,14 @@
 #include "vine_temp.h"
+
+#include <string.h>
+
+#include "vine_current_transfers.h"
 #include "vine_file.h"
 #include "vine_worker_info.h"
 #include "vine_file_replica_table.h"
+#include "vine_current_transfers.h"
 #include "vine_manager.h"
+#include "vine_manager_data_service.h"
 #include "vine_manager_put.h"
 #include "vine_file_replica.h"
 #include "vine_task.h"
@@ -34,7 +40,7 @@ static int worker_can_peer_transfer(struct vine_worker_info *w)
 	if (!w->transfer_port_active) {
 		return 0;
 	}
-	if (w->draining || w->pending_removal) {
+	if (w->draining || w->pending_removal || w->losing || vine_worker_source_is_suspect(w)) {
 		return 0;
 	}
 	if (!w->resources) {
@@ -94,10 +100,6 @@ static struct vine_worker_info *get_best_source_worker(struct vine_manager *q, s
 		if (!worker_can_peer_transfer(w)) {
 			continue;
 		}
-		/* skip if outgoing transfer counter is too high */
-		if (w->outgoing_xfer_counter >= q->worker_source_max_transfers) {
-			continue;
-		}
 		/* skip if the worker does not have this file (which is faulty) */
 		struct vine_file_replica *replica = vine_file_replica_table_lookup(w, f->cached_name);
 		if (!replica) {
@@ -105,6 +107,10 @@ static struct vine_worker_info *get_best_source_worker(struct vine_manager *q, s
 		}
 		/* skip if the file is not ready */
 		if (replica->state != VINE_FILE_REPLICA_STATE_READY) {
+			continue;
+		}
+		/* skip if the worker sends as many transfers or bytes as a source sends at once */
+		if (!vine_current_transfers_source_has_room(q, w, replica->size)) {
 			continue;
 		}
 		/* workers with fewer outgoing transfers are preferred */
@@ -117,10 +123,35 @@ static struct vine_worker_info *get_best_source_worker(struct vine_manager *q, s
 }
 
 /**
+Check whether a worker runs on a host that holds a replica of a temp file, or receives one.
+Replicas being deleted do not count. The cost is the number of the file's replicas.
+*/
+static int host_holds_replica(struct set *holders, struct vine_file *f, struct vine_worker_info *w)
+{
+	struct vine_worker_info *holder;
+	int iteration;
+	SET_ITERATE(holders, iteration, holder)
+	{
+		if (strcmp(holder->hostname, w->hostname)) {
+			continue;
+		}
+		struct vine_file_replica *replica = vine_file_replica_table_lookup(holder, f->cached_name);
+		if (replica && (replica->state == VINE_FILE_REPLICA_STATE_CREATING || replica->state == VINE_FILE_REPLICA_STATE_READY)) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+/**
 Select a destination worker that can accept a new replica. Workers must be
 active, not currently hosting the file, and have sufficient free cache space.
 Those with more available disk space are prioritized to reduce pressure on
 heavily utilized workers.
+With temp-replica-distinct-hosts, a worker on a host that holds no replica of
+the file is preferred, because the workers of one host are often lost together.
+Any eligible worker is chosen when every host holds one.
 */
 static struct vine_worker_info *get_best_dest_worker(struct vine_manager *q, struct vine_file *f)
 {
@@ -129,6 +160,13 @@ static struct vine_worker_info *get_best_dest_worker(struct vine_manager *q, str
 	}
 
 	struct vine_worker_info *best_dest_worker = NULL;
+
+	/* The best worker on a host without a replica, considered only when replicas must spread across hosts. */
+	struct vine_worker_info *best_other_host_worker = NULL;
+	struct set *holders = NULL;
+	if (q->temp_replica_distinct_hosts) {
+		holders = hash_table_lookup(q->file_worker_table, f->cached_name);
+	}
 
 	char *key;
 	struct vine_worker_info *w;
@@ -156,6 +194,14 @@ static struct vine_worker_info *get_best_dest_worker(struct vine_manager *q, str
 		if (!best_dest_worker || worker_get_available_disk(w) > worker_get_available_disk(best_dest_worker)) {
 			best_dest_worker = w;
 		}
+		/* the same preference among workers on hosts that hold no replica of the file */
+		if (holders && (!best_other_host_worker || worker_get_available_disk(w) > worker_get_available_disk(best_other_host_worker)) && !host_holds_replica(holders, f, w)) {
+			best_other_host_worker = w;
+		}
+	}
+
+	if (best_other_host_worker) {
+		return best_other_host_worker;
 	}
 
 	return best_dest_worker;
@@ -208,8 +254,8 @@ static int attempt_replication(struct vine_manager *q, struct vine_file *f)
 /*************************************************************/
 
 /**
-Check if a temporary file exists somewhere in all workers.
-Returns 1 if at least one CREATING or READY replica exists, 0 otherwise.
+Check whether a temporary file has a complete vault entry at the Manager or a Worker replica.
+Returns 1 for a vault entry or at least one CREATING or READY Worker replica, 0 otherwise.
 
 We accept both CREATING and READY replicas as available sources, since a CREATING
 replica may already exist physically but hasn't yet received the cache-update
@@ -224,6 +270,10 @@ int vine_temp_exists_somewhere(struct vine_manager *q, struct vine_file *f)
 {
 	if (!q || !f || f->type != VINE_TEMP || f->state != VINE_FILE_STATE_CREATED) {
 		return 0;
+	}
+
+	if (vine_manager_data_service_vault_contains(q, f)) {
+		return 1;
 	}
 
 	struct set *workers = hash_table_lookup(q->file_worker_table, f->cached_name);

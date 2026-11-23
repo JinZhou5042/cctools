@@ -13,6 +13,7 @@ See the file COPYING for details.
 #include "full_io.h"
 #include "macros.h"
 #include "stringtools.h"
+#include "timestamp.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -39,6 +40,10 @@ See the file COPYING for details.
 #include <string.h>
 #include <time.h>
 
+#if defined(CCTOOLS_OPSYS_LINUX)
+#include <sys/epoll.h>
+#endif
+
 #ifndef TCP_LOW_PORT_DEFAULT
 #define TCP_LOW_PORT_DEFAULT 1024
 #endif
@@ -46,6 +51,11 @@ See the file COPYING for details.
 #ifndef TCP_HIGH_PORT_DEFAULT
 #define TCP_HIGH_PORT_DEFAULT 32767
 #endif
+
+/* Connections that wait for accept() on a listening socket. A manager with thousands of workers receives bursts of
+connections, and a connection dropped from a full queue costs its client a retransmitted SYN of at least a second.
+The kernel caps the value at net.core.somaxconn. */
+#define LINK_LISTEN_BACKLOG 4096
 
 #ifdef HAS_OPENSSL
 #include "openssl/bio.h"
@@ -73,11 +83,77 @@ struct link {
 	char raddr[LINK_ADDRESS_MAX];
 	int rport;
 
+	/* Seconds a read or write may wait without progress before it fails. Zero waits as long as the stoptime allows. */
+	int idle_timeout;
+	/* Set once a wait ended at the idle timeout. Later waits fail at once, so a read or write that made partial
+	 * progress and is called again does not wait another idle timeout. */
+	int idle_expired;
+	/* Time of timestamp_monotonic() at which a read last took bytes from the link, or at which it was created. */
+	timestamp_t last_read;
+	/* Set by link_buffer_has_line() when the buffer holds only the start of a line and nothing more could be read.
+	 * Polls and link_buffer_empty() then treat the buffer as empty, so a wait sleeps until more data arrives. Any read
+	 * clears it. */
+	int line_waits;
+
 #ifdef HAS_OPENSSL
 	SSL_CTX *ctx;
 	SSL *ssl;
 #endif
+
+	/* Membership in a poll set, or null. */
+	struct link_poll_entry *poll;
 };
+
+/* The lists of a poll set that a link can be in: links with events that were not taken yet, in the order in which
+ * they became ready, urgent links (link_poll_set_urgent()) apart from the others, and links whose input buffer may hold
+ * data that the next wait must report. */
+enum poll_list_kind {
+	POLL_READY,
+	POLL_URGENT,
+	POLL_CHECK,
+	POLL_LISTS
+};
+
+/* The place of a link in one list of its poll set. */
+struct poll_node {
+	struct link *prev;
+	struct link *next;
+	int member; /* Whether the link is in the list. */
+};
+
+/* A list of links of a poll set, linked through their entries so that any link leaves it at once. */
+struct poll_list {
+	struct link *head;
+	struct link *tail;
+};
+
+/* The membership of a link in a poll set. */
+struct link_poll_entry {
+	struct link_poll_set *set;
+	void *data;  /* The caller's value, returned with the link's events. */
+	int events;  /* The events of interest. */
+	int revents; /* The events found by a wait and not taken yet. */
+	int index;   /* The position of the link in set->links. */
+	int urgent;  /* Whether the link's events are reported ahead of every other link's, in POLL_URGENT. */
+	struct poll_node node[POLL_LISTS];
+};
+
+struct link_poll_set {
+	struct link **links; /* Every link of the set, for its deletion and the poll() fallback. */
+	int count;	     /* Number of links in the set. */
+	int size;	     /* Allocated entries of links and of the wait array below. */
+	struct poll_list list[POLL_LISTS];
+#if defined(CCTOOLS_OPSYS_LINUX)
+	int epoll_fd;		   /* The epoll instance that watches every link of the set. */
+	struct epoll_event *ready; /* Events returned by one epoll_wait(). */
+#else
+	struct pollfd *fds; /* The poll() array, rebuilt for every wait. */
+#endif
+};
+
+static void poll_set_note_buffer(struct link *link);
+static ssize_t read_aux(struct link *link, char *data, size_t count, time_t stoptime);
+static int poll_set_grow(struct link_poll_set *set);
 
 static int link_send_window = 65536;
 static int link_recv_window = 65536;
@@ -137,6 +213,15 @@ static int link_squelch()
 	return 1;
 }
 
+static int link_close_on_exec(struct link *link)
+{
+	int flags = fcntl(link->fd, F_GETFD);
+	if (flags == -1) {
+		return 0;
+	}
+	return fcntl(link->fd, F_SETFD, flags | FD_CLOEXEC) != -1;
+}
+
 int link_keepalive(struct link *link, int onoff)
 {
 	int result, value;
@@ -178,9 +263,76 @@ int link_nonblocking(struct link *link, int onoff)
 	return 1;
 }
 
+/* Data is waiting to be read without a look at the socket: in the link's buffer, or decrypted inside the SSL object.
+ * SSL reads a whole record from the socket, and a read that asks for less than the record leaves the rest there, where
+ * neither the buffer nor a poll of the socket shows it. */
+static int link_has_buffered_data(struct link *link)
+{
+	if (link->line_waits) {
+		return 0;
+	}
+	if (link->buffer_length > 0) {
+		return 1;
+	}
+#ifdef HAS_OPENSSL
+	if (link->ssl && SSL_pending(link->ssl) > 0) {
+		return 1;
+	}
+#endif
+	return 0;
+}
+
 int link_buffer_empty(struct link *link)
 {
-	return link->buffer_length > 0 ? 0 : 1;
+	return link_has_buffered_data(link) ? 0 : 1;
+}
+
+/* A read that may not wait reports nothing to read as one of these. */
+static int nothing_to_read(int e)
+{
+	return e == ETIMEDOUT || errno_is_temporary(e);
+}
+
+int link_buffer_has_line(struct link *link)
+{
+	link->line_waits = 0;
+	if (link->buffer_length > 0 && memchr(link->buffer_start, '\n', link->buffer_length)) {
+		return 1;
+	}
+
+	/* Move the start of the line to the front of the buffer, and add what arrived without waiting. */
+	if (link->buffer_start != link->buffer && link->buffer_length > 0) {
+		memmove(link->buffer, link->buffer_start, link->buffer_length);
+	}
+	link->buffer_start = link->buffer;
+	size_t scanned = link->buffer_length;
+	while (link->buffer_length < sizeof(link->buffer)) {
+		ssize_t chunk = read_aux(link, link->buffer + link->buffer_length, sizeof(link->buffer) - link->buffer_length, LINK_NOWAIT);
+		if (chunk > 0) {
+			link->read += chunk;
+			link->last_read = timestamp_monotonic();
+			link->buffer_length += chunk;
+			if (memchr(link->buffer + scanned, '\n', link->buffer_length - scanned)) {
+				poll_set_note_buffer(link);
+				return 1;
+			}
+			scanned = link->buffer_length;
+		} else if (chunk == 0 || !nothing_to_read(errno)) {
+			/* The end of the stream or an error: the caller's read reports it. */
+			return 1;
+		} else {
+			break;
+		}
+	}
+	if (link->buffer_length == sizeof(link->buffer)) {
+		/* A line longer than the buffer is read as it arrives. */
+		return 1;
+	}
+	if (link->buffer_length == 0) {
+		return 0;
+	}
+	link->line_waits = 1;
+	return -1;
 }
 
 int errno_is_temporary(int e)
@@ -192,20 +344,17 @@ int errno_is_temporary(int e)
 	}
 }
 
-static int link_internal_sleep(struct link *link, struct timeval *timeout, sigset_t *mask, int reading, int writing)
+/* Wait until the link is ready or the deadline, a time of timestamp_monotonic(), passes. A deadline of zero waits
+ * forever. A signal does not extend the wait, because each poll waits only for the time left. With a mask, a signal
+ * ends the wait. */
+static int link_internal_sleep(struct link *link, timestamp_t deadline, sigset_t *mask, int reading, int writing)
 {
 	int result;
 	struct pollfd pfd;
 	int msec;
 	sigset_t cmask;
 
-	if (timeout) {
-		msec = (timeout->tv_sec * 1000.0) + (timeout->tv_usec / 1000.0);
-	} else {
-		msec = -1;
-	}
-
-	if (reading && link->buffer_length) {
+	if (reading && link_has_buffered_data(link)) {
 		return 1;
 	}
 
@@ -213,10 +362,20 @@ static int link_internal_sleep(struct link *link, struct timeval *timeout, sigse
 		pfd.fd = link->fd;
 		pfd.revents = 0;
 
-		if (reading)
-			pfd.events = POLLIN;
-		if (writing)
-			pfd.events = POLLOUT;
+		pfd.events = 0;
+		if (reading) {
+			pfd.events |= POLLIN;
+		}
+		if (writing) {
+			pfd.events |= POLLOUT;
+		}
+
+		if (deadline) {
+			timestamp_t now = timestamp_monotonic();
+			msec = deadline > now ? (deadline - now + 999) / 1000 : 0;
+		} else {
+			msec = -1;
+		}
 
 		sigprocmask(SIG_UNBLOCK, mask, &cmask);
 		result = poll(&pfd, 1, msec);
@@ -229,8 +388,9 @@ static int link_internal_sleep(struct link *link, struct timeval *timeout, sigse
 			if (writing && (pfd.revents & POLLOUT)) {
 				return 1;
 			}
-			if (pfd.revents & POLLHUP) {
-				return 0;
+			/* An error or hangup without the requested event is reported by the next read or write. */
+			if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+				return 1;
 			}
 			continue;
 		} else if (result == 0) {
@@ -245,50 +405,96 @@ static int link_internal_sleep(struct link *link, struct timeval *timeout, sigse
 	}
 }
 
+/* Convert a stoptime into a deadline of timestamp_monotonic() for link_internal_sleep, where zero means forever. Return
+ * zero with errno ETIMEDOUT, as link_sleep always did, when the stoptime has already passed. */
+static int stoptime_to_deadline(time_t stoptime, timestamp_t now, timestamp_t *deadline)
+{
+	*deadline = 0;
+	if (stoptime == LINK_FOREVER) {
+		return 1;
+	}
+	time_t timeout = stoptime - time(0);
+	if (timeout <= 0) {
+		errno = ETIMEDOUT;
+		return 0;
+	}
+	*deadline = now + (timestamp_t)timeout * 1000000;
+	return 1;
+}
+
 int link_sleep(struct link *link, time_t stoptime, int reading, int writing)
 {
-	struct timeval tm, *tptr;
-
-	if (stoptime == LINK_FOREVER) {
-		tptr = 0;
-	} else {
-		time_t timeout = stoptime - time(0);
-		if (timeout <= 0) {
-			errno = ECONNRESET;
-			return 0;
-		}
-		tm.tv_sec = timeout;
-		tm.tv_usec = 0;
-		tptr = &tm;
+	timestamp_t deadline;
+	if (!stoptime_to_deadline(stoptime, timestamp_monotonic(), &deadline)) {
+		return 0;
 	}
 
-	return link_internal_sleep(link, tptr, NULL, reading, writing);
+	return link_internal_sleep(link, deadline, NULL, reading, writing);
+}
+
+/* Wait for a read or write to make progress. The wait ends at the stoptime, or earlier when the link's idle timeout
+ * passes first. Every caller waits here only after its last read or write, so each piece of progress renews the idle
+ * timeout. A wait that ends at the idle timeout marks the link, so later waits fail at once. With a mask, a signal also
+ * ends the wait. */
+static int link_wait_mask(struct link *link, time_t stoptime, sigset_t *mask, int reading, int writing)
+{
+	timestamp_t now = timestamp_monotonic();
+	timestamp_t deadline;
+	if (!stoptime_to_deadline(stoptime, now, &deadline)) {
+		return 0;
+	}
+	if (link->idle_expired) {
+		errno = ETIMEDOUT;
+		return 0;
+	}
+	if (link->idle_timeout <= 0) {
+		return link_internal_sleep(link, deadline, mask, reading, writing);
+	}
+
+	timestamp_t idle_deadline = now + (timestamp_t)link->idle_timeout * 1000000;
+	int idle = !deadline || idle_deadline < deadline;
+	if (idle) {
+		deadline = idle_deadline;
+	}
+	int result = link_internal_sleep(link, deadline, mask, reading, writing);
+	if (!result && idle && timestamp_monotonic() >= idle_deadline) {
+		errno = ETIMEDOUT;
+		link->idle_expired = 1;
+		debug(D_TCP, "link to %s port %d made no progress for %d s", link->raddr, link->rport, link->idle_timeout);
+	}
+	return result;
+}
+
+static int link_wait(struct link *link, time_t stoptime, int reading, int writing)
+{
+	return link_wait_mask(link, stoptime, NULL, reading, writing);
+}
+
+void link_set_idle_timeout(struct link *link, int seconds)
+{
+	link->idle_timeout = MAX(0, seconds);
+}
+
+timestamp_t link_last_read(struct link *link)
+{
+	return link->last_read;
 }
 
 int link_usleep(struct link *link, int usec, int reading, int writing)
 {
-	struct timeval tm;
-
-	tm.tv_sec = 0;
-	tm.tv_usec = usec;
-
-	return link_internal_sleep(link, &tm, NULL, reading, writing);
+	return link_internal_sleep(link, timestamp_monotonic() + usec, NULL, reading, writing);
 }
 
 int link_usleep_mask(struct link *link, int usec, sigset_t *mask, int reading, int writing)
 {
-	struct timeval tm;
 	sigset_t emptymask;
-
-	tm.tv_sec = 0;
-	tm.tv_usec = usec;
 
 	if (!mask) {
 		sigemptyset(&emptymask);
 		mask = &emptymask;
 	}
 
-	return link_internal_sleep(link, &tm, mask, reading, writing);
+	return link_internal_sleep(link, timestamp_monotonic() + usec, mask, reading, writing);
 }
 
 static struct link *link_create()
@@ -311,6 +517,11 @@ static struct link *link_create()
 	link->raddr[0] = 0;
 	link->rport = 0;
 	link->type = LINK_TYPE_STANDARD;
+	link->poll = 0;
+	link->idle_timeout = 0;
+	link->idle_expired = 0;
+	link->last_read = timestamp_monotonic();
+	link->line_waits = 0;
 
 #ifdef HAS_OPENSSL
 	link->ctx = 0;
@@ -474,12 +685,9 @@ struct link *link_serve_address(const char *addr, int port)
 	if (link->fd < 0)
 		goto failure;
 
-	value = fcntl(link->fd, F_GETFD);
-	if (value == -1)
+	if (!link_close_on_exec(link)) {
 		goto failure;
-	value |= FD_CLOEXEC;
-	if (fcntl(link->fd, F_SETFD, value) == -1)
-		goto failure;
+	}
 
 	value = 1;
 	setsockopt(link->fd, SOL_SOCKET, SO_REUSEADDR, (void *)&value, sizeof(value));
@@ -492,7 +700,7 @@ struct link *link_serve_address(const char *addr, int port)
 	if (success < 0)
 		goto failure;
 
-	success = listen(link->fd, 5);
+	success = listen(link->fd, LINK_LISTEN_BACKLOG);
 	if (success < 0)
 		goto failure;
 
@@ -586,16 +794,44 @@ struct link *link_serve(int port)
 	}
 }
 
+#ifdef HAS_OPENSSL
+/* Complete a TLS handshake on a non-blocking link. Each wait for the peer ends at the stoptime, or earlier when the
+ * link's idle timeout passes, so a peer that stops in the middle of the handshake cannot hold the caller forever. With a
+ * mask, a signal also ends it. Return the result of the last SSL_accept or SSL_connect, which is positive on success. */
+static int ssl_handshake(struct link *link, int accepting, time_t stoptime, sigset_t *mask)
+{
+	int result;
+	while ((result = accepting ? SSL_accept(link->ssl) : SSL_connect(link->ssl)) <= 0) {
+		int ready;
+		switch (SSL_get_error(link->ssl, result)) {
+		case SSL_ERROR_WANT_READ:
+			ready = link_wait_mask(link, stoptime, mask, 1, 0);
+			break;
+		case SSL_ERROR_WANT_WRITE:
+			ready = link_wait_mask(link, stoptime, mask, 0, 1);
+			break;
+		default:
+			ready = 0;
+			break;
+		}
+		if (!ready) {
+			return result;
+		}
+	}
+	return result;
+}
+#endif
+
 int link_ssl_wrap_accept(struct link *link, const char *key, const char *cert)
+{
+	return link_ssl_wrap_accept_stoptime(link, key, cert, LINK_FOREVER);
+}
+
+int link_ssl_wrap_accept_stoptime(struct link *link, const char *key, const char *cert, time_t stoptime)
 {
 #ifdef HAS_OPENSSL
 	if (key && cert) {
 		debug(D_TCP, "accepting ssl state for %s port %d", link->raddr, link->rport);
-
-		/* go to blocking mode during handshake */
-		if (!link_nonblocking(link, 0)) {
-			return 0;
-		}
 
 		link->ctx = _create_ssl_context();
 		_set_ssl_keys(link->ctx, key, cert);
@@ -603,16 +839,11 @@ int link_ssl_wrap_accept(struct link *link, const char *key, const char *cert)
 		link->ssl = SSL_new(link->ctx);
 		SSL_set_fd(link->ssl, link->fd);
 
-		int ret = SSL_accept(link->ssl);
+		int ret = ssl_handshake(link, 1, stoptime, NULL);
 		if (ret <= 0) {
 			debug(D_SSL, "ssl accept failed from %s port %d", link->raddr, link->rport);
 			ERR_print_errors_cb(_ssl_errors_cb, /* use warn */ (void *)1);
 			ret = 0;
-		}
-
-		if (!link_nonblocking(link, 1)) {
-			debug(D_SSL, "Could not switch link back to non-blocking after SSL handshake: %s", strerror(errno));
-			return 0;
 		}
 
 		return ret;
@@ -625,11 +856,6 @@ int link_ssl_wrap_accept(struct link *link, const char *key, const char *cert)
 int link_ssl_wrap_connect(struct link *link, const char *sni_hostname)
 {
 #ifdef HAS_OPENSSL
-
-	/* go to blocking mode during the ssl handshake */
-	if (!link_nonblocking(link, 0)) {
-		return 0;
-	}
 
 	link->ctx = _create_ssl_context();
 	link->ssl = SSL_new(link->ctx);
@@ -644,25 +870,21 @@ int link_ssl_wrap_connect(struct link *link, const char *sni_hostname)
 	debug(D_SSL, "Setting SNI to: %s", name);
 	SSL_set_tlsext_host_name(link->ssl, name);
 
-	int result;
-	while ((result = SSL_connect(link->ssl)) <= 0) {
-		switch (SSL_get_error(link->ssl, result)) {
-		case SSL_ERROR_WANT_READ:
-			link_sleep(link, LINK_FOREVER, 1, 0);
-			break;
-		case SSL_ERROR_WANT_WRITE:
-			link_sleep(link, LINK_FOREVER, 0, 1);
-			break;
-		default:
-			ERR_print_errors_cb(_ssl_errors_cb, 0);
-			return result;
-			break;
+	/*
+	The handshake waits for the server as long as the link's idle timeout allows. A
+	signal also ends it, because a peer that never answers would otherwise hold the
+	process after a termination signal whose handler does not end the program. A
+	handler installed with SA_RESTART, as signal() does, never interrupts it.
+	*/
+	sigset_t emptymask;
+	sigemptyset(&emptymask);
+	int result = ssl_handshake(link, 0, LINK_FOREVER, &emptymask);
+	if (result <= 0) {
+		if (errno == EINTR) {
+			debug(D_SSL, "ssl handshake with %s:%d was interrupted by a signal", link->raddr, link->rport);
+			return 0;
 		}
-	}
-
-	if (!link_nonblocking(link, 1)) {
-		debug(D_SSL, "Could not switch link back to non-blocking after SSL handshake: %s", strerror(errno));
-		return 0;
+		ERR_print_errors_cb(_ssl_errors_cb, 0);
 	}
 
 	return result;
@@ -698,6 +920,9 @@ struct link *link_accept(struct link *parent, time_t stoptime)
 		}
 	} while (1);
 
+	if (!link_close_on_exec(link)) {
+		goto failure;
+	}
 	if (!link_nonblocking(link, 1))
 		goto failure;
 	if (!link_address_remote(link, link->raddr, &link->rport))
@@ -741,6 +966,10 @@ struct link *link_connect(const char *addr, int port, time_t stoptime)
 	link->fd = socket(address.ss_family, SOCK_STREAM, 0);
 	if (link->fd < 0)
 		goto failure;
+
+	if (!link_close_on_exec(link)) {
+		goto failure;
+	}
 
 	link_window_configure(link);
 
@@ -804,7 +1033,8 @@ failure:
 	return 0;
 }
 
-ssize_t read_aux(struct link *link, char *data, size_t count)
+/* Read from the link once. With SSL, wait until a record arrives, the stoptime passes, or the idle timeout passes. */
+static ssize_t read_aux(struct link *link, char *data, size_t count, time_t stoptime)
 {
 #ifdef HAS_OPENSSL
 	if (link->ssl) {
@@ -812,15 +1042,24 @@ ssize_t read_aux(struct link *link, char *data, size_t count)
 		while ((result = SSL_read(link->ssl, data, count)) <= 0) {
 			switch (SSL_get_error(link->ssl, result)) {
 			case SSL_ERROR_WANT_READ:
-				link_sleep(link, LINK_FOREVER, 1, 0);
+				if (!link_wait(link, stoptime, 1, 0)) {
+					return -1;
+				}
 				break;
 			case SSL_ERROR_WANT_WRITE:
-				link_sleep(link, LINK_FOREVER, 0, 1);
+				if (!link_wait(link, stoptime, 0, 1)) {
+					return -1;
+				}
 				break;
 			default:
 				return result;
 				break;
 			}
+		}
+
+		/* A wait of the link's poll set reports what the read left inside the SSL object. */
+		if (SSL_pending(link->ssl) > 0) {
+			poll_set_note_buffer(link);
 		}
 
 		return result;
@@ -831,7 +1070,9 @@ ssize_t read_aux(struct link *link, char *data, size_t count)
 	return read(link->fd, data, count);
 }
 
-ssize_t write_aux(struct link *link, const char *data, size_t count)
+/* Write to the link once. With SSL, wait until the record is written, the stoptime passes, or the idle timeout
+ * passes. */
+static ssize_t write_aux(struct link *link, const char *data, size_t count, time_t stoptime)
 {
 #ifdef HAS_OPENSSL
 	if (link->ssl) {
@@ -839,10 +1080,14 @@ ssize_t write_aux(struct link *link, const char *data, size_t count)
 		while ((result = SSL_write(link->ssl, data, count)) <= 0) {
 			switch (SSL_get_error(link->ssl, result)) {
 			case SSL_ERROR_WANT_READ:
-				link_sleep(link, LINK_FOREVER, 1, 0);
+				if (!link_wait(link, stoptime, 1, 0)) {
+					return -1;
+				}
 				break;
 			case SSL_ERROR_WANT_WRITE:
-				link_sleep(link, LINK_FOREVER, 0, 1);
+				if (!link_wait(link, stoptime, 0, 1)) {
+					return -1;
+				}
 				break;
 			default:
 				return result;
@@ -864,11 +1109,13 @@ static ssize_t fill_buffer(struct link *link, time_t stoptime)
 		return link->buffer_length;
 
 	while (1) {
-		ssize_t chunk = read_aux(link, link->buffer, sizeof(link->buffer));
+		ssize_t chunk = read_aux(link, link->buffer, sizeof(link->buffer), stoptime);
 		if (chunk > 0) {
 			link->read += chunk;
+			link->last_read = timestamp_monotonic();
 			link->buffer_start = link->buffer;
 			link->buffer_length = chunk;
+			poll_set_note_buffer(link);
 			return chunk;
 		} else if (chunk == 0) {
 			link->buffer_start = link->buffer;
@@ -876,7 +1123,7 @@ static ssize_t fill_buffer(struct link *link, time_t stoptime)
 			return 0;
 		} else {
 			if (errno_is_temporary(errno)) {
-				if (link_sleep(link, stoptime, 1, 0)) {
+				if (link_wait(link, stoptime, 1, 0)) {
 					continue;
 				} else {
 					return -1;
@@ -891,6 +1138,7 @@ static ssize_t fill_buffer(struct link *link, time_t stoptime)
 /* link_read blocks until all the requested data is available */
 ssize_t link_read(struct link *link, char *data, size_t count, time_t stoptime)
 {
+	link->line_waits = 0;
 	ssize_t total = 0;
 	ssize_t chunk = 0;
 
@@ -919,10 +1167,10 @@ ssize_t link_read(struct link *link, char *data, size_t count, time_t stoptime)
 	/* Otherwise, pull it all off the wire. */
 
 	while (count > 0) {
-		chunk = read_aux(link, data, count);
+		chunk = read_aux(link, data, count, stoptime);
 		if (chunk < 0) {
 			if (errno_is_temporary(errno)) {
-				if (link_sleep(link, stoptime, 1, 0)) {
+				if (link_wait(link, stoptime, 1, 0)) {
 					continue;
 				} else {
 					break;
@@ -934,6 +1182,7 @@ ssize_t link_read(struct link *link, char *data, size_t count, time_t stoptime)
 			break;
 		} else {
 			link->read += chunk;
+			link->last_read = timestamp_monotonic();
 			total += chunk;
 			count -= chunk;
 			data += chunk;
@@ -955,6 +1204,7 @@ ssize_t link_read(struct link *link, char *data, size_t count, time_t stoptime)
 
 ssize_t link_read_avail(struct link *link, char *data, size_t count, time_t stoptime)
 {
+	link->line_waits = 0;
 	ssize_t total = 0;
 	ssize_t chunk = 0;
 
@@ -973,11 +1223,11 @@ ssize_t link_read_avail(struct link *link, char *data, size_t count, time_t stop
 	/* Next, read what is available off the wire */
 
 	while (count > 0) {
-		chunk = read_aux(link, data, count);
+		chunk = read_aux(link, data, count, stoptime);
 		if (chunk < 0) {
 			/* ONLY BLOCK IF NOTHING HAS BEEN READ */
 			if (errno_is_temporary(errno) && total == 0) {
-				if (link_sleep(link, stoptime, 1, 0)) {
+				if (link_wait(link, stoptime, 1, 0)) {
 					continue;
 				} else {
 					break;
@@ -989,6 +1239,7 @@ ssize_t link_read_avail(struct link *link, char *data, size_t count, time_t stop
 			break;
 		} else {
 			link->read += chunk;
+			link->last_read = timestamp_monotonic();
 			total += chunk;
 			count -= chunk;
 			data += chunk;
@@ -1008,6 +1259,7 @@ ssize_t link_read_avail(struct link *link, char *data, size_t count, time_t stop
 
 int link_readline(struct link *link, char *line, size_t length, time_t stoptime)
 {
+	link->line_waits = 0;
 	while (1) {
 		while (length > 0 && link->buffer_length > 0) {
 			*line = *link->buffer_start;
@@ -1041,10 +1293,10 @@ ssize_t link_write(struct link *link, const char *data, size_t count, time_t sto
 		return errno = EINVAL, -1;
 
 	while (count > 0) {
-		chunk = write_aux(link, data, count);
+		chunk = write_aux(link, data, count, stoptime);
 		if (chunk < 0) {
 			if (errno_is_temporary(errno)) {
-				if (link_sleep(link, stoptime, 0, 1)) {
+				if (link_wait(link, stoptime, 0, 1)) {
 					continue;
 				} else {
 					break;
@@ -1103,26 +1355,35 @@ int link_buffer_output(struct link *link, size_t size)
 	}
 }
 
-int link_flush_output(struct link *link)
+/* Write the buffered output of link_printf, waiting until stoptime. */
+static int link_flush_output_until(struct link *link, time_t stoptime)
 {
 	if (buffer_pos(&link->output_buffer) == 0)
 		return 0;
 
 	size_t len;
 	const char *str = buffer_tolstring(&link->output_buffer, &len);
-	int rc = link_putlstring(link, str, len, time(0) + 60);
+	int rc = link_putlstring(link, str, len, stoptime);
 	buffer_free(&link->output_buffer);
 	buffer_init(&link->output_buffer);
 	return rc;
+}
+
+int link_flush_output(struct link *link)
+{
+	return link_flush_output_until(link, time(0) + 60);
 }
 
 ssize_t link_vprintf(struct link *link, time_t stoptime, const char *fmt, va_list va)
 {
 	int rc = buffer_putvfstring(&link->output_buffer, fmt, va);
 
+	/* Wait as long as the caller allows: a fixed deadline would drop the rest of a message that a slow reader is
+	 * still taking, and the stream would continue in the middle of it. */
 	if (buffer_pos(&link->output_buffer) > link->output_buffer_size) {
-		if (link_flush_output(link) < 0)
+		if (link_flush_output_until(link, stoptime) < 0) {
 			rc = -1;
+		}
 	}
 
 	return rc;
@@ -1143,6 +1404,9 @@ ssize_t link_printf(struct link *link, time_t stoptime, const char *fmt, ...)
 void link_close(struct link *link)
 {
 	if (link) {
+		if (link->poll) {
+			link_poll_set_remove(link->poll->set, link);
+		}
 		link_flush_output(link);
 		buffer_free(&link->output_buffer);
 
@@ -1173,6 +1437,9 @@ void link_close(struct link *link)
 void link_detach(struct link *link)
 {
 	if (link) {
+		if (link->poll) {
+			link_poll_set_remove(link->poll->set, link);
+		}
 		free(link);
 	}
 }
@@ -1451,7 +1718,7 @@ int link_poll(struct link_info *links, int nlinks, int msec)
 	for (i = 0; i < nlinks; i++) {
 		fds[i].fd = links[i].link->fd;
 		fds[i].events = link_to_poll(links[i].events);
-		if (links[i].link->buffer_length) { // If there's data already waiting, don't sit in the poll
+		if (link_has_buffered_data(links[i].link)) { // If there's data already waiting, don't sit in the poll
 			msec = 0;
 		}
 	}
@@ -1461,7 +1728,7 @@ int link_poll(struct link_info *links, int nlinks, int msec)
 	if (result >= 0) {
 		for (i = 0; i < nlinks; i++) {
 			links[i].revents = poll_to_link(fds[i].revents);
-			if (links[i].link->buffer_length) {
+			if (link_has_buffered_data(links[i].link)) {
 				links[i].revents |= LINK_READ;
 				result++;
 			}
@@ -1478,6 +1745,396 @@ int link_get_buffer_bytes(struct link *link)
 	int bytes;
 	ioctl(link->fd, TIOCOUTQ, &bytes);
 	return bytes;
+}
+
+static void poll_list_push(struct link_poll_set *set, enum poll_list_kind kind, struct link *link)
+{
+	struct poll_node *node = &link->poll->node[kind];
+	if (node->member) {
+		return;
+	}
+	struct poll_list *list = &set->list[kind];
+	node->prev = list->tail;
+	node->next = NULL;
+	node->member = 1;
+	if (list->tail) {
+		list->tail->poll->node[kind].next = link;
+	} else {
+		list->head = link;
+	}
+	list->tail = link;
+}
+
+static void poll_list_remove(struct link_poll_set *set, enum poll_list_kind kind, struct link *link)
+{
+	struct poll_node *node = &link->poll->node[kind];
+	if (!node->member) {
+		return;
+	}
+	struct poll_list *list = &set->list[kind];
+	if (node->prev) {
+		node->prev->poll->node[kind].next = node->next;
+	} else {
+		list->head = node->next;
+	}
+	if (node->next) {
+		node->next->poll->node[kind].prev = node->prev;
+	} else {
+		list->tail = node->prev;
+	}
+	node->prev = node->next = NULL;
+	node->member = 0;
+}
+
+static struct link *poll_list_pop(struct link_poll_set *set, enum poll_list_kind kind)
+{
+	struct link *link = set->list[kind].head;
+	if (link) {
+		poll_list_remove(set, kind, link);
+	}
+	return link;
+}
+
+/* Data that a read left in the buffer of a link is reported by the next wait of its set. */
+static void poll_set_note_buffer(struct link *link)
+{
+	if (link->poll) {
+		poll_list_push(link->poll->set, POLL_CHECK, link);
+	}
+}
+
+/* The list of ready links that a link joins when it has events. */
+static enum poll_list_kind poll_ready_kind(struct link *link)
+{
+	return link->poll->urgent ? POLL_URGENT : POLL_READY;
+}
+
+/* Record events found for a link, which keeps its place among the ready links or takes the last one. */
+static void poll_set_mark(struct link_poll_set *set, struct link *link, int revents)
+{
+	if (revents) {
+		link->poll->revents |= revents;
+		poll_list_push(set, poll_ready_kind(link), link);
+	}
+}
+
+#if defined(CCTOOLS_OPSYS_LINUX)
+static uint32_t link_to_epoll(int events)
+{
+	uint32_t r = 0;
+	if (events & LINK_READ) {
+		r |= EPOLLIN;
+	}
+	if (events & LINK_WRITE) {
+		r |= EPOLLOUT;
+	}
+	return r;
+}
+
+/* An error is reported as the events of interest, because the operations that waited for them no longer block. */
+static int epoll_to_link(uint32_t revents, int events)
+{
+	int r = 0;
+	if (revents & (EPOLLIN | EPOLLHUP)) {
+		r |= LINK_READ;
+	}
+	if (revents & EPOLLOUT) {
+		r |= LINK_WRITE;
+	}
+	if (revents & EPOLLERR) {
+		r |= events;
+	}
+	return r;
+}
+#endif
+
+struct link_poll_set *link_poll_set_create(void)
+{
+	struct link_poll_set *set = calloc(1, sizeof(*set));
+	if (!set) {
+		return NULL;
+	}
+#if defined(CCTOOLS_OPSYS_LINUX)
+	set->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+	if (set->epoll_fd < 0) {
+		free(set);
+		return NULL;
+	}
+#endif
+	/* The arrays always have room, so a wait on an empty set passes a valid array. */
+	if (!poll_set_grow(set)) {
+		link_poll_set_delete(set);
+		return NULL;
+	}
+	return set;
+}
+
+void link_poll_set_delete(struct link_poll_set *set)
+{
+	if (!set) {
+		return;
+	}
+	while (set->count > 0) {
+		link_poll_set_remove(set, set->links[set->count - 1]);
+	}
+#if defined(CCTOOLS_OPSYS_LINUX)
+	close(set->epoll_fd);
+	free(set->ready);
+#else
+	free(set->fds);
+#endif
+	free(set->links);
+	free(set);
+}
+
+/* Make room for one more link in the arrays of a set. */
+static int poll_set_grow(struct link_poll_set *set)
+{
+	if (set->count < set->size) {
+		return 1;
+	}
+	int size = set->size ? set->size * 2 : 8;
+	struct link **links = realloc(set->links, size * sizeof(*links));
+	if (!links) {
+		return 0;
+	}
+	set->links = links;
+#if defined(CCTOOLS_OPSYS_LINUX)
+	struct epoll_event *ready = realloc(set->ready, size * sizeof(*ready));
+	if (!ready) {
+		return 0;
+	}
+	set->ready = ready;
+#else
+	struct pollfd *fds = realloc(set->fds, size * sizeof(*fds));
+	if (!fds) {
+		return 0;
+	}
+	set->fds = fds;
+#endif
+	set->size = size;
+	return 1;
+}
+
+int link_poll_set_add(struct link_poll_set *set, struct link *link, int events, void *data)
+{
+	if (link->poll) {
+		if (link->poll->set != set) {
+			return 0;
+		}
+		link->poll->data = data;
+		return link_poll_set_modify(set, link, events);
+	}
+
+	if (!poll_set_grow(set)) {
+		return 0;
+	}
+
+	struct link_poll_entry *entry = calloc(1, sizeof(*entry));
+	if (!entry) {
+		return 0;
+	}
+
+#if defined(CCTOOLS_OPSYS_LINUX)
+	struct epoll_event event = {.events = link_to_epoll(events), .data.ptr = link};
+	if (epoll_ctl(set->epoll_fd, EPOLL_CTL_ADD, link->fd, &event) < 0) {
+		debug(D_TCP, "could not watch link %d: %s", link->fd, strerror(errno));
+		free(entry);
+		return 0;
+	}
+#endif
+
+	entry->set = set;
+	entry->data = data;
+	entry->events = events;
+	entry->index = set->count;
+	set->links[set->count++] = link;
+	link->poll = entry;
+
+	/* Data read before the link joined the set is reported by the next wait. */
+	poll_set_note_buffer(link);
+
+	return 1;
+}
+
+int link_poll_set_modify(struct link_poll_set *set, struct link *link, int events)
+{
+	struct link_poll_entry *entry = link->poll;
+	if (!entry || entry->set != set) {
+		return 0;
+	}
+	if (entry->events == events) {
+		return 1;
+	}
+
+#if defined(CCTOOLS_OPSYS_LINUX)
+	struct epoll_event event = {.events = link_to_epoll(events), .data.ptr = link};
+	if (epoll_ctl(set->epoll_fd, EPOLL_CTL_MOD, link->fd, &event) < 0) {
+		debug(D_TCP, "could not change the events of link %d: %s", link->fd, strerror(errno));
+		return 0;
+	}
+#endif
+
+	entry->events = events;
+	if (!(events & LINK_WRITE)) {
+		entry->revents &= ~LINK_WRITE;
+	}
+	if (!entry->revents) {
+		poll_list_remove(set, poll_ready_kind(link), link);
+	}
+	return 1;
+}
+
+int link_poll_set_urgent(struct link_poll_set *set, struct link *link, int urgent)
+{
+	struct link_poll_entry *entry = link->poll;
+	if (!entry || entry->set != set) {
+		return 0;
+	}
+	urgent = !!urgent;
+	if (entry->urgent == urgent) {
+		return 1;
+	}
+	int ready = entry->node[poll_ready_kind(link)].member;
+	poll_list_remove(set, poll_ready_kind(link), link);
+	entry->urgent = urgent;
+	if (ready) {
+		poll_list_push(set, poll_ready_kind(link), link);
+	}
+	return 1;
+}
+
+void link_poll_set_remove(struct link_poll_set *set, struct link *link)
+{
+	struct link_poll_entry *entry = link->poll;
+	if (!entry || entry->set != set) {
+		return;
+	}
+
+#if defined(CCTOOLS_OPSYS_LINUX)
+	/* The descriptor may be shared with a child process, so closing it would not remove it from the epoll set. */
+	epoll_ctl(set->epoll_fd, EPOLL_CTL_DEL, link->fd, NULL);
+#endif
+
+	for (int kind = 0; kind < POLL_LISTS; kind++) {
+		poll_list_remove(set, kind, link);
+	}
+
+	struct link *last = set->links[--set->count];
+	set->links[entry->index] = last;
+	last->poll->index = entry->index;
+
+	free(entry);
+	link->poll = NULL;
+}
+
+int link_poll_set_wait(struct link_poll_set *set, int msec)
+{
+	/* Links that were not taken keep their place, and their events are confirmed below: by their sockets, or by data
+	 * in their buffers, which may be what made them ready and which their sockets no longer show. */
+	struct link *link;
+	for (int kind = POLL_READY; kind <= POLL_URGENT; kind++) {
+		for (link = set->list[kind].head; link; link = link->poll->node[kind].next) {
+			link->poll->revents = 0;
+			poll_list_push(set, POLL_CHECK, link);
+		}
+	}
+
+	/* Links that a read left with data in their buffer are readable without a look at their sockets. */
+	while ((link = poll_list_pop(set, POLL_CHECK))) {
+		if (link_has_buffered_data(link)) {
+			poll_set_mark(set, link, LINK_READ);
+			msec = 0;
+		}
+	}
+
+	int result;
+#if defined(CCTOOLS_OPSYS_LINUX)
+	result = epoll_wait(set->epoll_fd, set->ready, MAX(set->size, 1), msec);
+	for (int i = 0; i < result; i++) {
+		link = set->ready[i].data.ptr;
+		poll_set_mark(set, link, epoll_to_link(set->ready[i].events, link->poll->events));
+	}
+#else
+	for (int i = 0; i < set->count; i++) {
+		set->fds[i].fd = set->links[i]->fd;
+		set->fds[i].events = link_to_poll(set->links[i]->poll->events);
+		set->fds[i].revents = 0;
+	}
+	result = poll(set->fds, set->count, msec);
+	int polled = result > 0 ? set->count : 0;
+	for (int i = 0; i < polled; i++) {
+		int revents = poll_to_link(set->fds[i].revents);
+		if (set->fds[i].revents & POLLERR) {
+			revents |= set->links[i]->poll->events;
+		}
+		poll_set_mark(set, set->links[i], revents);
+	}
+#endif
+
+	/* Drop links whose events were not confirmed, and count the rest. */
+	int ready = 0;
+	struct link *next;
+	for (int kind = POLL_READY; kind <= POLL_URGENT; kind++) {
+		for (link = set->list[kind].head; link; link = next) {
+			next = link->poll->node[kind].next;
+			if (link->poll->revents) {
+				ready++;
+			} else {
+				poll_list_remove(set, kind, link);
+			}
+		}
+	}
+
+	if (result < 0 && errno != EINTR) {
+		return -1;
+	}
+	return ready;
+}
+
+/* Take the events of the first link of one list of ready links. */
+static struct link *poll_set_next_of(struct link_poll_set *set, enum poll_list_kind kind, int *revents, void **data)
+{
+	struct link *link = poll_list_pop(set, kind);
+	if (!link) {
+		return NULL;
+	}
+	*revents = link->poll->revents;
+	link->poll->revents = 0;
+	if (data) {
+		*data = link->poll->data;
+	}
+	/* The caller reads the link now and may leave data in its buffer. */
+	poll_set_note_buffer(link);
+	return link;
+}
+
+struct link *link_poll_set_next(struct link_poll_set *set, int *revents, void **data)
+{
+	struct link *link = poll_set_next_of(set, POLL_URGENT, revents, data);
+	return link ? link : poll_set_next_of(set, POLL_READY, revents, data);
+}
+
+struct link *link_poll_set_next_urgent(struct link_poll_set *set, int *revents, void **data)
+{
+	return poll_set_next_of(set, POLL_URGENT, revents, data);
+}
+
+int link_poll_set_take(struct link_poll_set *set, struct link *link, int events)
+{
+	struct link_poll_entry *entry = link->poll;
+	if (!entry || entry->set != set) {
+		return 0;
+	}
+	int taken = entry->revents & events;
+	entry->revents &= ~events;
+	if (!entry->revents) {
+		poll_list_remove(set, poll_ready_kind(link), link);
+	}
+	if (taken & LINK_READ) {
+		poll_set_note_buffer(link);
+	}
+	return taken;
 }
 
 /* vim: set noexpandtab tabstop=8: */

@@ -28,7 +28,7 @@ from .task import (
     Task,
 )
 from .utils import (
-    set_port_range,
+    port_range,
     get_c_constant,
 )
 from . import vine_cache as vc
@@ -119,8 +119,6 @@ class Manager(object):
         else:
             self._staging_explicit = None
 
-        set_port_range(port)
-
         if status_display_interval and status_display_interval >= 1:
             self._info_widget = JupyterDisplay(interval=status_display_interval)
 
@@ -138,8 +136,13 @@ class Manager(object):
 
             ssl_key, ssl_cert = self._setup_ssl(ssl, run_info_path)
 
-            # use port = 0, as a port range has been set with set_port_range
-            self._taskvine = cvine.vine_ssl_create(0, ssl_key, ssl_cert)
+            # A single port goes to the C manager directly. A range reaches it through the environment only while the
+            # manager is created, so processes started later, such as local workers, choose their own ports.
+            if isinstance(port, int):
+                self._taskvine = cvine.vine_ssl_create(port, ssl_key, ssl_cert)
+            else:
+                with port_range(port):
+                    self._taskvine = cvine.vine_ssl_create(0, ssl_key, ssl_cert)
 
             if ssl_key:
                 self._using_ssl = True
@@ -319,6 +322,16 @@ class Manager(object):
     @property
     def port(self):
         return cvine.vine_port(self._taskvine)
+
+    ##
+    # Get the port on which the manager serves data to workers. Behind a
+    # firewall, give the manager a range of two ports so that both are known.
+    # @code
+    # >>> print(q.data_port)
+    # @endcode
+    @property
+    def data_port(self):
+        return cvine.vine_data_port(self._taskvine)
 
     ##
     # Whether the manager is using ssl to talk to workers
@@ -898,6 +911,20 @@ class Manager(object):
         return cvine.vine_workers_shutdown(self._taskvine, n)
 
     ##
+    # Lose the state of a worker as its loss would, while it stays connected, for failure-injection experiments.
+    #
+    # Its running tasks return to the ready queue, its file replicas are forgotten, and transfers to or from it fail,
+    # as when a worker is lost. The worker kills its tasks and libraries, ends the transfers that it serves, and
+    # removes its cached files of workflow level or less. It keeps its connection and takes new tasks once it has
+    # answered.
+    #
+    # @param self       Reference to the current manager object.
+    # @param worker_id  The id of a connected worker, the "workerid" field of its entry in status("workers").
+    # @return True if the worker was lost, False if no connected worker has that id.
+    def lose_worker(self, worker_id):
+        return cvine.vine_lose_worker(self._taskvine, worker_id) == 0
+
+    ##
     # Block workers running on host from working for the manager.
     #
     # @param self   Reference to the current manager object.
@@ -969,8 +996,8 @@ class Manager(object):
     # - "hungry-minimum" Mimimum number of tasks to consider manager not hungry. (default=10)
     # - "hungry-minimum-factor" Queue is hungry if number of waiting tasks is less than hungry-minumum-factor x (number of workers) | 2 |
     # - "immediate-recovery" If set to 1, create recovery tasks for temporary files as soon as their worker disconnects. Otherwise, create recovery tasks only if the temporary files are used as input when trying to dispatch another task.
-    # - "keepalive-interval" Set the minimum number of seconds to wait before sending new keepalive checks to workers. (default=300)
-    # - "keepalive-timeout" Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. (default=30)
+    # - "keepalive-interval" Set the minimum number of seconds to wait before sending new keepalive checks to workers. (default=120, or T/2 with a response time, see response-timeout)
+    # - "keepalive-timeout" Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. (default=900, or T with a response time, see response-timeout)
     # - "long-timeout" Set the minimum timeout in seconds when sending a large message to a single worker. (default=3600)
     # - "max-retrievals" Sets the max number of tasks to retrieve per manager wait(). If less than 1, the manager prefers to retrieve all completed tasks before dispatching new tasks to workers. (default=1)
     # - "min-transfer-timeout" Set the minimum number of seconds to wait for files to be transferred to or from a worker. (default=10)
@@ -979,6 +1006,9 @@ class Manager(object):
     # - "proportional-resources" If set to 0, do not assign resources proportionally to tasks. The default is to use proportions.
     # - "proportional-whole-tasks" Round up resource proportions such that only an integer number of tasks could be fit in the worker. The default is to use proportions.
     # - "ramp-down-heuristic" If set to 1 and there are more workers than tasks waiting, then tasks are allocated all the free resources of a worker large enough to run them. If monitoring watchdog is not enabled, then this heuristic has no effect. (default=0)
+    # - "response-timeout" The response time X in seconds of a worker that has not declared its own (vine_worker --response-timeout). If positive, a worker that makes no progress for T = 2X is removed. (default=0, off)
+    # - "manager-response-timeout" The manager's own response time X_M in seconds, sent to workers with a probe link, which then leave the manager when a check on the probe link stays unanswered for 2 X_M. (default=0, off)
+    # - "queue-stall-timeout" Seconds that the control queue of a worker judged by its probe link may take no data before the worker is removed. (default=0, meaning T + 372 s)
     # - "resource-submit-multiplier" Treat each worker as having ({cores,memory,gpus} * multiplier) when submitting tasks. This allows for tasks to wait at a worker rather than the manager. (default = 1.0)
     # - "short-timeout" Set the minimum timeout when sending a brief message to a single worker. (default=5s)
     # - "transfer-outlier-factor" Transfer that are this many times slower than the average will be terminated.  (default=10x)
@@ -1098,7 +1128,6 @@ class Manager(object):
 
     ##
     # Remove a library from all connected workers
-    #
     #
     # @param self   Reference to the current manager object.
     # @param name   Name of the library to be removed.

@@ -584,6 +584,30 @@ or `qdel` as appropriate. If you forget to remove them, they will exit
 automatically after fifteen minutes. (This can be adjusted with the `-t`
 option to `worker`.)
 
+### Ports and Firewalls
+
+A manager listens on two ports: `m.port`, where workers connect to receive
+tasks, and `m.data_port`, where workers fetch data the manager keeps for them.
+`vine.Manager(9123)` listens on port 9123 and takes any free port for data.
+If only some ports are open to workers, give the manager a range instead:
+`vine.Manager([9123, 9124])` takes the first free port of the range for tasks
+and the next one for data. A range of a single port leaves no port for data,
+so the manager cannot start.
+
+Workers also listen on a transfer port, from which other workers and the
+manager copy their files. If the manager cannot reach that port, for example
+because the workers run behind a cluster firewall or a NAT, start the workers
+with `--connect-back` (with `vine_factory`, `-E --connect-back`). Each worker
+then connects to the manager's data port to send the files the manager asks
+for, so it needs no port that the manager can reach. Workers still copy files
+from each other through their transfer ports.
+
+Creating a manager does not change the environment of the program. Workers
+that the program starts afterwards choose their own ports. The `TCP_LOW_PORT`
+and `TCP_HIGH_PORT` environment variables, if you set them, bound every port
+that is not given explicitly, including the data port of a manager given a
+single port.
+
 ### Project Names and the Catalog Server
 
 Keeping track of the manager's hostname and port can get cumbersome, especially
@@ -1222,7 +1246,9 @@ limit on the number of retries:
 
 When a task cannot be completed in the set number of tries, then the its result
 is set to the result of the last attempt (e.g. `"resource exhaustion"` in python,
-or `VINE_RESULT_RESOURCE_EXHAUSTION` in C).
+or `VINE_RESULT_RESOURCE_EXHAUSTION` in C). If the last try ended because its
+worker disconnected unexpectedly, the result is `"max retries"` in python, or
+`VINE_RESULT_MAX_RETRIES` in C.
 
 
 ### Pipelined Submission
@@ -1653,9 +1679,46 @@ and when it is returned, the result is present as `t.output`:
         print(t.output)
     ```
 
-Note that both library tasks and function invocations consume
-resources at the worker, and the number of running tasks will be
-constrained by the available resources in the same way as normal tasks.
+Note that a library task consumes resources at the worker like a
+normal task, and its function invocations run inside the slots of the
+library rather than in resources of their own.  A function invocation
+occupies one slot by default.  An invocation that requests cores with
+`set_cores(k)` occupies `k` slots of its library instance, and runs only
+on an instance with at least `k` free slots, so a library with 4 slots
+runs four 1-core invocations, two 2-core invocations, or one 4-core
+invocation at a time.  The library limits the thread pools (OpenMP,
+BLAS) of an invocation to its library cores divided by its slots, and an
+invocation of `k` slots to `k` times that.  Memory and disk requests of
+an invocation do not affect its placement.  An invocation that requests
+more cores than the library has slots never runs: if the slots of the library do not depend
+on the worker (direct execution mode, `set_function_slots`, or `set_cores`
+on the library task), it is returned with the result
+`VINE_RESULT_MISSING_LIBRARY`.  Otherwise it waits for a worker large
+enough, and the manager periodically reports it as a task that cannot fit
+any connected worker.
+
+A library can instead share the resources of its worker with other tasks
+by calling `set_library_pool(True)` on the library task before installing
+it.  Such a library reserves no cores, memory, or GPUs, and has one slot
+per core of its worker.  Each of its invocations takes the cores it
+requests (one by default) and the memory it requests (none by default)
+from the worker while it runs, as a normal task does, so invocations and
+normal tasks share the worker's cores and memory, and an idle library is
+not removed to make room for other tasks.  In fork mode an invocation sees
+its cores and memory as the `CORES` and `MEMORY` environment variables.
+An invocation that requests more than any connected worker has waits, and
+the manager periodically reports it.
+
+An invocation with a wall time (`set_time_max`) that it exceeds is stopped
+by its library in fork mode: the library kills the process that runs the
+invocation, which keeps its slots and resources until the library reports
+its end, and the invocation is returned with the result
+`VINE_RESULT_MAX_WALL_TIME`.  An invocation that ends before the library
+stops it is returned as it ended.  The invocation runs in the process
+group of its library, so processes that it started itself are killed only
+when the library ends.
+A library in direct mode cannot stop an invocation, which then runs to its
+end.
 
 ### Stateful Serverless Computing
 A function typically sets up its states (e.g., load modules/packages, build internal models or states) before executing its computation. With advanced serverless computing in TaskVine, you can set up a shared state between function invocations so the cost of setting up states doesn't have to be paid for every invocation, but instead is paid once and shared many times. TaskVine supports this technique as demonstrated via the below example.
@@ -2810,24 +2873,31 @@ change.
 | clean-redundant-replicas | Remove redundant temporary file replicas to save worker's local disk space. | 0 |
 | default-transfer-rate | The assumed network bandwidth used until sufficient data has been collected.  (1MB/s)
 | disconnect-slow-workers-factor | Set the multiplier of the average task time at which point to disconnect a worker; disabled if less than 1. (default=0)
+| enable-logs | If set to 0, keep only errors and notices in the debug log and close the performance, transactions, and taskgraph logs for the rest of the run, which spares a busy manager their writes. Logs turned off stay off. | 1 |
 | hungry-minimum          | Smallest number of waiting tasks in the manager before declaring it hungry | 10 |
 | hungry-minimum-factor   | Queue is hungry if number of waiting tasks is less than hungry-minumum-factor x (number of workers) | 2 |
 | immediate-recovery    | If set to 1, create recovery tasks for temporary files as soon as their worker disconnects. Otherwise, create recovery tasks only if the temporary files are used as input when trying to dispatch another task. | 0 |
-| keepalive-interval | Set the minimum number of seconds to wait before sending new keepalive checks to workers. | 300 |
-| keepalive-timeout | Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. | 30 |
+| keepalive-interval | Set the minimum number of seconds to wait before sending new keepalive checks to workers. | 120, or T/2 with a response time (see below) |
+| keepalive-timeout | Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. | 900, or T with a response time (see below) |
 | load-from-shared-filesystem | If set to 1, workers can load in data to their caches from the shared filesystem | 0 |
 | long-timeout | Set the minimum timeout in seconds when sending a large message to a single worker. | 3600 |
+| manager-response-timeout | The manager's own response time X_M in seconds, which it sends to workers with a probe link. Such a worker checks the manager on the probe link and leaves it when a check stays unanswered for 2 X_M (see below). 0 leaves workers to judge the manager by their first connection. | 0 |
 | max-retrievals | Sets the max number of tasks to retrieve per manager wait(). If less than 1, the manager prefers to retrieve all completed tasks before dispatching new tasks to workers. | 1 |
+| max-origin-failures | A task whose input URL or mini task could not be fetched from its origin more than this many times (failed copies from peer workers do not count) fails with the result input missing, instead of being returned to the workers without end. -1 is unlimited. | -1 |
 | min-transfer-timeout | Set the minimum number of seconds to wait for files to be transferred to or from a worker. | 10 |
 | monitor-interval        | Maximum number of seconds between resource monitor measurements. If less than 1, use default. | 5 |
+| perf-log-interval | Minimum number of seconds between performance log entries. Each entry takes a pass over every worker. | 1 |
 | prefer-dispatch | If 1, try to dispatch tasks even if there are retrieved tasks ready to be reportedas done. | 0 |
 | proportional-whole-tasks | Round up resource proportions such that only an integer number of tasks could be fit in the worker. The default is to use proportions. (See [task resources.](#task-resources) | 1 |
+| queue-stall-timeout | Seconds that the queue on the first connection of a worker judged by its probe link may take no data before the worker is removed, and that such a worker waits for a manager whose queue stalls. 0 means T + 372 s (see below). | 0 |
 | ramp-down-heuristic     | If set to 1 and there are more workers than tasks waiting, then tasks are allocated all the free resources of a worker large enough to run them. If monitoring watchdog is not enabled, then this heuristic has no effect. | 0 |
+| response-timeout | The response time X in seconds of a worker that has not declared its own (`--response-timeout`). If positive, a worker that makes no progress for T = 2X is removed (see below). 0 leaves the timeouts above in effect. | 0 |
 | resource-submit-multiplier | Assume that workers have `resource x resources-submit-multiplier` available.<br> This overcommits resources at the worker, causing tasks to be sent to workers that cannot be immediately executed.<br>The extra tasks wait at the worker until resources become available. | 1 |
 | sandbox-grow-factor    | When task disk sandboxes are exhausted, increase the allocation using their measured valued times this factor. Minimum is 1.1. | 2 |
 | shift-disk-load | Proactively shift temporary files away from the most disk-heavy worker to those with more available disk. | 0 |
 | short-timeout | Set the minimum timeout in seconds when sending a brief message to a single worker. | 5 |
 | temp-replica-count    | Number of temp file replicas created across workers | 0 |
+| temp-replica-distinct-hosts | Place each temp file replica on a host that holds no replica of the file when such a worker exists, since the workers of one host are often lost together. | 0 |
 | transfer-outlier-factor | Transfer that are this many times slower than the average will be terminated. | 10 |
 | transfer-replica-per-cycle | Number of replicas to schedule per file per iteration. | 1 |
 | transfer-temps-recovery | If 1, try to replicate temp files to reach threshold on worker removal. | 0 |
@@ -2836,6 +2906,40 @@ change.
 | worker-retrievals | If 1, retrieve all completed tasks from a worker when retrieving results, even if going above the parameter max-retrievals . Otherwise, if 0, retrieve just one task before deciding to dispatch new tasks or connect new workers. | 1 |
 | watch-library-logfiles | If 1, watch the output files produced by each of the library processes running on the remote workers, take
 them back the current logging directory. | 0 |
+
+By default, the manager and its workers wait for each other with the fixed timeouts above. A response time X turns
+on a timeout by progress instead: a worker declares it when it connects (`vine_worker --response-timeout X`), and
+`response-timeout` at the manager applies to every worker that has not declared one. A healthy worker then makes
+progress within X, and the manager removes a worker that makes no progress for T = 2X: every read or write on its
+link, every file sent to it, and every transfer of the manager's data port fails after T without data moving, however
+large the data, and a worker that sends nothing gets a keepalive check after T/2 and is removed when it has not answered
+for T. A worker with a response time judges the manager, its peers, its libraries, and its downloads by the same T.
+A worker that declares its own response time also opens a second connection to the manager's port, its probe link,
+set up as the first one is (TLS and password), which carries only the keepalive checks and their answers. A check
+there never waits behind tasks or files queued for the worker, and the worker answers it within a round of its main
+loop, also while it receives a large file or task on its first connection, which it reads in pieces as the data
+arrives. A worker on a busy or slow link is therefore not removed while it takes data, and a stopped worker is removed
+within T of its first unanswered check, however much the manager keeps sending it. While its probe link answers, the
+worker is not removed because its first connection takes no data: that connection may wait for the network to show the
+room the worker made, which can take minutes after a lost acknowledgment, so such a stall removes the worker only after
+`queue-stall-timeout`, by default T + 372 s.
+
+The probe link also lets a worker judge the manager. When the manager declares its own response time X_M
+(`manager-response-timeout`), it sends X_M to each worker on its probe link, reads probe links first in every step, and
+answers the worker's checks there at once. Such a worker sends a check when it has heard nothing from the manager on
+either connection for X_M, and leaves the manager when the check stays unanswered for 2 X_M with nothing heard on either
+connection, so a stopped manager is detected within about 3 X_M, while a manager whose first connection is full but
+which still answers is never left before `queue-stall-timeout`. X_M must cover the longest step of the manager's wait
+as the workers see it, including a crossing of the network. Without X_M a worker judges the manager by its first
+connection alone.
+These guarantees have these limits:
+
+- Operations keep their own timeouts as outer limits, so a slow transfer that keeps making progress lasts as long as
+  its data takes.
+- The TLS handshake and the password check of a new connection run on the manager's thread and may hold it for up to
+  T, or `short-timeout` without a response time.
+- For a worker without a probe link (one that declares no response time of its own), the network must drain the
+  buffers on the path within X/2, or a keepalive check waiting behind them arrives late.
 
 === "Python"
     ```python

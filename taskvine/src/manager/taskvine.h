@@ -96,7 +96,7 @@ typedef enum {
 	VINE_RESULT_MAX_END_TIME = 3 << 3,  /**< The task ran after the specified (absolute since epoch) end time. **/
 	VINE_RESULT_UNKNOWN = 4 << 3,	    /**< The result could not be classified. **/
 	VINE_RESULT_FORSAKEN = 5 << 3,	    /**< The task failed, but it was not a task error **/
-	VINE_RESULT_MAX_RETRIES = 6 << 3,   /**< Currently unused. **/
+	VINE_RESULT_MAX_RETRIES = 6 << 3,   /**< The task lost its worker after using all its retries. **/
 	VINE_RESULT_MAX_WALL_TIME = 7 << 3, /**< The task ran for more than the specified time (relative since running
 					       in a worker). **/
 	VINE_RESULT_RMONITOR_ERROR =
@@ -282,6 +282,12 @@ This may be called on tasks after they are returned from @ref vine_wait.
 */
 void vine_task_delete(struct vine_task *t);
 
+/** Add a reference to an existing task object, return the same object.
+@param t A task object.
+@return The same task object, or null.
+*/
+struct vine_task *vine_task_addref(struct vine_task *t);
+
 /** Indicate the command to be executed.
 @param t A task object.
 @param cmd The command to be executed.  This string will be duplicated by this call, so the argument may be freed or
@@ -320,6 +326,18 @@ If unset, the library will runs as many functions as it has cores available.
 */
 void vine_task_set_function_slots(struct vine_task *t, int nslots);
 
+/** Make a library share the resources of its worker with other tasks.
+A library in this mode reserves no cores, memory, or gpus, and its disk only when requested. Each of its function calls
+takes the cores it requests (one when unset) and the memory it requests (none when unset) from the worker while it
+runs, as a standard task does, and sees them as CORES and MEMORY. The library has one slot per core of its worker, so
+its calls are bounded by the worker's cores, not by slots, and an idle library is not removed to make room for other
+tasks. Function slots and cores requested for the library are ignored. Calls must run in fork mode to be stopped at
+their wall time. Libraries without this mode are unchanged.
+@param t A library task object.
+@param pool Non-zero to enable the mode, zero to disable it.
+*/
+void vine_task_set_library_pool(struct vine_task *t, int pool);
+
 /** Set the execution mode of functions inside a library.
 A mode can either be "fork" where the library forks and executes functions, or
 "direct" where the library executes a function in its memory space.
@@ -352,12 +370,27 @@ int vine_task_add_output(struct vine_task *t, struct vine_file *f, const char *r
 
 /** Specify the number of times this task is retried on worker errors. If less than one, the task is retried
 indefinitely (this the default). A task that did not succeed after the given number of retries is returned with the
-result of its last attempt.
+result of its last attempt. A task whose worker disconnected unexpectedly while running it after it used all its retries
+is returned with VINE_RESULT_MAX_RETRIES.
 @param t A task object.
 @param max_retries The number of retries.
 */
 
 void vine_task_set_retries(struct vine_task *t, int64_t max_retries);
+
+/** Carry the worker losses of earlier tasks for the same work into a task before it is submitted, so that the bound on
+losses holds across them. A frontend that submits a new task after an earlier one returned passes the earlier task's
+"worker_losses_charged" and "worker_losses_excused" metrics (see @ref vine_task_get_metric). The charged losses count
+as tries already used: the task returns with VINE_RESULT_MAX_RETRIES once charged losses and its own tries exceed its
+retries, it is quarantined from its second charged loss, and it is excused at most max_retries + 1 losses in all. Since
+they are tries, they also shorten the retries of results that are retried, such as resource exhaustion. A task that
+was never given losses behaves as before.
+@param t A task object, not yet submitted.
+@param charged The number of worker losses charged to earlier tasks of the same work.
+@param excused The number of worker losses excused for earlier tasks of the same work.
+*/
+
+void vine_task_set_worker_losses(struct vine_task *t, int charged, int excused);
 
 /** Specify the total number of times this task can be return to the manager without being executed. If less than zero,
 the task is tried indefinitely (this the default). A task that did not succeed after the given number is returned with
@@ -491,6 +524,12 @@ int vine_task_set_monitor_output(struct vine_task *t, const char *monitor_output
 
 const char *vine_task_get_state(struct vine_task *t);
 
+/** Return the original task id that a recovery task is restoring.
+@param t A task object.
+@return The source task id for a recovery task, or zero for non-recovery tasks.
+*/
+int vine_task_get_recovery_source_task_id(struct vine_task *t);
+
 /** Get the command line of the task.
 @param t A task object.
 @return The command line set by @ref vine_task_create.
@@ -590,6 +629,8 @@ const char *vine_task_get_hostname(struct vine_task *t);
 - "bytes_received"
 - "bytes_sent"
 - "bytes_transferred"
+- "worker_losses_charged": the unexpected worker losses that counted as tries of the task
+- "worker_losses_excused": the unexpected worker losses that were excused for the task
 @return The metric value, or zero if an invalid name is given.
 */
 
@@ -717,6 +758,14 @@ has previously been called on this object.
 */
 const char *vine_file_contents(struct vine_file *f);
 
+/** Release a reference to a file object.
+Most declared files should be released with @ref vine_undeclare_file; this function is for file references owned outside
+the manager declaration table.
+@param f A file object.
+@return The remaining reference count, or zero.
+*/
+int vine_file_delete(struct vine_file *f);
+
 /** Get the length of a vine file.
 @param f A file object.
 @return The length of the file, or zero if unknown.
@@ -735,6 +784,18 @@ const char *vine_file_source(struct vine_file *f);
 @return A file type.
 */
 vine_file_type_t vine_file_type(struct vine_file *f);
+
+/** Get the manager-side cached name of a file.
+@param f A file object.
+@return The cached name, or null.
+*/
+const char *vine_file_cached_name(struct vine_file *f);
+
+/** Return non-zero if a file is currently being recovered.
+@param f A file object.
+@return Non-zero if the file is currently being recovered.
+*/
+int vine_file_is_recovering(struct vine_file *f);
 
 /** Get the number of replicas of a file.
 @param m A manager object
@@ -938,6 +999,13 @@ but is still available on the manager's site, and can be recovered by submitting
 */
 int vine_prune_file(struct vine_manager *m, struct vine_file *f);
 
+/** Return a declared file by its cached name, or NULL if it is unknown to the manager.
+@param m A manager object.
+@param cached_name The file cache name.
+@return The declared file object, or null.
+*/
+struct vine_file *vine_manager_lookup_file(struct vine_manager *m, const char *cached_name);
+
 //@}
 
 /** @name Functions - Managers */
@@ -1000,6 +1068,9 @@ int vine_submit(struct vine_manager *m, struct vine_task *t);
 
 /** Indicate the library to be installed on all workers connected to the manager.
 The library is expected to run on all workers until they disconnect from the manager.
+The manager owns the task from now on, and deletes it when the library is removed,
+either by @ref vine_manager_remove_library or after the library fails too many times,
+or when the manager is deleted. The caller must not use the task afterwards.
 @param m A manager object
 @param t A task object.
 @param name The library to be installed
@@ -1025,6 +1096,18 @@ This is a testing support hook, not a normal manager control operation.
 */
 int vine_manager_release_random_worker(struct vine_manager *m);
 
+/** Lose the state of a worker as its loss would, while it stays connected, for failure-injection experiments.
+The manager returns the worker's running tasks to the ready queue, forgets its file replicas, and fails the transfers
+to or from it, as when a worker is lost. The worker kills its tasks and libraries, ends the transfers that it serves,
+and removes its cached files of workflow level or less. It keeps its connection and identity, and takes new tasks
+once it has answered. Call it from the thread that calls @ref vine_wait.
+@param m A manager object.
+@param worker_id The id of a connected worker, as reported in the "workerid" field of @ref vine_get_status with
+"workers".
+@return 0 if the worker's state was lost, -1 if no connected worker has that id.
+*/
+int vine_lose_worker(struct vine_manager *m, const char *worker_id);
+
 /** Wait for a task to complete.
 This call will block until either a task has completed, the timeout has expired, or the manager is empty.
 If a task has completed, the corresponding task object will be returned by this function.
@@ -1044,6 +1127,15 @@ task, or there is completed child process (call @ref process_wait to retrieve th
 process).
 */
 struct vine_task *vine_wait(struct vine_manager *m, int timeout);
+
+/** Make a blocking @ref vine_wait return soon, from any thread.
+An application whose thread waits in @ref vine_wait can call this from another thread to regain control, for example
+after it queued work that the waiting thread hands to the manager. The wait returns after its current step, with or
+without a completed task. A wake that arrives while no wait runs makes the next wait return after one step.
+This is the only manager function that is safe to call from another thread, and only while the manager exists.
+@param m A manager object
+*/
+void vine_wake(struct vine_manager *m);
 
 /** Wait for a task with a given task to complete.
 Similar to @ref vine_wait, but guarantees that the returned task has the specified tag.
@@ -1101,6 +1193,15 @@ Rather than assuming a specific port, the user should simply call this function 
 */
 int vine_port(struct vine_manager *m);
 
+/** Get the port on which the manager serves data to workers.
+Workers connect to this port, in addition to @ref vine_port, to fetch files the manager keeps for them.
+It is a free port of the range set by TCP_LOW_PORT and TCP_HIGH_PORT when the manager is created,
+so a range of two ports places both listening ports of the manager behind a firewall.
+@param m A manager object
+@return The data port of the manager.
+*/
+int vine_data_port(struct vine_manager *m);
+
 /** Change the project name for a given manager.
 @param m A manager object
 @param name The new project name.
@@ -1129,6 +1230,15 @@ int vine_enable_peer_transfers(struct vine_manager *m);
 
 /** Disable taskvine peer transfers to be scheduled by the manager **/
 int vine_disable_peer_transfers(struct vine_manager *m);
+
+/** Enable external recovery handling by returning recovery tasks from vine_wait.
+The application deletes each returned recovery task with @ref vine_task_delete.
+By default, recovery tasks are handled internally by the manager. **/
+int vine_enable_external_recovery_handling(struct vine_manager *m);
+
+/** Disable external recovery handling.
+Recovery tasks will be handled internally by the manager. **/
+int vine_disable_external_recovery_handling(struct vine_manager *m);
 
 /** When enabled, resources to tasks in are assigned in proportion to the size
 of the worker. If a resource is specified (e.g. with @ref vine_task_set_cores),
@@ -1441,15 +1551,23 @@ This allows for tasks to wait at a worker rather than the manager. (default = 1.
  - "disconnect-slow-workers-factor" Set the multiplier of the average task time at which point to disconnect;
 deactivated if less than 1. (default=0)
  - "keepalive-interval" Set the minimum number of seconds to wait before sending new keepalive checks to workers.
-(default=300)
+(default=120, or T/2 with a response time, see response-timeout)
  - "keepalive-timeout" Set the minimum number of seconds to wait for a keepalive response from worker before marking it
-as dead. (default=30)
+as dead. (default=900, or T with a response time, see response-timeout)
+ - "response-timeout" The response time X in seconds of a worker that has not declared its own (vine_worker
+--response-timeout). If positive, a worker that makes no progress for T = 2X is removed. (default=0, off)
+ - "manager-response-timeout" The manager's own response time X_M in seconds, sent to workers with a probe link,
+which then leave the manager when a check on the probe link stays unanswered for 2 X_M. (default=0, off)
+ - "queue-stall-timeout" Seconds that the control queue of a worker judged by its probe link may take no data before the
+worker is removed. (default=0, meaning T + 372 s)
  - "short-timeout" Set the minimum timeout when sending a brief message to a single worker. (default=5s)
  - "monitor-interval" Maximum number of seconds between resource monitor measurements. If less than 1, use default (5s).
 (default=5)
  - "category-steady-n-tasks" Set the number of tasks considered when computing category buckets.
  - "hungry-minimum" Mimimum number of tasks to consider manager not hungry. (default=10)
  - "wait-for-workers" Mimimum number of workers to connect before starting dispatching tasks. (default=0)
+ - "enable-logs" If 0, keep only errors and notices in the debug log and close the performance, transactions, and
+taskgraph logs for the rest of the run, which spares a busy manager their writes. Logs turned off stay off. (default=1)
  - "attempt-schedule-depth" The amount of tasks to attempt scheduling on each pass of send_one_task in the main loop.
 (default=100)
  - "wait_retrieve_many" Parameter to alter how vine_wait works. If set to 0, vine_wait breaks out of the while loop
@@ -1460,6 +1578,8 @@ loop (wait_retrieve_many mode). (default=0)
 a times series, if this feature is enabled. See @ref vine_enable_monitoring.
  - "update_interval"  Seconds between updates to the catalog. (default=60)
  - "temp-replica-count" Degree of replication across workers for remote temp files (default=0)
+ - "temp-replica-distinct-hosts" If set to 1, place each replica of a temp file on a host that holds no replica of it
+when such a worker exists, since the workers of one host are often lost together. (default=0)
  - "transient-error-interval" Time to wait in seconds after a resource failure before attempting to use it again
 (default=15)
  - "resource_management_interval" Seconds between measurement of manager local resources. (default=30)
@@ -1470,10 +1590,20 @@ a times series, if this feature is enabled. See @ref vine_enable_monitoring.
  - "option_blocklist_slow_workers_timeout" Timeout for slow workers to come back to the pool. (default=900)
  - "watch-library-logfiles" If 1, watch the output files produced by each of the library processes running on the remote workers, take them back the current logging directory. (default=0)
  - "max-library-retries" The number of times a library task can fail and be retried before it is permanently removed.
+ - "worker-source-max-checkpoints" The number of checkpoints that one worker sends to the manager's vault at once. They
+do not count against worker-source-max-transfers. (default=10)
+ - "max-origin-failures" A task whose workers cannot set it up because an input url or mini task failed to be fetched from its origin more than this many times fails with VINE_RESULT_INPUT_MISSING. Failed copies from peer workers and library deaths do not count. (default=-1, unlimited)
 @param value The value to set the parameter to.
 @return 0 on succes, -1 on failure.
 */
 int vine_tune(struct vine_manager *m, const char *name, double value);
+
+/** Tell whether @ref vine_tune takes a parameter name, without a manager.
+A program that checks settings before it creates a manager, or without one, uses it.
+@param name The name of the parameter.
+@return 1 when vine_tune takes the name, 0 otherwise.
+*/
+int vine_tune_known(const char *name);
 
 /** Sets the maximum resources a task without an explicit category ("default" category).
 rm specifies the maximum resources a task in the default category may use.

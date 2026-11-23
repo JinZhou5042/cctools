@@ -45,10 +45,17 @@ typedef enum {
 } vine_cache_status_t;
 
 struct vine_cache * vine_cache_create( const char *cachedir, int max_procs );
+/* Save the control connection peer address and the Manager data port. */
+int vine_cache_set_manager_transfer(struct vine_cache *c, const char *ip, int port);
+/* Copy the Manager data address into ip, which holds LINK_ADDRESS_MAX bytes. Return zero before the Manager sends it. */
+int vine_cache_get_manager_transfer(struct vine_cache *c, char *ip, int *port);
 void vine_cache_delete( struct vine_cache *c );
 void vine_cache_load( struct vine_cache *c );
 void vine_cache_scan( struct vine_cache *c, struct link *manager );
 void vine_cache_prune( struct vine_cache *c, vine_cache_level_t level );
+void vine_cache_lose_start( struct vine_cache *c, struct link *manager );
+struct budget;
+int vine_cache_lose_continue( struct vine_cache *c, const struct budget *b );
 
 char *vine_cache_data_path( struct vine_cache *c, const char *cachename );
 char *vine_cache_meta_path( struct vine_cache *c, const char *cachename );

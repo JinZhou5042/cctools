@@ -39,6 +39,23 @@ static char debug_program_name[PATH_MAX];
 static int64_t debug_flags = D_NOTICE | D_ERROR | D_FATAL;
 static pid_t debug_cached_pid = 0;
 
+/* The prefix of a debug line (local time to a hundredth of a second, program name, and pid) is the same for every
+ * line within a hundredth of a second, so each thread keeps the last prefix it formatted and copies it, instead of
+ * converting the time and formatting the prefix again for every line. */
+struct debug_prefix {
+	time_t seconds;	     /* the time of the prefix, in seconds */
+	long centiseconds;   /* the hundredths of a second of the prefix */
+	pid_t pid;	     /* the process that formatted it, which differs in a child after fork() */
+	unsigned generation; /* debug_prefix_generation when it was formatted */
+	int length;	     /* the length of text, or zero when nothing is kept */
+	char text[256];	     /* the prefix, which is not kept when longer */
+};
+
+static __thread struct debug_prefix debug_prefix_cache;
+
+/* Incremented when the program name changes, which makes every thread format its prefix again. */
+static volatile unsigned debug_prefix_generation = 1;
+
 struct flag_info {
 	const char *name;
 	int64_t flag;
@@ -187,25 +204,45 @@ static void do_debug(int64_t flags, const char *fmt, va_list args)
 
 	if (debug_write == debug_file_write || debug_write == debug_stderr_write || debug_write == debug_stdout_write) {
 		struct timeval tv;
-		struct tm tm_storage;
-		struct tm *tm;
 		gettimeofday(&tv, 0);
-		tm = localtime_r(&tv.tv_sec, &tm_storage);
 
 		/* Fetch the pid just once and use it multiple times. */
 		pid_t pid = getpid();
+		long centiseconds = (long)tv.tv_usec / 10000;
 
-		buffer_putfstring(&B,
-				"%04d/%02d/%02d %02d:%02d:%02d.%02ld %s[%d]",
-				tm->tm_year + 1900,
-				tm->tm_mon + 1,
-				tm->tm_mday,
-				tm->tm_hour,
-				tm->tm_min,
-				tm->tm_sec,
-				(long)tv.tv_usec / 10000,
-				debug_program_name,
-				pid);
+		struct debug_prefix *prefix = &debug_prefix_cache;
+		if (prefix->length > 0 && prefix->seconds == tv.tv_sec && prefix->centiseconds == centiseconds && prefix->pid == pid &&
+				prefix->generation == debug_prefix_generation) {
+			buffer_putlstring(&B, prefix->text, prefix->length);
+		} else {
+			struct tm tm_storage;
+			struct tm *tm = localtime_r(&tv.tv_sec, &tm_storage);
+			size_t start = buffer_pos(&B);
+
+			buffer_putfstring(&B,
+					"%04d/%02d/%02d %02d:%02d:%02d.%02ld %s[%d]",
+					tm->tm_year + 1900,
+					tm->tm_mon + 1,
+					tm->tm_mday,
+					tm->tm_hour,
+					tm->tm_min,
+					tm->tm_sec,
+					centiseconds,
+					debug_program_name,
+					pid);
+
+			size_t length = buffer_pos(&B) - start;
+			if (length < sizeof(prefix->text)) {
+				memcpy(prefix->text, buffer_tostring(&B) + start, length);
+				prefix->length = (int)length;
+				prefix->seconds = tv.tv_sec;
+				prefix->centiseconds = centiseconds;
+				prefix->pid = pid;
+				prefix->generation = debug_prefix_generation;
+			} else {
+				prefix->length = 0;
+			}
+		}
 	}
 	/* Parrot prints debug messages for children: */
 	if (debug_child_getpid) {
@@ -335,6 +372,7 @@ void debug_config(const char *name)
 {
 	strncpy(debug_program_name, path_basename(name), sizeof(debug_program_name) - 1);
 	debug_cached_pid = getpid();
+	debug_prefix_generation++;
 }
 
 void debug_config_file_size(off_t size)

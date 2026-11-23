@@ -7,20 +7,22 @@ CCTOOLS_DYNAMIC_SUFFIX = so
 LOCAL_CCFLAGS = -w -fPIC -DNDEBUG $(CCTOOLS_PYTHON3_CCFLAGS) -I ../../manager
 LOCAL_LINKAGE = $(CCTOOLS_PYTHON3_LDFLAGS) -lz $(CCTOOLS_OPENSSL_LDFLAGS) $(CCTOOLS_HOME)/taskvine/src/manager/libtaskvine.a $(CCTOOLS_HOME)/dttools/src/libdttools.a
 
-CCTOOLS_FLAKE8_IGNORE_FILES = "cvine.py"
+CCTOOLS_FLAKE8_IGNORE_FILES = "cvine.py,vine_graph_capi.py"
 
 DSPYTHONSO = ndcctools/taskvine/_cvine.$(CCTOOLS_DYNAMIC_SUFFIX)
+VINE_GRAPH_MODULE_DIR = $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/vine_graph
 LIBRARIES = $(DSPYTHONSO)
 OBJECTS = vine_wrap.o
 TARGETS = $(LIBRARIES)
 
 all: $(TARGETS)
 
-vine_wrap.c: taskvine.i
+# The interface wraps taskvine.h, so a change of the public header regenerates the wrapper.
+vine_wrap.c: taskvine.i $(CCTOOLS_HOME)/taskvine/src/manager/taskvine.h
 	@echo "SWIG taskvine.i (python)"
 	@$(CCTOOLS_SWIG) -o vine_wrap.c -outdir ndcctools/taskvine -python -I$(CCTOOLS_HOME)/dttools/src -I$(CCTOOLS_HOME)/taskvine/src/manager taskvine.i
 
-$(DSPYTHONSO): vine_wrap.o $(EXTERNAL_DEPENDENCIES)
+$(DSPYTHONSO): vine_wrap.o $(CCTOOLS_HOME)/taskvine/src/manager/libtaskvine.a $(EXTERNAL_DEPENDENCIES)
 
 test:
 
@@ -29,9 +31,16 @@ lint:
 
 clean:
 	rm -rf $(OBJECTS) $(TARGETS) ndcctools/taskvine/cvine.py vine_wrap.c vine_wrap.o *.pyc __pycache__
+	rm -rf ndcctools/taskvine/vine_graph/__pycache__
+	find ndcctools/taskvine/vine_graph -name __pycache__ -type d -prune -exec rm -rf {} +
 
 install: all
 	mkdir -p $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/compat
 	cp ndcctools/taskvine/*.py $(DSPYTHONSO) $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine
 	cp ndcctools/taskvine/compat/*.py $(CCTOOLS_PYTHON3_PATH)/ndcctools/taskvine/compat
+	mkdir -p $(VINE_GRAPH_MODULE_DIR)
+	rm -rf $(VINE_GRAPH_MODULE_DIR)/adaptors $(VINE_GRAPH_MODULE_DIR)/__pycache__
+	rm -f $(VINE_GRAPH_MODULE_DIR)/*.py
+	cd ndcctools/taskvine/vine_graph && find . -path ./test -prune -o -type d -print | while read dir; do mkdir -p "$(VINE_GRAPH_MODULE_DIR)/$$dir"; done
+	cd ndcctools/taskvine/vine_graph && find . -path ./test -prune -o -name '*.py' -print | while read file; do cp "$$file" "$(VINE_GRAPH_MODULE_DIR)/$$file"; done
 	cp taskvine.py $(CCTOOLS_PYTHON3_PATH)/

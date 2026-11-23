@@ -517,6 +517,17 @@ class Task(object):
         return cvine.vine_task_set_retries(self._task, max_retries)
 
     ##
+    # Carry the worker losses of earlier tasks for the same work into this task before it is submitted, so that the
+    # bound on losses holds across them. Pass the earlier task's get_metric("worker_losses_charged") and
+    # get_metric("worker_losses_excused"). Charged losses count as tries already used.
+    #
+    # @param self Reference to the current task object.
+    # @param charged The number of worker losses charged to earlier tasks of the same work.
+    # @param excused The number of worker losses excused for earlier tasks of the same work.
+    def set_worker_losses(self, charged, excused):
+        return cvine.vine_task_set_worker_losses(self._task, charged, excused)
+
+    ##
     # Indicate the number of times the task can be returned to the manager
     # without being executed. If less than 0 (the default), the task is tried indefinitely.
     # A task that did not succeed after the given number of retries is returned
@@ -1239,6 +1250,17 @@ class LibraryTask(Task):
             super().__del__()
         except TypeError:
             pass
+
+    ##
+    # Make the library share its worker's resources with other tasks. The library then reserves no cores, memory, or
+    # gpus, each function call takes the cores (one when unset) and memory (none when unset) it requests from the
+    # worker while it runs and sees them as CORES and MEMORY, and an idle library is not removed to make room for
+    # other tasks. Slots and cores set for the library are ignored. Set this before installing the library.
+    #
+    # @param self Reference to the current library object.
+    # @param pool True to enable the mode, False to disable it.
+    def set_library_pool(self, pool=True):
+        return cvine.vine_task_set_library_pool(self._task, 1 if pool else 0)
 
 
 # vim: set sts=4 sw=4 ts=4 expandtab ft=python:

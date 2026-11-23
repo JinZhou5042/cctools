@@ -2,6 +2,7 @@ include ../../config.mk
 include ../../rules.mk
 
 SOURCES = \
+	thread_pool.c \
 	address.c \
 	auth.c \
 	auth_address.c \
@@ -21,6 +22,7 @@ SOURCES = \
 	bucketing_exhaust_common.c \
 	bucketing_greedy_common.c \
 	bucketing_manager.c \
+	budget.c \
 	buffer.c \
 	catalog_query.c \
 	category.c \
@@ -81,6 +83,7 @@ SOURCES = \
 	jx_function.c \
 	link.c \
 	link_auth.c \
+	link_writer.c \
 	list.c \
 	load_average.c \
 	md5.c \
@@ -104,6 +107,7 @@ SOURCES = \
 	rmonitor.c \
 	rmonitor_poll.c \
 	rmsummary.c \
+	round_timer.c \
 	set.c \
 	semaphore.c \
 	sha1.c \
@@ -149,6 +153,7 @@ HEADERS_PUBLIC = \
 	bucketing_exhaust_common.h \
 	bucketing_greedy_common.h \
 	bucketing_manager.h \
+	budget.h \
 	buffer.h \
 	category.h \
 	cctools.h \
@@ -170,6 +175,7 @@ HEADERS_PUBLIC = \
 	jx.h \
 	jx_match.h \
 	link.h \
+	link_writer.h \
 	list.h \
 	load_average.h \
 	md5.h \
@@ -179,6 +185,7 @@ HEADERS_PUBLIC = \
 	progress_bar.h \
 	rmonitor_poll.h \
 	rmsummary.h \
+	round_timer.h \
 	skip_list.h \
 	stringtools.h \
 	text_array.h \
@@ -208,7 +215,7 @@ PROGRAMS = $(MOST_PROGRAMS) catalog_query
 
 SCRIPTS = cctools_gpu_autodetect
 TARGETS = $(LIBRARIES) $(PRELOAD_LIBRARIES) $(PROGRAMS) $(TEST_PROGRAMS)
-TEST_PROGRAMS = auth_test disk_alloc_test jx_test microbench multirun jx_count_obj_test jx_canonicalize_test jx_merge_test hash_table_benchmark hash_table_test histogram_test category_test jx_binary_test bucketing_base_test bucketing_manager_test priority_queue_test progress_bar_test skip_list_test
+TEST_PROGRAMS = auth_test disk_alloc_test jx_test microbench multirun jx_count_obj_test jx_canonicalize_test jx_merge_test hash_table_benchmark hash_table_test histogram_test category_test jx_binary_test bucketing_base_test bucketing_manager_test priority_queue_test progress_bar_test skip_list_test link_poll_set_test jx_print_number_test hash_table_removal_test link_writer_test list_iterate_test
 
 all: $(TARGETS) catalog_query
 

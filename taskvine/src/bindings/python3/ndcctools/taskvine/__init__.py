@@ -77,7 +77,6 @@ except (ImportError, ModuleNotFoundError):
     from .compat import DaskVine
     from .compat import DaskVineDag
 
-
 __all__ = [
     "Manager",
     "File",

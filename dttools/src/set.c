@@ -5,6 +5,7 @@ See the file COPYING for details.
 */
 
 #include "debug.h"
+#include "xxmalloc.h"
 #include "set.h"
 
 #include <stdlib.h>
@@ -14,15 +15,27 @@ See the file COPYING for details.
 #define DEFAULT_SIZE 127
 #define DEFAULT_LOAD 0.75
 #define DEFAULT_MIN_LOAD 0.125
+#define REMOVED_KEEP_MIN 1024 /* removed array capacity that is always kept across compactions */
+#define MIGRATE_INSERT 16      /* old buckets that each insert moves while a resize is in progress */
+#define MIGRATE_COMPACT 16384  /* old buckets that each compaction moves while a resize is in progress */
 
 #define ITERATION_MAX 1000000 /* very conservative overflow protection */
 
+/* One element. A removed entry leaves its bucket at once, so lookups walk only live entries, but it stays allocated in
+ * the set's removed array, still marked deleted and with its next pointer intact, until the set frees removed entries
+ * at a compaction, a resize, or a clear. An iterator that stands on it therefore stays valid exactly as long as when
+ * removed entries stayed in their buckets. */
 struct entry {
 	uintptr_t element;
-	struct entry *next;
+	struct entry *next; /* Next entry of the bucket, or of the bucket it left when it was removed. */
 	int deleted;
 };
 
+/* A resize moves the entries a few buckets at a time, so no single operation costs O(entries): while it is in
+ * progress, old_buckets holds the buckets not moved yet, every insert moves MIGRATE_INSERT of them and every compaction
+ * MIGRATE_COMPACT, and lookups and removals look in both arrays. Iterations walk the buckets and then the old buckets,
+ * as one sequence of bucket_count + old_count buckets, and only inserts, compactions, and clears move entries, each of
+ * which ends any iteration in progress. */
 struct set {
 	int size;
 	int bucket_count;
@@ -30,8 +43,56 @@ struct set {
 	int ibucket;
 	struct entry *ientry;
 	int iteration_index;
-	int need_compact;
+	int need_compact;	/* entries removed since the last compaction, which the removed array holds */
+	struct entry **removed; /* removed entries, freed at the next compaction, resize, or clear */
+	int removed_capacity;	/* length of the removed array */
+	struct entry **old_buckets; /* buckets that a resize in progress has not moved yet, or NULL */
+	int old_count;		    /* length of old_buckets, or 0 */
+	int old_next;		    /* index of the first old bucket not moved yet */
+	int shrinking;		    /* set while compactions halve the buckets of a set whose load is low */
 };
+
+/* The bucket at index i of the sequence that iterations walk: the buckets, then the old buckets of a resize. */
+static struct entry *bucket_at(struct set *s, int i)
+{
+	return i < s->bucket_count ? s->buckets[i] : s->old_buckets[i - s->bucket_count];
+}
+
+static int bucket_total(struct set *s)
+{
+	return s->bucket_count + s->old_count;
+}
+
+/* Stand the iterator on the first entry of the first bucket at index i or later of the sequence that iterations walk,
+ * or on none. Bucket heads are live entries, because a removed entry leaves its bucket at once. */
+static void seek_bucket(struct set *s, int i)
+{
+	s->ientry = 0;
+	for (; i < s->bucket_count; i++) {
+		if (s->buckets[i]) {
+			s->ientry = s->buckets[i];
+			s->ibucket = i;
+			return;
+		}
+	}
+	for (; i < s->bucket_count + s->old_count; i++) {
+		if (s->old_buckets[i - s->bucket_count]) {
+			s->ientry = s->old_buckets[i - s->bucket_count];
+			s->ibucket = i;
+			return;
+		}
+	}
+	s->ibucket = i;
+}
+
+/* Elements are mostly pointers, which are multiples of 16, so the bucket of an element comes from a mix of all of its
+ * bits rather than from the element itself, which would fill only every 16th bucket of an even bucket count. */
+static uint64_t set_bucket(uintptr_t element, int bucket_count)
+{
+	uint64_t x = (uint64_t)element * 0x9E3779B97F4A7C15ull;
+	x ^= x >> 32;
+	return x % bucket_count;
+}
 
 struct set *set_create(int bucket_count)
 {
@@ -53,8 +114,14 @@ struct set *set_create(int bucket_count)
 
 	s->size = 0;
 	s->need_compact = 0;
+	s->removed = 0;
+	s->removed_capacity = 0;
 	s->ientry = 0;
 	s->iteration_index = 0;
+	s->old_buckets = 0;
+	s->old_count = 0;
+	s->old_next = 0;
+	s->shrinking = 0;
 	return s;
 }
 
@@ -92,39 +159,78 @@ struct set *set_union(struct set *s1, struct set *s2)
 	return s;
 }
 
-static int set_insert_to_buckets_aux(struct entry **buckets, int bucket_count, struct entry *new_entry)
+/* Keep a removed entry until the next compaction, resize, or clear. */
+static void hold_removed(struct set *s, struct entry *e)
 {
-	uint64_t index;
-	struct entry *e;
-
-	index = new_entry->element % bucket_count;
-	e = buckets[index];
-
-	while (e) {
-		if (new_entry->element == e->element) {
-			e->deleted = 0;
-			free(new_entry);
-			return 1;
-		}
-		e = e->next;
+	if (s->need_compact == s->removed_capacity) {
+		s->removed_capacity = s->removed_capacity ? 2 * s->removed_capacity : 8;
+		s->removed = xxrealloc(s->removed, sizeof(*s->removed) * s->removed_capacity);
 	}
-
-	new_entry->next = buckets[index];
-	buckets[index] = new_entry;
-
-	return 1;
+	s->removed[s->need_compact++] = e;
 }
 
-static int set_reduce_buckets(struct set *s)
+/* Free the entries removed since the last compaction. The removed array keeps its capacity for the next removals,
+ * unless it holds more than REMOVED_KEEP_MIN entries and eight times the live entries plus buckets, so it never holds
+ * more than a constant times the most removals between two compactions, and a set that is filled and emptied again
+ * and again does not reallocate it each time. The removed entries stay in an array rather than in a list linked
+ * through them: freeing walks the array in removal order without a cache miss per entry. */
+static void free_removed(struct set *s)
 {
-	int new_count = ((s->bucket_count + 1) / 2) - 1;
+	if (s->need_compact) {
+		/* The iterator may stand on a removed entry. A pop resumes from it, so it starts again instead. */
+		s->ientry = 0;
+	}
+	for (int i = 0; i < s->need_compact; i++) {
+		free(s->removed[i]);
+	}
+	s->need_compact = 0;
+	if (s->removed_capacity > REMOVED_KEEP_MIN && s->removed_capacity > 8 * (s->size + s->bucket_count)) {
+		free(s->removed);
+		s->removed = 0;
+		s->removed_capacity = 0;
+	}
+}
 
-	if (new_count < DEFAULT_SIZE) {
-		return 0;
+/* Move the entries of up to count old buckets of a resize in progress into the buckets, in the order of the old
+ * buckets, and end the resize once every old bucket was moved. Moving entries ends any iteration in progress, and a pop
+ * starts again, because the iterator's bucket index no longer describes where its entry is. */
+static void set_migrate(struct set *s, int count)
+{
+	if (!s->old_buckets) {
+		return;
 	}
 
-	if (((float)s->size / new_count) > DEFAULT_LOAD) {
-		return 1;
+	struct entry *e, *f;
+	for (; count > 0 && s->old_next < s->old_count; count--, s->old_next++) {
+		e = s->old_buckets[s->old_next];
+		s->old_buckets[s->old_next] = 0;
+		while (e) {
+			f = e->next;
+			uint64_t index = set_bucket(e->element, s->bucket_count);
+			e->next = s->buckets[index];
+			s->buckets[index] = e;
+			e = f;
+		}
+	}
+
+	if (s->old_next == s->old_count) {
+		free(s->old_buckets);
+		s->old_buckets = 0;
+		s->old_count = 0;
+		s->old_next = 0;
+	}
+
+	s->ientry = 0;
+	s->iteration_index = (s->iteration_index + 1) % ITERATION_MAX;
+}
+
+/* Start moving every entry to a new array of new_count buckets, and free the removed entries. Inserts and compactions
+ * then move the old buckets a few at a time (set_migrate()), so a resize costs O(1) per operation instead of
+ * O(entries) in one. The new array comes zeroed from calloc(), which maps a large one without touching its pages. */
+static int set_resize(struct set *s, int new_count)
+{
+	if (s->old_buckets) {
+		return 0;
 	}
 
 	struct entry **new_buckets = (struct entry **)calloc(new_count, sizeof(struct entry *));
@@ -132,63 +238,58 @@ static int set_reduce_buckets(struct set *s)
 		return 0;
 	}
 
-	struct entry *e, *f;
-	for (int i = 0; i < s->bucket_count; i++) {
-		e = s->buckets[i];
-		while (e) {
-			f = e->next;
-			if (!e->deleted) {
-				e->next = NULL;
-				set_insert_to_buckets_aux(new_buckets, new_count, e);
-			}
-			e = f;
-		}
-	}
-
-	free(s->buckets);
+	free_removed(s);
+	s->old_buckets = s->buckets;
+	s->old_count = s->bucket_count;
+	s->old_next = 0;
 	s->buckets = new_buckets;
 	s->bucket_count = new_count;
-	s->need_compact = 0;
 
+	s->ientry = 0;
 	s->iteration_index = (s->iteration_index + 1) % ITERATION_MAX;
 
 	return 1;
 }
 
-void set_compact(struct set *s)
+/* Halve the buckets of a set whose load fell below DEFAULT_MIN_LOAD, as (n+1)/2-1 undoes the doubling to 2n+1,
+ * unless the load would then exceed half of DEFAULT_LOAD, so the next inserts do not double it again at once. One
+ * halving at a time keeps the old buckets of the resize at most twice the new ones, so the inserts before the next
+ * doubling, at least a quarter of the old buckets, move them all. Return whether a resize started, which also frees
+ * the removed entries. */
+static int set_reduce_buckets(struct set *s)
 {
-	struct entry *e, *f;
-	int i;
-
-	if (!s->need_compact) {
-		return;
+	if (((float)s->size / s->bucket_count) >= DEFAULT_MIN_LOAD) {
+		return 0;
 	}
 
-	for (i = 0; i < s->bucket_count; i++) {
-		e = s->buckets[i];
-
-		while (e && e->deleted) {
-			f = e->next;
-			free(e);
-			e = f;
-		}
-		s->buckets[i] = e;
-
-		while (e) {
-			f = e->next;
-			while (f && f->deleted) {
-				e->next = f->next;
-				free(f);
-				f = e->next;
-			}
-			e = f;
-		}
+	int half = ((s->bucket_count + 1) / 2) - 1;
+	if (half < DEFAULT_SIZE || ((float)s->size / half) > DEFAULT_LOAD / 2) {
+		return 0;
 	}
 
-	s->need_compact = 0;
-	if (((float)s->size / s->bucket_count) < DEFAULT_MIN_LOAD) {
-		set_reduce_buckets(s);
+	return set_resize(s, half);
+}
+
+/* Free the entries removed since the last compaction, move up to MIGRATE_COMPACT old buckets of a resize in
+ * progress, and start halving the buckets when the load is low. A set whose removals started a shrink keeps halving at
+ * later compactions until its load is no longer low. The cost is O(removed entries), amortized O(1) per removal however
+ * often it is called, plus O(MIGRATE_COMPACT). A compaction that frees or moves entries ends any iteration in
+ * progress, as an insert does: an iteration continued afterwards aborts instead of reading a freed entry. */
+int set_compact(struct set *s)
+{
+	int freed = s->need_compact;
+	if (!freed && !s->old_buckets && !s->shrinking) {
+		return 0;
 	}
+
+	if (!s->old_buckets) {
+		s->shrinking = set_reduce_buckets(s);
+	}
+	set_migrate(s, MIGRATE_COMPACT);
+	free_removed(s);
+	s->iteration_index = (s->iteration_index + 1) % ITERATION_MAX;
+
+	return freed;
 }
 
 void set_clear(struct set *s)
@@ -196,8 +297,8 @@ void set_clear(struct set *s)
 	struct entry *e, *f;
 	int i;
 
-	for (i = 0; i < s->bucket_count; i++) {
-		e = s->buckets[i];
+	for (i = 0; i < bucket_total(s); i++) {
+		e = bucket_at(s, i);
 		while (e) {
 			f = e->next;
 			free(e);
@@ -209,14 +310,21 @@ void set_clear(struct set *s)
 		s->buckets[i] = 0;
 	}
 
+	free(s->old_buckets);
+	s->old_buckets = 0;
+	s->old_count = 0;
+	s->old_next = 0;
+	s->shrinking = 0;
+
+	free_removed(s);
 	s->size = 0;
-	s->need_compact = 0;
 	s->iteration_index = (s->iteration_index + 1) % ITERATION_MAX;
 }
 
 void set_delete(struct set *s)
 {
 	set_clear(s);
+	free(s->removed);
 	free(s->buckets);
 	free(s);
 }
@@ -226,58 +334,34 @@ int set_size(struct set *s)
 	return s->size;
 }
 
-int set_lookup(struct set *s, void *element)
+/* Return whether key, whose bucket index is given, is in the buckets or, while a resize is in progress, in the old
+ * buckets, where a bucket already moved is empty. */
+static int find_element(struct set *s, uintptr_t key, uint64_t index)
 {
 	struct entry *e;
-	uint64_t index;
-
-	uintptr_t key = (uintptr_t)element;
-
-	index = key % s->bucket_count;
-	e = s->buckets[index];
-
-	while (e) {
+	for (e = s->buckets[index]; e; e = e->next) {
 		if (key == e->element) {
-			if (!e->deleted) {
+			return 1;
+		}
+	}
+	if (s->old_buckets) {
+		for (e = s->old_buckets[set_bucket(key, s->old_count)]; e; e = e->next) {
+			if (key == e->element) {
 				return 1;
 			}
-			return 0;
 		}
-		e = e->next;
 	}
-
 	return 0;
+}
+
+int set_lookup(struct set *s, void *element)
+{
+	return find_element(s, (uintptr_t)element, set_bucket((uintptr_t)element, s->bucket_count));
 }
 
 static int set_double_buckets(struct set *s)
 {
-	int new_count = 2 * s->bucket_count;
-	struct entry **new_buckets = (struct entry **)calloc(new_count, sizeof(struct entry *));
-	if (!new_buckets) {
-		return 0;
-	}
-
-	struct entry *e, *f;
-	for (int i = 0; i < s->bucket_count; i++) {
-		e = s->buckets[i];
-		while (e) {
-			f = e->next;
-			if (!e->deleted) {
-				e->next = NULL;
-				set_insert_to_buckets_aux(new_buckets, new_count, e);
-			}
-			e = f;
-		}
-	}
-
-	free(s->buckets);
-	s->buckets = new_buckets;
-	s->bucket_count = new_count;
-	s->need_compact = 0;
-
-	s->iteration_index = (s->iteration_index + 1) % ITERATION_MAX;
-
-	return 1;
+	return set_resize(s, (2 * (s->bucket_count + 1)) - 1);
 }
 
 int set_insert(struct set *s, const void *element)
@@ -287,22 +371,24 @@ int set_insert(struct set *s, const void *element)
 
 	uintptr_t key = (uintptr_t)element;
 
-	if (((float)s->size / s->bucket_count) > DEFAULT_LOAD)
-		set_double_buckets(s);
+	/* A set above its load while a resize is in progress doubles once the resize ended, which takes fewer inserts
+	 * than it took to reach that load. */
+	if (s->old_buckets) {
+		set_migrate(s, MIGRATE_INSERT);
+	} else if (((float)s->size / s->bucket_count) > DEFAULT_LOAD && set_double_buckets(s)) {
+		set_migrate(s, MIGRATE_INSERT);
+	}
 
-	index = key % s->bucket_count;
-	e = s->buckets[index];
+	index = set_bucket(key, s->bucket_count);
+	if (find_element(s, key, index)) {
+		return 1;
+	}
 
-	while (e) {
-		if (key == e->element) {
-			if (e->deleted) {
-				e->deleted = 0;
-				s->size++;
-				s->iteration_index = (s->iteration_index + 1) % ITERATION_MAX;
-			}
-			return 1;
-		}
-		e = e->next;
+	/* A set that is never iterated is never compacted, so compact once removed entries outnumber the rest. A new
+	 * entry ends any iteration in progress, so no iterator is left on a freed entry. */
+	if (s->need_compact > s->size + s->bucket_count) {
+		set_compact(s);
+		index = set_bucket(key, s->bucket_count);
 	}
 
 	e = (struct entry *)malloc(sizeof(struct entry));
@@ -352,25 +438,27 @@ int set_push(struct set *s, const void *element)
 
 int set_remove(struct set *s, const void *element)
 {
-	struct entry *e;
-	uint64_t index;
+	struct entry *e, **link;
 
 	uintptr_t key = (uintptr_t)element;
 
-	index = key % s->bucket_count;
-	e = s->buckets[index];
+	link = &s->buckets[set_bucket(key, s->bucket_count)];
 
-	while (e) {
-		if (key == e->element) {
-			if (e->deleted) {
-				return 0;
+	for (int old = 0; old < 2; old++) {
+		while ((e = *link)) {
+			if (key == e->element) {
+				*link = e->next;
+				e->deleted = 1;
+				hold_removed(s, e);
+				s->size--;
+				return 1;
 			}
-			e->deleted = 1;
-			s->need_compact = 1;
-			s->size--;
-			return 1;
+			link = &e->next;
 		}
-		e = e->next;
+		if (!s->old_buckets) {
+			break;
+		}
+		link = &s->old_buckets[set_bucket(key, s->old_count)];
 	}
 
 	return 0;
@@ -408,12 +496,7 @@ int set_first_element(struct set *s)
 	set_compact(s);
 	s->iteration_index = (s->iteration_index + 1) % ITERATION_MAX;
 
-	s->ientry = 0;
-	for (s->ibucket = 0; s->ibucket < s->bucket_count; s->ibucket++) {
-		s->ientry = s->buckets[s->ibucket];
-		if (s->ientry)
-			break;
-	}
+	seek_bucket(s, 0);
 
 	return s->iteration_index;
 }
@@ -438,12 +521,7 @@ void *set_next_element(struct set *s, int iteration)
 			s->ientry = s->ientry->next;
 		}
 		if (!s->ientry) {
-			s->ibucket++;
-			for (; s->ibucket < s->bucket_count; s->ibucket++) {
-				s->ientry = s->buckets[s->ibucket];
-				if (s->ientry && !s->ientry->deleted)
-					break;
-			}
+			seek_bucket(s, s->ibucket + 1);
 		}
 
 		return element;
@@ -459,8 +537,8 @@ void set_foreach_ro(struct set *s, void (*func)(void *element, void *arg), void 
 
 	int prev_iteration = s->iteration_index;
 
-	for (i = 0; i < s->bucket_count; i++) {
-		e = s->buckets[i];
+	for (i = 0; i < bucket_total(s); i++) {
+		e = bucket_at(s, i);
 		while (e) {
 			if (!e->deleted) {
 				func((void *)e->element, arg);
@@ -483,10 +561,10 @@ int set_random_element(struct set *s, int *offset_bookkeep)
 		return s->iteration_index;
 	}
 
-	int ibucket_start = random() % s->bucket_count;
+	int ibucket_start = random() % bucket_total(s);
 
-	for (s->ibucket = ibucket_start; s->ibucket < s->bucket_count; s->ibucket++) {
-		s->ientry = s->buckets[s->ibucket];
+	for (s->ibucket = ibucket_start; s->ibucket < bucket_total(s); s->ibucket++) {
+		s->ientry = bucket_at(s, s->ibucket);
 		while (s->ientry && s->ientry->deleted) {
 			s->ientry = s->ientry->next;
 		}
@@ -497,7 +575,7 @@ int set_random_element(struct set *s, int *offset_bookkeep)
 	}
 
 	for (s->ibucket = 0; s->ibucket < ibucket_start; s->ibucket++) {
-		s->ientry = s->buckets[s->ibucket];
+		s->ientry = bucket_at(s, s->ibucket);
 		while (s->ientry && s->ientry->deleted) {
 			s->ientry = s->ientry->next;
 		}
@@ -526,7 +604,7 @@ void *set_next_element_with_offset(struct set *s, int offset_bookkeep, int itera
 
 	void *element = NULL;
 
-	offset_bookkeep = offset_bookkeep % s->bucket_count;
+	offset_bookkeep = offset_bookkeep % bucket_total(s);
 
 	if (s->ientry) {
 		element = (void *)s->ientry->element;
@@ -536,9 +614,9 @@ void *set_next_element_with_offset(struct set *s, int offset_bookkeep, int itera
 			s->ientry = s->ientry->next;
 		}
 		if (!s->ientry) {
-			s->ibucket = (s->ibucket + 1) % s->bucket_count;
-			for (; s->ibucket != offset_bookkeep; s->ibucket = (s->ibucket + 1) % s->bucket_count) {
-				s->ientry = s->buckets[s->ibucket];
+			s->ibucket = (s->ibucket + 1) % bucket_total(s);
+			for (; s->ibucket != offset_bookkeep; s->ibucket = (s->ibucket + 1) % bucket_total(s)) {
+				s->ientry = bucket_at(s, s->ibucket);
 				while (s->ientry && s->ientry->deleted) {
 					s->ientry = s->ientry->next;
 				}

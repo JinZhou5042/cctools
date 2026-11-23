@@ -2,9 +2,9 @@
 
 ## Performance Log Format
 
-The performance log is a sequence of records, recorded at
-each significant change in an integer metric such as the number of tasks submitted,
-running, and so forth.
+The performance log is a sequence of records, recorded when
+an integer metric such as the number of tasks submitted, running, and so forth changes,
+at most once per `perf-log-interval` seconds (one by default), and when the manager starts and ends.
 The first row always contains the name of the columns, which correspond to
 values that can be obtained from `vine_stats`.  The first column is a Unix timestamp
 with microsecond resolution.

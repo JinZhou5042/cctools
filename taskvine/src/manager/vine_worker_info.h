@@ -13,6 +13,7 @@ See the file COPYING for details.
 #include "domain_name.h"
 #include "hash_table.h"
 #include "link.h"
+#include "link_writer.h"
 #include "itable.h"
 
 typedef enum {
@@ -21,12 +22,23 @@ typedef enum {
 	VINE_WORKER_TYPE_STATUS  = 4,    // connection is known to be a status client
 } vine_worker_type_t;
 
+struct vine_transfer_pair;
+
 struct vine_worker_info {
 	/* Type of connection: unknown, worker, status client. */
 	vine_worker_type_t type;
 
 	/* Connection to the worker or other client. */
 	struct link *link;
+
+	/* Everything sent to the worker. */
+	struct link_writer *lw;
+
+	/* Entry in the manager's sending_workers, or NULL. */
+	struct list_cursor *sending;
+
+	/* Entry in the manager's send_held_workers, or NULL. */
+	struct list_cursor *send_held;
 
 	/* Static properties reported by worker when it connects. */
 	char *hostname;
@@ -47,12 +59,49 @@ struct vine_worker_info {
 	int  transfer_port;
 	int  transfer_port_active;
 	char *transfer_url;       /* worker(ip)?://transfer_addr:transfer_port */
+	int  transfer_connect_back; /* The Manager cannot reach the transfer port, so the Worker connects back to send files. */
+
+	/* Response time X in seconds that the worker declared (info response-timeout), or zero. The manager judges the
+	 * worker failed when it makes no progress for T = 2X, see vine_manager_worker_timeout(). */
+	int  response_timeout;
+
+	/* The probe link of a worker that declared X (see "Probe link" in vine_manager.c): a second connection that
+	 * carries only the manager's checks and the worker's answers, so nothing lies ahead of a check. probe_lw writes
+	 * the checks. probe_sent is when the outstanding check was handed to probe_lw, zero when none is outstanding, and
+	 * probe_answer when the last answer arrived. All are null or zero while the worker has no probe link. */
+	struct link *probe_link;
+	struct link_writer *probe_lw;
+	timestamp_t probe_sent;
+	timestamp_t probe_answer;
+
+	/* The worker id under which this connection waits in the manager's probe_rendezvous for its other half, or null:
+	 * a worker that declared X waits for its probe link, and a probe link that arrived first waits for its worker. */
+	char *probe_key;
+
+	/* Scratch space of vine_schedule_task_to_worker(): bytes of the task's inputs cached on this worker, and whether it
+	 * holds the task's first input without a transfer source, valid only while schedule_stamp equals the manager's
+	 * schedule_stamp. */
+	int64_t schedule_cached_bytes;
+	int schedule_holds_unsourced;
+	uint64_t schedule_stamp;
+
+	/* Entry of the manager's capacity index (workers_by_capacity): the worker's free capacity priority when it was last
+	 * placed there, and its serial, which is unique among workers and zero while the worker is not in the index. */
+	double schedule_capacity;
+	uint64_t schedule_serial;
+
+	/* Blocking inputs of ready tasks that this worker holds, each with a reference. When the worker frees a transfer
+	 * slot, gains room for a task, or leaves, each of them is woken (see vine_schedule.h). */
+	struct set *blocked_files;
 
 	/* Worker condition that may affect task start or cancellation. */
 	int  draining;                          // if 1, worker does not accept anymore tasks. It is shutdown if no task running.
 	int  pending_removal;                   // if not 0, the vine_worker_disconnect_reason_t with which the worker will be removed
 	                                        // by disconnect_failed_workers. Such a worker is not in worker_table, but may still be
 	                                        // reachable from tasks and replica sets, which should skip it.
+	int64_t lose_sequence;                  // number of the last loss of the worker's state, see vine_lose_worker()
+	int  losing;                            // if 1, the worker has not yet answered "lose <lose_sequence>" with "lost": it takes
+	                                        // no task or transfer, and its messages about earlier state are dropped.
 	int  alarm_slow_worker;                 // if 1, no task has finished since a slow running task triggered a disconnection.
 	                                        // 0 otherwise. A 2nd task triggering disconnection will cause the worker to disconnect
 	int64_t     end_time;                   // epoch time (in seconds) at which the worker terminates
@@ -83,6 +132,9 @@ struct vine_worker_info {
 	timestamp_t total_task_time;
 	timestamp_t total_transfer_time;
 	timestamp_t last_transfer_failure;
+	/* Time of the last failed transfer from this worker as a source. It is not chosen as a source again until a
+	 * message from it arrives after this time. */
+	timestamp_t last_source_failure;
 	timestamp_t start_time;
 	timestamp_t last_msg_recv_time;
 	timestamp_t last_update_msg_time;
@@ -102,10 +154,37 @@ struct vine_worker_info {
 
 	int incoming_xfer_counter;
 	int outgoing_xfer_counter;
+	/* Checkpoints of the data service that this worker sends over connections. They are counted apart from
+	 * outgoing_xfer_counter and limited by worker-source-max-checkpoints, so a worker that anchors its outputs still
+	 * serves the tasks that read them. */
+	int outgoing_checkpoints;
+
+	/* Bytes of the files that this worker sends to other workers in the manager's transfer records, and the smallest file
+	 * refused since the last wake because it would not fit beside them (-1 if none). See
+	 * vine_current_transfers_source_has_room(). */
+	int64_t outgoing_xfer_bytes;
+	int64_t outgoing_refused_bytes;
+
+	/* The manager's transfer records with this worker as destination and as source, so removing the worker drops its
+	 * records without a pass over the records of all workers. See vine_current_transfers.c. */
+	struct vine_transfer_pair *incoming_transfers;
+	struct vine_transfer_pair *outgoing_transfers;
+
+	/* Quarantine of tasks charged two lost workers (see vine_schedule.h): the id of the quarantined task that runs here,
+	 * so the worker takes no other task, and the id of the quarantined task for which the worker takes no new task
+	 * until it runs nothing, or zero. */
+	int quarantine_task_id;
+	int quarantine_reserved_id;
+
+	/* The outgoing transfers of every worker on this worker's host, named by its hostname, or null before the worker
+	 * reported it (see vine_current_transfers.h). */
+	struct vine_transfer_host *transfer_host_load;
 };
 
 struct vine_worker_info * vine_worker_create( struct link * lnk );
 void vine_worker_delete( struct vine_worker_info *w );
 
 struct jx * vine_worker_to_jx( struct vine_worker_info *w );
+
+int vine_worker_source_is_suspect( struct vine_worker_info *w );
 #endif

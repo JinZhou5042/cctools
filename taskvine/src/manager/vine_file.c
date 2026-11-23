@@ -65,6 +65,7 @@ int vine_file_delete(struct vine_file *f)
 		}
 
 		vine_task_delete(f->mini_task);
+		free(f->origin_error);
 		free(f->source);
 		free(f->cached_name);
 		free(f->data);
@@ -328,11 +329,14 @@ struct vine_file *vine_file_xrootd(const char *source, struct vine_file *proxy, 
 		}
 	}
 
-	char *command = string_format("xrdcp %s output.root", source);
+	char *quoted = string_escape_shell(source);
+	char *command = string_format("xrdcp %s output.root", quoted);
+	free(quoted);
 	struct vine_task *t = vine_task_create(command);
 
+	/* The proxy is mounted under the name that X509_USER_PROXY gives. */
 	if (proxy) {
-		vine_task_set_env_var(t, "X509_USER_PROXY", "proxy509");
+		vine_task_set_env_var(t, "X509_USER_PROXY", "proxy509.pem");
 		vine_task_add_input(t, proxy, "proxy509.pem", 0);
 	}
 
@@ -372,6 +376,21 @@ vine_file_type_t vine_file_type(struct vine_file *f)
 const char *vine_file_source(struct vine_file *f)
 {
 	return f->source;
+}
+
+const char *vine_file_cached_name(struct vine_file *f)
+{
+	return f ? f->cached_name : NULL;
+}
+
+int vine_file_is_recovering(struct vine_file *f)
+{
+	/* The recovery task is a copy of the task that wrote the file; it is recovering only while it runs. */
+	if (!f || f->type != VINE_TEMP || !f->recovery_task || f->recovery_task->type != VINE_TASK_TYPE_RECOVERY) {
+		return 0;
+	}
+
+	return f->recovery_task->state != VINE_TASK_INITIAL && f->recovery_task->state != VINE_TASK_DONE;
 }
 
 void vine_file_set_mode(struct vine_file *f, int mode)

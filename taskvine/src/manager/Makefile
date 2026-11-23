@@ -3,9 +3,11 @@ include ../../../rules.mk
 
 SOURCES = \
 	vine_manager.c \
+	vine_manager_data_service.c \
 	vine_manager_get.c \
 	vine_manager_put.c \
 	vine_manager_factory.c \
+	vine_manager_catalog.c \
 	vine_manager_summarize.c \
 	vine_schedule.c \
 	vine_worker_info.c \
@@ -29,7 +31,9 @@ SOURCES = \
 	vine_fair.c \
 	vine_runtime_dir.c \
 	vine_task_groups.c \
-	vine_temp.c
+	vine_temp.c \
+	vine_transfer_receive.c \
+	vine_transfer_send.c
 
 PUBLIC_HEADERS = taskvine.h
 
@@ -41,6 +45,11 @@ TARGETS = $(LIBRARIES)
 all: $(TARGETS)
 
 libtaskvine.a: $(OBJECTS)
+
+# Rebuild Manager objects when their shared internal structure changes.
+$(OBJECTS): vine_manager.h
+vine_manager.o: vine_protocol.h
+vine_manager.o vine_manager_data_service.o: vine_manager_data_service.h
 
 install: all
 	mkdir -p $(CCTOOLS_INSTALL_DIR)/lib

@@ -32,12 +32,12 @@ struct vine_worker_options *vine_worker_options_create()
 	self->idle_timeout = 900;
 	self->connect_timeout = 900;
 	self->active_timeout = 3600;
+	self->response_timeout = 0;
 
 	self->init_backoff_interval = 1;
 	self->max_backoff_interval = 8;
 
 	self->check_resources_interval = 5;
-	self->max_time_on_measurement = 3;
 
 	self->features = hash_table_create(0, 0);
 
@@ -61,6 +61,11 @@ struct vine_worker_options *vine_worker_options_create()
 	self->reported_transfer_host = 0;
 
 	return self;
+}
+
+int vine_worker_options_timeout(struct vine_worker_options *self, int otherwise)
+{
+	return self->response_timeout > 0 ? 2 * self->response_timeout : otherwise;
 }
 
 void vine_worker_options_delete(struct vine_worker_options *self)
@@ -104,6 +109,7 @@ void vine_worker_options_show_help(const char *cmd, struct vine_worker_options *
 	printf(" %-30s Set both --idle-timeout and --connect-timeout.\n", "-t,--timeout=<time>");
 	printf(" %-30s Disconnect after this time if manager sends no work. (default=%ds)\n", "   --idle-timeout=<time>", options->idle_timeout);
 	printf(" %-30s Abort after this time if no managers are available. (default=%ds)\n", "   --connect-timeout=<time>", options->idle_timeout);
+	printf(" %-30s Response time X, declared to the manager: a link fails after 2X without progress. (default=off)\n", "   --response-timeout=<time>");
 	printf(" %-30s Exit if parent process dies.\n", "--parent-death");
 	printf(" %-30s Set TCP window size.\n", "-w,--tcp-window-size=<size>");
 	printf(" %-30s Set initial value for backoff interval when worker fails to connect\n", "-i,--min-backoff=<time>");
@@ -144,6 +150,7 @@ void vine_worker_options_show_help(const char *cmd, struct vine_worker_options *
 	printf(" %-30s Listening port for worker-worker transfers. Either port or port_min:port_max (default: any)\n", "--transfer-port");
 	printf(" %-30s Explicit contact host:port for worker-worker transfers, e.g., when routing is used. (default: :<transfer_port>)\n", "--contact-hostport");
 	printf(" %-30s Maximum number of concurrent worker transfer requests (default=%d)\n", "--max-transfer-procs", options->max_transfer_procs);
+	printf(" %-30s Connect to the manager to send the files it requests, for a manager that cannot reach the transfer port.\n", "--connect-back");
 
 	printf(" %-30s Enable tls connection to manager (manager should support it).\n", "--ssl");
 	printf(" %-30s SNI domain name if different from manager hostname. Implies --ssl.\n", "--tls-sni=<domain name>");
@@ -176,6 +183,8 @@ enum {
 	LONG_OPT_KEEP_WORKSPACE,
 	LONG_OPT_MAX_TRANSFER_PROCS,
 	LONG_OPT_TASK_WRAPPER,
+	LONG_OPT_CONNECT_BACK,
+	LONG_OPT_RESPONSE_TIMEOUT,
 };
 
 static const struct option long_options[] = {{"advertise", no_argument, 0, 'a'},
@@ -189,6 +198,7 @@ static const struct option long_options[] = {{"advertise", no_argument, 0, 'a'},
 		{"timeout", required_argument, 0, 't'},
 		{"idle-timeout", required_argument, 0, LONG_OPT_OPTIONS_IDLE_TIMEOUT},
 		{"connect-timeout", required_argument, 0, LONG_OPT_CONNECT_TIMEOUT},
+		{"response-timeout", required_argument, 0, LONG_OPT_RESPONSE_TIMEOUT},
 		{"tcp-window-size", required_argument, 0, 'w'},
 		{"min-backoff", required_argument, 0, 'i'},
 		{"max-backoff", required_argument, 0, 'b'},
@@ -219,6 +229,7 @@ static const struct option long_options[] = {{"advertise", no_argument, 0, 'a'},
 		{"max-transfer-procs", required_argument, 0, LONG_OPT_MAX_TRANSFER_PROCS},
 		{"contact-hostport", required_argument, 0, LONG_OPT_CONTACT_HOSTPORT},
 		{"task-wrapper", required_argument, 0, LONG_OPT_TASK_WRAPPER},
+		{"connect-back", no_argument, 0, LONG_OPT_CONNECT_BACK},
 		{0, 0, 0, 0}};
 
 static void vine_worker_options_get_env(const char *name, int64_t *manual_option)
@@ -325,6 +336,9 @@ void vine_worker_options_get(struct vine_worker_options *options, int argc, char
 			break;
 		case LONG_OPT_CONNECT_TIMEOUT:
 			options->connect_timeout = string_time_parse(optarg);
+			break;
+		case LONG_OPT_RESPONSE_TIMEOUT:
+			options->response_timeout = MAX(0, string_time_parse(optarg));
 			break;
 		case 'o':
 			debug_config_file(optarg);
@@ -468,6 +482,9 @@ void vine_worker_options_get(struct vine_worker_options *options, int argc, char
 			break;
 		case LONG_OPT_MAX_TRANSFER_PROCS:
 			options->max_transfer_procs = atoi(optarg);
+			break;
+		case LONG_OPT_CONNECT_BACK:
+			options->connect_back = 1;
 			break;
 		case LONG_OPT_TASK_WRAPPER:
 			options->task_wrapper = optarg;

@@ -13,6 +13,8 @@ This module is private to the manager and should not be invoked by the end user.
 */
 
 #include "taskvine.h"
+#include "budget.h"
+#include "round_timer.h"
 #include <limits.h>
 
 /*
@@ -27,6 +29,7 @@ typedef enum {
 	VINE_APP_FAILURE,
 	VINE_MGR_FAILURE,
 	VINE_END_OF_LIST,
+	VINE_LINK_MOVED, /* The connection became the probe link of another worker, and its own entry was deleted. */
 } vine_result_code_t;
 
 /*
@@ -38,7 +41,8 @@ typedef enum {
 	VINE_MSG_PROCESSED = 0,        /* Message was processed and connection is still good. */
 	VINE_MSG_PROCESSED_DISCONNECT, /* Message was processed and disconnect now expected. */
 	VINE_MSG_NOT_PROCESSED,        /* Message was not processed, waiting to be consumed. */
-	VINE_MSG_FAILURE               /* Message not received, connection failure. */
+	VINE_MSG_FAILURE,              /* Message not received, connection failure. */
+	VINE_MSG_PROCESSED_MOVED       /* Message was processed and the connection now belongs to another worker. */
 } vine_msg_code_t;
 
 /* The current resource monitoring configuration of the manager. */
@@ -83,14 +87,28 @@ struct vine_manager {
 	int   port;          /* Port number on which this manager is listening for connections. */
 	int   priority;      /* Priority of this manager relative to other managers with the same name. */
 	char *catalog_hosts; /* List of catalogs to which this manager reports. */
+	struct vine_manager_catalog *catalog; /* Thread that sends catalog updates and factory queries, once one is sent. */
+	char *owner;         /* Name of the user running the manager, looked up once. */
 	char *manager_preferred_connection; /* Recommended method for connecting to this manager.  @ref vine_set_manager_preferred_connection */
 	char  workingdir[PATH_MAX];         /* Current working dir, for reporting to the catalog server. */
 	char *uuid;          /* Unique identifier of manager when reported to catalog. */
 	struct hash_table *properties;   /* Set of additional properties to report to catalog server. */
 
+	struct vine_manager_data_service *ds; /* Own the data listener and bidirectional transfer executors. */
 	struct link *manager_link;       /* Listening TCP connection for accepting new workers. */
-	struct link_info *poll_table;    /* Table for polling on all connected workers. */
-	int poll_table_size;             /* Number of entries in poll_table. */
+	struct link_poll_set *poll_set;  /* Links that a step waits on: the manager link, the data service, the wake pipe, every worker in worker_table (with its worker as data), and departing links. */
+	struct list *sending_workers;	 /* Workers whose output queue holds data or failed. */
+	int send_holds;                  /* Nesting depth of vine_manager_send_hold(). While positive, sends only queue. */
+	struct list *send_held_workers;  /* Workers given data while sends were held, written once at the outermost release. */
+	int connections_waiting;         /* The manager link was readable at the last poll. */
+	struct list *departing_links;	 /* Removed workers' links whose sealed queues still hold a final message. */
+	struct budget round;             /* Time for the work of one step of vine_wait(), started after its poll. */
+	struct round_timer round_timer;  /* The parts of the current step of vine_wait(), see vine_manager_round_step(). */
+	int round_running;               /* A step is being timed: its poll ended and its next poll has not begun. */
+	struct round_window round_summary; /* Steps since the last round summary in the debug log. */
+	struct link *wake_link;          /* Read end of the pipe that vine_wake() writes to from other threads. */
+	int wake_fd;                     /* Write end of that pipe. */
+	int woken;                       /* A wake arrived during the current vine_wait(), which then returns. */
 
 	/* Security configuration */
 
@@ -102,24 +120,47 @@ struct vine_manager {
 	/* Primary data structures for tracking task state. */
 
 	struct itable *tasks;           /* Maps task_id -> vine_task of all tasks in any state. */
+	int standard_tasks_count;       /* Number of standard tasks in the tasks table, so that vine_empty() takes constant time. */
 	struct skip_list   *ready_tasks;       /* Skip list of vine_task that are waiting to execute. */
 	struct itable   *running_table;      /* Table of vine_task that are running at workers. */
 	struct list   *waiting_retrieval_list;      /* List of vine_task that are waiting to be retrieved. */
 	struct list   *retrieved_list;      /* List of vine_task that have been retrieved. */
 	struct list   *task_info_list;  /* List of last N vine_task_infos for computing capacity. */
+	/* Sums of the reports in task_info_list, kept as reports are added and removed, so that the capacity costs O(1) per
+	 * returned task instead of a pass over the list. limit is the list's bound, which never shrinks. */
+	struct {
+		timestamp_t transfer_time;
+		timestamp_t exec_time;
+		timestamp_t manager_time;
+		double cores;
+		double memory;
+		double disk;
+		double gpus;
+		int limit;
+	} task_info_sums;
 	struct hash_table *categories;  /* Maps category_name -> struct category */
+	struct category *last_category; /* The category that vine_category_lookup_or_create() returned last, which most calls ask for again. */
 	struct hash_table *library_templates; /* Maps library name -> vine_task of library with that name. */
+	uint64_t library_templates_serial;    /* Advanced whenever a library template is added or removed. */
+	char *library_checked_name;           /* The library name whose presence was checked last, a copy, or NULL. */
+	uint64_t library_checked_serial;      /* library_templates_serial when library_checked_name was checked. */
+	int library_checked_found;            /* Whether that library had a template then. */
 
 	struct skip_list_cursor *ready_tasks_cr;      /* Iterates ready_list in order */
 
 	/* Primary data structures for tracking worker state. */
 
 	struct hash_table *worker_table;     /* Maps link -> vine_worker_info */
+	struct hash_table *probe_rendezvous; /* Maps a worker id to the half of a probe link pair that arrived first, see "Probe link" in vine_manager.c. */
 	struct list *zombie_workers;         /* Workers marked for removal. They are not in worker_table, and are removed in disconnect_failed_workers. */
 	struct hash_table *worker_blocklist; /* Maps hostname -> vine_blocklist_info */
 	struct hash_table *factory_table;    /* Maps factory_name -> vine_factory_info */
 	struct hash_table *workers_with_watched_file_updates;  /* Maps link -> vine_worker_info */
-	struct hash_table *current_transfer_table; 	/* Maps uuid -> struct transfer_pair */
+	struct hash_table *current_transfer_table; 	/* Maps transfer id -> struct transfer_pair */
+	uint64_t next_transfer_id;	/* Number of the next transfer record, from a random start, so ids of another manager never match. */
+	struct hash_table *current_transfer_url_table; 	/* Maps source url -> int count of current transfers */
+	struct hash_table *transfer_hosts;	/* Maps a worker's hostname -> struct vine_transfer_host, the outgoing transfers of its workers. */
+	double transfer_rate_peak;	/* The highest send rate that any of transfer_hosts reached, in bytes per second. */
 	struct itable     *task_group_table; 	/* Maps group id -> list vine_task */
 	struct hash_table *workers_idle_disconnecting;  /* set of workers that were granted a request to idle disconnect, and are in the process of disconnecting. */
 
@@ -133,6 +174,17 @@ struct vine_manager {
 	/* Primary scheduling controls. */
 
 	vine_schedule_t worker_selection_algorithm;    /* Mode for selecting best worker for task in main scheduler. */
+	uint64_t schedule_stamp;                       /* Marks worker scratch space of the current vine_schedule_task_to_worker(). */
+	struct skip_list *workers_by_capacity;         /* Capacity index: the workers of worker_table by free cores and function slots, see vine_schedule.h. */
+	uint64_t worker_serial;                        /* Last serial given to a worker that entered the capacity index. */
+	struct hash_table *blocked_sources;            /* Blocking inputs by the URL of their source, each a set of file references, see vine_schedule.h. */
+	uint64_t blocked_epoch;                        /* Advanced by vine_schedule_wake_all(), which ends the wait of every blocked ready task. */
+	uint64_t blocked_pass;                         /* Counts dispatch passes, so a blocking input is checked once per pass. */
+	uint64_t schedule_wakes;                       /* Counts the events that may end the wait of a blocked ready task, and changes of the ready tasks. */
+	uint64_t blocked_files_registered;             /* Files registered as blocking at their current serial, so a wake by name of a file looks it up only while some file is. */
+	uint64_t schedule_waiting_wakes;               /* The value of schedule_wakes while schedule_waiting_run counts. */
+	uint64_t schedule_waiting_run;                 /* Ready tasks found waiting in a row by dispatch passes since schedule_wakes last changed. */
+	timestamp_t time_last_blocked_wake;            /* When every blocked ready task was last woken by time. */
 	vine_category_mode_t allocation_default_mode;  /* Mode for computing resources allocations for each task. */
 
 	/* Internal state modified by the manager */
@@ -142,6 +194,8 @@ struct vine_manager {
 	int num_tasks_left;    /* Optional: Number of tasks remaining, if given by user.  @ref vine_set_num_tasks */
 	int nothing_happened_last_wait_cycle; /* Set internally in main loop if no messages or tasks were processed during the last wait loop.
 																					 If set, poll longer to avoid wasting cpu cycles, and growing log files unnecessarily.*/
+	int dispatch_blocked;  /* Set when the last dispatch attempt found no worker with room for a task, or every ready task waiting for an event. */
+	int gpus_requested;    /* Set once a ready task or a category requests gpus. Until then, idle gpus are not room for a task. */
 
 	/* Accumulation of statistics for reporting to the caller. */
 
@@ -153,6 +207,11 @@ struct vine_manager {
 	timestamp_t time_last_wait;
 	timestamp_t time_last_log_stats;
 	timestamp_t time_last_large_tasks_check;
+	timestamp_t time_last_ready_tasks_check;
+	timestamp_t time_last_worker_checks; /* When keepalives, slow and drained workers, and blocks were last checked. */
+	timestamp_t time_last_compaction;    /* When the tables were last compacted, see compact_tables(). */
+	timestamp_t time_unexplained_worker_losses[2]; /* The two most recent unexpected losses of workers that held tasks
+							  that had never lost a worker, newest first, or zero. See cleanup_worker(). */
 	timestamp_t link_poll_end;
 	time_t      catalog_last_update_time;
 	time_t      resources_last_update_time;
@@ -164,6 +223,7 @@ struct vine_manager {
 	FILE *txn_logfile;         /* Transaction logfile for recording every event of interest. */
 	FILE *graph_logfile;       /* Graph logfile for visualizing application structure. */
 	int perf_log_interval;	   /* Minimum interval for performance log entries in seconds. */
+	int perf_log_pending;      /* An event since the last performance log entry waits for the interval to pass. */
 	
 	/* Resource monitoring configuration. */
 
@@ -179,6 +239,7 @@ struct vine_manager {
 	int peer_transfers_enabled;
 	int file_source_max_transfers;
 	int worker_source_max_transfers;
+	int worker_source_max_checkpoints; /* Checkpoints that one worker sends to the data service at once. */
 
 	/* Hungry call optimization */
 	timestamp_t time_last_hungry;      /* Last time vine_hungry_computation was called. */
@@ -192,13 +253,16 @@ struct vine_manager {
 
 	/* Various performance knobs that can be tuned. */
 	int short_timeout;            /* Timeout in seconds to send/recv a brief message from worker */
+	int response_timeout;         /* Response time X in seconds of a worker that declared none, or zero: see "Timeouts". */
+	int manager_response_timeout; /* The manager's own response time X_M in seconds, which workers with a probe link judge it by, or zero: see "Probe link". */
+	int queue_stall_timeout;      /* Seconds a control queue of a worker judged by its probe link may take no data, or zero for T + VINE_QUEUE_STALL_SLACK. */
 	int long_timeout;             /* Timeout if in the middle of an incomplete message. */
 	int minimum_transfer_timeout; /* Minimum number of seconds to allow for a manager<-> worker file transfer. */
 	int transfer_outlier_factor;  /* Factor to consider a given transfer time to be an outlier justifying cancellation. */
 	int default_transfer_rate;    /* Assumed data transfer rate for computing timeouts, prior to collecting observations. */
 	int process_pending_check;    /* Enables check for waiting processes in main loop via @ref process_pending */
-	int keepalive_interval;	      /* Time between keepalive request transmissions. */
-	int keepalive_timeout;	      /* Keepalive response must be received within this time, otherwise worker disconnected. */
+	int keepalive_interval;	      /* Time between keepalive request transmissions. Negative: the default, see "Timeouts". */
+	int keepalive_timeout;	      /* Keepalive response must be received within this time, otherwise worker disconnected. Negative: the default. */
 	int hungry_minimum;           /* Minimum number of waiting tasks to consider queue not hungry. */
 	int hungry_minimum_factor;    /* queue is hungry if number of waiting tasks is less than hungry_minimum_factor * number of connected workers. */
 	int wait_for_workers;         /* Wait for these many workers to connect before dispatching tasks at start of execution. */
@@ -221,8 +285,10 @@ struct vine_manager {
 	int transfer_temps_recovery;  /* If true, attempt to recover temp files from lost worker to reach threshold required */
 	int transfer_replica_per_cycle;  /* Maximum number of replica to request per temp file per iteration */
 	int temp_replica_count;       /* Number of replicas per temp file */
+	int temp_replica_distinct_hosts; /* If true, place each replica of a temp file on a host without one when possible. */
 	int clean_redundant_replicas; /* If true, remove redundant replicas of temp files to save disk space. */
 	int shift_disk_load;          /* If true, shift storage burden to more available workers to minimize disk usage peaks. */
+	int external_recovery_handling; /* If true, recovery tasks are returned by vine_wait to the user. */
 
 	double resource_submit_multiplier; /* Factor to permit overcommitment of resources at each worker.  */
 	double bandwidth_limit;            /* Artificial limit on bandwidth of manager<->worker transfers. */
@@ -233,6 +299,7 @@ struct vine_manager {
 	timestamp_t transient_error_interval; /* microseconds between new attempts on task rescheduling and using a file replica as source after a failure. */
 
 	int max_library_retries;        /* The maximum time that a library can be failed and retry another one, if over this count the library template will be removed */
+	int max_origin_failures;        /* A task forsaken for an input url or mini task whose fetches from its origin failed more often fails as INPUT_MISSING. -1 (the default) is unlimited. */
 	int watch_library_logfiles;     /* If true, watch the output files produced by each of the library processes running on the remote workers, take them back the current logging directory */
 
 	double sandbox_grow_factor;         /* When task disk sandboxes are exhausted, increase the allocation using their measured valued times this factor */
@@ -260,17 +327,40 @@ be called on the manager object by other elements of the manager process.
 struct vine_file *vine_manager_declare_file(struct vine_manager *m, struct vine_file *f);
 struct vine_file *vine_manager_lookup_file(struct vine_manager *q, const char *cached_name);
 
-/* Send a printf-style message to a remote worker. */
+/* Queue a printf-style message for a remote worker. Return its length, or -1 if the worker's link has failed. */
 #ifndef SWIG
 __attribute__ (( format(printf,3,4) ))
 #endif
 int vine_manager_send( struct vine_manager *q, struct vine_worker_info *w, const char *fmt, ... );
 
-/* Receive a line-oriented message from a remote worker. */
+/* Queue bytes for a remote worker. Return 0, or -1 if the worker's link has failed. */
+int vine_manager_send_data(struct vine_manager *q, struct vine_worker_info *w, const char *data, size_t length);
+
+/* Only queue sends until the matching vine_manager_send_release(), so the messages of one operation leave in one write
+ * per worker. Holds nest, and the outermost release writes each worker given data once. */
+void vine_manager_send_hold(struct vine_manager *q);
+void vine_manager_send_release(struct vine_manager *q);
+
+/* Queue a byte range of a local file for a remote worker, read when it reaches the head of the queue. Return 0, or -1
+ * if the worker's link has failed. */
+int vine_manager_send_file(struct vine_manager *q, struct vine_worker_info *w, const char *path, int64_t offset, int64_t length);
+
+/* Queue a reference to shared data for a remote worker, so data sent to many workers is held once. Return 0, or -1 if
+ * the worker's link has failed. */
+struct link_writer_shared;
+int vine_manager_send_shared(struct vine_manager *q, struct vine_worker_info *w, struct link_writer_shared *s);
+
+/* Receive a line-oriented message from a remote worker, after writing everything queued for it. */
 vine_msg_code_t vine_manager_recv( struct vine_manager *q, struct vine_worker_info *w, char *line, int length );
 
 /* Compute the expected wait time for a transfer of length bytes. */
 int vine_manager_transfer_time( struct vine_manager *q, struct vine_worker_info *w, int64_t length );
+
+/* Return T = 2X in seconds, the time without progress after which the manager judges a worker failed, where X is the
+ * response time that w declared, else the manager's response-timeout (for any worker when w is NULL). Return otherwise
+ * when neither is set: the timeout framework is then off and the caller keeps its own timeout, see "Timeouts" in
+ * vine_manager.c. */
+int vine_manager_worker_timeout( struct vine_manager *q, struct vine_worker_info *w, int otherwise );
 
 /* Various functions to compute expected properties of tasks. */
 const struct rmsummary *vine_manager_task_resources_min(struct vine_manager *q, struct vine_task *t);
@@ -279,10 +369,17 @@ const struct rmsummary *vine_manager_task_resources_max(struct vine_manager *q, 
 /* Find a library template on the manager */
 struct vine_task *vine_manager_find_library_template(struct vine_manager *q, const char *library_name);
 
+/* Internal: Return true if t is a function call of a library in pool mode, whose calls take their cores and memory from
+ * the worker (see vine_task_set_library_pool). */
+int vine_manager_function_call_in_pool(struct vine_manager *q, struct vine_task *t);
+
 /* Internal: Enable shortcut of main loop upon child process completion. Needed for Makeflow to interleave local and remote execution. */
 void vine_manager_enable_process_shortcut(struct vine_manager *q);
 
 struct rmsummary *vine_manager_choose_resources_for_task( struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t );
+
+/* Return the number of function slots a library instance gets with the given resources, or, with none, on every worker (zero when that depends on the worker). */
+int vine_manager_library_slots(struct vine_task *library, const struct rmsummary *limits);
 
 int64_t overcommitted_resource_total(struct vine_manager *q, int64_t total);
 
@@ -301,6 +398,11 @@ void vine_manager_mark_worker_for_removal(struct vine_manager *q, struct vine_wo
 
 /* Check if the worker is able to transfer the necessary files for this task. */
 int vine_manager_transfer_capacity_available(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t);
+int vine_manager_limits_sends(struct vine_manager *q, struct vine_file *f);
+
+/* Check if an input that a worker does not hold can be fetched now, whatever the worker. */
+int vine_manager_transfer_source_available(struct vine_manager *q, struct vine_file *f);
+
 
 /* Delete a file from a worker. */
 int delete_worker_file(struct vine_manager *q, struct vine_worker_info *w, const char *filename, vine_cache_level_t cache_level, vine_cache_level_t delete_upto_level);

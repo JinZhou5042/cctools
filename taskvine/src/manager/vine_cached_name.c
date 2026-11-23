@@ -101,6 +101,13 @@ information, that the file should not be cached. That is, generating a cachename
 worker side.
 */
 
+/* Seconds that curl may take to connect to the server of a URL, and to fetch its headers through every redirect. The
+ * declaration of a URL waits for them on the manager's thread, so a server that accepts the connection and never
+ * answers would otherwise hold the manager forever. A URL whose headers do not arrive in time gets a cache name from
+ * the URL alone, as one whose server cannot be reached does. */
+#define VINE_URL_HEADERS_CONNECT_TIMEOUT 5
+#define VINE_URL_HEADERS_TIMEOUT 15
+
 typedef enum {
 	VINE_FOUND_NONE,
 	VINE_FOUND_LAST_MODIFIED,
@@ -143,7 +150,9 @@ static vine_url_cache_t get_url_properties(const char *url, char *tag)
 
 	/* Otherwise, proceed to use curl to get the headers. */
 
-	char *command = string_format("curl -IL --verbose --stderr /dev/stdout \"%s\"", url);
+	char *quoted = string_escape_shell(url);
+	char *command = string_format("curl -IL --connect-timeout %d --max-time %d --verbose --stderr /dev/stdout %s", VINE_URL_HEADERS_CONNECT_TIMEOUT, VINE_URL_HEADERS_TIMEOUT, quoted);
+	free(quoted);
 
 	FILE *stream = popen(command, "r");
 
@@ -288,7 +297,9 @@ char *vine_meta_name(const struct vine_file *f, ssize_t *totalsize)
 
 	if (stat(f->source, &info))
 		return 0;
-	char *mtime = ctime(&info.st_mtime);
+	/* ctime() returns a static string, which other threads of the process may overwrite. */
+	char mtime[32];
+	ctime_r(&info.st_mtime, mtime);
 	char *meta = string_format("%s-%" PRIu64 "-%s", f->source, info.st_size, mtime);
 	char *metahash = md5_of_string(meta);
 	char *name = string_format("file-meta-%s", metahash);
@@ -306,31 +317,34 @@ Returns a string that must be freed with free().
 
 char *vine_random_name(const struct vine_file *f)
 {
-	char *name;
-	char random[17];
-	string_cookie(random, 16);
-
+	const char *prefix;
 	switch (f->type) {
 	case VINE_FILE:
-		name = string_format("file-rnd-%s", random);
+		prefix = "file-rnd-";
 		break;
 	case VINE_MINI_TASK:
-		name = string_format("task-rnd-%s", random);
+		prefix = "task-rnd-";
 		break;
 	case VINE_URL:
-		name = string_format("url-rnd-%s", random);
+		prefix = "url-rnd-";
 		break;
 	case VINE_TEMP:
-		name = string_format("temp-rnd-%s", random);
+		prefix = "temp-rnd-";
 		break;
 	case VINE_BUFFER:
-		name = string_format("buffer-rnd-%s", random);
+		prefix = "buffer-rnd-";
 		break;
 	default:
 		fatal("invalid file type %d", f->type);
-		name = strdup("notreached");
-		break;
+		return strdup("notreached");
 	}
+
+	/* The prefix and 15 random letters, written in place: the manager names files of every task this way, and
+	 * formatting the name with printf took most of the time. */
+	size_t length = strlen(prefix);
+	char *name = xxmalloc(length + 16);
+	memcpy(name, prefix, length);
+	string_cookie(name + length, 16);
 	return name;
 }
 

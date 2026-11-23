@@ -13,9 +13,12 @@ void url_encode(const char *s, char *t, int length)
 {
 	if (s) {
 		while (*s && length > 1) {
-			if (*s <= 32 || *s == '%' || *s == '\\' || *s == '<' || *s == '>' || *s == '\'' || *s == '\"' || *s > 122) {
+			/* A plain char is negative for bytes above 127 where it is signed, so compare and format the byte unsigned. */
+			unsigned char c = *s;
+			if (c <= 32 || c == '%' || c == '\\' || c == '<' || c == '>' || c == '\'' || c == '\"' || c > 122) {
 				if (length > 3) {
-					snprintf(t, length, "%%%2X", *s);
+					/* Always two digits, so that a control character such as a newline does not become a space. */
+					snprintf(t, length, "%%%02X", c);
 					t += 3;
 					length -= 3;
 					s++;

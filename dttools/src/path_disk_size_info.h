@@ -7,6 +7,7 @@ See the file COPYING for details.
 #ifndef CWD_INFO_H
 #define CWD_INFO_H
 
+#include "budget.h"
 #include "int_sizes.h"
 #include "list.h"
 #include "hash_table.h"
@@ -40,12 +41,24 @@ If *state is NULL, start a new measurement, otherwise continue from
 the state recorded in state (see @ref path_disk_size_info).
 When the function returns, if *state->complete_measurement is 1, then the measurement was completed before a timeout.
 @param path Directory to be measured.
-@param max_secs Maximum number of seconds to spend in the measurement.
+@param max_secs Maximum number of seconds to spend in the measurement, or -1 to measure until complete.
 @param *state State of the measurement.
 @param exclude_paths  Hash table with strings of paths that should not be measured. Values of the hash table are ignored.
 @return zero on success, -1 if an error is encounterd (see errno).
 */
 int path_disk_size_info_get_r(const char *path, int64_t max_secs, struct path_disk_size_info **state, struct hash_table *exclude_paths);
+
+/** Get a (perhaps partial) disk usage on path, measuring until a time budget expires.
+This is @ref path_disk_size_info_get_r with a budget instead of a number of seconds, for a loop that measures in
+pieces between other work. The budget is checked after each entry, so a call measures at least one entry, and a call
+with an expired budget still makes progress.
+@param path Directory to be measured.
+@param b The budget that limits this call, or NULL to measure until complete.
+@param *state State of the measurement.
+@param exclude_paths  Hash table with strings of paths that should not be measured. Values of the hash table are ignored.
+@return zero on success, -1 if an error is encounterd (see errno).
+*/
+int path_disk_size_info_get_budget(const char *path, const struct budget *b, struct path_disk_size_info **state, struct hash_table *exclude_paths);
 
 
 void path_disk_size_info_delete_state(struct path_disk_size_info *state);

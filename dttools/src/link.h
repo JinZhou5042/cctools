@@ -41,6 +41,8 @@ link_close(link);
 
 */
 
+#include "timestamp.h"
+
 #include <sys/types.h>
 
 #include <limits.h>
@@ -56,7 +58,9 @@ link_close(link);
 /** Value to usewhen any listen port is acceptable */
 #define LINK_PORT_ANY 0
 
-/** Stoptime to give when you wish to wait forever */
+/** Stoptime to give when you wish to wait forever. On a link with an idle timeout (@ref link_set_idle_timeout), a read
+or write still fails when no data moves for that long, so LINK_FOREVER there means until the peer stops making
+progress. */
 #define LINK_FOREVER ((time_t)INT_MAX)
 #define LINK_NOWAIT ((time_t)INT_MIN)
 
@@ -69,6 +73,7 @@ link_close(link);
 struct link *link_connect(const char *addr, int port, time_t stoptime);
 
 /** Wrap a connect link with an ssl context and state
+The handshake waits for the server as long as the idle timeout of the link allows, and a signal ends it.
 @param link A link returned from @ref link_connect
 @param sni_hostname Optional domainame for tls routing.
 @return 0 on failure, 1 on success
@@ -141,12 +146,24 @@ struct link *link_accept(struct link *parent, time_t stoptime);
 
 /** Wrap an accepted link with an ssl context.
 If successful, the connection is now encrypted.
+The handshake waits for the client as long as the idle timeout of the link allows, see @ref link_set_idle_timeout.
 @param lnk A link returned from @ref link_accept
 @param key   The ssl key of the server.
 @param cert  The ssl cert of the server.
 @return 0 on failure, 1 on success
 */
 int link_ssl_wrap_accept(struct link *lnk, const char *key, const char *cert);
+
+/** Wrap an accepted link with an ssl context, giving up at a stoptime.
+This is @ref link_ssl_wrap_accept with a limit on the whole handshake: it fails at the stoptime even while the client
+makes progress.
+@param lnk A link returned from @ref link_accept
+@param key   The ssl key of the server.
+@param cert  The ssl cert of the server.
+@param stoptime The absolute time at which to give up, or @ref LINK_FOREVER to rely on the link's idle timeout.
+@return 0 on failure, 1 on success
+*/
+int link_ssl_wrap_accept_stoptime(struct link *lnk, const char *key, const char *cert, time_t stoptime);
 
 
 /** Read data from a connection.
@@ -241,6 +258,8 @@ int link_usleep(struct link *link, int usec, int reading, int writing);
 int link_usleep_mask(struct link *link, int usec, sigset_t *mask, int reading, int writing);
 
 /** Block until a link is readable or writable.
+An error or hangup on the link also ends the wait, so that the next read or write reports it.
+The idle timeout of the link does not apply to this wait.
 @param link The link to wait on.
 @param stoptime The time at which to abort.
 @param reading Wait for the link to become readable.
@@ -248,6 +267,26 @@ int link_usleep_mask(struct link *link, int usec, sigset_t *mask, int reading, i
 @return One if the link becomes readable or writable before the timeout expires, zero otherwise.
 */
 int link_sleep(struct link *link, time_t stoptime, int reading, int writing);
+
+/** Limit how long a read or write on a link may go without progress.
+Every function that reads or writes the link with a stoptime then fails, with errno set to ETIMEDOUT, when no data
+moves for the given number of seconds, even if its stoptime is later or is @ref LINK_FOREVER. Each piece of data that
+moves renews the limit, so a large transfer that keeps making progress succeeds however long it takes. Once a wait has
+failed this way, later waits for the link to become readable or writable in reads and writes fail at once, because the
+stream may have stopped in the middle of a message. The limit also bounds each wait of an ssl handshake. Waits for a
+connection, such as @ref link_accept and @ref link_sleep, and reads and writes with @ref LINK_NOWAIT, are not affected.
+@param link The link to limit.
+@param seconds Seconds without progress before a read or write fails. Zero, the default, removes the limit, so only
+the stoptime of each call applies.
+*/
+void link_set_idle_timeout(struct link *link, int seconds);
+
+/** Report when a read last took data from a link, so that its owner can judge the peer by the progress of both
+directions, together with @ref link_writer_last_progress.
+@param link The link.
+@return The time of @ref timestamp_monotonic at which a read last took bytes from the link, or at which it was created.
+*/
+timestamp_t link_last_read(struct link *link);
 
 /** Close a connection.
 @param link The connection to close.
@@ -329,6 +368,16 @@ int link_nonblocking(struct link *link, int onoff);
 */
 int link_buffer_empty(struct link *link);
 
+/** Check whether a whole line is buffered, reading what arrived without waiting. A loop that must not block calls it
+before it reads a message line, and reads only when it returns one. When only the start of a line is buffered, the
+link's polls and @ref link_buffer_empty treat the buffer as empty until the next read, so a poll waits for the rest
+of the line instead of returning at once.
+@param link The link to examine.
+@return One if a line ends in the buffer, or if the next read must happen now: the buffer is full, the stream ended,
+or the link failed. Zero if nothing is buffered. Minus one if the buffer holds only the start of a line.
+*/
+int link_buffer_has_line(struct link *link);
+
 /** Return the local address of the link in text format.
 @param link The link to examine.
 @param addr Pointer to a string of at least @ref LINK_ADDRESS_MAX bytes, which will be filled with a text representation of the local IP address.
@@ -391,6 +440,97 @@ Wait for a activity on a an array of links.
 */
 
 int link_poll(struct link_info *array, int nlinks, int msec);
+
+/** @struct link_poll_set
+A persistent set of links that a program waits on together. Unlike @ref link_poll, which takes every link in every
+call, a link is added once and stays until it is removed or closed, so a wait costs time in proportion to the links
+that are ready, not to all links in the set. Linux uses epoll, and other systems poll every link in the set.
+<p>
+A wait reports the events of a link until the caller takes them with @ref link_poll_set_next or
+@ref link_poll_set_take. Links whose events were not taken keep their place ahead of newly ready links, so a caller
+that stops early serves every ready link in turn. A wait confirms the events of such links again and drops those that
+are no longer ready. A link whose input buffer holds data is reported readable even when its socket has nothing, as
+@ref link_poll does: this covers data that any read of the link left in its buffer. An urgent link
+(@ref link_poll_set_urgent) is reported ahead of every link that is not, whenever it became ready, so a caller can serve
+a few links that carry checks before the rest of its work (@ref link_poll_set_next_urgent).
+<p>
+Closing a link removes it from its set. A set and its links belong to one thread. A link is in at most one set.
+*/
+struct link_poll_set;
+
+/** Create an empty poll set.
+@return A new poll set, or null on failure.
+*/
+struct link_poll_set *link_poll_set_create(void);
+
+/** Delete a poll set. Its links are removed from it and stay open.
+@param set The set to delete.
+*/
+void link_poll_set_delete(struct link_poll_set *set);
+
+/** Add a link to a poll set, or change the events and data of a link that it holds.
+@param set The poll set.
+@param link The link to watch. A link in another set is refused.
+@param events The events to wait for (@ref LINK_READ, @ref LINK_WRITE, both, or zero). A closed connection is reported as @ref LINK_READ whatever the events.
+@param data A value returned with the link's events, such as the object that owns the link.
+@return One on success, zero on failure.
+*/
+int link_poll_set_add(struct link_poll_set *set, struct link *link, int events, void *data);
+
+/** Change the events that a poll set waits for on one of its links. Events that are no longer wanted are dropped.
+@param set The poll set.
+@param link A link in the set.
+@param events The events to wait for.
+@return One on success, zero if the link is not in the set or the change failed.
+*/
+int link_poll_set_modify(struct link_poll_set *set, struct link *link, int events);
+
+/** Remove a link from a poll set. Nothing happens when the link is not in the set.
+@param set The poll set.
+@param link The link to remove.
+*/
+void link_poll_set_remove(struct link_poll_set *set, struct link *link);
+
+/** Wait for activity on the links of a poll set.
+@param set The poll set.
+@param msec The number of milliseconds to wait. Zero does not wait, and -1 waits forever. A wait does not sleep while a link is ready already, by events not yet taken or by data in its buffer.
+@return The number of ready links, or -1 on error.
+*/
+int link_poll_set_wait(struct link_poll_set *set, int msec);
+
+/** Take the events of the next ready link: urgent links first, then the others, each in the order in which they
+became ready.
+@param set The poll set.
+@param revents Filled with the events of the link.
+@param data Filled with the data given to @ref link_poll_set_add, if not null.
+@return The next ready link, or null when no link is ready.
+*/
+struct link *link_poll_set_next(struct link_poll_set *set, int *revents, void **data);
+
+/** Take the events of the next ready urgent link, leaving every other link for @ref link_poll_set_next.
+@param set The poll set.
+@param revents Filled with the events of the link.
+@param data Filled with the data given to @ref link_poll_set_add, if not null.
+@return The next ready urgent link, or null when no urgent link is ready.
+*/
+struct link *link_poll_set_next_urgent(struct link_poll_set *set, int *revents, void **data);
+
+/** Mark a link of a poll set urgent, or not: the events of an urgent link are reported ahead of those of every link
+that is not, in the order in which urgent links became ready.
+@param set The poll set.
+@param link A link in the set.
+@param urgent Non-zero to make the link urgent, zero to make it ordinary.
+@return One on success, zero if the link is not in the set.
+*/
+int link_poll_set_urgent(struct link_poll_set *set, struct link *link, int urgent);
+
+/** Take some events of one link, leaving its other events for @ref link_poll_set_next.
+@param set The poll set.
+@param link A link in the set.
+@param events The events to take.
+@return The events taken, zero if none of them was ready.
+*/
+int link_poll_set_take(struct link_poll_set *set, struct link *link, int events);
 
 /** Get the number of bytes in the output buffer of a link.
 @param link The link to examine.

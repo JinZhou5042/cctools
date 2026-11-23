@@ -6,6 +6,7 @@ See the file COPYING for details.
 
 #include "vine_file_replica.h"
 #include "vine_counters.h"
+#include "vine_file.h"
 #include "debug.h"
 
 struct vine_file_replica *vine_file_replica_create(vine_file_type_t type, vine_cache_level_t cache_level, int64_t size, time_t mtime)
@@ -18,9 +19,31 @@ struct vine_file_replica *vine_file_replica_create(vine_file_type_t type, vine_c
 	r->transfer_time = 0;
 	r->last_failure_time = 0;
 	r->state = VINE_FILE_REPLICA_STATE_CREATING;
+	r->manager_send = NULL;
 
 	vine_counters.replica.created++;
 	return r;
+}
+
+void vine_file_replica_set_manager_send(struct vine_file_replica *r, struct vine_file *f)
+{
+	if (r->manager_send) {
+		return;
+	}
+	r->manager_send = vine_file_addref(f);
+	f->manager_sends++;
+}
+
+/* The manager's send of this replica ended: the copy arrived, or it will never arrive. */
+static void end_manager_send(struct vine_file_replica *r)
+{
+	struct vine_file *f = r->manager_send;
+	if (!f) {
+		return;
+	}
+	r->manager_send = NULL;
+	f->manager_sends--;
+	vine_file_delete(f);
 }
 
 void vine_file_replica_delete(struct vine_file_replica *r)
@@ -29,6 +52,7 @@ void vine_file_replica_delete(struct vine_file_replica *r)
 		return;
 	}
 
+	end_manager_send(r);
 	free(r);
 	vine_counters.replica.deleted++;
 }
@@ -107,6 +131,7 @@ int vine_file_replica_change_state_on_event(struct vine_file_replica *replica, v
 			return 1;
 		case VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_CACHE_UPDATE:
 			replica->state = VINE_FILE_REPLICA_STATE_READY;
+			end_manager_send(replica);
 			return 1;
 		case VINE_FILE_REPLICA_STATE_TRANSITION_EVENT_CACHE_INVALID:
 			replica->state = VINE_FILE_REPLICA_STATE_DELETED;

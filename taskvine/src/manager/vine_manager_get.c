@@ -126,6 +126,10 @@ static vine_result_code_t vine_manager_get_file_contents(struct vine_manager *q,
 	}
 
 	int fd = open(local_name, O_WRONLY | O_TRUNC | O_CREAT, 0777);
+	if (fd < 0 && errno == EACCES && unlink(local_name) == 0) {
+		/* A retrieved file keeps the read-only mode of the Worker cache. A rerun task replaces that copy. */
+		fd = open(local_name, O_WRONLY | O_TRUNC | O_CREAT, 0777);
+	}
 	if (fd < 0) {
 		debug(D_NOTICE, "Cannot open file %s for writing: %s", local_name, strerror(errno));
 		link_soak(w->link, length, stoptime);
@@ -165,13 +169,18 @@ after the "symlink" header has already been received.
 
 static vine_result_code_t vine_manager_get_symlink_contents(struct vine_manager *q, struct vine_worker_info *w, struct vine_task *t, const char *filename, int length)
 {
-	char *target = malloc(length);
+	/* The body holds the target without a terminating null. */
+	char *target = malloc(length + 1);
+	if (!target) {
+		return VINE_MGR_FAILURE;
+	}
 
 	int actual = link_read(w->link, target, length, time(0) + q->short_timeout);
 	if (actual != length) {
 		free(target);
 		return VINE_WORKER_FAILURE;
 	}
+	target[length] = 0;
 
 	int result = symlink(target, filename);
 	if (result < 0) {

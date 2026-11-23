@@ -2,3 +2,4 @@ cctools.test.log
 vine_wrap.*
 cvine.py
 *.so
+vine_graph_capi.py

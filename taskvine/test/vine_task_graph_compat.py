@@ -84,14 +84,20 @@ is constructed by dask.""")
         print(f"dask graph example is:\n{dsk_graph}")
         print(f"desired keys are {desired_keys}")
 
+        status = 1
         try:
             results = m.get(dsk_graph, desired_keys, lazy_transfers=True, checkpoint_fn=checkpoint, resources={"cores": 1})
-            print({k: v for k, v in zip(desired_keys, results)})
+            results = {k: v for k, v in zip(desired_keys, results)}
+            print(results)
+            if results["t"] == expected_result:
+                status = 0
+            else:
+                print(f"expected t to be {expected_result}, got {results['t']}")
         except Exception:
             traceback.print_exc()
 
         print("Terminating workers...", end="")
 
     print("done!")
-sys.exit(0)
+    sys.exit(status)
 # vim: set sts=4 sw=4 ts=4 expandtab ft=python:
